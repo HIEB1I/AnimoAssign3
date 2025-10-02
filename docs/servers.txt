@@ -1,0 +1,32 @@
+https://ccscloud.dlsu.edu.ph.
+[11116] ALTDSI-R11-AnimoAssign01
+OS: Ubuntu Server 22.04
+CPU: 2vCPU Intel 5115 Gold
+RAM: 8GB
+Storage: 64GB HDD
+Local IP Address: 10.1.11.16
+Username: root
+Password: DLSU1234!
+
+Port Forwarding Configuration:
+External Port 11160 -> Local Port 80 (http)
+External Port 11161 -> Local Port 22 (ssh)
+
+Remote Access via SSH
+ssh -p 11161 root@ccscloud.dlsu.edu.ph
+
+[11117] ALTDSI-R11-AnimoAssign02
+OS: Ubuntu Server 22.04
+CPU: 2vCPU Intel 5115 Gold
+RAM: 8GB
+Storage: 64GB HDD
+Local IP Address: 10.1.11.17
+Username: root
+Password: DLSU1234!
+
+Port Forwarding Configuration:
+External Port 11165 -> Local Port 80 (http)
+External Port 11166 -> Local Port 22 (ssh)
+
+Remote Access via SSH
+ssh -p 11166 root@ccscloud.dlsu.edu.ph
