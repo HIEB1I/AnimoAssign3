@@ -1,0 +1,125 @@
+AnimoAssign Architecture 2.0
+
+- Backend container
+- Analytics container
+- Frontend container
+- Database container
+	[Database is one nosql only for all]
+
+My intial idea is
+Server 1: 
+- Backend container (S1 Main)
+- Analytics container (S1 Main)
+- Frontend container (S1 Main)
+- Database container (S1 Main)
+
+Server 2: 
+- Backend container (S2 Secondary)
+- Analytics container (S2 Secondary)
+- Frontend container (S2 Secondary)
+- Database container (S2 Secondary)
+
+GITHUB 
+User: HIEB1I
+Private Repo: AnimoAssign3
+
+Features Included:
+1. GitHub Repo Integration
+
+Local:
+Developers push to GitHub.
+
+Production (CCSCloud):
+GitHub Actions pipeline.
+
+2. Reverse Proxy + Load Balancer
+Apply Nginx (relative paths) for both local and production
+
+Local (nginx.local.conf):
+Simple reverse proxy for frontend → backend → MongoDB.
+No need for load balancing, just routing.
+Only routes requests inside the local Docker network.
+
+Production (nginx.prod.conf):
+	Nginx runs on both servers.
+
+Handles:
+	SSL termination
+	Routing (frontend, backend, analytics)
+	Load balancing between Server 1 & Server 2 (if one fails, traffic shifts).
+	Ensures users always hit the healthy node.
+
+3. Docker Compose Orchestration
+
+Local (docker-compose.local.yml):
+Core services only:
+	Backend
+	Analytics
+	Frontend
+	MongoDB (single instance, seeded with dev/test data)
+	
+	Developers connect to MongoDB directly using Compass on their laptop.
+
+Production (docker-compose.prod.yml):
+
+Full stack:
+Backend (S1 + S2)
+Analytics (S1 + S2)
+Frontend (S1 + S2)
+MongoDB replica set (S1 primary, S2 secondary)
+Reverse proxy/load balancer (Nginx)
+Use MongoDB Compass for DB Ui.
+
+4. Database Replication
+
+Local:
+Single MongoDB instance seeded with test data.
+Developers connect via Compass to browse & edit test collections.
+
+Production:
+MongoDB replica set across Server 1 + Server 2.
+Writes → primary (e.g., Server 1).
+Reads → secondary (Server 2 can take read load).
+Auto-failover if primary crashes.
+Developers/DBA connect with Compass via secure connection (no container UI).
+
+5. Portainer
+
+Local:
+Useful here → run Portainer to manage containers visually, inspect logs, restart services.
+Safe because only you access it on your dev laptop/network.
+
+Production:
+⚠️ Do not expose Portainer publicly.
+Run Portainer but bind only to localhost and access via SSH tunnel.
+
+6. MongoDB Compass
+
+Local:
+Connect Compass on your laptop to the local MongoDB container (seeded dev DB).
+Lets you browse, insert, and test data easily.
+
+Production:
+Instead: connect Compass directly from your laptop → CCSCloud MongoDB replica (using the primary’s IP/port with SSH tunnel).
+
+Safer than exposing Compass UI as a container.
+
+7. Local Testing without Deploying
+
+Run only:
+	Frontend
+	Backend 
+	Analytics
+	MongoDB (seeded with sample dev/test data)
+Connect via Compass to view DB state.
+No proxies, Portainer, or replication → keeps local dev simple.
+
+8. CI/CD (GitHub Actions)
+Workflow:
+Developer commits → push to GitHub.
+GitHub Actions builds Docker images.
+Run unit tests (backend APIs, seeded MongoDB).
+Push images to container registry.
+SSH into Server 1 & 2 → pull latest images → docker compose up -d.
+
+

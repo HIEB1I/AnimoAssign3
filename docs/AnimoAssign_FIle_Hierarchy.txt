@@ -1,0 +1,51 @@
+AnimoAssign/
+├── backend/                          # Backend service code
+│   ├── src/                          # Python/FastAPI/Django source code
+│   ├── tests/                        # Unit/integration tests
+│   ├── requirements.txt              # Python dependencies
+│   ├── Dockerfile                    # Backend container build file
+│   └── README.md
+│
+├── analytics/                        # Analytics service code
+│   ├── src/                          # Rule engine, reporting, forecasting
+│   ├── tests/                        # Analytics-specific tests
+│   ├── requirements.txt
+│   ├── Dockerfile
+│   └── README.md
+│
+├── frontend/                         # Frontend React code
+│   ├── public/
+│   ├── src/
+│   ├── package.json
+│   ├── Dockerfile                    # Build React → serve via Nginx
+│   └── README.md
+│
+├── db/                               # Database-related configs
+│   ├── seed/                         # Dev/test seed data
+│   │   ├── init.js                   # MongoDB init script for local
+│   │   └── sample_data.json
+│   └── mongo.conf                    # Optional MongoDB configs
+│
+├── nginx/                            # Reverse proxy configs
+│   ├── nginx.local.conf              # Local routing only
+│   ├── nginx.prod.conf               # Prod reverse proxy + load balancing
+│   └── Dockerfile                    # Custom Nginx image (if needed)
+│
+├── .github/                          # GitHub Actions CI/CD workflows
+│   └── workflows/
+│       └── ci-cd.yml                 # Build, test, deploy pipeline
+│
+├── docker/                           # Docker compose + orchestration
+│   ├── docker-compose.local.yml      # Local dev: 4 containers only
+│   ├── docker-compose.prod.yml       # Prod: Full stack + replication
+│   └── .env                          # Shared environment variables
+│
+├── docs/                             # Documentation
+│   ├── architecture-diagram.png      # Visual system architecture
+│   ├── file-hierarchy.md             # This hierarchy explanation
+│   └── setup-guide.md                # How to deploy/run locally & in prod
+│
+├── .env.local                        # Local env variables
+├── .env.prod                         # Prod env variables (no secrets in git!)
+├── .gitignore
+└── README.md                         # Project overview
