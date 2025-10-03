@@ -1,0 +1,56 @@
+version: "3.9"
+
+services:
+  mongo:
+    image: mongo:7
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: root
+      MONGO_INITDB_ROOT_PASSWORD: local-root-secret
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+      - ../db/seed:/docker-entrypoint-initdb.d
+
+  backend:
+    build: ../backend
+    environment:
+      BACKEND_MONGODB_URI: mongodb://animo_app:local-dev-secret@mongo:27017/animoassign?authSource=admin
+    depends_on:
+      - mongo
+    ports:
+      - "8000:8000"
+
+  analytics:
+    build: ../analytics
+    environment:
+      ANALYTICS_MONGODB_URI: mongodb://animo_app:local-dev-secret@mongo:27017/animoassign?authSource=admin
+    depends_on:
+      - mongo
+    ports:
+      - "8100:8000"
+
+  frontend-builder:
+    build:
+      context: ../frontend
+      target: build
+    working_dir: /app
+
+  frontend:
+    build: ../frontend
+    depends_on:
+      - backend
+      - analytics
+    ports:
+      - "3000:80"
+
+  nginx:
+    build: ../nginx
+    depends_on:
+      - frontend
+    ports:
+      - "8080:80"
+
+volumes:
+  mongo_data:
