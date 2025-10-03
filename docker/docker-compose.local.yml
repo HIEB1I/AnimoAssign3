@@ -32,6 +32,7 @@ services:
       - "8100:8000"
 
   frontend-builder:
+    # Helper container for one-off npm commands; it is not meant to stay running.
     build:
       context: ../frontend
       target: build

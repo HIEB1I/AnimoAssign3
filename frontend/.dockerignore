@@ -1,0 +1,9 @@
+node_modules
+npm-debug.log*
+dist
+.vite
+.cache
+.git
+.gitignore
+Dockerfile
+*.tsbuildinfo

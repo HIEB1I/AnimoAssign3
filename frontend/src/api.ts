@@ -1,5 +1,5 @@
-const backendBase = import.meta.env.VITE_BACKEND_URL;
-const analyticsBase = import.meta.env.VITE_ANALYTICS_URL;
+const backendBase = import.meta.env.VITE_BACKEND_URL ?? "/api";
+const analyticsBase = import.meta.env.VITE_ANALYTICS_URL ?? "/analytics";
 
 export async function fetchAssignments() {
   const response = await fetch(`${backendBase}/assignments`);

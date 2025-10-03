@@ -10,9 +10,7 @@ db = client.get_default_database()
 
 
 async def compute_assignment_totals():
-    pipeline = [
-        {"$group": {"_id": "$status", "count": {"$sum": 1}}}
-    ]
+    pipeline = [{"$group": {"_id": "$status", "count": {"$sum": 1}}}]
     return await db.assignments.aggregate(pipeline).to_list(None)
 
 
