@@ -4,7 +4,13 @@ services:
   mongo-secondary:
     container_name: mongo-secondary
     image: mongo:7
-    command: ["mongod", "--replSet", "animoassignRS", "--bind_ip_all", "--keyFile", "/run/secrets/mongo-keyfile"]
+    command:
+      - mongod
+      - --replSet
+      - ${MONGO_REPLICA_SET:-animoassignRS}
+      - --bind_ip_all
+      - --keyFile
+      - /run/secrets/mongo-keyfile
     environment:
       MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME}
       MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD}
@@ -15,6 +21,8 @@ services:
       - /opt/AnimoAssign3/secrets/mongo-keyfile:/run/secrets/mongo-keyfile:ro
     networks:
       - animoassign
+    extra_hosts:
+      - "mongo-primary.animoassign.internal:${MONGO_PRIMARY_PRIVATE_IP}"
 
   backend-secondary:
     container_name: backend-secondary
@@ -29,7 +37,7 @@ services:
     networks:
       - animoassign
     extra_hosts:
-      - "mongo-primary.animoassign.internal:10.1.11.16"
+      - "mongo-primary.animoassign.internal:${MONGO_PRIMARY_PRIVATE_IP}"
 
   analytics-secondary:
     container_name: analytics-secondary
@@ -44,7 +52,7 @@ services:
     networks:
       - animoassign
     extra_hosts:
-      - "mongo-primary.animoassign.internal:10.1.11.16"
+      - "mongo-primary.animoassign.internal:${MONGO_PRIMARY_PRIVATE_IP}"
 
   frontend-secondary:
     container_name: frontend-secondary
@@ -62,10 +70,10 @@ services:
     container_name: nginx-secondary
     volumes:
       - ../nginx/nginx.prod.s2.conf:/etc/nginx/conf.d/default.conf:ro
-    ports:
-      - "80:80"
     depends_on:
       - frontend-secondary
+    ports:
+      - "80:80"
     networks:
       - animoassign
 

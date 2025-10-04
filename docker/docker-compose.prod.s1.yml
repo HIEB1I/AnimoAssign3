@@ -4,7 +4,13 @@ services:
   mongo-primary:
     container_name: mongo-primary
     image: mongo:7
-    command: ["mongod", "--replSet", "animoassignRS", "--bind_ip_all", "--keyFile", "/run/secrets/mongo-keyfile"]
+    command:
+      - mongod
+      - --replSet
+      - ${MONGO_REPLICA_SET:-animoassignRS}
+      - --bind_ip_all
+      - --keyFile
+      - /run/secrets/mongo-keyfile
     environment:
       MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME}
       MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD}
@@ -16,6 +22,29 @@ services:
     networks:
       - animoassign
 
+  mongo-primary-bootstrap:
+    image: mongo:7
+    container_name: mongo-primary-bootstrap
+    depends_on:
+      mongo-primary:
+        condition: service_started
+    environment:
+      MONGO_ROOT_USERNAME: ${MONGO_ROOT_USERNAME}
+      MONGO_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD}
+      MONGO_REPLICA_SET: ${MONGO_REPLICA_SET:-animoassignRS}
+      MONGO_PRIMARY_HOST: ${MONGO_PRIMARY_HOST:-mongo-primary}
+      MONGO_PRIMARY_PORT: ${MONGO_PRIMARY_PORT:-27017}
+      MONGO_PRIMARY_NODE: ${MONGO_PRIMARY_NODE:-mongo-primary:27017}
+      MONGO_SECONDARY_NODE: ${MONGO_SECONDARY_NODE:-}
+      APP_MONGODB_USERNAME: ${APP_MONGODB_USERNAME}
+      APP_MONGODB_PASSWORD: ${APP_MONGODB_PASSWORD}
+    volumes:
+      - ../db/scripts:/scripts:ro
+    entrypoint: ["/bin/bash", "/scripts/bootstrap-replica.sh"]
+    restart: "no"
+    networks:
+      - animoassign
+
   backend-primary:
     container_name: backend-primary
     build: ../backend
@@ -23,7 +52,10 @@ services:
       BACKEND_MONGODB_URI: mongodb://${APP_MONGODB_USERNAME}:${APP_MONGODB_PASSWORD}@${APP_MONGODB_HOST}:27017/animoassign?authSource=admin
       SERVICE_ROLE: primary
     depends_on:
-      - mongo-primary
+      mongo-primary:
+        condition: service_started
+      mongo-primary-bootstrap:
+        condition: service_completed_successfully
     ports:
       - "18000:8000"
     networks:
@@ -36,7 +68,10 @@ services:
       ANALYTICS_MONGODB_URI: mongodb://${APP_MONGODB_USERNAME}:${APP_MONGODB_PASSWORD}@${APP_MONGODB_HOST}:27017/animoassign?authSource=admin
       SERVICE_ROLE: primary
     depends_on:
-      - mongo-primary
+      mongo-primary:
+        condition: service_started
+      mongo-primary-bootstrap:
+        condition: service_completed_successfully
     ports:
       - "18100:8000"
     networks:
@@ -58,10 +93,10 @@ services:
     container_name: nginx-primary
     volumes:
       - ../nginx/nginx.prod.s1.conf:/etc/nginx/conf.d/default.conf:ro
-    ports:
-      - "80:80"
     depends_on:
       - frontend-primary
+    ports:
+      - "80:80"
     networks:
       - animoassign
 
