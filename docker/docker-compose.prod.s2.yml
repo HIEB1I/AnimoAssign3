@@ -1,0 +1,76 @@
+version: "3.9"
+
+services:
+  mongo-secondary:
+    container_name: mongo-secondary
+    image: mongo:7
+    command: ["mongod", "--replSet", "animoassignRS", "--bind_ip_all"]
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD}
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_secondary_data:/data/db
+    networks:
+      - animoassign
+
+  backend-secondary:
+    container_name: backend-secondary
+    build: ../backend
+    environment:
+      BACKEND_MONGODB_URI: mongodb://${APP_MONGODB_USERNAME}:${APP_MONGODB_PASSWORD}@${APP_MONGODB_HOST}:27017/animoassign?authSource=admin
+      SERVICE_ROLE: secondary
+    depends_on:
+      - mongo-secondary
+    ports:
+      - "28000:8000"
+    networks:
+      - animoassign
+    extra_hosts:
+      - "mongo-primary.animoassign.internal:10.1.11.16"
+
+  analytics-secondary:
+    container_name: analytics-secondary
+    build: ../analytics
+    environment:
+      ANALYTICS_MONGODB_URI: mongodb://${APP_MONGODB_USERNAME}:${APP_MONGODB_PASSWORD}@${APP_MONGODB_HOST}:27017/animoassign?authSource=admin
+      SERVICE_ROLE: secondary
+    depends_on:
+      - mongo-secondary
+    ports:
+      - "28100:8000"
+    networks:
+      - animoassign
+    extra_hosts:
+      - "mongo-primary.animoassign.internal:10.1.11.16"
+
+  frontend-secondary:
+    container_name: frontend-secondary
+    build: ../frontend
+    depends_on:
+      - backend-secondary
+      - analytics-secondary
+    ports:
+      - "28080:80"
+    networks:
+      - animoassign
+
+  nginx:
+    image: nginx:1.25-alpine
+    container_name: nginx-secondary
+    volumes:
+      - ../nginx/nginx.prod.s2.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - "80:80"
+    depends_on:
+      - frontend-secondary
+    networks:
+      - animoassign
+
+networks:
+  animoassign:
+    driver: bridge
+
+volumes:
+  mongo_secondary_data:

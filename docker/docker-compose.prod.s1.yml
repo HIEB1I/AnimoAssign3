@@ -1,0 +1,72 @@
+version: "3.9"
+
+services:
+  mongo-primary:
+    container_name: mongo-primary
+    image: mongo:7
+    command: ["mongod", "--replSet", "animoassignRS", "--bind_ip_all"]
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD}
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_primary_data:/data/db
+    networks:
+      - animoassign
+
+  backend-primary:
+    container_name: backend-primary
+    build: ../backend
+    environment:
+      BACKEND_MONGODB_URI: mongodb://${APP_MONGODB_USERNAME}:${APP_MONGODB_PASSWORD}@${APP_MONGODB_HOST}:27017/animoassign?authSource=admin
+      SERVICE_ROLE: primary
+    depends_on:
+      - mongo-primary
+    ports:
+      - "18000:8000"
+    networks:
+      - animoassign
+
+  analytics-primary:
+    container_name: analytics-primary
+    build: ../analytics
+    environment:
+      ANALYTICS_MONGODB_URI: mongodb://${APP_MONGODB_USERNAME}:${APP_MONGODB_PASSWORD}@${APP_MONGODB_HOST}:27017/animoassign?authSource=admin
+      SERVICE_ROLE: primary
+    depends_on:
+      - mongo-primary
+    ports:
+      - "18100:8000"
+    networks:
+      - animoassign
+
+  frontend-primary:
+    container_name: frontend-primary
+    build: ../frontend
+    depends_on:
+      - backend-primary
+      - analytics-primary
+    ports:
+      - "18080:80"
+    networks:
+      - animoassign
+
+  nginx:
+    image: nginx:1.25-alpine
+    container_name: nginx-primary
+    volumes:
+      - ../nginx/nginx.prod.s1.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - "80:80"
+    depends_on:
+      - frontend-primary
+    networks:
+      - animoassign
+
+networks:
+  animoassign:
+    driver: bridge
+
+volumes:
+  mongo_primary_data:

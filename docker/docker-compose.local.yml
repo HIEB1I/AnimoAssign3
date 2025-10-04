@@ -5,19 +5,18 @@ services:
     image: mongo:7
     restart: unless-stopped
     command: ["mongod", "--bind_ip_all"]
-    ports:
-      - "27017:27017"
     environment:
       MONGO_INITDB_ROOT_USERNAME: root
-      MONGO_INITDB_ROOT_PASSWORD: local-root-secret
+      MONGO_INITDB_ROOT_PASSWORD: localroot
+    ports:
+      - "27017:27017"
     volumes:
-      - mongo_data:/data/db
       - ../db/seed:/docker-entrypoint-initdb.d
 
   backend:
     build: ../backend
     environment:
-      BACKEND_MONGODB_URI: mongodb://animo_app:local-dev-secret@mongo:27017/animoassign?authSource=admin
+      BACKEND_MONGODB_URI: mongodb://animo_app:localdev@mongo:27017/animoassign?authSource=admin
     depends_on:
       - mongo
     ports:
@@ -26,7 +25,7 @@ services:
   analytics:
     build: ../analytics
     environment:
-      ANALYTICS_MONGODB_URI: mongodb://animo_app:local-dev-secret@mongo:27017/animoassign?authSource=admin
+      ANALYTICS_MONGODB_URI: mongodb://animo_app:localdev@mongo:27017/animoassign?authSource=admin
     depends_on:
       - mongo
     ports:
