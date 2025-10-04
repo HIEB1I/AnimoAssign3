@@ -4,7 +4,7 @@ services:
   mongo-secondary:
     container_name: mongo-secondary
     image: mongo:7
-    command: ["mongod", "--replSet", "animoassignRS", "--bind_ip_all"]
+    command: ["mongod", "--replSet", "animoassignRS", "--bind_ip_all", "--keyFile", "/run/secrets/mongo-keyfile"]
     environment:
       MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME}
       MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD}
@@ -12,6 +12,7 @@ services:
       - "27017:27017"
     volumes:
       - mongo_secondary_data:/data/db
+      - /opt/AnimoAssign3/secrets/mongo-keyfile:/run/secrets/mongo-keyfile:ro
     networks:
       - animoassign
 
