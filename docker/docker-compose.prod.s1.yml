@@ -2,12 +2,7 @@ services:
   mongo-primary:
     container_name: mongo-primary
     image: mongo:7
-    command:
-      - mongod
-      - --replSet
-      - ${MONGO_REPLICA_SET:-animoassignRS}
-      - --bind_ip_all
-      - --keyFile
+    command: ["mongod", "--replSet", "animoassignRS", "--bind_ip_all", "--keyFile", "/run/secrets/mongo-keyfile"]
     environment:
       MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME}
       MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD}
