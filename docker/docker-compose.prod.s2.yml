@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   mongo-secondary:
     container_name: mongo-secondary
@@ -10,19 +8,13 @@ services:
       - ${MONGO_REPLICA_SET:-animoassignRS}
       - --bind_ip_all
       - --keyFile
-      - /run/secrets/mongo-keyfile
     environment:
       MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME}
       MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD}
-    ports:
-      - "27017:27017"
     volumes:
       - mongo_secondary_data:/data/db
       - /opt/AnimoAssign3/secrets/mongo-keyfile:/run/secrets/mongo-keyfile:ro
-    networks:
-      - animoassign
-    extra_hosts:
-      - "mongo-primary.animoassign.internal:${MONGO_PRIMARY_PRIVATE_IP}"
+    network_mode: host
 
   backend-secondary:
     container_name: backend-secondary
@@ -36,8 +28,6 @@ services:
       - "28000:8000"
     networks:
       - animoassign
-    extra_hosts:
-      - "mongo-primary.animoassign.internal:${MONGO_PRIMARY_PRIVATE_IP}"
 
   analytics-secondary:
     container_name: analytics-secondary
@@ -51,8 +41,6 @@ services:
       - "28100:8000"
     networks:
       - animoassign
-    extra_hosts:
-      - "mongo-primary.animoassign.internal:${MONGO_PRIMARY_PRIVATE_IP}"
 
   frontend-secondary:
     container_name: frontend-secondary
