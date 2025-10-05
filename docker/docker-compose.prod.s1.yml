@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   mongo-primary:
     container_name: mongo-primary
@@ -10,17 +8,13 @@ services:
       - ${MONGO_REPLICA_SET:-animoassignRS}
       - --bind_ip_all
       - --keyFile
-      - /run/secrets/mongo-keyfile
     environment:
       MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME}
       MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD}
-    ports:
-      - "27017:27017"
     volumes:
       - mongo_primary_data:/data/db
       - /opt/AnimoAssign3/secrets/mongo-keyfile:/run/secrets/mongo-keyfile:ro
-    networks:
-      - animoassign
+    network_mode: host
 
   mongo-primary-bootstrap:
     image: mongo:7
@@ -32,7 +26,7 @@ services:
       MONGO_ROOT_USERNAME: ${MONGO_ROOT_USERNAME}
       MONGO_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD}
       MONGO_REPLICA_SET: ${MONGO_REPLICA_SET:-animoassignRS}
-      MONGO_PRIMARY_HOST: ${MONGO_PRIMARY_HOST:-mongo-primary}
+      MONGO_PRIMARY_HOST: ${MONGO_PRIMARY_HOST:-127.0.0.1}
       MONGO_PRIMARY_PORT: ${MONGO_PRIMARY_PORT:-27017}
       MONGO_PRIMARY_NODE: ${MONGO_PRIMARY_NODE:-mongo-primary:27017}
       MONGO_SECONDARY_NODE: ${MONGO_SECONDARY_NODE:-}
@@ -42,8 +36,7 @@ services:
       - ../db/scripts:/scripts:ro
     entrypoint: ["/bin/bash", "/scripts/bootstrap-replica.sh"]
     restart: "no"
-    networks:
-      - animoassign
+    network_mode: host
 
   backend-primary:
     container_name: backend-primary
