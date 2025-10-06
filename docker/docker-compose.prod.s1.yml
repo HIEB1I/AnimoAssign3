@@ -68,6 +68,9 @@ services:
   frontend-primary:
     container_name: frontend-primary
     build: ../frontend
+    environment:
+      BACKEND_SERVICE_HOST: backend-primary
+      ANALYTICS_SERVICE_HOST: analytics-primary
     depends_on:
       - backend-primary
       - analytics-primary
