@@ -6,6 +6,7 @@ class Settings(BaseSettings):
     mongodb_uri: str = (
         "mongodb://animo_app:local-dev-secret@mongo:27017/animoassign?authSource=admin"
     )
+    mongodb_direct_connection: bool = False
     service_name: str = "backend"
     analytics_url: str = "http://analytics:8000"
     analytics_timeout_seconds: float = 5.0

@@ -11,7 +11,10 @@ from .config import get_settings
 
 app = FastAPI(title="AnimoAssign Backend", version="1.0.0")
 settings = get_settings()
-client = AsyncIOMotorClient(settings.mongodb_uri)
+client = AsyncIOMotorClient(
+    settings.mongodb_uri,
+    directConnection=settings.mongodb_direct_connection,
+)
 db = client.get_default_database()
 
 
