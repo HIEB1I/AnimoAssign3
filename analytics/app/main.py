@@ -8,6 +8,12 @@ from .config import get_settings
 
 app = FastAPI(title="AnimoAssign Analytics", version="1.0.0")
 settings = get_settings()
+client = AsyncIOMotorClient(
+    settings.mongodb_uri,
+    connectTimeoutMS=settings.mongodb_connect_timeout_ms,
+    serverSelectionTimeoutMS=settings.mongodb_server_selection_timeout_ms,
+    socketTimeoutMS=settings.mongodb_socket_timeout_ms,
+)
 client = AsyncIOMotorClient(settings.mongodb_uri)
 db = client.get_default_database()
 
