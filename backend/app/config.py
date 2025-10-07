@@ -4,7 +4,7 @@ from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     mongodb_uri: str = (
-        "mongodb://animo_app:DLSU1234!@mongo:10.1.11.16:27017/animoassign?authSource=admin"
+        "mongodb://animo_app:DLSU1234!@mongo-primary.animoassign.internal:27017/animoassign?authSource=admin"
     )
     mongodb_direct_connection: bool = False
     service_name: str = "backend"
