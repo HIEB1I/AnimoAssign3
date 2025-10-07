@@ -5,8 +5,8 @@ services:
     command: ["mongod", "--replSet", "animoassignRS", "--bind_ip_all", "--keyFile", "/run/secrets/mongo-keyfile"]
     hostname: ${APP_MONGODB_HOST:-mongo-primary}
     environment:
-      MONGO_INITDB_ROOT_USERNAME: ${MONGO_INITDB_ROOT_USERNAME:-${MONGO_ROOT_USERNAME:-}}
-      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD:-${MONGO_ROOT_PASSWORD:-}}
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD}
     volumes:
       - mongo_primary_data:/data/db
       - /opt/AnimoAssign3/secrets/mongo-keyfile:/run/secrets/mongo-keyfile:ro
@@ -29,8 +29,6 @@ services:
     environment:
       MONGO_ROOT_USERNAME: ${MONGO_ROOT_USERNAME}
       MONGO_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD}
-      MONGO_INITDB_ROOT_USERNAME: ${MONGO_INITDB_ROOT_USERNAME:-${MONGO_ROOT_USERNAME:-}}
-      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD:-${MONGO_ROOT_PASSWORD:-}}
       MONGO_REPLICA_SET: ${MONGO_REPLICA_SET:-animoassignRS}
       MONGO_PRIMARY_SERVICE_HOST: ${MONGO_PRIMARY_SERVICE_HOST:-mongo-primary}
       MONGO_PRIMARY_HOST: ${MONGO_PRIMARY_HOST:-mongo-primary}

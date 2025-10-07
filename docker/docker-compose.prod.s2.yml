@@ -5,8 +5,8 @@ services:
     command: ["mongod", "--replSet", "animoassignRS", "--bind_ip_all", "--keyFile", "/run/secrets/mongo-keyfile"]
     hostname: ${APP_MONGODB_HOST:-mongo-secondary}
     environment:
-      MONGO_INITDB_ROOT_USERNAME: ${MONGO_INITDB_ROOT_USERNAME:-${MONGO_ROOT_USERNAME:-}}
-      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD:-${MONGO_ROOT_PASSWORD:-}}
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD}
     volumes:
       - mongo_secondary_data:/data/db
       - /opt/AnimoAssign3/secrets/mongo-keyfile:/run/secrets/mongo-keyfile:ro
