@@ -16,13 +16,15 @@ services:
       animoassign:
         aliases:
           - mongo-secondary
+          - mongo-secondary.animoassign.internal
           - ${APP_MONGODB_HOST:-mongo-secondary}
+          - ${MONGO_SECONDARY_HOST:-mongo-secondary}
 
   backend-secondary:
     container_name: backend-secondary
     build: ../backend
     environment:
-      BACKEND_MONGODB_URI: mongodb://${APP_MONGODB_USERNAME}:${APP_MONGODB_PASSWORD}@${APP_MONGODB_HOST}:27017/animoassign?authSource=admin
+      BACKEND_MONGODB_URI: mongodb://${APP_MONGODB_USERNAME}:${APP_MONGODB_PASSWORD}@${APP_MONGODB_HOST:-mongo-secondary}:27017/animoassign?authSource=admin
       SERVICE_ROLE: secondary
     extra_hosts:
       - "${APP_MONGODB_HOST:-mongo-secondary}:host-gateway"
@@ -37,7 +39,7 @@ services:
     container_name: analytics-secondary
     build: ../analytics
     environment:
-      ANALYTICS_MONGODB_URI: mongodb://${APP_MONGODB_USERNAME}:${APP_MONGODB_PASSWORD}@${APP_MONGODB_HOST}:27017/animoassign?authSource=admin
+      ANALYTICS_MONGODB_URI: mongodb://${APP_MONGODB_USERNAME}:${APP_MONGODB_PASSWORD}@${APP_MONGODB_HOST:-mongo-secondary}:27017/animoassign?authSource=admin
       SERVICE_ROLE: secondary
     extra_hosts:
       - "${APP_MONGODB_HOST:-mongo-secondary}:host-gateway"

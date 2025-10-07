@@ -16,7 +16,9 @@ services:
       animoassign:
         aliases:
           - mongo-primary
+          - mongo-primary.animoassign.internal
           - ${APP_MONGODB_HOST:-mongo-primary}
+          - ${MONGO_PRIMARY_HOST:-mongo-primary}
 
   mongo-primary-bootstrap:
     image: mongo:7
@@ -45,7 +47,7 @@ services:
     container_name: backend-primary
     build: ../backend
     environment:
-      BACKEND_MONGODB_URI: mongodb://${APP_MONGODB_USERNAME}:${APP_MONGODB_PASSWORD}@${APP_MONGODB_HOST}:27017/animoassign?authSource=admin
+      BACKEND_MONGODB_URI: mongodb://${APP_MONGODB_USERNAME}:${APP_MONGODB_PASSWORD}@${APP_MONGODB_HOST:-mongo-primary}:27017/animoassign?authSource=admin
       SERVICE_ROLE: primary
     extra_hosts:
       - "${APP_MONGODB_HOST:-mongo-primary}:host-gateway"
@@ -63,8 +65,7 @@ services:
     container_name: analytics-primary
     build: ../analytics
     environment:
-      ANALYTICS_MONGODB_URI: mongodb://${APP_MONGODB_USERNAME}:${APP_MONGODB_PASSWORD}@${APP_MONGODB_HOST}:27017/animoassign?authSource=admin
-      SERVICE_ROLE: primary
+      ANALYTICS_MONGODB_URI: mongodb://${APP_MONGODB_USERNAME}:${APP_MONGODB_PASSWORD}@${APP_MONGODB_HOST:-mongo-primary}:27017/animoassign?authSource=admin
     extra_hosts:
       - "${APP_MONGODB_HOST:-mongo-primary}:host-gateway"
     depends_on:

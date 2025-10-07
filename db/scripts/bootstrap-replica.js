@@ -54,7 +54,7 @@
     }
   }
 
-  function seedDemoData(appDb) {
+function seedDemoData(appDb) {
     try {
       var existingAssignment = appDb.assignments.findOne({});
       if (existingAssignment) {
