@@ -38,6 +38,7 @@ services:
     build: ../backend
     environment:
       BACKEND_MONGODB_URI: mongodb://${APP_MONGODB_USERNAME}:${APP_MONGODB_PASSWORD}@${APP_MONGODB_HOST}:27017/animoassign?authSource=admin
+      BACKEND_ANALYTICS_URL: http://analytics-primary:8000
       SERVICE_ROLE: primary
     depends_on:
       mongo-primary:
@@ -48,6 +49,8 @@ services:
       - "18000:8000"
     networks:
       - animoassign
+    extra_hosts:
+      - "mongo-primary.animoassign.internal:host-gateway"
 
   analytics-primary:
     container_name: analytics-primary
@@ -64,6 +67,8 @@ services:
       - "18100:8000"
     networks:
       - animoassign
+    extra_hosts:
+      - "mongo-primary.animoassign.internal:host-gateway"
 
   frontend-primary:
     container_name: frontend-primary

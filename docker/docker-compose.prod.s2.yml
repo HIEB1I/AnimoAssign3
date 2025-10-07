@@ -16,6 +16,7 @@ services:
     build: ../backend
     environment:
       BACKEND_MONGODB_URI: mongodb://${APP_MONGODB_USERNAME}:${APP_MONGODB_PASSWORD}@${APP_MONGODB_HOST}:27017/animoassign?authSource=admin
+      BACKEND_ANALYTICS_URL: http://analytics-secondary:8000
       SERVICE_ROLE: secondary
     depends_on:
       - mongo-secondary
@@ -23,6 +24,9 @@ services:
       - "28000:8000"
     networks:
       - animoassign
+    extra_hosts:
+      - "mongo-primary.animoassign.internal:host-gateway"
+      - "mongo-secondary.animoassign.internal:host-gateway"
 
   analytics-secondary:
     container_name: analytics-secondary
@@ -36,6 +40,9 @@ services:
       - "28100:8000"
     networks:
       - animoassign
+    extra_hosts:
+      - "mongo-primary.animoassign.internal:host-gateway"
+      - "mongo-secondary.animoassign.internal:host-gateway"
 
   frontend-secondary:
     container_name: frontend-secondary
