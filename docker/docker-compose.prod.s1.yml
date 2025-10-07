@@ -51,6 +51,7 @@ services:
       - animoassign
     extra_hosts:
       - "mongo-primary.animoassign.internal:host-gateway"
+      - "mongo-secondary.animoassign.internal:host-gateway"
 
   analytics-primary:
     container_name: analytics-primary
@@ -69,6 +70,7 @@ services:
       - animoassign
     extra_hosts:
       - "mongo-primary.animoassign.internal:host-gateway"
+      - "mongo-secondary.animoassign.internal:host-gateway"
 
   frontend-primary:
     container_name: frontend-primary
