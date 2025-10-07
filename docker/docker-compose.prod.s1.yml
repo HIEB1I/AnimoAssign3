@@ -39,6 +39,8 @@ services:
     environment:
       BACKEND_MONGODB_URI: mongodb://${APP_MONGODB_USERNAME}:${APP_MONGODB_PASSWORD}@${APP_MONGODB_HOST}:27017/animoassign?authSource=admin
       SERVICE_ROLE: primary
+    extra_hosts:
+      - "${APP_MONGODB_HOST:-mongo-primary}:host-gateway"
     depends_on:
       mongo-primary:
         condition: service_started
@@ -55,6 +57,8 @@ services:
     environment:
       ANALYTICS_MONGODB_URI: mongodb://${APP_MONGODB_USERNAME}:${APP_MONGODB_PASSWORD}@${APP_MONGODB_HOST}:27017/animoassign?authSource=admin
       SERVICE_ROLE: primary
+    extra_hosts:
+      - "${APP_MONGODB_HOST:-mongo-primary}:host-gateway"
     depends_on:
       mongo-primary:
         condition: service_started

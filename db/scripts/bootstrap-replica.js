@@ -54,6 +54,28 @@
     }
   }
 
+  function seedDemoData(appDb) {
+    try {
+      var existingAssignment = appDb.assignments.findOne({});
+      if (existingAssignment) {
+        log('Assignments collection already populated; skipping seed.');
+        return;
+      }
+
+      var now = new Date();
+      var seedAssignments = [
+        { title: 'Prototype architecture', status: 'in_progress', created_at: now },
+        { title: 'Implement backend', status: 'todo', created_at: now },
+        { title: 'Analytics aggregation', status: 'done', created_at: now }
+      ];
+      appDb.assignments.insertMany(seedAssignments, { ordered: true });
+      log('Seeded demo assignments collection.');
+    } catch (seedError) {
+      log('Failed to seed demo assignments: ' + seedError.message);
+    }
+  }
+
+
   if (!replicaAlreadyInitialised()) {
     log('Initialising replica set ' + replicaSet + ' with primary ' + primaryNode + (secondaryNode ? ' and secondary ' + secondaryNode : ''));
     var config = {
@@ -101,6 +123,13 @@
     }
   } else {
     log('Application credentials missing; skipping user creation.');
+  }
+
+ try {
+    var appDb = db.getSiblingDB('animoassign');
+    seedDemoData(appDb);
+  } catch (appDbError) {
+    log('Unable to obtain application database: ' + appDbError.message);
   }
 
   log('Replica bootstrap complete.');

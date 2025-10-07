@@ -21,8 +21,9 @@ if (!existingUser) {
 const appDb = db.getSiblingDB("animoassign");
 
 appDb.assignments.drop();
+const now = new Date();
 appDb.assignments.insertMany([
-  { title: "Prototype architecture", status: "in_progress" },
-  { title: "Implement backend", status: "todo" },
-  { title: "Analytics aggregation", status: "done" },
+  { title: "Prototype architecture", status: "in_progress", created_at: now },
+  { title: "Implement backend", status: "todo", created_at: now },
+  { title: "Analytics aggregation", status: "done", created_at: now },
 ]);

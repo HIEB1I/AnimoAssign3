@@ -17,6 +17,8 @@ services:
     environment:
       BACKEND_MONGODB_URI: mongodb://${APP_MONGODB_USERNAME}:${APP_MONGODB_PASSWORD}@${APP_MONGODB_HOST}:27017/animoassign?authSource=admin
       SERVICE_ROLE: secondary
+    extra_hosts:
+      - "${APP_MONGODB_HOST:-mongo-secondary}:host-gateway"
     depends_on:
       - mongo-secondary
     ports:
@@ -30,6 +32,8 @@ services:
     environment:
       ANALYTICS_MONGODB_URI: mongodb://${APP_MONGODB_USERNAME}:${APP_MONGODB_PASSWORD}@${APP_MONGODB_HOST}:27017/animoassign?authSource=admin
       SERVICE_ROLE: secondary
+    extra_hosts:
+      - "${APP_MONGODB_HOST:-mongo-secondary}:host-gateway"
     depends_on:
       - mongo-secondary
     ports:
