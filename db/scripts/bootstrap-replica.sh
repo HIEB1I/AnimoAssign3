@@ -1,10 +1,28 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MONGO_PRIMARY_HOST=${MONGO_PRIMARY_HOST:-mongo-primary}
+MONGO_PRIMARY_SERVICE_HOST=${MONGO_PRIMARY_SERVICE_HOST:-mongo-primary}
+MONGO_PRIMARY_HOST=${MONGO_PRIMARY_HOST:-$MONGO_PRIMARY_SERVICE_HOST}
 MONGO_PRIMARY_PORT=${MONGO_PRIMARY_PORT:-27017}
 MONGO_ROOT_USERNAME=${MONGO_ROOT_USERNAME:-${MONGO_INITDB_ROOT_USERNAME:-}}
 MONGO_ROOT_PASSWORD=${MONGO_ROOT_PASSWORD:-${MONGO_INITDB_ROOT_PASSWORD:-}}
+
+is_loopback_host() {
+  case "$1" in
+    ""|localhost|127.*|::1|0.0.0.0)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+if is_loopback_host "$MONGO_PRIMARY_HOST"; then
+  printf 'Provided MongoDB host "%s" resolves to the bootstrap container; falling back to service host "%s".\n' \
+    "$MONGO_PRIMARY_HOST" "$MONGO_PRIMARY_SERVICE_HOST" >&2
+  MONGO_PRIMARY_HOST=$MONGO_PRIMARY_SERVICE_HOST
+fi
 
 mongo_args=(--host "$MONGO_PRIMARY_HOST" --port "$MONGO_PRIMARY_PORT")
 if [[ -n "${MONGO_ROOT_USERNAME}" ]]; then
@@ -31,10 +49,3 @@ while true; do
   fi
 
   printf '.'
-  if (( attempt % 15 == 0 )); then
-    printf $'\nStill waiting for MongoDB (exit %s). Last error:\n%s\n' "$status" "$output" >&2
-  fi
-  sleep 2
-done
-printf $' done\n'
-mongosh "${mongo_args[@]}" /scripts/bootstrap-replica.js
