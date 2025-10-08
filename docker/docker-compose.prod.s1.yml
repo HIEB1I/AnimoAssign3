@@ -38,7 +38,7 @@ services:
     build: ../backend
     environment:
       BACKEND_MONGODB_URI: mongodb://${APP_MONGODB_USERNAME}:${APP_MONGODB_PASSWORD}@${APP_MONGODB_HOST}:27017/animoassign?authSource=admin
-      BACKEND_ANALYTICS_URL: http://analytics-primary:8000
+      BACKEND_ANALYTICS_URL: http://analytics-primary:8000/analytics
       SERVICE_ROLE: primary
     depends_on:
       mongo-primary:

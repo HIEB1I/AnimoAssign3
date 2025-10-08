@@ -1,6 +1,7 @@
-from datetime import datetime
+from datetime import datetime, timezone
+from typing import Any, Dict, List
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field
 
@@ -12,23 +13,20 @@ client = AsyncIOMotorClient(settings.mongodb_uri)
 db = client.get_default_database()
 
 
-STATUS_LABELS = {
-    "todo": "To do",
-    "in_progress": "In progress",
-    "done": "Done",
-}
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
-async def compute_assignment_totals():
-    pipeline = [{"$group": {"_id": "$status", "count": {"$sum": 1}}}]
-    return await db.assignments.aggregate(pipeline).to_list(None)
+def _iso_timestamp(value: datetime) -> str:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-class AnalyticsTestEvent(BaseModel):
-    title: str = Field(..., description="Title associated with the diagnostic payload")
-    status: str = Field(..., description="Assignment status provided by the diagnostic")
-    notes: str | None = Field(None, description="Optional notes supplied with the payload")
-    source: str | None = Field(None, description="Origin of the diagnostic payload")
+class RecordIngestEvent(BaseModel):
+    id: str = Field(..., description="Identifier of the ingested record")
+    title: str = Field(..., description="Title of the record")
+    created_at: datetime = Field(default_factory=_utc_now)
 
 
 @app.get("/health")
@@ -36,60 +34,55 @@ async def health():
     return {"status": "ok", "service": settings.service_name}
 
 
-@app.get("/analytics/assignment-totals")
-async def get_assignment_totals():
-    results = await compute_assignment_totals()
-    await db.analytics_status.replace_one(
-        {"_id": "assignment_totals"},
-        {"_id": "assignment_totals", "results": results},
-        upsert=True,
-    )
-    return {"results": results}
-
-
-@app.post("/analytics/test-event")
-async def receive_test_event(event: AnalyticsTestEvent):
-    document = event.model_dump()
-    document["created_at"] = datetime.utcnow()
-    try:
-        result = await db.analytics_events.insert_one(document)
-    except Exception as exc:  # pragma: no cover - defensive guard
-        raise HTTPException(status_code=500, detail=f"Failed to record test event: {exc}")
-
-    return {
-        "ok": True,
-        "detail": "Test event stored in analytics datastore.",
-        "id": str(result.inserted_id),
-        "service": settings.service_name,
-    }
-
-
 @app.get("/analytics/summary")
-async def analytics_summary():
-    totals = await compute_assignment_totals()
-    total_assignments = sum(int(row.get("count", 0)) for row in totals)
+async def analytics_summary(top_limit: int = Query(5, ge=1, le=25)):
+    total_records = await db.records.count_documents({})
 
-    breakdown = []
-    for row in totals:
-        status = row.get("_id", "unknown")
-        count = int(row.get("count", 0))
-        label = STATUS_LABELS.get(status, status.replace("_", " ").title())
-        percentage = (count / total_assignments * 100) if total_assignments else 0.0
-        breakdown.append(
-            {
-                "status": status,
-                "label": label,
-                "count": count,
-                "percentage": round(percentage, 2),
+    top_terms_pipeline: List[Dict[str, Any]] = [
+        {"$unwind": "$terms"},
+        {"$group": {"_id": "$terms", "count": {"$sum": 1}}},
+        {"$sort": {"count": -1, "_id": 1}},
+        {"$limit": top_limit},
+    ]
+    top_terms_cursor = db.records.aggregate(top_terms_pipeline)
+    top_terms: List[Dict[str, Any]] = []
+    async for row in top_terms_cursor:
+        top_terms.append({"term": row.get("_id"), "count": int(row.get("count", 0))})
+
+    daily_pipeline: List[Dict[str, Any]] = [
+        {
+            "$group": {
+                "_id": {
+                    "$dateToString": {
+                        "format": "%Y-%m-%d",
+                        "date": "$created_at",
+                    }
+                },
+                "count": {"$sum": 1},
             }
-        )
-
-    diagnostics_count = await db.analytics_events.count_documents({})
+        },
+        {"$sort": {"_id": 1}},
+    ]
+    daily_cursor = db.records.aggregate(daily_pipeline)
+    daily_ingest: List[Dict[str, Any]] = []
+    async for row in daily_cursor:
+        daily_ingest.append({"date": row.get("_id"), "count": int(row.get("count", 0))})
 
     return {
-        "generatedAt": datetime.utcnow().isoformat() + "Z",
-        "totalAssignments": total_assignments,
-        "diagnosticEventsStored": diagnostics_count,
-        "statusBreakdown": breakdown,
+        "generatedAt": _iso_timestamp(_utc_now()),
         "service": settings.service_name,
+        "totalRecords": total_records,
+        "topTerms": top_terms,
+        "dailyIngest": daily_ingest,
     }
+
+
+@app.post("/analytics/ingest")
+async def record_ingest(event: RecordIngestEvent):
+    document = event.model_dump()
+    document["received_at"] = _utc_now()
+    try:
+        await db.analytics_events.insert_one(document)
+    except Exception as exc:  # pragma: no cover - guard
+        raise HTTPException(status_code=500, detail=f"Failed to record ingest event: {exc}")
+    return {"ok": True, "service": settings.service_name}

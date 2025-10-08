@@ -1,14 +1,18 @@
 from functools import lru_cache
+from pydantic import Field
 from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    mongodb_uri: str = (
-        "mongodb://animo_app:DLSU1234!@mongo-primary.animoassign.internal:27017/animoassign?authSource=admin"
+    mongodb_uri: str = Field(
+        default="mongodb://animo_app:local-dev-secret@mongo:27017/animoassign?authSource=admin",
+        description="Connection string used for MongoDB access.",
     )
-    mongodb_direct_connection: bool = False
     service_name: str = "backend"
-    analytics_url: str = "http://analytics:8000"
+    analytics_url: str = Field(
+        default="http://analytics:8000/analytics",
+        description="Base URL for the analytics service",
+    )
     analytics_timeout_seconds: float = 5.0
 
     class Config:
@@ -18,4 +22,6 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
+    """Return a cached instance of :class:`Settings`."""
+
     return Settings()
