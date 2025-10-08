@@ -1,9 +1,9 @@
-# analytics/app/main.py
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, APIRouter, HTTPException
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field
 
@@ -13,15 +13,13 @@ settings = get_settings()
 app = FastAPI(title="AnimoAssign Analytics", version="1.0.0")
 
 client = AsyncIOMotorClient(settings.mongodb_uri)
-db = client.get_default_database()  # DB comes from URI path
+db = client.get_default_database()
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_credentials=True,
     allow_methods=["*"], allow_headers=["*"],
 )
-
-router = APIRouter(prefix="/analytics", tags=["analytics"])
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -31,16 +29,31 @@ class IngestEvent(BaseModel):
     title: str = Field(..., min_length=1, max_length=200)
     created_at: Optional[str] = None  # ISO8601 from backend
 
-@router.get("/health")
+# ---- Root pages/APIs (Nginx strips /analytics → these root routes) ----
+
+@app.get("/", response_class=HTMLResponse)
+async def overview():
+    return """<!doctype html>
+<html><body>
+  <h1>Analytics Overview</h1>
+  <p>Insights computed by the analytics service.</p>
+  <ul>
+    <li><a href="/health">/health</a></li>
+    <li><a href="/events">/events</a></li>
+    <li><a href="/summary">/summary</a></li>
+  </ul>
+</body></html>"""
+
+@app.get("/health")
 async def health():
     return {"status": "ok", "service": settings.service_name}
 
-@router.get("/health/db")
+@app.get("/health/db")
 async def health_db():
     await client.admin.command("ping")
     return {"db": "ok"}
 
-@router.post("/ingest", status_code=202)
+@app.post("/ingest", status_code=202)
 async def ingest(payload: IngestEvent):
     doc: Dict[str, Any] = {
         "id": payload.id,
@@ -52,11 +65,10 @@ async def ingest(payload: IngestEvent):
     try:
         await db.analytics_events.insert_one(doc)
     except Exception as e:
-        # Return 400 for client-ish problems, 500 otherwise
         raise HTTPException(status_code=500, detail=f"store_failed: {e}")
     return {"status": "accepted"}
-    
-@router.get("/events")
+
+@app.get("/events")
 async def list_events(limit: int = 100):
     cur = db.analytics_events.find({}).sort("received_at", -1).limit(limit)
     items: List[Dict[str, Any]] = []
@@ -65,4 +77,12 @@ async def list_events(limit: int = 100):
         items.append(d)
     return {"items": items, "limit": limit}
 
-app.include_router(router)
+@app.get("/summary")
+async def summary(limit: int = 10):
+    cur = db.analytics_events.find({}).sort("received_at", -1).limit(limit)
+    latest: List[Dict[str, Any]] = []
+    async for d in cur:
+        d["_id"] = str(d["_id"])
+        latest.append(d)
+    total = await db.analytics_events.count_documents({})
+    return {"total": total, "latest": latest, "limit": limit}
