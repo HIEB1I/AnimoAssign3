@@ -71,7 +71,8 @@ services:
 
 networks:
   animoassign:
-    driver: bridge
+    external: true
+    name: docker_animoassign
 
 volumes:
   mongo_secondary_data:
