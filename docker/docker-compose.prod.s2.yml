@@ -9,13 +9,15 @@ services:
     volumes:
       - mongo_secondary_data:/data/db
       - /opt/AnimoAssign3/secrets/mongo-keyfile:/run/secrets/mongo-keyfile:ro
-    network_mode: animoassign
+    ports:
+      - "27017:27017"           # expose to host so 10.1.11.16 can reach it
+    networks: [animoassign]
+    restart: unless-stopped
 
   backend-secondary:
     container_name: backend-secondary
     build: ../backend
     environment:
-      # Primary (S1) + Secondary (S2), replica set-aware
       MONGODB_URI: "mongodb://animo_app:DLSU1234!@10.1.11.16:27017,10.1.11.17:27017/animoassign?replicaSet=animoassignRS&authSource=admin&retryWrites=true&w=majority"
       BACKEND_ANALYTICS_URL: "http://analytics-secondary:8000/analytics"
       SERVICE_ROLE: secondary
@@ -24,9 +26,7 @@ services:
     ports:
       - "28000:8000"
     networks: [animoassign]
-    extra_hosts:
-      - "mongo-primary.animoassign.internal:10.1.11.16"  # S1 IP
-      - "mongo-secondary.animoassign.internal:host-gateway"  # local on S2
+    restart: unless-stopped
 
   analytics-secondary:
     container_name: analytics-secondary
@@ -39,9 +39,7 @@ services:
     ports:
       - "28100:8000"
     networks: [animoassign]
-    extra_hosts:
-      - "mongo-primary.animoassign.internal:10.1.11.16"
-      - "mongo-secondary.animoassign.internal:host-gateway"
+    restart: unless-stopped
 
   frontend-secondary:
     container_name: frontend-secondary
@@ -54,8 +52,8 @@ services:
       - analytics-secondary
     ports:
       - "28080:80"
-    networks:
-      - animoassign
+    networks: [animoassign]
+    restart: unless-stopped
 
   nginx:
     image: nginx:1.25-alpine
@@ -66,8 +64,8 @@ services:
       - frontend-secondary
     ports:
       - "80:80"
-    networks:
-      - animoassign
+    networks: [animoassign]
+    restart: unless-stopped
 
 networks:
   animoassign:

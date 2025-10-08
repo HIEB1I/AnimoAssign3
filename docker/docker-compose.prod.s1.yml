@@ -9,7 +9,10 @@ services:
     volumes:
       - mongo_primary_data:/data/db
       - /opt/AnimoAssign3/secrets/mongo-keyfile:/run/secrets/mongo-keyfile:ro
-    network_mode: animoassign
+    ports:
+      - "27017:27017"          # expose to host so S2 can reach it
+    networks: [animoassign]
+    restart: unless-stopped
 
   mongo-primary-bootstrap:
     image: mongo:7
@@ -31,7 +34,7 @@ services:
       - ../db/scripts:/scripts:ro
     entrypoint: ["/bin/bash", "/scripts/bootstrap-replica.sh"]
     restart: "no"
-    network_mode: animoassign
+    networks: [animoassign]
 
   backend-primary:
     container_name: backend-primary
@@ -47,9 +50,7 @@ services:
     ports:
       - "18000:8000"
     networks: [animoassign]
-    extra_hosts:
-      - "mongo-primary.animoassign.internal:host-gateway"  
-      - "mongo-secondary.animoassign.internal:10.1.11.17"  
+    restart: unless-stopped
 
   analytics-primary:
     container_name: analytics-primary
@@ -64,10 +65,7 @@ services:
     ports:
       - "18100:8000"
     networks: [animoassign]
-    extra_hosts:
-      - "mongo-primary.animoassign.internal:host-gateway"
-      - "mongo-secondary.animoassign.internal:10.1.11.17"
-
+    restart: unless-stopped
 
   frontend-primary:
     container_name: frontend-primary
@@ -80,8 +78,8 @@ services:
       - analytics-primary
     ports:
       - "18080:80"
-    networks:
-      - animoassign
+    networks: [animoassign]
+    restart: unless-stopped
 
   nginx:
     image: nginx:1.25-alpine
@@ -92,8 +90,8 @@ services:
       - frontend-primary
     ports:
       - "80:80"
-    networks:
-      - animoassign
+    networks: [animoassign]
+    restart: unless-stopped
 
 networks:
   animoassign:
