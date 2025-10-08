@@ -84,5 +84,14 @@ async def summary(limit: int = 10):
     async for d in cur:
         d["_id"] = str(d["_id"])
         latest.append(d)
+
     total = await db.analytics_events.count_documents({})
-    return {"total": total, "latest": latest, "limit": limit}
+
+    # ✅ keep old keys AND provide the shape most UIs expect
+    return {
+        "total": total,
+        "latest": latest,
+        "limit": limit,
+        "items": latest,          # <— add this line
+        "count": len(latest),     # <— handy & harmless
+    }
