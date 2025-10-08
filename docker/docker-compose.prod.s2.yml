@@ -34,6 +34,7 @@ services:
     build: ../analytics
     environment:
       MONGODB_URI: "mongodb://animo_app:DLSU1234!@10.1.11.16:27017,10.1.11.17:27017/animoassign?replicaSet=animoassignRS&authSource=admin&retryWrites=true&w=majority"
+      ANALYTICS_MONGODB_URI: "mongodb://animo_app:DLSU1234!@10.1.11.16:27017,10.1.11.17:27017/animoassign?replicaSet=animoassignRS&authSource=admin&retryWrites=true&w=majority"
       SERVICE_ROLE: secondary
     depends_on:
       - mongo-secondary

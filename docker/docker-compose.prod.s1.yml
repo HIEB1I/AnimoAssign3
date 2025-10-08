@@ -15,11 +15,18 @@ services:
     restart: unless-stopped
 
   backend-primary:
+    healthcheck:
+      test: ["CMD-SHELL", "python - <<'PY'\nfrom pymongo import MongoClient\nimport os,sys\nu=os.getenv('MONGODB_URI') or os.getenv('BACKEND_MONGODB_URI')\nMongoClient(u, serverSelectionTimeoutMS=3000).admin.command('ping')\nPY"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
     container_name: backend-primary
     build: ../backend
     environment:
       MONGODB_URI: "mongodb://animo_app:DLSU1234!@10.1.11.16:27017,10.1.11.17:27017/animoassign?replicaSet=animoassignRS&authSource=admin&retryWrites=true&w=majority"
       BACKEND_MONGODB_URI: "mongodb://animo_app:DLSU1234!@10.1.11.16:27017,10.1.11.17:27017/animoassign?replicaSet=animoassignRS&authSource=admin&retryWrites=true&w=majority"
+      BACKEND_ANALYTICS_URL: "http://analytics-primary:8000/analytics"
       SERVICE_ROLE: primary
     depends_on:
       mongo-primary:
@@ -30,10 +37,17 @@ services:
     restart: unless-stopped
 
   analytics-primary:
+    healthcheck:
+      test: ["CMD-SHELL", "python - <<'PY'\nfrom pymongo import MongoClient\nimport os,sys\nu=os.getenv('MONGODB_URI') or os.getenv('ANALYTICS_MONGODB_URI')\nMongoClient(u, serverSelectionTimeoutMS=3000).admin.command('ping')\nPY"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
     container_name: analytics-primary
     build: ../analytics
     environment:
       MONGODB_URI: "mongodb://animo_app:DLSU1234!@10.1.11.16:27017,10.1.11.17:27017/animoassign?replicaSet=animoassignRS&authSource=admin&retryWrites=true&w=majority"
+      ANALYTICS_MONGODB_URI: "mongodb://animo_app:DLSU1234!@10.1.11.16:27017,10.1.11.17:27017/animoassign?replicaSet=animoassignRS&authSource=admin&retryWrites=true&w=majority"
     depends_on:
       mongo-primary:
         condition: service_started

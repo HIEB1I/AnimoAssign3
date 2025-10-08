@@ -1,88 +1,68 @@
+# analytics/app/main.py
 from datetime import datetime, timezone
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, APIRouter, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field
 
 from .config import get_settings
 
-app = FastAPI(title="AnimoAssign Analytics", version="1.0.0")
 settings = get_settings()
-client = AsyncIOMotorClient(settings.mongodb_uri)
-db = client.get_default_database()
+app = FastAPI(title="AnimoAssign Analytics", version="1.0.0")
 
+client = AsyncIOMotorClient(settings.mongodb_uri)
+db = client.get_default_database()  # DB comes from URI path
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], allow_credentials=True,
+    allow_methods=["*"], allow_headers=["*"],
+)
+
+router = APIRouter(prefix="/analytics", tags=["analytics"])
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
+class IngestEvent(BaseModel):
+    id: Optional[str] = None
+    title: str = Field(..., min_length=1, max_length=200)
+    created_at: Optional[str] = None  # ISO8601 from backend
 
-def _iso_timestamp(value: datetime) -> str:
-    if value.tzinfo is None:
-        value = value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-
-
-class RecordIngestEvent(BaseModel):
-    id: str = Field(..., description="Identifier of the ingested record")
-    title: str = Field(..., description="Title of the record")
-    created_at: datetime = Field(default_factory=_utc_now)
-
-
-@app.get("/health")
+@router.get("/health")
 async def health():
     return {"status": "ok", "service": settings.service_name}
 
+@router.get("/health/db")
+async def health_db():
+    await client.admin.command("ping")
+    return {"db": "ok"}
 
-@app.get("/analytics/summary")
-async def analytics_summary(top_limit: int = Query(5, ge=1, le=25)):
-    total_records = await db.records.count_documents({})
-
-    top_terms_pipeline: List[Dict[str, Any]] = [
-        {"$unwind": "$terms"},
-        {"$group": {"_id": "$terms", "count": {"$sum": 1}}},
-        {"$sort": {"count": -1, "_id": 1}},
-        {"$limit": top_limit},
-    ]
-    top_terms_cursor = db.records.aggregate(top_terms_pipeline)
-    top_terms: List[Dict[str, Any]] = []
-    async for row in top_terms_cursor:
-        top_terms.append({"term": row.get("_id"), "count": int(row.get("count", 0))})
-
-    daily_pipeline: List[Dict[str, Any]] = [
-        {
-            "$group": {
-                "_id": {
-                    "$dateToString": {
-                        "format": "%Y-%m-%d",
-                        "date": "$created_at",
-                    }
-                },
-                "count": {"$sum": 1},
-            }
-        },
-        {"$sort": {"_id": 1}},
-    ]
-    daily_cursor = db.records.aggregate(daily_pipeline)
-    daily_ingest: List[Dict[str, Any]] = []
-    async for row in daily_cursor:
-        daily_ingest.append({"date": row.get("_id"), "count": int(row.get("count", 0))})
-
-    return {
-        "generatedAt": _iso_timestamp(_utc_now()),
-        "service": settings.service_name,
-        "totalRecords": total_records,
-        "topTerms": top_terms,
-        "dailyIngest": daily_ingest,
+@router.post("/ingest", status_code=202)
+async def ingest(payload: IngestEvent):
+    doc: Dict[str, Any] = {
+        "id": payload.id,
+        "title": payload.title.strip(),
+        "created_at": payload.created_at or _utc_now().isoformat().replace("+00:00", "Z"),
+        "received_at": _utc_now(),
+        "kind": "record_created",
     }
-
-
-@app.post("/analytics/ingest")
-async def record_ingest(event: RecordIngestEvent):
-    document = event.model_dump()
-    document["received_at"] = _utc_now()
     try:
-        await db.analytics_events.insert_one(document)
-    except Exception as exc:  # pragma: no cover - guard
-        raise HTTPException(status_code=500, detail=f"Failed to record ingest event: {exc}")
-    return {"ok": True, "service": settings.service_name}
+        await db.analytics_events.insert_one(doc)
+    except Exception as e:
+        # Return 400 for client-ish problems, 500 otherwise
+        raise HTTPException(status_code=500, detail=f"store_failed: {e}")
+    return {"status": "accepted"}
+    
+@router.get("/events")
+async def list_events(limit: int = 100):
+    cur = db.analytics_events.find({}).sort("received_at", -1).limit(limit)
+    items: List[Dict[str, Any]] = []
+    async for d in cur:
+        d["_id"] = str(d["_id"])
+        items.append(d)
+    return {"items": items, "limit": limit}
+
+app.include_router(router)
