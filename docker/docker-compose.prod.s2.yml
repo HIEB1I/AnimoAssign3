@@ -55,7 +55,7 @@ services:
     ports:
       - "28080:80"
     networks:
-      - [animoassign]
+      - animoassign
 
   nginx:
     image: nginx:1.25-alpine
@@ -67,7 +67,7 @@ services:
     ports:
       - "80:80"
     networks:
-      - [animoassign]
+      - animoassign
 
 networks:
   animoassign:
