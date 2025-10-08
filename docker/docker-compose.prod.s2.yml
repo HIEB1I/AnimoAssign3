@@ -20,7 +20,7 @@ services:
     environment:
       MONGODB_URI: "mongodb://animo_app:DLSU1234!@10.1.11.16:27017,10.1.11.17:27017/animoassign?replicaSet=animoassignRS&authSource=admin&retryWrites=true&w=majority"
       BACKEND_MONGODB_URI: "mongodb://animo_app:DLSU1234!@10.1.11.16:27017,10.1.11.17:27017/animoassign?replicaSet=animoassignRS&authSource=admin&retryWrites=true&w=majority"
-      BACKEND_ANALYTICS_URL: "http://analytics-secondary:8000/analytics"
+      BACKEND_ANALYTICS_URL: http://analytics-secondary:8000
       SERVICE_ROLE: secondary
     depends_on:
       - mongo-secondary
