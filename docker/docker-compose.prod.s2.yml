@@ -16,8 +16,7 @@ services:
     build: ../backend
     environment:
       # Primary (S1) + Secondary (S2), replica set-aware
-      MONGODB_URI: "mongodb://animo_app:DLSU1234!@mongo-primary.animoassign.internal:27017,mongo-secondary.animoassign.internal:27017/animoassign?replicaSet=animoassignRS&authSource=admin&retryWrites=true&w=majority"
-      BACKEND_MONGODB_URI: "mongodb://animo_app:DLSU1234!@mongo-primary.animoassign.internal:27017,mongo-secondary.animoassign.internal:27017/animoassign?replicaSet=animoassignRS&authSource=admin&retryWrites=true&w=majority"
+      MONGODB_URI: "mongodb://animo_app:DLSU1234!@10.1.11.16:27017,10.1.11.17:27017/animoassign?replicaSet=animoassignRS&authSource=admin&retryWrites=true&w=majority"
       BACKEND_ANALYTICS_URL: "http://analytics-secondary:8000/analytics"
       SERVICE_ROLE: secondary
     depends_on:
@@ -33,8 +32,7 @@ services:
     container_name: analytics-secondary
     build: ../analytics
     environment:
-      MONGODB_URI: "mongodb://animo_app:DLSU1234!@mongo-primary.animoassign.internal:27017,mongo-secondary.animoassign.internal:27017/animoassign?replicaSet=animoassignRS&authSource=admin&retryWrites=true&w=majority"
-      ANALYTICS_MONGODB_URI: "mongodb://animo_app:DLSU1234!@mongo-primary.animoassign.internal:27017,mongo-secondary.animoassign.internal:27017/animoassign?replicaSet=animoassignRS&authSource=admin&retryWrites=true&w=majority"
+      MONGODB_URI: "mongodb://animo_app:DLSU1234!@10.1.11.16:27017,10.1.11.17:27017/animoassign?replicaSet=animoassignRS&authSource=admin&retryWrites=true&w=majority"
       SERVICE_ROLE: secondary
     depends_on:
       - mongo-secondary
