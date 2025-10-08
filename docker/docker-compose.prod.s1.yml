@@ -37,8 +37,9 @@ services:
     container_name: backend-primary
     build: ../backend
     environment:
-      BACKEND_MONGODB_URI: mongodb://${APP_MONGODB_USERNAME}:${APP_MONGODB_PASSWORD}@${APP_MONGODB_HOST}:27017/animoassign?authSource=admin
-      BACKEND_ANALYTICS_URL: http://analytics-primary:8000/analytics
+      MONGODB_URI: "mongodb://animo_app:DLSU1234!@mongo-primary.animoassign.internal:27017,mongo-secondary.animoassign.internal:27017/animoassign?replicaSet=animoassignRS&authSource=admin&retryWrites=true&w=majority"
+      BACKEND_MONGODB_URI: "mongodb://animo_app:DLSU1234!@mongo-primary.animoassign.internal:27017,mongo-secondary.animoassign.internal:27017/animoassign?replicaSet=animoassignRS&authSource=admin&retryWrites=true&w=majority"
+      BACKEND_ANALYTICS_URL: "http://analytics-primary:8000/analytics"
       SERVICE_ROLE: primary
     depends_on:
       mongo-primary:
@@ -47,18 +48,17 @@ services:
         condition: service_completed_successfully
     ports:
       - "18000:8000"
-    networks:
-      - animoassign
+    networks: [animoassign]
     extra_hosts:
-      - "mongo-primary.animoassign.internal:host-gateway"
-      - "mongo-secondary.animoassign.internal:host-gateway"
+      - "mongo-primary.animoassign.internal:host-gateway"  
+      - "mongo-secondary.animoassign.internal:10.1.11.17"  
 
   analytics-primary:
     container_name: analytics-primary
     build: ../analytics
     environment:
-      ANALYTICS_MONGODB_URI: mongodb://${APP_MONGODB_USERNAME}:${APP_MONGODB_PASSWORD}@${APP_MONGODB_HOST}:27017/animoassign?authSource=admin
-      SERVICE_ROLE: primary
+      MONGODB_URI: "mongodb://animo_app:DLSU1234!@mongo-primary.animoassign.internal:27017,mongo-secondary.animoassign.internal:27017/animoassign?replicaSet=animoassignRS&authSource=admin&retryWrites=true&w=majority"
+      ANALYTICS_MONGODB_URI: "mongodb://animo_app:DLSU1234!@mongo-primary.animoassign.internal:27017,mongo-secondary.animoassign.internal:27017/animoassign?replicaSet=animoassignRS&authSource=admin&retryWrites=true&w=majority"
     depends_on:
       mongo-primary:
         condition: service_started
@@ -66,11 +66,11 @@ services:
         condition: service_completed_successfully
     ports:
       - "18100:8000"
-    networks:
-      - animoassign
+    networks: [animoassign]
     extra_hosts:
       - "mongo-primary.animoassign.internal:host-gateway"
-      - "mongo-secondary.animoassign.internal:host-gateway"
+      - "mongo-secondary.animoassign.internal:10.1.11.17"
+
 
   frontend-primary:
     container_name: frontend-primary
