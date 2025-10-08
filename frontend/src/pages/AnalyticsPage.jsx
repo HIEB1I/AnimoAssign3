@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
-import { AnalyticsSummary, fetchAnalyticsSummary } from "../api";
+import { AnalyticsSummary } from "../api";
+import { fetchAnalyticsSummary } from "../api";
+
 
 export default function AnalyticsPage() {
   const [summary, setSummary] = useState<AnalyticsSummary | null>(null);
