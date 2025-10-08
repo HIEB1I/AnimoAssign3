@@ -115,6 +115,22 @@ async def search_assignments(
         items.append(_serialize(doc))
     return {"items": items, "query": q, "count": len(items)}
 
+@app.get("/records", tags=["records"])
+async def list_records_compat(limit: int = Query(50, ge=1, le=200)):
+    # reuse assignments implementation
+    return await list_assignments(limit=limit)
+
+@app.post("/records", tags=["records"], status_code=201)
+async def create_record_compat(payload: AssignmentIn):
+    return await create_assignment(payload)
+
+@app.get("/records/search", tags=["records"])
+async def search_records_compat(
+    q: str = Query("", max_length=200),
+    limit: int = Query(25, ge=1, le=100),
+):
+    return await search_assignments(q=q, limit=limit)
+
 # ---------- Diagnostics (end-to-end) ----------
 
 @app.post("/connectivity-test", tags=["diagnostics"])
