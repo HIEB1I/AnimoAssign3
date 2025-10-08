@@ -1,6 +1,34 @@
 const backendBase = import.meta.env.VITE_BACKEND_URL ?? "/api";
 const analyticsBase = import.meta.env.VITE_ANALYTICS_URL ?? "/analytics";
 
+function join(a: string, b: string) {
+  // join base + path without double slashes
+  return `${a.replace(/\/+$/, "")}/${b.replace(/^\/+/, "")}`;
+}
+
+export async function fetchAnalyticsSummary(): Promise<AnalyticsSummary> {
+  const url = join(analyticsBase, "/summary");
+  const res = await fetch(url, {
+    headers: { Accept: "application/json" },
+  });
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`Analytics failed (${res.status}): ${text || res.statusText}`);
+  }
+
+  const data = (await res.json()) as AnalyticsSummary;
+  if (
+    typeof data?.totalRecords !== "number" ||
+    typeof data?.generatedAt !== "string" ||
+    !Array.isArray(data?.topTerms) ||
+    !Array.isArray(data?.dailyIngest)
+  ) {
+    throw new Error("Unexpected analytics summary shape");
+  }
+  return data;
+}
+
 export type RecordPayload = {
   title: string;
   content: string;
@@ -28,28 +56,6 @@ export type AnalyticsSummary = {
   topTerms: AnalyticsTerm[];
   dailyIngest: AnalyticsDaily[];
 };
-
-export async function fetchAnalyticsSummary(): Promise<AnalyticsSummary> {
-  const res = await fetch("/analytics/summary", {
-    headers: { "Accept": "application/json" },
-  });
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`Analytics failed (${res.status}): ${text || res.statusText}`);
-  }
-  const data = (await res.json()) as AnalyticsSummary;
-  // minimal shape check to avoid white screens
-  if (
-    typeof data?.totalRecords !== "number" ||
-    typeof data?.generatedAt !== "string" ||
-    !Array.isArray(data?.topTerms) ||
-    !Array.isArray(data?.dailyIngest)
-  ) {
-    throw new Error("Unexpected analytics summary shape");
-  }
-  return data;
-}
-
 
 export async function createRecord(payload: RecordPayload): Promise<RecordItem> {
   const response = await fetch(`${backendBase}/records`, {
@@ -92,3 +98,5 @@ export async function searchRecords(query: string): Promise<SearchResponse> {
 
   return response.json();
 }
+
+
