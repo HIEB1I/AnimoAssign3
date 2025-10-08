@@ -11,6 +11,3 @@ frontend/.vite/
 frontend/*.tsbuildinfo
 *.pyc
 pytest_cache/
-docker/.env
-frontend/.env.local
-frontend/.env.prod
