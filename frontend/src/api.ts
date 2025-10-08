@@ -19,13 +19,37 @@ export type SearchResponse = {
   count: number;
 };
 
+// frontend/src/api/index.ts
+export type AnalyticsTerm = { term: string; count: number };
+export type AnalyticsDaily = { date: string; count: number };
 export type AnalyticsSummary = {
-  generatedAt: string;
-  service: string;
   totalRecords: number;
-  topTerms: { term: string; count: number }[];
-  dailyIngest: { date: string; count: number }[];
+  generatedAt: string;
+  topTerms: AnalyticsTerm[];
+  dailyIngest: AnalyticsDaily[];
 };
+
+export async function fetchAnalyticsSummary(): Promise<AnalyticsSummary> {
+  const res = await fetch("/analytics/summary", {
+    headers: { "Accept": "application/json" },
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`Analytics failed (${res.status}): ${text || res.statusText}`);
+  }
+  const data = (await res.json()) as AnalyticsSummary;
+  // minimal shape check to avoid white screens
+  if (
+    typeof data?.totalRecords !== "number" ||
+    typeof data?.generatedAt !== "string" ||
+    !Array.isArray(data?.topTerms) ||
+    !Array.isArray(data?.dailyIngest)
+  ) {
+    throw new Error("Unexpected analytics summary shape");
+  }
+  return data;
+}
+
 
 export async function createRecord(payload: RecordPayload): Promise<RecordItem> {
   const response = await fetch(`${backendBase}/records`, {
@@ -64,16 +88,6 @@ export async function searchRecords(query: string): Promise<SearchResponse> {
   if (!response.ok) {
     const message = await response.text();
     throw new Error(message || "Failed to search records");
-  }
-
-  return response.json();
-}
-
-export async function fetchAnalyticsSummary(): Promise<AnalyticsSummary> {
-  const response = await fetch(`${analyticsBase}/summary`);
-  if (!response.ok) {
-    const message = await response.text();
-    throw new Error(message || "Failed to load analytics summary");
   }
 
   return response.json();

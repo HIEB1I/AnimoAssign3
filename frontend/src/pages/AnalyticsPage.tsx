@@ -76,4 +76,14 @@ export default function AnalyticsPage() {
       )}
     </div>
   );
+
+  {error && (
+  <div className="form__status form__status--error">
+    <p>{error}</p>
+    <button onClick={() => { setError(null); setLoading(true); fetchAnalyticsSummary().then(setSummary).catch(e => setError(e.message)).finally(() => setLoading(false)); }}>
+      Retry
+    </button>
+  </div>
+)}
+
 }
