@@ -9,7 +9,7 @@ services:
     volumes:
       - mongo_secondary_data:/data/db
       - /opt/AnimoAssign3/secrets/mongo-keyfile:/run/secrets/mongo-keyfile:ro
-    network_mode: [animoassign]
+    network_mode: animoassign
 
   backend-secondary:
     container_name: backend-secondary

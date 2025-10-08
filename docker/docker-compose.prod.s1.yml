@@ -9,7 +9,7 @@ services:
     volumes:
       - mongo_primary_data:/data/db
       - /opt/AnimoAssign3/secrets/mongo-keyfile:/run/secrets/mongo-keyfile:ro
-    network_mode: [animoassign]
+    network_mode: animoassign
 
   mongo-primary-bootstrap:
     image: mongo:7
@@ -31,7 +31,7 @@ services:
       - ../db/scripts:/scripts:ro
     entrypoint: ["/bin/bash", "/scripts/bootstrap-replica.sh"]
     restart: "no"
-    network_mode: [animoassign]
+    network_mode: animoassign
 
   backend-primary:
     container_name: backend-primary
