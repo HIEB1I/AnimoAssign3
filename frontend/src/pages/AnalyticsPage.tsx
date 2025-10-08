@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { AnalyticsSummary } from "../api";
+import type { AnalyticsSummary } from "../api";
 import { fetchAnalyticsSummary } from "../api";
 
 
