@@ -9,32 +9,7 @@ services:
     volumes:
       - mongo_primary_data:/data/db
       - /opt/AnimoAssign3/secrets/mongo-keyfile:/run/secrets/mongo-keyfile:ro
-    ports:
-      - "27017:27017"          # expose to host so S2 can reach it
-    networks: [animoassign]
-    restart: unless-stopped
-
-  mongo-primary-bootstrap:
-    image: mongo:7
-    container_name: mongo-primary-bootstrap
-    depends_on:
-      mongo-primary:
-        condition: service_started
-    environment:
-      MONGO_ROOT_USERNAME: ${MONGO_ROOT_USERNAME}
-      MONGO_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD}
-      MONGO_REPLICA_SET: ${MONGO_REPLICA_SET:-animoassignRS}
-      MONGO_PRIMARY_HOST: ${MONGO_PRIMARY_HOST:-127.0.0.1}
-      MONGO_PRIMARY_PORT: ${MONGO_PRIMARY_PORT:-27017}
-      MONGO_PRIMARY_NODE: ${MONGO_PRIMARY_NODE:-mongo-primary:27017}
-      MONGO_SECONDARY_NODE: ${MONGO_SECONDARY_NODE:-}
-      APP_MONGODB_USERNAME: ${APP_MONGODB_USERNAME}
-      APP_MONGODB_PASSWORD: ${APP_MONGODB_PASSWORD}
-    volumes:
-      - ../db/scripts:/scripts:ro
-    entrypoint: ["/bin/bash", "/scripts/bootstrap-replica.sh"]
-    restart: "no"
-    networks: [animoassign]
+    network_mode: animoassign
 
   backend-primary:
     container_name: backend-primary
@@ -45,12 +20,12 @@ services:
     depends_on:
       mongo-primary:
         condition: service_started
-      mongo-primary-bootstrap:
-        condition: service_completed_successfully
     ports:
       - "18000:8000"
     networks: [animoassign]
-    restart: unless-stopped
+    extra_hosts:
+      - "mongo-primary.animoassign.internal:host-gateway"  
+      - "mongo-secondary.animoassign.internal:10.1.11.17"  
 
   analytics-primary:
     container_name: analytics-primary
@@ -60,12 +35,13 @@ services:
     depends_on:
       mongo-primary:
         condition: service_started
-      mongo-primary-bootstrap:
-        condition: service_completed_successfully
     ports:
       - "18100:8000"
     networks: [animoassign]
-    restart: unless-stopped
+    extra_hosts:
+      - "mongo-primary.animoassign.internal:host-gateway"
+      - "mongo-secondary.animoassign.internal:10.1.11.17"
+
 
   frontend-primary:
     container_name: frontend-primary
@@ -78,8 +54,8 @@ services:
       - analytics-primary
     ports:
       - "18080:80"
-    networks: [animoassign]
-    restart: unless-stopped
+    networks:
+      - animoassign
 
   nginx:
     image: nginx:1.25-alpine
@@ -90,8 +66,8 @@ services:
       - frontend-primary
     ports:
       - "80:80"
-    networks: [animoassign]
-    restart: unless-stopped
+    networks:
+      - animoassign
 
 networks:
   animoassign:
