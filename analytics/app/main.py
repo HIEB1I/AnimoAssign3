@@ -38,9 +38,9 @@ async def overview():
   <h1>Analytics Overview</h1>
   <p>Insights computed by the analytics service.</p>
   <ul>
-    <li><a href="/health">/health</a></li>
-    <li><a href="/events">/events</a></li>
-    <li><a href="/summary">/summary</a></li>
+    <li><a href="/analytics/health">/analytics/health</a></li>
+    <li><a href="/analytics/events">/analytics/events</a></li>
+    <li><a href="/analytics/summary">/analytics/summary</a></li>
   </ul>
 </body></html>"""
 
