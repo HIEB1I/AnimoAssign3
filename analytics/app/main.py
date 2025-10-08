@@ -7,6 +7,9 @@ from fastapi.responses import HTMLResponse
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field
 
+from collections import Counter
+import re
+
 from .config import get_settings
 
 settings = get_settings()
@@ -44,6 +47,55 @@ async def overview():
   </ul>
 </body></html>"""
 
+_WORD = re.compile(r"[A-Za-z0-9]+")
+
+@app.get("/summary")
+async def summary(limit: int = 10):
+    # 1) total records (events ingested)
+    total = await db.analytics_events.count_documents({})
+
+    # 2) daily ingest counts (YYYY-MM-DD)
+    pipeline = [
+        {
+            "$group": {
+                "_id": {"$dateToString": {"format": "%Y-%m-%d", "date": "$received_at"}},
+                "count": {"$sum": 1},
+            }
+        },
+        {"$sort": {"_id": -1}},
+        {"$limit": 30},
+    ]
+    daily: list[dict] = []
+    async for row in db.analytics_events.aggregate(pipeline):
+        daily.append({"date": row["_id"], "count": row["count"]})
+    daily = list(reversed(daily))  # oldest → newest
+
+    # 3) top terms (simple tokenization of recent titles)
+    #    (Adjust window if you like)
+    recent_cursor = db.analytics_events.find(
+        {}, projection={"title": 1}
+    ).sort("received_at", -1).limit(200)
+
+    counts: Counter[str] = Counter()
+    async for ev in recent_cursor:
+        title = (ev.get("title") or "").lower()
+        for m in _WORD.finditer(title):
+            w = m.group(0)
+            if len(w) < 2:
+                continue
+            if w in {"the","a","an","of","and","for","to","in","on","at","with","by","from","is","are"}:
+                continue
+            counts[w] += 1
+
+    topTerms = [{"term": t, "count": c} for t, c in counts.most_common(10)]
+
+    return {
+        "totalRecords": total,
+        "generatedAt": _utc_now().isoformat().replace("+00:00", "Z"),
+        "topTerms": topTerms,
+        "dailyIngest": daily[-limit:] if limit else daily,
+    }
+    
 @app.get("/health")
 async def health():
     return {"status": "ok", "service": settings.service_name}
