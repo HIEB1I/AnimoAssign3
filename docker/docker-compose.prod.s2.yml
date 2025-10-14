@@ -9,9 +9,7 @@ services:
     volumes:
       - mongo_secondary_data:/data/db
       - /opt/secrets/animoassign/mongo-keyfile:/run/secrets/mongo-keyfile:ro
-    ports:
-      - "27017:27017"           # expose to host so 10.1.11.16 can reach it
-    networks: [animoassign]
+    network_mode: host
     restart: unless-stopped
 
   backend-secondary:
