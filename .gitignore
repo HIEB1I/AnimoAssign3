@@ -11,3 +11,4 @@ frontend/.vite/
 frontend/*.tsbuildinfo
 *.pyc
 pytest_cache/secrets
+/secrets
