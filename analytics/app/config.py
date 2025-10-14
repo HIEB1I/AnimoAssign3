@@ -1,34 +1,22 @@
+# analytics/app/config.py
+import os
 from functools import lru_cache
-from pydantic import Field
-from pydantic_settings import BaseSettings
+from typing import Optional
 
+DEFAULT_MONGODB_URI: Optional[str] = None  # keep None to force envs
 
-class Settings(BaseSettings):
-    mongodb_uri: str = Field(
-        default="mongodb://animo_app:local-dev-secret@mongo:27017/animoassign?authSource=admin",
-        description="Connection string used for MongoDB access.",
-    )
-    mongodb_connect_timeout_ms: int = Field(
-        default=1000,
-        description="Timeout in milliseconds for establishing a MongoDB connection.",
-    )
-    mongodb_server_selection_timeout_ms: int = Field(
-        default=1000,
-        description="Timeout in milliseconds for selecting a MongoDB server.",
-    )
-    mongodb_socket_timeout_ms: int = Field(
-        default=1000,
-        description="Timeout in milliseconds for MongoDB socket operations.",
-    )
-    service_name: str = "analytics"
+def _pick_mongo_uri() -> str:
+    uri = os.getenv("MONGODB_URI") or os.getenv("ANALYTICS_MONGODB_URI") or DEFAULT_MONGODB_URI
+    if not uri:
+        raise RuntimeError("Set MONGODB_URI or ANALYTICS_MONGODB_URI for analytics")
+    return uri
 
-    class Config:
-        env_file = ".env"
-        env_prefix = "ANALYTICS_"
+class Settings:
+    mongodb_uri: str = _pick_mongo_uri()
+    service_name: str = os.getenv("ANALYTICS_SERVICE_NAME", "analytics")
+    # optional timeouts, etc.
+    request_timeout_s: float = float(os.getenv("ANALYTICS_TIMEOUT_SECONDS", "3.0"))
 
-
-@lru_cache
+@lru_cache(maxsize=1)
 def get_settings() -> Settings:
-    """Return cached analytics settings."""
-
     return Settings()
