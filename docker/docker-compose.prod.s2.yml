@@ -3,7 +3,6 @@ services:
     container_name: mongo-secondary
     image: mongo:7
     command: ["mongod", "--replSet", "animoassignRS", "--bind_ip_all", "--keyFile", "/run/secrets/mongo-keyfile"]
-    hostname: ${APP_MONGODB_HOST:-mongo-secondary}
     environment:
       MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME}
       MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD}
@@ -11,44 +10,38 @@ services:
       - mongo_secondary_data:/data/db
       - /opt/AnimoAssign3/secrets/mongo-keyfile:/run/secrets/mongo-keyfile:ro
     ports:
-      - "27017:27017"
-    networks:
-      animoassign:
-        aliases:
-          - mongo-secondary
-          - mongo-secondary.animoassign.internal
-          - ${APP_MONGODB_HOST:-mongo-secondary}
-          - ${MONGO_SECONDARY_HOST:-mongo-secondary}
+      - "27017:27017"           # expose to host so 10.1.11.16 can reach it
+    networks: [animoassign]
+    restart: unless-stopped
 
   backend-secondary:
     container_name: backend-secondary
     build: ../backend
     environment:
-      BACKEND_MONGODB_URI: mongodb://${APP_MONGODB_USERNAME}:${APP_MONGODB_PASSWORD}@${APP_MONGODB_HOST:-mongo-secondary}:27017/animoassign?authSource=admin
+      MONGODB_URI: "mongodb://animo_app:DLSU1234!@10.1.11.16:27017,10.1.11.17:27017/animoassign?replicaSet=animoassignRS&authSource=admin&retryWrites=true&w=majority"
+      BACKEND_MONGODB_URI: "mongodb://animo_app:DLSU1234!@10.1.11.16:27017,10.1.11.17:27017/animoassign?replicaSet=animoassignRS&authSource=admin&retryWrites=true&w=majority"
+      BACKEND_ANALYTICS_URL: http://analytics-secondary:8000
       SERVICE_ROLE: secondary
-    extra_hosts:
-      - "${APP_MONGODB_HOST:-mongo-secondary}:host-gateway"
     depends_on:
       - mongo-secondary
     ports:
       - "28000:8000"
-    networks:
-      - animoassign
+    networks: [animoassign]
+    restart: unless-stopped
 
   analytics-secondary:
     container_name: analytics-secondary
     build: ../analytics
     environment:
-      ANALYTICS_MONGODB_URI: mongodb://${APP_MONGODB_USERNAME}:${APP_MONGODB_PASSWORD}@${APP_MONGODB_HOST:-mongo-secondary}:27017/animoassign?authSource=admin
+      MONGODB_URI: "mongodb://animo_app:DLSU1234!@10.1.11.16:27017,10.1.11.17:27017/animoassign?replicaSet=animoassignRS&authSource=admin&retryWrites=true&w=majority"
+      ANALYTICS_MONGODB_URI: "mongodb://animo_app:DLSU1234!@10.1.11.16:27017,10.1.11.17:27017/animoassign?replicaSet=animoassignRS&authSource=admin&retryWrites=true&w=majority"
       SERVICE_ROLE: secondary
-    extra_hosts:
-      - "${APP_MONGODB_HOST:-mongo-secondary}:host-gateway"
     depends_on:
       - mongo-secondary
     ports:
       - "28100:8000"
-    networks:
-      - animoassign
+    networks: [animoassign]
+    restart: unless-stopped
 
   frontend-secondary:
     container_name: frontend-secondary
@@ -61,8 +54,8 @@ services:
       - analytics-secondary
     ports:
       - "28080:80"
-    networks:
-      - animoassign
+    networks: [animoassign]
+    restart: unless-stopped
 
   nginx:
     image: nginx:1.25-alpine
@@ -73,12 +66,13 @@ services:
       - frontend-secondary
     ports:
       - "80:80"
-    networks:
-      - animoassign
+    networks: [animoassign]
+    restart: unless-stopped
 
 networks:
   animoassign:
-    driver: bridge
+    external: true
+    name: docker_animoassign
 
 volumes:
   mongo_secondary_data:
