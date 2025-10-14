@@ -10,4 +10,4 @@ frontend/dist/
 frontend/.vite/
 frontend/*.tsbuildinfo
 *.pyc
-pytest_cache/
+pytest_cache/secrets
