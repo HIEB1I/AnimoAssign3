@@ -3,6 +3,7 @@ services:
     container_name: mongo-primary
     image: mongo:7
     command: ["mongod", "--replSet", "animoassignRS", "--bind_ip_all", "--keyFile", "/run/secrets/mongo-keyfile"]
+    hostname: ${APP_MONGODB_HOST:-mongo-primary}
     environment:
       MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME}
       MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD}
@@ -10,51 +11,73 @@ services:
       - mongo_primary_data:/data/db
       - /opt/AnimoAssign3/secrets/mongo-keyfile:/run/secrets/mongo-keyfile:ro
     ports:
-      - "27017:27017"          # expose to host so S2 can reach it
-    networks: [animoassign]
-    restart: unless-stopped
+      - "27017:27017"
+    networks:
+      animoassign:
+        aliases:
+          - mongo-primary
+          - mongo-primary.animoassign.internal
+          - ${APP_MONGODB_HOST:-mongo-primary}
+          - ${MONGO_PRIMARY_HOST:-mongo-primary}
+
+  mongo-primary-bootstrap:
+    image: mongo:7
+    container_name: mongo-primary-bootstrap
+    depends_on:
+      mongo-primary:
+        condition: service_started
+    environment:
+      MONGO_ROOT_USERNAME: ${MONGO_ROOT_USERNAME}
+      MONGO_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD}
+      MONGO_REPLICA_SET: ${MONGO_REPLICA_SET:-animoassignRS}
+      MONGO_PRIMARY_SERVICE_HOST: ${MONGO_PRIMARY_SERVICE_HOST:-mongo-primary}
+      MONGO_PRIMARY_HOST: ${MONGO_PRIMARY_HOST:-mongo-primary}
+      MONGO_PRIMARY_PORT: ${MONGO_PRIMARY_PORT:-27017}
+      MONGO_PRIMARY_NODE: ${MONGO_PRIMARY_NODE:-mongo-primary:27017}
+      MONGO_SECONDARY_NODE: ${MONGO_SECONDARY_NODE:-}
+      APP_MONGODB_USERNAME: ${APP_MONGODB_USERNAME}
+      APP_MONGODB_PASSWORD: ${APP_MONGODB_PASSWORD}
+    volumes:
+      - ../db/scripts:/scripts:ro
+    entrypoint: ["/bin/bash", "/scripts/bootstrap-replica.sh"]
+    restart: "no"
+    networks:
+      - animoassign
 
   backend-primary:
-    healthcheck:
-      test: ["CMD-SHELL", "python - <<'PY'\nfrom pymongo import MongoClient\nimport os,sys\nu=os.getenv('MONGODB_URI') or os.getenv('BACKEND_MONGODB_URI')\nMongoClient(u, serverSelectionTimeoutMS=3000).admin.command('ping')\nPY"]
-      interval: 15s
-      timeout: 5s
-      retries: 5
-      start_period: 20s
     container_name: backend-primary
     build: ../backend
     environment:
-      MONGODB_URI: "mongodb://animo_app:DLSU1234!@10.1.11.16:27017,10.1.11.17:27017/animoassign?replicaSet=animoassignRS&authSource=admin&retryWrites=true&w=majority"
-      BACKEND_MONGODB_URI: "mongodb://animo_app:DLSU1234!@10.1.11.16:27017,10.1.11.17:27017/animoassign?replicaSet=animoassignRS&authSource=admin&retryWrites=true&w=majority"
-      BACKEND_ANALYTICS_URL: http://analytics-primary:8000
+      BACKEND_MONGODB_URI: mongodb://${APP_MONGODB_USERNAME}:${APP_MONGODB_PASSWORD}@${APP_MONGODB_HOST:-mongo-primary}:27017/animoassign?authSource=admin
       SERVICE_ROLE: primary
+    extra_hosts:
+      - "${APP_MONGODB_HOST:-mongo-primary}:host-gateway"
     depends_on:
       mongo-primary:
         condition: service_started
+      mongo-primary-bootstrap:
+        condition: service_completed_successfully
     ports:
       - "18000:8000"
-    networks: [animoassign]
-    restart: unless-stopped
+    networks:
+      - animoassign
 
   analytics-primary:
-    healthcheck:
-      test: ["CMD-SHELL", "python - <<'PY'\nfrom pymongo import MongoClient\nimport os,sys\nu=os.getenv('MONGODB_URI') or os.getenv('ANALYTICS_MONGODB_URI')\nMongoClient(u, serverSelectionTimeoutMS=3000).admin.command('ping')\nPY"]
-      interval: 15s
-      timeout: 5s
-      retries: 5
-      start_period: 20s
     container_name: analytics-primary
     build: ../analytics
     environment:
-      MONGODB_URI: "mongodb://animo_app:DLSU1234!@10.1.11.16:27017,10.1.11.17:27017/animoassign?replicaSet=animoassignRS&authSource=admin&retryWrites=true&w=majority"
-      ANALYTICS_MONGODB_URI: "mongodb://animo_app:DLSU1234!@10.1.11.16:27017,10.1.11.17:27017/animoassign?replicaSet=animoassignRS&authSource=admin&retryWrites=true&w=majority"
+      ANALYTICS_MONGODB_URI: mongodb://${APP_MONGODB_USERNAME}:${APP_MONGODB_PASSWORD}@${APP_MONGODB_HOST:-mongo-primary}:27017/animoassign?authSource=admin
+    extra_hosts:
+      - "${APP_MONGODB_HOST:-mongo-primary}:host-gateway"
     depends_on:
       mongo-primary:
         condition: service_started
+      mongo-primary-bootstrap:
+        condition: service_completed_successfully
     ports:
       - "18100:8000"
-    networks: [animoassign]
-    restart: unless-stopped
+    networks:
+      - animoassign
 
   frontend-primary:
     container_name: frontend-primary
@@ -67,8 +90,8 @@ services:
       - analytics-primary
     ports:
       - "18080:80"
-    networks: [animoassign]
-    restart: unless-stopped
+    networks:
+      - animoassign
 
   nginx:
     image: nginx:1.25-alpine
@@ -79,13 +102,12 @@ services:
       - frontend-primary
     ports:
       - "80:80"
-    networks: [animoassign]
-    restart: unless-stopped
+    networks:
+      - animoassign
 
 networks:
   animoassign:
-    external: true
-    name: docker_animoassign
+    driver: bridge
 
 volumes:
   mongo_primary_data:

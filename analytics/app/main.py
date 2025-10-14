@@ -1,149 +1,101 @@
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from datetime import datetime
 
 from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field
 
-from collections import Counter
-import re
-
 from .config import get_settings
 
-settings = get_settings()
 app = FastAPI(title="AnimoAssign Analytics", version="1.0.0")
-
+settings = get_settings()
+client = AsyncIOMotorClient(
+    settings.mongodb_uri,
+    connectTimeoutMS=settings.mongodb_connect_timeout_ms,
+    serverSelectionTimeoutMS=settings.mongodb_server_selection_timeout_ms,
+    socketTimeoutMS=settings.mongodb_socket_timeout_ms,
+)
 client = AsyncIOMotorClient(settings.mongodb_uri)
 db = client.get_default_database()
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"], allow_credentials=True,
-    allow_methods=["*"], allow_headers=["*"],
-)
 
-def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+STATUS_LABELS = {
+    "todo": "To do",
+    "in_progress": "In progress",
+    "done": "Done",
+}
 
-class IngestEvent(BaseModel):
-    id: Optional[str] = None
-    title: str = Field(..., min_length=1, max_length=200)
-    created_at: Optional[str] = None  # ISO8601 from backend
 
-# ---- Root pages/APIs (Nginx strips /analytics → these root routes) ----
+async def compute_assignment_totals():
+    pipeline = [{"$group": {"_id": "$status", "count": {"$sum": 1}}}]
+    return await db.assignments.aggregate(pipeline).to_list(None)
 
-@app.get("/", response_class=HTMLResponse)
-async def overview():
-    return """<!doctype html>
-<html><body>
-  <h1>Analytics Overview</h1>
-  <p>Insights computed by the analytics service.</p>
-  <ul>
-    <li><a href="/analytics/health">/analytics/health</a></li>
-    <li><a href="/analytics/events">/analytics/events</a></li>
-    <li><a href="/analytics/summary">/analytics/summary</a></li>
-  </ul>
-</body></html>"""
 
-_WORD = re.compile(r"[A-Za-z0-9]+")
+class AnalyticsTestEvent(BaseModel):
+    title: str = Field(..., description="Title associated with the diagnostic payload")
+    status: str = Field(..., description="Assignment status provided by the diagnostic")
+    notes: str | None = Field(None, description="Optional notes supplied with the payload")
+    source: str | None = Field(None, description="Origin of the diagnostic payload")
 
-@app.get("/summary")
-async def summary(limit: int = 10):
-    # 1) total records (events ingested)
-    total = await db.analytics_events.count_documents({})
 
-    # 2) daily ingest counts (YYYY-MM-DD)
-    pipeline = [
-        {
-            "$group": {
-                "_id": {"$dateToString": {"format": "%Y-%m-%d", "date": "$received_at"}},
-                "count": {"$sum": 1},
-            }
-        },
-        {"$sort": {"_id": -1}},
-        {"$limit": 30},
-    ]
-    daily: list[dict] = []
-    async for row in db.analytics_events.aggregate(pipeline):
-        daily.append({"date": row["_id"], "count": row["count"]})
-    daily = list(reversed(daily))  # oldest → newest
-
-    # 3) top terms (simple tokenization of recent titles)
-    #    (Adjust window if you like)
-    recent_cursor = db.analytics_events.find(
-        {}, projection={"title": 1}
-    ).sort("received_at", -1).limit(200)
-
-    counts: Counter[str] = Counter()
-    async for ev in recent_cursor:
-        title = (ev.get("title") or "").lower()
-        for m in _WORD.finditer(title):
-            w = m.group(0)
-            if len(w) < 2:
-                continue
-            if w in {"the","a","an","of","and","for","to","in","on","at","with","by","from","is","are"}:
-                continue
-            counts[w] += 1
-
-    topTerms = [{"term": t, "count": c} for t, c in counts.most_common(10)]
-
-    return {
-        "totalRecords": total,
-        "generatedAt": _utc_now().isoformat().replace("+00:00", "Z"),
-        "topTerms": topTerms,
-        "dailyIngest": daily[-limit:] if limit else daily,
-    }
-    
 @app.get("/health")
 async def health():
     return {"status": "ok", "service": settings.service_name}
 
-@app.get("/health/db")
-async def health_db():
-    await client.admin.command("ping")
-    return {"db": "ok"}
 
-@app.post("/ingest", status_code=202)
-async def ingest(payload: IngestEvent):
-    doc: Dict[str, Any] = {
-        "id": payload.id,
-        "title": payload.title.strip(),
-        "created_at": payload.created_at or _utc_now().isoformat().replace("+00:00", "Z"),
-        "received_at": _utc_now(),
-        "kind": "record_created",
-    }
+@app.get("/analytics/assignment-totals")
+async def get_assignment_totals():
+    results = await compute_assignment_totals()
+    await db.analytics_status.replace_one(
+        {"_id": "assignment_totals"},
+        {"_id": "assignment_totals", "results": results},
+        upsert=True,
+    )
+    return {"results": results}
+
+
+@app.post("/analytics/test-event")
+async def receive_test_event(event: AnalyticsTestEvent):
+    document = event.model_dump()
+    document["created_at"] = datetime.utcnow()
     try:
-        await db.analytics_events.insert_one(doc)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"store_failed: {e}")
-    return {"status": "accepted"}
+        result = await db.analytics_events.insert_one(document)
+    except Exception as exc:  # pragma: no cover - defensive guard
+        raise HTTPException(status_code=500, detail=f"Failed to record test event: {exc}")
 
-@app.get("/events")
-async def list_events(limit: int = 100):
-    cur = db.analytics_events.find({}).sort("received_at", -1).limit(limit)
-    items: List[Dict[str, Any]] = []
-    async for d in cur:
-        d["_id"] = str(d["_id"])
-        items.append(d)
-    return {"items": items, "limit": limit}
-
-@app.get("/summary")
-async def summary(limit: int = 10):
-    cur = db.analytics_events.find({}).sort("received_at", -1).limit(limit)
-    latest: List[Dict[str, Any]] = []
-    async for d in cur:
-        d["_id"] = str(d["_id"])
-        latest.append(d)
-
-    total = await db.analytics_events.count_documents({})
-
-    # ✅ keep old keys AND provide the shape most UIs expect
     return {
-        "total": total,
-        "latest": latest,
-        "limit": limit,
-        "items": latest,          # <— add this line
-        "count": len(latest),     # <— handy & harmless
+        "ok": True,
+        "detail": "Test event stored in analytics datastore.",
+        "id": str(result.inserted_id),
+        "service": settings.service_name,
+    }
+
+
+@app.get("/analytics/summary")
+async def analytics_summary():
+    totals = await compute_assignment_totals()
+    total_assignments = sum(int(row.get("count", 0)) for row in totals)
+
+    breakdown = []
+    for row in totals:
+        status = row.get("_id", "unknown")
+        count = int(row.get("count", 0))
+        label = STATUS_LABELS.get(status, status.replace("_", " ").title())
+        percentage = (count / total_assignments * 100) if total_assignments else 0.0
+        breakdown.append(
+            {
+                "status": status,
+                "label": label,
+                "count": count,
+                "percentage": round(percentage, 2),
+            }
+        )
+
+    diagnostics_count = await db.analytics_events.count_documents({})
+
+    return {
+        "generatedAt": datetime.utcnow().isoformat() + "Z",
+        "totalAssignments": total_assignments,
+        "diagnosticEventsStored": diagnostics_count,
+        "statusBreakdown": breakdown,
+        "service": settings.service_name,
     }

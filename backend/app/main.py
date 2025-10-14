@@ -1,5 +1,4 @@
-# backend/app/main.py
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any, Dict, List
 
 import httpx
@@ -10,195 +9,211 @@ from pydantic import BaseModel, Field
 
 from .config import get_settings
 
-settings = get_settings()
-
 app = FastAPI(title="AnimoAssign Backend", version="1.0.0")
-
-# Async Mongo client; directConnection may be False in RS mode, True for single-node probes
+settings = get_settings()
 client = AsyncIOMotorClient(
     settings.mongodb_uri,
-    directConnection=getattr(settings, "mongodb_direct_connection", False),
+    connectTimeoutMS=settings.mongodb_connect_timeout_ms,
+    serverSelectionTimeoutMS=settings.mongodb_server_selection_timeout_ms,
+    socketTimeoutMS=settings.mongodb_socket_timeout_ms,
 )
+client = AsyncIOMotorClient(settings.mongodb_uri)
 db = client.get_default_database()
 
-# ---------- Models ----------
 
 class ConnectivityTestPayload(BaseModel):
-    title: str = Field(..., description="Sample title for the diagnostic record")
-    status: str = Field("todo", pattern=r"^[a-zA-Z0-9_-]+$")
-    notes: str | None = Field(default=None, max_length=500)
+    """Payload sent from the frontend when running a connectivity check."""
 
-class AssignmentIn(BaseModel):
-    title: str = Field(..., min_length=1, max_length=200)
-    content: str | None = Field(default=None, max_length=4000)
+    title: str = Field(..., description="Sample title used when inserting a test record")
+    status: str = Field(
+        "todo",
+        description="Assignment status used for the test record",
+        pattern="^[a-zA-Z0-9_-]+$",
+    )
+    notes: str | None = Field(
+        default=None,
+        description="Optional notes to store alongside the test record",
+        max_length=500,
+    )
 
-# ---------- Helpers ----------
 
-def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+def _service_result(
+    name: str,
+    ok: bool,
+    detail: str,
+    latency_ms: float | None,
+) -> Dict[str, Any]:
+    """Utility to construct a service response payload."""
 
-def _service_result(name: str, ok: bool, detail: str, latency_ms: float | None) -> Dict[str, Any]:
-    out: Dict[str, Any] = {"service": name, "ok": ok, "detail": detail}
+    payload: Dict[str, Any] = {
+        "service": name,
+        "ok": ok,
+        "detail": detail,
+    }
     if latency_ms is not None:
-        out["latencyMs"] = round(latency_ms, 2)
-    return out
-
-def _serialize(doc: Dict[str, Any]) -> Dict[str, Any]:
-    d = dict(doc)
-    d["id"] = str(d.pop("_id", ""))
-    # normalize created_at
-    ca = d.get("created_at")
-    if isinstance(ca, datetime):
-        if ca.tzinfo is None:
-            ca = ca.replace(tzinfo=timezone.utc)
-        d["createdAt"] = ca.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-    else:
-        d["createdAt"] = _utcnow().isoformat().replace("+00:00", "Z")
-    return d
-
-# ---------- CORS ----------
+        payload["latencyMs"] = round(latency_ms, 2)
+    return payload
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], allow_credentials=True,
-    allow_methods=["*"], allow_headers=["*"],
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-# ---------- System ----------
 
 @app.get("/health", tags=["system"])
-async def health():
+async def health_check():
     return {"status": "ok", "service": settings.service_name}
 
-@app.get("/health/db", tags=["system"])
-async def health_db():
-    # simple ping to admin
-    await client.admin.command("ping")
-    return {"db": "ok"}
-
-# ---------- Assignments ----------
 
 @app.get("/assignments", tags=["assignments"])
-async def list_assignments(limit: int = Query(50, ge=1, le=200)):
-    cursor = db.assignments.find({}).sort("_id", -1).limit(limit)
-    items: List[Dict[str, Any]] = []
-    async for doc in cursor:
-        items.append(_serialize(doc))
-    return {"items": items, "limit": limit}
+async def list_assignments():
+    assignments = []
+    async for doc in db.assignments.find():
+        doc["_id"] = str(doc["_id"])
+        assignments.append(doc)
+    return {"items": assignments}
+
 
 @app.post("/assignments", tags=["assignments"], status_code=201)
-async def create_assignment(payload: AssignmentIn):
-    document = {
-        "title": payload.title.strip(),
-        "content": (payload.content or "").strip(),
-        "created_at": _utcnow(),
-    }
-    result = await db.assignments.insert_one(document)
+async def create_assignment(payload: dict):
+    result = await db.assignments.insert_one(payload)
     created = await db.assignments.find_one({"_id": result.inserted_id})
-    if not created:
+    if created is None:
         raise HTTPException(status_code=500, detail="Failed to create assignment")
-    return _serialize(created)
+    created["_id"] = str(created["_id"])
+    return created
+
 
 @app.get("/assignments/search", tags=["assignments"])
 async def search_assignments(
-    q: str = Query("", max_length=200, description="Search term for assignment titles/content"),
-    limit: int = Query(25, ge=1, le=100),
+    q: str = Query("", max_length=200, description="Search term for assignment titles"),
+    limit: int = Query(
+        25,
+        ge=1,
+        le=100,
+        description="Maximum number of assignments to return",
+    ),
 ):
-    q = q.strip()
     filters: Dict[str, Any] = {}
-    if q:
-        regex = {"$regex": q, "$options": "i"}
-        filters = {"$or": [{"title": regex}, {"content": regex}]}
-    cursor = db.assignments.find(filters).sort("_id", -1).limit(limit)
-    items: List[Dict[str, Any]] = []
+    search_term = q.strip()
+    if search_term:
+        filters["title"] = {"$regex": search_term, "$options": "i"}
+
+    cursor = (
+        db.assignments.find(filters)
+        .sort("_id", -1)
+        .limit(limit)
+    )
+
+    results: List[Dict[str, Any]] = []
     async for doc in cursor:
-        items.append(_serialize(doc))
-    return {"items": items, "query": q, "count": len(items)}
+        doc["_id"] = str(doc["_id"])
+        results.append(doc)
 
-@app.get("/records", tags=["records"])
-async def list_records_compat(limit: int = Query(50, ge=1, le=200)):
-    # reuse assignments implementation
-    return await list_assignments(limit=limit)
+    return {"items": results, "query": q, "count": len(results)}
 
-@app.post("/records", tags=["records"], status_code=201)
-async def create_record_compat(payload: AssignmentIn):
-    return await create_assignment(payload)
-
-@app.get("/records/search", tags=["records"])
-async def search_records_compat(
-    q: str = Query("", max_length=200),
-    limit: int = Query(25, ge=1, le=100),
-):
-    return await search_assignments(q=q, limit=limit)
-
-# ---------- Diagnostics (end-to-end) ----------
 
 @app.post("/connectivity-test", tags=["diagnostics"])
-async def connectivity_test(payload: ConnectivityTestPayload):
+async def run_connectivity_test(payload: ConnectivityTestPayload):
+    """Run a workflow that ensures each dependent service is reachable."""
+
     results: List[Dict[str, Any]] = []
-    t0 = _utcnow()
 
-    # Backend self
-    results.append(_service_result(settings.service_name, True, "Backend reached.", 0.0))
+    backend_start = datetime.now()
+    results.append(
+        _service_result(
+            name=settings.service_name,
+            ok=True,
+            detail="Backend received the diagnostic payload.",
+            latency_ms=0.0,
+        )
+    )
 
-    # Mongo write/read/cleanup
-    m0 = _utcnow()
-    mongo_ok, mongo_detail = True, "Inserted and read diagnostic record."
+    mongo_start = datetime.now()
+    mongo_status = True
+    mongo_detail = "Inserted and read diagnostic record successfully."
     inserted_id = None
     try:
-        doc = {
+        document = {
             "title": payload.title,
             "status": payload.status,
             "notes": payload.notes,
             "source": "connectivity-test",
-            "created_at": _utcnow(),
+            "created_at": datetime.utcnow(),
         }
-        ins = await db.connectivity_tests.insert_one(doc)
-        inserted_id = ins.inserted_id
-        back = await db.connectivity_tests.find_one({"_id": inserted_id})
-        if back is None:
-            mongo_ok = False
-            mongo_detail = "Insert OK, but read-back failed."
-    except Exception as e:
-        mongo_ok = False
-        mongo_detail = f"MongoDB error: {e}"[:300]
+        result = await db.connectivity_tests.insert_one(document)
+        inserted_id = result.inserted_id
+        fetched = await db.connectivity_tests.find_one({"_id": inserted_id})
+        if fetched is None:
+            mongo_status = False
+            mongo_detail = "Inserted diagnostic record but could not read it back."
+    except Exception as exc:  # pragma: no cover - defensive logging
+        mongo_status = False
+        mongo_detail = f"MongoDB error: {exc}"[:300]
     finally:
         if inserted_id is not None:
             try:
                 await db.connectivity_tests.delete_one({"_id": inserted_id})
-            except Exception as e:
-                mongo_ok = False
-                extra = f"Cleanup error: {e}"[:200]
-                mongo_detail = f"{mongo_detail} | {extra}"
-    m_latency = (datetime.now(timezone.utc) - m0).total_seconds() * 1000
-    results.append(_service_result("mongodb", mongo_ok, mongo_detail, m_latency))
+            except Exception as cleanup_exc:  # pragma: no cover - defensive guard
+                mongo_status = False
+                cleanup_message = f"MongoDB cleanup error: {cleanup_exc}"[:300]
+                if "error" in mongo_detail.lower():
+                    mongo_detail = f"{mongo_detail} | {cleanup_message}"
+                else:
+                    mongo_detail = cleanup_message
 
-    # Analytics POST (NOTE: analytics_url points to ROOT; endpoint is /ingest)
-    a0 = _utcnow()
-    a_ok, a_detail = True, "Analytics acknowledged event."
+    mongo_latency = (datetime.now() - mongo_start).total_seconds() * 1000
+    results.append(
+        _service_result(
+            name="mongodb",
+            ok=mongo_status,
+            detail=mongo_detail,
+            latency_ms=mongo_latency,
+        )
+    )
+
+    analytics_start = datetime.now()
+    analytics_status = True
+    analytics_detail = "Analytics acknowledged the diagnostic event."
     try:
-        async with httpx.AsyncClient(timeout=settings.analytics_timeout_seconds) as s:
-            r = await s.post(
-                f"{settings.analytics_url}/ingest",
+        async with httpx.AsyncClient(timeout=settings.analytics_timeout_seconds) as client:
+            response = await client.post(
+                f"{settings.analytics_url}/analytics/test-event",
                 json={
-                    "id": "connectivity-test",
                     "title": payload.title,
-                    "created_at": _utcnow().isoformat().replace("+00:00", "Z"),
+                    "status": payload.status,
+                    "notes": payload.notes,
+                    "source": "connectivity-test",
                 },
             )
-            r.raise_for_status()
-            # optional: check returned JSON
-            _ = r.json()
-    except Exception as e:
-        a_ok = False
-        a_detail = f"Analytics error: {e}"[:300]
-    a_latency = (datetime.now(timezone.utc) - a0).total_seconds() * 1000
-    results.append(_service_result("analytics", a_ok, a_detail, a_latency))
+            response.raise_for_status()
+            body = response.json()
+            analytics_status = bool(body.get("ok", True))
+            analytics_detail = body.get(
+                "detail",
+                "Analytics service responded successfully.",
+            )
+    except Exception as exc:  # pragma: no cover - defensive logging
+        analytics_status = False
+        analytics_detail = f"Analytics error: {exc}"[:300]
 
-    total_ms = (datetime.now(timezone.utc) - t0).total_seconds() * 1000
+    analytics_latency = (datetime.now() - analytics_start).total_seconds() * 1000
+    results.append(
+        _service_result(
+            name="analytics",
+            ok=analytics_status,
+            detail=analytics_detail,
+            latency_ms=analytics_latency,
+        )
+    )
+
+    overall_latency = (datetime.now() - backend_start).total_seconds() * 1000
     return {
         "echo": payload.model_dump(),
         "services": results,
-        "latencyMs": round(total_ms, 2),
-        "timestamp": _utcnow().isoformat().replace("+00:00", "Z"),
+        "latencyMs": round(overall_latency, 2),
+        "timestamp": datetime.utcnow().isoformat() + "Z",
     }
