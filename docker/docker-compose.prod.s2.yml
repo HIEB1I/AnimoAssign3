@@ -8,7 +8,7 @@ services:
       MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD}
     volumes:
       - mongo_secondary_data:/data/db
-      - /opt/AnimoAssign3/secrets/mongo-keyfile:/run/secrets/mongo-keyfile:ro
+      - /opt/secrets/animoassign/mongo-keyfile:/run/secrets/mongo-keyfile:ro
     ports:
       - "27017:27017"           # expose to host so 10.1.11.16 can reach it
     networks: [animoassign]
