@@ -15,7 +15,7 @@ services:
   mongo-arbiter:
     container_name: mongo-arbiter
     image: mongo:7
-    command: ["mongod", "--replSet", "animoassignRS", "--bind_ip_all", "--port 27018", "--auth", "--keyFile", "/run/secrets/mongo-keyfile", "--nojournal"]
+    command: ["mongod", "--replSet", "animoassignRS", "--bind_ip_all", "--port", "27018", "--auth", "--keyFile", "/run/secrets/mongo-keyfile", "--nojournal"]
     environment:
       MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME}
       MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD}
