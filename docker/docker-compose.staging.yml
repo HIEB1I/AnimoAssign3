@@ -61,5 +61,10 @@ services:
     networks: [animoassign]
     restart: unless-stopped
 
+networks:
+  animoassign:
+    external: true
+    name: docker_animoassign
+    
 volumes:
   mongo_data_staging:
