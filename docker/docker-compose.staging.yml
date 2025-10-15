@@ -10,6 +10,7 @@ services:
       MONGO_INITDB_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD}
     volumes:
       - mongo_data_staging:/data/db
+      - /opt/AnimoAssign3-staging/db/staging-seed:/docker-entrypoint-initdb.d:ro
     # Optional host bind if you ever need to connect from host: 27018
     ports:
       - "27018:27017"
