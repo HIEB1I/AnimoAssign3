@@ -5,9 +5,11 @@ import SearchRecordsPage from "./pages/SearchRecordsPage";
 import SubmitRecordPage from "./pages/SubmitRecordPage";
 import "./App.css";
 
+const base = (import.meta.env.BASE_URL || "/").replace(/\/$/, ""); // '/staging' or ''
+
 export default function App() {
   return (
-    <BrowserRouter basename={import.meta.env.BASE_URL}>
+    <BrowserRouter basename={base}>
       <div className="app-shell">
         <nav className="app-nav">
           <Link to="/" className="app-nav__brand">
