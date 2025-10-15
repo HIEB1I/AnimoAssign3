@@ -9,56 +9,50 @@ services:
     volumes:
       - mongo_data_staging:/data/db
       - /opt/AnimoAssign3-staging/db/seed:/docker-entrypoint-initdb.d:ro
+    # optional host access; remove if not needed
     ports:
-      - "127.0.0.1:27018:27017"   # host-only (safer)
+      - "127.0.0.1:27018:27017"
     restart: unless-stopped
+    networks: [default]   # mongo doesn't need to be on nginx network
 
   backend:
-    # Build from your backend source (adjust path if different)
     build:
       context: ../backend
       dockerfile: Dockerfile
     container_name: backend-stg
     environment:
-      # what your app typically reads
       MONGODB_URI: ${BACKEND_MONGODB_URI}
-      # optional extra alias if your app uses this name somewhere
       BACKEND_MONGODB_URI: ${BACKEND_MONGODB_URI}
-    depends_on:
-      - mongo-stg
-    ports:
-      - "18000:8000"
+    depends_on: [mongo-stg]
     restart: unless-stopped
+    networks: [default, animoassign]   # <-- join nginx network
 
   analytics:
-    # Build from your analytics source (adjust path if different)
     build:
       context: ../analytics
-      dockerfile: Dockerfile
     container_name: analytics-stg
     environment:
-      # most apps read MONGODB_URI; keep both to be safe
       MONGODB_URI: ${ANALYTICS_MONGODB_URI}
       ANALYTICS_MONGODB_URI: ${ANALYTICS_MONGODB_URI}
-    depends_on:
-      - mongo-stg
-    ports:
-      - "18100:8000"
+    depends_on: [mongo-stg]
     restart: unless-stopped
+    networks: [default, animoassign]   # <-- join nginx network
 
   frontend-stg:
     container_name: frontend-stg
     build:
-      context: ../frontend            # your actual frontend dir
+      context: ../frontend
       dockerfile: Dockerfile
       args:
         VITE_BASE: "${VITE_BASE:-/staging/}"
-    ports:
-      - "18080:80"
-    depends_on:
-      - backend
-      - analytics
+    depends_on: [backend, analytics]
     restart: unless-stopped
+    networks: [animoassign]            # nginx only needs to reach this
 
 volumes:
   mongo_data_staging:
+
+networks:
+  animoassign:
+    external: true
+    name: docker_animoassign
