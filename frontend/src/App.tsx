@@ -7,7 +7,7 @@ import "./App.css";
 
 export default function App() {
   return (
-    <BrowserRouter>
+    <BrowserRouter basename={import.meta.env.BASE_URL}>
       <div className="app-shell">
         <nav className="app-nav">
           <Link to="/" className="app-nav__brand">

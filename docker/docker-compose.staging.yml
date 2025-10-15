@@ -1,0 +1,50 @@
+version: "3.9"
+
+services:
+  mongo-stg:
+    image: mongo:7
+    container_name: mongo-stg
+    command: ["--bind_ip_all"]
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_INITDB_ROOT_USERNAME}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD}
+    volumes:
+      - mongo_data_staging:/data/db
+    # Optional host bind if you ever need to connect from host: 27018
+    ports:
+      - "27018:27017"
+    restart: unless-stopped
+
+  backend:
+    container_name: backend-stg
+    environment:
+      BACKEND_MONGODB_URI: ${BACKEND_MONGODB_URI}
+    depends_on: [mongo-stg]
+    ports:
+      - "18000:8000"   # internal exposure (not used by users directly)
+    restart: unless-stopped
+
+  analytics:
+    container_name: analytics-stg
+    environment:
+      ANALYTICS_MONGODB_URI: ${ANALYTICS_MONGODB_URI}
+    depends_on: [mongo-stg]
+    ports:
+      - "18100:8000"
+    restart: unless-stopped
+
+  # Nginx serving the staging SPA build
+  frontend-stg:
+    container_name: frontend-stg
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.frontend   # use your existing one
+      args:
+        VITE_BASE: ${VITE_BASE}                 # <-- passes /staging/
+    ports:
+      - "18080:80"                              # internal exposure
+    depends_on: [backend-stg, analytics-stg]
+    restart: unless-stopped
+
+volumes:
+  mongo_data_staging:
