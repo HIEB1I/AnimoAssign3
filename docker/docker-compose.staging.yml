@@ -25,7 +25,8 @@ services:
     container_name: backend-stg
     environment:
       MONGODB_URI: ${BACKEND_MONGODB_URI}
-    depends_on: [mongo-stg]
+    depends_on: 
+      - mongo-stg
     ports:
       - "18000:8000"
     networks: [animoassign]
@@ -39,7 +40,8 @@ services:
     container_name: analytics-stg
     environment:
       ANALYTICS_MONGODB_URI: ${ANALYTICS_MONGODB_URI}
-    depends_on: [mongo-stg]
+    depends_on:
+      - mongo-stg
     ports:
       - "18100:8000"
     networks: [animoassign]
@@ -65,6 +67,6 @@ networks:
   animoassign:
     external: true
     name: docker_animoassign
-    
+
 volumes:
   mongo_data_staging:
