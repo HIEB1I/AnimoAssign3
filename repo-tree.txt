@@ -1,0 +1,87 @@
+.
+├── .env.local
+├── .env.prod
+├── .github
+│   └── workflows
+│       └── ci-cd.yml
+├── .gitignore
+├── README.md
+├── analytics
+│   ├── Dockerfile
+│   ├── README.md
+│   ├── app
+│   │   ├── __main__.py
+│   │   ├── config.py
+│   │   ├── db_async.py
+│   │   └── main.py
+│   └── requirements.txt
+├── backend
+│   ├── Dockerfile
+│   ├── README.md
+│   ├── app
+│   │   ├── __init__.py
+│   │   ├── __main__.py
+│   │   ├── config.py
+│   │   ├── db.py
+│   │   └── main.py
+│   ├── pytest.ini
+│   ├── requirements.txt
+│   └── tests
+│       └── test_records.py
+├── db
+│   ├── mongo.conf
+│   ├── scripts
+│   │   ├── bootstrap-replica.js
+│   │   └── bootstrap-replica.sh
+│   └── seed
+│       └── init.js
+├── docker
+│   ├── .env
+│   ├── docker-compose.local.yml
+│   ├── docker-compose.prod.s1.yml
+│   └── docker-compose.prod.s2.yml
+├── docs
+│   ├── AnimoAssign Architecture 2.txt
+│   ├── AnimoAssign_FIle_Hierarchy.txt
+│   ├── servers.txt
+│   └── setup-guide.md
+├── frontend
+│   ├── .dockerignore
+│   ├── .env
+│   ├── .gitignore
+│   ├── Dockerfile
+│   ├── README.md
+│   ├── eslint.config.js
+│   ├── index.html
+│   ├── nginx.conf
+│   ├── package-lock.json
+│   ├── package.json
+│   ├── public
+│   │   └── vite.svg
+│   ├── src
+│   │   ├── App.css
+│   │   ├── App.tsx
+│   │   ├── api.ts
+│   │   ├── assets
+│   │   │   └── react.svg
+│   │   ├── index.css
+│   │   ├── main.tsx
+│   │   └── pages
+│   │       ├── AnalyticsPage.tsx
+│   │       ├── LandingPage.tsx
+│   │       ├── SearchRecordsPage.tsx
+│   │       └── SubmitRecordPage.tsx
+│   ├── tsconfig.app.json
+│   ├── tsconfig.json
+│   ├── tsconfig.node.json
+│   └── vite.config.ts
+├── nginx
+│   ├── Dockerfile
+│   ├── nginx.local.conf
+│   ├── nginx.prod.s1.conf
+│   └── nginx.prod.s2.conf
+├── package-lock.json
+├── package.json
+└── repo-tree.txt
+
+19 directories, 66 files
