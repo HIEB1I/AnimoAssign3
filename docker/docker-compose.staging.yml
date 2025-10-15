@@ -6,67 +6,59 @@ services:
     environment:
       MONGO_INITDB_ROOT_USERNAME: ${MONGO_INITDB_ROOT_USERNAME}
       MONGO_INITDB_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD}
-      # map legacy names some files expect
-      MONGO_ROOT_USERNAME: ${MONGO_INITDB_ROOT_USERNAME}
-      MONGO_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD}
     volumes:
       - mongo_data_staging:/data/db
       - /opt/AnimoAssign3-staging/db/seed:/docker-entrypoint-initdb.d:ro
     ports:
-      - "127.0.0.1:27018:27017"
-    networks: [animoassign]
+      - "127.0.0.1:27018:27017"   # host-only (safer)
     restart: unless-stopped
-    
 
   backend:
-    extends:
-      file: docker-compose.prod.s1.yml
-      service: backend-primary          # or backend-primary if that's the key in prod.s1
+    # Build from your backend source (adjust path if different)
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
     container_name: backend-stg
     environment:
+      # what your app typically reads
       MONGODB_URI: ${BACKEND_MONGODB_URI}
-    depends_on: 
+      # optional extra alias if your app uses this name somewhere
+      BACKEND_MONGODB_URI: ${BACKEND_MONGODB_URI}
+    depends_on:
       - mongo-stg
     ports:
       - "18000:8000"
-    networks: [animoassign]
     restart: unless-stopped
-  
 
   analytics:
-    extends:
-      file: docker-compose.prod.s1.yml
-      service: analytics-primary
+    # Build from your analytics source (adjust path if different)
+    build:
+      context: ../analytics
+      dockerfile: Dockerfile
     container_name: analytics-stg
     environment:
+      # most apps read MONGODB_URI; keep both to be safe
+      MONGODB_URI: ${ANALYTICS_MONGODB_URI}
       ANALYTICS_MONGODB_URI: ${ANALYTICS_MONGODB_URI}
     depends_on:
       - mongo-stg
     ports:
       - "18100:8000"
-    networks: [animoassign]
     restart: unless-stopped
 
-  # Nginx serving the staging SPA build
   frontend-stg:
     container_name: frontend-stg
     build:
-      context: ../frontend
-      dockerfile: Dockerfile  # use your existing one
+      context: ../frontend            # your actual frontend dir
+      dockerfile: Dockerfile
       args:
-        VITE_BASE: ${VITE_BASE}                 # <-- passes /staging/
+        VITE_BASE: "${VITE_BASE:-/staging/}"
     ports:
-      - "18080:80"                              # internal exposure
-    depends_on: 
+      - "18080:80"
+    depends_on:
       - backend
       - analytics
-    networks: [animoassign]
     restart: unless-stopped
-
-networks:
-  animoassign:
-    external: true
-    name: docker_animoassign
 
 volumes:
   mongo_data_staging:
