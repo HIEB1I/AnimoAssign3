@@ -51,8 +51,8 @@ services:
     ports:
       - "18080:80"                              # internal exposure
     depends_on: 
-      - backend-stg
-      - analytics-stg
+      - backend
+      - analytics
     restart: unless-stopped
 
 volumes:
