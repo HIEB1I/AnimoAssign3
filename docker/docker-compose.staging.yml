@@ -14,7 +14,9 @@ services:
       - /opt/AnimoAssign3-staging/db/seed:/docker-entrypoint-initdb.d:ro
     ports:
       - "127.0.0.1:27018:27017"
+    networks: [animoassign]
     restart: unless-stopped
+    
 
   backend:
     extends:
@@ -26,7 +28,9 @@ services:
     depends_on: [mongo-stg]
     ports:
       - "18000:8000"
+    networks: [animoassign]
     restart: unless-stopped
+  
 
   analytics:
     extends:
@@ -38,6 +42,7 @@ services:
     depends_on: [mongo-stg]
     ports:
       - "18100:8000"
+    networks: [animoassign]
     restart: unless-stopped
 
   # Nginx serving the staging SPA build
@@ -53,6 +58,7 @@ services:
     depends_on: 
       - backend
       - analytics
+    networks: [animoassign]
     restart: unless-stopped
 
 volumes:
