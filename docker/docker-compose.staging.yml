@@ -44,8 +44,8 @@ services:
   frontend-stg:
     container_name: frontend-stg
     build:
-      context: ..
-      dockerfile: docker/Dockerfile.frontend   # use your existing one
+      context: .
+      dockerfile: frontend/Dockerfile  # use your existing one
       args:
         VITE_BASE: ${VITE_BASE}                 # <-- passes /staging/
     ports:
