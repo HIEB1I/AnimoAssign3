@@ -8,24 +8,32 @@ services:
     environment:
       MONGO_INITDB_ROOT_USERNAME: ${MONGO_INITDB_ROOT_USERNAME}
       MONGO_INITDB_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD}
+      # map legacy names some files expect
+      MONGO_ROOT_USERNAME: ${MONGO_INITDB_ROOT_USERNAME}
+      MONGO_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD}
     volumes:
       - mongo_data_staging:/data/db
-      - /opt/AnimoAssign3-staging/db/staging-seed:/docker-entrypoint-initdb.d:ro
-    # Optional host bind if you ever need to connect from host: 27018
+      - /opt/AnimoAssign3-staging/db/seed:/docker-entrypoint-initdb.d:ro
     ports:
-      - "27018:27017"
+      - "127.0.0.1:27018:27017"
     restart: unless-stopped
 
   backend:
+    extends:
+      file: docker-compose.prod.s1.yml
+      service: backend-primary          # or backend-primary if that's the key in prod.s1
     container_name: backend-stg
     environment:
-      BACKEND_MONGODB_URI: ${BACKEND_MONGODB_URI}
+      MONGODB_URI: ${BACKEND_MONGODB_URI}
     depends_on: [mongo-stg]
     ports:
-      - "18000:8000"   # internal exposure (not used by users directly)
+      - "18000:8000"
     restart: unless-stopped
 
   analytics:
+    extends:
+      file: docker-compose.prod.s1.yml
+      service: analytics-primary
     container_name: analytics-stg
     environment:
       ANALYTICS_MONGODB_URI: ${ANALYTICS_MONGODB_URI}
