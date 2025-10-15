@@ -45,7 +45,7 @@ services:
     container_name: frontend-stg
     build:
       context: ../frontend
-      dockerfile: ockerfile  # use your existing one
+      dockerfile: Dockerfile  # use your existing one
       args:
         VITE_BASE: ${VITE_BASE}                 # <-- passes /staging/
     ports:
