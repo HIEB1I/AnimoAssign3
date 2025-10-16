@@ -1,29 +1,70 @@
+// frontend/src/pages/Login/Login.tsx
 import React from "react";
+import { useNavigate } from "react-router-dom";
 import { Eye, EyeOff } from "lucide-react";
 
-// Import logo (path is relative to src)
+// If you’re using the @ alias (recommended), keep these:
 import AA_Logo from "@/assets/Images/AA_Logo.png";
 import Login_BG from "@/assets/Images/login_bg.png";
+// If not using alias, switch to: "./assets/Images/AA_Logo.png" etc.
 
+// POST /api/login with { email }
+async function apiLogin(email: string) {
+  const res = await fetch("/api/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email }),
+  });
+  if (!res.ok) {
+    const msg = await res.text().catch(() => "");
+    throw new Error(msg || `Login failed (${res.status})`);
+  }
+  return res.json() as Promise<{
+    userId: string;
+    email: string;
+    fullName: string;
+    roles: string[];
+  }>;
+}
 
 const Login: React.FC = () => {
   const [showPw, setShowPw] = React.useState(false);
+  const [email, setEmail] = React.useState("staff.ccs@dlsu.edu.ph"); // sample from seed
+  // ✅ Default placeholder value; password is ignored (temporary)
+  const [password, setPassword] = React.useState("use-google-sso");
+  const [loading, setLoading] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+  const navigate = useNavigate();
+
+  async function onSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setLoading(true);
+    setError(null);
+    try {
+      // Password is currently ignored server-side (email-only)
+      const user = await apiLogin(email.trim());
+      localStorage.setItem("animo.user", JSON.stringify(user));
+      navigate("/om/home");
+    } catch (err: any) {
+      setError(err?.message || "Login failed");
+    } finally {
+      setLoading(false);
+    }
+  }
 
   return (
     <div
       className="min-h-screen w-full flex bg-cover bg-center"
-      style={{ backgroundImage: `url(${Login_BG})` }} 
+      style={{ backgroundImage: `url(${Login_BG})` }}  // ✅ fix: template string
     >
       {/* Left panel with logo */}
       <div className="hidden sm:flex flex-1 items-center justify-center">
         <div className="relative px-6">
-          {/* Logo image */}
           <img
             src={AA_Logo}
             alt="AnimoAssign Logo"
             className="w-[750px] h-[150px]"
           />
-          {/* Slogan text */}
           <p className="absolute left-[115px] top-[125px] text-white text-xl font-normal">
             Delivering schedules that work for all.
           </p>
@@ -47,7 +88,7 @@ const Login: React.FC = () => {
             <div className="h-1 w-16 sm:w-20 bg-[#21804A] rounded mt-2" />
           </div>
 
-          <form className="space-y-4 sm:space-y-5">
+          <form className="space-y-4 sm:space-y-5" onSubmit={onSubmit}>
             {/* Email */}
             <div>
               <label className="block text-sm font-medium text-gray-900 mb-1">
@@ -57,10 +98,14 @@ const Login: React.FC = () => {
                 type="email"
                 className="w-full rounded-xl bg-gray-100 border border-gray-200 px-4 py-3 shadow-inner focus:outline-none focus:ring-2 focus:ring-[#21804A]/60 focus:border-[#21804A]"
                 placeholder="name@dlsu.edu.ph"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                required
+                autoComplete="email"
               />
             </div>
 
-            {/* Password */}
+            {/* Password (temporary placeholder; not validated yet) */}
             <div>
               <label className="block text-sm font-medium text-gray-900 mb-1">
                 Password
@@ -69,7 +114,10 @@ const Login: React.FC = () => {
                 <input
                   type={showPw ? "text" : "password"}
                   className="w-full rounded-xl bg-gray-100 border border-gray-200 px-4 py-3 pr-11 shadow-inner focus:outline-none focus:ring-2 focus:ring-[#21804A]/60 focus:border-[#21804A]"
-                  placeholder="Enter your password"
+                  placeholder="use-google-sso"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  autoComplete="current-password"
                 />
                 <button
                   type="button"
@@ -85,24 +133,29 @@ const Login: React.FC = () => {
                 </button>
               </div>
               <div className="mt-2 text-right">
-                <a href="#" className="text-sm text-blue-600 hover:underline">
-                  Forgot Password?
-                </a>
+                <span className="text-xs text-gray-500">
+                  Temporary: password is ignored; Google SSO coming soon.
+                </span>
               </div>
             </div>
+
+            {/* Error */}
+            {error && <div className="text-sm text-red-600">{error}</div>}
 
             {/* Primary Login */}
             <button
               type="submit"
-              className="w-full py-3 rounded-xl bg-[#21804A] text-white font-semibold shadow hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-[#21804A]"
+              disabled={loading}
+              className="w-full py-3 rounded-xl bg-[#21804A] text-white font-semibold shadow hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-[#21804A] disabled:opacity-60"
             >
-              Login
+              {loading ? "Logging in…" : "Login"}
             </button>
 
-            {/* Google Login */}
+            {/* Google Login (placeholder) */}
             <button
               type="button"
-              className="w-full py-3 rounded-xl border border-gray-300 bg-white font-medium shadow-sm hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-gray-300 flex items-center justify-center gap-3"
+              className="w-full py-3 rounded- xl border border-gray-300 bg-white font-medium shadow-sm hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-gray-300 flex items-center justify-center gap-3"
+              onClick={() => alert("Google SSO not yet configured")}
             >
               <svg
                 className="h-5 w-5 shrink-0"
@@ -117,7 +170,6 @@ const Login: React.FC = () => {
               </svg>
               <span>Login with Google</span>
             </button>
-
           </form>
         </div>
       </div>

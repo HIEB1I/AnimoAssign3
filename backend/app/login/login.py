@@ -1,80 +1,36 @@
-# backend/app/main.py
-from datetime import datetime, timezone
-from typing import Any, Dict, List
+# backend/app/Login/Login.py
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel, EmailStr
+from ..main import db  # <-- reuse the db created in main.py
 
-import httpx
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.middleware.cors import CORSMiddleware
-from motor.motor_asyncio import AsyncIOMotorClient
-from pydantic import BaseModel, Field
+router = APIRouter(tags=["login"])
 
-from ..config import get_settings
+class LoginRequest(BaseModel):
+    email: EmailStr
 
-settings = get_settings()
+class LoginResponse(BaseModel):
+    userId: str
+    email: EmailStr
+    fullName: str
+    roles: list[str]
 
-app = FastAPI(title="AnimoAssign Backend", version="1.0.0")
+@router.post("/login", response_model=LoginResponse)
+async def login(payload: LoginRequest):
+    # seed has users with: user_id, email, first_name, last_name, ...  :contentReference[oaicite:0]{index=0}
+    user = await db["users"].find_one({"email": payload.email})
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
 
-# Async Mongo client; directConnection may be False in RS mode, True for single-node probes
-client = AsyncIOMotorClient(
-    settings.mongodb_uri,
-    directConnection=getattr(settings, "mongodb_direct_connection", False),
-)
-db = client.get_default_database()
+    user_id = user["user_id"]
+    roles_cur = db["user_roles"].find({"user_id": user_id})
+    role_names = [r async for r in roles_cur]
+    role_names = [r.get("role_type", "User") for r in role_names] or ["User"]
 
-# ---------- Models ----------
+    full_name = f'{(user.get("first_name") or "").strip()} {(user.get("last_name") or "").strip()}'.strip() or user["email"]
 
-class ConnectivityTestPayload(BaseModel):
-    title: str = Field(..., description="Sample title for the diagnostic record")
-    status: str = Field("todo", pattern=r"^[a-zA-Z0-9_-]+$")
-    notes: str | None = Field(default=None, max_length=500)
-
-class AssignmentIn(BaseModel):
-    title: str = Field(..., min_length=1, max_length=200)
-    content: str | None = Field(default=None, max_length=4000)
-
-# ---------- Helpers ----------
-
-def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
-
-def _service_result(name: str, ok: bool, detail: str, latency_ms: float | None) -> Dict[str, Any]:
-    out: Dict[str, Any] = {"service": name, "ok": ok, "detail": detail}
-    if latency_ms is not None:
-        out["latencyMs"] = round(latency_ms, 2)
-    return out
-
-def _serialize(doc: Dict[str, Any]) -> Dict[str, Any]:
-    d = dict(doc)
-    d["id"] = str(d.pop("_id", ""))
-    # normalize created_at
-    ca = d.get("created_at")
-    if isinstance(ca, datetime):
-        if ca.tzinfo is None:
-            ca = ca.replace(tzinfo=timezone.utc)
-        d["createdAt"] = ca.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-    else:
-        d["createdAt"] = _utcnow().isoformat().replace("+00:00", "Z")
-    return d
-
-# ---------- CORS ----------
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"], allow_credentials=True,
-    allow_methods=["*"], allow_headers=["*"],
-)
-
-# ---------- System ----------
-
-@app.get("/health", tags=["system"])
-async def health():
-    return {"status": "ok", "service": settings.service_name}
-
-@app.get("/health/db", tags=["system"])
-async def health_db():
-    # simple ping to admin
-    await client.admin.command("ping")
-    return {"db": "ok"}
-
-# ---------- Assignments ----------
-
+    return LoginResponse(
+        userId=user_id,
+        email=user["email"],
+        fullName=full_name,
+        roles=role_names,
+    )
