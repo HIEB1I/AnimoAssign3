@@ -1,26 +1,22 @@
 # analytics/app/config.py
+import os
 from functools import lru_cache
-from pydantic import BaseSettings, Field
+from typing import Optional
 
-class Settings(BaseSettings):
-    # Accept either MONGODB_URI or ANALYTICS_MONGODB_URI
-    mongodb_uri: str = Field("", env="MONGODB_URI")
-    analytics_mongodb_uri: str = Field("", env="ANALYTICS_MONGODB_URI")
+DEFAULT_MONGODB_URI: Optional[str] = None  # keep None to force envs
 
-    service_name: str = Field("analytics", env="ANALYTICS_SERVICE_NAME")
-    records_collection: str = Field("records", env="RECORDS_COLLECTION")
-    request_timeout_s: float = Field(3.0, env="ANALYTICS_TIMEOUT_SECONDS")
+def _pick_mongo_uri() -> str:
+    uri = os.getenv("MONGODB_URI") or os.getenv("ANALYTICS_MONGODB_URI") or DEFAULT_MONGODB_URI
+    if not uri:
+        raise RuntimeError("Set MONGODB_URI or ANALYTICS_MONGODB_URI for analytics")
+    return uri
 
-    @property
-    def mongo_uri(self) -> str:
-        # prefer MONGODB_URI, fallback to ANALYTICS_MONGODB_URI
-        return self.mongodb_uri or self.analytics_mongodb_uri
-
-    model_config = {"extra": "ignore"}  # ignore unknown envs safely
+class Settings:
+    mongodb_uri: str = _pick_mongo_uri()
+    service_name: str = os.getenv("ANALYTICS_SERVICE_NAME", "analytics")
+    # optional timeouts, etc.
+    request_timeout_s: float = float(os.getenv("ANALYTICS_TIMEOUT_SECONDS", "3.0"))
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
-    s = Settings()
-    if not s.mongo_uri:
-        raise RuntimeError("Set MONGODB_URI or ANALYTICS_MONGODB_URI for analytics")
-    return s
+    return Settings()
