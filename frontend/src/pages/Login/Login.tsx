@@ -70,7 +70,7 @@ const Login: React.FC = () => {
           </p>
         </div>
       </div>
-
+    
       {/* Right panel (login form) */}
       <div
         className="
