@@ -1,0 +1,59 @@
+services:
+  mongo-stg:
+    image: mongo:7
+    container_name: mongo-stg
+    command: ["--bind_ip_all"]
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_INITDB_ROOT_USERNAME}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD}
+    volumes:
+      - mongo_data_staging:/data/db
+      - /opt/AnimoAssign3-staging/db/seed:/docker-entrypoint-initdb.d:ro
+    # optional host access; remove if not needed
+    ports:
+      - "127.0.0.1:27018:27017"
+    restart: unless-stopped
+    networks: [default]   # mongo doesn't need to be on nginx network
+
+  backend:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    container_name: backend-stg
+    environment:
+      MONGODB_URI: ${BACKEND_MONGODB_URI}
+      BACKEND_MONGODB_URI: ${BACKEND_MONGODB_URI}
+      BACKEND_ANALYTICS_URL: http://analytics-stg:8000 
+    depends_on: [mongo-stg]
+    restart: unless-stopped
+    networks: [default, animoassign]   # <-- join nginx network
+
+  analytics:
+    build:
+      context: ../analytics
+    container_name: analytics-stg
+    environment:
+      MONGODB_URI: ${ANALYTICS_MONGODB_URI}
+      ANALYTICS_MONGODB_URI: ${ANALYTICS_MONGODB_URI}
+    depends_on: [mongo-stg]
+    restart: unless-stopped
+    networks: [default, animoassign]   # <-- join nginx network
+
+  frontend-stg:
+    container_name: frontend-stg
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_BASE: "${VITE_BASE:-/staging/}"
+    depends_on: [backend, analytics]
+    restart: unless-stopped
+    networks: [animoassign]            # nginx only needs to reach this
+
+volumes:
+  mongo_data_staging:
+
+networks:
+  animoassign:
+    external: true
+    name: docker_animoassign
