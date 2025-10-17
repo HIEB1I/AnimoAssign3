@@ -55,7 +55,7 @@ const Login: React.FC = () => {
   return (
     <div
       className="min-h-screen w-full flex bg-cover bg-center"
-      style={{ backgroundImage: `url(${Login_BG})` }}  // ✅ fix: template string
+      style={{ backgroundImage: `url(${Login_BG})` }}  // fix: template string
     >
       {/* Left panel with logo */}
       <div className="hidden sm:flex flex-1 items-center justify-center">
