@@ -134,7 +134,7 @@ const Login: React.FC = () => {
               </div>
               <div className="mt-2 text-right">
                 <span className="text-xs text-gray-500">
-                  Temporary: password is ignored; Google SSO coming soon.
+                  BWAHHAHAHA
                 </span>
               </div>
             </div>
