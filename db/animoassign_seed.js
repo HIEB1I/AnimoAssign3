@@ -85,11 +85,8 @@
   ];
 
   const users = [
-      { user_id: "USR001", email: "dean.ccs@dlsu.edu.ph", first_name: "John", last_name: "Dean", status: true, created_at: now, updated_at: now, last_login: now },
-      { user_id: "USR002", email: "chair.ccs@dlsu.edu.ph", first_name: "Jane", last_name: "Chair", status: true, created_at: now, updated_at: now, last_login: now },
-      { user_id: "USR003", email: "faculty.cs@dlsu.edu.ph", first_name: "Frank", last_name: "Faculty", status: true, created_at: now, updated_at: now, last_login: now },
-      { user_id: "USR004", email: "staff.ccs@dlsu.edu.ph", first_name: "Stacy", last_name: "Staff", status: true, created_at: now, updated_at: now, last_login: now },
-      { user_id: "USR101", email: "stud.2025@dlsu.edu.ph", first_name: "Sam", last_name: "Student", status: true, created_at: now, updated_at: now, last_login: now }
+      { user_id: "USR002", google_id: "", email: "chair.ccs@dlsu.edu.ph", first_name: "Jane", last_name: "Chair", status: true, profile_image: "", created_at: "2024-09-01T00:00:00+08:00", last_login: "2024-09-01T00:00:00+08:00" },
+      { user_id: "USR003", google_id: "", email: "arnulfo.azcarraga@dlsu.edu.ph", first_name: "Arnulfo", last_name: "Azcarraga", status: true, profile_image: "", created_at: "2024-09-01T00:00:00+08:00", last_login: "2024-09-01T00:00:00+08:00" }
   ];
 
   const user_roles = [
@@ -100,35 +97,30 @@
   ];
 
   const kacs = [
-      { kac_id: "KAC_CS", kac_code: "CS", kac_name: "Computer Science", program_area: "Computing", course_list: [], description: "CS Area", department_id: "DEPT_CCS" },
-      { kac_id: "KAC_IT", kac_code: "IT", kac_name: "Information Technology", program_area: "Computing", course_list: [], description: "IT Area", department_id: "DEPT_CCS" }
+      { kac_id: "KAC001", kac_name: "Programming Foundations", kac_code: "PROGP", program_area: "CS", course_list: ["CRS001", "CRS002"], description: "Core programming KAC", department_id: "DEPT_CCS" }
   ];
 
   const courses = [
-      { course_id: "COURSE_CS101", course_code: "CS101", course_title: "Introduction to Programming", kac_id: "KAC_CS", program_level: "Undergraduate", units: 3, owning_department: "DEPT_CCS", prerequisites: [], room_type: "lecture", min_enrollee: 10, max_enrollee: 45 },
-      { course_id: "COURSE_CS201", course_code: "CS201", course_title: "Data Structures", kac_id: "KAC_CS", program_level: "Undergraduate", units: 3, owning_department: "DEPT_CCS", prerequisites: ["COURSE_CS101"], room_type: "lecture", min_enrollee: 10, max_enrollee: 45 },
-      { course_id: "COURSE_IT150", course_code: "IT150", course_title: "Networking Fundamentals", kac_id: "KAC_IT", program_level: "Undergraduate", units: 3, owning_department: "DEPT_CCS", prerequisites: [], room_type: "lab", min_enrollee: 10, max_enrollee: 30 }
+      { course_id: "CRS001", course_code: ["ADANI-1"], course_title: "Animation 1 : Modeling and Rigging", kac_id: "", program_level: "", units: 3, owning_department: "ST", prerequisites: [], description: "Animation 1, Modelling and Rigging...", room_type: "Classroom", max_enrollee: 45, min_enrollee: 15, type_of_course: "Professional" },
+      { course_id: "CRS002", course_code: ["ADANI-2"], course_title: "Animation 2 : Texturing and Lighting", kac_id: "", program_level: "", units: 3, owning_department: "ST", prerequisites: [], description: "Animation 2...", room_type: "Classroom", max_enrollee: 45, min_enrollee: 15, type_of_course: "Professional" }
   ];
 
   const terms = [
-      { term_id: "TERM_2025_T1", academic_year: "2025-2026", term_number: 1, start_date: "2025-09-01", end_date: "2025-12-15", status: "active" },
-      { term_id: "TERM_2025_T2", academic_year: "2025-2026", term_number: 2, start_date: "2026-01-06", end_date: "2026-04-20", status: "planned" }
+      { term_id: "TERM_2025_T1", acad_year_start: 2025, term_number: 1, term_index: 1, start_date: "2025-09-01", end_date: "2025-12-15", status: "active" }
   ];
 
   const rooms = [
-      { room_id: "ROOM_GOK402", room_code: "GOK-402", capacity: 45, type: "lecture", campus: "DLSU Taft", building: "Gokongwei Hall" },
-      { room_id: "ROOM_GOKL201", room_code: "GOKL-201", capacity: 30, type: "lab", campus: "DLSU Taft", building: "Gokongwei Hall" }
+      { room_id: "A1708", room_number: "A1708", capacity: 45, description: "Computer Lab", building: "Andrew", campus_id: "CMPS001", status: "active", updated_at: "2024-09-01T00:00:00+08:00" }
   ];
 
   const sections = [
-      { section_id: "SEC_CS101_A", section_code: "CS101-A", course_id: "COURSE_CS101", term_id: "TERM_2025_T1", campus_id: "CAMP_TAFT", department_id: "DEPT_CCS", min_enrollee: 10, max_enrollee: 45, created_at: now, updated_at: now },
-      { section_id: "SEC_CS201_A", section_code: "CS201-A", course_id: "COURSE_CS201", term_id: "TERM_2025_T1", campus_id: "CAMP_TAFT", department_id: "DEPT_CCS", min_enrollee: 10, max_enrollee: 45, created_at: now, updated_at: now }
+      { section_id: "SEC_CS101_A", section_code: "CS101-A", course_id: "CRS001", term_id: "TERM_2025_T1", enrollment_cap: 45, enrolled: 38, batch_number: 123, status: "active", remarks: "HYB", created_at: now, updated_at: now },
+      { section_id: "SEC_CS201_A", section_code: "CS201-A", course_id: "CRS002", term_id: "TERM_2025_T1", enrollment_cap: 45, enrolled: 35, batch_number: 123, status: "active", remarks: "", created_at: now, updated_at: now }
   ];
 
   const section_schedules = [
-      { schedule_id: "SCH_CS101_A_M", section_id: "SEC_CS101_A", day: "Mon", start_time: "08:00", end_time: "09:30", room_id: "ROOM_GOK402", mode: "Face-to-Face", created_at: now, updated_at: now },
-      { schedule_id: "SCH_CS101_A_W", section_id: "SEC_CS101_A", day: "Wed", start_time: "08:00", end_time: "09:30", room_id: "ROOM_GOK402", mode: "Face-to-Face", created_at: now, updated_at: now },
-      { schedule_id: "SCH_CS201_A_T", section_id: "SEC_CS201_A", day: "Tue", start_time: "10:00", end_time: "11:30", room_id: "ROOM_GOKL201", mode: "Face-to-Face", created_at: now, updated_at: now }
+      { schedule_id: "SCH_CS101_A_M", section_id: "SEC_CS101_A", day: "M", start_time: "730", end_time: "900", room_id: "Online", room_type: "Online", created_at: now, updated_at: now },
+      { schedule_id: "SCH_CS101_A_H", section_id: "SEC_CS101_A", day: "H", start_time: "915", end_time: "1045", room_id: "A1708", room_type: "Classroom", created_at: now, updated_at: now }
   ];
 
   const student_profiles = [
@@ -140,15 +132,15 @@
   ];
 
   const faculty_profiles = [
-      { faculty_id: "FAC001", user_id: "USR003", department_id: "DEPT_CCS", campus_id: ["CAMP_TAFT"], description: "CS Faculty" }
+      { faculty_id: "FAC001", user_id: "USR003", employment_type: "FT", min_units: 12, max_preps: 3, certifications: [], qualified_kacs: ["KAC001", "KAC003"], teaching_years: 5, updated_at: "2024-09-01T00:00:00+08:00", department_id: "DEPT_CCS" }
   ];
 
   const faculty_loads = [
-      { load_id: "LOAD_T1_CCS_01", term_id: "TERM_2025_T1", department_id: "DEPT_CCS", status: "draft", created_at: now, updated_at: now }
+      { load_id: "LOAD_T1_CCS_01", term_id: "TERM_2025_T1", department_id: "DEPT_CCS", status: "draft", total_units: 6, created_by: "USR003", created_at: now, finalized_at: "", updated_at: now }
   ];
   const faculty_assignments = [
-      { assignment_id: "ASG001", load_id: "LOAD_T1_CCS_01", faculty_id: "FAC001", course_id: "COURSE_CS101", section_id: "SEC_CS101_A", is_archived: false, created_at: now },
-      { assignment_id: "ASG002", load_id: "LOAD_T1_CCS_01", faculty_id: "FAC001", course_id: "COURSE_CS201", section_id: "SEC_CS201_A", is_archived: false, created_at: now }
+      { assignment_id: "ASG001", load_id: "LOAD_T1_CCS_01", section_id: "SEC_CS101_A", faculty_id: "FAC001", created_at: "2025-06-01T09:00:00+08:00", is_archived: false },
+      { assignment_id: "ASG002", load_id: "LOAD_T1_CCS_01", section_id: "SEC_CS201_A", faculty_id: "FAC001", created_at: "2025-06-01T09:05:00+08:00", is_archived: false }
   ];
 
   const plantilla_submissions = [
