@@ -34,3 +34,4 @@ async def login(payload: LoginRequest):
         fullName=full_name,
         roles=role_names,
     )
+
