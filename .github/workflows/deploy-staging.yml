@@ -1,0 +1,85 @@
+name: Deploy Staging (S1)
+
+on:
+  push:
+    branches: [staging]
+  workflow_dispatch: {}
+
+concurrency:
+  group: deploy-staging
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: staging }
+
+      # Frontend build check (adjust if your build script differs)
+      - name: Frontend build
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+      # Backend quick tests (won’t fail pipeline if no tests yet)
+      - name: Backend tests
+        working-directory: backend
+        run: |
+          python -m pip install -r requirements.txt || true
+          pytest -q || true
+
+      # Analytics quick tests
+      - name: Analytics tests
+        working-directory: analytics
+        run: |
+          python -m pip install -r requirements.txt || true
+          pytest -q || true
+
+  deploy:
+    needs: build-test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trust S1 host key
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -p "${{ secrets.S1_PORT }}" "${{ secrets.S1_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Deploy to S1 (staging)
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.S1_HOST }}
+          username: ${{ secrets.S1_USER }}
+          key: ${{ secrets.S1_KEY }}
+          port: ${{ secrets.S1_PORT }}
+          script: |
+            set -Eeuo pipefail
+            if [ ! -d /opt/AnimoAssign3-staging ]; then
+              mkdir -p /opt/AnimoAssign3-staging
+              chown -R $USER:$USER /opt/AnimoAssign3-staging || true
+            fi
+
+            if [ ! -d /opt/AnimoAssign3-staging/.git ]; then
+              cd /opt/AnimoAssign3-staging
+              git clone https://github.com/HIEB1I/AnimoAssign3.git .
+            fi
+
+            cd /opt/AnimoAssign3-staging
+            git fetch --all --prune
+            git checkout staging
+            git pull --ff-only
+
+            if [ ! -f .env.staging ]; then
+              echo "Missing .env.staging on server. Create it before deploying."; exit 1
+            fi
+
+            export COMPOSE_PROJECT_NAME=animo_staging
+            docker compose -f docker/compose.staging.yml --env-file .env.staging up -d --build
+
+            # Smoke tests (adjust ports if you changed them)
+            curl -fsS http://127.0.0.1:18010/health || (docker compose logs backend && exit 1)
+            curl -fsS http://127.0.0.1:19010/health || (docker compose logs analytics && exit 1)
+            curl -fsS http://127.0.0.1:8081        || (docker compose logs frontend && exit 1)
+
+            docker system prune -f

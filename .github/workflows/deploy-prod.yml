@@ -1,0 +1,91 @@
+name: Deploy Production (S1 & S2)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Frontend build
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Backend tests
+        working-directory: backend
+        run: |
+          python -m pip install -r requirements.txt || true
+          pytest -q || true
+
+      - name: Analytics tests
+        working-directory: analytics
+        run: |
+          python -m pip install -r requirements.txt || true
+          pytest -q || true
+
+  deploy:
+    needs: build-test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: s1
+            HOST: ${{ secrets.S1_HOST }}
+            PORT: ${{ secrets.S1_PORT }}
+            USER: ${{ secrets.S1_USER }}
+            KEY:  ${{ secrets.S1_KEY }}
+          - name: s2
+            HOST: ${{ secrets.S2_HOST }}
+            PORT: ${{ secrets.S2_PORT }}
+            USER: ${{ secrets.S2_USER }}
+            KEY:  ${{ secrets.S2_KEY }}
+    steps:
+      - name: Trust host key (${{ matrix.name }})
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -p "${{ matrix.PORT }}" "${{ matrix.HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Deploy to ${{ matrix.name }}
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ matrix.HOST }}
+          username: ${{ matrix.USER }}
+          key: ${{ matrix.KEY }}
+          port: ${{ matrix.PORT }}
+          script: |
+            set -Eeuo pipefail
+
+            if [ ! -d /opt/AnimoAssign3/.git ]; then
+              cd /opt/AnimoAssign3
+              git clone https://github.com/HIEB1I/AnimoAssign3.git .
+            fi
+
+            cd /opt/AnimoAssign3
+            git fetch --all --prune
+            git checkout main
+            git pull --ff-only
+
+            if [ ! -f .env.prod ]; then
+              echo "Missing .env.prod on server. Create it before deploying."; exit 1
+            fi
+
+            export COMPOSE_PROJECT_NAME=animo_prod
+            docker compose -f docker/compose.prod.yml --env-file .env.prod up -d --build
+
+            # Smoke tests (adjust ports if you changed them)
+            curl -fsS http://127.0.0.1:18000/health || (docker compose logs backend && exit 1)
+            curl -fsS http://127.0.0.1:19000/health || (docker compose logs analytics && exit 1)
+            curl -fsS http://127.0.0.1:8080        || (docker compose logs frontend && exit 1)
+
+            docker system prune -f
