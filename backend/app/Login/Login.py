@@ -3,7 +3,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, EmailStr
 from ..main import db  # <-- reuse the db created in main.py
 
-router = APIRouter(tags=["login"])
+router = APIRouter(tags=["Login"])
 
 class LoginRequest(BaseModel):
     email: EmailStr
@@ -14,7 +14,7 @@ class LoginResponse(BaseModel):
     fullName: str
     roles: list[str]
 
-@router.post("/login", response_model=LoginResponse)
+@router.post("/Login", response_model=LoginResponse)
 async def login(payload: LoginRequest):
     # seed has users with: user_id, email, first_name, last_name, ...  :contentReference[oaicite:0]{index=0}
     user = await db["users"].find_one({"email": payload.email})

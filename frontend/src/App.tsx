@@ -17,7 +17,7 @@ function RequireAuth() {
   } catch {
     ok = false;
   }
-  return ok ? <Outlet /> : <Navigate to="/login" replace />;
+  return ok ? <Outlet /> : <Navigate to="/Login" replace />;
 }
 
 export default function App() {
@@ -25,10 +25,10 @@ export default function App() {
     <BrowserRouter basename={base}>
       <Routes>
         {/* Default -> login */}
-        <Route path="/" element={<Navigate to="/login" replace />} />
+        <Route path="/" element={<Navigate to="/Login" replace />} />
 
         {/* Public */}
-        <Route path="/login" element={<Login />} />
+        <Route path="/Login" element={<Login />} />
 
         {/* Protected (after login) */}
         <Route element={<RequireAuth />}>
@@ -37,7 +37,7 @@ export default function App() {
         </Route>
 
         {/* Fallback */}
-        <Route path="*" element={<Navigate to="/login" replace />} />
+        <Route path="*" element={<Navigate to="/Login" replace />} />
       </Routes>
     </BrowserRouter>
   );
