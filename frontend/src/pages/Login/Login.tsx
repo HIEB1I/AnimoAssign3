@@ -10,7 +10,7 @@ import Login_BG from "@/assets/Images/login_bg.png";
 
 // POST /api/login with { email }
 async function apiLogin(email: string) {
-  const res = await fetch("/api/login", {
+  const res = await fetch("/api/Login", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ email }),

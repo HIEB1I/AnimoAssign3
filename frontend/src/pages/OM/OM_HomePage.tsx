@@ -9,7 +9,7 @@ export default function OM_HomePage() {
 
   useEffect(() => {
     const raw = localStorage.getItem("animo.user");
-    if (!raw) { nav("/login"); return; }
+    if (!raw) { nav("/Login"); return; }
     const u = JSON.parse(raw);
     fetchOmHome(u.userId).then(setData).catch(e=>setErr(String(e)));
   }, [nav]);
