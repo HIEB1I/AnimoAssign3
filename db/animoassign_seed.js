@@ -85,9 +85,11 @@
   ];
 
   const users = [
-      { user_id: "USR002", google_id: "", email: "chair.ccs@dlsu.edu.ph", first_name: "Jane", last_name: "Chair", status: true, profile_image: "", created_at: "2024-09-01T00:00:00+08:00", last_login: "2024-09-01T00:00:00+08:00" },
-      { user_id: "USR003", google_id: "", email: "arnulfo.azcarraga@dlsu.edu.ph", first_name: "Arnulfo", last_name: "Azcarraga", status: true, profile_image: "", created_at: "2024-09-01T00:00:00+08:00", last_login: "2024-09-01T00:00:00+08:00" }
-  ];
+    { user_id: "USR001", email: "dean.ccs@dlsu.edu.ph", first_name: "John", last_name: "Dean", status: true, created_at: now, updated_at: now, last_login: now },
+    { user_id: "USR002", email: "chair.ccs@dlsu.edu.ph", first_name: "Jane", last_name: "Chair", status: true, created_at: now, updated_at: now, last_login: now },
+    { user_id: "USR003", email: "faculty.cs@dlsu.edu.ph", first_name: "Frank", last_name: "Faculty", status: true, created_at: now, updated_at: now, last_login: now },
+    { user_id: "USR004", email: "staff.ccs@dlsu.edu.ph", first_name: "Stacy", last_name: "Staff", status: true, created_at: now, updated_at: now, last_login: now },
+    { user_id: "USR101", email: "stud.2025@dlsu.edu.ph", first_name: "Sam", last_name: "Student", status: true, created_at: now, updated_at: now, last_login: now }];
 
   const user_roles = [
       { role_id: "ROLE001", user_id: "USR001", role_type: "Dean", department_id: "DEPT_CCS", is_active: true, created_at: now, updated_at: now },
