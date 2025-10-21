@@ -39,30 +39,21 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - name: s1
-            HOST: ${{ secrets.S1_HOST }}
-            PORT: ${{ secrets.S1_PORT }}
-            USER: ${{ secrets.S1_USER }}
-            KEY:  ${{ secrets.S1_KEY }}
-          - name: s2
-            HOST: ${{ secrets.S2_HOST }}
-            PORT: ${{ secrets.S2_PORT }}
-            USER: ${{ secrets.S2_USER }}
-            KEY:  ${{ secrets.S2_KEY }}
+        target: [s1, s2]   # keep matrix STATIC; choose values at step time
     steps:
-      - name: Trust host key (${{ matrix.name }})
+      - name: Trust host key (${{ matrix.target }})
         run: |
           mkdir -p ~/.ssh
-          ssh-keyscan -p "${{ matrix.PORT }}" "${{ matrix.HOST }}" >> ~/.ssh/known_hosts
+          ssh-keyscan -p "${{ matrix.target == 's1' && vars.S1_PORT || vars.S2_PORT }}" \
+                      "${{ matrix.target == 's1' && vars.S1_HOST || vars.S2_HOST }}" >> ~/.ssh/known_hosts
 
-      - name: Deploy to ${{ matrix.name }}
+      - name: Deploy to ${{ matrix.target }}
         uses: appleboy/ssh-action@v1.0.3
         with:
-          host: ${{ matrix.HOST }}
-          username: ${{ matrix.USER }}
-          key: ${{ matrix.KEY }}
-          port: ${{ matrix.PORT }}
+          host:     ${{ matrix.target == 's1' && vars.S1_HOST || vars.S2_HOST }}
+          port:     ${{ matrix.target == 's1' && vars.S1_PORT || vars.S2_PORT }}
+          username: ${{ matrix.target == 's1' && vars.S1_USER || vars.S2_USER }}
+          key:      ${{ matrix.target == 's1' && secrets.S1_KEY || secrets.S2_KEY }}
           script: |
             set -Eeuo pipefail
 
@@ -83,9 +74,9 @@ jobs:
             export COMPOSE_PROJECT_NAME=animo_prod
             docker compose -f docker/compose.prod.yml --env-file .env.prod up -d --build
 
-            # Smoke tests (adjust ports if you changed them)
+            # Smoke tests (adjust ports if needed)
             curl -fsS http://127.0.0.1:18000/health || (docker compose logs backend && exit 1)
             curl -fsS http://127.0.0.1:19000/health || (docker compose logs analytics && exit 1)
-            curl -fsS http://127.0.0.1:8080        || (docker compose logs frontend && exit 1)
+            curl -fsSI http://127.0.0.1:8080        || (docker compose logs frontend && exit 1)
 
             docker system prune -f
