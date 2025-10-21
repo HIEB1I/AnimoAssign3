@@ -118,8 +118,13 @@ jobs:
             docker compose -f "$FILE" --env-file "$ENVF" up -d --build
 
             # Health checks INSIDE the compose network (no host port needed)
-            docker run --rm --network "$NET" curlimages/curl:8.10.1 -fsS http://backend-stg:8000/health
-            docker run --rm --network "$NET" curlimages/curl:8.10.1 -fsS http://analytics-stg:8000/health
-            docker run --rm --network "$NET" curlimages/curl:8.10.1 -fsSI http://frontend-stg
+            # Health checks: use the right network for each service
+            DEF_NET="${COMPOSE_PROJECT_NAME}_default"
+            EXT_NET="docker_animoassign"   # from networks.animoassign.name in compose
 
+            docker run --rm --network "$DEF_NET" curlimages/curl:8.10.1 -fsS  http://backend-stg:8000/health
+            docker run --rm --network "$DEF_NET" curlimages/curl:8.10.1 -fsS  http://analytics-stg:8000/health
+            docker run --rm --network "$EXT_NET" curlimages/curl:8.10.1 -fsSI http://frontend-stg
+
+            
             docker system prune -f
