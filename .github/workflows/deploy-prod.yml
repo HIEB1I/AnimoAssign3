@@ -39,25 +39,24 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [s1, s2]   # matrix stays static
-
-    # Map repo VARIABLES/SECRETS per target into env for easier reuse/validation
-    env:
-      HOST:     ${{ matrix.target == 's1' && vars.S1_HOST || vars.S2_HOST }}
-      PORT:     ${{ matrix.target == 's1' && vars.S1_PORT || vars.S2_PORT }}
-      USER:     ${{ matrix.target == 's1' && vars.S1_USER || vars.S2_USER }}
-      SSH_KEY:  ${{ matrix.target == 's1' && secrets.S1_KEY || secrets.S2_KEY }}
+        target: [s1, s2]
 
     steps:
+      - name: Set target env (${{ matrix.target }})
+        run: |
+          echo "HOST=${{ matrix.target == 's1' && secrets.S1_HOST || secrets.S2_HOST }}" >> $GITHUB_ENV
+          echo "PORT=${{ matrix.target == 's1' && secrets.S1_PORT || secrets.S2_PORT }}" >> $GITHUB_ENV
+          echo "USER=${{ matrix.target == 's1' && secrets.S1_USER || secrets.S2_USER }}" >> $GITHUB_ENV
+
       - name: Validate inputs (${{ matrix.target }})
         run: |
-          for v in HOST PORT USER SSH_KEY; do
+          for v in HOST PORT USER; do
             if [ -z "${!v}" ]; then
-              echo "::error ::$v is empty for target ${{ matrix.target }}. Check repo Variables/Secrets."
+              echo "::error ::$v is empty for target ${{ matrix.target }}. Check repo Secrets."
               exit 1
             fi
           done
-          echo "Using HOST=$HOST PORT=$PORT USER=$USER for target ${{ matrix.target }}"
+          echo "Using $USER@$HOST:$PORT"
 
       - name: Trust host key (${{ matrix.target }})
         run: |
@@ -70,7 +69,7 @@ jobs:
           host:     ${{ env.HOST }}
           port:     ${{ env.PORT }}
           username: ${{ env.USER }}
-          key:      ${{ env.SSH_KEY }}
+          key:      ${{ matrix.target == 's1' && secrets.S1_KEY || secrets.S2_KEY }}
           script: |
             set -Eeuo pipefail
 
@@ -81,6 +80,16 @@ jobs:
             fi
 
             cd /opt/AnimoAssign3
+
+            # Force HTTPS for GitHub remotes
+            unset GIT_SSH_COMMAND || true
+            git config --global url.https://github.com/.insteadof git@github.com:
+            git config --global url.https://github.com/.insteadof ssh://git@github.com/
+            git config --global --add safe.directory /opt/AnimoAssign3
+            if git config --get remote.origin.url >/dev/null 2>&1; then
+              git remote set-url origin https://github.com/HIEB1I/AnimoAssign3.git
+            fi
+
             git fetch --all --prune
             git checkout main
             git pull --ff-only
