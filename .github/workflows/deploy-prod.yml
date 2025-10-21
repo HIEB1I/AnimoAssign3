@@ -39,21 +39,38 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [s1, s2]   # keep static; choose credentials via expressions below
+        target: [s1, s2]   # matrix stays static
+
+    # Map repo VARIABLES/SECRETS per target into env for easier reuse/validation
+    env:
+      HOST:     ${{ matrix.target == 's1' && vars.S1_HOST || vars.S2_HOST }}
+      PORT:     ${{ matrix.target == 's1' && vars.S1_PORT || vars.S2_PORT }}
+      USER:     ${{ matrix.target == 's1' && vars.S1_USER || vars.S2_USER }}
+      SSH_KEY:  ${{ matrix.target == 's1' && secrets.S1_KEY || secrets.S2_KEY }}
+
     steps:
+      - name: Validate inputs (${{ matrix.target }})
+        run: |
+          for v in HOST PORT USER SSH_KEY; do
+            if [ -z "${!v}" ]; then
+              echo "::error ::$v is empty for target ${{ matrix.target }}. Check repo Variables/Secrets."
+              exit 1
+            fi
+          done
+          echo "Using HOST=$HOST PORT=$PORT USER=$USER for target ${{ matrix.target }}"
+
       - name: Trust host key (${{ matrix.target }})
         run: |
           mkdir -p ~/.ssh
-          ssh-keyscan -p "${{ matrix.target == 's1' && vars.S1_PORT || vars.S2_PORT }}" \
-                      "${{ matrix.target == 's1' && vars.S1_HOST || vars.S2_HOST }}" >> ~/.ssh/known_hosts
+          ssh-keyscan -p "$PORT" "$HOST" >> ~/.ssh/known_hosts
 
       - name: Deploy to ${{ matrix.target }}
         uses: appleboy/ssh-action@v1.0.3
         with:
-          host:     ${{ matrix.target == 's1' && vars.S1_HOST || vars.S2_HOST }}
-          port:     ${{ matrix.target == 's1' && vars.S1_PORT || vars.S2_PORT }}
-          username: ${{ matrix.target == 's1' && vars.S1_USER || vars.S2_USER }}
-          key:      ${{ matrix.target == 's1' && secrets.S1_KEY || secrets.S2_KEY }}
+          host:     ${{ env.HOST }}
+          port:     ${{ env.PORT }}
+          username: ${{ env.USER }}
+          key:      ${{ env.SSH_KEY }}
           script: |
             set -Eeuo pipefail
 
@@ -68,7 +85,7 @@ jobs:
             git checkout main
             git pull --ff-only
 
-            # Resolve compose + env-file from repo (docker/ preferred)
+            # Resolve compose + env file from repo
             FILE=""
             [ -f docker/compose.prod.yml ] && FILE=docker/compose.prod.yml
             [ -z "$FILE" ] && [ -f docker/docker-compose.prod.yml ] && FILE=docker/docker-compose.prod.yml
@@ -79,13 +96,13 @@ jobs:
 
             ENVF=""
             [ -f docker/.env.prod ] && ENVF=docker/.env.prod
-            [ -z "$ENVF" ] && [ -f .env.prod ] && ENVF=.env.prod  # repo root fallback (present in your repo)
+            [ -z "$ENVF" ] && [ -f .env.prod ] && ENVF=.env.prod
             [ -z "$ENVF" ] && { echo "Missing prod env file (docker/.env.prod or .env.prod)"; exit 1; }
 
             export COMPOSE_PROJECT_NAME=animo_prod
             docker compose -f "$FILE" --env-file "$ENVF" up -d --build
 
-            # Example smoke checks (tweak as needed)
+            # Smoke checks (adjust if your ports differ)
             curl -fsS  http://127.0.0.1:18000/health || (docker compose -f "$FILE" logs backend && exit 1)
             curl -fsS  http://127.0.0.1:19000/health || (docker compose -f "$FILE" logs analytics && exit 1)
             curl -fsSI http://127.0.0.1:8080         || (docker compose -f "$FILE" logs frontend && exit 1)
