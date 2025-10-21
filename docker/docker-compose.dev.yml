@@ -1,0 +1,58 @@
+services:
+  mongo-dev:
+    image: mongo:7
+    container_name: mongo-dev
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_INITDB_ROOT_USERNAME}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD}
+      DEV_DB_NAME: ${DEV_DB_NAME}
+      DEV_APP_USER: ${DEV_APP_USER}
+      DEV_APP_PASS: ${DEV_APP_PASS}
+    command: ["--bind_ip_all"]
+    volumes:
+      - mongo_data_dev:/data/db
+      - ./db/seed/init-dev.js:/docker-entrypoint-initdb.d/01-init-dev.js:ro
+    ports:
+      - "27019:27017"         # Compass will use this
+    restart: unless-stopped
+
+  backend-dev:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    container_name: backend-dev
+    environment:
+      MONGODB_URI: ${BACKEND_MONGODB_URI}
+      BACKEND_MONGODB_URI: ${BACKEND_MONGODB_URI}
+      BACKEND_ANALYTICS_URL: http://analytics-dev:8000
+    volumes:
+      - ../backend:/app       # hot reload code
+    command: >
+      sh -lc "pip install -q -r requirements.txt &&
+              uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+    depends_on: [mongo-dev]
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+  analytics-dev:
+    build:
+      context: ../analytics
+      dockerfile: Dockerfile
+    container_name: analytics-dev
+    environment:
+      MONGODB_URI: ${ANALYTICS_MONGODB_URI}
+      ANALYTICS_MONGODB_URI: ${ANALYTICS_MONGODB_URI}
+      RECORDS_COLLECTION: ${RECORDS_COLLECTION:-records}
+    volumes:
+      - ../analytics:/app     # hot reload code
+    command: >
+      sh -lc "pip install -q -r requirements.txt &&
+              uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+    depends_on: [mongo-dev]
+    ports:
+      - "8100:8000"
+    restart: unless-stopped
+
+volumes:
+  mongo_data_dev:

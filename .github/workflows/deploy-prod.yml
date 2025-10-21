@@ -1,0 +1,160 @@
+name: Deploy Production (S1 + S2)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: main }
+
+      # (Optional) quick FE build so you catch compile issues before shipping
+      - name: Frontend build
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+      # (Optional) backend/analytics sanity tests (best-effort, won’t fail pipeline)
+      - name: Backend tests (best-effort)
+        working-directory: backend
+        run: |
+          python -m pip install -r requirements.txt || true
+          pytest -q || true
+
+      - name: Analytics tests (best-effort)
+        working-directory: analytics
+        run: |
+          python -m pip install -r requirements.txt || true
+          pytest -q || true
+
+  deploy-s1:
+    name: Deploy S1 (primary)
+    needs: build-test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate S1 secrets
+        run: |
+          for v in S1_HOST S1_PORT S1_USER S1_KEY; do
+            test -n "${{ secrets[$v] }}" || { echo "::error ::Missing secret $v"; exit 1; }
+          done
+
+      - name: Trust S1 host key
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -p "${{ secrets.S1_PORT }}" "${{ secrets.S1_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Deploy to S1
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host:     ${{ secrets.S1_HOST }}
+          port:     ${{ secrets.S1_PORT }}
+          username: ${{ secrets.S1_USER }}
+          key:      ${{ secrets.S1_KEY }}
+          script: |
+            set -Eeuo pipefail
+
+            REPO_DIR=/opt/AnimoAssign3
+            COMPOSE_FILE=docker/docker-compose.prod.s1.yml
+            ENVF=docker/.env
+            export COMPOSE_PROJECT_NAME=animo_prod_s1
+
+            # Ensure checkout exists, use HTTPS (no SSH needed on server)
+            if [ ! -d "$REPO_DIR/.git" ]; then
+              mkdir -p "$REPO_DIR"
+              git clone https://github.com/HIEB1I/AnimoAssign3.git "$REPO_DIR"
+            fi
+            cd "$REPO_DIR"
+            unset GIT_SSH_COMMAND || true
+            git config --global url.https://github.com/.insteadof git@github.com:
+            git config --global url.https://github.com/.insteadof ssh://git@github.com/
+            git config --global --add safe.directory "$REPO_DIR"
+            git remote set-url origin https://github.com/HIEB1I/AnimoAssign3.git
+            git fetch --all --prune
+            git checkout main
+            git pull --ff-only
+
+            # Network used by nginx and app containers
+            docker network inspect docker_animoassign >/dev/null 2>&1 || docker network create docker_animoassign
+
+            # Sanity checks
+            [ -f "$COMPOSE_FILE" ] || { echo "Missing $COMPOSE_FILE"; exit 1; }
+            [ -f "$ENVF" ]         || { echo "Missing $ENVF"; exit 1; }
+
+            # Recreate changed services only; never delete volumes
+            docker compose -f "$COMPOSE_FILE" --env-file "$ENVF" up -d --build --remove-orphans
+
+            # Health checks (S1 exposes 18000/18100/18080)
+            docker run --rm curlimages/curl:8.10.1 -fsS  http://127.0.0.1:18000/health  >/dev/null && echo "::notice ::S1 backend healthy"
+            docker run --rm curlimages/curl:8.10.1 -fsS  http://127.0.0.1:18100/health  >/dev/null && echo "::notice ::S1 analytics healthy"
+            docker run --rm curlimages/curl:8.10.1 -fsSI http://127.0.0.1:18080        | head -n1
+
+            # Light cleanup (images only; keeps volumes)
+            docker image prune -f || true
+
+  deploy-s2:
+    name: Deploy S2 (backup)
+    needs: build-test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate S2 secrets
+        run: |
+          for v in S2_HOST S2_PORT S2_USER S2_KEY; do
+            test -n "${{ secrets[$v] }}" || { echo "::error ::Missing secret $v"; exit 1; }
+          done
+
+      - name: Trust S2 host key
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -p "${{ secrets.S2_PORT }}" "${{ secrets.S2_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Deploy to S2
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host:     ${{ secrets.S2_HOST }}
+          port:     ${{ secrets.S2_PORT }}
+          username: ${{ secrets.S2_USER }}
+          key:      ${{ secrets.S2_KEY }}
+          script: |
+            set -Eeuo pipefail
+
+            REPO_DIR=/opt/AnimoAssign3
+            COMPOSE_FILE=docker/docker-compose.prod.s2.yml
+            ENVF=docker/.env
+            export COMPOSE_PROJECT_NAME=animo_prod_s2
+
+            if [ ! -d "$REPO_DIR/.git" ]; then
+              mkdir -p "$REPO_DIR"
+              git clone https://github.com/HIEB1I/AnimoAssign3.git "$REPO_DIR"
+            fi
+            cd "$REPO_DIR"
+            unset GIT_SSH_COMMAND || true
+            git config --global url.https://github.com/.insteadof git@github.com:
+            git config --global url.https://github.com/.insteadof ssh://git@github.com/
+            git config --global --add safe.directory "$REPO_DIR"
+            git remote set-url origin https://github.com/HIEB1I/AnimoAssign3.git
+            git fetch --all --prune
+            git checkout main
+            git pull --ff-only
+
+            docker network inspect docker_animoassign >/dev/null 2>&1 || docker network create docker_animoassign
+
+            [ -f "$COMPOSE_FILE" ] || { echo "Missing $COMPOSE_FILE"; exit 1; }
+            [ -f "$ENVF" ]         || { echo "Missing $ENVF"; exit 1; }
+
+            docker compose -f "$COMPOSE_FILE" --env-file "$ENVF" up -d --build --remove-orphans
+
+            # Health checks (S2 backup ports: 28000/28100/28080 per your nginx upstream)
+            docker run --rm curlimages/curl:8.10.1 -fsS  http://127.0.0.1:28000/health  >/dev/null && echo "::notice ::S2 backend healthy"
+            docker run --rm curlimages/curl:8.10.1 -fsS  http://127.0.0.1:28100/health  >/dev/null && echo "::notice ::S2 analytics healthy"
+            docker run --rm curlimages/curl:8.10.1 -fsSI http://127.0.0.1:28080        | head -n1
+
+            docker image prune -f || true

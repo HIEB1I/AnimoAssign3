@@ -1,0 +1,151 @@
+name: Deploy Staging (S1)
+
+on:
+  push:
+    branches: [staging]
+  workflow_dispatch: {}
+
+concurrency:
+  group: deploy-staging
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: staging
+
+      - name: Frontend build
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Backend tests (best-effort)
+        working-directory: backend
+        run: |
+          python -m pip install -r requirements.txt || true
+          pytest -q || true
+
+      - name: Analytics tests (best-effort)
+        working-directory: analytics
+        run: |
+          python -m pip install -r requirements.txt || true
+          pytest -q || true
+
+  deploy:
+    needs: build-test
+    runs-on: ubuntu-latest
+
+    env:
+      S1_HOST: ${{ secrets.S1_HOST }}
+      S1_PORT: ${{ secrets.S1_PORT }}
+      S1_USER: ${{ secrets.S1_USER }}
+      S1_KEY:  ${{ secrets.S1_KEY }}
+
+    steps:
+      - name: Validate inputs
+        run: |
+          for v in S1_HOST S1_PORT S1_USER S1_KEY; do
+            if [ -z "${!v}" ]; then
+              echo "::error ::$v is empty. Add it in Settings → Secrets → Actions."
+              exit 1
+            fi
+          done
+          echo "Using $S1_USER@$S1_HOST:$S1_PORT"
+
+      - name: Trust S1 host key
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -p "$S1_PORT" "$S1_HOST" >> ~/.ssh/known_hosts
+
+      - name: Deploy to S1 (staging)
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host:     ${{ env.S1_HOST }}
+          port:     ${{ env.S1_PORT }}
+          username: ${{ env.S1_USER }}
+          key:      ${{ env.S1_KEY }}
+          script: |
+            set -Eeuo pipefail
+
+            # Ensure checkout exists
+            if [ ! -d /opt/AnimoAssign3-staging/.git ]; then
+              mkdir -p /opt/AnimoAssign3-staging
+              cd /opt/AnimoAssign3-staging
+              git clone https://github.com/HIEB1I/AnimoAssign3.git .
+            fi
+
+            cd /opt/AnimoAssign3-staging
+
+            # Pull via HTTPS (no SSH needed on server)
+            unset GIT_SSH_COMMAND || true
+            git config --global url.https://github.com/.insteadof git@github.com:
+            git config --global url.https://github.com/.insteadof ssh://git@github.com/
+            git config --global --add safe.directory /opt/AnimoAssign3-staging
+            git remote set-url origin https://github.com/HIEB1I/AnimoAssign3.git
+
+            git fetch --all --prune
+            git checkout staging
+            git pull --ff-only
+
+            # Paths (pin to the files you actually have)
+            FILE=docker/docker-compose.staging.yml
+            ENVF=docker/staging.env
+            [ -f "$FILE" ] || { echo "Compose file not found: $FILE"; exit 1; }
+            [ -f "$ENVF" ] || { echo "Env file not found: $ENVF"; exit 1; }
+
+            export COMPOSE_PROJECT_NAME=animo_staging
+            NET="${COMPOSE_PROJECT_NAME}_default"
+
+            # Export env vars so compose substitution never warns
+            set -a
+            . "$ENVF"
+            set +a
+
+            # ---- PRE-CLEAN ONCE to absorb legacy containers (name conflicts)
+            docker compose -f "$FILE" --env-file "$ENVF" down --remove-orphans || true
+            for c in backend-stg analytics-stg frontend-stg mongo-stg; do
+              docker rm -f "$c" 2>/dev/null || true
+            done
+            # ----
+
+            # After one clean run, you may switch to this "steady-state" line instead:
+            # docker compose -f "$FILE" --env-file "$ENVF" up -d --build --remove-orphans
+
+            docker compose -f "$FILE" --env-file "$ENVF" up -d --build
+
+            # Health checks INSIDE the compose network (no host port needed)
+            # Health checks: use the right network for each service
+            # --- Health checks with retry on the correct networks ---
+            DEF_NET="${COMPOSE_PROJECT_NAME}_default"
+            EXT_NET="docker_animoassign"   # matches networks.animoassign.name in compose
+
+            curl_wait() {
+              # usage: curl_wait <network> <url> <compose_service_name> [retries]
+              local net="$1" url="$2" svc="$3" tries="${4:-40}" i=0
+              while true; do
+                if docker run --rm --network "$net" curlimages/curl:8.10.1 -fsS "$url" >/dev/null 2>&1; then
+                  echo "::notice ::$svc is healthy at $url"
+                  break
+                fi
+                i=$((i+1))
+                if [ "$i" -ge "$tries" ]; then
+                  echo "::error ::$svc did not become ready at $url"
+                  # show last logs for that compose service (service name, not container_name)
+                  docker compose -f "$FILE" logs --tail=200 "$svc" || true
+                  exit 1
+                fi
+                sleep 3
+              done
+            }
+
+            curl_wait "$DEF_NET" http://backend-stg:8000/health   backend
+            curl_wait "$DEF_NET" http://analytics-stg:8000/health analytics
+            curl_wait "$EXT_NET" http://frontend-stg              frontend-stg
+            # -------------------------------------------------------
+
+
+            docker system prune -f
