@@ -39,7 +39,6 @@ jobs:
     needs: build-test
     runs-on: ubuntu-latest
 
-    # Map secrets to env so we can validate them in bash
     env:
       S1_HOST: ${{ secrets.S1_HOST }}
       S1_PORT: ${{ secrets.S1_PORT }}
@@ -72,7 +71,7 @@ jobs:
           script: |
             set -Eeuo pipefail
 
-            # Ensure staging checkout exists
+            # Ensure checkout exists
             if [ ! -d /opt/AnimoAssign3-staging/.git ]; then
               mkdir -p /opt/AnimoAssign3-staging
               cd /opt/AnimoAssign3-staging
@@ -86,9 +85,7 @@ jobs:
             git config --global url.https://github.com/.insteadof git@github.com:
             git config --global url.https://github.com/.insteadof ssh://git@github.com/
             git config --global --add safe.directory /opt/AnimoAssign3-staging
-            if git config --get remote.origin.url >/dev/null 2>&1; then
-              git remote set-url origin https://github.com/HIEB1I/AnimoAssign3.git
-            fi
+            git remote set-url origin https://github.com/HIEB1I/AnimoAssign3.git
 
             git fetch --all --prune
             git checkout staging
@@ -109,7 +106,20 @@ jobs:
             [ -z "$ENVF" ] && { echo "Missing staging env file (docker/.env.staging or .env.staging)"; exit 1; }
 
             export COMPOSE_PROJECT_NAME=animo_staging
+
+            # ---- PRE-CLEAN to avoid name conflicts (mongo-stg etc.)
+            docker compose -f "$FILE" --env-file "$ENVF" down --remove-orphans || true
+            # Remove any leftover containers that were not created by this compose project
+            for c in mongo-stg mongo_stg mongo-staging; do
+              docker rm -f "$c" 2>/dev/null || true
+            done
+            # ----
+
             docker compose -f "$FILE" --env-file "$ENVF" up -d --build
+
+            # Optional: verify required envs exist (uncomment if you want strict checks)
+            # grep -E "^(MONGO_INITDB_ROOT_USERNAME|MONGO_INITDB_ROOT_PASSWORD|BACKEND_MONGODB_URI|ANALYTICS_MONGODB_URI)=" "$ENVF" >/dev/null || \
+            # { echo "One or more Mongo/URI envs missing in $ENVF"; exit 1; }
 
             # Smoke checks (adjust ports if your compose uses different ones)
             curl -fsS  http://127.0.0.1:18010/health || (docker compose -f "$FILE" logs backend && exit 1)
