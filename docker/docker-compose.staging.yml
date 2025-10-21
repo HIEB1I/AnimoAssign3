@@ -46,6 +46,11 @@ services:
       dockerfile: Dockerfile
       args:
         VITE_BASE: "${VITE_BASE:-/staging/}"
+        VITE_BACKEND_URL: "${VITE_BACKEND_URL:-/api}"         # ADD
+        VITE_ANALYTICS_URL: "${VITE_ANALYTICS_URL:-/analytics}" # ADD
+    environment:                                  # ADD (runtime for nginx)
+      BACKEND_SERVICE_HOST: backend-stg
+      ANALYTICS_SERVICE_HOST: analytics-stg
     depends_on: [backend, analytics]
     restart: unless-stopped
     networks: [animoassign]            # nginx only needs to reach this
