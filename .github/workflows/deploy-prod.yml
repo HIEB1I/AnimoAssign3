@@ -21,13 +21,13 @@ jobs:
           npm ci
           npm run build
 
-      - name: Backend tests
+      - name: Backend tests (best-effort)
         working-directory: backend
         run: |
           python -m pip install -r requirements.txt || true
           pytest -q || true
 
-      - name: Analytics tests
+      - name: Analytics tests (best-effort)
         working-directory: analytics
         run: |
           python -m pip install -r requirements.txt || true
@@ -39,7 +39,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [s1, s2]   # keep matrix STATIC; choose values at step time
+        target: [s1, s2]   # keep static; choose credentials via expressions below
     steps:
       - name: Trust host key (${{ matrix.target }})
         run: |
@@ -58,6 +58,7 @@ jobs:
             set -Eeuo pipefail
 
             if [ ! -d /opt/AnimoAssign3/.git ]; then
+              mkdir -p /opt/AnimoAssign3
               cd /opt/AnimoAssign3
               git clone https://github.com/HIEB1I/AnimoAssign3.git .
             fi
@@ -67,16 +68,26 @@ jobs:
             git checkout main
             git pull --ff-only
 
-            if [ ! -f .env.prod ]; then
-              echo "Missing .env.prod on server. Create it before deploying."; exit 1
-            fi
+            # Resolve compose + env-file from repo (docker/ preferred)
+            FILE=""
+            [ -f docker/compose.prod.yml ] && FILE=docker/compose.prod.yml
+            [ -z "$FILE" ] && [ -f docker/docker-compose.prod.yml ] && FILE=docker/docker-compose.prod.yml
+            [ -z "$FILE" ] && [ -f docker/compose.yml ] && FILE=docker/compose.yml
+            [ -z "$FILE" ] && [ -f docker/docker-compose.yml ] && FILE=docker/docker-compose.yml
+            [ -z "$FILE" ] && [ -f docker-compose.yml ] && FILE=docker-compose.yml
+            [ -z "$FILE" ] && { echo "No compose file found"; exit 1; }
+
+            ENVF=""
+            [ -f docker/.env.prod ] && ENVF=docker/.env.prod
+            [ -z "$ENVF" ] && [ -f .env.prod ] && ENVF=.env.prod  # repo root fallback (present in your repo)
+            [ -z "$ENVF" ] && { echo "Missing prod env file (docker/.env.prod or .env.prod)"; exit 1; }
 
             export COMPOSE_PROJECT_NAME=animo_prod
-            docker compose -f docker/compose.prod.yml --env-file .env.prod up -d --build
+            docker compose -f "$FILE" --env-file "$ENVF" up -d --build
 
-            # Smoke tests (adjust ports if needed)
-            curl -fsS http://127.0.0.1:18000/health || (docker compose logs backend && exit 1)
-            curl -fsS http://127.0.0.1:19000/health || (docker compose logs analytics && exit 1)
-            curl -fsSI http://127.0.0.1:8080        || (docker compose logs frontend && exit 1)
+            # Example smoke checks (tweak as needed)
+            curl -fsS  http://127.0.0.1:18000/health || (docker compose -f "$FILE" logs backend && exit 1)
+            curl -fsS  http://127.0.0.1:19000/health || (docker compose -f "$FILE" logs analytics && exit 1)
+            curl -fsSI http://127.0.0.1:8080         || (docker compose -f "$FILE" logs frontend && exit 1)
 
             docker system prune -f
