@@ -119,12 +119,34 @@ jobs:
 
             # Health checks INSIDE the compose network (no host port needed)
             # Health checks: use the right network for each service
+            # --- Health checks with retry on the correct networks ---
             DEF_NET="${COMPOSE_PROJECT_NAME}_default"
-            EXT_NET="docker_animoassign"   # from networks.animoassign.name in compose
+            EXT_NET="docker_animoassign"   # matches networks.animoassign.name in compose
 
-            docker run --rm --network "$DEF_NET" curlimages/curl:8.10.1 -fsS  http://backend-stg:8000/health
-            docker run --rm --network "$DEF_NET" curlimages/curl:8.10.1 -fsS  http://analytics-stg:8000/health
-            docker run --rm --network "$EXT_NET" curlimages/curl:8.10.1 -fsSI http://frontend-stg
+            curl_wait() {
+              # usage: curl_wait <network> <url> <compose_service_name> [retries]
+              local net="$1" url="$2" svc="$3" tries="${4:-40}" i=0
+              while true; do
+                if docker run --rm --network "$net" curlimages/curl:8.10.1 -fsS "$url" >/dev/null 2>&1; then
+                  echo "::notice ::$svc is healthy at $url"
+                  break
+                fi
+                i=$((i+1))
+                if [ "$i" -ge "$tries" ]; then
+                  echo "::error ::$svc did not become ready at $url"
+                  # show last logs for that compose service (service name, not container_name)
+                  docker compose -f "$FILE" logs --tail=200 "$svc" || true
+                  exit 1
+                fi
+                sleep 3
+              done
+            }
+
+            curl_wait "$DEF_NET" http://backend-stg:8000/health   backend
+            curl_wait "$DEF_NET" http://analytics-stg:8000/health analytics
+            curl_wait "$EXT_NET" http://frontend-stg              frontend-stg
+            # -------------------------------------------------------
+
 
             
             docker system prune -f
