@@ -93,6 +93,19 @@ jobs:
             [ -f "$COMPOSE_FILE" ] || { echo "Missing $COMPOSE_FILE"; exit 1; }
             [ -f "$ENVF" ]         || { echo "Missing $ENVF"; exit 1; }
 
+            # --- Pre-clean only our app services (never touch mongo) -----------------
+            # Remove containers with the same fixed names if they are NOT owned by this project.
+            for svc in backend-primary analytics-primary frontend-primary nginx; do
+              if docker ps -a --format '{{.Names}}' | grep -Fxq "$svc"; then
+                owner=$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project"}}' "$svc" 2>/dev/null || true)
+                if [ "$owner" != "$COMPOSE_PROJECT_NAME" ]; then
+                  echo "Removing stray container $svc (owner=$owner)"
+                  docker rm -f "$svc" || true
+                fi
+              fi
+            done
+            # ------------------------------------------------------------------------
+
             # ---- Dynamically resolve services, exclude any mongo* services
             services=$(docker compose -f "$COMPOSE_FILE" --env-file "$ENVF" config --services | grep -E -v '^mongo')
             if [ -z "$services" ]; then
@@ -167,6 +180,19 @@ jobs:
 
             [ -f "$COMPOSE_FILE" ] || { echo "Missing $COMPOSE_FILE"; exit 1; }
             [ -f "$ENVF" ]         || { echo "Missing $ENVF"; exit 1; }
+
+            # --- Pre-clean only our app services (never touch mongo) -----------------
+            # Remove containers with the same fixed names if they are NOT owned by this project.
+            for svc in backend-secondary analytics-secondary frontend-secondary nginx; do
+              if docker ps -a --format '{{.Names}}' | grep -Fxq "$svc"; then
+                owner=$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project"}}' "$svc" 2>/dev/null || true)
+                if [ "$owner" != "$COMPOSE_PROJECT_NAME" ]; then
+                  echo "Removing stray container $svc (owner=$owner)"
+                  docker rm -f "$svc" || true
+                fi
+              fi
+            done
+            # ------------------------------------------------------------------------
 
             # ---- Dynamically resolve services, exclude any mongo* services
             services=$(docker compose -f "$COMPOSE_FILE" --env-file "$ENVF" config --services | grep -E -v '^mongo')
