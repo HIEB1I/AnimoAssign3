@@ -75,13 +75,13 @@
   // ---------- DATA STARTS HERE ----------
 
   const campuses = [
-      { campus_id: "CAMP_TAFT", campus_name: "DLSU Taft", address: "2401 Taft Ave, Malate, Manila" },
-      { campus_id: "CAMP_LAG", campus_name: "DLSU Laguna", address: "Leandro V. Locsin Campus, Biñan, Laguna" }
+    { campus_id: "CMPS001", campus_name: "Manila Campus", address: "De La Salle University Manila, 2401 Taft Ave, Malate, Manila, 1004 Metro Manila" },
+    { campus_id: "CMPS002", campus_name: "Laguna Campus", address: "De La Salle University – Laguna Campus, 727V+352, LTI Spine Road, Laguna Blvd, Biñan, Laguna" }
   ];
 
   const departments = [
-      { department_id: "DEPT_CCS", department_name: "College of Computer Studies", campus_id: "CAMP_TAFT", description: "CCS main department", created_at: now, updated_at: now },
-      { department_id: "DEPT_CLA", department_name: "College of Liberal Arts", campus_id: "CAMP_TAFT", description: "CLA department", created_at: now, updated_at: now }
+    { department_id: "DEPT001", department_name: "Department of Software Technology", campus_id: "CMPS001", description: "The DLSU Department of Software Technology offers the Bachelor of Science in Computer Science Major in Software Technology (ST) program, which prepares students to be mature software engineers and researchers by integrating fundamental computing theories with applied software engineering principles.", created_at: now, updated_at: now },
+    { department_id: "DEPT002", department_name: "Department of Information Technology", campus_id: "CMPS001", description: "The De La Salle University (DLSU) Information Technology (IT) Department, part of the College of Computer Studies, focuses on developing computing professionals who can analyze organizational needs and create effective technological solutions for businesses and other entities.", created_at: now, updated_at: now }
   ];
 
   const users = [
@@ -92,10 +92,16 @@
     { user_id: "USR101", email: "stud.2025@dlsu.edu.ph", first_name: "Sam", last_name: "Student", status: true, created_at: now, updated_at: now, last_login: now }];
 
   const user_roles = [
-      { role_id: "ROLE001", user_id: "USR001", role_type: "Dean", department_id: "DEPT_CCS", is_active: true, created_at: now, updated_at: now },
-      { role_id: "ROLE002", user_id: "USR002", role_type: "Chair", department_id: "DEPT_CCS", is_active: true, created_at: now, updated_at: now },
-      { role_id: "ROLE003", user_id: "USR003", role_type: "Faculty", department_id: "DEPT_CCS", is_active: true, created_at: now, updated_at: now },
-      { role_id: "ROLE004", user_id: "USR004", role_type: "Staff", department_id: "DEPT_CCS", is_active: true, created_at: now, updated_at: now }
+    { role_id: "ROLE001", user_id: "USR001", role_type: "admin", department_id: "DEPT001", description: "System administrator with full system access", is_active: true, created_at: now, updated_at: now },
+    { role_id: "ROLE002", user_id: "USR001", role_type: "department_chair", department_id: "DEPT001", description: "Provost office staff with academic oversight responsibilities", is_active: true, created_at: now, updated_at: now },
+    { role_id: "ROLE003", user_id: "USR001", role_type: "dean", department_id: "DEPT001", description: "College dean with faculty and academic program management", is_active: true, created_at: now, updated_at: now },
+    { role_id: "ROLE004", user_id: "USR001", role_type: "apo", department_id: "DEPT001", description: "Academic Program Officer with curriculum coordination duties", is_active: true, created_at: now, updated_at: now },
+    { role_id: "ROLE005", user_id: "USR001", role_type: "department_chair", department_id: "DEPT001", description: "Department chairperson with departmental leadership responsibilities", is_active: true, created_at: now, updated_at: now },
+    { role_id: "ROLE006", user_id: "USR001", role_type: "office_assistant", department_id: "DEPT001", description: "Office Assistant with administrative support functions, previously called Department Secretary", is_active: true, created_at: now, updated_at: now },
+    { role_id: "ROLE007", user_id: "USR001", role_type: "office_manager", department_id: "DEPT001", description: "Office manager is assigned to allocate the faculty loads of the faculty members, previously the Department Vice Chair", is_active: true, created_at: now, updated_at: now },
+    { role_id: "ROLE008", user_id: "USR001", role_type: "gs_coordinator", department_id: "DEPT001", description: "Graduate Studies Coordinator", is_active: true, created_at: now, updated_at: now },
+    { role_id: "ROLE009", user_id: "USR001", role_type: "faculty", department_id: "DEPT001", description: "Faculty member with teaching and research responsibilities", is_active: true, created_at: now, updated_at: now },
+    { role_id: "ROLE010", user_id: "USR001", role_type: "student", department_id: "DEPT001", description: "Student with access to academic resources and courses", is_active: true, created_at: now, updated_at: now }
   ];
 
   const kacs = [
