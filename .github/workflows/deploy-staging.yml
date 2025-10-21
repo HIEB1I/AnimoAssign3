@@ -16,7 +16,6 @@ jobs:
       - uses: actions/checkout@v4
         with: { ref: staging }
 
-      # Frontend build check (adjust if your scripts differ)
       - name: Frontend build
         working-directory: frontend
         run: |
@@ -38,23 +37,40 @@ jobs:
   deploy:
     needs: build-test
     runs-on: ubuntu-latest
+
+    # Pull repo VARIABLES into the job environment
+    env:
+      S1_HOST: ${{ vars.S1_HOST }}
+      S1_PORT: ${{ vars.S1_PORT }}
+      S1_USER: ${{ vars.S1_USER }}
+
     steps:
+      - name: Validate inputs
+        run: |
+          for v in S1_HOST S1_PORT S1_USER; do
+            if [ -z "${!v}" ]; then
+              echo "::error ::$v is empty. Set repository variable '$v' (Settings → Actions → Variables)."
+              exit 1
+            fi
+          done
+          echo "Using S1_HOST=$S1_HOST S1_PORT=$S1_PORT S1_USER=$S1_USER"
+
       - name: Trust S1 host key
         run: |
           mkdir -p ~/.ssh
-          ssh-keyscan -p "${{ vars.S1_PORT }}" "${{ vars.S1_HOST }}" >> ~/.ssh/known_hosts
+          ssh-keyscan -p "$S1_PORT" "$S1_HOST" >> ~/.ssh/known_hosts
 
       - name: Deploy to S1 (staging)
         uses: appleboy/ssh-action@v1.0.3
         with:
-          host:     ${{ vars.S1_HOST }}
-          port:     ${{ vars.S1_PORT }}
-          username: ${{ vars.S1_USER }}
+          host:     ${{ env.S1_HOST }}
+          port:     ${{ env.S1_PORT }}
+          username: ${{ env.S1_USER }}
           key:      ${{ secrets.S1_KEY }}
           script: |
             set -Eeuo pipefail
 
-            # Ensure repo exists on S1 staging dir
+            # Ensure staging checkout exists
             if [ ! -d /opt/AnimoAssign3-staging/.git ]; then
               mkdir -p /opt/AnimoAssign3-staging
               cd /opt/AnimoAssign3-staging
@@ -66,7 +82,7 @@ jobs:
             git checkout staging
             git pull --ff-only
 
-            # Resolve compose + env-file from repo (docker/ preferred)
+            # Resolve compose + env file from repo
             FILE=""
             [ -f docker/compose.staging.yml ] && FILE=docker/compose.staging.yml
             [ -z "$FILE" ] && [ -f docker/docker-compose.staging.yml ] && FILE=docker/docker-compose.staging.yml
@@ -83,7 +99,7 @@ jobs:
             export COMPOSE_PROJECT_NAME=animo_staging
             docker compose -f "$FILE" --env-file "$ENVF" up -d --build
 
-            # Example smoke checks (tweak ports/paths to your app)
+            # Smoke checks (adjust ports if needed)
             curl -fsS  http://127.0.0.1:18010/health || (docker compose -f "$FILE" logs backend && exit 1)
             curl -fsS  http://127.0.0.1:19010/health || (docker compose -f "$FILE" logs analytics && exit 1)
             curl -fsSI http://127.0.0.1:8081         || (docker compose -f "$FILE" logs frontend && exit 1)
