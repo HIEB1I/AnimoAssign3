@@ -46,8 +46,6 @@ services:
       dockerfile: Dockerfile
       args:
         VITE_BASE: "${VITE_BASE:-/staging/}"
-        VITE_BACKEND_URL:    "${VITE_BACKEND_URL:-/staging/api}"
-        VITE_ANALYTICS_URL:  "${VITE_ANALYTICS_URL:-/staging/analytics}"
     depends_on: [backend, analytics]
     restart: unless-stopped
     networks: [animoassign]            # nginx only needs to reach this
