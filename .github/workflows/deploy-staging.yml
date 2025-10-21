@@ -107,13 +107,16 @@ jobs:
 
             export COMPOSE_PROJECT_NAME=animo_staging
 
-            # ---- PRE-CLEAN to avoid name conflicts (mongo-stg etc.)
+            # ---- PRE-CLEAN to avoid name conflicts with hardcoded container_name ----
             docker compose -f "$FILE" --env-file "$ENVF" down --remove-orphans || true
-            # Remove any leftover containers that were not created by this compose project
-            for c in mongo-stg mongo_stg mongo-staging; do
+
+            # Remove any leftover containers that were created by older/other projects
+            # (keep names EXACT — they match your compose `container_name` values)
+            for c in backend-stg analytics-stg frontend-stg mongo-stg; do
               docker rm -f "$c" 2>/dev/null || true
             done
-            # ----
+            # ------------------------------------------------------------------------
+
 
             docker compose -f "$FILE" --env-file "$ENVF" up -d --build
 
