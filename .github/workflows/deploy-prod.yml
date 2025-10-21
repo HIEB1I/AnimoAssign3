@@ -38,8 +38,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      matrix:
-        target: [s1, s2]
+      matrix: { target: [s1, s2] }
 
     steps:
       - name: Set target env (${{ matrix.target }})
@@ -47,10 +46,11 @@ jobs:
           echo "HOST=${{ matrix.target == 's1' && secrets.S1_HOST || secrets.S2_HOST }}" >> $GITHUB_ENV
           echo "PORT=${{ matrix.target == 's1' && secrets.S1_PORT || secrets.S2_PORT }}" >> $GITHUB_ENV
           echo "USER=${{ matrix.target == 's1' && secrets.S1_USER || secrets.S2_USER }}" >> $GITHUB_ENV
+          echo "KEY=${{ matrix.target == 's1' && secrets.S1_KEY  || secrets.S2_KEY  }}" >> $GITHUB_ENV
 
       - name: Validate inputs (${{ matrix.target }})
         run: |
-          for v in HOST PORT USER; do
+          for v in HOST PORT USER KEY; do
             if [ -z "${!v}" ]; then
               echo "::error ::$v is empty for target ${{ matrix.target }}. Check repo Secrets."
               exit 1
@@ -69,7 +69,7 @@ jobs:
           host:     ${{ env.HOST }}
           port:     ${{ env.PORT }}
           username: ${{ env.USER }}
-          key:      ${{ matrix.target == 's1' && secrets.S1_KEY || secrets.S2_KEY }}
+          key:      ${{ env.KEY }}
           script: |
             set -Eeuo pipefail
 
@@ -81,7 +81,7 @@ jobs:
 
             cd /opt/AnimoAssign3
 
-            # Force HTTPS for GitHub remotes
+            # Pull via HTTPS
             unset GIT_SSH_COMMAND || true
             git config --global url.https://github.com/.insteadof git@github.com:
             git config --global url.https://github.com/.insteadof ssh://git@github.com/
@@ -92,33 +92,40 @@ jobs:
             git checkout main
             git pull --ff-only
 
-            # Resolve compose + env file from repo
-            FILE=""
-            [ -f docker/compose.prod.yml ] && FILE=docker/compose.prod.yml
-            [ -z "$FILE" ] && [ -f docker/docker-compose.prod.yml ] && FILE=docker/docker-compose.prod.yml
-            [ -z "$FILE" ] && [ -f docker/compose.yml ] && FILE=docker/compose.yml
-            [ -z "$FILE" ] && [ -f docker/docker-compose.yml ] && FILE=docker/docker-compose.yml
-            [ -z "$FILE" ] && [ -f docker-compose.yml ] && FILE=docker-compose.yml
-            [ -z "$FILE" ] && { echo "No compose file found"; exit 1; }
+            # Use the server-specific compose file if you have them
+            if [ "${{ matrix.target }}" = "s1" ]; then
+              FILE=docker/docker-compose.prod.s1.yml
+            else
+              FILE=docker/docker-compose.prod.s2.yml
+            fi
+            [ -f "$FILE" ] || FILE=docker/docker-compose.prod.yml
 
+            # Pick an env file for prod
             ENVF=""
-            [ -f docker/.env.prod ] && ENVF=docker/.env.prod
+            [ -f docker/prod.env ] && ENVF=docker/prod.env
+            [ -z "$ENVF" ] && [ -f docker/.env ] && ENVF=docker/.env
             [ -z "$ENVF" ] && [ -f .env.prod ] && ENVF=.env.prod
-            [ -z "$ENVF" ] && { echo "Missing prod env file (docker/.env.prod or .env.prod)"; exit 1; }
+            [ -z "$ENVF" ] && { echo "No prod env file found (docker/prod.env, docker/.env, or .env.prod)"; exit 1; }
 
             export COMPOSE_PROJECT_NAME=animo_prod
+            NET="${COMPOSE_PROJECT_NAME}_default"
 
-            # ---- PRE-CLEAN to avoid name conflicts
+            # Export envs to silence substitution warnings
+            set -a
+            . "$ENVF"
+            set +a
+
+            # PRE-CLEAN once to absorb legacy containers with fixed names
             docker compose -f "$FILE" --env-file "$ENVF" down --remove-orphans || true
-            # (Add specific names if you hardcoded container_name in prod compose)
-            # for c in mongo-prod mongo_prod; do docker rm -f "$c" 2>/dev/null || true; done
-            # ----
+            for c in backend-primary analytics-primary frontend-primary mongo-primary nginx-primary; do
+              docker rm -f "$c" 2>/dev/null || true
+            done
 
             docker compose -f "$FILE" --env-file "$ENVF" up -d --build
 
-            # Smoke checks (adjust if your ports differ)
-            curl -fsS  http://127.0.0.1:18000/health || (docker compose -f "$FILE" logs backend && exit 1)
-            curl -fsS  http://127.0.0.1:19000/health || (docker compose -f "$FILE" logs analytics && exit 1)
-            curl -fsSI http://127.0.0.1:8080         || (docker compose -f "$FILE" logs frontend && exit 1)
+            # Health checks inside the compose network
+            docker run --rm --network "$NET" curlimages/curl:8.10.1 -fsS  http://backend-primary:8000/health
+            docker run --rm --network "$NET" curlimages/curl:8.10.1 -fsS  http://analytics-primary:8000/health
+            docker run --rm --network "$NET" curlimages/curl:8.10.1 -fsSI http://frontend-primary
 
             docker system prune -f
