@@ -93,11 +93,11 @@ jobs:
 
             # Resolve compose + env file from repo
             FILE=""
-            [ -f docker/compose.staging.yml ] && FILE=docker/compose.staging.yml
+            [ -f docker/docker-compose.staging.yml ] && FILE=docker/docker-compose.staging.yml
             [ -z "$FILE" ] && [ -f docker/docker-compose.staging.yml ] && FILE=docker/docker-compose.staging.yml
-            [ -z "$FILE" ] && [ -f docker/compose.yml ] && FILE=docker/compose.yml
-            [ -z "$FILE" ] && [ -f docker/docker-compose.yml ] && FILE=docker/docker-compose.yml
-            [ -z "$FILE" ] && [ -f docker-compose.yml ] && FILE=docker-compose.yml
+            [ -z "$FILE" ] && [ -f docker/docker-compose.staging.yml] && FILE=docker/docker-compose.staging.yml
+            [ -z "$FILE" ] && [ -f docker/docker-compose.staging.yml ] && FILE=docker/docker-compose.staging.yml
+            [ -z "$FILE" ] && [ -f docker-compose.staging.yml] && FILE=docker-compose.staging.yml
             [ -z "$FILE" ] && { echo "No compose file found"; exit 1; }
 
             ENVF=""
