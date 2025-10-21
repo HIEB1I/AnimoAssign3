@@ -94,17 +94,19 @@ jobs:
             [ -f "$ENVF" ]         || { echo "Missing $ENVF"; exit 1; }
 
             # ---- Dynamically resolve services, exclude any mongo* services
-            services="$(docker compose -f "$COMPOSE_FILE" --env-file "$ENVF" config --services | grep -E -v '^mongo')"
-            echo "Services (S1):"
-            echo "$services" | sed 's/^/  - /'
-            [ -n "$services" ] || { echo "::error ::No non-mongo services found"; exit 1; }
+            services=$(docker compose -f "$COMPOSE_FILE" --env-file "$ENVF" config --services | grep -E -v '^mongo')
+            if [ -z "$services" ]; then
+              echo "::warning ::No non-mongo services found (nothing to deploy)"; exit 0
+            fi
+            echo "Services (S1):"; printf '%s\n' "$services" | sed 's/^/  - /'
+            # Deploy without starting dependencies (so Mongo is not touched)
+            docker compose -f "$COMPOSE_FILE" --env-file "$ENVF" up -d --build --remove-orphans --no-deps $services
             # ----
 
-            docker compose -f "$COMPOSE_FILE" --env-file "$ENVF" up -d --build --remove-orphans $services
-
+            # Health checks
             docker run --rm curlimages/curl:8.10.1 -fsS  http://127.0.0.1:18000/health  >/dev/null && echo "::notice ::S1 backend healthy"
             docker run --rm curlimages/curl:8.10.1 -fsS  http://127.0.0.1:18100/health  >/dev/null && echo "::notice ::S1 analytics healthy"
-            docker run --rm curlimages/curl:8.10.1 -fsSI http://127.0.0.1:18080 | head -n1
+            docker run --rm curlimages/curl:8.10.1 -fsSI http://127.0.0.1:18080        | head -n1
 
             docker image prune -f || true
 
@@ -167,16 +169,17 @@ jobs:
             [ -f "$ENVF" ]         || { echo "Missing $ENVF"; exit 1; }
 
             # ---- Dynamically resolve services, exclude any mongo* services
-            services="$(docker compose -f "$COMPOSE_FILE" --env-file "$ENVF" config --services | grep -E -v '^mongo')"
-            echo "Services (S2):"
-            echo "$services" | sed 's/^/  - /'
-            [ -n "$services" ] || { echo "::error ::No non-mongo services found"; exit 1; }
+            services=$(docker compose -f "$COMPOSE_FILE" --env-file "$ENVF" config --services | grep -E -v '^mongo')
+            if [ -z "$services" ]; then
+              echo "::warning ::No non-mongo services found (nothing to deploy)"; exit 0
+            fi
+            echo "Services (S2):"; printf '%s\n' "$services" | sed 's/^/  - /'
+            docker compose -f "$COMPOSE_FILE" --env-file "$ENVF" up -d --build --remove-orphans --no-deps $services
             # ----
-
-            docker compose -f "$COMPOSE_FILE" --env-file "$ENVF" up -d --build --remove-orphans $services
 
             docker run --rm curlimages/curl:8.10.1 -fsS  http://127.0.0.1:28000/health  >/dev/null && echo "::notice ::S2 backend healthy"
             docker run --rm curlimages/curl:8.10.1 -fsS  http://127.0.0.1:28100/health  >/dev/null && echo "::notice ::S2 analytics healthy"
-            docker run --rm curlimages/curl:8.10.1 -fsSI http://127.0.0.1:28080 | head -n1
+            docker run --rm curlimages/curl:8.10.1 -fsSI http://127.0.0.1:28080        | head -n1
 
             docker image prune -f || true
+
