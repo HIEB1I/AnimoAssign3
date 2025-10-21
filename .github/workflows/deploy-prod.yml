@@ -16,14 +16,12 @@ jobs:
       - uses: actions/checkout@v4
         with: { ref: main }
 
-      # (Optional) quick FE build so you catch compile issues before shipping
       - name: Frontend build
         working-directory: frontend
         run: |
           npm ci
           npm run build
 
-      # (Optional) backend/analytics sanity tests (best-effort, won’t fail pipeline)
       - name: Backend tests (best-effort)
         working-directory: backend
         run: |
@@ -42,9 +40,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Validate S1 secrets
+        env:
+          S1_HOST: ${{ secrets.S1_HOST }}
+          S1_PORT: ${{ secrets.S1_PORT }}
+          S1_USER: ${{ secrets.S1_USER }}
+          S1_KEY:  ${{ secrets.S1_KEY }}
         run: |
+          set -e
           for v in S1_HOST S1_PORT S1_USER S1_KEY; do
-            test -n "${{ secrets[$v] }}" || { echo "::error ::Missing secret $v"; exit 1; }
+            if [ -z "${!v}" ]; then
+              echo "::error ::Missing secret $v"
+              exit 1
+            fi
           done
 
       - name: Trust S1 host key
@@ -67,7 +74,6 @@ jobs:
             ENVF=docker/.env
             export COMPOSE_PROJECT_NAME=animo_prod_s1
 
-            # Ensure checkout exists, use HTTPS (no SSH needed on server)
             if [ ! -d "$REPO_DIR/.git" ]; then
               mkdir -p "$REPO_DIR"
               git clone https://github.com/HIEB1I/AnimoAssign3.git "$REPO_DIR"
@@ -82,22 +88,17 @@ jobs:
             git checkout main
             git pull --ff-only
 
-            # Network used by nginx and app containers
             docker network inspect docker_animoassign >/dev/null 2>&1 || docker network create docker_animoassign
 
-            # Sanity checks
             [ -f "$COMPOSE_FILE" ] || { echo "Missing $COMPOSE_FILE"; exit 1; }
             [ -f "$ENVF" ]         || { echo "Missing $ENVF"; exit 1; }
 
-            # Recreate changed services only; never delete volumes
             docker compose -f "$COMPOSE_FILE" --env-file "$ENVF" up -d --build --remove-orphans
 
-            # Health checks (S1 exposes 18000/18100/18080)
             docker run --rm curlimages/curl:8.10.1 -fsS  http://127.0.0.1:18000/health  >/dev/null && echo "::notice ::S1 backend healthy"
             docker run --rm curlimages/curl:8.10.1 -fsS  http://127.0.0.1:18100/health  >/dev/null && echo "::notice ::S1 analytics healthy"
             docker run --rm curlimages/curl:8.10.1 -fsSI http://127.0.0.1:18080        | head -n1
 
-            # Light cleanup (images only; keeps volumes)
             docker image prune -f || true
 
   deploy-s2:
@@ -106,9 +107,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Validate S2 secrets
+        env:
+          S2_HOST: ${{ secrets.S2_HOST }}
+          S2_PORT: ${{ secrets.S2_PORT }}
+          S2_USER: ${{ secrets.S2_USER }}
+          S2_KEY:  ${{ secrets.S2_KEY }}
         run: |
+          set -e
           for v in S2_HOST S2_PORT S2_USER S2_KEY; do
-            test -n "${{ secrets[$v] }}" || { echo "::error ::Missing secret $v"; exit 1; }
+            if [ -z "${!v}" ]; then
+              echo "::error ::Missing secret $v"
+              exit 1
+            fi
           done
 
       - name: Trust S2 host key
@@ -152,7 +162,6 @@ jobs:
 
             docker compose -f "$COMPOSE_FILE" --env-file "$ENVF" up -d --build --remove-orphans
 
-            # Health checks (S2 backup ports: 28000/28100/28080 per your nginx upstream)
             docker run --rm curlimages/curl:8.10.1 -fsS  http://127.0.0.1:28000/health  >/dev/null && echo "::notice ::S2 backend healthy"
             docker run --rm curlimages/curl:8.10.1 -fsS  http://127.0.0.1:28100/health  >/dev/null && echo "::notice ::S2 analytics healthy"
             docker run --rm curlimages/curl:8.10.1 -fsSI http://127.0.0.1:28080        | head -n1
