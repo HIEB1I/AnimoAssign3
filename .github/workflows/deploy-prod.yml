@@ -95,7 +95,7 @@ jobs:
 
             # --- Pre-clean only our app services (never touch mongo) -----------------
             # Remove containers with the same fixed names if they are NOT owned by this project.
-            for svc in backend-primary analytics-primary frontend-primary nginx; do
+            for svc in backend-primary analytics-primary frontend-primary nginx-primary; do
               if docker ps -a --format '{{.Names}}' | grep -Fxq "$svc"; then
                 owner=$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project"}}' "$svc" 2>/dev/null || true)
                 if [ "$owner" != "$COMPOSE_PROJECT_NAME" ]; then
@@ -183,7 +183,7 @@ jobs:
 
             # --- Pre-clean only our app services (never touch mongo) -----------------
             # Remove containers with the same fixed names if they are NOT owned by this project.
-            for svc in backend-secondary analytics-secondary frontend-secondary nginx; do
+            for svc in backend-secondary analytics-secondary frontend-secondary nginx-secondary; do
               if docker ps -a --format '{{.Names}}' | grep -Fxq "$svc"; then
                 owner=$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project"}}' "$svc" 2>/dev/null || true)
                 if [ "$owner" != "$COMPOSE_PROJECT_NAME" ]; then
