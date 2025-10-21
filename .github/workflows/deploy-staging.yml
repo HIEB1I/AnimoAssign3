@@ -101,9 +101,9 @@ jobs:
             [ -z "$FILE" ] && { echo "No compose file found"; exit 1; }
 
             ENVF=""
-            [ -f docker/.env.staging ] && ENVF=docker/.env.staging
-            [ -z "$ENVF" ] && [ -f .env.staging ] && ENVF=.env.staging
-            [ -z "$ENVF" ] && { echo "Missing staging env file (docker/.env.staging or .env.staging)"; exit 1; }
+            [ -f docker/staging.env ] && ENVF=docker/staging.env
+            [ -z "$ENVF" ] && [ -f staging.env ] && ENVF=staging.env
+            [ -z "$ENVF" ] && { echo "Missing staging env file (docker/staging.env or staging.env)"; exit 1; }
 
             export COMPOSE_PROJECT_NAME=animo_staging
 
