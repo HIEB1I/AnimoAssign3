@@ -1,152 +1,144 @@
 # analytics/app/main.py
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Literal
+from typing import Any, Dict, List, Optional
+import os
+import re
+from collections import Counter
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field
 
-from .OM_REPORTS_ANALYTICS.OM_RP_DeloadingUtilization import fetch_deloading_utilization_term_paged  # descriptive #3
-
-from collections import Counter
-import re
-
 from .config import get_settings
 
-# --------------------------------------------------------------------
-# Settings & App
-# --------------------------------------------------------------------
 settings = get_settings()
-app = FastAPI(title="AnimoAssign Backend", version="1.0.0")
+app = FastAPI(title="AnimoAssign Analytics", version="1.0.0")
 
-# --------------------------------------------------------------------
-# Database (single shared client/database for all routers)
-# --------------------------------------------------------------------
-client = AsyncIOMotorClient(
-    settings.mongodb_uri,
-    # keep directConnection optional for single-node vs RS; do not force it
-    directConnection=getattr(settings, "mongodb_direct_connection", False),
-)
+client = AsyncIOMotorClient(settings.mongodb_uri)
 db = client.get_default_database()
 
+# ---- Which collection should analytics read from?
+# default to "assignments" for your staging; override with env if needed
+SOURCE_COLLECTION = os.getenv("ANALYTICS_SOURCE_COLLECTION", "assignments")
 
-@app.on_event("startup")
-async def _ensure_faculty_overview_indexes() -> None:
-    # lookups / filters
-    await db.faculty_profiles.create_index("user_id")
-    await db.faculty_assignments.create_index([("faculty_id", 1), ("is_archived", 1)])
-    await db.sections.create_index([("section_id", 1), ("term_id", 1)])
-    await db.section_schedules.create_index("section_id")
-    await db.rooms.create_index([("room_id", 1), ("campus_id", 1)])
-    await db.campuses.create_index("campus_id")
-    await db.courses.create_index("course_id")
-    await db.terms.create_index([("acad_year_start", -1), ("term_number", -1)])
-    await db.departments.create_index("department_id")
-    # summary header lookup
-    await db.faculty_loads.create_index([("department_id", 1), ("term_id", 1)])
-
-    # ------------------------------------------------------
-    # FACULTY: PREFERENCES (pattern: fast fetch + unique scope)
-    # ------------------------------------------------------
-    await db.faculty_preferences.create_index([("faculty_id", 1), ("term_id", 1)], unique=True)
-    await db.faculty_preferences.create_index([("submitted_at", -1)])  # recency sort
-
-    # Lookups used by router
-    await db.kacs.create_index("kac_id")
-    await db.kacs.create_index("kac_code")
-    await db.campuses.create_index("campus_id")  # already present above; safe if duplicated
-    await db.terms.create_index([("acad_year_start", -1), ("term_number", -1)])  # already present
-
-    # OM: LOAD ASSIGNMENT – lookups & sorts
-    await db.faculty_assignments.create_index([("section_id", 1)])
-    await db.faculty_assignments.create_index([("faculty_id", 1)])
-    await db.faculty_assignments.create_index([("created_at", -1)])
-    await db.sections.create_index([("section_id", 1)])
-    await db.section_schedules.create_index([("section_id", 1), ("start_time", 1)])
-    await db.courses.create_index([("course_id", 1)])
-    await db.users.create_index([("user_id", 1)])
-
-    # ------------------------------------------------------
-    # ADMIN: MANAGEMENT – lookups & recency sort
-    # (added per request; idempotent if run multiple times)
-    # ------------------------------------------------------
-    await db.users.create_index("user_id")  # already created above; safe duplicate
-    await db.users.create_index("email")
-    await db.user_roles.create_index("role_id")
-    await db.user_roles.create_index("role_type")
-    await db.role_assignments.create_index("user_id")
-    await db.departments.create_index("department_id")  # already created above; safe duplicate
-    await db.departments.create_index("dept_code")
-    await db.audit_logs.create_index([("timestamp", -1)])
-
-
-__all__ = ["app", "db"]
-
-# --------------------------------------------------------------------
-# CORS (unchanged policy; adjust only if you already do elsewhere)
-# --------------------------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # keep as-is if this is what you already use
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=["*"], allow_credentials=True,
+    allow_methods=["*"], allow_headers=["*"],
 )
 
-# --------------------------------------------------------------------
-# Small helpers (safe to keep even if unused by new routes)
-# --------------------------------------------------------------------
-def _utcnow() -> datetime:
+def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
+class IngestEvent(BaseModel):
+    id: Optional[str] = None
+    title: str = Field(..., min_length=1, max_length=200)
+    created_at: Optional[str] = None  # ISO8601 from backend
 
-def _service_result(name: str, ok: bool, detail: str, latency_ms: Optional[float]) -> Dict[str, Any]:
-    out: Dict[str, Any] = {"service": name, "ok": ok, "detail": detail}
-    if latency_ms is not None:
-        out["latencyMs"] = round(latency_ms, 2)
-    return out
+@app.get("/", response_class=HTMLResponse)
+async def overview():
+    return """<!doctype html>
+<html><body>
+  <h1>Analytics Overview</h1>
+  <p>Insights computed by the analytics service.</p>
+  <ul>
+    <li><a href="/analytics/health">/analytics/health</a></li>
+    <li><a href="/analytics/events">/analytics/events</a></li>
+    <li><a href="/analytics/summary">/analytics/summary</a></li>
+  </ul>
+</body></html>"""
 
-Direction = Literal["current", "next", "prev"]
+_WORD = re.compile(r"[A-Za-z0-9]+")
 
-# --------------------------------------------------------------------
-# System endpoints (keep your existing ones)
-# --------------------------------------------------------------------
-@app.get("/health", tags=["system"])
+@app.get("/summary")
+async def summary(limit: int = 10):
+    """
+    Computes cards from SOURCE_COLLECTION (default: 'assignments'):
+      - totalRecords: count of docs
+      - dailyIngest: per-day counts using created_at (string or date)
+      - topTerms: top tokens from recent titles
+    """
+    coll = db[SOURCE_COLLECTION]
+
+    # 1) total
+    total = await coll.count_documents({})
+
+    # 2) daily ingest (created_at may be string or Date → $toDate is safe)
+    pipeline = [
+        {
+            "$group": {
+                "_id": {
+                    "$dateToString": {
+                        "format": "%Y-%m-%d",
+                        "date": {"$toDate": "$created_at"},
+                    }
+                },
+                "count": {"$sum": 1},
+            }
+        },
+        {"$sort": {"_id": -1}},
+        {"$limit": 30},
+    ]
+    daily: List[Dict[str, Any]] = []
+    async for row in coll.aggregate(pipeline):
+        daily.append({"date": row["_id"], "count": row["count"]})
+    daily = list(reversed(daily))  # oldest → newest
+
+    # 3) top terms from recent titles
+    recent_cursor = coll.find({}, projection={"title": 1, "created_at": 1}) \
+                        .sort("created_at", -1).limit(200)
+
+    counts: Counter[str] = Counter()
+    async for d in recent_cursor:
+        title = (d.get("title") or "").lower()
+        for m in _WORD.finditer(title):
+            w = m.group(0)
+            if len(w) < 2:
+                continue
+            if w in {"the","a","an","of","and","for","to","in","on","at","with","by","from","is","are"}:
+                continue
+            counts[w] += 1
+    topTerms = [{"term": t, "count": c} for t, c in counts.most_common(10)]
+
+    return {
+        "totalRecords": int(total),
+        "generatedAt": _utc_now().isoformat().replace("+00:00", "Z"),
+        "topTerms": topTerms,
+        "dailyIngest": daily[-limit:] if limit else daily,
+    }
+
+@app.get("/health")
 async def health():
-    return {"status": "ok", "service": getattr(settings, "service_name", "backend")}
+    return {"status": "ok", "service": settings.service_name, "source": SOURCE_COLLECTION}
 
-
-@app.get("/health/db", tags=["system"])
+@app.get("/health/db")
 async def health_db():
     await client.admin.command("ping")
     return {"db": "ok"}
 
+# Kept for compatibility if backend ever posts events, but unused for your cards
+@app.post("/ingest", status_code=202)
+async def ingest(payload: IngestEvent):
+    doc: Dict[str, Any] = {
+        "id": payload.id,
+        "title": payload.title.strip(),
+        "created_at": payload.created_at or _utc_now().isoformat().replace("+00:00", "Z"),
+        "received_at": _utc_now(),
+        "kind": "record_created",
+    }
+    try:
+        await db["analytics_events"].insert_one(doc)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"store_failed: {e}")
+    return {"status": "accepted"}
 
-@app.get("/analytics/deloadings/by-term")
-async def deloadings_by_term(
-    anchor_term_id: Optional[str] = Query(None),
-    direction: Direction = Query("current")
-):
-    return await fetch_deloading_utilization_term_paged(anchor_term_id, direction)
-
-# --------------------------------------------------------------------
-# Feature routers (NEW) – no path/routing changes needed
-# These will live under the backend root; your nginx/Vite already forward /api/* here.
-# --------------------------------------------------------------------
-# keep these imports
-from .OM_REPORTS_ANALYTICS.OM_RP_FacultyTeachingHistory import router as om_rp_teachhist_router
-from .OM_REPORTS_ANALYTICS.OM_RP_CourseProfile import router as om_rp_courseprof_router
-from .OM_REPORTS_ANALYTICS.OM_RP_DeloadingUtilization import router as om_rp_deload_router
-from .OM_REPORTS_ANALYTICS.OM_RP_AvailabilityForecasting import router as om_rp_avail_router
-from .OM_REPORTS_ANALYTICS.OM_RP_LoadRisk import router as om_rp_loadrisk_router
-
-# include routers
-app.include_router(om_rp_teachhist_router)                 # no prefix
-app.include_router(om_rp_courseprof_router)                # ← remove prefix here
-app.include_router(om_rp_deload_router, prefix="/api")
-app.include_router(om_rp_avail_router)  # exposes /analytics/faculty-availability-heatmap
-app.include_router(om_rp_loadrisk_router)
-
-
+@app.get("/events")
+async def list_events(limit: int = 100):
+    cur = db["analytics_events"].find({}).sort("received_at", -1).limit(limit)
+    items: List[Dict[str, Any]] = []
+    async for d in cur:
+        d["_id"] = str(d["_id"])
+        items.append(d)
+    return {"items": items, "limit": limit}
