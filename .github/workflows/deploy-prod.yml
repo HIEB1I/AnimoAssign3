@@ -70,8 +70,8 @@ jobs:
             set -Eeuo pipefail
 
             REPO_DIR=/opt/AnimoAssign3
-            COMPOSE_FILE=docker/docker-compose.prod.s1.yml
-            ENVF=docker/.env
+            COMPOSE_FILE=/docker/docker-compose.prod.s1.yml
+            ENVF=/docker/.env
             export COMPOSE_PROJECT_NAME=animo_prod_s1
 
             if [ ! -d "$REPO_DIR/.git" ]; then
@@ -138,7 +138,7 @@ jobs:
 
             REPO_DIR=/opt/AnimoAssign3
             COMPOSE_FILE=docker/docker-compose.prod.s2.yml
-            ENVF=docker/.env
+            ENVF=/docker/.env
             export COMPOSE_PROJECT_NAME=animo_prod_s2
 
             if [ ! -d "$REPO_DIR/.git" ]; then
