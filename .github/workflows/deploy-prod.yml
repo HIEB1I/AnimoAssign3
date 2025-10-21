@@ -86,9 +86,7 @@ jobs:
             git config --global url.https://github.com/.insteadof git@github.com:
             git config --global url.https://github.com/.insteadof ssh://git@github.com/
             git config --global --add safe.directory /opt/AnimoAssign3
-            if git config --get remote.origin.url >/dev/null 2>&1; then
-              git remote set-url origin https://github.com/HIEB1I/AnimoAssign3.git
-            fi
+            git remote set-url origin https://github.com/HIEB1I/AnimoAssign3.git
 
             git fetch --all --prune
             git checkout main
@@ -109,6 +107,13 @@ jobs:
             [ -z "$ENVF" ] && { echo "Missing prod env file (docker/.env.prod or .env.prod)"; exit 1; }
 
             export COMPOSE_PROJECT_NAME=animo_prod
+
+            # ---- PRE-CLEAN to avoid name conflicts
+            docker compose -f "$FILE" --env-file "$ENVF" down --remove-orphans || true
+            # (Add specific names if you hardcoded container_name in prod compose)
+            # for c in mongo-prod mongo_prod; do docker rm -f "$c" 2>/dev/null || true; done
+            # ----
+
             docker compose -f "$FILE" --env-file "$ENVF" up -d --build
 
             # Smoke checks (adjust if your ports differ)
