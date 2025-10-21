@@ -1,71 +1,27 @@
-name: Deploy Staging (S1)
-
-on:
-  push:
-    branches: [staging]
-  workflow_dispatch: {}
-
-concurrency:
-  group: deploy-staging
-  cancel-in-progress: true
-
-jobs:
-  build-test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with: { ref: staging }
-
-      - name: Frontend build
-        working-directory: frontend
-        run: |
-          npm ci
-          npm run build
-
-      - name: Backend tests (best-effort)
-        working-directory: backend
-        run: |
-          python -m pip install -r requirements.txt || true
-          pytest -q || true
-
-      - name: Analytics tests (best-effort)
-        working-directory: analytics
-        run: |
-          python -m pip install -r requirements.txt || true
-          pytest -q || true
-
   deploy:
     needs: build-test
     runs-on: ubuntu-latest
-
-    # Pull repo VARIABLES into the job environment
-    env:
-      S1_HOST: ${{ vars.S1_HOST }}
-      S1_PORT: ${{ vars.S1_PORT }}
-      S1_USER: ${{ vars.S1_USER }}
-
     steps:
       - name: Validate inputs
         run: |
-          for v in S1_HOST S1_PORT S1_USER; do
-            if [ -z "${!v}" ]; then
-              echo "::error ::$v is empty. Set repository variable '$v' (Settings → Actions → Variables)."
+          for v in S1_HOST S1_PORT S1_USER S1_KEY; do
+            if [ -z "${{ secrets[$v] }}" ]; then
+              echo "::error ::$v is empty. Add it in Settings → Secrets → Actions."
               exit 1
             fi
           done
-          echo "Using S1_HOST=$S1_HOST S1_PORT=$S1_PORT S1_USER=$S1_USER"
 
       - name: Trust S1 host key
         run: |
           mkdir -p ~/.ssh
-          ssh-keyscan -p "$S1_PORT" "$S1_HOST" >> ~/.ssh/known_hosts
+          ssh-keyscan -p "${{ secrets.S1_PORT }}" "${{ secrets.S1_HOST }}" >> ~/.ssh/known_hosts
 
       - name: Deploy to S1 (staging)
         uses: appleboy/ssh-action@v1.0.3
         with:
-          host:     ${{ env.S1_HOST }}
-          port:     ${{ env.S1_PORT }}
-          username: ${{ env.S1_USER }}
+          host:     ${{ secrets.S1_HOST }}
+          port:     ${{ secrets.S1_PORT }}
+          username: ${{ secrets.S1_USER }}
           key:      ${{ secrets.S1_KEY }}
           script: |
             set -Eeuo pipefail
@@ -78,6 +34,17 @@ jobs:
             fi
 
             cd /opt/AnimoAssign3-staging
+
+            # --- Force HTTPS for GitHub remotes (avoid SSH on the server)
+            unset GIT_SSH_COMMAND || true
+            git config --global url.https://github.com/.insteadof git@github.com:
+            git config --global url.https://github.com/.insteadof ssh://git@github.com/
+            git config --global --add safe.directory /opt/AnimoAssign3-staging
+            if git config --get remote.origin.url >/dev/null 2>&1; then
+              git remote set-url origin https://github.com/HIEB1I/AnimoAssign3.git
+            fi
+            # ---
+
             git fetch --all --prune
             git checkout staging
             git pull --ff-only
