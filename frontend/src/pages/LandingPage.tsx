@@ -13,7 +13,7 @@ export default function LandingPage() {
 
       <section className="card-grid">
         <article className="card">
-          <h2>Submit Records CICD TEST</h2>
+          <h2>Submit Records CICD TEST 1.4</h2>
           <p>Send a new record through the backend service and persist it in MongoDB.</p>
           <Link className="button" to="/submit">
             Create a record
