@@ -80,7 +80,7 @@ jobs:
 
             cd /opt/AnimoAssign3-staging
 
-            # Force HTTPS for GitHub remotes (avoid SSH on the server)
+            # Pull via HTTPS (no SSH needed on server)
             unset GIT_SSH_COMMAND || true
             git config --global url.https://github.com/.insteadof git@github.com:
             git config --global url.https://github.com/.insteadof ssh://git@github.com/
@@ -91,42 +91,35 @@ jobs:
             git checkout staging
             git pull --ff-only
 
-            # Resolve compose + env file from repo
-            FILE=""
-            [ -f docker/docker-compose.staging.yml ] && FILE=docker/docker-compose.staging.yml
-            [ -z "$FILE" ] && [ -f docker/docker-compose.staging.yml ] && FILE=docker/docker-compose.staging.yml
-            [ -z "$FILE" ] && [ -f docker/docker-compose.staging.yml] && FILE=docker/docker-compose.staging.yml
-            [ -z "$FILE" ] && [ -f docker/docker-compose.staging.yml ] && FILE=docker/docker-compose.staging.yml
-            [ -z "$FILE" ] && [ -f docker-compose.staging.yml] && FILE=docker-compose.staging.yml
-            [ -z "$FILE" ] && { echo "No compose file found"; exit 1; }
-
-            ENVF=""
-            [ -f docker/staging.env ] && ENVF=docker/staging.env
-            [ -z "$ENVF" ] && [ -f staging.env ] && ENVF=staging.env
-            [ -z "$ENVF" ] && { echo "Missing staging env file (docker/staging.env or staging.env)"; exit 1; }
+            # Paths (pin to the files you actually have)
+            FILE=docker/docker-compose.staging.yml
+            ENVF=docker/staging.env
+            [ -f "$FILE" ] || { echo "Compose file not found: $FILE"; exit 1; }
+            [ -f "$ENVF" ] || { echo "Env file not found: $ENVF"; exit 1; }
 
             export COMPOSE_PROJECT_NAME=animo_staging
+            NET="${COMPOSE_PROJECT_NAME}_default"
 
-            # ---- PRE-CLEAN to avoid name conflicts with hardcoded container_name ----
+            # Export env vars so compose substitution never warns
+            set -a
+            . "$ENVF"
+            set +a
+
+            # ---- PRE-CLEAN ONCE to absorb legacy containers (name conflicts)
             docker compose -f "$FILE" --env-file "$ENVF" down --remove-orphans || true
-
-            # Remove any leftover containers that were created by older/other projects
-            # (keep names EXACT — they match your compose `container_name` values)
             for c in backend-stg analytics-stg frontend-stg mongo-stg; do
               docker rm -f "$c" 2>/dev/null || true
             done
-            # ------------------------------------------------------------------------
+            # ----
 
+            # After one clean run, you may switch to this "steady-state" line instead:
+            # docker compose -f "$FILE" --env-file "$ENVF" up -d --build --remove-orphans
 
             docker compose -f "$FILE" --env-file "$ENVF" up -d --build
 
-            # Optional: verify required envs exist (uncomment if you want strict checks)
-            # grep -E "^(MONGO_INITDB_ROOT_USERNAME|MONGO_INITDB_ROOT_PASSWORD|BACKEND_MONGODB_URI|ANALYTICS_MONGODB_URI)=" "$ENVF" >/dev/null || \
-            # { echo "One or more Mongo/URI envs missing in $ENVF"; exit 1; }
-
-            # Smoke checks (adjust ports if your compose uses different ones)
-            curl -fsS  http://127.0.0.1:18010/health || (docker compose -f "$FILE" logs backend && exit 1)
-            curl -fsS  http://127.0.0.1:19010/health || (docker compose -f "$FILE" logs analytics && exit 1)
-            curl -fsSI http://127.0.0.1:8081         || (docker compose -f "$FILE" logs frontend && exit 1)
+            # Health checks INSIDE the compose network (no host port needed)
+            docker run --rm --network "$NET" curlimages/curl:8.10.1 -fsS http://backend-stg:8000/health
+            docker run --rm --network "$NET" curlimages/curl:8.10.1 -fsS http://analytics-stg:8000/health
+            docker run --rm --network "$NET" curlimages/curl:8.10.1 -fsSI http://frontend-stg
 
             docker system prune -f
