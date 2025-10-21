@@ -48,10 +48,7 @@ jobs:
         run: |
           set -e
           for v in S1_HOST S1_PORT S1_USER S1_KEY; do
-            if [ -z "${!v}" ]; then
-              echo "::error ::Missing secret $v"
-              exit 1
-            fi
+            [ -n "${!v}" ] || { echo "::error ::Missing secret $v"; exit 1; }
           done
 
       - name: Trust S1 host key
@@ -70,8 +67,8 @@ jobs:
             set -Eeuo pipefail
 
             REPO_DIR=/opt/AnimoAssign3
-            COMPOSE_FILE=/docker/docker-compose.prod.s1.yml
-            ENVF=/docker/.env
+            COMPOSE_FILE=docker/docker-compose.prod.s1.yml
+            ENVF=docker/.env
             export COMPOSE_PROJECT_NAME=animo_prod_s1
 
             if [ ! -d "$REPO_DIR/.git" ]; then
@@ -79,10 +76,13 @@ jobs:
               git clone https://github.com/HIEB1I/AnimoAssign3.git "$REPO_DIR"
             fi
             cd "$REPO_DIR"
+
+            # Force HTTPS pulls
             unset GIT_SSH_COMMAND || true
             git config --global url.https://github.com/.insteadof git@github.com:
             git config --global url.https://github.com/.insteadof ssh://git@github.com/
             git config --global --add safe.directory "$REPO_DIR"
+
             git remote set-url origin https://github.com/HIEB1I/AnimoAssign3.git
             git fetch --all --prune
             git checkout main
@@ -93,11 +93,18 @@ jobs:
             [ -f "$COMPOSE_FILE" ] || { echo "Missing $COMPOSE_FILE"; exit 1; }
             [ -f "$ENVF" ]         || { echo "Missing $ENVF"; exit 1; }
 
-            docker compose -f "$COMPOSE_FILE" --env-file "$ENVF" up -d --build --remove-orphans \ backend-primary analytics-primary frontend-primary nginx
+            # ---- Dynamically resolve services, exclude any mongo* services
+            services="$(docker compose -f "$COMPOSE_FILE" --env-file "$ENVF" config --services | grep -E -v '^mongo')"
+            echo "Services (S1):"
+            echo "$services" | sed 's/^/  - /'
+            [ -n "$services" ] || { echo "::error ::No non-mongo services found"; exit 1; }
+            # ----
+
+            docker compose -f "$COMPOSE_FILE" --env-file "$ENVF" up -d --build --remove-orphans $services
 
             docker run --rm curlimages/curl:8.10.1 -fsS  http://127.0.0.1:18000/health  >/dev/null && echo "::notice ::S1 backend healthy"
             docker run --rm curlimages/curl:8.10.1 -fsS  http://127.0.0.1:18100/health  >/dev/null && echo "::notice ::S1 analytics healthy"
-            docker run --rm curlimages/curl:8.10.1 -fsSI http://127.0.0.1:18080        | head -n1
+            docker run --rm curlimages/curl:8.10.1 -fsSI http://127.0.0.1:18080 | head -n1
 
             docker image prune -f || true
 
@@ -115,10 +122,7 @@ jobs:
         run: |
           set -e
           for v in S2_HOST S2_PORT S2_USER S2_KEY; do
-            if [ -z "${!v}" ]; then
-              echo "::error ::Missing secret $v"
-              exit 1
-            fi
+            [ -n "${!v}" ] || { echo "::error ::Missing secret $v"; exit 1; }
           done
 
       - name: Trust S2 host key
@@ -138,7 +142,7 @@ jobs:
 
             REPO_DIR=/opt/AnimoAssign3
             COMPOSE_FILE=docker/docker-compose.prod.s2.yml
-            ENVF=/docker/.env
+            ENVF=docker/.env
             export COMPOSE_PROJECT_NAME=animo_prod_s2
 
             if [ ! -d "$REPO_DIR/.git" ]; then
@@ -146,10 +150,12 @@ jobs:
               git clone https://github.com/HIEB1I/AnimoAssign3.git "$REPO_DIR"
             fi
             cd "$REPO_DIR"
+
             unset GIT_SSH_COMMAND || true
             git config --global url.https://github.com/.insteadof git@github.com:
             git config --global url.https://github.com/.insteadof ssh://git@github.com/
             git config --global --add safe.directory "$REPO_DIR"
+
             git remote set-url origin https://github.com/HIEB1I/AnimoAssign3.git
             git fetch --all --prune
             git checkout main
@@ -160,10 +166,17 @@ jobs:
             [ -f "$COMPOSE_FILE" ] || { echo "Missing $COMPOSE_FILE"; exit 1; }
             [ -f "$ENVF" ]         || { echo "Missing $ENVF"; exit 1; }
 
-            docker compose -f "$COMPOSE_FILE" --env-file "$ENVF" up -d --build --remove-orphans \ backend-secondary analytics-secondary frontend-secondary nginx
+            # ---- Dynamically resolve services, exclude any mongo* services
+            services="$(docker compose -f "$COMPOSE_FILE" --env-file "$ENVF" config --services | grep -E -v '^mongo')"
+            echo "Services (S2):"
+            echo "$services" | sed 's/^/  - /'
+            [ -n "$services" ] || { echo "::error ::No non-mongo services found"; exit 1; }
+            # ----
+
+            docker compose -f "$COMPOSE_FILE" --env-file "$ENVF" up -d --build --remove-orphans $services
 
             docker run --rm curlimages/curl:8.10.1 -fsS  http://127.0.0.1:28000/health  >/dev/null && echo "::notice ::S2 backend healthy"
             docker run --rm curlimages/curl:8.10.1 -fsS  http://127.0.0.1:28100/health  >/dev/null && echo "::notice ::S2 analytics healthy"
-            docker run --rm curlimages/curl:8.10.1 -fsSI http://127.0.0.1:28080        | head -n1
+            docker run --rm curlimages/curl:8.10.1 -fsSI http://127.0.0.1:28080 | head -n1
 
             docker image prune -f || true
