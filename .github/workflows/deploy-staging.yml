@@ -14,7 +14,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with: { ref: staging }
+        with:
+          ref: staging
 
       - name: Frontend build
         working-directory: frontend
@@ -34,31 +35,40 @@ jobs:
           python -m pip install -r requirements.txt || true
           pytest -q || true
 
-    deploy:
+  deploy:
     needs: build-test
     runs-on: ubuntu-latest
+
+    # Map secrets to env so we can validate them in bash
+    env:
+      S1_HOST: ${{ secrets.S1_HOST }}
+      S1_PORT: ${{ secrets.S1_PORT }}
+      S1_USER: ${{ secrets.S1_USER }}
+      S1_KEY:  ${{ secrets.S1_KEY }}
+
     steps:
       - name: Validate inputs
         run: |
           for v in S1_HOST S1_PORT S1_USER S1_KEY; do
-            if [ -z "${{ secrets[$v] }}" ]; then
+            if [ -z "${!v}" ]; then
               echo "::error ::$v is empty. Add it in Settings → Secrets → Actions."
               exit 1
             fi
           done
+          echo "Using $S1_USER@$S1_HOST:$S1_PORT"
 
       - name: Trust S1 host key
         run: |
           mkdir -p ~/.ssh
-          ssh-keyscan -p "${{ secrets.S1_PORT }}" "${{ secrets.S1_HOST }}" >> ~/.ssh/known_hosts
+          ssh-keyscan -p "$S1_PORT" "$S1_HOST" >> ~/.ssh/known_hosts
 
       - name: Deploy to S1 (staging)
         uses: appleboy/ssh-action@v1.0.3
         with:
-          host:     ${{ secrets.S1_HOST }}
-          port:     ${{ secrets.S1_PORT }}
-          username: ${{ secrets.S1_USER }}
-          key:      ${{ secrets.S1_KEY }}
+          host:     ${{ env.S1_HOST }}
+          port:     ${{ env.S1_PORT }}
+          username: ${{ env.S1_USER }}
+          key:      ${{ env.S1_KEY }}
           script: |
             set -Eeuo pipefail
 
@@ -71,7 +81,7 @@ jobs:
 
             cd /opt/AnimoAssign3-staging
 
-            # --- Force HTTPS for GitHub remotes (avoid SSH on the server)
+            # Force HTTPS for GitHub remotes (avoid SSH on the server)
             unset GIT_SSH_COMMAND || true
             git config --global url.https://github.com/.insteadof git@github.com:
             git config --global url.https://github.com/.insteadof ssh://git@github.com/
@@ -79,7 +89,6 @@ jobs:
             if git config --get remote.origin.url >/dev/null 2>&1; then
               git remote set-url origin https://github.com/HIEB1I/AnimoAssign3.git
             fi
-            # ---
 
             git fetch --all --prune
             git checkout staging
@@ -102,7 +111,7 @@ jobs:
             export COMPOSE_PROJECT_NAME=animo_staging
             docker compose -f "$FILE" --env-file "$ENVF" up -d --build
 
-            # Smoke checks (adjust ports if needed)
+            # Smoke checks (adjust ports if your compose uses different ones)
             curl -fsS  http://127.0.0.1:18010/health || (docker compose -f "$FILE" logs backend && exit 1)
             curl -fsS  http://127.0.0.1:19010/health || (docker compose -f "$FILE" logs analytics && exit 1)
             curl -fsSI http://127.0.0.1:8081         || (docker compose -f "$FILE" logs frontend && exit 1)
