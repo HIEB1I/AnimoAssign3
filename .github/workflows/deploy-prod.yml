@@ -77,7 +77,7 @@ jobs:
             fi
             cd "$REPO_DIR"
 
-            # Force HTTPS pulls
+            # Pull via HTTPS
             unset GIT_SSH_COMMAND || true
             git config --global url.https://github.com/.insteadof git@github.com:
             git config --global url.https://github.com/.insteadof ssh://git@github.com/
@@ -93,8 +93,7 @@ jobs:
             [ -f "$COMPOSE_FILE" ] || { echo "Missing $COMPOSE_FILE"; exit 1; }
             [ -f "$ENVF" ]         || { echo "Missing $ENVF"; exit 1; }
 
-            # --- Pre-clean only our app services (never touch mongo) -----------------
-            # Remove containers with the same fixed names if they are NOT owned by this project.
+            # Pre-clean only our app service names if they belong to a different compose project
             for svc in backend-primary analytics-primary frontend-primary nginx-primary; do
               if docker ps -a --format '{{.Names}}' | grep -Fxq "$svc"; then
                 owner=$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project"}}' "$svc" 2>/dev/null || true)
@@ -104,22 +103,56 @@ jobs:
                 fi
               fi
             done
-            # ------------------------------------------------------------------------
 
-            # ---- Dynamically resolve services, exclude any mongo* services
+            # Deploy only non-mongo services (avoid touching your running Mongo)
             services=$(docker compose -f "$COMPOSE_FILE" --env-file "$ENVF" config --services | grep -E -v '^mongo')
             if [ -z "$services" ]; then
               echo "::warning ::No non-mongo services found (nothing to deploy)"; exit 0
             fi
             echo "Services (S1):"; printf '%s\n' "$services" | sed 's/^/  - /'
-            # Deploy without starting dependencies (so Mongo is not touched)
             docker compose -f "$COMPOSE_FILE" --env-file "$ENVF" up -d --build --remove-orphans --no-deps $services
-            # ----
 
-            # Health checks
-            docker run --rm curlimages/curl:8.10.1 -fsS  http://127.0.0.1:18000/health  >/dev/null && echo "::notice ::S1 backend healthy"
-            docker run --rm curlimages/curl:8.10.1 -fsS  http://127.0.0.1:18100/health  >/dev/null && echo "::notice ::S1 analytics healthy"
-            docker run --rm curlimages/curl:8.10.1 -fsSI http://127.0.0.1:18080        | head -n1
+            # --- Network-based health checks with retry (no host ports needed) ---
+            NET=docker_animoassign
+
+            wait_http () {
+              net="$1"; url="$2"; svc="$3"; tries="${4:-40}"; i=0
+              while true; do
+                if docker run --rm --network "$net" curlimages/curl:8.10.1 -fsS "$url" >/dev/null 2>&1; then
+                  echo "::notice ::$svc healthy at $url"
+                  break
+                fi
+                i=$((i+1))
+                if [ "$i" -ge "$tries" ]; then
+                  echo "::error ::$svc failed health check at $url"
+                  docker compose -f "$COMPOSE_FILE" --env-file "$ENVF" logs --tail=200 "$svc" || true
+                  exit 1
+                fi
+                sleep 3
+              done
+            }
+
+            wait_head () {
+              net="$1"; url="$2"; svc="$3"; tries="${4:-40}"; i=0
+              while true; do
+                if docker run --rm --network "$net" curlimages/curl:8.10.1 -fsSI "$url" >/dev/null 2>&1; then
+                  echo "::notice ::$svc serving at $url"
+                  break
+                fi
+                i=$((i+1))
+                if [ "$i" -ge "$tries" ]; then
+                  echo "::error ::$svc failed HEAD check at $url"
+                  docker compose -f "$COMPOSE_FILE" --env-file "$ENVF" logs --tail=200 "$svc" || true
+                  exit 1
+                fi
+                sleep 3
+              done
+            }
+
+            wait_http "$NET" http://backend-primary:8000/health   backend-primary
+            wait_http "$NET" http://analytics-primary:8000/health analytics-primary
+            wait_head "$NET" http://frontend-primary               frontend-primary
+            # ---------------------------------------------------------------------
 
             docker image prune -f || true
 
@@ -181,8 +214,7 @@ jobs:
             [ -f "$COMPOSE_FILE" ] || { echo "Missing $COMPOSE_FILE"; exit 1; }
             [ -f "$ENVF" ]         || { echo "Missing $ENVF"; exit 1; }
 
-            # --- Pre-clean only our app services (never touch mongo) -----------------
-            # Remove containers with the same fixed names if they are NOT owned by this project.
+            # Pre-clean only our app service names if they belong to a different compose project
             for svc in backend-secondary analytics-secondary frontend-secondary nginx-secondary; do
               if docker ps -a --format '{{.Names}}' | grep -Fxq "$svc"; then
                 owner=$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project"}}' "$svc" 2>/dev/null || true)
@@ -192,20 +224,54 @@ jobs:
                 fi
               fi
             done
-            # ------------------------------------------------------------------------
 
-            # ---- Dynamically resolve services, exclude any mongo* services
+            # Deploy only non-mongo services
             services=$(docker compose -f "$COMPOSE_FILE" --env-file "$ENVF" config --services | grep -E -v '^mongo')
             if [ -z "$services" ]; then
               echo "::warning ::No non-mongo services found (nothing to deploy)"; exit 0
             fi
             echo "Services (S2):"; printf '%s\n' "$services" | sed 's/^/  - /'
             docker compose -f "$COMPOSE_FILE" --env-file "$ENVF" up -d --build --remove-orphans --no-deps $services
-            # ----
 
-            docker run --rm curlimages/curl:8.10.1 -fsS  http://127.0.0.1:28000/health  >/dev/null && echo "::notice ::S2 backend healthy"
-            docker run --rm curlimages/curl:8.10.1 -fsS  http://127.0.0.1:28100/health  >/dev/null && echo "::notice ::S2 analytics healthy"
-            docker run --rm curlimages/curl:8.10.1 -fsSI http://127.0.0.1:28080        | head -n1
+            # Health checks via docker network
+            NET=docker_animoassign
+
+            wait_http () {
+              net="$1"; url="$2"; svc="$3"; tries="${4:-40}"; i=0
+              while true; do
+                if docker run --rm --network "$net" curlimages/curl:8.10.1 -fsS "$url" >/dev/null 2>&1; then
+                  echo "::notice ::$svc healthy at $url"
+                  break
+                fi
+                i=$((i+1))
+                if [ "$i" -ge "$tries" ]; then
+                  echo "::error ::$svc failed health check at $url"
+                  docker compose -f "$COMPOSE_FILE" --env-file "$ENVF" logs --tail=200 "$svc" || true
+                  exit 1
+                fi
+                sleep 3
+              done
+            }
+
+            wait_head () {
+              net="$1"; url="$2"; svc="$3"; tries="${4:-40}"; i=0
+              while true; do
+                if docker run --rm --network "$net" curlimages/curl:8.10.1 -fsSI "$url" >/dev/null 2>&1; then
+                  echo "::notice ::$svc serving at $url"
+                  break
+                fi
+                i=$((i+1))
+                if [ "$i" -ge "$tries" ]; then
+                  echo "::error ::$svc failed HEAD check at $url"
+                  docker compose -f "$COMPOSE_FILE" --env-file "$ENVF" logs --tail=200 "$svc" || true
+                  exit 1
+                fi
+                sleep 3
+              done
+            }
+
+            wait_http "$NET" http://backend-secondary:8000/health   backend-secondary
+            wait_http "$NET" http://analytics-secondary:8000/health analytics-secondary
+            wait_head "$NET" http://frontend-secondary               frontend-secondary
 
             docker image prune -f || true
-
