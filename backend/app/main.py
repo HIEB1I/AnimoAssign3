@@ -68,7 +68,10 @@ async def health_db():
 from .Login.Login import router as login_router
 from .OM.OM_HomePage import router as om_home_router
 from .OM.OM_Profile import router as om_profile_router
+from .APO.APO_PreEnlistment import router as preenlistment_router
 
 app.include_router(login_router)
 app.include_router(om_home_router)
 app.include_router(om_profile_router)
+app.include_router(preenlistment_router, prefix="/api")
+

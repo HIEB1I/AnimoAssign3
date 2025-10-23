@@ -76,3 +76,86 @@ export async function fetchOmProfile(userId: string) {
   if (!r.ok) throw new Error(await r.text());
   return r.json();
 }
+
+// ---------- APO: single-route preenlistment ----------
+export type PreenlistmentCountDoc = {
+  count_id: string;
+  code: string;
+  career: string;
+  acad_group: string;
+  campus: "MANILA" | "LAGUNA";
+  course_code: string;
+  count: number;
+  campus_id: "CMPS001" | "CMPS002";
+  apo_user_id: string;
+  term_id: string;
+  created_at?: string;
+  updated_at?: string;
+};
+
+export type PreenlistmentStatDoc = {
+  stat_id: string;
+  program: string;
+  freshman: number;
+  sophomore: number;
+  junior: number;
+  senior: number;
+  term_id: string;
+  created_at?: string;
+  updated_at?: string;
+};
+
+export type ApoPreenlistmentResponse = {
+  count: PreenlistmentCountDoc[];
+  statistics: PreenlistmentStatDoc[];
+};
+
+// CSV headers EXACTLY like your files
+export type CountCsvRow = {
+  Code?: string;
+  Career: string;
+  "Acad Group": string;
+  Campus: "MANILA" | "LAGUNA";
+  "Course Code": string;
+  Count: number | string;
+};
+export type StatCsvRow = {
+  Program: string;
+  FRESHMAN: number | string;
+  SOPHOMORE: number | string;
+  JUNIOR: number | string;
+  SENIOR: number | string;
+};
+
+export async function getApoPreenlistment(
+  userId: string,
+  termId = "TERM_2025_T1"
+): Promise<ApoPreenlistmentResponse> {
+  const r = await fetch(
+    join(API_BASE, `apo/preenlistment?userId=${encodeURIComponent(userId)}&termId=${encodeURIComponent(termId)}`)
+  );
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+export async function importApoPreenlistment(
+  userId: string,
+  countRows: CountCsvRow[],
+  statRows: StatCsvRow[],
+  termId = "TERM_2025_T1",
+  opts?: { replaceCount?: boolean; replaceStats?: boolean }
+) {
+  const qs = new URLSearchParams({
+    userId,
+    termId,
+    replaceCount: String(!!opts?.replaceCount),
+    replaceStats: String(!!opts?.replaceStats),
+  });
+  const r = await fetch(join(API_BASE, `apo/preenlistment?${qs.toString()}`), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ countRows, statRows }),
+  });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}

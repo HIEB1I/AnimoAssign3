@@ -1,10 +1,11 @@
 # backend/app/Login/Login.py
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, EmailStr
-from ..main import db  # <-- reuse the db created in main.py
+from app.main import db  # import the shared db instance
 
-router = APIRouter(tags=["Login"])
+router = APIRouter(prefix="/api", tags=["Login"])
 
+# ---------- Pydantic Models ----------
 class LoginRequest(BaseModel):
     email: EmailStr
 
@@ -14,23 +15,38 @@ class LoginResponse(BaseModel):
     fullName: str
     roles: list[str]
 
-@router.post("/Login", response_model=LoginResponse)
+# ---------- Route ----------
+@router.post("/login", response_model=LoginResponse)
 async def login(payload: LoginRequest):
-    # seed has users with: user_id, email, first_name, last_name, ...  :contentReference[oaicite:0]{index=0}
+    """
+    Login endpoint — validates user by email, fetches their active roles,
+    and returns basic user info + roles.
+    """
+    # Find user by email
     user = await db["users"].find_one({"email": payload.email})
     if not user:
-        raise HTTPException(status_code=401, detail="Invalid credentials")
+        raise HTTPException(status_code=404, detail="User not found")
 
-    user_id = user["user_id"]
-    roles_cur = db["user_roles"].find({"user_id": user_id})
-    role_names = [r async for r in roles_cur]
-    role_names = [r.get("role_type", "User") for r in role_names] or ["User"]
+    # Fetch active roles for this user
+    roles_cursor = db["user_roles"].find(
+        {"user_id": user["user_id"], "is_active": True},
+        {"role_type": 1, "_id": 0}
+    )
+    roles = [doc["role_type"] async for doc in roles_cursor]
 
-    full_name = f'{(user.get("first_name") or "").strip()} {(user.get("last_name") or "").strip()}'.strip() or user["email"]
+    # Default fallback if user has no active roles
+    if not roles:
+        roles = ["user"]
 
+    # Compose full name
+    first = (user.get("first_name") or "").strip()
+    last = (user.get("last_name") or "").strip()
+    full_name = f"{first} {last}".strip() or user["email"]
+
+    # Return unified response
     return LoginResponse(
-        userId=user_id,
+        userId=user["user_id"],
         email=user["email"],
         fullName=full_name,
-        roles=role_names,
+        roles=roles,
     )

@@ -19,17 +19,13 @@ export default defineConfig(({ mode }) => {
       host: true,
       port: 5173,
       proxy: {
-        // strip /api to mirror Nginx prod
         "/api": {
           target: "http://localhost:8000",
           changeOrigin: true,
-          rewrite: (p) => p.replace(/^\/api/, ""),
         },
-        // strip /analytics to mirror Nginx prod
         "/analytics": {
           target: "http://localhost:8100",
           changeOrigin: true,
-          rewrite: (p) => p.replace(/^\/analytics/, ""),
         },
       },
     },

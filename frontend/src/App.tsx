@@ -7,6 +7,12 @@ import Login from "./pages/Login/Login";
 import OM_HomePage from "./pages/OM/OM_HomePage";
 import OM_ProfilePage from "./pages/OM/OM_Profile";
 
+// ---------------- APO ----------------
+import APO_PreEnlistment from "./pages/APO/APO_PreEnlistment";
+import APO_CourseOfferings from "./pages/APO/APO_CourseOfferings";
+import APO_RoomAllocation from "./pages/APO/APO_RoomAllocation";
+import APO_Inbox from "./pages/APO/APO_Inbox";
+
 const base = (import.meta.env.BASE_URL || "/").replace(/\/$/, "");
 
 // Simple auth gate: requires localStorage "animo.user"
@@ -34,6 +40,14 @@ export default function App() {
         <Route element={<RequireAuth />}>
           <Route path="/om/home" element={<OM_HomePage />} />
           <Route path="/om/profile" element={<OM_ProfilePage />} />
+        </Route>
+
+        {/* -------- APO -------- */}
+        <Route element={<RequireAuth />}>
+          <Route path="/apo/preenlistment" element={<APO_PreEnlistment />} />
+          <Route path="/apo/courseofferings" element={<APO_CourseOfferings />} />
+          <Route path="/apo/roomallocation" element={<APO_RoomAllocation />} />
+          <Route path="/apo/inbox" element={<APO_Inbox />} />
         </Route>
 
         {/* Fallback */}
