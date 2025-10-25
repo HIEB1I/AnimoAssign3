@@ -44,12 +44,7 @@ export const api = axios.create({ baseURL: API_BASE });
 
 // ---------- Feature calls ----------
 
-export type LoginResponse = {
-  userId: string;
-  email: string;
-  fullName: string;
-  roles: string[];
-};
+export type LoginResponse = { userId: string; email: string; fullName: string; roles: string[] };
 
 export async function login(email: string): Promise<LoginResponse> {
   const r = await fetch(join(API_BASE, "login"), {
@@ -60,7 +55,6 @@ export async function login(email: string): Promise<LoginResponse> {
   if (!r.ok) throw new Error(await r.text());
   return r.json();
 }
-
 export async function fetchOmHome(userId: string) {
   const r = await fetch(join(API_BASE, `om/home?userId=${encodeURIComponent(userId)}`));
   if (!r.ok) throw new Error(await r.text());
@@ -76,10 +70,10 @@ export async function fetchOmProfile(userId: string) {
 // ---------------- APO: Pre Enlistment ----------------
 export type PreenlistmentCountDoc = {
   count_id: string;
-  preenlistment_code?: string; // was "code" before; now seed uses this
+  preenlistment_code?: string;
   career: string;
   acad_group: string;
-  campus_name: "MANILA" | "LAGUNA"; // was "campus"
+  campus_name: "MANILA" | "LAGUNA";
   course_code: string;
   count: number;
   campus_id?: "CMPS001" | "CMPS002";
@@ -93,7 +87,7 @@ export type PreenlistmentCountDoc = {
 
 export type PreenlistmentStatDoc = {
   stat_id: string;
-  program_code: string; // was "program"
+  program_code: string;
   program_id?: string;
   freshman: number;
   sophomore: number;
@@ -109,6 +103,8 @@ export type TermMeta = {
   term_id: string;
   ay_label: string;
   term_number?: number;
+  is_current?: boolean;
+  campus_label?: string;   // NEW: provided by backend
 };
 
 export type ApoPreenlistmentResponse = {
@@ -119,9 +115,8 @@ export type ApoPreenlistmentResponse = {
   [k: string]: unknown;
 };
 
-// CSV headers EXACTLY like your files
 export type CountCsvRow = {
-  Code?: string; // becomes preenlistment_code
+  Code?: string;
   Career: string;
   "Acad Group": string;
   Campus: "MANILA" | "LAGUNA";
@@ -130,7 +125,7 @@ export type CountCsvRow = {
 };
 
 export type StatCsvRow = {
-  Program: string; // becomes program_code
+  Program: string;
   FRESHMAN: number | string;
   SOPHOMORE: number | string;
   JUNIOR: number | string;

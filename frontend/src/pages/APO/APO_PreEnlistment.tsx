@@ -1,3 +1,4 @@
+// frontend/src/pages/APO/APO_PreEnlistment.tsx
 import React, { useEffect, useMemo, useState } from "react";
 import Papa, { type ParseResult } from "papaparse";
 import { Pencil, Check, Upload, Archive } from "lucide-react";
@@ -18,10 +19,8 @@ import {
 } from "../../api";
 
 export default function APO_PreEnlistment() {
-  // view
   const [view, setView] = useState<"active" | "archives">("active");
 
-  // active view
   const [activeMeta, setActiveMeta] = useState<TermMeta | null>(null);
   const [enlistedCourses, setEnlistedCourses] = useState<string[][]>([]);
   const [enrollmentStats, setEnrollmentStats] = useState<string[][]>([]);
@@ -29,20 +28,17 @@ export default function APO_PreEnlistment() {
   const [err, setErr] = useState<string | null>(null);
   const [archiving, setArchiving] = useState(false);
 
-  // inline edit
   const [editIndexCourses, setEditIndexCourses] = useState<number | null>(null);
   const [editRowCourses, setEditRowCourses] = useState<string[] | null>(null);
   const [editIndexStats, setEditIndexStats] = useState<number | null>(null);
   const [editRowStats, setEditRowStats] = useState<string[] | null>(null);
 
-  // archives view
   const [archiveTerms, setArchiveTerms] = useState<ArchiveMetaItem[]>([]);
   const [archiveTermId, setArchiveTermId] = useState<string>("");
   const [archiveCount, setArchiveCount] = useState<string[][]>([]);
   const [archiveStats, setArchiveStats] = useState<string[][]>([]);
   const [archiveLoading, setArchiveLoading] = useState(false);
 
-  // user
   const user = useMemo(() => {
     const raw = localStorage.getItem("animo.user");
     return raw ? JSON.parse(raw) : null;
@@ -53,7 +49,6 @@ export default function APO_PreEnlistment() {
     return user.roles.includes("apo") ? "Academic Programming Officer" : user.roles[0] || "User";
   }, [user]);
 
-  // initial load
   useEffect(() => {
     (async () => {
       if (!user?.userId) {
@@ -74,28 +69,27 @@ export default function APO_PreEnlistment() {
   }, [user]);
 
   const headerLabel = activeMeta ? `Term ${activeMeta.term_number ?? ""} ${activeMeta.ay_label}` : "";
+  const campusLabel = activeMeta?.campus_label ? activeMeta.campus_label : "";
 
   const refresh = async () => {
     if (!user?.userId) return;
-    // termId omitted -> backend uses current active term
     const { count, statistics, meta } = await getApoPreenlistment(user.userId, undefined, "active");
 
     setActiveMeta((meta as TermMeta) ?? null);
 
-    // Map DB docs -> table rows (seed fields)
     setEnlistedCourses(
       (count ?? ([] as PreenlistmentCountDoc[])).map((d) => [
-        d.preenlistment_code || "", // "No." column (seed: preenlistment_code)
+        d.preenlistment_code || "",
         d.career,
         d.acad_group,
-        d.campus_name,              // seed uses campus_name
+        d.campus_name,
         d.course_code,
         String(d.count),
       ])
     );
     setEnrollmentStats(
       (statistics ?? ([] as PreenlistmentStatDoc[])).map((s) => [
-        s.program_code,             // seed uses program_code
+        s.program_code,
         String(s.freshman),
         String(s.sophomore),
         String(s.junior),
@@ -104,7 +98,6 @@ export default function APO_PreEnlistment() {
     );
   };
 
-  // --- edits (counts)
   const startEditCourses = (i: number) => {
     setEditIndexCourses(i);
     setEditRowCourses([...(enlistedCourses[i] || [])]);
@@ -120,7 +113,7 @@ export default function APO_PreEnlistment() {
       try {
         if (!user?.userId) throw new Error("Not logged in");
         const rows: CountCsvRow[] = updated.map((r) => ({
-          Code: r[0] || "", // becomes preenlistment_code in backend
+          Code: r[0] || "",
           Career: r[1],
           "Acad Group": r[2],
           Campus: r[3] as "MANILA" | "LAGUNA",
@@ -136,7 +129,6 @@ export default function APO_PreEnlistment() {
     }
   };
 
-  // --- edits (stats)
   const startEditStats = (i: number) => {
     setEditIndexStats(i);
     setEditRowStats([...(enrollmentStats[i] || [])]);
@@ -152,7 +144,7 @@ export default function APO_PreEnlistment() {
       try {
         if (!user?.userId) throw new Error("Not logged in");
         const rows: StatCsvRow[] = updated.map((r) => ({
-          Program: r[0], // becomes program_code in backend
+          Program: r[0],
           FRESHMAN: Number(r[1] ?? 0),
           SOPHOMORE: Number(r[2] ?? 0),
           JUNIOR: Number(r[3] ?? 0),
@@ -167,7 +159,6 @@ export default function APO_PreEnlistment() {
     }
   };
 
-  // --- CSV import
   const handleImportCourses = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file || !user?.userId) return;
@@ -198,15 +189,14 @@ export default function APO_PreEnlistment() {
     });
   };
 
-  // --- archive actions (is_archived flip + advance term in backend)
   const moveToArchives = async () => {
     if (!user?.userId) return;
     const label = activeMeta ? `Term ${activeMeta.term_number ?? ""} ${activeMeta.ay_label}` : "current term";
     if (!confirm(`Archive ${label}? This will snapshot active rows and advance to the next term.`)) return;
     try {
       setArchiving(true);
-      await archiveApoPreenlistment(user.userId); // backend figures out active term & advances
-      await refresh(); // reload now-active (advanced) term
+      await archiveApoPreenlistment(user.userId);
+      await refresh();
     } catch (e: any) {
       setErr(e?.message || "Failed to archive.");
     } finally {
@@ -214,7 +204,6 @@ export default function APO_PreEnlistment() {
     }
   };
 
-  // --- archives view
   const labelForTerm = (t: ArchiveMetaItem) => `${t.term_id} · ${t.ay_label}`;
   const labelToTid = (label: string) => label.split(" · ")[0] || "";
 
@@ -233,14 +222,14 @@ export default function APO_PreEnlistment() {
           (count ?? ([] as PreenlistmentCountDoc[])).map((d) => [
             d.career,
             d.acad_group,
-            d.campus_name, // seed field
+            d.campus_name,
             d.course_code,
             String(d.count),
           ])
         );
         setArchiveStats(
           (statistics ?? ([] as PreenlistmentStatDoc[])).map((s) => [
-            s.program_code, // seed field
+            s.program_code,
             String(s.freshman),
             String(s.sophomore),
             String(s.junior),
@@ -267,14 +256,14 @@ export default function APO_PreEnlistment() {
         (count ?? ([] as PreenlistmentCountDoc[])).map((d) => [
           d.career,
           d.acad_group,
-          d.campus_name, // seed field
+          d.campus_name,
           d.course_code,
           String(d.count),
         ])
       );
       setArchiveStats(
         (statistics ?? ([] as PreenlistmentStatDoc[])).map((s) => [
-          s.program_code, // seed field
+          s.program_code,
           String(s.freshman),
           String(s.sophomore),
           String(s.junior),
@@ -288,7 +277,7 @@ export default function APO_PreEnlistment() {
 
   return (
     <div className="min-h-screen w-full bg-gray-50 text-slate-900">
-      <TopBar fullName={fullName} role={roleName} />
+      <TopBar fullName={fullName} role={campusLabel ? `${roleName} | ${campusLabel}` : roleName} />
       <Tabs
         mode="nav"
         items={[
@@ -299,7 +288,6 @@ export default function APO_PreEnlistment() {
       />
 
       <main className="p-6 w-full">
-        {/* local view switch */}
         <div className="mb-3 flex items-center gap-2">
           <button
             className={`rounded-md px-3 py-2 text-sm border ${
@@ -334,7 +322,6 @@ export default function APO_PreEnlistment() {
           )}
         </div>
 
-        {/* ACTIVE VIEW */}
         {view === "active" && (
           <div className="rounded-xl bg-white shadow-sm border border-gray-200 p-6 w-full">
             <div className="mb-3 text-sm">
@@ -350,7 +337,7 @@ export default function APO_PreEnlistment() {
             </div>
 
             <div className="flex flex-col md:flex-row">
-              {/* Left - Enlisted Courses */}
+              {/* left */}
               <section className="flex-1 max-h-[400px] overflow-y-auto pr-4">
                 <div className="flex items-center justify-between mb-3">
                   <h3 className="text-base font-semibold">List of Enlisted Courses</h3>
@@ -422,10 +409,9 @@ export default function APO_PreEnlistment() {
                 </table>
               </section>
 
-              {/* Divider */}
               <div className="my-6 md:my-0 md:mx-6 border-t md:border-t-0 md:border-l border-gray-300"></div>
 
-              {/* Right - Enrollment Stats */}
+              {/* right */}
               <section className="flex-1 max-h-[400px] overflow-y-auto pl-4">
                 <div className="flex items-center justify-between mb-3">
                   <h3 className="text-base font-semibold">Enrollment Statistics</h3>
@@ -499,7 +485,6 @@ export default function APO_PreEnlistment() {
           </div>
         )}
 
-        {/* ARCHIVES VIEW */}
         {view === "archives" && (
           <div className="rounded-xl bg-white shadow-sm border border-gray-200 p-6 w-full">
             <div className="mb-4 flex items-center gap-3">
@@ -510,11 +495,13 @@ export default function APO_PreEnlistment() {
                 <SelectBox
                   value={
                     archiveTermId && archiveTerms.length
-                      ? labelForTerm(archiveTerms.find(x => x.term_id === archiveTermId)!)
+                      ? `${archiveTerms.find(x => x.term_id === archiveTermId)!.term_id} · ${
+                          archiveTerms.find(x => x.term_id === archiveTermId)!.ay_label
+                        }`
                       : ""
                   }
                   onChange={(label) => changeArchiveTerm(label)}
-                  options={archiveTerms.map(labelForTerm)}
+                  options={archiveTerms.map((t) => `${t.term_id} · ${t.ay_label}`)}
                   placeholder="— Select Term —"
                   className="w-[280px]"
                   disabled={archiveLoading}

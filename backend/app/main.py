@@ -74,7 +74,7 @@ from .APO.APO_RoomAllocation import router as roomallocation_router
 from .STUDENT.STUDENT_Petition import router as studentpetition_router
 from .FACULTY.FACULTY_Overview import router as facultyoverview_router
 
-app.include_router(login_router)
+app.include_router(login_router, prefix="/api")
 app.include_router(om_home_router)
 app.include_router(om_profile_router)
 app.include_router(preenlistment_router, prefix="/api")
