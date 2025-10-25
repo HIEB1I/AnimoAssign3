@@ -53,8 +53,8 @@ const Login: React.FC = () => {
         navigate("/apo/preenlistment");
       } else if (user.roles.includes("office_manager")) {
         navigate("/om/home");
-      } else if (user.roles.includes("faculty")) {
-        navigate("/faculty/dashboard");
+      } else if (user.roles.includes("student")) {
+        navigate("/student/petition");
       } else if (user.roles.includes("dean")) {
         navigate("/dean/dashboard");
       } else {

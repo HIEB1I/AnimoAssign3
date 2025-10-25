@@ -13,6 +13,13 @@ import APO_CourseOfferings from "./pages/APO/APO_CourseOfferings";
 import APO_RoomAllocation from "./pages/APO/APO_RoomAllocation";
 import APO_Inbox from "./pages/APO/APO_Inbox";
 
+// ---------------- Student ----------------
+import STUDENT_Petition from "./pages/STUDENT/STUDENT_Petition";
+
+// ---------------- Faculty ----------------
+import FACULTY_Overview from "./pages/FACULTY/FACULTY_Overview";
+import FACULTY_Inbox from "./pages/FACULTY/FACULTY_Inbox";
+
 const base = (import.meta.env.BASE_URL || "/").replace(/\/$/, "");
 
 // Simple auth gate: requires localStorage "animo.user"
@@ -49,7 +56,17 @@ export default function App() {
           <Route path="/apo/roomallocation" element={<APO_RoomAllocation />} />
           <Route path="/apo/inbox" element={<APO_Inbox />} />
         </Route>
-
+        {/* -------- Student -------- */}
+        <Route element={<RequireAuth />}>
+          <Route path="/student/petition" element={<STUDENT_Petition />} />
+        </Route>
+        {/* -------- Faculty -------- */}
+        <Route element={<RequireAuth />}>
+          <Route path="/faculty/overview" element={<FACULTY_Overview />} />
+          <Route path="/faculty/history" element={<div className="p-6">History (placeholder)</div>} />
+          <Route path="/faculty/preferences" element={<div className="p-6">Preferences (placeholder)</div>} />
+          <Route path="/faculty/inbox" element={<FACULTY_Inbox />} />
+        </Route>
         {/* Fallback */}
         <Route path="*" element={<Navigate to="/Login" replace />} />
       </Routes>

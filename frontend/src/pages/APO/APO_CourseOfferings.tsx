@@ -1171,7 +1171,7 @@ export default function CourseOfferingsScreen() {
             onClick={() => setShowForward(true)}
             disabled={busy}
             className={cls(
-              "ml-auto inline-flex items-center gap-2 rounded-md bg-emerald-700 px-4 py-2 text-sm font-medium text-white shadow-sm hover:brightness-110",
+              "ml-auto inline-flex items-center gap-2 rounded-md bg-[#006045] px-4 py-2 text-sm font-medium text-white shadow-sm hover:brightness-110",
               busy && "opacity-50 cursor-not-allowed hover:brightness-100"
             )}
             title={busy ? "Finish current action first" : "Forward"}
@@ -1189,7 +1189,7 @@ export default function CourseOfferingsScreen() {
               <p className="text-sm text-gray-500">Term 1 AY 2025-2026</p>
             </div>
 
-            <label className="cursor-pointer inline-flex items-center gap-2 rounded-md bg-emerald-700 px-4 py-2 text-sm font-medium text-white hover:brightness-110">
+            <label className="cursor-pointer inline-flex items-center gap-2 rounded-md bg-[#008e4e] px-4 py-2 text-sm font-medium text-white hover:brightness-110">
               <Upload className="h-4 w-4" />
               Import CSV
               <input type="file" accept=".csv" onChange={handleImportCSV} className="hidden" />
