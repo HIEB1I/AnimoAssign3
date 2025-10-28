@@ -29,6 +29,16 @@ export default function OM_HomePage() {
       </div>
       <div style={{marginTop:24}}>
         <Link to="/om/profile">Go to Profile →</Link>
+        <div />
+        <Link to="/om/desc">Go to descriptive 1 →</Link>
+        <div />
+        <Link to="/om/desc2">Go to descriptive 2 →</Link>
+        <div />
+        <Link to="/om/desc3">Go to descriptive 3 →</Link>
+        <div />
+        <Link to="/om/pred1">Go to predictive 1 →</Link>
+        <div />
+        <Link to="/om/pred2">Go to predictive 2 →</Link>
       </div>
     </div>
   );
