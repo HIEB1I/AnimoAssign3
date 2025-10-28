@@ -40,6 +40,113 @@ export const ANALYTICS_BASE = resolveBase(
 
 // Optional axios instance if you use axios elsewhere
 export const api = axios.create({ baseURL: API_BASE });
+/* =========================================================
+   ===============  ADMIN: MANAGEMENT  =====================
+   ========================================================= */
+
+export type AdminUserRow = {
+  id: number;
+  fullName: string;
+  email: string;
+  status: "Active" | "Inactive";
+  role: string;
+  department: string;
+  joinedDate: string;
+};
+
+export type AdminLogRow = {
+  id: number;
+  user: string;
+  action: string;
+  details: string;
+  timestamp: string;
+};
+
+export type AdminOptions = {
+  ok: boolean;
+  roles: string[];
+  departments: string[];
+};
+
+export type AdminProfile = {
+  ok: boolean;
+  first_name: string;
+  last_name: string;
+};
+
+/**
+ * Fetch all admin users (with resolved roles and departments)
+ */
+export async function getAdminUsersList(userId: string) {
+  const { data } = await axios.post(
+    `${API_BASE}/admin/manage`,
+    {},
+    { params: { userId, action: "fetch" } }
+  );
+  return (data?.users ?? []) as AdminUserRow[];
+}
+
+/**
+ * Retrieve audit logs for Admin → Logs table.
+ */
+export async function getAdminLogs(userId: string) {
+  const { data } = await axios.post(
+    `${API_BASE}/admin/manage`,
+    {},
+    { params: { userId, action: "logs" } }
+  );
+  return (data?.logs ?? []) as AdminLogRow[];
+}
+
+/**
+ * Get dropdown options for roles and departments.
+ */
+export async function getAdminOptions(userId: string) {
+  const { data } = await axios.post(
+    `${API_BASE}/admin/manage`,
+    {},
+    { params: { userId, action: "options" } }
+  );
+  return data as AdminOptions;
+}
+
+/**
+ * Fetch minimal admin profile (for greetings or headers).
+ */
+export async function getAdminProfile(userId: string) {
+  const { data } = await axios.post(
+    `${API_BASE}/admin/manage`,
+    {},
+    { params: { userId, action: "profile" } }
+  );
+  return data as AdminProfile;
+}
+
+/**
+ * Submit new admin user entry.
+ * Mirrors backend validation and structure.
+ */
+export async function submitAdminUser(
+  userId: string,
+  payload: {
+    lastName: string;
+    firstName: string;
+    middleInitial?: string; // display-only; ignored by backend
+    email: string;
+    status: "Active" | "Inactive";
+    role?: string;
+    department?: string; // e.g. "ST" for Science & Tech
+  }
+) {
+  const { data } = await axios.post(
+    `${API_BASE}/admin/manage`,
+    payload,
+    { params: { userId, action: "submit" } }
+  );
+  return data as { ok: boolean; user: AdminUserRow };
+}
+
+
 // DONT REMOVE ABOVE
 
 /* =========================================================
@@ -588,12 +695,190 @@ export async function submitStudentPetition(userId: string, payload: PetitionSub
 /* =========================================================
    ===============  FACULTY: OVERVIEW  =====================
    ========================================================= */
-export async function getFacultyOverview(userId: string) {
-  try {
-    const res = await axios.get(`${API_BASE}/faculty/overview`, { params: { userId } });
-    return res.data;
-  } catch (err: any) {
-    const msg = err?.response?.data?.detail || err?.message || "Request failed";
-    return { ok: false, message: msg };
-  }
+export async function getFacultyOverviewList(userId: string) {
+  const { data } = await axios.post(`${API_BASE}/faculty/overview`, {}, {
+    params: { userId, action: "fetch" },
+  });
+  return data;
 }
+
+export async function getFacultyOverviewProfile(userId: string) {
+  const { data } = await axios.post(`${API_BASE}/faculty/overview`, {}, {
+    params: { userId, action: "profile" },
+  });
+  return data;
+}
+
+export async function getFacultyOverviewOptions(userId: string) {
+  const { data } = await axios.post(`${API_BASE}/faculty/overview`, {}, {
+    params: { userId, action: "options" },
+  });
+  return data;
+}
+
+// (Deprecated alias; safe to remove later)
+export async function getFacultyOverview(userId: string) {
+  return getFacultyOverviewList(userId);
+}
+
+/* =========================================================
+   ===============  FACULTY: HISTORY  ======================
+   ========================================================= */
+// Mirrors Student Petition API shape (POST + ?action=*)
+
+export type FacultyHistoryRow = {
+  // Stored IDs (not all may exist in sample data)
+  assignment_id: string;
+  faculty_id: string;
+  section_id: string;
+  term_id?: string;
+  course_id?: string;
+  room_id?: string | null;
+
+  // Display-ready (joined/derived by backend)
+  course_code?: string | string[];
+  course_title?: string;
+  section_code?: string;
+  day_time?: string;          // e.g. "M 07:30–09:00; H 07:30–09:00"
+  room_label?: string;        // "A1101 (Classroom)" or "Online" / "TBA"
+  campus_name?: string;       // MUST be present even if Online/TBA
+  term_label?: string;        // e.g. "AY 2024–2025 T1"
+  created_at?: string;        // for sorting on UI
+};
+
+export type FacultyHistoryProfile = {
+  faculty_id: string;
+  faculty_name?: string;
+  department_id?: string;
+};
+
+export type FacultyHistoryOptions = {
+  // keep minimal; extend later if needed
+  statuses?: string[];
+};
+
+export async function getFacultyHistoryList(userId: string) {
+  const { data } = await axios.post(`${API_BASE}/faculty/history`, {}, {
+    params: { userId, action: "fetch" },
+  });
+  return data as FacultyHistoryRow[];
+}
+
+export async function getFacultyHistoryProfile(userId: string) {
+  const { data } = await axios.post(`${API_BASE}/faculty/history`, {}, {
+    params: { userId, action: "profile" },
+  });
+  return data as FacultyHistoryProfile;
+}
+
+export async function getFacultyHistoryOptions(userId: string) {
+  const { data } = await axios.post(`${API_BASE}/faculty/history`, {}, {
+    params: { userId, action: "options" },
+  });
+  return data as FacultyHistoryOptions;
+}
+
+// kept for architecture parity; real writes likely not needed here
+export async function submitFacultyHistory(userId: string, payload: Record<string, unknown>) {
+  const { data } = await axios.post(`${API_BASE}/faculty/history`, payload, {
+    params: { userId, action: "submit" },
+  });
+  return data as FacultyHistoryRow;
+}
+
+
+/* =========================================================
+   ============  FACULTY: PREFERENCES  =====================
+   ========================================================= */
+export async function getFacultyPreferencesList(userId: string) {
+  const { data } = await axios.post(`${API_BASE}/faculty/preferences`, {}, {
+    params: { userId, action: "fetch" },
+  });
+  return data;
+}
+export async function getFacultyPreferencesOptions(userId: string) {
+  const { data } = await axios.post(`${API_BASE}/faculty/preferences`, {}, {
+    params: { userId, action: "options" },
+  });
+  return data;
+}
+export async function getFacultyPreferencesProfile(userId: string) {
+  const { data } = await axios.post(`${API_BASE}/faculty/preferences`, {}, {
+    params: { userId, action: "profile" },
+  });
+  return data;
+}
+export async function submitFacultyPreferences(
+  userId: string,
+  payload: {
+    preferred_units: number;
+    availability_days: string[];
+    preferred_times: string[];
+    preferred_kacs: string[];       // KAC codes or IDs
+    mode?: { mode?: string; campus_id?: string };
+    notes?: string;
+    has_new_prep?: boolean;
+    is_finished?: boolean;
+    term_id?: string;               // optional; server falls back to active term
+  }
+) {
+  const { data } = await axios.post(`${API_BASE}/faculty/preferences`, payload, {
+    params: { userId, action: "submit" },
+  });
+  return data;
+}
+
+/* =========================================================
+   ==============  OM: LOAD ASSIGNMENT  ====================
+   ========================================================= */
+export type OmLoadRow = {
+  id: string;
+  course: string;
+  title: string;
+  units: number | "";
+  section: string;
+  faculty: string;
+  day1: string;
+  begin1: string;
+  end1: string;
+  room1: string;
+  day2: string;
+  begin2: string;
+  end2: string;
+  room2: string;
+  capacity: number | "";
+  status?: "" | "Confirmed" | "Pending" | "Unassigned" | "Conflict";
+  conflictNote?: string;
+};
+
+export async function getOmLoadAssignmentList(userId: string) {
+  const { data } = await axios.post(`${API_BASE}/om/loadassignment`, {}, {
+    params: { userId, action: "fetch" },
+  });
+  return data as { term?: string; rows: OmLoadRow[] };
+}
+
+export async function getOmLoadAssignmentOptions(userId: string) {
+  const { data } = await axios.post(`${API_BASE}/om/loadassignment`, {}, {
+    params: { userId, action: "options" },
+  });
+  return data;
+}
+
+export async function getOmLoadAssignmentProfile(userId: string) {
+  const { data } = await axios.post(`${API_BASE}/om/loadassignment`, {}, {
+    params: { userId, action: "profile" },
+  });
+  return data;
+}
+
+export async function submitOmLoadAssignment(
+  userId: string,
+  payload: { rows: OmLoadRow[] }
+) {
+  const { data } = await axios.post(`${API_BASE}/om/loadassignment`, payload, {
+    params: { userId, action: "submit" },
+  });
+  return data as { ok: boolean; rows: OmLoadRow[] };
+}
+

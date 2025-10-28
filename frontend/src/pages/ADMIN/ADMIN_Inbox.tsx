@@ -1,26 +1,9 @@
-// frontend/src/pages/FACULTY/FAC_Inbox.tsx
-import { useEffect, useMemo, useState } from "react";
-import { Search, Plus } from "lucide-react";
+// frontend/src/pages/ADMIN/ADMIN_Inbox.tsx
+import React, { useEffect, useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
+import { Search, Plus, ChevronLeft } from "lucide-react";
 
-const cls = (...s: (string | false | undefined)[]) => s.filter(Boolean).join(" ");
-const timeAgo = (d: Date) => {
-  const s = Math.floor((Date.now() - d.getTime()) / 1000);
-  if (s < 60) return `${s}s ago`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m} minutes ago`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h} hours ago`;
-  const dd = Math.floor(h / 24);
-  return `${dd} day${dd > 1 ? "s" : ""} ago`;
-};
-const initials = (name: string) =>
-  name
-    .split(" ")
-    .map((n) => n[0])
-    .slice(0, 2)
-    .join("")
-    .toUpperCase();
-
+/* ========== local helpers (scoped to this file) ========== */
 type Mail = {
   id: number;
   from: string;
@@ -31,7 +14,29 @@ type Mail = {
   receivedAt: Date;
 };
 
-function InboxMain() {
+const cls = (...s: (string | false | undefined)[]) => s.filter(Boolean).join(" ");
+
+const initials = (name: string) => {
+  const parts = (name || "").trim().split(/\s+/);
+  if (!parts.length) return "?";
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+};
+
+const timeAgo = (d: Date) => {
+  const sec = Math.floor((Date.now() - d.getTime()) / 1000);
+  if (sec < 60) return `${sec}s ago`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}h ago`;
+  const day = Math.floor(hr / 24);
+  return `${day}d ago`;
+};
+
+/* ========== Inline Admin Inbox (TopBar-less) ========== */
+/** Use this inside the Admin dashboard (ADMIN.tsx) when showInbox === true */
+export function InboxContent() {
   const [query, setQuery] = useState("");
   const [mode, setMode] = useState<"default" | "compose" | "read">("default");
   const [mails, setMails] = useState<Mail[]>([]);
@@ -42,9 +47,10 @@ function InboxMain() {
     const userId: string | undefined = user.userId || user.user_id || user.id;
     if (!userId) return;
 
-    fetch(`/api/faculty/inbox?userId=${encodeURIComponent(userId)}`)
+    fetch(`/api/admin/inbox?userId=${encodeURIComponent(userId)}`)
       .then((res) => res.json())
       .then((data) => {
+        // Expecting { ok: boolean, inbox: [...] }
         if (!data?.ok) return;
         const mapped: Mail[] = (data.inbox || []).map((it: any, idx: number) => ({
           id: Number(it.id ?? idx + 1),
@@ -57,7 +63,7 @@ function InboxMain() {
         }));
         setMails(mapped);
       })
-      .catch((err) => console.error("Inbox fetch error", err));
+      .catch((err) => console.error("Admin inbox fetch error", err));
   }, []);
 
   const filtered = useMemo(() => {
@@ -80,39 +86,38 @@ function InboxMain() {
   return (
     <section className="mx-auto w-full max-w-screen-2xl px-4">
       <div className="rounded-xl border border-gray-200 bg-white p-5">
-        {/* Header to match in-tab look (no page topbar) */}
+        {/* Header (no page topbar) */}
         <div className="mb-4 flex items-center justify-between">
-        <div>
-          <h3 className="text-lg font-bold text-gray-900">Inbox</h3>
-          <p className="text-sm text-gray-500">Manage communication and support requests</p>
+          <div>
+            <h3 className="text-lg font-bold text-gray-900">Inbox</h3>
+            <p className="text-sm text-gray-500">Manage communication and support requests</p>
+          </div>
+          <button
+            onClick={() => window.dispatchEvent(new Event("admin:closeInbox"))}
+            className="rounded-lg border border-gray-300 px-3 py-2 text-sm hover:bg-gray-50"
+          >
+            Back to Dashboard
+          </button>
         </div>
-        <button
-          onClick={() => window.dispatchEvent(new Event("faculty:closeInbox"))}
-          className="rounded-lg border border-gray-300 px-3 py-2 text-sm hover:bg-gray-50"
-        >
-          Back to Dashboard
-        </button>
-      </div>
 
-        {/* Actions / Search */}
+        {/* Search + Compose */}
         <div className="mb-4 flex items-center gap-3">
           <div className="relative flex-1 rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm shadow-sm">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-500" />
+            <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-500" />
             <input
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               placeholder="Search messages..."
-              className="w-full bg-transparent outline-none pl-7"
+              className="w-full bg-transparent pl-7 outline-none"
             />
           </div>
-
           <button
             onClick={openCompose}
             disabled={mode === "compose"}
             className={cls(
               "inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium",
               mode === "compose"
-                ? "bg-gray-300 text-gray-600 cursor-not-allowed"
+                ? "cursor-not-allowed bg-gray-300 text-gray-600"
                 : "bg-emerald-700 text-white hover:bg-emerald-700"
             )}
           >
@@ -122,7 +127,7 @@ function InboxMain() {
 
         {/* Two-column layout */}
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-[360px_1fr]">
-          {/* List */}
+          {/* Left list */}
           <aside className="space-y-3">
             <div className="text-sm font-semibold text-gray-700">Messages</div>
             <div className="space-y-3">
@@ -150,7 +155,7 @@ function InboxMain() {
                   </div>
                 </button>
               ))}
-              {filtered.length === 0 && (
+              {!filtered.length && (
                 <div className="rounded-xl border border-dashed border-gray-300 p-6 text-center text-sm text-gray-500">
                   No messages found.
                 </div>
@@ -158,7 +163,7 @@ function InboxMain() {
             </div>
           </aside>
 
-          {/* Reader / Composer */}
+          {/* Right panel */}
           <section className="min-h-[520px] rounded-xl border border-gray-200 bg-white p-5">
             {mode === "default" && (
               <div className="grid h-full place-items-center text-center text-gray-500">
@@ -201,7 +206,10 @@ function InboxMain() {
                   >
                     Cancel
                   </button>
-                  <button className="rounded-lg bg-emerald-700 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700">
+                  <button
+                    onClick={backToDefault}
+                    className="rounded-lg bg-emerald-700 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700"
+                  >
                     Send
                   </button>
                 </div>
@@ -225,11 +233,9 @@ function InboxMain() {
                     </div>
                   </div>
                 </div>
-
                 <div className="whitespace-pre-wrap rounded-lg border border-gray-200 bg-gray-50 p-4 text-sm text-gray-800">
                   {selected.body}
                 </div>
-
                 <div className="space-y-2">
                   <div className="text-sm font-semibold">Reply</div>
                   <textarea
@@ -257,8 +263,30 @@ function InboxMain() {
   );
 }
 
-export function InboxContent() {
-  return <InboxMain />;
-}
+/* ========== Full-page route wrapper (default export) ========== */
+/** Used by <Route path="/admin/inbox" element={<ADMIN_Inbox />} /> */
+export default function ADMIN_Inbox() {
+  const navigate = useNavigate();
+  return (
+    <div className="min-h-screen w-full bg-gray-50 text-slate-900">
+      {/* Simple header bar with a Back button */}
+      <header className="sticky top-0 z-10 border-b border-gray-200 bg-white">
+        <div className="mx-auto flex max-w-screen-2xl items-center gap-3 px-4 py-3">
+          <button
+            onClick={() => navigate("/admin")}
+            className="inline-flex items-center gap-2 rounded-lg border border-gray-200 px-3 py-1.5 text-sm hover:bg-gray-50"
+          >
+            <ChevronLeft className="h-4 w-4" />
+            Back to Dashboard
+          </button>
+          <div className="ml-1 text-sm text-gray-500">Admin Inbox (full-page)</div>
+        </div>
+      </header>
 
-export default InboxMain;
+      {/* Reuse the inline content */}
+      <main className="mx-auto max-w-screen-2xl px-4 py-6">
+        <InboxContent />
+      </main>
+    </div>
+  );
+}

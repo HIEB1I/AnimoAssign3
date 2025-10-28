@@ -13,27 +13,76 @@ const Login: React.FC = () => {
   const [error, setError] = React.useState<string | null>(null);
   const navigate = useNavigate();
 
+  async function fetchFacultyIdByUser(userId: string): Promise<string | null> {
+    try {
+      const res = await fetch(`/api/faculty/by-user/${encodeURIComponent(userId)}/id`, {
+        headers: { "Accept": "application/json" },
+        credentials: "include",
+      });
+      if (!res.ok) return null;
+      const data = await res.json();
+      // Expecting shape: { faculty_id: "FACxxxx" | null }
+      return data?.faculty_id ?? null;
+    } catch {
+      return null;
+    }
+  }
+
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
     setLoading(true);
     setError(null);
     try {
+      // 1) Authenticate (mock/dev login still allowed)
       const user: LoginResponse = await apiLogin(email.trim());
-      localStorage.setItem("animo.user", JSON.stringify(user));
 
-      const roles = (user.roles || []).map((r) => r.toLowerCase());
+      // 2) Normalize roles once
+      const norm = (r: string) => r.toLowerCase().replace(/\s+/g, "_");
+      const roles = (user.roles || []).map(norm);
+
+      // 3) Resolve faculty_id from DB (no hardcoding, no globals)
+      let faculty_id: string | null = null;
+      if (roles.includes("faculty")) {
+        faculty_id = await fetchFacultyIdByUser(user.userId);
+        if (!faculty_id) {
+          // If they're a faculty but we can't find a faculty profile, stop early.
+          throw new Error(
+            "Your account is marked as Faculty but no faculty profile was found. Please contact the administrator."
+          );
+        }
+      }
+
+      // 4) Persist ONE canonical session object the whole app can read
+      const sessionBlob = {
+        user_id: user.userId,
+        email: user.email,
+        full_name: user.fullName,
+        roles,           // normalized roles
+        faculty_id,      // null for non-faculty; string for faculty
+      };
+      localStorage.setItem("animo.user", JSON.stringify(sessionBlob));
+
+      // (Kept: individual keys, since the rest of the app already reads them)
+      localStorage.setItem("userId", user.userId);
+      localStorage.setItem("email", user.email);
+      localStorage.setItem("fullName", user.fullName);
+      localStorage.setItem("roles", JSON.stringify(roles));
+
+      // 5) Route by role (no hardcoded IDs anywhere)
       if (roles.includes("apo")) {
         navigate("/apo/preenlistment", { replace: true });
       } else if (roles.includes("office_manager")) {
-        navigate("/om/home", { replace: true });
+        navigate("/om/load-assignment", { replace: true }); // <- not /om/home unless it's defined
       } else if (roles.includes("faculty")) {
+        // Only hits if faculty_id was resolved; otherwise we threw above.
         navigate("/faculty/overview", { replace: true });
       } else if (roles.includes("student")) {
         navigate("/student/petition", { replace: true });
       } else if (roles.includes("dean")) {
         navigate("/dean/dashboard", { replace: true });
       } else {
-        navigate("/om/home", { replace: true });
+        // Safe fallback that exists
+        navigate("/faculty/overview", { replace: true });
       }
     } catch (err: any) {
       setError(err?.message || "Login failed");
@@ -47,7 +96,9 @@ const Login: React.FC = () => {
       <div className="hidden sm:flex flex-1 items-center justify-center">
         <div className="relative px-6">
           <img src={AA_Logo} alt="AnimoAssign Logo" className="w-[750px] h-[150px]" />
-          <p className="absolute left-[115px] top-[125px] text-white text-xl font-normal">Delivering schedules that work for all.</p>
+          <p className="absolute left-[115px] top-[125px] text-white text-xl font-normal">
+            Delivering schedules that work for all.
+          </p>
         </div>
       </div>
 
@@ -83,7 +134,11 @@ const Login: React.FC = () => {
                   onChange={(e) => setPassword(e.target.value)}
                   autoComplete="current-password"
                 />
-                <button type="button" onClick={() => setShowPw((s) => !s)} className="absolute inset-y-0 right-0 pr-3 flex items-center">
+                <button
+                  type="button"
+                  onClick={() => setShowPw((s) => !s)}
+                  className="absolute inset-y-0 right-0 pr-3 flex items-center"
+                >
                   {showPw ? <Eye className="h-5 w-5 text-gray-500" /> : <EyeOff className="h-5 w-5 text-gray-500" />}
                 </button>
               </div>
@@ -91,7 +146,11 @@ const Login: React.FC = () => {
 
             {error && <div className="text-sm text-red-600 text-center">{error}</div>}
 
-            <button type="submit" disabled={loading} className="w-full py-3 rounded-xl bg-[#21804A] text-white font-semibold shadow hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-[#21804A] disabled:opacity-60">
+            <button
+              type="submit"
+              disabled={loading}
+              className="w-full py-3 rounded-xl bg-[#21804A] text-white font-semibold shadow hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-[#21804A] disabled:opacity-60"
+            >
               {loading ? "Logging in…" : "Login"}
             </button>
 
