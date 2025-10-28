@@ -67,8 +67,6 @@ export default function App() {
         
         {/* Protected (after login) */}
         <Route element={<RequireAuth />}>
-          <Route path="/om/home" element={<OM_HomePage />} />
-          <Route path="/om/profile" element={<OM_ProfilePage />} />
           <Route path="/om/desc" element={<OM_desc />} />
           <Route path="/om/desc2" element={<OM_desc2 />} />
           <Route path="/om/desc3" element={<OM_desc3 />} />
