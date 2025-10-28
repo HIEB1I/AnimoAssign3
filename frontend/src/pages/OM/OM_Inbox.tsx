@@ -1,4 +1,4 @@
-// frontend/src/pages/FACULTY/FAC_Inbox.tsx
+// frontend/src/pages/OM/OM_Inbox.tsx
 import { useEffect, useMemo, useState } from "react";
 import { Search, Plus } from "lucide-react";
 
@@ -31,7 +31,7 @@ type Mail = {
   receivedAt: Date;
 };
 
-function InboxMain() {
+function OMInboxMain() {
   const [query, setQuery] = useState("");
   const [mode, setMode] = useState<"default" | "compose" | "read">("default");
   const [mails, setMails] = useState<Mail[]>([]);
@@ -42,7 +42,7 @@ function InboxMain() {
     const userId: string | undefined = user.userId || user.user_id || user.id;
     if (!userId) return;
 
-    fetch(`/api/faculty/inbox?userId=${encodeURIComponent(userId)}`)
+    fetch(`/api/om/inbox?userId=${encodeURIComponent(userId)}`)
       .then((res) => res.json())
       .then((data) => {
         if (!data?.ok) return;
@@ -57,7 +57,7 @@ function InboxMain() {
         }));
         setMails(mapped);
       })
-      .catch((err) => console.error("Inbox fetch error", err));
+      .catch((err) => console.error("OM Inbox fetch error", err));
   }, []);
 
   const filtered = useMemo(() => {
@@ -80,19 +80,19 @@ function InboxMain() {
   return (
     <section className="mx-auto w-full max-w-screen-2xl px-4">
       <div className="rounded-xl border border-gray-200 bg-white p-5">
-        {/* Header to match in-tab look (no page topbar) */}
+        {/* Header to match in-tab look */}
         <div className="mb-4 flex items-center justify-between">
-        <div>
-          <h3 className="text-lg font-bold text-gray-900">Inbox</h3>
-          <p className="text-sm text-gray-500">Manage communication and support requests</p>
+          <div>
+            <h3 className="text-lg font-bold text-gray-900">Inbox</h3>
+            <p className="text-sm text-gray-500">Manage communication with faculty</p>
+          </div>
+          <button
+            onClick={() => window.dispatchEvent(new Event("om:closeInbox"))}
+            className="rounded-lg border border-gray-300 px-3 py-2 text-sm hover:bg-gray-50"
+          >
+            Back to Load Assignment
+          </button>
         </div>
-        <button
-          onClick={() => window.dispatchEvent(new Event("faculty:closeInbox"))}
-          className="rounded-lg border border-gray-300 px-3 py-2 text-sm hover:bg-gray-50"
-        >
-          Back to Dashboard
-        </button>
-      </div>
 
         {/* Actions / Search */}
         <div className="mb-4 flex items-center gap-3">
@@ -258,7 +258,7 @@ function InboxMain() {
 }
 
 export function InboxContent() {
-  return <InboxMain />;
+  return <OMInboxMain />;
 }
 
-export default InboxMain;
+export default OMInboxMain;
