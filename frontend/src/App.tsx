@@ -4,8 +4,16 @@ import "./App.css";
 
 // Pages
 import Login from "./pages/Login/Login";
-import OM_HomePage from "./pages/OM/OM_HomePage";
-import OM_ProfilePage from "./pages/OM/OM_Profile";
+
+// ---------------- OM ----------------
+import OM_LoadAssignment from "./pages/OM/OM_LoadAssignment";
+import OM_FacultyMgt from "./pages/OM/OM_FacultyMgt";
+//import OM_CourseMgt from "./pages/OM/OM_CourseMgt";
+//import OM_ReportsAnalytics from "./pages/OM/OM_ReportsAnalytics";
+//import OM_FacultyForm from "./pages/OM/OM_FacultyForm";
+//import OM_StudentPetition from "./pages/OM/OM_StudentPetition";
+//import OM_ClassRetention from "./pages/OM/OM_ClassRetention";
+import OM_Inbox from "./pages/OM/OM_Inbox";
 
 // ---------------- APO ----------------
 import APO_PreEnlistment from "./pages/APO/APO_PreEnlistment";
@@ -19,6 +27,12 @@ import STUDENT_Petition from "./pages/STUDENT/STUDENT_Petition";
 // ---------------- Faculty ----------------
 import FACULTY_Overview from "./pages/FACULTY/FACULTY_Overview";
 import FACULTY_Inbox from "./pages/FACULTY/FACULTY_Inbox";
+import FACULTY_History from "./pages/FACULTY/FACULTY_History";
+import FACULTY_Preferences from "./pages/FACULTY/FACULTY_Preferences";
+
+// Admin
+import ADMIN from "./pages/ADMIN/ADMIN";
+import ADMIN_Inbox from "./pages/ADMIN/ADMIN_Inbox";
 
 const base = (import.meta.env.BASE_URL || "/").replace(/\/$/, "");
 
@@ -45,28 +59,42 @@ export default function App() {
 
         {/* Protected (after login) */}
         <Route element={<RequireAuth />}>
-          <Route path="/om/home" element={<OM_HomePage />} />
-          <Route path="/om/profile" element={<OM_ProfilePage />} />
-        </Route>
+          {/* OM */}
+          <Route path="/om/load-assignment" element={<OM_LoadAssignment />} />
+          <Route path="/om/faculty-management" element={<OM_FacultyMgt />} />
 
-        {/* -------- APO -------- */}
-        <Route element={<RequireAuth />}>
+          {<Route path="/om/inbox" element={<OM_Inbox />} /> }
+          
+           {/* 
+          <Route path="/om/course-management" element={<OM_CourseMgt />} />
+          <Route path="/om/reports-analytics" element={<OM_ReportsAnalytics />} />
+          <Route path="/om/faculty-form" element={<OM_FacultyForm />} />
+          <Route path="/om/student-petition" element={<OM_StudentPetition />} />
+          <Route path="/om/class-retention" element={<OM_ClassRetention />} />
+          {/* Optional direct route for OM Inbox (TopBar also opens it inline as a tab) */}
+          {/* <Route path="/om/inbox" element={<OM_Inbox />} /> */}
+        
+
+          {/* APO */}
           <Route path="/apo/preenlistment" element={<APO_PreEnlistment />} />
           <Route path="/apo/courseofferings" element={<APO_CourseOfferings />} />
           <Route path="/apo/roomallocation" element={<APO_RoomAllocation />} />
           <Route path="/apo/inbox" element={<APO_Inbox />} />
-        </Route>
-        {/* -------- Student -------- */}
-        <Route element={<RequireAuth />}>
+
+          {/* Student */}
           <Route path="/student/petition" element={<STUDENT_Petition />} />
-        </Route>
-        {/* -------- Faculty -------- */}
-        <Route element={<RequireAuth />}>
+
+          {/* Faculty */}
           <Route path="/faculty/overview" element={<FACULTY_Overview />} />
-          <Route path="/faculty/history" element={<div className="p-6">History (placeholder)</div>} />
-          <Route path="/faculty/preferences" element={<div className="p-6">Preferences (placeholder)</div>} />
-          <Route path="/faculty/inbox" element={<FACULTY_Inbox />} />
+          <Route path="/faculty/history" element={<FACULTY_History />} />
+          <Route path="/faculty/preferences" element={<FACULTY_Preferences />} />
+          <Route path="/inbox" element={<FACULTY_Inbox />} />
+
+          {/* Admin */}
+          <Route path="/admin" element={<ADMIN />} />
+          <Route path="/admin/inbox" element={<ADMIN_Inbox />} />
         </Route>
+
         {/* Fallback */}
         <Route path="*" element={<Navigate to="/Login" replace />} />
       </Routes>
