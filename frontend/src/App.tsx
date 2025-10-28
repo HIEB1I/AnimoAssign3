@@ -12,6 +12,7 @@ import OM_desc2 from "./pages/OM/OM_desc2";
 import OM_desc3 from "./pages/OM/OM_desc3";
 import OM_pred1 from "./pages/OM/OM_pred1";
 import OM_pred2 from "./pages/OM/OM_pred2";
+import OM_LoadReco from "./pages/OM/OM_LoadReco";
 
 // ---------------- APO ----------------
 import APO_PreEnlistment from "./pages/APO/APO_PreEnlistment";
@@ -59,6 +60,7 @@ export default function App() {
           <Route path="/om/desc3" element={<OM_desc3 />} />
           <Route path="/om/pred1" element={<OM_pred1 />} />
           <Route path="/om/pred2" element={<OM_pred2 />} />
+          <Route path="/om/loadreco" element={<OM_LoadReco />} />
         </Route>
 
         {/* -------- APO -------- */}

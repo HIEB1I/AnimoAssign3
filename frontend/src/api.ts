@@ -132,6 +132,31 @@ export async function fetchPTRisk(params: {
 }
 
 /* =========================================================
+   ===============  Load Recommendation ===================
+   ========================================================= */
+export type FacultyProfile = {
+  _id?: string;
+  faculty_id?: string;
+  first_name?: string;
+  last_name?: string;
+  email?: string;
+  department_id?: string;
+  [k: string]: any;
+};
+
+// Communicated with OM_LoadReco.tsx & analytics reco
+
+export async function getOneFacultyProfile(): Promise<FacultyProfile> {
+  // Resolve under current BASE (handles /staging/ automatically)
+  const url = join(BASE, "/analytics/om/loadreco");
+  const { data } = await axios.get(url);
+  return data;
+}
+
+
+
+
+/* =========================================================
    ===============  APO: PRE-ENLISTMENT  ===================
    ========================================================= */
 export type PreenlistmentCountDoc = {

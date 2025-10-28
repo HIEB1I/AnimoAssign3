@@ -4,6 +4,9 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from .config import get_settings
 from datetime import datetime
 
+import math
+from typing import List
+
 @lru_cache(maxsize=1)
 def get_client() -> AsyncIOMotorClient:
     return AsyncIOMotorClient(get_settings().mongodb_uri)
@@ -275,7 +278,7 @@ async def demand_sections_sections_first(
         ]
         agg = [x async for x in db.sections.aggregate(pipeline)]
         avg_cap = int(round(agg[0]["avg_cap"])) if agg else 40
-        return int(ceil(float(PE["seats_requested"]) / max(1, avg_cap)))
+        return int(math.ceil(float(PE["seats_requested"]) / max(1, avg_cap)))
 
     # Fallback B: historical realized demand using weighted past sections × fill rates
     # last 3 terms before current
@@ -551,3 +554,17 @@ async def run_pt_risk(
         "generated_at": datetime.utcnow().isoformat() + "Z",
         "params": P,
     }
+
+# -- =========================================================
+#    ===============  LOAD RECO ===================
+#    ========================================================= --
+
+   
+async def get_one_faculty_profile() -> Optional[Dict[str, Any]]:
+    """
+    Returns a single document from the 'faculty_profiles' collection.
+    Excludes _id for easier JSON serialization. Adjust projection as needed.
+    """
+    db = get_db()
+    doc = await db["faculty_profiles"].find_one({}, {"_id": 0})
+    return doc
