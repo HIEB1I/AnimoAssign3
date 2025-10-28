@@ -1,7 +1,7 @@
 // frontend/src/pages/APO/APO_PreEnlistment.tsx
 import React, { useEffect, useMemo, useState } from "react";
 import Papa, { type ParseResult } from "papaparse";
-import { Pencil, Check, Upload, Archive } from "lucide-react";
+import { Pencil, Check, Upload, Archive, Download } from "lucide-react";
 import TopBar from "../../component/TopBar";
 import Tabs from "../../component/Tabs";
 import SelectBox from "../../component/SelectBox";
@@ -16,6 +16,7 @@ import {
   type PreenlistmentStatDoc,
   type TermMeta,
   type ArchiveMetaItem,
+  campusFromRoles,
 } from "../../api";
 
 export default function APO_PreEnlistment() {
@@ -39,14 +40,48 @@ export default function APO_PreEnlistment() {
   const [archiveStats, setArchiveStats] = useState<string[][]>([]);
   const [archiveLoading, setArchiveLoading] = useState(false);
 
+  // Label shows "Term {term_number} · AY ..."
+  const archiveLabel = (t: ArchiveMetaItem) => `Term ${t.term_number ?? "—"} · ${t.ay_label}`;
+
+  // --- Totals (no search bars in archive) ---
+  const totalArchiveCount = useMemo(
+    () => archiveCount.reduce((sum, r) => sum + (parseInt(r[4] as string, 10) || 0), 0),
+    [archiveCount]
+  );
+  const totalsArchiveStats = useMemo(() => {
+    const sums = [0, 0, 0, 0];
+    archiveStats.forEach((r) => {
+      sums[0] += parseInt(r[1] as string, 10) || 0;
+      sums[1] += parseInt(r[2] as string, 10) || 0;
+      sums[2] += parseInt(r[3] as string, 10) || 0;
+      sums[3] += parseInt(r[4] as string, 10) || 0;
+    });
+    return sums;
+  }, [archiveStats]);
+
+  const exportCsv = (filename: string, headers: string[], rows: (string | number)[][]) => {
+    const esc = (v: any) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+    const csv = [headers.map(esc).join(","), ...rows.map((r) => r.map(esc).join(","))].join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   const user = useMemo(() => {
     const raw = localStorage.getItem("animo.user");
     return raw ? JSON.parse(raw) : null;
   }, []);
   const fullName = user?.fullName ?? "APO";
+  const campusName = campusFromRoles(user?.roles || []); // "MANILA" | "LAGUNA" | null
   const roleName = useMemo(() => {
     if (!user?.roles) return "Academic Programming Officer";
-    return user.roles.includes("apo") ? "Academic Programming Officer" : user.roles[0] || "User";
+    return (user.roles as string[]).some((r) => /^apo\b/i.test(r))
+      ? "Academic Programming Officer"
+      : user.roles[0] || "User";
   }, [user]);
 
   useEffect(() => {
@@ -66,34 +101,54 @@ export default function APO_PreEnlistment() {
         setLoading(false);
       }
     })();
-  }, [user]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.userId, campusName]);
 
   const headerLabel = activeMeta ? `Term ${activeMeta.term_number ?? ""} ${activeMeta.ay_label}` : "";
-  const campusLabel = activeMeta?.campus_label ? activeMeta.campus_label : "";
+  const campusLabel = activeMeta?.campus_label
+    ? activeMeta.campus_label
+    : campusName === "MANILA"
+    ? "Manila"
+    : campusName === "LAGUNA"
+    ? "Laguna"
+    : "";
+
+  const normalizeProgramCode = (s: PreenlistmentStatDoc) =>
+    (s as any).program_code ??
+    (s as any)?.programs?.program_code ??
+    ""; // backend may return programs.program_code (joined)
 
   const refresh = async () => {
     if (!user?.userId) return;
-    const { count, statistics, meta } = await getApoPreenlistment(user.userId, undefined, "active");
+    const { count, statistics, meta } = await getApoPreenlistment(
+      user.userId,
+      undefined,
+      "active",
+      campusName || undefined
+    );
 
     setActiveMeta((meta as TermMeta) ?? null);
 
+    // COUNT table (acad_group now comes from colleges.college_code via backend)
     setEnlistedCourses(
       (count ?? ([] as PreenlistmentCountDoc[])).map((d) => [
         d.preenlistment_code || "",
-        d.career,
-        d.acad_group,
-        d.campus_name,
-        d.course_code,
-        String(d.count),
+        d.career || "",
+        (d as any).acad_group || "", // display-only, equals colleges.college_code
+        d.campus_name || "",
+        d.course_code || "",
+        String(d.count ?? 0),
       ])
     );
+
+    // STATS table (program_code may be nested)
     setEnrollmentStats(
       (statistics ?? ([] as PreenlistmentStatDoc[])).map((s) => [
-        s.program_code,
-        String(s.freshman),
-        String(s.sophomore),
-        String(s.junior),
-        String(s.senior),
+        normalizeProgramCode(s),
+        String(s.freshman ?? 0),
+        String(s.sophomore ?? 0),
+        String(s.junior ?? 0),
+        String(s.senior ?? 0),
       ])
     );
   };
@@ -115,12 +170,19 @@ export default function APO_PreEnlistment() {
         const rows: CountCsvRow[] = updated.map((r) => ({
           Code: r[0] || "",
           Career: r[1],
-          "Acad Group": r[2],
-          Campus: r[3] as "MANILA" | "LAGUNA",
+          "Acad Group": r[2], // not stored; backend derives from colleges on display
+          Campus: (r[3] as "MANILA" | "LAGUNA") || (campusName as "MANILA" | "LAGUNA"),
           "Course Code": r[4],
           Count: Number(r[5] ?? 0),
         }));
-        await importApoPreenlistment(user.userId, rows, [], undefined, { replaceCount: true });
+        await importApoPreenlistment(
+          user.userId,
+          rows,
+          [],
+          undefined,
+          { replaceCount: true },
+          campusName || undefined
+        );
         await refresh();
       } catch (e) {
         console.error(e);
@@ -144,13 +206,21 @@ export default function APO_PreEnlistment() {
       try {
         if (!user?.userId) throw new Error("Not logged in");
         const rows: StatCsvRow[] = updated.map((r) => ({
-          Program: r[0],
+          Program: r[0], // program_code
           FRESHMAN: Number(r[1] ?? 0),
           SOPHOMORE: Number(r[2] ?? 0),
           JUNIOR: Number(r[3] ?? 0),
           SENIOR: Number(r[4] ?? 0),
+          // ENROLLMENT (optional) can be omitted; backend computes if not provided
         }));
-        await importApoPreenlistment(user.userId, [], rows, undefined, { replaceStats: true });
+        await importApoPreenlistment(
+          user.userId,
+          [],
+          rows,
+          undefined,
+          { replaceStats: true },
+          campusName || undefined
+        );
         await refresh();
       } catch (e) {
         console.error(e);
@@ -166,10 +236,20 @@ export default function APO_PreEnlistment() {
       header: true,
       skipEmptyLines: true,
       complete: async (results: ParseResult<CountCsvRow>) => {
-        const rows = results.data.filter(
-          (r) => r["Course Code"] && r.Career && r["Acad Group"] && r.Campus && r.Count !== undefined
+        const rows = results.data
+          .map((r) => {
+            if (!r.Campus && campusName) (r as any).Campus = campusName;
+            return r;
+          })
+          .filter((r) => r["Course Code"] && r.Career && r.Campus && r.Count !== undefined);
+        await importApoPreenlistment(
+          user.userId,
+          rows,
+          [],
+          undefined,
+          { replaceCount: true },
+          campusName || undefined
         );
-        await importApoPreenlistment(user.userId, rows, [], undefined, { replaceCount: true });
         await refresh();
       },
     });
@@ -183,7 +263,14 @@ export default function APO_PreEnlistment() {
       skipEmptyLines: true,
       complete: async (results: ParseResult<StatCsvRow>) => {
         const rows = results.data.filter((r) => !!r.Program);
-        await importApoPreenlistment(user.userId, [], rows, undefined, { replaceStats: true });
+        await importApoPreenlistment(
+          user.userId,
+          [],
+          rows,
+          undefined,
+          { replaceStats: true },
+          campusName || undefined
+        );
         await refresh();
       },
     });
@@ -192,10 +279,10 @@ export default function APO_PreEnlistment() {
   const moveToArchives = async () => {
     if (!user?.userId) return;
     const label = activeMeta ? `Term ${activeMeta.term_number ?? ""} ${activeMeta.ay_label}` : "current term";
-    if (!confirm(`Archive ${label}? This will snapshot active rows and advance to the next term.`)) return;
+    if (!confirm(`Archive ${label}? This will snapshot active rows (for your campus) and may advance the term.`)) return;
     try {
       setArchiving(true);
-      await archiveApoPreenlistment(user.userId);
+      await archiveApoPreenlistment(user.userId, undefined, campusName || undefined);
       await refresh();
     } catch (e: any) {
       setErr(e?.message || "Failed to archive.");
@@ -204,36 +291,38 @@ export default function APO_PreEnlistment() {
     }
   };
 
-  const labelForTerm = (t: ArchiveMetaItem) => `${t.term_id} · ${t.ay_label}`;
-  const labelToTid = (label: string) => label.split(" · ")[0] || "";
-
   const goToArchives = async () => {
     if (!user?.userId) return;
     setView("archives");
     setArchiveLoading(true);
     try {
-      const { archives } = await getApoPreenlistmentMeta(user.userId);
+      const { archives } = await getApoPreenlistmentMeta(user.userId, campusName || undefined);
       setArchiveTerms(archives);
       const firstTid = archives[0]?.term_id ?? "";
       setArchiveTermId(firstTid);
       if (firstTid) {
-        const { count, statistics } = await getApoPreenlistment(user.userId, firstTid, "archive");
+        const { count, statistics } = await getApoPreenlistment(
+          user.userId,
+          firstTid,
+          "archive",
+          campusName || undefined
+        );
         setArchiveCount(
           (count ?? ([] as PreenlistmentCountDoc[])).map((d) => [
-            d.career,
-            d.acad_group,
-            d.campus_name,
-            d.course_code,
-            String(d.count),
+            d.career || "",
+            (d as any).acad_group || "",
+            d.campus_name || "",
+            d.course_code || "",
+            String(d.count ?? 0),
           ])
         );
         setArchiveStats(
           (statistics ?? ([] as PreenlistmentStatDoc[])).map((s) => [
-            s.program_code,
-            String(s.freshman),
-            String(s.sophomore),
-            String(s.junior),
-            String(s.senior),
+            normalizeProgramCode(s),
+            String(s.freshman ?? 0),
+            String(s.sophomore ?? 0),
+            String(s.junior ?? 0),
+            String(s.senior ?? 0),
           ])
         );
       } else {
@@ -245,29 +334,35 @@ export default function APO_PreEnlistment() {
     }
   };
 
-  const changeArchiveTerm = async (tidOrLabel: string) => {
+  const changeArchiveTerm = async (label: string) => {
     if (!user?.userId) return;
-    const tid = tidOrLabel.includes(" · ") ? labelToTid(tidOrLabel) : tidOrLabel;
+    const picked = archiveTerms.find((t) => archiveLabel(t) === label);
+    const tid = picked?.term_id ?? "";
     setArchiveTermId(tid);
     setArchiveLoading(true);
     try {
-      const { count, statistics } = await getApoPreenlistment(user.userId, tid, "archive");
+      const { count, statistics } = await getApoPreenlistment(
+        user.userId,
+        tid,
+        "archive",
+        campusName || undefined
+      );
       setArchiveCount(
         (count ?? ([] as PreenlistmentCountDoc[])).map((d) => [
-          d.career,
-          d.acad_group,
-          d.campus_name,
-          d.course_code,
-          String(d.count),
+          d.career || "",
+          (d as any).acad_group || "",
+          d.campus_name || "",
+          d.course_code || "",
+          String(d.count ?? 0),
         ])
       );
       setArchiveStats(
         (statistics ?? ([] as PreenlistmentStatDoc[])).map((s) => [
-          s.program_code,
-          String(s.freshman),
-          String(s.sophomore),
-          String(s.junior),
-          String(s.senior),
+          normalizeProgramCode(s),
+          String(s.freshman ?? 0),
+          String(s.sophomore ?? 0),
+          String(s.junior ?? 0),
+          String(s.senior ?? 0),
         ])
       );
     } finally {
@@ -362,15 +457,16 @@ export default function APO_PreEnlistment() {
                   <tbody className="text-gray-700">
                     {enlistedCourses.map((row, i) => (
                       <tr key={i} className="border-b last:border-0 hover:bg-gray-50">
-                        {row.map((cell, j) => (
+                        <td className="py-2 px-2">{i + 1}</td>
+                        {row.slice(1).map((cell, j) => (
                           <td key={j} className="py-2 px-2 whitespace-nowrap">
-                            {editIndexCourses === i && j === row.length - 1 ? (
+                            {editIndexCourses === i && j === row.length - 2 ? (
                               <input
-                                value={editRowCourses?.[j] ?? ""}
+                                value={editRowCourses?.[j + 1] ?? ""}
                                 onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
                                   const base = editRowCourses ?? [];
                                   const copy = [...base];
-                                  copy[j] = e.target.value;
+                                  copy[j + 1] = e.target.value;
                                   setEditRowCourses(copy);
                                 }}
                                 type="number"
@@ -391,7 +487,11 @@ export default function APO_PreEnlistment() {
                               <Check className="h-4 w-4" strokeWidth={2.5} />
                             </button>
                           ) : (
-                            <button onClick={() => startEditCourses(i)} className="text-gray-500 hover:text-black" title="Edit count">
+                            <button
+                              onClick={() => startEditCourses(i)}
+                              className="text-gray-500 hover:text-black"
+                              title="Edit count"
+                            >
                               <Pencil className="h-4 w-4" />
                             </button>
                           )}
@@ -464,7 +564,11 @@ export default function APO_PreEnlistment() {
                               <Check className="h-4 w-4" strokeWidth={2.5} />
                             </button>
                           ) : (
-                            <button onClick={() => startEditStats(i)} className="text-gray-500 hover:text-black" title="Edit stats">
+                            <button
+                              onClick={() => startEditStats(i)}
+                              className="text-gray-500 hover:text-black"
+                              title="Edit stats"
+                            >
                               <Pencil className="h-4 w-4" />
                             </button>
                           )}
@@ -474,7 +578,7 @@ export default function APO_PreEnlistment() {
                     {enrollmentStats.length === 0 && (
                       <tr>
                         <td colSpan={6} className="py-8 text-center text-gray-500">
-                          No rows yet — import a CSV.
+                          No data.
                         </td>
                       </tr>
                     )}
@@ -486,8 +590,8 @@ export default function APO_PreEnlistment() {
         )}
 
         {view === "archives" && (
-          <div className="rounded-xl bg-white shadow-sm border border-gray-200 p-6 w-full">
-            <div className="mb-4 flex items-center gap-3">
+          <div className="rounded-2xl bg-white shadow-sm border border-neutral-200 p-6 w-full">
+            <div className="mb-5 flex flex-wrap items-center gap-3">
               <h3 className="text-lg font-semibold">Archived Data</h3>
 
               <div className="ml-6 flex items-center gap-3">
@@ -495,13 +599,11 @@ export default function APO_PreEnlistment() {
                 <SelectBox
                   value={
                     archiveTermId && archiveTerms.length
-                      ? `${archiveTerms.find(x => x.term_id === archiveTermId)!.term_id} · ${
-                          archiveTerms.find(x => x.term_id === archiveTermId)!.ay_label
-                        }`
+                      ? archiveLabel(archiveTerms.find((x) => x.term_id === archiveTermId)!)
                       : ""
                   }
                   onChange={(label) => changeArchiveTerm(label)}
-                  options={archiveTerms.map((t) => `${t.term_id} · ${t.ay_label}`)}
+                  options={archiveTerms.map(archiveLabel)}
                   placeholder="— Select Term —"
                   className="w-[280px]"
                   disabled={archiveLoading}
@@ -520,32 +622,57 @@ export default function APO_PreEnlistment() {
             </div>
 
             <div className="grid md:grid-cols-2 gap-6">
-              <div className="border rounded-lg overflow-hidden">
-                <div className="px-4 py-2 border-b font-medium bg-gray-50">List of Enlisted Courses</div>
-                <div className="max-h-[420px] overflow-auto">
+              {/* Enlisted Courses */}
+              <div className="border rounded-xl overflow-hidden shadow-[0_1px_10px_-6px_rgba(0,0,0,0.25)]">
+                <div className="flex items-center justify-between gap-3 px-4 py-2 border-b bg-neutral-50/70">
+                  <div className="font-medium text-neutral-800">List of Enlisted Courses</div>
+                  <button
+                    onClick={() => {
+                      const sel = archiveTerms.find(t => t.term_id === archiveTermId);
+                      const base = sel
+                        ? `Term-${sel.term_number ?? "—"}_${sel.ay_label.replaceAll(" ", "-")}`
+                        : (archiveTermId || "term");
+                      exportCsv(
+                        `${base}-courses.csv`,
+                        ["Career", "Acad Group", "Campus", "Course Code", "Count"],
+                        archiveCount
+                      );
+                    }}
+                    className="inline-flex items-center gap-2 rounded-md border border-neutral-300 bg-white/80 px-3 py-1.5 text-sm hover:bg-neutral-50"
+                    title="Export CSV"
+                  >
+                    <Download className="h-4 w-4" />
+                    Export
+                  </button>
+                </div>
+
+                <div className="max-h-[460px] overflow-auto">
                   <table className="w-full text-sm">
-                    <thead className="text-left text-xs text-gray-500 border-b">
+                    <thead className="sticky top-0 z-10 bg-white/95 backdrop-blur text-left text-xs text-neutral-500 border-b">
                       <tr>
-                        <th className="py-2 px-2">Career</th>
-                        <th className="py-2 px-2">Acad Group</th>
-                        <th className="py-2 px-2">Campus</th>
-                        <th className="py-2 px-2">Course Code</th>
-                        <th className="py-2 px-2 text-right">Count</th>
+                        <th className="py-2.5 px-3">Career</th>
+                        <th className="py-2.5 px-3">Acad Group</th>
+                        <th className="py-2.5 px-3">Campus</th>
+                        <th className="py-2.5 px-3">Course Code</th>
+                        <th className="py-2.5 px-3 text-right">Count</th>
                       </tr>
                     </thead>
-                    <tbody>
+                    <tbody className="text-neutral-800">
                       {archiveCount.map((r, i) => (
-                        <tr key={i} className="border-b last:border-0">
-                          <td className="py-2 px-2">{r[0]}</td>
-                          <td className="py-2 px-2">{r[1]}</td>
-                          <td className="py-2 px-2">{r[2]}</td>
-                          <td className="py-2 px-2">{r[3]}</td>
-                          <td className="py-2 px-2 text-right">{r[4]}</td>
+                        <tr
+                          key={i}
+                          className="border-b last:border-0 odd:bg-white even:bg-neutral-50/60 hover:bg-emerald-50/40 transition-colors"
+                        >
+                          <td className="py-2.5 px-3">{r[0]}</td>
+                          <td className="py-2.5 px-3">{r[1]}</td>
+                          <td className="py-2.5 px-3">{r[2]}</td>
+                          <td className="py-2.5 px-3">{r[3]}</td>
+                          <td className="py-2.5 px-3 text-right tabular-nums">{r[4]}</td>
                         </tr>
                       ))}
                       {archiveCount.length === 0 && (
                         <tr>
-                          <td colSpan={5} className="py-6 text-center text-gray-500">
+                          <td colSpan={5} className="py-8 text-center text-gray-500">
                             No data.
                           </td>
                         </tr>
@@ -555,32 +682,57 @@ export default function APO_PreEnlistment() {
                 </div>
               </div>
 
-              <div className="border rounded-lg overflow-hidden">
-                <div className="px-4 py-2 border-b font-medium bg-gray-50">Enrollment Statistics</div>
-                <div className="max-h-[420px] overflow-auto">
+              {/* Enrollment Statistics */}
+              <div className="border rounded-xl overflow-hidden shadow-[0_1px_10px_-6px_rgba(0,0,0,0.25)]">
+                <div className="flex items-center justify-between gap-3 px-4 py-2 border-b bg-neutral-50/70">
+                  <div className="font-medium text-neutral-800">Enrollment Statistics</div>
+                  <button
+                    onClick={() => {
+                      const sel = archiveTerms.find(t => t.term_id === archiveTermId);
+                      const base = sel
+                        ? `Term-${sel.term_number ?? "—"}_${sel.ay_label.replaceAll(" ", "-")}`
+                        : (archiveTermId || "term");
+                      exportCsv(
+                        `${base}-stats.csv`,
+                        ["Program", "Freshman", "Sophomore", "Junior", "Senior"],
+                        archiveStats
+                      );
+                    }}
+                    className="inline-flex items-center gap-2 rounded-md border border-neutral-300 bg-white/80 px-3 py-1.5 text-sm hover:bg-neutral-50"
+                    title="Export CSV"
+                  >
+                    <Download className="h-4 w-4" />
+                    Export
+                  </button>
+                </div>
+
+                <div className="max-h-[460px] overflow-auto">
                   <table className="w-full text-sm">
-                    <thead className="text-left text-xs text-gray-500 border-b">
+                    <thead className="sticky top-0 z-10 bg-white/95 backdrop-blur text-left text-xs text-neutral-500 border-b">
                       <tr>
-                        <th className="py-2 px-2">Program</th>
-                        <th className="py-2 px-2 text-right">Freshman</th>
-                        <th className="py-2 px-2 text-right">Sophomore</th>
-                        <th className="py-2 px-2 text-right">Junior</th>
-                        <th className="py-2 px-2 text-right">Senior</th>
+                        <th className="py-2.5 px-3">Program</th>
+                        <th className="py-2.5 px-3 text-right">Freshman</th>
+                        <th className="py-2.5 px-3 text-right">Sophomore</th>
+                        <th className="py-2.5 px-3 text-right">Junior</th>
+                        <th className="py-2.5 px-3 text-right">Senior</th>
                       </tr>
                     </thead>
-                    <tbody>
+                    <tbody className="text-neutral-800">
                       {archiveStats.map((r, i) => (
-                        <tr key={i} className="border-b last:border-0">
-                          <td className="py-2 px-2">{r[0]}</td>
-                          <td className="py-2 px-2 text-right">{r[1]}</td>
-                          <td className="py-2 px-2 text-right">{r[2]}</td>
-                          <td className="py-2 px-2 text-right">{r[3]}</td>
-                          <td className="py-2 px-2 text-right">{r[4]}</td>
+                        <tr
+                          key={i}
+                          className="border-b last:border-0 odd:bg-white even:bg-neutral-50/60 hover:bg-emerald-50/40 transition-colors"
+                        >
+                          <td className="py-2.5 px-3">{r[0]}</td>
+                          <td className="py-2.5 px-3 text-right tabular-nums">{r[1]}</td>
+                          <td className="py-2.5 px-3 text-right tabular-nums">{r[2]}</td>
+                          <td className="py-2.5 px-3 text-right tabular-nums">{r[3]}</td>
+                          <td className="py-2.5 px-3 text-right tabular-nums">{r[4]}</td>
                         </tr>
                       ))}
                       {archiveStats.length === 0 && (
                         <tr>
-                          <td colSpan={5} className="py-6 text-center text-gray-500">
+                          <td colSpan={5} className="py-8 text-center text-gray-500">
                             No data.
                           </td>
                         </tr>

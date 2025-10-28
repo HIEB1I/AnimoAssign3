@@ -4,6 +4,7 @@ import "./App.css";
 
 // Pages
 import Login from "./pages/Login/Login";
+import AuthCallback from "./pages/Login/AuthCallback";
 import OM_HomePage from "./pages/OM/OM_HomePage";
 import OM_ProfilePage from "./pages/OM/OM_Profile";
 
@@ -42,7 +43,8 @@ export default function App() {
 
         {/* Public */}
         <Route path="/Login" element={<Login />} />
-
+        <Route path="/auth/callback" element={<AuthCallback />} />
+        
         {/* Protected (after login) */}
         <Route element={<RequireAuth />}>
           <Route path="/om/home" element={<OM_HomePage />} />

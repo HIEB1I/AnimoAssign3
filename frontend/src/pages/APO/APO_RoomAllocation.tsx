@@ -1,4 +1,3 @@
-// frontend/src/pages/APO/APO_RoomAllocation.tsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   Users,
@@ -6,9 +5,10 @@ import {
   Eye,
   Pencil,
   ChevronDown,
+  ChevronUp,
+  Search,
   FlaskConical,
   ArrowLeft,
-  Trash2,
   Plus,
 } from "lucide-react";
 import TopBar from "../../component/TopBar";
@@ -19,17 +19,18 @@ import {
   setRoomAvailability,
   assignRoom,
   unassignRoom,
-  removeRoom,
   addRoom,
 } from "../../api";
 
-/* ---------------- Types (mirror backend response) ---------------- */
+/* ---------------- Types ---------------- */
 type Day = "Monday" | "Tuesday" | "Wednesday" | "Thursday" | "Friday" | "Saturday";
+type RoomType = "Classroom" | "ComLab";
 
 type RoomCell = {
   day: Day;
   time_band: string;          // "HH:MM – HH:MM"
   section_id?: string | null; // assigned section for that cell
+  allowed?: boolean;
 };
 
 type RoomItem = {
@@ -37,10 +38,10 @@ type RoomItem = {
   room_number: string;
   building: string;
   campus_id: string;
-  room_type: "Classroom" | "Lab" | string;
+  room_type: RoomType | string;
   capacity: number;
   status?: string;
-  schedule: RoomCell[];
+  schedule: RoomCell[];       // only "allowed" cells (availability placeholders or assigned)
 };
 
 type SectionDoc = {
@@ -50,14 +51,8 @@ type SectionDoc = {
   course_code?: string;
 };
 
-type SectionSched = {
-  section_id: string;
-  day: Day;
-  time_band: string;
-};
-
+type SectionSched = { section_id: string; day: Day; time_band: string };
 type CourseDoc = { course_id: string; course_code: string[] | string };
-
 type FacultyInfo = { faculty_id: string; faculty_name: string };
 
 type RoomAllocationResponse = {
@@ -77,6 +72,7 @@ const chipClass =
   "inline-flex items-center rounded-full border border-emerald-200 bg-emerald-50 px-2 py-1 text-xs font-medium text-emerald-700";
 
 const DAYS: Day[] = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+const ROOM_TYPES: RoomType[] = ["Classroom", "ComLab"];
 
 /* ---------------- MultiSelect ---------------- */
 function MultiSelect({
@@ -170,7 +166,6 @@ function MultiSelect({
 }
 
 /* ---------------- Allocate Class Modal ---------------- */
-/** NOTE: day & timeBand are fixed — cannot be edited here */
 function AllocateClassModal({
   room,
   day,
@@ -182,6 +177,8 @@ function AllocateClassModal({
   rooms,
   facultyBySection,
   coursesMap,
+  saving,
+  allocError,
 }: {
   room: RoomItem;
   day: Day;
@@ -192,12 +189,12 @@ function AllocateClassModal({
   sectionSchedules: SectionSched[];
   rooms: RoomItem[];
   facultyBySection: Record<string, FacultyInfo>;
-  coursesMap: Record<string, string>; // course_id -> course_code
+  coursesMap: Record<string, string>;
+  saving: boolean;
+  allocError: string | null;
 }) {
-  // We show a human label in the SelectBox but keep a mapping to the section_id
   const [selectedLabel, setSelectedLabel] = useState<string>("");
 
-  // sections already assigned in any room at this exact day/time
   const assigned = useMemo(() => {
     const set = new Set<string>();
     rooms.forEach((r) =>
@@ -223,18 +220,16 @@ function AllocateClassModal({
     [sections, matchingSectionIds, assigned, day, timeBand]
   );
 
-  // label -> section_id map for SelectBox
   const labelToId = useMemo(() => {
     const m: Record<string, string> = {};
     availableSections.forEach((s) => {
       const code = s.course_code ?? (s.course_id ? coursesMap[s.course_id] : "");
-      const label = `${code} - ${s.section_code}`;
-      m[label] = s.section_id;
+      m[`${code} - ${s.section_code}`] = s.section_id;
     });
     return m;
   }, [availableSections, coursesMap]);
 
-  const labels = useMemo(() => Object.keys(labelToId), [labelToId]);
+  const labels = useMemo(() => Object.keys(labelToId).sort(), [labelToId]);
   const sectionId = selectedLabel ? labelToId[selectedLabel] : "";
 
   return (
@@ -261,18 +256,19 @@ function AllocateClassModal({
               const code = sec?.course_code ?? (sec?.course_id ? coursesMap[sec.course_id] : "");
               return (
                 <>
-                  <div>
-                    <span className="font-medium">Course:</span> {code || "—"}
-                  </div>
-                  <div>
-                    <span className="font-medium">Section:</span> {sec?.section_code || "—"}
-                  </div>
-                  <div>
-                    <span className="font-medium">Faculty:</span> {fac ? fac.faculty_name : "—"}
-                  </div>
+                  <div><span className="font-medium">Course:</span> {code || "—"}</div>
+                  <div><span className="font-medium">Section:</span> {sec?.section_code || "—"}</div>
+                  <div><span className="font-medium">Faculty:</span> {fac ? fac.faculty_name : "—"}</div>
                 </>
               );
             })()}
+          </div>
+        )}
+
+        {/* Error banner (shown when assign fails) */}
+        {allocError && (
+          <div className="mb-3 mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+            {allocError}
           </div>
         )}
 
@@ -284,11 +280,11 @@ function AllocateClassModal({
             Cancel
           </button>
           <button
-            disabled={!sectionId}
+            disabled={!sectionId || saving}
             onClick={() => onSave(sectionId)}
             className="rounded-lg bg-emerald-700 px-4 py-2 text-sm font-medium text-white hover:brightness-110 disabled:opacity-50"
           >
-            Save
+            {saving ? "Saving…" : "Save"}
           </button>
         </div>
       </div>
@@ -310,6 +306,7 @@ function AddRoomModal({
   onClose: () => void;
   onSaved: (newBuilding: string) => void;
 }) {
+  // Use *all* buildings (except the synthetic "All Buildings") from backend
   const existingBuildings = useMemo(
     () => buildings.filter((b) => b && b !== "All Buildings"),
     [buildings]
@@ -319,7 +316,7 @@ function AddRoomModal({
     defaultBuilding && defaultBuilding !== "All Buildings" ? defaultBuilding : existingBuildings[0] || ""
   );
   const [roomNumber, setRoomNumber] = useState("");
-  const [roomType, setRoomType] = useState<"Classroom" | "Lab">("Classroom");
+  const [roomType, setRoomType] = useState<RoomType>("Classroom");
   const [capacity, setCapacity] = useState<number | "">("");
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -372,19 +369,13 @@ function AddRoomModal({
         <div className="space-y-4 text-sm">
           <div>
             <label className="mb-1 block font-medium">Building</label>
-            {/* Allow free text with suggestions so new buildings are possible */}
-            <input
-              list="building-suggestions"
+            <SelectBox
               value={building}
-              onChange={(e) => setBuilding(e.target.value)}
-              placeholder="e.g. Gokongwei Hall"
-              className="w-full rounded-lg border border-gray-300 px-3 py-2 shadow-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/30"
+              onChange={setBuilding}
+              options={existingBuildings}
+              placeholder="Select a building"
+              className="w-full"
             />
-            <datalist id="building-suggestions">
-              {existingBuildings.map((b) => (
-                <option key={b} value={b} />
-              ))}
-            </datalist>
           </div>
 
           <div>
@@ -402,8 +393,8 @@ function AddRoomModal({
               <label className="mb-1 block font-medium">Room Type</label>
               <SelectBox
                 value={roomType}
-                onChange={(v) => setRoomType(v as "Classroom" | "Lab")}
-                options={["Classroom", "Lab"]}
+                onChange={(v) => setRoomType(v as RoomType)}
+                options={ROOM_TYPES}
                 placeholder="Select type"
               />
             </div>
@@ -447,22 +438,18 @@ function AddRoomModal({
 /* ---------------- Edit Room Modal ---------------- */
 function EditRoomModal({
   room,
-  campusName,
   timeBands,
   onClose,
   onSaved,
 }: {
   room: RoomItem;
-  campusName: string;
+  campusName: string; // kept for prop compatibility with caller
   timeBands: string[];
   onClose: () => void;
-  onSaved: () => void; // parent will refresh data
+  onSaved: () => void;
 }) {
   const [selectedDay, setSelectedDay] = useState<Day | "">("");
   const [selectedSlots, setSelectedSlots] = useState<string[]>([]);
-  const [confirmOpen, setConfirmOpen] = useState(false);
-
-  // preload slots when a day is picked
   useEffect(() => {
     if (selectedDay) {
       const slots = room.schedule.filter((s) => s.day === selectedDay).map((s) => s.time_band);
@@ -484,7 +471,8 @@ function EditRoomModal({
       day: selectedDay,
       time_bands: selectedSlots,
     });
-    onSaved();
+    await onSaved();
+    onClose();
   };
 
   return (
@@ -492,40 +480,15 @@ function EditRoomModal({
       <div className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-2xl">
         <h3 className="mb-4 text-xl font-semibold text-emerald-700">Edit Room</h3>
         <div className="space-y-4 text-sm">
-          <div className="grid gap-4 sm:grid-cols-3">
-            <div>
-              <div className="font-semibold">Campus</div>
-              <div>{campusName} Campus</div>
-            </div>
-            <div>
-              <div className="font-semibold">Building</div>
-              <div>{room.building}</div>
-            </div>
-            <div>
-              <div className="font-semibold">Room Number</div>
-              <div>{room.room_number}</div>
-            </div>
-          </div>
-          <div className="grid gap-4 sm:grid-cols-2">
-            <div>
-              <div className="font-semibold">Capacity</div>
-              <div>{room.capacity}</div>
-            </div>
-            <div>
-              <div className="font-semibold">Room Type</div>
-              <div>{room.room_type}</div>
-            </div>
-          </div>
-
           <div className="space-y-2">
-            <label className="block text-sm font-medium">Edit Day & Allowed Time Slots</label>
+            <label className="block text-sm font-medium">Choose day & time slots</label>
             <div className="flex items-start gap-2">
               <div className="flex-1 self-stretch">
                 <SelectBox
                   value={selectedDay}
                   onChange={(v) => setSelectedDay(v as Day)}
                   options={DAYS}
-                  placeholder="Select Day"
+                  placeholder="Select day"
                   className="w-full"
                 />
               </div>
@@ -542,65 +505,21 @@ function EditRoomModal({
           </div>
         </div>
 
-        <div className="mt-6 flex justify-between">
+        <div className="mt-6 flex justify-end gap-2">
           <button
-            onClick={() => setConfirmOpen(true)}
-            className="inline-flex items-center gap-2 rounded-lg border border-red-300 bg-red-50 px-4 py-2 text-sm font-medium text-red-600 hover:bg-red-100"
+            onClick={onClose}
+            className="rounded-lg border border-neutral-300 bg-neutral-100 px-4 py-2 text-sm hover:bg-neutral-200"
           >
-            <Trash2 className="h-4 w-4" />
-            Remove Room
+            Cancel
           </button>
-
-        <div className="flex gap-2">
-            <button
-              onClick={onClose}
-              className="rounded-lg border border-neutral-300 bg-neutral-100 px-4 py-2 text-sm hover:bg-neutral-200"
-            >
-              Close
-            </button>
-            <button
-              disabled={!selectedDay}
-              onClick={saveDay}
-              className="rounded-lg bg-emerald-700 px-4 py-2 text-sm font-medium text-white hover:brightness-110 disabled:opacity-50"
-            >
-              Save Day’s Slots
-            </button>
-          </div>
+          <button
+            disabled={!selectedDay}
+            onClick={saveDay}
+            className="rounded-lg bg-emerald-700 px-4 py-2 text-sm font-medium text-white hover:brightness-110 disabled:opacity-50"
+          >
+            Save
+          </button>
         </div>
-
-        {/* Confirm Remove */}
-        {confirmOpen && (
-          <div className="fixed inset-0 z-[110] grid place-items-center bg-black/40 p-4">
-            <div className="w-full max-w-sm rounded-2xl bg-white p-6 shadow-2xl">
-              <h3 className="text-lg font-semibold text-red-700 mb-2">Remove this room?</h3>
-              <p className="text-sm text-gray-700">
-                This will remove <span className="font-medium">{room.room_number}</span> and clear any class
-                assignments for its configured slots.
-              </p>
-              <div className="mt-5 flex justify-end gap-2">
-                <button
-                  onClick={() => setConfirmOpen(false)}
-                  className="rounded-lg border border-neutral-300 bg-neutral-100 px-4 py-2 text-sm hover:bg-neutral-200"
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={async () => {
-                    const user = JSON.parse(localStorage.getItem("animo.user") || "{}");
-                    if (!user?.userId) return;
-                    await removeRoom(user.userId, { room_id: room.room_id });
-                    setConfirmOpen(false);
-                    onSaved();
-                    onClose();
-                  }}
-                  className="rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white hover:brightness-110"
-                >
-                  Remove
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
       </div>
     </div>
   );
@@ -620,7 +539,7 @@ function RoomSchedule({
 }: {
   room: RoomItem;
   onBack: () => void;
-  onUpdated: (next: RoomItem) => void; // push latest room
+  onUpdated: (next: RoomItem) => void;
   timeBands: string[];
   sections: SectionDoc[];
   sectionSchedules: SectionSched[];
@@ -630,6 +549,9 @@ function RoomSchedule({
 }) {
   const [selectedSlot, setSelectedSlot] = useState<{ day: Day; time_band: string } | null>(null);
 
+  const [allocError, setAllocError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
   const user = useMemo(() => {
     const raw = localStorage.getItem("animo.user");
     return raw ? JSON.parse(raw) : null;
@@ -637,18 +559,25 @@ function RoomSchedule({
 
   const handleAllocate = async (section_id: string) => {
     if (!selectedSlot || !user?.userId) return;
-    await assignRoom(user.userId, {
-      room_id: room.room_id,
-      day: selectedSlot.day,
-      time_band: selectedSlot.time_band,
-      section_id,
-    });
-    // optimistic local apply so user sees instantly
-    const updatedCells = room.schedule.map((c) =>
-      c.day === selectedSlot.day && c.time_band === selectedSlot.time_band ? { ...c, section_id } : c
-    );
-    onUpdated({ ...room, schedule: updatedCells });
-    setSelectedSlot(null);
+    try {
+      setSaving(true);
+      setAllocError(null);
+      await assignRoom(user.userId, {
+        room_id: room.room_id,
+        day: selectedSlot.day,
+        time_band: selectedSlot.time_band,
+        section_id,
+      });
+      const updatedCells = room.schedule.map((c) =>
+        c.day === selectedSlot.day && c.time_band === selectedSlot.time_band ? { ...c, section_id } : c
+      );
+      onUpdated({ ...room, schedule: updatedCells });
+      setSelectedSlot(null);
+    } catch (e: any) {
+      setAllocError(e?.message || "Failed to assign room.");
+    } finally {
+      setSaving(false);
+    }
   };
 
   const handleRemove = async (day: Day, time_band: string, section_id?: string | null) => {
@@ -663,8 +592,6 @@ function RoomSchedule({
   return (
     <div className="w-full rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
       <h2 className="text-lg font-bold">Room Allocation</h2>
-      <p className="mb-4 text-sm text-gray-500">Manage room assignments and course scheduling for CCS</p>
-
       <div className="mb-4 flex items-center gap-2">
         <button onClick={onBack} className="flex items-center gap-2 text-emerald-700 hover:underline">
           <ArrowLeft className="h-5 w-5" />
@@ -700,21 +627,27 @@ function RoomSchedule({
                   const isAllowed = Boolean(cell);
                   const isAssigned = Boolean(cell?.section_id);
                   const sectionId = cell?.section_id || "";
+                  const sec = sections.find((s) => s.section_id === sectionId);
+                  const fac = facultyBySection[sectionId];
+                  const code = sec?.course_code ?? (sec?.course_id ? coursesMap[sec.course_id] : "");
 
-                  // resolve labels for assigned cell
                   let label: React.ReactNode = "—";
-                  if (isAssigned) {
-                    const sec = sections.find((s) => s.section_id === sectionId);
-                    const code = sec?.course_code ?? (sec?.course_id ? coursesMap[sec.course_id] : "");
-                    const fac = facultyBySection[sectionId];
+
+                  if (isAssigned && !sec) {
+                    // Assigned to a section outside APO's scope
+                    label = (
+                      <div className="text-center leading-tight">
+                        <div className="font-semibold text-[12px]">Occupied</div>
+                        <div className="text-[11px] text-neutral-600">Out-of-scope section</div>
+                      </div>
+                    );
+                  } else if (isAssigned) {
                     label = (
                       <div className="text-center leading-tight">
                         <div className="font-semibold text-[12px]">
-                          {code} – {sec?.section_code}
+                          {code || "—"} - {sec?.section_code || "—"}
                         </div>
-                        <div className="text-[11px] text-gray-600 flex items-center justify-center gap-1">
-                          <Users className="h-3 w-3 text-gray-500" /> {fac ? fac.faculty_name : "—"}
-                        </div>
+                        <div className="text-[11px]">{fac?.faculty_name || "—"}</div>
                       </div>
                     );
                   }
@@ -739,14 +672,17 @@ function RoomSchedule({
                           {label}
                           <div className="flex gap-1 mt-1">
                             <button
-                              onClick={() => setSelectedSlot({ day, time_band: band })}
-                              className="text-[11px] text-blue-600 underline"
+                              onClick={() => {
+                                setAllocError(null);
+                                setSelectedSlot({ day, time_band: band });
+                              }}
+                              className="text-[11px] rounded-full border border-neutral-200 bg-white/70 px-2 py-0.5 text-neutral-700 hover:bg-neutral-100 focus:outline-none focus:ring-2 focus:ring-emerald-400/20"
                             >
                               Edit
                             </button>
                             <button
                               onClick={() => handleRemove(day, band, sectionId)}
-                              className="text-[11px] text-red-600 underline"
+                              className="text-[11px] rounded-full border border-red-200 bg-white/70 px-2 py-0.5 text-red-600 hover:bg-red-50 focus:outline-none focus:ring-2 focus:ring-red-400/20"
                             >
                               Remove
                             </button>
@@ -754,8 +690,11 @@ function RoomSchedule({
                         </>
                       ) : (
                         <button
-                          onClick={() => setSelectedSlot({ day, time_band: band })}
-                          className="rounded bg-emerald-600 text-white text-[11px] px-2 py-1 hover:brightness-110"
+                          onClick={() => {
+                            setAllocError(null);
+                            setSelectedSlot({ day, time_band: band });
+                          }}
+                          className="rounded-md border border-emerald-300/70 bg-emerald-50 text-emerald-700 text-[11px] px-2 py-1 transition hover:bg-emerald-600 hover:text-white focus:outline-none focus:ring-2 focus:ring-emerald-400/30"
                         >
                           + Add Class
                         </button>
@@ -775,82 +714,199 @@ function RoomSchedule({
           day={selectedSlot.day}
           timeBand={selectedSlot.time_band}
           onSave={handleAllocate}
-          onCancel={() => setSelectedSlot(null)}
+          onCancel={() => {
+            setAllocError(null);
+            setSelectedSlot(null);
+          }}
           sections={sections}
           sectionSchedules={sectionSchedules}
           rooms={rooms}
           facultyBySection={facultyBySection}
           coursesMap={coursesMap}
+          saving={saving}
+          allocError={allocError}
         />
       )}
     </div>
   );
 }
 
-/* ---------------- Room Card ---------------- */
+/* ---------------- Status & availability helpers ---------------- */
 function computeStatus(room: RoomItem) {
-  // Full when every allowed cell has a section_id
   const cells = room.schedule || [];
   if (cells.length > 0 && cells.every((s) => s.section_id)) return "Full Slots";
   const avail = cells.filter((s) => !s.section_id).length;
   return cells.length === 0
-    ? "Available"
+    ? "No Available Slots"
     : avail > 0
     ? `${avail} Available Slot${avail !== 1 ? "s" : ""}`
     : "No Available Slots";
 }
+function computeCounts(room: RoomItem) {
+  const total = room.schedule.length;
+  const assigned = room.schedule.filter((c) => c.section_id).length;
+  const open = Math.max(total - assigned, 0);
+  return { total, assigned, open };
+}
+function statusColorClass(statusText: string) {
+  if (statusText === "Full Slots") return "text-amber-600";
+  if (statusText === "No Available Slots") return "text-red-600";
+  return "text-green-600";
+}
 
-function RoomCard({
-  room,
-  campusName,
-  onEdit,
+/* ---------------- Sort helpers ---------------- */
+type SortKey = "room" | "building" | "capacity" | "type" | "status" | "avail";
+type SortDir = "asc" | "desc";
+
+/* ---------------- Rooms Table ---------------- */
+function RoomsTable({
+  rooms,
   onView,
+  onEdit,
 }: {
-  room: RoomItem;
-  campusName: string;
-  onEdit: (r: RoomItem) => void;
+  rooms: RoomItem[];
+  timeBands: string[];
   onView: (r: RoomItem) => void;
+  onEdit: (r: RoomItem) => void;
 }) {
-  const typeIcon =
-    room.room_type === "Lab" ? (
-      <FlaskConical className="h-4 w-4 text-emerald-700" />
-    ) : (
-      <Building2 className="h-4 w-4 text-emerald-700" />
+  const [sortKey, setSortKey] = useState<SortKey>("room");
+  const [sortDir, setSortDir] = useState<SortDir>("asc");
+
+  const sorted = useMemo(() => {
+    const copy = [...rooms];
+    copy.sort((a, b) => {
+      const cmpStr = (x: string, y: string) => x.localeCompare(y, undefined, { numeric: true, sensitivity: "base" });
+      const { open: oa, total: ta } = computeCounts(a);
+      const { open: ob, total: tb } = computeCounts(b);
+      const statusA = computeStatus(a);
+      const statusB = computeStatus(b);
+
+      let res = 0;
+      if (sortKey === "room") res = cmpStr(a.room_number, b.room_number);
+      else if (sortKey === "building") res = cmpStr(a.building, b.building);
+      else if (sortKey === "capacity") res = a.capacity - b.capacity;
+      else if (sortKey === "type") res = cmpStr(a.room_type || "", b.room_type || "");
+      else if (sortKey === "status") res = cmpStr(statusA, statusB);
+      else if (sortKey === "avail") res = (oa / (ta || 1)) - (ob / (tb || 1));
+      return sortDir === "asc" ? res : -res;
+    });
+    return copy;
+  }, [rooms, sortKey, sortDir]);
+
+  const header = (label: string, key: SortKey, alignRight = false) => {
+    const active = sortKey === key;
+    const Icon = sortDir === "asc" ? ChevronUp : ChevronDown;
+    return (
+      <button
+        onClick={() => setSortKey(key)}
+        onDoubleClick={() => setSortDir((d) => (d === "asc" ? "desc" : "asc"))}
+        className={cls(
+          "group flex w-full items-center gap-1 font-semibold",
+          alignRight ? "justify-end" : "justify-start"
+        )}
+        title="Click to select; double-click to toggle direction"
+      >
+        <span>{label}</span>
+        <span className={cls("opacity-0 group-hover:opacity-60", active && "opacity-100")}>
+          <Icon className="h-3.5 w-3.5" />
+        </span>
+      </button>
     );
-  const statusText = computeStatus(room);
-  const statusColor = statusText === "No Available Slots" ? "text-red-600" : "text-green-600";
+  };
+
+  const btnBase =
+    "inline-flex items-center gap-2 rounded-full px-3 py-1.5 text-sm font-medium transition-all border shadow-sm focus:outline-none focus:ring-2";
+  const btnView =
+    `${btnBase} bg-white border-neutral-300 text-neutral-800 hover:bg-neutral-100 focus:ring-neutral-400/30 active:scale-[.98]`;
+  const btnEdit =
+    `${btnBase} bg-white border-neutral-300 text-neutral-800 hover:bg-neutral-100 focus:ring-neutral-400/30 active:scale-[.98]`;
 
   return (
-    <div className="rounded-lg border border-gray-300 bg-white p-4 shadow-sm">
-      <h3 className="font-bold">{room.room_number}</h3>
-      <p className="text-sm text-gray-600">
-        {room.building} | {campusName} Campus
-      </p>
-      <p className={cls("mt-1 font-medium", statusColor)}>{statusText}</p>
-      <div className="mt-2 flex items-center gap-4 text-sm text-gray-700">
-        <span className="flex items-center gap-1">
-          <Users className="h-4 w-4 text-emerald-700" />
-          {room.capacity}
-        </span>
-        <span className="flex items-center gap-1">
-          {typeIcon}
-          {room.room_type}
-        </span>
-      </div>
-      <div className="mt-3 flex gap-2">
-        <button
-          onClick={() => onView(room)}
-          className="flex items-center gap-1 rounded border px-3 py-1 text-sm hover:bg-gray-100"
-        >
-          <Eye className="h-4 w-4" /> View Schedule
-        </button>
-        <button
-          onClick={() => onEdit(room)}
-          className="flex items-center gap-1 rounded border px-3 py-1 text-sm hover:bg-gray-100"
-        >
-          <Pencil className="h-4 w-4" /> Edit
-        </button>
-      </div>
+    <div className="overflow-x-auto rounded-lg border border-neutral-200">
+      <table className="min-w-full">
+        <thead className="bg-neutral-50 sticky top-0 z-10">
+          <tr className="text-left text-[13px] text-neutral-700">
+            <th className="px-3 py-2 border-b">{header("Room", "room")}</th>
+            <th className="px-3 py-2 border-b">{header("Building", "building")}</th>
+            <th className="px-3 py-2 border-b">{header("Capacity", "capacity")}</th>
+            <th className="px-3 py-2 border-b">{header("Type", "type")}</th>
+            <th className="px-3 py-2 border-b">{header("Availability", "avail")}</th>
+            <th className="px-3 py-2 border-b">{header("Status", "status", true)}</th>
+            <th className="px-3 py-2 border-b w-[240px]">Actions</th>
+          </tr>
+        </thead>
+        <tbody className="text-sm">
+          {sorted.map((room, idx) => {
+            const statusText = computeStatus(room);
+            const { total, open } = computeCounts(room);
+            const pct = total ? Math.round((open / total) * 100) : 0;
+            const typeIcon =
+              (room.room_type as RoomType) === "ComLab" ? (
+                <FlaskConical className="h-4 w-4 text-emerald-700" />
+              ) : (
+                <Building2 className="h-4 w-4 text-emerald-700" />
+              );
+
+            return (
+              <tr
+                key={room.room_id}
+                className={cls(idx % 2 === 0 ? "bg-white" : "bg-neutral-50", "hover:bg-emerald-50/40 transition-colors")}
+              >
+                <td className="px-3 py-2 font-semibold">{room.room_number}</td>
+                <td className="px-3 py-2 text-neutral-700">{room.building}</td>
+                <td className="px-3 py-2">
+                  <span className="inline-flex items-center gap-1 text-neutral-800">
+                    <Users className="h-4 w-4 text-emerald-700" />
+                    {room.capacity}
+                  </span>
+                </td>
+                <td className="px-3 py-2">
+                  <span className="inline-flex items-center gap-1 text-neutral-800">
+                    {typeIcon}
+                    <span className="rounded-full border border-neutral-200 bg-neutral-100 px-2 py-0.5 text-[11px]">
+                      {room.room_type}
+                    </span>
+                  </span>
+                </td>
+                <td className="px-3 py-2">
+                  <div className="min-w-[160px]">
+                    <div className="h-2 rounded-full bg-neutral-200 overflow-hidden">
+                      <div
+                        className="h-2 bg-emerald-600"
+                        style={{ width: `${pct}%` }}
+                        title={`${open} open / ${total} slots`}
+                      />
+                    </div>
+                    <div className="mt-1 text-[11px] text-neutral-600">{open} open of {total}</div>
+                  </div>
+                </td>
+                <td className="px-3 py-2 text-right">
+                  <span className={cls("font-medium", statusColorClass(statusText))}>{statusText}</span>
+                </td>
+                <td className="px-3 py-2">
+                  <div className="flex items-center gap-2">
+                    <button onClick={() => onView(room)} className={btnView}>
+                      <Eye className="h-4 w-4" />
+                      View
+                    </button>
+                    <button onClick={() => onEdit(room)} className={btnEdit}>
+                      <Pencil className="h-4 w-4" />
+                      Edit
+                    </button>
+                  </div>
+                </td>
+              </tr>
+            );
+          })}
+          {rooms.length === 0 && (
+            <tr>
+              <td colSpan={7} className="px-3 py-6 text-center text-sm text-gray-500">
+                No rooms found for this view.
+              </td>
+            </tr>
+          )}
+        </tbody>
+      </table>
     </div>
   );
 }
@@ -859,6 +915,10 @@ function RoomCard({
 export default function RoomAllocationScreen() {
   const [buildings, setBuildings] = useState<string[]>([]);
   const [building, setBuilding] = useState<string>("All Buildings");
+  const [types, setTypes] = useState<string[]>(["All Types"]);
+  const [typeFilter, setTypeFilter] = useState<string>("All Types");
+  const [search, setSearch] = useState<string>("");
+
   const [timeBands, setTimeBands] = useState<string[]>([]);
   const [rooms, setRooms] = useState<RoomItem[]>([]);
   const [sections, setSections] = useState<SectionDoc[]>([]);
@@ -882,29 +942,35 @@ export default function RoomAllocationScreen() {
   const roleName = useMemo(() => {
     if (!user?.roles) return "Academic Programming Officer";
     return user.roles.includes("apo") ? "Academic Programming Officer" : user.roles[0] || "User";
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user]);
 
   const refresh = async (): Promise<RoomAllocationResponse | null> => {
     if (!user?.userId) return null;
     const data = await getApoRoomAllocation(user.userId);
-    setCampusName(data.campus.campus_name ? `${data.campus.campus_name}` : "");
-    setBuildings(["All Buildings", ...data.buildings]);
+
+    setCampusName(data.campus.campus_name || "");
     setTimeBands(data.timeBands);
+    setBuildings(["All Buildings", ...data.buildings]);
     setRooms(data.rooms);
+
     setSections(data.sections);
     setSectionSchedules(data.sectionSchedules);
     setFacultyBySection(data.facultyBySection || {});
-    // build course_id -> course_code map (handles string[] or string)
     const map: Record<string, string> = {};
     (data.courses ?? []).forEach((c) => {
       const cc = Array.isArray(c.course_code) ? c.course_code[0] : c.course_code;
       if (c.course_id && cc) map[c.course_id] = cc;
     });
-    // prefer course_code already on each section
     data.sections.forEach((s) => {
       if (s.course_id && s.course_code) map[s.course_id] = s.course_code;
     });
     setCoursesMap(map);
+
+    // derive types present for filter
+    const tset = new Set<string>();
+    data.rooms.forEach((r) => r.room_type && tset.add(r.room_type));
+    setTypes(["All Types", ...Array.from(tset).sort()]);
     return data;
   };
 
@@ -920,13 +986,31 @@ export default function RoomAllocationScreen() {
         setLoading(false);
       }
     })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const filteredRooms = rooms.filter((r) => building === "All Buildings" || r.building === building);
+  const filteredRooms = useMemo(() => {
+    let list = rooms;
+    if (building !== "All Buildings") {
+      list = list.filter((r) => r.building === building);
+    }
+    if (typeFilter !== "All Types") {
+      list = list.filter((r) => (r.room_type || "") === typeFilter);
+    }
+    if (search.trim()) {
+      const q = search.trim().toLowerCase();
+      list = list.filter(
+        (r) =>
+          r.room_number.toLowerCase().includes(q) ||
+          r.building.toLowerCase().includes(q)
+      );
+    }
+    return list;
+  }, [rooms, building, typeFilter, search]);
 
   return (
     <div className="min-h-screen w-full bg-gray-50 text-slate-900">
-      <TopBar fullName={fullName} role={roleName} />
+      <TopBar fullName={fullName} role={campusName ? `${roleName} | ${campusName}` : roleName} />
       <Tabs
         mode="nav"
         items={[
@@ -944,35 +1028,48 @@ export default function RoomAllocationScreen() {
               {err && !loading && <span className="text-red-600">{err}</span>}
             </div>
 
-            <h2 className="text-lg font-bold">Room Allocation</h2>
-            <p className="mb-4 text-sm text-gray-500">Campus: {campusName} Campus</p>
+            <div className="flex flex-wrap items-center gap-3 justify-between">
+              <div className="flex flex-wrap items-center gap-3">
+                <h2 className="text-lg font-bold">Room Allocation</h2>
+              </div>
 
-            <div className="mb-6 flex flex-wrap items-center gap-3">
-              <SelectBox value={building} onChange={setBuilding} options={buildings} />
               <button
                 onClick={() => setAdding(true)}
-                className="inline-flex items-center gap-2 rounded-lg bg-emerald-700 px-3 py-2 text-sm font-medium text-white hover:brightness-110"
+                className="inline-flex items-center gap-2 rounded-md bg-[#008e4e] px-4 py-2 text-sm font-medium text-white shadow-sm hover:brightness-110"
               >
                 <Plus className="h-4 w-4" />
                 Add Room
               </button>
             </div>
 
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-              {filteredRooms.map((r) => (
-                <RoomCard key={r.room_id} room={r} campusName={campusName} onEdit={setEditing} onView={setViewing} />
-              ))}
-              {!filteredRooms.length && !loading && (
-                <div className="text-sm text-gray-500">No rooms found for this building.</div>
-              )}
+            {/* Controls */}
+            <div className="mt-4 mb-4 grid gap-3 md:grid-cols-[220px_220px_1fr]">
+              <SelectBox value={building} onChange={setBuilding} options={buildings} />
+              <SelectBox value={typeFilter} onChange={setTypeFilter} options={types} />
+              <div className="relative">
+                <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-400" />
+                <input
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder="Search room or building…"
+                  className="w-full rounded-lg border border-gray-300 pl-9 pr-3 py-2 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30"
+                />
+              </div>
             </div>
+
+            {/* Table view */}
+            <RoomsTable
+              rooms={filteredRooms}
+              timeBands={timeBands}
+              onView={setViewing}
+              onEdit={setEditing}
+            />
           </div>
         ) : (
           <RoomSchedule
             room={viewing}
             onBack={() => setViewing(null)}
             onUpdated={(next) => {
-              // update both the grid and the card list
               setRooms((prev) => prev.map((r) => (r.room_id === next.room_id ? next : r)));
               setViewing(next);
             }}
@@ -994,7 +1091,6 @@ export default function RoomAllocationScreen() {
           onClose={() => setAdding(false)}
           onSaved={async (newBuilding) => {
             await refresh();
-            // auto-switch to the building where the new room was created
             if (newBuilding && buildings.includes(newBuilding)) {
               setBuilding(newBuilding);
             } else if (newBuilding) {
@@ -1012,11 +1108,7 @@ export default function RoomAllocationScreen() {
           timeBands={timeBands}
           onClose={() => setEditing(null)}
           onSaved={async () => {
-            const data = await refresh();
-            if (!data) return;
-            // keep modal open with refreshed room
-            const updated = data.rooms.find((r) => r.room_id === editing.room_id);
-            if (updated) setEditing(updated);
+            await refresh();
           }}
         />
       )}

@@ -42,8 +42,9 @@ export const ANALYTICS_BASE = resolveBase(
 export const api = axios.create({ baseURL: API_BASE });
 // DONT REMOVE ABOVE
 
-// ---------- Feature calls ----------
-
+/* =========================================================
+   ===============  LOGIN (Email and Password)  ============
+   ========================================================= */
 export type LoginResponse = { userId: string; email: string; fullName: string; roles: string[] };
 
 export async function login(email: string): Promise<LoginResponse> {
@@ -55,6 +56,19 @@ export async function login(email: string): Promise<LoginResponse> {
   if (!r.ok) throw new Error(await r.text());
   return r.json();
 }
+
+/* =========================================================
+   ===============  LOGIN (Google Auth)  ===================
+   ========================================================= */
+// Types kept for localStorage consumers
+// export type LoginResponse = { userId: string; email: string; fullName: string; roles: string[] };
+
+
+// Optional: build a start URL (used by Login.tsx directly, but you can import this too)
+// export function googleStartUrl(returnTo: string) {
+// return join(API_BASE, `auth/google/start?return_to=${encodeURIComponent(returnTo)}`);
+// }
+
 export async function fetchOmHome(userId: string) {
   const r = await fetch(join(API_BASE, `om/home?userId=${encodeURIComponent(userId)}`));
   if (!r.ok) throw new Error(await r.text());
@@ -67,33 +81,59 @@ export async function fetchOmProfile(userId: string) {
   return r.json();
 }
 
-// ---------------- APO: Pre Enlistment ----------------
+/* =========================================================
+   ===============  APO: PRE-ENLISTMENT  ===================
+   ========================================================= */
 export type PreenlistmentCountDoc = {
+  // IDs (stored)
   count_id: string;
+  term_id: string;
+  college_id?: string;
+  campus_id?: string;
+  course_id?: string;
+
+  // Business (stored)
   preenlistment_code?: string;
   career: string;
-  acad_group: string;
-  campus_name: "MANILA" | "LAGUNA";
-  course_code: string;
-  count: number;
-  campus_id?: "CMPS001" | "CMPS002";
-  course_id?: string;
-  user_id: string;
-  term_id: string;
+
+  // Derived/display (joined or aliased)
+  count: number; // alias of preenlistment_count from backend
+  course_code?: string; // from courses
+  campus_name?: "MANILA" | "LAGUNA"; // from campuses
+  college_code?: string; // from colleges
+  term_number?: number; // from terms
+  acad_year_start?: number; // from terms
+
   is_archived?: boolean;
   created_at?: string;
   updated_at?: string;
+
+  // Display-only aid for table (equals colleges.college_code; not stored)
+  acad_group?: string;
 };
 
 export type PreenlistmentStatDoc = {
+  // IDs (stored)
   stat_id: string;
-  program_code: string;
+  term_id: string;
   program_id?: string;
+  campus_id?: string;
+
+  // Numbers (stored)
+  enrollment?: number;
   freshman: number;
   sophomore: number;
   junior: number;
   senior: number;
-  term_id: string;
+
+  // Joined display fields (not stored)
+  term_number?: number;
+  acad_year_start?: number;
+  // backend may send nested "programs.program_code"
+  program_code?: string;
+  programs?: { program_code?: string };
+
+  // Misc
   is_archived?: boolean;
   created_at?: string;
   updated_at?: string;
@@ -103,8 +143,9 @@ export type TermMeta = {
   term_id: string;
   ay_label: string;
   term_number?: number;
+  acad_year_start?: number;
   is_current?: boolean;
-  campus_label?: string;   // NEW: provided by backend
+  campus_label?: string; // Provided by backend
 };
 
 export type ApoPreenlistmentResponse = {
@@ -118,21 +159,23 @@ export type ApoPreenlistmentResponse = {
 export type CountCsvRow = {
   Code?: string;
   Career: string;
-  "Acad Group": string;
+  "Acad Group": string; // not stored; for convenience in CSV only
   Campus: "MANILA" | "LAGUNA";
   "Course Code": string;
   Count: number | string;
 };
 
 export type StatCsvRow = {
-  Program: string;
+  Program: string; // program_code
   FRESHMAN: number | string;
   SOPHOMORE: number | string;
   JUNIOR: number | string;
   SENIOR: number | string;
+  ENROLLMENT?: number | string; // optional; backend computes if missing
 };
 
 export type ArchiveMetaItem = {
+  term_number?: number;
   term_id: string;
   ay_label: string;
   courses?: number;
@@ -141,23 +184,39 @@ export type ArchiveMetaItem = {
 
 export type ArchivesMetaResponse = { archives: ArchiveMetaItem[] };
 
+/**
+ * Derive campus from roles array (expects strings like "apo ccs-manila" / "apo ccs-laguna")
+ */
+export function campusFromRoles(roles: string[] = []): "MANILA" | "LAGUNA" | null {
+  const r = roles.map((s) => s.toLowerCase());
+  if (r.some((x) => x.includes("apo") && x.includes("manila"))) return "MANILA";
+  if (r.some((x) => x.includes("apo") && x.includes("laguna"))) return "LAGUNA";
+  return null;
+}
+
 export async function getApoPreenlistment(
   userId: string,
   termId?: string,
-  scope: "active" | "archive" | "archivesMeta" = "active"
+  scope: "active" | "archive" | "archivesMeta" = "active",
+  campusName?: "MANILA" | "LAGUNA"
 ): Promise<ApoPreenlistmentResponse> {
   const params = new URLSearchParams({ userId, scope });
   if (termId) params.set("termId", termId);
-  const r = await fetch(join(API_BASE, `apo/preenlistment?${params.toString()}`));
-  if (!r.ok) throw new Error(await r.text());
-  return r.json();
+  if (campusName) params.set("campus", campusName);
+  const url = join(API_BASE, `apo/preenlistment?${params.toString()}`);
+  const { data } = await axios.get(url);
+  return data;
 }
 
-export async function getApoPreenlistmentMeta(userId: string): Promise<ArchivesMetaResponse> {
+export async function getApoPreenlistmentMeta(
+  userId: string,
+  campusName?: "MANILA" | "LAGUNA"
+): Promise<ArchivesMetaResponse> {
   const params = new URLSearchParams({ userId, scope: "archivesMeta" });
-  const r = await fetch(join(API_BASE, `apo/preenlistment?${params.toString()}`));
-  if (!r.ok) throw new Error(await r.text());
-  return r.json();
+  if (campusName) params.set("campus", campusName);
+  const url = join(API_BASE, `apo/preenlistment?${params.toString()}`);
+  const { data } = await axios.get(url);
+  return data;
 }
 
 export async function importApoPreenlistment(
@@ -165,7 +224,8 @@ export async function importApoPreenlistment(
   countRows: CountCsvRow[],
   statRows: StatCsvRow[],
   termId?: string,
-  opts?: { replaceCount?: boolean; replaceStats?: boolean }
+  opts?: { replaceCount?: boolean; replaceStats?: boolean },
+  campusName?: "MANILA" | "LAGUNA"
 ) {
   const qs = new URLSearchParams({
     userId,
@@ -174,36 +234,143 @@ export async function importApoPreenlistment(
     replaceStats: String(!!opts?.replaceStats),
   });
   if (termId) qs.set("termId", termId);
-  const r = await fetch(join(API_BASE, `apo/preenlistment?${qs.toString()}`), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ countRows, statRows }),
-  });
-  if (!r.ok) throw new Error(await r.text());
-  return r.json();
+  if (campusName) qs.set("campus", campusName);
+  const url = join(API_BASE, `apo/preenlistment?${qs.toString()}`);
+  const { data } = await axios.post(url, { countRows, statRows });
+  return data;
 }
 
-export async function archiveApoPreenlistment(userId: string, termId?: string) {
+export async function archiveApoPreenlistment(
+  userId: string,
+  termId?: string,
+  campusName?: "MANILA" | "LAGUNA"
+) {
   const qs = new URLSearchParams({ userId, action: "archive" });
   if (termId) qs.set("termId", termId);
-  const r = await fetch(join(API_BASE, `apo/preenlistment?${qs.toString()}`), { method: "POST" });
+  if (campusName) qs.set("campus", campusName);
+  const url = join(API_BASE, `apo/preenlistment?${qs.toString()}`);
+  const { data } = await axios.post(url);
+  return data;
+}
+
+/* =========================================================
+   ===============  APO: COURSE OFFERINGS  ==================
+   ========================================================= */
+// ---------- tiny qs helper for other endpoints ----------
+type Queryish = Record<string, string | number | boolean | undefined>;
+
+function qs(q: Queryish) {
+  const u = new URLSearchParams();
+  Object.entries(q).forEach(([k, v]) => {
+    if (v === undefined || v === null || v === "") return;
+    u.set(k, String(v));
+  });
+  return u.toString();
+}
+
+export async function getApoCourseOfferings(
+  userId: string,
+  filters?: { level?: string; department_id?: string; batch_id?: string; program_id?: string }
+) {
+  const url = `${API_BASE}/apo/courseofferings?` + qs({ userId, ...filters });
+  const r = await fetch(url);
   if (!r.ok) throw new Error(await r.text());
   return r.json();
 }
 
-// ---------------- APO: Room Allocation ----------------
+export async function addApoOfferingRow(userId: string, data: {
+  batch_id: string;
+  course_id: string;
+  enrollment_cap?: number;
+  remarks?: string;
+  slot1?: { day: string; start_time: string; end_time: string; room_id?: string };
+  slot2?: { day: string; start_time: string; end_time: string; room_id?: string };
+  faculty_id?: string;
+}) {
+  const url = `${API_BASE}/apo/courseofferings?` + qs({ userId, action: "addRow" });
+  const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+export async function editApoOfferingRow(userId: string, data: {
+  section_id: string;
+  enrollment_cap?: number;
+  remarks?: string;
+  slot1?: { day: string; start_time: string; end_time: string; room_id?: string };
+  slot2?: { day: string; start_time: string; end_time: string; room_id?: string };
+  faculty_id?: string;
+}) {
+  const url = `${API_BASE}/apo/courseofferings?` + qs({ userId, action: "editRow" });
+  const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+export async function deleteApoOfferingRow(userId: string, data: { section_id: string }) {
+  const url = `${API_BASE}/apo/courseofferings?` + qs({ userId, action: "deleteRow" });
+  const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+export async function importApoOfferingsCSV(userId: string, file: File) {
+  const url = `${API_BASE}/apo/courseofferings?` + qs({ userId, action: "importCSV" });
+  const fd = new FormData();
+  fd.append("file", file);
+  const r = await fetch(url, { method: "POST", body: fd });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+export async function forwardApoCourseOfferings(userId: string, data: {
+  to: string;
+  subject: string;
+  message: string;
+  attachment_html: string;
+}) {
+  const url = `${API_BASE}/apo/courseofferings?` + qs({ userId, action: "forward" });
+  const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+/* =========================================================
+   ===============  APO: ROOM ALLOCATION  ==================
+   ========================================================= */
 export type Day = "Monday" | "Tuesday" | "Wednesday" | "Thursday" | "Friday" | "Saturday";
+export type RoomType = "Classroom" | "ComLab";
 
 export type RoomDoc = {
-  room_id: string; room_number: string; room_type: string; capacity: number; building: string; campus_id: string; status: string;
+  room_id: string;
+  room_number: string;
+  room_type: RoomType | string;
+  capacity: number;
+  building: string;
+  campus_id: string;
+  status: string;
 };
-export type SectionDoc = { section_id: string; section_code: string; course_id?: string; course_code?: string; };
+export type SectionDoc = {
+  section_id: string;
+  section_code: string;
+  course_id?: string;
+  course_code?: string;
+};
 export type SectionScheduleDoc = {
-  schedule_id: string; section_id: string; day: Day; start_time: string; end_time: string; room_id?: string | null; time_band: string;
+  schedule_id: string;
+  section_id: string;
+  day: Day;
+  start_time: string;
+  end_time: string;
+  room_id?: string | null;
+  time_band: string;
 };
 export type RoomScheduleCell = {
-  schedule_id?: string; section_id?: string | null; day: Day; start_time?: string; end_time?: string; time_band: string; room_id?: string | null;
-  section_code?: string; course_code?: string; label?: string; faculty?: string; allowed?: boolean;
+  schedule_id?: string;
+  section_id?: string | null;
+  day: Day;
+  time_band: string;
+  allowed?: boolean;
 };
 export type RoomWithSchedule = RoomDoc & { schedule: RoomScheduleCell[] };
 
@@ -227,90 +394,125 @@ export async function getApoRoomAllocation(userId: string): Promise<RoomAllocati
   return r.json();
 }
 
-export async function addRoom(userId: string, data: { building: string; room_number: string; room_type: string; capacity: number }) {
-  const r = await fetch(`${base}/apo/roomallocation?${new URLSearchParams({ userId, action: "addRoom" }).toString()}`, {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data),
-  });
+export async function addRoom(
+  userId: string,
+  data: { building: string; room_number: string; room_type: RoomType; capacity: number }
+) {
+  const r = await fetch(
+    `${base}/apo/roomallocation?${new URLSearchParams({ userId, action: "addRoom" }).toString()}`,
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) }
+  );
   if (!r.ok) throw new Error(await r.text());
   return r.json();
 }
 
-export async function updateRoom(userId: string, data: { room_id: string; capacity?: number; room_type?: string; status?: string }) {
-  const r = await fetch(`${base}/apo/roomallocation?${new URLSearchParams({ userId, action: "updateRoom" }).toString()}`, {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data),
-  });
+export async function updateRoom(
+  userId: string,
+  data: { room_id: string; capacity?: number; room_type?: RoomType; status?: string }
+) {
+  const r = await fetch(
+    `${base}/apo/roomallocation?${new URLSearchParams({ userId, action: "updateRoom" }).toString()}`,
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) }
+  );
   if (!r.ok) throw new Error(await r.text());
   return r.json();
 }
 
-export async function setRoomAvailability(userId: string, data: { room_id: string; day: Day; time_bands: string[] }) {
-  const r = await fetch(`${base}/apo/roomallocation?${new URLSearchParams({ userId, action: "setAvailability" }).toString()}`, {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data),
-  });
+export async function setRoomAvailability(
+  userId: string,
+  data: { room_id: string; day: Day; time_bands: string[] }
+) {
+  const r = await fetch(
+    `${base}/apo/roomallocation?${new URLSearchParams({ userId, action: "setAvailability" }).toString()}`,
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) }
+  );
   if (!r.ok) throw new Error(await r.text());
   return r.json();
 }
 
-export async function assignRoom(userId: string, data: { room_id: string; section_id: string; day: Day; time_band: string }) {
-  const r = await fetch(`${base}/apo/roomallocation?${new URLSearchParams({ userId, action: "assign" }).toString()}`, {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data),
-  });
+export async function assignRoom(
+  userId: string,
+  data: { room_id: string; section_id: string; day: Day; time_band: string }
+) {
+  const r = await fetch(
+    `${base}/apo/roomallocation?${new URLSearchParams({ userId, action: "assign" }).toString()}`,
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) }
+  );
   if (!r.ok) throw new Error(await r.text());
   return r.json();
 }
 
-export async function unassignRoom(userId: string, data: { room_id: string; section_id: string; day: Day; time_band: string }) {
-  const r = await fetch(`${base}/apo/roomallocation?${new URLSearchParams({ userId, action: "unassign" }).toString()}`, {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data),
-  });
+export async function unassignRoom(
+  userId: string,
+  data: { room_id: string; section_id: string; day: Day; time_band: string }
+) {
+  const r = await fetch(
+    `${base}/apo/roomallocation?${new URLSearchParams({ userId, action: "unassign" }).toString()}`,
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) }
+  );
   if (!r.ok) throw new Error(await r.text());
   return r.json();
 }
 
 export async function removeRoom(userId: string, payload: { room_id: string }) {
-  const r = await fetch(`${base}/apo/roomallocation?${new URLSearchParams({ userId, action: "removeRoom" }).toString()}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
+  const r = await fetch(
+    `${base}/apo/roomallocation?${new URLSearchParams({ userId, action: "removeRoom" }).toString()}`,
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) }
+  );
   if (!r.ok) throw new Error(await r.text());
   return r.json();
 }
 
-// ---------------- STUDENT: Petition ----------------
-// Fetch petitions
+/* =========================================================
+   ===============  STUDENT: PETITION  =====================
+   ========================================================= */
+export type StudentOptions = {
+  ok: boolean;
+  departments: string[];
+  courses: { course_code: string; course_title: string; dept_name: string }[];
+  programs: { program_id: string; program_code: string }[];
+  reasons: string[];   // from config in student_petitions
+  statuses: string[];  // from config in student_petitions
+};
+
+export type PetitionSubmitPayload = {
+  department: string;
+  courseCode: string;   // ONLY code
+  reason: string;       // must be one of options.reasons
+  studentNumber: string;
+};
+
 export async function getStudentPetitions(userId: string) {
-  const res = await axios.post(`${API_BASE}/student/petition`, {}, {
+  const { data } = await axios.post(`${API_BASE}/student/petition`, {}, {
     params: { userId, action: "fetch" },
   });
-  return res.data;
+  return data;
 }
 
-// Fetch dropdown options
-export async function getStudentOptions(userId: string) {
-  const res = await axios.post(`${API_BASE}/student/petition`, {}, {
+export async function getStudentOptions(userId: string): Promise<StudentOptions> {
+  const { data } = await axios.post(`${API_BASE}/student/petition`, {}, {
     params: { userId, action: "options" },
   });
-  return res.data;
+  return data;
 }
 
-// Fetch profile info (auto-fill)
 export async function getStudentProfile(userId: string) {
-  const res = await axios.post(`${API_BASE}/student/petition`, {}, {
+  const { data } = await axios.post(`${API_BASE}/student/petition`, {}, {
     params: { userId, action: "profile" },
   });
-  return res.data;
+  return data;
 }
 
-// Submit petition
-export async function submitStudentPetition(userId: string, data: any) {
-  const res = await axios.post(`${API_BASE}/student/petition`, data, {
+export async function submitStudentPetition(userId: string, payload: PetitionSubmitPayload) {
+  const { data } = await axios.post(`${API_BASE}/student/petition`, payload, {
     params: { userId, action: "submit" },
   });
-  return res.data;
+  return data;
 }
 
-// --- Faculty Overview ---
+/* =========================================================
+   ===============  FACULTY: OVERVIEW  =====================
+   ========================================================= */
 export async function getFacultyOverview(userId: string) {
   try {
     const res = await axios.get(`${API_BASE}/faculty/overview`, { params: { userId } });
