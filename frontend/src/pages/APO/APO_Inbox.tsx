@@ -101,8 +101,8 @@ function TopBar() {
   };
 
   return (
-    <header className="sticky top-0 z-80" ref={headerRef}>
-      <div className="w-full border-b border-emerald-900/30 bg-linear-to-r from-emerald-800 via-emerald-700 to-green-600 text-white">
+    <header className="sticky top-0 z-[80]" ref={headerRef}>
+      <div className="w-full border-b border-emerald-900/30 bg-gradient-to-r from-emerald-800 via-emerald-700 to-green-600 text-white">
         <div className="mx-auto flex w-full items-center justify-between px-5 py-4">
           {/* Profile Button */}
           <div ref={wrapperRef} className="relative">
@@ -119,7 +119,7 @@ function TopBar() {
               </span>
             </button>
             {menuOpen && (
-              <div className="absolute left-0 top-full z-90 mt-2 w-48 rounded-2xl border border-neutral-200 bg-white text-slate-800 shadow-2xl">
+              <div className="absolute left-0 top-full z-[90] mt-2 w-48 rounded-2xl border border-neutral-200 bg-white text-slate-800 shadow-2xl">
                 <div className="px-4 pb-2 pt-3 text-[15px] font-semibold text-emerald-700">My Account</div>
                 <div className="mx-4 h-px bg-neutral-200" />
                 <button onClick={logout} className="flex w-full items-center gap-2 px-4 py-3 text-left text-[15px] hover:bg-neutral-50">

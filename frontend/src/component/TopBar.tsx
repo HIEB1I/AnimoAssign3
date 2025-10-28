@@ -13,26 +13,19 @@ interface TopBarProps {
     time: Date | string;
     seen?: boolean;
   }[];
-  /** Which CustomEvent to dispatch when the Inbox icon is clicked.
-   * Defaults to "faculty:openInbox" so Faculty keeps working without changes.
-   * Use "admin:openInbox" on the Admin page.
-   */
-  inboxEvent?: string;
 }
 
 /**
- * Universal TopBar used by Admin, APO, and Faculty roles.
+ * Universal TopBar used by both APO and Faculty roles.
  * - Dynamic gradient bar and account dropdown
  * - Notifications dropdown with live "time ago"
  * - Optional department + notifications
- * - Inbox button dispatches a role-specific CustomEvent
  */
 export default function TopBar({
   fullName,
   role,
   department,
   notifications: incomingNotifs = [],
-  inboxEvent = "faculty:openInbox",
 }: TopBarProps) {
   const navigate = useNavigate();
 
@@ -62,12 +55,10 @@ export default function TopBar({
   // Click-outside behavior
   useEffect(() => {
     const onDocClick = (e: MouseEvent) => {
-      if (wrapperRef.current && !wrapperRef.current.contains(e.target as Node)) {
+      if (wrapperRef.current && !wrapperRef.current.contains(e.target as Node))
         setMenuOpen(false);
-      }
-      if (notifRef.current && !notifRef.current.contains(e.target as Node)) {
+      if (notifRef.current && !notifRef.current.contains(e.target as Node))
         setNotifOpen(false);
-      }
     };
     document.addEventListener("mousedown", onDocClick);
     return () => document.removeEventListener("mousedown", onDocClick);
@@ -78,7 +69,10 @@ export default function TopBar({
     if (!headerRef.current) return;
     const el = headerRef.current;
     const setVar = () =>
-      document.documentElement.style.setProperty("--header-h", `${el.offsetHeight}px`);
+      document.documentElement.style.setProperty(
+        "--header-h",
+        `${el.offsetHeight}px`
+      );
     setVar();
     const ro = new ResizeObserver(setVar);
     ro.observe(el);
@@ -107,24 +101,18 @@ export default function TopBar({
   // Notification logic
   const hasUnseen = notifications.some((n) => !n.seen);
   const sortedNotifs = [...notifications].sort(
-    (a, b) => (a.time as Date).getTime() - (b.time as Date).getTime()
-  ).reverse();
+    (a, b) => b.time.getTime() - a.time.getTime()
+  );
 
   const toggleNotif = () => {
     setNotifOpen((v) => !v);
-    if (!notifOpen) {
+    if (!notifOpen)
       setNotifications((n) => n.map((x) => ({ ...x, seen: true })));
-    }
-  };
-
-  // Open Inbox inside Overview (no route/navigation)
-  const openInboxInline = () => {
-    window.dispatchEvent(new Event(inboxEvent));
   };
 
   return (
-    <header className="sticky top-0 z-80" ref={headerRef}>
-      <div className="w-full border-b border-emerald-900/30 bg-linear-to-r from-emerald-800 via-emerald-700 to-green-600">
+    <header className="sticky top-0 z-[80]" ref={headerRef}>
+      <div className="w-full border-b border-emerald-900/30 bg-gradient-to-r from-emerald-800 via-emerald-700 to-green-600">
         <div className="mx-auto flex w-full items-center justify-between px-5 py-4 text-white">
           {/* --- Account Menu --- */}
           <div ref={wrapperRef} className="relative">
@@ -136,10 +124,7 @@ export default function TopBar({
                 <UserCircle className="h-6 w-6" />
               </span>
               <span className="leading-tight text-left">
-                <div className="text-[17px] font-semibold">
-                  {fullName || "(No name on file)"}
-                </div>
-
+                <div className="text-[17px] font-semibold">{fullName}</div>
                 <div className="text-[12px] opacity-90">
                   {role}
                   {department && ` | ${department}`}
@@ -148,7 +133,7 @@ export default function TopBar({
             </button>
 
             {menuOpen && (
-              <div className="absolute left-0 top-full z-90 mt-2 w-56 rounded-2xl border border-neutral-200 bg-white text-slate-800 shadow-2xl">
+              <div className="absolute left-0 top-full z-[90] mt-2 w-56 rounded-2xl border border-neutral-200 bg-white text-slate-800 shadow-2xl">
                 <div className="px-4 pb-2 pt-3 text-[15px] font-semibold text-emerald-700">
                   My Account
                 </div>
@@ -167,11 +152,9 @@ export default function TopBar({
           {/* --- Right icons --- */}
           <div className="flex items-center gap-2">
             <button
-              onClick={openInboxInline}
+              onClick={() => navigate("/inbox")}
               className="rounded-md p-2 hover:bg-white/15"
               title="Inbox"
-              aria-label="Open Inbox"
-              data-testid="topbar-inbox-btn"
             >
               <Inbox className="h-5 w-5" />
             </button>
@@ -181,8 +164,6 @@ export default function TopBar({
                 onClick={toggleNotif}
                 className="relative rounded-md p-2 hover:bg-white/15"
                 title="Notifications"
-                aria-haspopup="menu"
-                aria-expanded={notifOpen}
               >
                 <Bell className="h-5 w-5" />
                 {hasUnseen && (
@@ -205,9 +186,11 @@ export default function TopBar({
                           <div className="font-semibold text-slate-900">
                             {n.title}
                           </div>
-                          <div className="text-sm text-gray-600">{n.details}</div>
+                          <div className="text-sm text-gray-600">
+                            {n.details}
+                          </div>
                           <div className="mt-1 text-xs text-gray-400">
-                            {timeAgo(n.time as Date)}
+                            {timeAgo(new Date(n.time))}
                           </div>
                         </div>
                       ))
@@ -222,7 +205,7 @@ export default function TopBar({
             </div>
           </div>
         </div>
-        <div className="h-0.5 w-full bg-neutral-200/80" />
+        <div className="h-[2px] w-full bg-neutral-200/80" />
       </div>
     </header>
   );

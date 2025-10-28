@@ -1,4 +1,3 @@
-// frontend/src/pages/OM/OM_FacultyMgt.tsx
 import { useEffect, useState } from "react";
 import { fetchOmProfile } from "../../api";
 
