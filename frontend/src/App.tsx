@@ -75,25 +75,25 @@ export default function App() {
           <Route path="/om/pred1" element={<OM_pred1 />} />
           <Route path="/om/pred2" element={<OM_pred2 />} />
           <Route path="/om/loadreco" element={<OM_LoadReco />} />
+          <Route path="/om/load-assignment" element={<OM_LoadAssignment />} />
+          <Route path="/om/faculty-management" element={<OM_FacultyMgt />} />
+          <Route path="/om/inbox" element={<OM_Inbox />} />
         </Route>
+
+        {/* OM */}
+        {/* <Route path="/om/load-assignment" element={<OM_LoadAssignment />} /> */}
+        {/* <Route path="/om/faculty-management" element={<OM_FacultyMgt />} /> */}
+        {/* <Route path="/om/inbox" element={<OM_Inbox />} /> */}
+        {/* <Route path="/om/course-management" element={<OM_CourseMgt />} /> */}
+        {/* <Route path="/om/reports-analytics" element={<OM_ReportsAnalytics />} /> */}
+        {/* <Route path="/om/faculty-form" element={<OM_FacultyForm />} /> */}
+        {/* <Route path="/om/student-petition" element={<OM_StudentPetition />} /> */}
+        {/* <Route path="/om/class-retention" element={<OM_ClassRetention />} /> */}
+
 
         {/* -------- APO -------- */}
         <Route element={<RequireAuth />}>
-          {/* OM */}
-          <Route path="/om/load-assignment" element={<OM_LoadAssignment />} />
-          <Route path="/om/faculty-management" element={<OM_FacultyMgt />} />
 
-          {<Route path="/om/inbox" element={<OM_Inbox />} /> }
-          
-           {/* 
-          <Route path="/om/course-management" element={<OM_CourseMgt />} />
-          <Route path="/om/reports-analytics" element={<OM_ReportsAnalytics />} />
-          <Route path="/om/faculty-form" element={<OM_FacultyForm />} />
-          <Route path="/om/student-petition" element={<OM_StudentPetition />} />
-          <Route path="/om/class-retention" element={<OM_ClassRetention />} />
-          {/* Optional direct route for OM Inbox (TopBar also opens it inline as a tab) */}
-          {/* <Route path="/om/inbox" element={<OM_Inbox />} /> */}
-        
 
           {/* APO */}
           <Route path="/apo/preenlistment" element={<APO_PreEnlistment />} />
