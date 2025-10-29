@@ -198,8 +198,8 @@ export async function fetchTeachingHistory(facultyId: string) {
 }
 
 // Descriptive #2
-export async function fetchCourseProfiles(termId: string) {
-  const url = `${API_BASE.replace(/\/+$/, "")}/course-profiles?term_id=${encodeURIComponent(termId)}`;
+export async function fetchCourseProfile(query: string) {
+  const url = `${ANALYTICS_BASE.replace(/\/+$/, "")}/course-profile-for?query=${encodeURIComponent(query)}`;
   const r = await fetch(url);
   if (!r.ok) throw new Error(await r.text());
   return r.json();

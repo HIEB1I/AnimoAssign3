@@ -3,6 +3,7 @@ from functools import lru_cache
 from motor.motor_asyncio import AsyncIOMotorClient
 from .config import get_settings
 from datetime import datetime
+from typing import Any, Dict, List, Optional, Set
 
 import math
 from typing import List
@@ -13,9 +14,6 @@ def get_client() -> AsyncIOMotorClient:
 
 def get_db():
     return get_client().get_default_database()  # db from URI path
-
-
-from typing import Any, Dict, List, Optional
 
 # ------------------------------
 # Teaching History (Mongo/Motor)
@@ -121,6 +119,45 @@ async def fetch_teaching_history(faculty_id: str) -> List[Dict[str, Any]]:
 
     return results
 
+# ------------------------------
+# Course Profile Report
+# ------------------------------
+async def get_course_profile_for(query: str):
+    db = get_db()
+    # find by course_code or course_id
+    course = await db.courses.find_one({
+        "$or": [{"course_code": query}, {"course_id": query}]
+    })
+    if not course:
+        return {"course_id": query, "title": "Not found"}
+
+    course_id = str(course.get("_id") or course.get("course_id"))
+    title = course.get("title") or course.get("name")
+
+    # qualified faculty
+    fac = await db.faculty_profiles.find({"kac_ids": {"$all": course.get("kac_ids", [])}}).to_list(length=None)
+    qualified = []
+    for f in fac:
+        u = await db.users.find_one({"_id": f.get("_id")}, {"first_name": 1, "last_name": 1})
+        name = f"{u.get('last_name', '')}, {u.get('first_name', '')}" if u else f.get("faculty_id")
+        qualified.append({"faculty_id": str(f.get("faculty_id")), "name": name})
+
+    # past instructors
+    past_ids = await db.faculty_assignments.distinct("faculty_id", {"course_id": course_id})
+    past_instructors = []
+    for pid in past_ids:
+        u = await db.users.find_one({"_id": pid}, {"first_name": 1, "last_name": 1})
+        name = f"{u.get('last_name', '')}, {u.get('first_name', '')}" if u else str(pid)
+        past_instructors.append({"faculty_id": str(pid), "name": name})
+
+    return {
+        "course_id": course_id,
+        "course_code": course.get("course_code"),
+        "title": title,
+        "qualified_faculty": qualified,
+        "past_instructors": past_instructors,
+        "preferences": "N/A",
+    }
 
 # ------------------------------
 # Deloading Utilization Report

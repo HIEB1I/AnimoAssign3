@@ -3,15 +3,15 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field
 
 from .db_async import fetch_teaching_history            # descriptive #1
-
+from .db_async import get_course_profile_for            # descriptive #2
 from .db_async import fetch_deloading_utilization       # descriptive #3
 
-from .db_async import run_pt_risk                        # predictive #2
+from .db_async import run_pt_risk                       # predictive #2
 
 from collections import Counter
 import re
@@ -46,14 +46,10 @@ async def get_teaching_history(faculty_id: str = Query(...)):
     print("faculty_id:", faculty_id, "| documents found:", len(results))
     return {"faculty_id": faculty_id, "count": len(results), "rows": results}
 
-@app.get("/course-profiles")
-async def course_profiles(term_id: str = Query(..., alias="term_id")):
-    try:
-        db = get_db(MONGO_URI, DB_NAME)
-        data = await get_course_profiles(db, term_id)
-        return data
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+@app.get("/course-profile-for")
+async def course_profile_for(query: str):
+    data = await get_course_profile_for(query)
+    return JSONResponse(content=data)
 
 
 @app.get("/deloading-utilization")
