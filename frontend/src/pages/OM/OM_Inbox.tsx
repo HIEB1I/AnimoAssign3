@@ -1,6 +1,7 @@
 // frontend/src/pages/OM/OM_Inbox.tsx
 import { useEffect, useMemo, useState } from "react";
 import { Search, Plus } from "lucide-react";
+import { useNavigate } from "react-router-dom";
 
 const cls = (...s: (string | false | undefined)[]) => s.filter(Boolean).join(" ");
 const timeAgo = (d: Date) => {
@@ -36,6 +37,18 @@ function OMInboxMain() {
   const [mode, setMode] = useState<"default" | "compose" | "read">("default");
   const [mails, setMails] = useState<Mail[]>([]);
   const [selected, setSelected] = useState<Mail | null>(null);
+  const navigate = useNavigate();
+  
+  const handleBack = () => {
+  // Case 1: standalone route -> use browser history
+  if (window.history.length > 1) {
+    navigate(-1);
+    return;
+  }
+  // Case 2: in-tab inside OM pages -> close the inbox tab and ensure we land on Load Assignment
+  window.dispatchEvent(new Event("om:closeInbox"));
+  navigate("/om/load-assignment");
+  };
 
   useEffect(() => {
     const user = JSON.parse(localStorage.getItem("animo.user") || "{}");
@@ -87,11 +100,12 @@ function OMInboxMain() {
             <p className="text-sm text-gray-500">Manage communication with faculty</p>
           </div>
           <button
-            onClick={() => window.dispatchEvent(new Event("om:closeInbox"))}
+            onClick={handleBack}
             className="rounded-lg border border-gray-300 px-3 py-2 text-sm hover:bg-gray-50"
           >
-            Back to Load Assignment
+            Back to Dashboard
           </button>
+
         </div>
 
         {/* Actions / Search */}

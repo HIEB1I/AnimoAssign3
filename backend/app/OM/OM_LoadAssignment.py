@@ -45,8 +45,12 @@ async def _fetch_rows(userId: str) -> Dict[str, Any]:
     term_id_active = active.get("term_id")
 
     pipeline: List[Dict[str, Any]] = [
-        # If you want to scope by term: uncomment next line
-        # {"$match": {"is_archived": {"$ne": True}}},
+        # Scope to active term if present; otherwise fetch latest 200
+        # (keeps DB-only source of truth; no UI changes)
+        {"$lookup": {"from": COL_SECTIONS, "localField": "section_id", "foreignField": "section_id", "as": "sec"}},
+        {"$unwind": {"path": "$sec", "preserveNullAndEmptyArrays": True}},
+        # If we have an active term_id, filter to sections in that term
+        *(([{"$match": {"sec.term_id": term_id_active}}] if term_id_active else [])),
         {"$lookup": {"from": COL_SECTIONS, "localField": "section_id", "foreignField": "section_id", "as": "sec"}},
         {"$unwind": {"path": "$sec", "preserveNullAndEmptyArrays": True}},
         {"$lookup": {"from": COL_SCHED, "localField": "section_id", "foreignField": "section_id", "as": "scheds"}},

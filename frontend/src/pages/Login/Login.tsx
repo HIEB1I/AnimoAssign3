@@ -68,8 +68,11 @@ const Login: React.FC = () => {
       localStorage.setItem("fullName", user.fullName);
       localStorage.setItem("roles", JSON.stringify(roles));
 
-      // 5) Route by role (no hardcoded IDs anywhere)
-      if (roles.includes("apo")) {
+            // 5) Route by role (no hardcoded IDs anywhere)
+      // NOTE: backend returns normalized roles (snake_case) from DB/user_roles & staff_profiles
+      if (roles.includes("office_manager")) {
+        navigate("/om/load-assignment", { replace: true });
+      } else if (roles.includes("apo")) {
         navigate("/apo/preenlistment", { replace: true });
       } else if (roles.includes("office_manager")) {
         navigate("/om/load-assignment", { replace: true }); // <- not /om/home unless it's defined

@@ -140,7 +140,7 @@ from .ADMIN.ADMIN_Inbox import router as admin_inbox_router
 
 app.include_router(login_router, prefix="/api")
 
-app.include_router(om_inbox_router)
+app.include_router(om_inbox_router, prefix="/api")
 app.include_router(om_loadassignment_router, prefix="/api")
 
 app.include_router(preenlistment_router, prefix="/api")

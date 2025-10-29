@@ -23,14 +23,15 @@ def _slugify(s: str) -> str:
 async def _roles_for_user(user_id: str) -> List[str]:
     roles: Set[str] = set()
 
-    # 1) Primary source: role_assignments -> user_roles
+       # 1) Primary source: role_assignments -> user_roles (DB-only)
     ra = db["role_assignments"].find({"user_id": user_id}, {"_id": 0, "role_id": 1})
     role_ids = [doc["role_id"] async for doc in ra]
     if role_ids:
         ur = db["user_roles"].find({"role_id": {"$in": role_ids}}, {"_id": 0, "role_type": 1})
         for doc in await ur.to_list(None):
-            if doc.get("role_type"):
-                roles.add(_slugify(doc["role_type"]))  # e.g., "APO" -> "apo"
+            rt = (doc or {}).get("role_type")
+            if rt:
+                roles.add(_slugify(rt))  # "Office Manager" -> "office_manager"
 
     # 2) Fallback inference based on existing profile docs (still DB-driven)
     if not roles:
