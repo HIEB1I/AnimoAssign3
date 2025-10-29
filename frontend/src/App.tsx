@@ -75,7 +75,7 @@ export default function App() {
           <Route path="/om/pred2" element={<OM_pred2 />} />
           <Route path="/om/loadreco" element={<OM_LoadReco />} />
 
-          <Route path="/om/load-assignment" element={<OM_LoadAssignment />} />
+          <Route path="/om/home" element={<OM_LoadAssignment />} />
           <Route path="/om/faculty-management" element={<OM_FacultyMgt />} />
           {<Route path="/om/inbox" element={<OM_Inbox />} /> }
           <Route path="/om/course-management" element={<OM_CourseMgt />} />

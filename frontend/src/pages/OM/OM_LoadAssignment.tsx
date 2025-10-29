@@ -548,14 +548,20 @@ const RequestChangeModal = ({
 
 /* ---------------- Main ---------------- */
 export default function OM_LoadAssignment() {
-    // Session (DB-driven, no hardcodes)
-  const session: { user_id?: string; full_name?: string; roles?: string[] } | null = (() => {
+  // Session (DB-driven, no hardcodes)
+  const session: { userId?: string; fullName?: string; roles?: string[] } | null = (() => {
     try { return JSON.parse(localStorage.getItem("animo.user") || "null"); } catch { return null; }
   })();
-  const userId = session?.user_id || localStorage.getItem("userId") || "";
+
+  const userId = session?.userId || "";
+
+  const normRoles = (session?.roles || []).map((r) =>
+  String(r).toLowerCase().replace(/\s+/g, "_")
+  );
+  
 
   // TopBar profile from DB (fallback to session)
-  const [profileName, setProfileName] = useState<string>(session?.full_name || "");
+  const [profileName, setProfileName] = useState<string>(session?.fullName || "");
   const [profileSubtitle, setProfileSubtitle] = useState<string>("");
 
   // Term label from backend (no hardcoding)
@@ -567,17 +573,24 @@ export default function OM_LoadAssignment() {
       try {
         const p = await getOmLoadAssignmentProfile(userId);
         // p: { ok: boolean; staff_id?: string; position_title?: string }
-        if (session?.roles?.includes("office_manager")) {
-          setProfileSubtitle("Office Manager"); // role-driven label only
+
+        // ✅ 2) Updated role/subtitle logic (replaces the old session?.roles check)
+        if (normRoles.includes("office_manager") || normRoles.includes("role0006")) {
+          setProfileSubtitle("Office Manager");
         } else if (p?.position_title) {
           setProfileSubtitle(p.position_title);
         }
-        // prefer session full_name; if missing, keep whatever the TopBar shows
-        if (!profileName && session?.full_name) setProfileName(session.full_name);
-      } catch {/* ignore; non-blocking for UI */}
+
+        // ✅ 3) Updated name fallback logic (after subtitle)
+        if (!profileName) setProfileName(p?.full_name || session?.fullName || "");
+        
+      } catch {
+        /* ignore; non-blocking for UI */
+      }
     })();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userId]);
+
 
   const [search, setSearch] = useState("");
   const [rows, setRows] = useState<Row[]>([]);
@@ -595,8 +608,7 @@ export default function OM_LoadAssignment() {
 
   // Show the main Load Assignment content only on /om or /om/load-assignment
   const loc = useLocation();
-  const isIndex = /\/om(\/load-assignment)?$/.test(loc.pathname);
-
+  const isIndex = /^\/om(\/(load-assignment|home))?$/.test(loc.pathname);
 
   // === Inbox-as-tab behavior (mirrors Faculty) ===
   const [showInbox, setShowInbox] = useState(false);
