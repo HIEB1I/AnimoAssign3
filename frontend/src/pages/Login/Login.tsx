@@ -23,46 +23,8 @@ const Login: React.FC = () => {
 
       const roles = (user.roles || []).map((r) => r.toLowerCase());
       if (roles.includes("apo")) {
-
-      // 2) Normalize roles once
-      const norm = (r: string) => r.toLowerCase().replace(/\s+/g, "_");
-      const roles = (user.roles || []).map(norm);
-
-      // 3) Resolve faculty_id from DB (no hardcoding, no globals)
-      let faculty_id: string | null = null;
-      if (roles.includes("faculty")) {
-        faculty_id = await fetchFacultyIdByUser(user.userId);
-        if (!faculty_id) {
-          // If they're a faculty but we can't find a faculty profile, stop early.
-          throw new Error(
-            "Your account is marked as Faculty but no faculty profile was found. Please contact the administrator."
-          );
-        }
-      }
-
-      // 4) Persist ONE canonical session object the whole app can read
-      const sessionBlob = {
-        user_id: user.userId,
-        email: user.email,
-        full_name: user.fullName,
-        roles,           // normalized roles
-        faculty_id,      // null for non-faculty; string for faculty
-      };
-      localStorage.setItem("animo.user", JSON.stringify(sessionBlob));
-
-      // (Kept: individual keys, since the rest of the app already reads them)
-      localStorage.setItem("userId", user.userId);
-      localStorage.setItem("email", user.email);
-      localStorage.setItem("fullName", user.fullName);
-      localStorage.setItem("roles", JSON.stringify(roles));
-
-            // 5) Route by role (no hardcoded IDs anywhere)
-      // NOTE: backend returns normalized roles (snake_case) from DB/user_roles & staff_profiles
-      if (roles.includes("office_manager")) {
-        navigate("/om/load-assignment", { replace: true });
-      } else if (roles.includes("apo")) {
         navigate("/apo/preenlistment", { replace: true });
-      } else if (roles.includes("office_manager")) {
+      } else if (roles.includes("Office Manager")) {
         navigate("/om/home", { replace: true });
       } else if (roles.includes("faculty")) {
         navigate("/faculty/overview", { replace: true });
