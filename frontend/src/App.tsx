@@ -9,11 +9,12 @@ import AuthCallback from "./pages/Login/AuthCallback";
 // ---------------- OM ----------------
 import OM_LoadAssignment from "./pages/OM/OM_LoadAssignment";
 import OM_FacultyMgt from "./pages/OM/OM_FacultyMgt";
-//import OM_CourseMgt from "./pages/OM/OM_CourseMgt";
-//import OM_ReportsAnalytics from "./pages/OM/OM_ReportsAnalytics";
-//import OM_FacultyForm from "./pages/OM/OM_FacultyForm";
-//import OM_StudentPetition from "./pages/OM/OM_StudentPetition";
-//import OM_ClassRetention from "./pages/OM/OM_ClassRetention";
+import OM_CourseMgt from "./pages/OM/OM_CourseMgt";
+import OM_ReportsAnalytics from "./pages/OM/OM_ReportsAnalytics";
+import OM_FacultyForm from "./pages/OM/OM_FacultyForm";
+import OM_StudentPetition from "./pages/OM/OM_StudentPetition";
+import OM_ClassRetention from "./pages/OM/OM_ClassRetention";
+
 import OM_Inbox from "./pages/OM/OM_Inbox";
 import OM_desc from "./pages/OM/OM_desc";
 import OM_desc2 from "./pages/OM/OM_desc2";
@@ -73,26 +74,16 @@ export default function App() {
           <Route path="/om/pred1" element={<OM_pred1 />} />
           <Route path="/om/pred2" element={<OM_pred2 />} />
           <Route path="/om/loadreco" element={<OM_LoadReco />} />
+
           <Route path="/om/load-assignment" element={<OM_LoadAssignment />} />
           <Route path="/om/faculty-management" element={<OM_FacultyMgt />} />
-          <Route path="/om/inbox" element={<OM_Inbox />} />
-        </Route>
-
-        {/* OM */}
-        {/* <Route path="/om/load-assignment" element={<OM_LoadAssignment />} /> */}
-        {/* <Route path="/om/faculty-management" element={<OM_FacultyMgt />} /> */}
-        {/* <Route path="/om/inbox" element={<OM_Inbox />} /> */}
-        {/* <Route path="/om/course-management" element={<OM_CourseMgt />} /> */}
-        {/* <Route path="/om/reports-analytics" element={<OM_ReportsAnalytics />} /> */}
-        {/* <Route path="/om/faculty-form" element={<OM_FacultyForm />} /> */}
-        {/* <Route path="/om/student-petition" element={<OM_StudentPetition />} /> */}
-        {/* <Route path="/om/class-retention" element={<OM_ClassRetention />} /> */}
-
-
-        {/* -------- APO -------- */}
-        <Route element={<RequireAuth />}>
-
-
+          {<Route path="/om/inbox" element={<OM_Inbox />} /> }
+          <Route path="/om/course-management" element={<OM_CourseMgt />} />
+          <Route path="/om/reports-analytics" element={<OM_ReportsAnalytics />} />
+          <Route path="/om/faculty-form" element={<OM_FacultyForm />} />
+          <Route path="/om/student-petition" element={<OM_StudentPetition />} />
+          <Route path="/om/class-retention" element={<OM_ClassRetention />} />
+        
           {/* APO */}
           <Route path="/apo/preenlistment" element={<APO_PreEnlistment />} />
           <Route path="/apo/courseofferings" element={<APO_CourseOfferings />} />

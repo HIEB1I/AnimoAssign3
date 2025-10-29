@@ -1,5 +1,14 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { Outlet, useLocation } from "react-router-dom";
 import AppShell from "../../base/AppShell";
+
+import {
+  getOmLoadAssignmentList,
+  getOmLoadAssignmentProfile,   // ← add this
+  submitOmLoadAssignment,
+} from "../../api";
+
+
 import { cls } from "../../utilities/cls";
 import {
   ChevronDown,
@@ -17,7 +26,6 @@ import {
   X,
 } from "lucide-react";
 import { InboxContent as OMInboxContent } from "./OM_Inbox";
-import { getOmLoadAssignmentList, submitOmLoadAssignment } from "../../api";
 
 /* ---------------- Small inputs ---------------- */
 function SelectBox({
@@ -540,13 +548,37 @@ const RequestChangeModal = ({
 
 /* ---------------- Main ---------------- */
 export default function OM_LoadAssignment() {
-    // Pull userId (same shape used by STUDENT_Petition)
-  const user: { userId?: string; fullName?: string } | null = (() => {
+    // Session (DB-driven, no hardcodes)
+  const session: { user_id?: string; full_name?: string; roles?: string[] } | null = (() => {
     try { return JSON.parse(localStorage.getItem("animo.user") || "null"); } catch { return null; }
   })();
-  const userId = user?.userId || "";
+  const userId = session?.user_id || localStorage.getItem("userId") || "";
 
-  const [term] = useState("Term 1 AY 2025–2026");
+  // TopBar profile from DB (fallback to session)
+  const [profileName, setProfileName] = useState<string>(session?.full_name || "");
+  const [profileSubtitle, setProfileSubtitle] = useState<string>("");
+
+  // Term label from backend (no hardcoding)
+  const [term, setTerm] = useState<string>("");
+
+  useEffect(() => {
+    (async () => {
+      if (!userId) return;
+      try {
+        const p = await getOmLoadAssignmentProfile(userId);
+        // p: { ok: boolean; staff_id?: string; position_title?: string }
+        if (session?.roles?.includes("office_manager")) {
+          setProfileSubtitle("Office Manager"); // role-driven label only
+        } else if (p?.position_title) {
+          setProfileSubtitle(p.position_title);
+        }
+        // prefer session full_name; if missing, keep whatever the TopBar shows
+        if (!profileName && session?.full_name) setProfileName(session.full_name);
+      } catch {/* ignore; non-blocking for UI */}
+    })();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userId]);
+
   const [search, setSearch] = useState("");
   const [rows, setRows] = useState<Row[]>([]);
   type Mode = "idle" | "manual" | "run";
@@ -560,6 +592,11 @@ export default function OM_LoadAssignment() {
   const [reqChange, setReqChange] = useState<{ open: boolean; from?: string }>({
     open: false,
   });
+
+  // Show the main Load Assignment content only on /om or /om/load-assignment
+  const loc = useLocation();
+  const isIndex = /\/om(\/load-assignment)?$/.test(loc.pathname);
+
 
   // === Inbox-as-tab behavior (mirrors Faculty) ===
   const [showInbox, setShowInbox] = useState(false);
@@ -599,9 +636,11 @@ export default function OM_LoadAssignment() {
     if (!userId) return;
     const res = await getOmLoadAssignmentList(userId);
     setRows(Array.isArray(res?.rows) ? res.rows : []);
+    setTerm(typeof res?.term === "string" ? res.term : ""); // term label joined in backend
     setMode("run");
     setApproved(false);
   };
+
 
 
   const addRow = () => {
@@ -683,32 +722,34 @@ export default function OM_LoadAssignment() {
       <>—</>
     );
 
-  const facultyOptions = useMemo(() => {
-    const set = new Set<string>([
-      "Dr. Cabredo, Rafael",
-      "Dr. Samson, Briane",
-      "Ms. Beredo, Jacklyn",
-      "Dr. Cheng, Danny",
-      "Mr. Dela Cruz, Juan",
-    ]);
+    const facultyOptions = useMemo(() => {
+    // strictly DB-derived: only from fetched rows
+    const set = new Set<string>();
     rows.forEach((r) => r.faculty && set.add(r.faculty));
     return Array.from(set).sort();
-  }, [rows]);
+    }, [rows]);
+
 
   return (
-    <AppShell
+      <AppShell
       // make TopBar’s Inbox icon open our OM Inbox-as-tab
-      topbarProfileName="Jamaecha Dacanay"
-      topbarProfileSubtitle="Office Manager | Department of Software Technology"
-      // AppShell → Topbar uses this event name (same pattern used by Faculty). :contentReference[oaicite:4]{index=4}
+      topbarProfileName={profileName || " "}
+      topbarProfileSubtitle={profileSubtitle || " "}
       // @ts-ignore
       topbarInboxEvent="om:openInbox"
     >
-      {/* Render OM Inbox like a tab when opened; otherwise show the Load Assignment UI (screenshot layout intact). */}
+
+      {/* If Inbox is opened from the TopBar, show it like a tab */}
       {showInbox ? (
         <OMInboxContent />
       ) : (
-        <main className="w-full px-8 py-8">
+        <>
+          {/* Child “tabs” (Course Mgt, Faculty Form, etc.) render here */}
+          <Outlet />
+
+          {/* Show the main Load Assignment UI only on /om or /om/load-assignment */}
+          {isIndex && (
+            <main className="w-full px-8 py-8">
           <header className="mb-6 flex items-start justify-between">
             <div>
               <h1 className="text-2xl font-bold">
@@ -1110,9 +1151,12 @@ export default function OM_LoadAssignment() {
             </div>
           </div>
         </main>
+          )}
+        </>
       )}
-
+      
       <ApproveModal
+
         open={showApprove}
         onClose={() => setShowApprove(false)}
                 onApprove={() => {
