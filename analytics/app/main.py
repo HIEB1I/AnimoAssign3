@@ -46,11 +46,10 @@ async def get_teaching_history(faculty_id: str = Query(...)):
     print("faculty_id:", faculty_id, "| documents found:", len(results))
     return {"faculty_id": faculty_id, "count": len(results), "rows": results}
 
-@app.get("/course-profile-for")
-async def course_profile_for(query: str):
+@app.get("/analytics/course-profile-for")
+async def course_profile_for(query: str = Query(..., description="course_id or course_code")):
     data = await get_course_profile_for(query)
     return JSONResponse(content=data)
-
 
 @app.get("/deloading-utilization")
 async def get_deloading_utilization(term: str | None = Query(None)):
