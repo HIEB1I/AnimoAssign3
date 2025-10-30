@@ -124,6 +124,7 @@ from .Login.Login import router as login_router
 
 from .OM.OM_Inbox import router as om_inbox_router
 from .OM.OM_LoadAssignment import router as om_loadassignment_router
+from .OM.OM_ReportsAnalytics import router as om_reportsanalytics_router
 
 from .APO.APO_PreEnlistment import router as preenlistment_router
 from .APO.APO_RoomAllocation import router as roomallocation_router
@@ -142,6 +143,7 @@ app.include_router(login_router, prefix="/api")
 
 app.include_router(om_inbox_router, prefix="/api")
 app.include_router(om_loadassignment_router, prefix="/api")
+app.include_router(om_reportsanalytics_router, prefix="/api")
 
 app.include_router(preenlistment_router, prefix="/api")
 app.include_router(roomallocation_router, prefix="/api")

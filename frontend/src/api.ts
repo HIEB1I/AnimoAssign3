@@ -814,14 +814,17 @@ export async function submitFacultyPreferences(
     preferred_units: number;
     availability_days: string[];
     preferred_times: string[];
-    preferred_kacs: string[];       // KAC codes or IDs
-    mode?: { mode?: string; campus_id?: string };
+    preferred_kacs: string[]; // IDs (preferred) or names; backend normalizes
+    mode?: { mode?: string; campus_id?: string } | { mode?: string; campus_id?: string }[]; // accepts single or array
+    deloading_data?: { deloading_type?: string; units?: string | number }[];
+    preferred_courses?: string[]; // <— add this
     notes?: string;
     has_new_prep?: boolean;
     is_finished?: boolean;
-    term_id?: string;               // optional; server falls back to active term
+    term_id?: string;
   }
 ) {
+
   const { data } = await axios.post(`${API_BASE}/faculty/preferences`, payload, {
     params: { userId, action: "submit" },
   });

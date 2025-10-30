@@ -1,4 +1,3 @@
-// frontend/src/App.tsx
 import { BrowserRouter, Route, Routes, Navigate, Outlet } from "react-router-dom";
 import "./App.css";
 
@@ -14,7 +13,6 @@ import OM_ReportsAnalytics from "./pages/OM/OM_ReportsAnalytics";
 import OM_FacultyForm from "./pages/OM/OM_FacultyForm";
 import OM_StudentPetition from "./pages/OM/OM_StudentPetition";
 import OM_ClassRetention from "./pages/OM/OM_ClassRetention";
-
 import OM_Inbox from "./pages/OM/OM_Inbox";
 import OM_desc from "./pages/OM/OM_desc";
 import OM_desc2 from "./pages/OM/OM_desc2";
@@ -23,11 +21,12 @@ import OM_pred1 from "./pages/OM/OM_pred1";
 import OM_pred2 from "./pages/OM/OM_pred2";
 import OM_LoadReco from "./pages/OM/OM_LoadReco";
 
-// ---------------- APO ----------------
-import APO_PreEnlistment from "./pages/APO/APO_PreEnlistment";
-import APO_CourseOfferings from "./pages/APO/APO_CourseOfferings";
-import APO_RoomAllocation from "./pages/APO/APO_RoomAllocation";
-import APO_Inbox from "./pages/APO/APO_Inbox";
+// ----- Reports & Analytics sub-pages -----
+import OM_RP_FacultyTeachingHistory from "./pages/OM/OM_REPORTS_ANALYTICS/OM-RP_FacultyTeachingHistory";
+import OM_RP_CourseHistory from "./pages/OM/OM_REPORTS_ANALYTICS/OM-RP_CourseHistory";
+import OM_RP_DeloadingUtilization from "./pages/OM/OM_REPORTS_ANALYTICS/OM-RP_DeloadingUtilization";
+import OM_RP_AvailabilityForecasting from "./pages/OM/OM_REPORTS_ANALYTICS/OM-RP_AvailabilityForecasting";
+import OM_RP_LoadRisk from "./pages/OM/OM_REPORTS_ANALYTICS/OM-RP_LoadRisk";
 
 // ---------------- Student ----------------
 import STUDENT_Petition from "./pages/STUDENT/STUDENT_Petition";
@@ -65,30 +64,58 @@ export default function App() {
         {/* Public */}
         <Route path="/Login" element={<Login />} />
         <Route path="/auth/callback" element={<AuthCallback />} />
-        
-        {/* Protected (after login) */}
+
+        {/* Protected */}
         <Route element={<RequireAuth />}>
+          {/* OM loose pages */}
           <Route path="/om/desc" element={<OM_desc />} />
           <Route path="/om/desc2" element={<OM_desc2 />} />
           <Route path="/om/desc3" element={<OM_desc3 />} />
           <Route path="/om/pred1" element={<OM_pred1 />} />
           <Route path="/om/pred2" element={<OM_pred2 />} />
           <Route path="/om/loadreco" element={<OM_LoadReco />} />
-
-          <Route path="/om/home" element={<OM_LoadAssignment />} />
           <Route path="/om/faculty-management" element={<OM_FacultyMgt />} />
-          {<Route path="/om/inbox" element={<OM_Inbox />} /> }
           <Route path="/om/course-management" element={<OM_CourseMgt />} />
-          <Route path="/om/reports-analytics" element={<OM_ReportsAnalytics />} />
+          <Route path="/om/inbox" element={<OM_Inbox />} />
           <Route path="/om/faculty-form" element={<OM_FacultyForm />} />
           <Route path="/om/student-petition" element={<OM_StudentPetition />} />
           <Route path="/om/class-retention" element={<OM_ClassRetention />} />
-        
-          {/* APO */}
-          <Route path="/apo/preenlistment" element={<APO_PreEnlistment />} />
-          <Route path="/apo/courseofferings" element={<APO_CourseOfferings />} />
-          <Route path="/apo/roomallocation" element={<APO_RoomAllocation />} />
-          <Route path="/apo/inbox" element={<APO_Inbox />} />
+
+          {/* OM shell with children (ONE declaration only) */}
+          <Route path="/om/home" element={<OM_LoadAssignment />}>
+            {/* Reports & Analytics landing */}
+            <Route path="reports-analytics" element={<OM_ReportsAnalytics />} />
+
+            {/* Child detail pages (inherit shell via Outlet) */}
+            <Route path="reports-analytics/teaching-history" element={<OM_RP_FacultyTeachingHistory />} />
+            <Route path="reports-analytics/course-history" element={<OM_RP_CourseHistory />} />
+            <Route path="reports-analytics/deloading-utilization" element={<OM_RP_DeloadingUtilization />} />
+            <Route path="reports-analytics/availability-forecast" element={<OM_RP_AvailabilityForecasting />} />
+            <Route path="reports-analytics/load-risk" element={<OM_RP_LoadRisk />} />
+          </Route>
+
+          {/* Optional: legacy/shortcut paths -> redirect to nested routes */}
+          <Route path="/om/reports-analytics" element={<Navigate to="/om/home/reports-analytics" replace />} />
+          <Route
+            path="/om/reports-analytics/teaching-history"
+            element={<Navigate to="/om/home/reports-analytics/teaching-history" replace />}
+          />
+          <Route
+            path="/om/reports-analytics/course-history"
+            element={<Navigate to="/om/home/reports-analytics/course-history" replace />}
+          />
+          <Route
+            path="/om/reports-analytics/deloading-utilization"
+            element={<Navigate to="/om/home/reports-analytics/deloading-utilization" replace />}
+          />
+          <Route
+            path="/om/reports-analytics/availability-forecast"
+            element={<Navigate to="/om/home/reports-analytics/availability-forecast" replace />}
+          />
+          <Route
+            path="/om/reports-analytics/load-risk"
+            element={<Navigate to="/om/home/reports-analytics/load-risk" replace />}
+          />
 
           {/* Student */}
           <Route path="/student/petition" element={<STUDENT_Petition />} />
@@ -102,9 +129,12 @@ export default function App() {
           {/* Admin */}
           <Route path="/admin" element={<ADMIN />} />
           <Route path="/admin/inbox" element={<ADMIN_Inbox />} />
+
+          {/* Authenticated wildcard: unknown paths for logged-in users go home (not /Login) */}
+          <Route path="*" element={<Navigate to="/om/home" replace />} />
         </Route>
 
-        {/* Fallback */}
+        {/* Public fallback: unknown + unauthenticated -> Login */}
         <Route path="*" element={<Navigate to="/Login" replace />} />
       </Routes>
     </BrowserRouter>
