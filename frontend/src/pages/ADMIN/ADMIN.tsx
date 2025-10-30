@@ -1,7 +1,7 @@
 // frontend/src/pages/ADMIN/ADMIN.tsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Search, Plus, PencilLine, Trash2, X } from "lucide-react";
-// import { InboxContent as AdminInboxContent } from "./ADMIN_Inbox";
+import { InboxContent as AdminInboxContent } from "./ADMIN_Inbox";
 import TopBar from "../../component/TopBar";
 import {
   getAdminUsersList,
@@ -427,7 +427,7 @@ export default function ADMIN() {
           role={role}
           department={department}
           notifications={notifications}
-          // inboxEvent="admin:openInbox"
+          inboxEvent="admin:openInbox"
         />
         <main className="mx-auto w-full max-w-none px-4 py-10 sm:px-6 lg:px-8">
           <div className="rounded-xl border border-neutral-200 bg-white p-8 text-center text-sm text-neutral-600">
@@ -445,7 +445,7 @@ export default function ADMIN() {
           role={role}
           department={department}
           notifications={notifications}
-          // inboxEvent="admin:openInbox"
+          inboxEvent="admin:openInbox"
         />
         <main className="mx-auto w-full max-w-none px-4 py-10 sm:px-6 lg:px-8">
           <div className="rounded-xl border border-red-200 bg-red-50 p-8 text-center text-sm text-red-700">
@@ -463,9 +463,11 @@ export default function ADMIN() {
         role={role}
         department={department}
         notifications={notifications}
-        // inboxEvent="admin:openInbox"
+        inboxEvent="admin:openInbox"
       />
       <main className="mx-auto w-full max-w-none space-y-8 px-4 py-6 sm:px-6 lg:px-8">
+        {showInbox && <AdminInboxContent />}
+
         {/* ================= User Management ================= */}
         <section className="rounded-xl border border-neutral-200 bg-white">
           <div className="flex items-center justify-between border-b border-neutral-200 px-6 py-4">
