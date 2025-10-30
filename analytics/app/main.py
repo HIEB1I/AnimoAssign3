@@ -7,11 +7,11 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field
 
-from .db_async import fetch_teaching_history            # descriptive #1
-from .db_async import get_course_profile_for            # descriptive #2
-from .db_async import fetch_deloading_utilization       # descriptive #3
-
-from .db_async import run_pt_risk                       # predictive #2
+from .db_async import fetch_teaching_history                # descriptive #1
+from .db_async import get_course_profile_for                # descriptive #2
+from .db_async import fetch_deloading_utilization           # descriptive #3
+from .db_async import build_faculty_availability_heatmap    # predictive #1
+from .db_async import run_pt_risk                           # predictive #2
 
 from collections import Counter
 import re
@@ -40,7 +40,7 @@ class IngestEvent(BaseModel):
 
 # ---- Root pages/APIs (Nginx strips /analytics → these root routes) ----   
 
-@app.get("/teaching-history")
+@app.get("/analytics/teaching-history")
 async def get_teaching_history(faculty_id: str = Query(...)):
     results = await fetch_teaching_history(faculty_id)
     print("faculty_id:", faculty_id, "| documents found:", len(results))
@@ -51,11 +51,21 @@ async def course_profile_for(query: str = Query(..., description="course_id or c
     data = await get_course_profile_for(query)
     return JSONResponse(content=data)
 
-@app.get("/deloading-utilization")
+@app.get("/analytics/deloading-utilization")
 async def get_deloading_utilization(term: str | None = Query(None)):
     results = await fetch_deloading_utilization(term)
     print("term:", term, "| entries:", len(results))
     return {"term": term, "count": len(results), "rows": results}
+
+@app.get("/analytics/faculty-availability-heatmap")
+async def faculty_availability_heatmap(
+    course_id: Optional[str] = Query(None),
+    dept_id: Optional[str] = Query(None),
+    threshold: float = Query(0.50),
+):
+    return await build_faculty_availability_heatmap(
+        course_id=course_id, dept_id=dept_id, threshold=threshold
+    )
 
 @app.get("/analytics/pt-risk")
 async def pt_risk_endpoint(

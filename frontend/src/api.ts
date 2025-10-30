@@ -213,7 +213,25 @@ export async function fetchDeloadingUtilization(term?: string) {
   return r.json();
 }
 
-// Predictive #1
+// Predictive #1 (updated)
+export async function fetchFacultyAvailabilityHeatmap<T = unknown>(params?: {
+  course_id?: string;
+  dept_id?: string;
+  threshold?: number; // default handled server-side (e.g., 0.50)
+}): Promise<T> {
+  const qs = new URLSearchParams();
+  if (params?.course_id) qs.set("course_id", params.course_id);
+  if (params?.dept_id) qs.set("dept_id", params.dept_id);
+  if (params?.threshold !== undefined) qs.set("threshold", String(params.threshold));
+
+  const url =
+    `${ANALYTICS_BASE.replace(/\/+$/, "")}/faculty-availability-heatmap` +
+    (qs.toString() ? `?${qs.toString()}` : "");
+
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(await r.text());
+  return (await r.json()) as T;
+}
 
 // Predictive #2
 export async function fetchPTRisk(params: {
@@ -231,7 +249,7 @@ export async function fetchPTRisk(params: {
   if (params.include_only_with_preferences != null) sp.set("include_only_with_preferences", String(params.include_only_with_preferences));
   if (params.allow_fallback_without_sections != null) sp.set("allow_fallback_without_sections", String(params.allow_fallback_without_sections));
 
-  const url = `${base}/analytics/pt-risk?${sp.toString()}`;
+  const url = `${base}/pt-risk?${sp.toString()}`;
   const r = await fetch(url);
   if (!r.ok) throw new Error(await r.text());
   return r.json();

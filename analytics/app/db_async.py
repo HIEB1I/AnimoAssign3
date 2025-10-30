@@ -3,7 +3,7 @@ from functools import lru_cache
 from motor.motor_asyncio import AsyncIOMotorClient
 from .config import get_settings
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Set
+from typing import Dict, List, Optional, Tuple, Any
 
 import math
 from typing import List
@@ -122,9 +122,7 @@ async def fetch_teaching_history(faculty_id: str) -> List[Dict[str, Any]]:
 # ------------------------------
 # Course Profile Report
 # ------------------------------
-
 db = get_db()
-
 def _fmt_name(u: Dict[str, Any] | None) -> str | None:
     if not u: return None
     fn = (u.get("first_name") or "").strip()
@@ -424,6 +422,337 @@ async def fetch_deloading_utilization(selected_term: str | None = None):
     # Sort results by faculty name ASC, then updated_at DESC
     results.sort(key=lambda x: (x["faculty_name"], -(x["updated_at"].timestamp() if x.get("updated_at") else 0)))
     return results
+
+# ------------------------------------------------------------------------------
+# Predictive #1
+# ------------------------------------------------------------------------------
+# ---- Propensity-to-Assign Heatmap (Predictive #1b) ---------------------------
+# Goal: highlight slots each faculty is MOST LIKELY to take (good fit),
+#       not merely "free". We:
+#   • Build per-faculty per-slot teaching FREQUENCY (recency-weighted 0.6/0.3/0.1)
+#   • Add preference reinforcement (+0.20) if slot is in previous-term preferences
+#   • Compute propensity score: 0.30 (base) + pref_boost + freq * 0.50  → clamp [0,1]
+#   • Keep ONLY each faculty’s Top 5 slots (highest scores)
+#   • Aggregate Top-5 into the heatmap; threshold filters low-confidence entries
+#
+# Notes:
+#   • Single-day model (M,T,W,H,F,S); UI may render M–H / T–F / W–S pairs.
+#   • Time normalization: accepts "730"/"0730"/"07:30" and ranges like "730-900".
+#   • “Frequency” counts repeated overlaps (no de-dup): more occurrences → higher score.
+
+from typing import Any, Dict, List, Optional, Tuple
+
+DAY_CODES: List[str] = ["M", "T", "W", "H", "F", "S"]
+TIME_SLOTS: List[str] = [
+    "07:30-09:00","09:15-10:45","11:00-12:30",
+    "12:45-14:15","14:30-16:00","16:15-17:45",
+    "18:00-19:30","19:45-21:15",
+]
+
+TOP_N_PER_FACULTY = 5  # <<— chose the top ? of a faculty's best schedule
+
+# --- Normalization helpers -----------------------------------------------------
+
+DAY_MAP = {
+    "Mon": "M", "Monday": "M", "M": "M",
+    "Tue": "T", "Tues": "T", "Tuesday": "T", "T": "T",
+    "Wed": "W", "Wednesday": "W", "W": "W",
+    "Thu": "H", "Thur": "H", "Thurs": "H", "Thursday": "H", "H": "H",
+    "Fri": "F", "Friday": "F", "F": "F",
+    "Sat": "S", "Saturday": "S", "S": "S",
+}
+
+def _clamp(x: float, lo: float = 0.0, hi: float = 1.0) -> float:
+    return max(lo, min(hi, x))
+
+def _to_minutes_any(s: str) -> int:
+    """
+    Accepts '07:30', '0730', '730', or '07:30:00'.
+    Returns minutes since 00:00.
+    """
+    v = str(s or "").strip()
+    if not v:
+        return 0
+    if ":" in v:
+        parts = v.split(":")
+        hh = int(parts[0] or 0)
+        mm = int(parts[1] or 0)
+        return hh * 60 + mm
+    v = v.zfill(4)  # '730' -> '0730'
+    hh, mm = int(v[:2]), int(v[2:])
+    return hh * 60 + mm
+
+def _range_to_minutes(rng: str) -> Tuple[int, int]:
+    """
+    Accepts '07:30-09:00' OR '730-900' OR '0730-0900'.
+    Returns (start_min, end_min).
+    """
+    parts = [p.strip() for p in str(rng).split("-")]
+    if len(parts) != 2:
+        return (0, 0)
+    return (_to_minutes_any(parts[0]), _to_minutes_any(parts[1]))
+
+def _recency_weights(term_ids: List[str]) -> Dict[str, float]:
+    """Newest→older weights 0.6 / 0.3 / 0.1 truncated to len(term_ids), mapped by term_id."""
+    if not term_ids:
+        return {}
+    w = [0.6, 0.3, 0.1][:len(term_ids)]
+    newest_first = list(reversed(term_ids))
+    return {newest_first[i]: w[i] for i in range(len(newest_first))}
+
+def _overlaps(a_start: int, a_end: int, b_start: int, b_end: int) -> bool:
+    return max(a_start, b_start) < min(a_end, b_end)
+
+# Precompute canonical slot minute ranges (based on TIME_SLOTS)
+SLOT_RANGES: List[Tuple[int, int]] = []
+for s in TIME_SLOTS:
+    a, b = [x.strip() for x in s.split("-")]
+    SLOT_RANGES.append((_to_minutes_any(a), _to_minutes_any(b)))
+
+def _slot_key(day: str, slot_label: str) -> Tuple[str, str]:
+    """slot_label is canonical 'HH:MM-HH:MM' as in TIME_SLOTS."""
+    return (day, slot_label)
+
+# --- Core builder --------------------------------------------------------------
+
+async def build_faculty_availability_heatmap(
+    course_id: Optional[str] = None,
+    dept_id: Optional[str] = None,
+    threshold: float = 0.50,
+) -> Dict[str, Any]:
+    """
+    Output:
+      {
+        term_id, previous_term_for_prefs, history_terms, warnings: [..],
+        slots: { "D|HH:MM-HH:MM": { count, list:[{faculty_id,name,email,confidence_pct,reason,notes[]}] } }
+      }
+    """
+    db = get_db()
+
+    # Terms
+    cur = await current_term(db)
+    if not cur:
+        return {"warnings": ["No current term found."], "slots": {}}
+    curr_term_id = cur.get("term_id") or cur.get("_id")
+
+    # Use CURRENT term preferences (T) to forecast NEXT term (T+1)
+    prev_term = curr_term_id
+
+    hist_terms = await prev_n_terms(db, curr_term_id, 3)      
+    hist_terms = list(hist_terms) if hist_terms else []
+    weights = _recency_weights(hist_terms)
+
+    # Warnings banner
+    warnings: List[str] = []
+    # We now expect prefs in the CURRENT term (T), used to forecast T+1
+    curr_pref_count = await db.faculty_preferences.count_documents({"term_id": curr_term_id})
+
+    if curr_pref_count == 0:
+        warnings.append(
+            f"Pre-survey mode: expecting current-term preferences ({curr_term_id}) for next-term forecast; "
+            "none found yet. Using assignment history only."
+        )
+
+    # Build empty grid
+    grid: Dict[Tuple[str, str], Dict[str, Any]] = {
+        (d, s): {"count": 0, "list": []} for d in DAY_CODES for s in TIME_SLOTS
+    }
+
+    # Iterate faculty candidates
+    async for fp in db.faculty_profiles.find({}):
+        # Optional filters
+        if dept_id and fp.get("department_id") != dept_id:
+            continue
+        if course_id:
+            kvals = set(fp.get("qualified_kacs", [])) | set(fp.get("course_ids", []))
+            if course_id not in kvals:
+                continue
+
+        fid = fp["faculty_id"]
+
+        # Candidate pool rule: include if (prev-term pref) OR (has history in last 3)
+        has_prev_pref = False
+        if prev_term:
+            has_prev_pref = await db.faculty_preferences.find_one(
+                {"faculty_id": fid, "term_id": prev_term},
+                projection={"_id": 1}
+            ) is not None
+
+        has_history_any = False
+        if hist_terms:
+            sec_ids_hist = await db.sections.distinct("section_id", {"term_id": {"$in": hist_terms}})
+            if sec_ids_hist:
+                has_history_any = await db.faculty_assignments.find_one(
+                    {"faculty_id": fid, "section_id": {"$in": sec_ids_hist}},
+                    projection={"_id": 1}
+                ) is not None
+
+        if not (has_prev_pref or has_history_any):
+            continue  # not in candidate pool
+
+        # Exclusions
+        lv = await db.leaves.find_one({
+            "faculty_id": fid,
+            "approval_status": "APPROVED",
+            "start_term_id": {"$lte": curr_term_id},
+            "end_term_id":   {"$gte": curr_term_id},
+        })
+        if lv:
+            continue
+
+        pref_curr = await db.faculty_preferences.find_one(
+            {"faculty_id": fid, "term_id": curr_term_id},
+            projection={"preferred_units": 1}
+        )
+        if pref_curr and int(pref_curr.get("preferred_units", 0)) == 0:
+            continue
+
+        # For display (name/email) — join via user_id (not _id)
+        # Join with users via user_id (not _id)
+        u = await db.users.find_one(
+            {"user_id": fp.get("user_id")},
+            {"first_name": 1, "last_name": 1, "email": 1},
+        )
+
+        # Optional fallback: some datasets store user_id == faculty_id
+        if not u and fp.get("faculty_id"):
+            u = await db.users.find_one(
+                {"user_id": fp.get("faculty_id")},
+                {"first_name": 1, "last_name": 1, "email": 1},
+            )
+
+        name = f"{(u or {}).get('last_name','')}, {(u or {}).get('first_name','')}".strip(", ").strip()
+        if not name:
+            name = fp.get("faculty_id")  # final fallback
+        email = (u or {}).get("email")
+
+        # ----- Frequency map from history (recency-weighted; COUNTS multiplicity) -----
+        # freq[(day, slot)] accumulates weights for every overlapping meeting in hist_terms.
+        freq: Dict[Tuple[str, str], float] = {(d, s): 0.0 for d in DAY_CODES for s in TIME_SLOTS}
+        has_history_detailed = False
+
+        if hist_terms:
+            assigns = await db.faculty_assignments.find({"faculty_id": fid}).to_list(length=None)
+            if assigns:
+                section_ids = [a["section_id"] for a in assigns]
+                sec_map: Dict[str, str] = {}
+                async for sec in db.sections.find(
+                    {"section_id": {"$in": section_ids}, "term_id": {"$in": hist_terms}},
+                    {"section_id": 1, "term_id": 1}
+                ):
+                    sec_map[sec["section_id"]] = sec["term_id"]
+
+                if sec_map:
+                    has_history_detailed = True
+                    async for sc in db.section_schedules.find({"section_id": {"$in": list(sec_map.keys())}}):
+                        tid = sec_map.get(sc["section_id"])
+                        if not tid or tid not in weights:
+                            continue
+                        d_raw = sc.get("day")
+                        d = DAY_MAP.get(str(d_raw), d_raw)
+                        if d not in DAY_CODES:
+                            continue
+
+                        st_min = _to_minutes_any(sc.get("start_time"))
+                        et_min = _to_minutes_any(sc.get("end_time"))
+                        if st_min >= et_min:
+                            continue
+
+                        w = weights[tid]
+                        # Add EVERY overlap (frequency), no de-dup
+                        for idx, slot_label in enumerate(TIME_SLOTS):
+                            slot_st, slot_et = SLOT_RANGES[idx]
+                            if _overlaps(st_min, et_min, slot_st, slot_et):
+                                freq[(d, slot_label)] += w
+
+        # ----- Preference reinforcement from previous term (supports "730-900") -----
+        pref_keys: set = set()
+        if prev_term:
+            prev_doc = await db.faculty_preferences.find_one(
+                {"faculty_id": fid, "term_id": prev_term},
+                projection={"availability_days": 1, "preferred_times": 1}
+            )
+            if prev_doc:
+                days = [DAY_MAP.get(str(d), d) for d in (prev_doc.get("availability_days") or [])]
+                for rng in (prev_doc.get("preferred_times") or []):
+                    st_min, et_min = _range_to_minutes(rng)
+                    if st_min >= et_min:
+                        continue
+                    for idx, label in enumerate(TIME_SLOTS):
+                        sst, setm = SLOT_RANGES[idx]
+                        if _overlaps(st_min, et_min, sst, setm):
+                            for d in days:
+                                if d in DAY_CODES:
+                                    pref_keys.add((d, label))
+
+        # ----- Score all slots, keep Top 5 per faculty (propensity model) -----
+        scored: List[Tuple[Tuple[str, str], float, str]] = []  # [(key, score, reason)]
+        for key in freq.keys():
+            f = freq.get(key, 0.0)             # 0..(≥1 if repeated)
+            preferred = key in pref_keys
+            base = 0.30
+            pref_boost = 0.20 if preferred else 0.0
+            score = _clamp(base + pref_boost + _clamp(f, 0.0, 1.0) * 0.50, 0.0, 1.0)
+
+            # Reason text
+            if f > 0 and preferred:
+                reason = "Commonly taught in recent terms & preferred last term"
+            elif f > 0:
+                reason = "Commonly taught in recent terms"
+            elif preferred:
+                reason = "Preferred in previous term"
+            else:
+                # For safety: allow only if candidate had at least one criterion upstream.
+                reason = "Pattern signal"
+
+            scored.append((key, score, reason))
+
+        # If no detailed history, we still allow preference-only slots to score
+        if not has_history_detailed and pref_keys:
+            for key in pref_keys:
+                # ensure present with preference-only scoring
+                base = 0.30
+                score = _clamp(base + 0.20, 0.0, 1.0)  # 0.50
+                scored.append((key, score, "Preferred in previous term"))
+
+        # Rank and keep Top N
+        scored.sort(key=lambda x: x[1], reverse=True)
+        topN = scored[:TOP_N_PER_FACULTY]
+
+        # Shared notes for drill-down
+        notes = []
+        if not pref_curr:
+            notes.append("No current-term preference on record.")
+        notes.append("No leaves recorded for this term.")
+        if has_prev_pref:
+            notes.append("Candidate criterion: previous-term preference.")
+        if has_history_any:
+            notes.append("Candidate criterion: has assignment history in last 3 terms.")
+
+        # Aggregate Top-N into grid (respect threshold)
+        for (day, label), score, reason in topN:
+            if score < threshold:
+                continue
+            grid[(day, label)]["count"] += 1
+            grid[(day, label)]["list"].append({
+                "faculty_id": fid,
+                "name": name,
+                "email": email,
+                "confidence_pct": round(score * 100),
+                "reason": reason,
+                "notes": notes,
+            })
+
+    # Final payload (string keys "D|HH:MM-HH:MM")
+    slots = { f"{d}|{s}": grid[(d, s)] for d in DAY_CODES for s in TIME_SLOTS }
+    return {
+        "term_id": cur["term_id"],
+        "previous_term_for_prefs": prev_term,
+        "history_terms": hist_terms,
+        "warnings": warnings,
+        "slots": slots,
+    }
+# ---- end Propensity-to-Assign Heatmap ----------------------------------------
 
 
 # ------------------------------------------------------------------------------
