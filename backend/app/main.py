@@ -121,8 +121,8 @@ async def health_db():
 # These will live under the backend root; your nginx/Vite already forward /api/* here.
 # --------------------------------------------------------------------
 from .Login.Login import router as login_router
-from .OM.OM_HomePage import router as om_home_router
-from .OM.OM_Profile import router as om_profile_router
+# from .OM.OM_HomePage import router as om_home_router
+# from .OM.OM_Profile import router as om_profile_router
 from .OM.OM_FacultyManagement import router as om_facultymanagement
 # from .OM.OM_CourseManagement import router as om_coursemanagement
 # from .OM.OM_FacultyForm import router as om_facultyform
@@ -143,8 +143,8 @@ from .FACULTY.FACULTY_Preferences import router as faculty_prefs_router
 from .FACULTY.FACULTY_History import router as faculty_history_router
 from .FACULTY.FACULTY_Inbox import router as faculty_inbox_router
 
-from .ADMIN.ADMIN import router as admin_router
-from .ADMIN.ADMIN_Inbox import router as admin_inbox_router
+# from .ADMIN.ADMIN import router as admin_router
+# from .ADMIN.ADMIN_Inbox import router as admin_inbox_router
 
 app.include_router(login_router, prefix="/api")
 
@@ -167,5 +167,5 @@ app.include_router(faculty_prefs_router, prefix="/api")
 app.include_router(faculty_history_router, prefix="/api")
 app.include_router(faculty_inbox_router, prefix="/api")
 
-app.include_router(admin_router, prefix="/api")
-app.include_router(admin_inbox_router, prefix="/api")
+# app.include_router(admin_router, prefix="/api")
+# app.include_router(admin_inbox_router, prefix="/api")

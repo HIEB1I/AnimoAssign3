@@ -7,8 +7,6 @@ import AuthCallback from "./pages/Login/AuthCallback";
 
 // ---------------- OM ----------------
 import OM_LoadAssignment from "./pages/OM/OM_LoadAssignment";
-import OM_FacultyMgt from "./pages/OM/OM_FacultyMgt";
-import OM_CourseMgt from "./pages/OM/OM_CourseMgt";
 import OM_ReportsAnalytics from "./pages/OM/OM_ReportsAnalytics";
 import OM_FacultyForm from "./pages/OM/OM_FacultyForm";
 import OM_StudentPetition from "./pages/OM/OM_StudentPetition";
@@ -37,9 +35,18 @@ import FACULTY_Inbox from "./pages/FACULTY/FACULTY_Inbox";
 import FACULTY_History from "./pages/FACULTY/FACULTY_History";
 import FACULTY_Preferences from "./pages/FACULTY/FACULTY_Preferences";
 
-// Admin
+// ---------------- Admin ----------------
 import ADMIN from "./pages/ADMIN/ADMIN";
 import ADMIN_Inbox from "./pages/ADMIN/ADMIN_Inbox";
+import OM_FacultyManagement from "./pages/OM/OM_FacultyManagement";
+import OM_CourseManagement from "./pages/OM/OM_CourseManagement";
+
+// ---------------- APO ----------------
+import APO_PreEnlistment from "./pages/APO/APO_PreEnlistment";
+import APO_CourseOfferings from "./pages/APO/APO_CourseOfferings";
+import APO_RoomAllocation from "./pages/APO/APO_RoomAllocation";
+
+
 
 const base = (import.meta.env.BASE_URL || "/").replace(/\/$/, "");
 
@@ -74,8 +81,8 @@ export default function App() {
           <Route path="/om/pred1" element={<OM_pred1 />} />
           <Route path="/om/pred2" element={<OM_pred2 />} />
           <Route path="/om/loadreco" element={<OM_LoadReco />} />
-          <Route path="/om/faculty-management" element={<OM_FacultyMgt />} />
-          <Route path="/om/course-management" element={<OM_CourseMgt />} />
+          <Route path="/om/faculty-management" element={<OM_FacultyManagement />} />
+          <Route path="/om/course-management" element={<OM_CourseManagement />} />
           <Route path="/om/inbox" element={<OM_Inbox />} />
           <Route path="/om/faculty-form" element={<OM_FacultyForm />} />
           <Route path="/om/student-petition" element={<OM_StudentPetition />} />
@@ -119,6 +126,12 @@ export default function App() {
 
           {/* Student */}
           <Route path="/student/petition" element={<STUDENT_Petition />} />
+
+          {/* APO */}
+          <Route path="/apo/preenlistment" element={<APO_PreEnlistment/>} />
+          <Route path="/apo/courseofferings" element={<APO_CourseOfferings/>} />
+          <Route path="/apo/roomallocation" element={<APO_RoomAllocation/>} />
+
 
           {/* Faculty */}
           <Route path="/faculty/overview" element={<FACULTY_Overview />} />
