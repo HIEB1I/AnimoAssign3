@@ -1,4 +1,3 @@
-// frontend/src/pages/APO/APO_PreEnlistment.tsx
 import React, { useEffect, useMemo, useState } from "react";
 import Papa, { type ParseResult } from "papaparse";
 import { Pencil, Check, Upload, Archive, Download } from "lucide-react";
@@ -40,36 +39,7 @@ export default function APO_PreEnlistment() {
   const [archiveStats, setArchiveStats] = useState<string[][]>([]);
   const [archiveLoading, setArchiveLoading] = useState(false);
 
-  // Label shows "Term {term_number} · AY ..."
   const archiveLabel = (t: ArchiveMetaItem) => `Term ${t.term_number ?? "—"} · ${t.ay_label}`;
-
-  // --- Totals (no search bars in archive) ---
-  const totalArchiveCount = useMemo(
-    () => archiveCount.reduce((sum, r) => sum + (parseInt(r[4] as string, 10) || 0), 0),
-    [archiveCount]
-  );
-  const totalsArchiveStats = useMemo(() => {
-    const sums = [0, 0, 0, 0];
-    archiveStats.forEach((r) => {
-      sums[0] += parseInt(r[1] as string, 10) || 0;
-      sums[1] += parseInt(r[2] as string, 10) || 0;
-      sums[2] += parseInt(r[3] as string, 10) || 0;
-      sums[3] += parseInt(r[4] as string, 10) || 0;
-    });
-    return sums;
-  }, [archiveStats]);
-
-  const exportCsv = (filename: string, headers: string[], rows: (string | number)[][]) => {
-    const esc = (v: any) => `"${String(v ?? "").replace(/"/g, '""')}"`;
-    const csv = [headers.map(esc).join(","), ...rows.map((r) => r.map(esc).join(","))].join("\n");
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = filename;
-    a.click();
-    URL.revokeObjectURL(url);
-  };
 
   const user = useMemo(() => {
     const raw = localStorage.getItem("animo.user");
@@ -114,9 +84,7 @@ export default function APO_PreEnlistment() {
     : "";
 
   const normalizeProgramCode = (s: PreenlistmentStatDoc) =>
-    (s as any).program_code ??
-    (s as any)?.programs?.program_code ??
-    ""; // backend may return programs.program_code (joined)
+    (s as any).program_code ?? (s as any)?.programs?.program_code ?? "";
 
   const refresh = async () => {
     if (!user?.userId) return;
@@ -129,19 +97,18 @@ export default function APO_PreEnlistment() {
 
     setActiveMeta((meta as TermMeta) ?? null);
 
-    // COUNT table (acad_group now comes from colleges.college_code via backend)
+    // IMPORTANT: we read `.count` which backend guarantees from `preenlistment_count`
     setEnlistedCourses(
       (count ?? ([] as PreenlistmentCountDoc[])).map((d) => [
         d.preenlistment_code || "",
-        d.career || "",
-        (d as any).acad_group || "", // display-only, equals colleges.college_code
+        d.career || "",                                  // UGB / GSM as-is
+        (d as any).acad_group || "",                     // CSV 'Acad Group' or college_code fallback
         d.campus_name || "",
         d.course_code || "",
-        String(d.count ?? 0),
+        String((d as any).count ?? 0),
       ])
     );
 
-    // STATS table (program_code may be nested)
     setEnrollmentStats(
       (statistics ?? ([] as PreenlistmentStatDoc[])).map((s) => [
         normalizeProgramCode(s),
@@ -169,8 +136,8 @@ export default function APO_PreEnlistment() {
         if (!user?.userId) throw new Error("Not logged in");
         const rows: CountCsvRow[] = updated.map((r) => ({
           Code: r[0] || "",
-          Career: r[1],
-          "Acad Group": r[2], // not stored; backend derives from colleges on display
+          Career: r[1],                 // keep UGB/GSM for display
+          "Acad Group": r[2],           // keep CSV code for display
           Campus: (r[3] as "MANILA" | "LAGUNA") || (campusName as "MANILA" | "LAGUNA"),
           "Course Code": r[4],
           Count: Number(r[5] ?? 0),
@@ -206,12 +173,11 @@ export default function APO_PreEnlistment() {
       try {
         if (!user?.userId) throw new Error("Not logged in");
         const rows: StatCsvRow[] = updated.map((r) => ({
-          Program: r[0], // program_code
+          Program: r[0],
           FRESHMAN: Number(r[1] ?? 0),
           SOPHOMORE: Number(r[2] ?? 0),
           JUNIOR: Number(r[3] ?? 0),
           SENIOR: Number(r[4] ?? 0),
-          // ENROLLMENT (optional) can be omitted; backend computes if not provided
         }));
         await importApoPreenlistment(
           user.userId,
@@ -276,10 +242,25 @@ export default function APO_PreEnlistment() {
     });
   };
 
+  const [archiveCountTotal, setArchiveCountTotal] = useState(0);
+  const [archiveStatsTotals, setArchiveStatsTotals] = useState([0, 0, 0, 0]);
+
+  const calcArchiveTotals = (countRows: string[][], statRows: string[][]) => {
+    setArchiveCountTotal(countRows.reduce((sum, r) => sum + (parseInt(r[4] as string, 10) || 0), 0));
+    const sums = [0, 0, 0, 0];
+    statRows.forEach((r) => {
+      sums[0] += parseInt(r[1] as string, 10) || 0;
+      sums[1] += parseInt(r[2] as string, 10) || 0;
+      sums[2] += parseInt(r[3] as string, 10) || 0;
+      sums[3] += parseInt(r[4] as string, 10) || 0;
+    });
+    setArchiveStatsTotals(sums);
+  };
+
   const moveToArchives = async () => {
     if (!user?.userId) return;
     const label = activeMeta ? `Term ${activeMeta.term_number ?? ""} ${activeMeta.ay_label}` : "current term";
-    if (!confirm(`Archive ${label}? This will snapshot active rows (for your campus) and may advance the term.`)) return;
+    if (!confirm(`Archive ${label}? This will snapshot active rows for your campus and may advance the term.`)) return;
     try {
       setArchiving(true);
       await archiveApoPreenlistment(user.userId, undefined, campusName || undefined);
@@ -307,27 +288,27 @@ export default function APO_PreEnlistment() {
           "archive",
           campusName || undefined
         );
-        setArchiveCount(
-          (count ?? ([] as PreenlistmentCountDoc[])).map((d) => [
-            d.career || "",
-            (d as any).acad_group || "",
-            d.campus_name || "",
-            d.course_code || "",
-            String(d.count ?? 0),
-          ])
-        );
-        setArchiveStats(
-          (statistics ?? ([] as PreenlistmentStatDoc[])).map((s) => [
-            normalizeProgramCode(s),
-            String(s.freshman ?? 0),
-            String(s.sophomore ?? 0),
-            String(s.junior ?? 0),
-            String(s.senior ?? 0),
-          ])
-        );
+        const countRows = (count ?? ([] as PreenlistmentCountDoc[])).map((d) => [
+          d.career || "",
+          (d as any).acad_group || "",
+          d.campus_name || "",
+          d.course_code || "",
+          String((d as any).count ?? 0),
+        ]);
+        const statRows = (statistics ?? ([] as PreenlistmentStatDoc[])).map((s) => [
+          normalizeProgramCode(s),
+          String(s.freshman ?? 0),
+          String(s.sophomore ?? 0),
+          String(s.junior ?? 0),
+          String(s.senior ?? 0),
+        ]);
+        setArchiveCount(countRows);
+        setArchiveStats(statRows);
+        calcArchiveTotals(countRows, statRows);
       } else {
         setArchiveCount([]);
         setArchiveStats([]);
+        calcArchiveTotals([], []);
       }
     } finally {
       setArchiveLoading(false);
@@ -347,27 +328,38 @@ export default function APO_PreEnlistment() {
         "archive",
         campusName || undefined
       );
-      setArchiveCount(
-        (count ?? ([] as PreenlistmentCountDoc[])).map((d) => [
-          d.career || "",
-          (d as any).acad_group || "",
-          d.campus_name || "",
-          d.course_code || "",
-          String(d.count ?? 0),
-        ])
-      );
-      setArchiveStats(
-        (statistics ?? ([] as PreenlistmentStatDoc[])).map((s) => [
-          normalizeProgramCode(s),
-          String(s.freshman ?? 0),
-          String(s.sophomore ?? 0),
-          String(s.junior ?? 0),
-          String(s.senior ?? 0),
-        ])
-      );
+      const countRows = (count ?? ([] as PreenlistmentCountDoc[])).map((d) => [
+        d.career || "",
+        (d as any).acad_group || "",
+        d.campus_name || "",
+        d.course_code || "",
+        String((d as any).count ?? 0),
+      ]);
+      const statRows = (statistics ?? ([] as PreenlistmentStatDoc[])).map((s) => [
+        normalizeProgramCode(s),
+        String(s.freshman ?? 0),
+        String(s.sophomore ?? 0),
+        String(s.junior ?? 0),
+        String(s.senior ?? 0),
+      ]);
+      setArchiveCount(countRows);
+      setArchiveStats(statRows);
+      calcArchiveTotals(countRows, statRows);
     } finally {
       setArchiveLoading(false);
     }
+  };
+
+  const exportCsv = (filename: string, headers: string[], rows: (string | number)[][]) => {
+    const esc = (v: any) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+    const csv = [headers.map(esc).join(","), ...rows.map((r) => r.map(esc).join(","))].join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
   };
 
   return (
@@ -385,18 +377,14 @@ export default function APO_PreEnlistment() {
       <main className="p-6 w-full">
         <div className="mb-3 flex items-center gap-2">
           <button
-            className={`rounded-md px-3 py-2 text-sm border ${
-              view === "active" ? "bg-white border-gray-300 shadow-sm" : "bg-transparent border-transparent text-gray-500"
-            }`}
+            className={`rounded-md px-3 py-2 text-sm border ${view === "active" ? "bg-white border-gray-300 shadow-sm" : "bg-transparent border-transparent text-gray-500"}`}
             onClick={() => setView("active")}
           >
             Active
           </button>
 
           <button
-            className={`rounded-md px-3 py-2 text-sm border ${
-              view === "archives" ? "bg-white border-gray-300 shadow-sm" : "bg-transparent border-transparent text-gray-500"
-            }`}
+            className={`rounded-md px-3 py-2 text-sm border ${view === "archives" ? "bg-white border-gray-300 shadow-sm" : "bg-transparent border-transparent text-gray-500"}`}
             onClick={goToArchives}
           >
             Archived Data
@@ -433,7 +421,7 @@ export default function APO_PreEnlistment() {
 
             <div className="flex flex-col md:flex-row">
               {/* left */}
-              <section className="flex-1 max-h-[400px] overflow-y-auto pr-4">
+              <section className="flex-1 max-h-[420px] overflow-y-auto pr-4">
                 <div className="flex items-center justify-between mb-3">
                   <h3 className="text-base font-semibold">List of Enlisted Courses</h3>
                   <label className="inline-flex items-center gap-2 rounded-md bg-[#008e4e] px-4 py-2 text-sm font-medium text-white shadow-sm hover:brightness-110">
@@ -464,8 +452,7 @@ export default function APO_PreEnlistment() {
                               <input
                                 value={editRowCourses?.[j + 1] ?? ""}
                                 onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
-                                  const base = editRowCourses ?? [];
-                                  const copy = [...base];
+                                  const copy = [...(editRowCourses ?? [])];
                                   copy[j + 1] = e.target.value;
                                   setEditRowCourses(copy);
                                 }}
@@ -512,7 +499,7 @@ export default function APO_PreEnlistment() {
               <div className="my-6 md:my-0 md:mx-6 border-t md:border-t-0 md:border-l border-gray-300"></div>
 
               {/* right */}
-              <section className="flex-1 max-h-[400px] overflow-y-auto pl-4">
+              <section className="flex-1 max-h-[420px] overflow-y-auto pl-4">
                 <div className="flex items-center justify-between mb-3">
                   <h3 className="text-base font-semibold">Enrollment Statistics</h3>
                   <label className="inline-flex items-center gap-2 rounded-md bg-[#008e4e] px-4 py-2 text-sm font-medium text-white shadow-sm hover:brightness-110">
@@ -541,8 +528,7 @@ export default function APO_PreEnlistment() {
                               <input
                                 value={editRowStats?.[j] ?? ""}
                                 onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
-                                  const base = editRowStats ?? [];
-                                  const copy = [...base];
+                                  const copy = [...(editRowStats ?? [])];
                                   copy[j] = e.target.value;
                                   setEditRowStats(copy);
                                 }}
@@ -680,6 +666,10 @@ export default function APO_PreEnlistment() {
                     </tbody>
                   </table>
                 </div>
+
+                <div className="px-4 py-2 text-sm text-neutral-700 border-t bg-neutral-50/70">
+                  Total Count: <strong className="tabular-nums">{archiveCountTotal}</strong>
+                </div>
               </div>
 
               {/* Enrollment Statistics */}
@@ -739,6 +729,13 @@ export default function APO_PreEnlistment() {
                       )}
                     </tbody>
                   </table>
+                </div>
+
+                <div className="px-4 py-2 text-sm text-neutral-700 border-t bg-neutral-50/70">
+                  Totals — F: <strong className="tabular-nums">{archiveStatsTotals[0]}</strong>
+                  &nbsp; S: <strong className="tabular-nums">{archiveStatsTotals[1]}</strong>
+                  &nbsp; J: <strong className="tabular-nums">{archiveStatsTotals[2]}</strong>
+                  &nbsp; SR: <strong className="tabular-nums">{archiveStatsTotals[3]}</strong>
                 </div>
               </div>
             </div>

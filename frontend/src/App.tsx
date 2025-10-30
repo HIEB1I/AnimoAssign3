@@ -7,6 +7,11 @@ import Login from "./pages/Login/Login";
 import AuthCallback from "./pages/Login/AuthCallback";
 import OM_HomePage from "./pages/OM/OM_HomePage";
 import OM_ProfilePage from "./pages/OM/OM_Profile";
+import OM_FacultyManagement from "./pages/OM/OM_FacultyManagement";
+import OM_CourseManagement from "./pages/OM/OM_CourseManagement";
+import OM_FacultyForm from "./pages/OM/OM_FacultyForm";
+import OM_StudentPetition from "./pages/OM/OM_StudentPetition";
+import OM_ClassRetention from "./pages/OM/OM_ClassRetention";
 
 // ---------------- APO ----------------
 import APO_PreEnlistment from "./pages/APO/APO_PreEnlistment";
@@ -49,6 +54,11 @@ export default function App() {
         <Route element={<RequireAuth />}>
           <Route path="/om/home" element={<OM_HomePage />} />
           <Route path="/om/profile" element={<OM_ProfilePage />} />
+          <Route path="/om/faculty-management" element={<OM_FacultyManagement />} />
+          <Route path="/om/course-management" element={<OM_CourseManagement />} />
+          <Route path="/om/faculty-form" element={<OM_FacultyForm />} />
+          <Route path="/om/student-petition" element={<OM_StudentPetition />} />
+          <Route path="/om/class-retention" element={<OM_ClassRetention />} />
         </Route>
 
         {/* -------- APO -------- */}

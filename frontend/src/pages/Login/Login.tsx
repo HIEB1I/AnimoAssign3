@@ -24,8 +24,8 @@ const Login: React.FC = () => {
       const roles = (user.roles || []).map((r) => r.toLowerCase());
       if (roles.includes("apo")) {
         navigate("/apo/preenlistment", { replace: true });
-      } else if (roles.includes("office_manager")) {
-        navigate("/om/home", { replace: true });
+      } else if (roles.includes("office manager")) {
+        navigate("/om/faculty-management", { replace: true });
       } else if (roles.includes("faculty")) {
         navigate("/faculty/overview", { replace: true });
       } else if (roles.includes("student")) {

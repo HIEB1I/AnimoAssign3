@@ -69,9 +69,15 @@ async def health_db():
 from .Login.Login import router as login_router
 from .OM.OM_HomePage import router as om_home_router
 from .OM.OM_Profile import router as om_profile_router
+from .OM.OM_FacultyManagement import router as om_facultymanagement
+# from .OM.OM_CourseManagement import router as om_coursemanagement
+# from .OM.OM_FacultyForm import router as om_facultyform
+from .OM.OM_StudentPetition import router as om_studentpetition
+# from .OM.OM_ClassRentention import router as om_classretention
+
 from .APO.APO_PreEnlistment import router as preenlistment_router
 from .APO.APO_RoomAllocation import router as roomallocation_router
-# from .APO.APO_CourseOfferings import router as courseofferings_router
+from .APO.APO_CourseOfferings import router as courseofferings_router
 from .STUDENT.STUDENT_Petition import router as studentpetition_router
 from .FACULTY.FACULTY_Overview import router as facultyoverview_router
 
@@ -80,6 +86,11 @@ app.include_router(om_home_router)
 app.include_router(om_profile_router)
 app.include_router(preenlistment_router, prefix="/api")
 app.include_router(roomallocation_router, prefix="/api")
-# app.include_router(courseofferings_router, prefix="/api")
+app.include_router(courseofferings_router, prefix="/api")
 app.include_router(studentpetition_router, prefix="/api")
+app.include_router(om_facultymanagement, prefix="/api")
+# app.include_router(om_coursemanagement, prefix="/api")
+# app.include_router(om_facultyform, prefix="/api")
+app.include_router(om_studentpetition, prefix="/api")
+# app.include_router(om_classretention, prefix="/api")
 app.include_router(facultyoverview_router, prefix="/api")

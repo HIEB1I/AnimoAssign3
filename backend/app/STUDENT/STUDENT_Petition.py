@@ -1,18 +1,22 @@
-# app/routes/student_petition.py
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, List
+
 from fastapi import APIRouter, HTTPException, Query, Body
-from ..main import db
 from pymongo import ReturnDocument
+
+from ..main import db
 
 router = APIRouter(prefix="/student", tags=["student"])
 
+# ---------------- collections ----------------
 COL_USERS = "users"
-COL_PETITIONS = "student_petitions"  # holds petitions AND the single config doc
+COL_PETITIONS = "student_petitions"        # holds petitions AND the single config doc
 COL_DEPARTMENTS = "departments"
 COL_COURSES = "courses"
 COL_PROGRAMS = "programs"
 COL_TERMS = "terms"
+COL_CURRICULUM = "curriculum"
+COL_ADMIN = "student_petitions_admin"      # optional, used by OM to pin status/remarks
 
 # ---------------- helpers ----------------
 
@@ -20,24 +24,36 @@ def _now_dt() -> datetime:
     return datetime.now(timezone.utc)
 
 async def _active_term() -> Dict[str, Any]:
-    """Return minimal active term info."""
+    """
+    Return the active term. If none is explicitly flagged,
+    fall back to the latest by acad_year_start + term_number.
+    """
     t = await db[COL_TERMS].find_one(
         {"$or": [{"status": "active"}, {"is_current": True}]},
         {"_id": 0, "term_id": 1, "acad_year_start": 1, "term_number": 1},
     )
-    return t or {}
+    if t:
+        return t
+
+    fallback = await db[COL_TERMS].find(
+        {}, {"_id": 0, "term_id": 1, "acad_year_start": 1, "term_number": 1}
+    ).sort([("acad_year_start", -1), ("term_number", -1)]).limit(1).to_list(1)
+
+    return fallback[0] if fallback else {}
 
 async def _find_course_by_code(code: str) -> Optional[Dict[str, Any]]:
-    """Match courses where course_code could be a string or array; return ids & display fields."""
+    """
+    Match courses where course_code could be a string or array; return ids & display fields.
+    """
     if not code:
         return None
     code = code.strip().upper()
     doc = await db[COL_COURSES].find_one(
         {
             "$or": [
-                {"course_code": code},
-                {"course_code": {"$in": [code]}},
-                {"course_code": {"$elemMatch": {"$regex": f"^{code}$", "$options": "i"}}},
+                {"course_code": code},                  # string match
+                {"course_code": {"$in": [code]}},       # array contains code (array shorthand)
+                {"course_code": {"$elemMatch": {"$regex": f"^{code}$", "$options": "i"}}},  # array (case-insens.)
             ]
         },
         {"_id": 0, "course_id": 1, "course_code": 1, "course_title": 1, "department_id": 1},
@@ -45,11 +61,14 @@ async def _find_course_by_code(code: str) -> Optional[Dict[str, Any]]:
     if doc:
         cc = doc.get("course_code")
         if isinstance(cc, list):
+            # Normalize to the first code for display
             doc["course_code"] = cc[0] if cc else ""
     return doc
 
 async def _get_department_by_name(name: str) -> Optional[Dict[str, Any]]:
-    """Departments may use 'department_name' (preferred). Fallback to 'dept_name'."""
+    """
+    Departments may use 'department_name' (preferred). Fallback to 'dept_name'.
+    """
     if not name:
         return None
     name = name.strip()
@@ -69,7 +88,7 @@ async def _get_program_by_code(program_code: str) -> Optional[Dict[str, Any]]:
 
 async def _get_petition_config() -> Dict[str, Any]:
     cfg = await db[COL_PETITIONS].find_one(
-        {"_id": "config", "doc_type": "config"},
+        {"_id": "config", "doc_type": {"$in": ["config", "Config"]}},
         {"_id": 0, "reasons": 1, "statuses": 1, "next_seq": 1},
     )
     if not cfg:
@@ -155,6 +174,7 @@ async def petition_handler(
                 "student_number": 1,
                 "reason": 1,
                 "status": 1,
+                "remarks": 1,
                 "submitted_at": 1,
                 # Display (joined)
                 "terms.term_number": "$term.term_number",
@@ -170,7 +190,7 @@ async def petition_handler(
         ]
         rows = [r async for r in db[COL_PETITIONS].aggregate(pipeline)]
 
-        # Make a flat, UI-friendly shape (keeps your current frontend happy)
+        # Make a flat, UI-friendly shape
         def to_view(r: Dict[str, Any]) -> Dict[str, Any]:
             ay = r.get("terms", {}).get("acad_year_start")
             return {
@@ -181,6 +201,7 @@ async def petition_handler(
                 "course_title": r.get("courses", {}).get("course_title", ""),
                 "reason": r.get("reason", ""),
                 "status": r.get("status", ""),
+                "remarks": r.get("remarks", ""),
                 "submitted_at": r.get("submitted_at"),
                 "acad_year_start": ay,
                 "term_number": r.get("terms", {}).get("term_number"),
@@ -211,15 +232,30 @@ async def petition_handler(
     if action == "options":
         cfg = await _get_petition_config()
 
-        # departments (provide names for dropdown)
+        # departments (names for dropdown)
         depts = [d async for d in db[COL_DEPARTMENTS].find(
             {}, {"_id": 0, "department_id": 1, "department_name": 1, "dept_name": 1}
         )]
         dept_names = [(d.get("department_name") or d.get("dept_name") or "").strip() for d in depts]
         dept_names = [x for x in dept_names if x]
 
-        # courses joined with departments for display
+        # active term
+        active = await _active_term()
+        term_id = active.get("term_id", "")
+        if not term_id:
+            return {
+                "ok": False,
+                "departments": dept_names,
+                "courses": [],
+                "programs": [],
+                "reasons": cfg.get("reasons", []),
+                "statuses": cfg.get("statuses", []),
+                "message": "No active term found. Please configure a current term."
+            }
+
+        # courses offered this term (via curriculum.term_id + curriculum.course_list -> courses.course_id)
         pipeline = [
+            # Join dept for display
             {"$lookup": {
                 "from": COL_DEPARTMENTS,
                 "localField": "department_id",
@@ -227,13 +263,32 @@ async def petition_handler(
                 "as": "dept",
             }},
             {"$unwind": {"path": "$dept", "preserveNullAndEmptyArrays": True}},
+
+            # Keep only courses that appear in the active term curriculum
+            {"$lookup": {
+                "from": COL_CURRICULUM,
+                "let": {"cid": "$course_id", "term": term_id},
+                "pipeline": [
+                    {"$match": {
+                        "$expr": {"$and": [
+                            {"$eq": ["$term_id", "$$term"]},
+                            {"$in": ["$$cid", {"$ifNull": ["$course_list", []]}]},   # SAFE
+                        ]}
+                    }},
+                    {"$limit": 1}
+                ],
+                "as": "cur"
+            }},
+            {"$match": {"cur": {"$ne": []}}},
+
+            # Normalize code + project display
             {"$project": {
                 "_id": 0,
                 "course_code": {
                     "$cond": [
                         {"$isArray": "$course_code"},
-                        {"$arrayElemAt": ["$course_code", 0]},
-                        "$course_code",
+                        {"$ifNull": [{"$arrayElemAt": ["$course_code", 0]}, ""]},
+                        {"$ifNull": ["$course_code", ""]}
                     ]
                 },
                 "course_title": 1,
@@ -241,6 +296,7 @@ async def petition_handler(
             }},
             {"$sort": {"dept_name": 1, "course_code": 1}},
         ]
+
         courses = [c async for c in db[COL_COURSES].aggregate(pipeline)]
 
         # programs
@@ -249,7 +305,7 @@ async def petition_handler(
         return {
             "ok": True,
             "departments": dept_names,
-            "courses": courses,        # {course_code, course_title, dept_name}
+            "courses": courses,        # {course_code, course_title, dept_name} for current term only
             "programs": programs,      # {program_id, program_code}
             "reasons": cfg.get("reasons", []),
             "statuses": cfg.get("statuses", []),
@@ -260,14 +316,17 @@ async def petition_handler(
         if not payload:
             raise HTTPException(status_code=400, detail="Missing payload")
 
+        # Required fields
         for k in ["department", "courseCode", "reason", "studentNumber", "degree"]:
             if not str(payload.get(k) or "").strip():
                 raise HTTPException(status_code=400, detail="All required fields must be filled.")
 
+        # Student number guard
         sn = str(payload["studentNumber"]).strip()
         if not (sn.isdigit() and len(sn) == 8):
             raise HTTPException(status_code=400, detail="Student number must be exactly 8 digits.")
 
+        # Config + reason validation
         cfg = await _get_petition_config()
         if payload["reason"] not in set(cfg.get("reasons", [])):
             raise HTTPException(status_code=400, detail="Invalid reason value.")
@@ -288,12 +347,23 @@ async def petition_handler(
         if not course:
             raise HTTPException(status_code=400, detail="Course code not found.")
 
-        # Ensure course belongs to dept (if you want strictness)
+        # Ensure course belongs to department (optional strictness)
         if course.get("department_id") and dept.get("department_id") and course["department_id"] != dept["department_id"]:
             raise HTTPException(status_code=400, detail="Course does not belong to the selected department.")
 
+        # Active term and "offered" validation
         active_term = await _active_term()
         term_id = active_term.get("term_id", "")
+        if not term_id:
+            raise HTTPException(status_code=503, detail="No active term configured.")
+
+        # Validate via curriculum that course is offered this term
+        cur_hit = await db[COL_CURRICULUM].find_one({
+            "term_id": term_id,
+            "course_list": {"$in": [course["course_id"]]},
+        })
+        if not cur_hit:
+            raise HTTPException(status_code=400, detail="Course is not offered in the current term.")
 
         # Block duplicates in active term
         dup = await db[COL_PETITIONS].find_one({
@@ -305,11 +375,22 @@ async def petition_handler(
         if dup:
             raise HTTPException(status_code=409, detail="You already submitted a petition for this course.")
 
+        # ===== Inherit OM’s current decision for this (term, course) =====
+        admin = await db[COL_ADMIN].find_one(
+            {"term_id": term_id, "course_id": course["course_id"]},
+            {"_id": 0, "status": 1, "remarks": 1}
+        )
+        latest = await db[COL_PETITIONS].find_one(
+            {"term_id": term_id, "course_id": course["course_id"], "petition_id": {"$exists": True}},
+            sort=[("submitted_at", -1)],
+            projection={"status": 1, "remarks": 1, "_id": 0},
+        )
+        inherited_status = (admin or {}).get("status") or (latest or {}).get("status") or initial_status
+        inherited_remarks = (admin or {}).get("remarks", (latest or {}).get("remarks", ""))
+
         petition_id = await _next_petition_id()
 
-        # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-        # STORE **ONLY IDs** (+ reason/status/student_number/submitted_at)
-        # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+        # Store ONLY IDs (+ reason/status/student_number/submitted_at/remarks)
         doc = {
             "petition_id": petition_id,
             "user_id": userId,
@@ -317,15 +398,16 @@ async def petition_handler(
             "program_id": prog["program_id"],
             "department_id": dept["department_id"],
             "course_id": course["course_id"],
-            "student_number": int(sn),
+            "student_number": int(sn),          # change to 'sn' (string) if your schema needs string
             "reason": payload["reason"],
-            "status": initial_status,
+            "status": inherited_status,
+            "remarks": inherited_remarks,
             "submitted_at": _now_dt(),
         }
 
         await db[COL_PETITIONS].insert_one(doc)
 
-        # Reuse fetch pipeline for a single item-like response (optional fast projection)
+        # Response (fast projection)
         return {"ok": True, "petition": {
             "petition_id": petition_id,
             "user_id": userId,
@@ -333,7 +415,8 @@ async def petition_handler(
             "course_code": course.get("course_code", ""),
             "course_title": course.get("course_title", ""),
             "reason": payload["reason"],
-            "status": initial_status,
+            "status": doc["status"],
+            "remarks": doc["remarks"],
             "submitted_at": doc["submitted_at"],
             "acad_year_start": active_term.get("acad_year_start"),
             "term_number": active_term.get("term_number"),
