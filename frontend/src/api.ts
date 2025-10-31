@@ -769,18 +769,69 @@ export async function getFacultyProfile(facultyId: string) {
   };
 }
 
-export async function getFacultySchedule(facultyId: string, termId?: string) {
-  const { data } = await axios.post(`${API_BASE}/om/facultymanagement`, {}, {
-    params: { action: "schedule", facultyId, termId },
-  });
-  return data as { ok: boolean; term_id: string; days: any[] };
+
+export async function getFacultySchedule(
+  facultyId: string,
+  termId?: string
+): Promise<{ ok: boolean; term_id: string | null; teaching_load: any[] }> {
+  const { data } = await axios.post(
+    `${API_BASE}/om/facultymanagement`,
+    {},
+    { params: { action: "schedule", facultyId, termId } }
+  );
+  // Normalize to always provide teaching_load array
+  const tl = Array.isArray(data?.teaching_load) ? data.teaching_load : [];
+  return { ok: !!data?.ok, term_id: data?.term_id ?? null, teaching_load: tl };
 }
 
-export async function getFacultyHistory(facultyId: string, acadYearStart?: number) {
-  const { data } = await axios.post(`${API_BASE}/om/facultymanagement`, {}, {
-    params: { action: "history", facultyId, acadYearStart },
+export async function getFacultyHistory(
+  facultyId: string,
+  termOrAy?: string | number
+): Promise<{ ok: boolean; term_id: string | null; teaching_history: Array<{
+  code: string;
+  title: string;
+  section: string;
+  mode?: string | null;
+  day1?: string | null;
+  room1?: string | null;
+  day2?: string | null;
+  room2?: string | null;
+  time?: string | null;
+  term?: string | null;
+}> }> {
+  const params: Record<string, any> = { action: "history", facultyId };
+  if (typeof termOrAy === "number") params.acadYearStart = termOrAy;  // AY start (e.g., 2024)
+  else if (typeof termOrAy === "string" && termOrAy) params.termId = termOrAy;
+
+  const { data } = await axios.post(`${API_BASE}/om/facultymanagement`, {}, { params });
+
+  // Normalize backend response ({ terms: Record<string, any[]> }) to teaching_history[]
+  const teaching_history: Array<any> = [];
+  const termsObj = data?.terms || {};
+  Object.entries(termsObj).forEach(([termKey, list]) => {
+    const termMatch = /Term\s*([123])/i.exec(termKey);
+    const termLabel = termMatch ? `Term ${termMatch[1]}` : (termKey.includes("Term") ? termKey : "Term 1");
+    (list as any[]).forEach((r) => {
+      teaching_history.push({
+        code: r.code ?? r.course_code ?? "",
+        title: r.title ?? r.course_title ?? "",
+        section: r.section ?? r.section_code ?? "",
+        mode: r.mode ?? "",
+        day1: r.day1 ?? "",
+        room1: r.room1 ?? "",
+        day2: r.day2 ?? "",
+        room2: r.room2 ?? "",
+        time: r.time ?? r.schedule ?? "",
+        term: termLabel,
+      });
+    });
   });
-  return data as { ok: boolean; acad_year_start: number; terms: Record<string, any[]> };
+
+  return {
+    ok: !!data?.ok,
+    term_id: (data?.term_id ?? null) as string | null,
+    teaching_history,
+  };
 }
 
 /* =========================================================
