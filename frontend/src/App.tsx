@@ -8,6 +8,8 @@ import AuthCallback from "./pages/Login/AuthCallback";
 // ---------------- OM ----------------
 import OM_LoadAssignment from "./pages/OM/OM_LoadAssignment";
 import OM_ReportsAnalytics from "./pages/OM/OM_ReportsAnalytics";
+import OM_FacultyManagement from "./pages/OM/OM_FacultyManagement";
+import OM_CourseManagement from "./pages/OM/OM_CourseManagement";
 import OM_FacultyForm from "./pages/OM/OM_FacultyForm";
 import OM_StudentPetition from "./pages/OM/OM_StudentPetition";
 import OM_ClassRetention from "./pages/OM/OM_ClassRetention";
@@ -38,15 +40,11 @@ import FACULTY_Preferences from "./pages/FACULTY/FACULTY_Preferences";
 // ---------------- Admin ----------------
 import ADMIN from "./pages/ADMIN/ADMIN";
 import ADMIN_Inbox from "./pages/ADMIN/ADMIN_Inbox";
-import OM_FacultyManagement from "./pages/OM/OM_FacultyManagement";
-import OM_CourseManagement from "./pages/OM/OM_CourseManagement";
 
 // ---------------- APO ----------------
 import APO_PreEnlistment from "./pages/APO/APO_PreEnlistment";
 import APO_CourseOfferings from "./pages/APO/APO_CourseOfferings";
 import APO_RoomAllocation from "./pages/APO/APO_RoomAllocation";
-
-
 
 const base = (import.meta.env.BASE_URL || "/").replace(/\/$/, "");
 
@@ -81,15 +79,25 @@ export default function App() {
           <Route path="/om/pred1" element={<OM_pred1 />} />
           <Route path="/om/pred2" element={<OM_pred2 />} />
           <Route path="/om/loadreco" element={<OM_LoadReco />} />
-          <Route path="/om/faculty-management" element={<OM_FacultyManagement />} />
-          <Route path="/om/course-management" element={<OM_CourseManagement />} />
+          {/* 🔧 FIX: make the loose course-management path redirect into the shell */}
+          <Route
+            path="/om/course-management"
+            element={<Navigate to="/om/home/course-management" replace />}
+          />
           <Route path="/om/inbox" element={<OM_Inbox />} />
           <Route path="/om/faculty-form" element={<OM_FacultyForm />} />
-          <Route path="/om/student-petition" element={<OM_StudentPetition />} />
           <Route path="/om/class-retention" element={<OM_ClassRetention />} />
 
           {/* OM shell with children (ONE declaration only) */}
           <Route path="/om/home" element={<OM_LoadAssignment />}>
+            {/* Index & canonical load-assignment (shell decides what to show) */}
+            <Route index element={<></>} />
+            <Route path="load-assignment" element={<></>} />
+
+            <Route path="faculty-management" element={<OM_FacultyManagement />} />
+            <Route path="course-management" element={<OM_CourseManagement />} />
+            <Route path="student-petition" element={<OM_StudentPetition />} />
+
             {/* Reports & Analytics landing */}
             <Route path="reports-analytics" element={<OM_ReportsAnalytics />} />
 
@@ -101,37 +109,24 @@ export default function App() {
             <Route path="reports-analytics/load-risk" element={<OM_RP_LoadRisk />} />
           </Route>
 
-          {/* Optional: legacy/shortcut paths -> redirect to nested routes */}
+          {/* Redirects for old/external links -> new nested routes */}
+          <Route path="/om/faculty-management" element={<Navigate to="/om/home/faculty-management" replace />} />
+          <Route path="/om/course-management" element={<Navigate to="/om/home/course-management" replace />} />
+          <Route path="/om/student-petition" element={<Navigate to="/om/home/student-petition" replace />} />
           <Route path="/om/reports-analytics" element={<Navigate to="/om/home/reports-analytics" replace />} />
-          <Route
-            path="/om/reports-analytics/teaching-history"
-            element={<Navigate to="/om/home/reports-analytics/teaching-history" replace />}
-          />
-          <Route
-            path="/om/reports-analytics/course-history"
-            element={<Navigate to="/om/home/reports-analytics/course-history" replace />}
-          />
-          <Route
-            path="/om/reports-analytics/deloading-utilization"
-            element={<Navigate to="/om/home/reports-analytics/deloading-utilization" replace />}
-          />
-          <Route
-            path="/om/reports-analytics/availability-forecast"
-            element={<Navigate to="/om/home/reports-analytics/availability-forecast" replace />}
-          />
-          <Route
-            path="/om/reports-analytics/load-risk"
-            element={<Navigate to="/om/home/reports-analytics/load-risk" replace />}
-          />
+          <Route path="/om/reports-analytics/teaching-history" element={<Navigate to="/om/home/reports-analytics/teaching-history" replace />} />
+          <Route path="/om/reports-analytics/course-history" element={<Navigate to="/om/home/reports-analytics/course-history" replace />} />
+          <Route path="/om/reports-analytics/deloading-utilization" element={<Navigate to="/om/home/reports-analytics/deloading-utilization" replace />} />
+          <Route path="/om/reports-analytics/availability-forecast" element={<Navigate to="/om/home/reports-analytics/availability-forecast" replace />} />
+          <Route path="/om/reports-analytics/load-risk" element={<Navigate to="/om/home/reports-analytics/load-risk" replace />} />
 
           {/* Student */}
           <Route path="/student/petition" element={<STUDENT_Petition />} />
 
           {/* APO */}
-          <Route path="/apo/preenlistment" element={<APO_PreEnlistment/>} />
-          <Route path="/apo/courseofferings" element={<APO_CourseOfferings/>} />
-          <Route path="/apo/roomallocation" element={<APO_RoomAllocation/>} />
-
+          <Route path="/apo/preenlistment" element={<APO_PreEnlistment />} />
+          <Route path="/apo/courseofferings" element={<APO_CourseOfferings />} />
+          <Route path="/apo/roomallocation" element={<APO_RoomAllocation />} />
 
           {/* Faculty */}
           <Route path="/faculty/overview" element={<FACULTY_Overview />} />
@@ -143,7 +138,7 @@ export default function App() {
           <Route path="/admin" element={<ADMIN />} />
           <Route path="/admin/inbox" element={<ADMIN_Inbox />} />
 
-          {/* Authenticated wildcard: unknown paths for logged-in users go home (not /Login) */}
+          {/* Authenticated wildcard: unknown paths for logged-in users go home */}
           <Route path="*" element={<Navigate to="/om/home" replace />} />
         </Route>
 

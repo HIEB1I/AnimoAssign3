@@ -202,7 +202,7 @@ export default function OM_FacForms() {
         {/* Header */}
         <header className="mb-6 flex items-center justify-between">
           <div>
-            <h1 className="text-2xl font-bold">Faculty Form</h1>
+            <h1 className="text-2xl font-bold">Faculty Preferences</h1>
             <p className="text-sm text-gray-600">
               Faculty load assignment submissions for Term 1 AY 2025–2026
             </p>

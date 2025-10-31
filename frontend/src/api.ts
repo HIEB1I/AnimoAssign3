@@ -688,7 +688,27 @@ export async function submitStudentPetition(
 }
 
 /* =========================================================
-   ===============  OM: FACULTY MANAGEMENT  ================
+   ==============  OM: SHARED HEADER (Topbar)  =============
+   ========================================================= */
+export type OmHeader = {
+  ok: boolean;
+  email?: string;
+  role_id?: string;
+  department_id?: string;
+  profileName?: string;
+  profileSubtitle?: string; // “Role | Department”
+  message?: string;
+};
+
+export async function getOmHeader(userEmail?: string, userId?: string): Promise<OmHeader> {
+  const { data } = await axios.post(`${API_BASE}/om/facultymanagement`, {}, {
+    params: { action: "header", userEmail, userId },
+  });
+  return data as OmHeader;
+}
+
+/* =========================================================
+   ==============  OM: FACULTY DIRECTORY  ==================
    ========================================================= */
 export type FacultyRow = {
   faculty_id: string;
@@ -708,23 +728,6 @@ export type FMOptions = {
   academicYears: number[];
 };
 
-export type OmHeader = {
-  ok: boolean;
-  email?: string;
-  role_id?: string;
-  department_id?: string;
-  profileName?: string;
-  profileSubtitle?: string;
-  message?: string;
-};
-
-export async function getOmHeader(userEmail?: string, userId?: string): Promise<OmHeader> {
-  const { data } = await axios.post(`${API_BASE}/om/facultymanagement`, {}, {
-    params: { action: "header", userEmail, userId },
-  });
-  return data as OmHeader;
-}
-
 export async function getFacultyOptions(): Promise<FMOptions> {
   const { data } = await axios.post(`${API_BASE}/om/facultymanagement`, {}, {
     params: { action: "options" },
@@ -732,7 +735,11 @@ export async function getFacultyOptions(): Promise<FMOptions> {
   return data;
 }
 
-export async function listFaculty(params: { department?: string; facultyType?: string; search?: string }) {
+export async function listFaculty(params: {
+  department?: string;
+  facultyType?: string;
+  search?: string;
+}) {
   const { department, facultyType, search } = params || {};
   const { data } = await axios.post(`${API_BASE}/om/facultymanagement`, {}, {
     params: { action: "list", department, facultyType, search },
@@ -740,11 +747,26 @@ export async function listFaculty(params: { department?: string; facultyType?: s
   return data as { ok: boolean; rows: FacultyRow[] };
 }
 
+/** Profile now returns an array: course_coordinator_of: [{ code, title }] */
 export async function getFacultyProfile(facultyId: string) {
   const { data } = await axios.post(`${API_BASE}/om/facultymanagement`, {}, {
     params: { action: "profile", facultyId },
   });
-  return data as { ok: boolean; profile: any };
+  return data as {
+    ok: boolean;
+    profile: {
+      faculty_id: string;
+      name: string;
+      email: string;
+      department: string;
+      faculty_type: string;
+      status: string;
+      position?: string;
+      admin_position?: string;
+      course_coordinator_of?: Array<{ code: string; title?: string }>;
+      load?: { teaching?: number; admin?: number; research?: number; faculty_units?: number };
+    };
+  };
 }
 
 export async function getFacultySchedule(facultyId: string, termId?: string) {
@@ -762,7 +784,56 @@ export async function getFacultyHistory(facultyId: string, acadYearStart?: numbe
 }
 
 /* =========================================================
-   ===============  OM: STUDENT PETITION  ==================
+   ==============  OM: COURSE MANAGEMENT  =================
+   ========================================================= */
+export type CMCourseRow = {
+  course_id: string;
+  kac: string;
+  code: string;
+  title: string;
+  units: number | string;
+  coordinator_name: string;                 // joined string (back-compat)
+  coordinator_email: string;                // first email (back-compat)
+  coordinators?: { name: string; email?: string }[]; // new: all coordinators
+  composition: string[];
+  syllabus: string;
+};
+
+export type CMOptions = {
+  ok: boolean;
+  clusters: string[];
+  activeTerm?: { term_id: string; acad_year_start?: number; term_number?: number };
+};
+
+export async function getCMOptions(userEmail?: string, userId?: string): Promise<CMOptions> {
+  const { data } = await axios.post(`${API_BASE}/om/course-management`, {}, {
+    params: { action: "options", userEmail, userId },
+  });
+  return data as CMOptions;
+}
+
+export async function listCMCourses(params: {
+  userEmail?: string;
+  userId?: string;
+  cluster?: string;
+  search?: string;
+}) {
+  const { userEmail, userId, cluster, search } = params || {};
+  const { data } = await axios.post(`${API_BASE}/om/course-management`, {}, {
+    params: { action: "list", userEmail, userId, cluster, search },
+  });
+  return data as { ok: boolean; rows: CMCourseRow[]; term?: any };
+}
+
+export async function getCMHeader(userEmail?: string, userId?: string) {
+  const { data } = await axios.post(`${API_BASE}/om/course-management`, {}, {
+    params: { action: "header", userEmail, userId },
+  });
+  return data as { ok: boolean; profileName?: string; profileSubtitle?: string };
+}
+
+/* =========================================================
+   ==============  OM: STUDENT PETITION  ===================
    ========================================================= */
 export type OMPetitionRow = {
   course_id: string;
@@ -778,14 +849,6 @@ export type OMPetitionOptions = {
   statuses: string[];
   activeTerm: { term_id: string; acad_year_start?: number; term_number?: number };
 };
-
-export async function getOMSPHeader(params: { userEmail?: string; userId?: string }) {
-  const { userEmail, userId } = params || {};
-  const { data } = await axios.post(`${API_BASE}/om/student-petition`, {}, {
-    params: { action: "header", userEmail, userId },
-  });
-  return data as { ok: boolean; profileName?: string; profileSubtitle?: string };
-}
 
 export async function getOMSPOptions() {
   const { data } = await axios.post(`${API_BASE}/om/student-petition`, {}, {

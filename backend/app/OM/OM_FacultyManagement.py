@@ -1,4 +1,4 @@
-# app/routes/facultymanagement.py
+# backend/app/OM/facultymanagement.py
 from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Query, Body
 from ..main import db
@@ -10,11 +10,12 @@ COL_USERS = "users"
 COL_FACULTY = "faculty_profiles"
 COL_DEPARTMENTS = "departments"
 COL_TERMS = "terms"
-COL_SECTIONS = "sections"                 # adjust if your collection name differs
-COL_ASSIGNMENTS = "teaching_assignments"  # optional; fallback to sections for history
+COL_SECTIONS = "sections"                 # or your actual sections coll
+COL_ASSIGNMENTS = "teaching_assignments"  # optional; falls back to sections
 COL_PREFS = "faculty_preferences"
 COL_ROLE_ASSIGN = "role_assignments"
-COL_USER_ROLES = "user_roles"             # uses { role_id, role_type, ... }
+COL_USER_ROLES = "user_roles"
+COL_COURSES = "courses"                   # <-- for course coordinator join
 
 WEEKDAY_ORDER = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
 
@@ -26,18 +27,14 @@ def _dept_name_expr():
 def _full_name_expr():
     return {
         "$trim": {
-            "input": {
-                "$concat": [
-                    {"$ifNull": ["$u.first_name", ""]},
-                    " ",
-                    {"$ifNull": ["$u.last_name", ""]},
-                ]
-            }
+            "input": {"$concat": [
+                {"$ifNull": ["$u.first_name", ""]}, " ",
+                {"$ifNull": ["$u.last_name",  ""]}
+            ]}
         }
     }
 
 def _role_display_expr():
-    # Prefer user_roles.role_type (e.g., "Office Manager")
     return {"$ifNull": ["$role.role_type", ""]}
 
 async def _active_term() -> Dict[str, Any]:
@@ -74,7 +71,7 @@ async def facultymanagement_handler(
 
     payload: Optional[Dict[str, Any]] = Body(None),
 ):
-    # ----- HEADER: Topbar identity (name + role_type + department name) -----
+    # ----- HEADER -----
     if action == "header":
         if not userEmail and not userId:
             raise HTTPException(status_code=400, detail="userEmail or userId is required.")
@@ -84,8 +81,6 @@ async def facultymanagement_handler(
         pipeline: List[Dict[str, Any]] = [
             {"$match": user_match},
             {"$project": {"_id": 0, "user_id": 1, "email": 1, "first_name": 1, "last_name": 1}},
-
-            # role assignments
             {"$lookup": {
                 "from": COL_ROLE_ASSIGN,
                 "localField": "user_id",
@@ -93,8 +88,6 @@ async def facultymanagement_handler(
                 "as": "ra_list"
             }},
             {"$unwind": {"path": "$ra_list", "preserveNullAndEmptyArrays": True}},
-
-            # pick department from scope[] where type == "department"
             {"$addFields": {
                 "deptScope": {
                     "$first": {
@@ -107,8 +100,6 @@ async def facultymanagement_handler(
                 },
                 "role_id_from_ra": "$ra_list.role_id",
             }},
-
-            # departments
             {"$lookup": {
                 "from": COL_DEPARTMENTS,
                 "localField": "deptScope.id",
@@ -116,8 +107,6 @@ async def facultymanagement_handler(
                 "as": "dept"
             }},
             {"$unwind": {"path": "$dept", "preserveNullAndEmptyArrays": True}},
-
-            # user_roles.role_type
             {"$lookup": {
                 "from": COL_USER_ROLES,
                 "localField": "role_id_from_ra",
@@ -125,12 +114,11 @@ async def facultymanagement_handler(
                 "as": "role"
             }},
             {"$unwind": {"path": "$role", "preserveNullAndEmptyArrays": True}},
-
             {"$addFields": {
                 "full_name": {
                     "$trim": {"input": {"$concat": [
                         {"$ifNull": ["$first_name", ""]}, " ",
-                        {"$ifNull": ["$last_name",  ""]},
+                        {"$ifNull": ["$last_name",  ""]}
                     ]}}
                 },
                 "dept_name": {"$ifNull": ["$dept.department_name", "$dept.dept_name"]},
@@ -160,9 +148,9 @@ async def facultymanagement_handler(
         docs = [d async for d in db[COL_USERS].aggregate(pipeline)]
         if not docs:
             return {"ok": False, "message": "User not found."}
-        return {"ok": True, **docs[0]}  # {ok, profileName, profileSubtitle, role_type, department_id}
+        return {"ok": True, **docs[0]}
 
-    # ----- OPTIONS: dropdown values (departments, types, AY list) -----
+    # ----- OPTIONS -----
     if action == "options":
         depts = [d async for d in db[COL_DEPARTMENTS]
                  .find({}, {"_id": 0, "department_name": 1, "dept_name": 1})]
@@ -171,7 +159,7 @@ async def facultymanagement_handler(
             for d in depts if (d.get("department_name") or d.get("dept_name"))
         })
 
-        codes = await db[COL_FACULTY].distinct("employment_type")  # 'FT' / 'PT'
+        codes = await db[COL_FACULTY].distinct("employment_type")  # FT / PT
         type_map = {"FT": "Full-Time", "PT": "Part-Time"}
         faculty_types = sorted({type_map.get(c, c) for c in codes if c})
 
@@ -184,7 +172,7 @@ async def facultymanagement_handler(
         return {"ok": True, "departments": department_options,
                 "facultyTypes": faculty_types, "academicYears": ay_list}
 
-    # ----- LIST: faculty table -----
+    # ----- LIST -----
     if action == "list":
         early_match: Dict[str, Any] = {}
         if facultyType and facultyType.strip().lower() != "all type":
@@ -198,8 +186,6 @@ async def facultymanagement_handler(
 
         pipeline: List[Dict[str, Any]] = [
             {"$match": early_match},
-
-            # department
             {"$lookup": {
                 "from": COL_DEPARTMENTS,
                 "localField": "department_id",
@@ -207,8 +193,6 @@ async def facultymanagement_handler(
                 "as": "dept",
             }},
             {"$unwind": {"path": "$dept", "preserveNullAndEmptyArrays": True}},
-
-            # users to compute full name + email + status
             {"$lookup": {
                 "from": COL_USERS,
                 "let": {"uid": "$user_id", "femail": "$email"},
@@ -222,19 +206,16 @@ async def facultymanagement_handler(
                 "as": "u"
             }},
             {"$unwind": {"path": "$u", "preserveNullAndEmptyArrays": True}},
-
-            # faculty preferences (teaching units)
             {"$lookup": {
                 "from": COL_PREFS,
                 "let": {"fid": "$faculty_id"},
                 "pipeline": [
-                    {"$match": {"$expr": {"$eq": ["$faculty_id", "$$fid"]}}},  # single pref doc per faculty
+                    {"$match": {"$expr": {"$eq": ["$faculty_id", "$$fid"]}}},
                     {"$project": {"_id": 0, "preferred_units": 1}}
                 ],
                 "as": "pref"
             }},
             {"$unwind": {"path": "$pref", "preserveNullAndEmptyArrays": True}},
-
             {"$addFields": {
                 "department_display": _dept_name_expr(),
                 "name": _full_name_expr(),
@@ -251,15 +232,12 @@ async def facultymanagement_handler(
                 },
                 "teaching_units_display": {"$ifNull": ["$pref.preferred_units", "N/A"]},
             }},
-
-            # department filter (after computing display)
             {"$match": {"$expr": {"$or": [
                 {"$eq": [dept_filter, ""]},
                 {"$eq": ["$department_display", dept_filter]}
-            ]}}},
+            ]}}}
         ]
 
-        # search AFTER we computed "name" and "email_display"
         if search and search.strip():
             s = search.strip()
             pipeline.append({"$match": {"$or": [
@@ -286,11 +264,12 @@ async def facultymanagement_handler(
         rows = [r async for r in db[COL_FACULTY].aggregate(pipeline)]
         return {"ok": True, "rows": rows}
 
-    # ----- PROFILE: faculty details modal -----
+    # ----- PROFILE (now includes real Course Coordinator list) -----
     if action == "profile":
         if not facultyId:
             raise HTTPException(status_code=400, detail="facultyId is required.")
-        pipeline = [
+
+        pipeline: List[Dict[str, Any]] = [
             {"$match": {"faculty_id": facultyId}},
             {"$lookup": {
                 "from": COL_DEPARTMENTS,
@@ -307,11 +286,60 @@ async def facultymanagement_handler(
                         {"$and": [{"$ne": ["$$uid", None]}, {"$eq": ["$user_id", "$$uid"]}]},
                         {"$and": [{"$ne": ["$$femail", None]}, {"$eq": ["$email", "$$femail"]}]},
                     ]}}},
-                    {"$project": {"_id": 0, "first_name": 1, "last_name": 1, "status": 1, "email": 1}}
+                    # include user_id so we can join to courses
+                    {"$project": {"_id": 0, "user_id": 1, "first_name": 1, "last_name": 1, "status": 1, "email": 1}}
                 ],
                 "as": "u"
             }},
             {"$unwind": {"path": "$u", "preserveNullAndEmptyArrays": True}},
+
+            # ---- REAL course coordinator list from courses ----
+            {"$lookup": {
+                "from": COL_COURSES,
+                "let": {"uid": {"$ifNull": ["$user_id", "$u.user_id"]}},
+                "pipeline": [
+                    # normalize course_coordinator to array and match
+                    {"$addFields": {
+                        "cc_list": {
+                            "$cond": [
+                                {"$isArray": "$course_coordinator"},
+                                {"$ifNull": ["$course_coordinator", []]},
+                                {"$cond": [
+                                    {"$gt": [{"$type": "$course_coordinator"}, "missing"]},
+                                    [{"$ifNull": ["$course_coordinator", ""]}],
+                                    []
+                                ]}
+                            ]
+                        }
+                    }},
+                    {"$match": {"$expr": {"$in": ["$$uid", "$cc_list"]}}},
+                    # reduce course_code (array/string) to neat display
+                    {"$addFields": {
+                        "code_list": {
+                            "$cond": [
+                                {"$isArray": "$course_code"}, "$course_code",
+                                {"$cond": [{"$ne": ["$course_code", None]}, ["$course_code"], []]}
+                            ]
+                        }
+                    }},
+                    {"$addFields": {
+                        "code": {
+                            "$cond": [
+                                {"$gt": [{"$size": "$code_list"}, 0]},
+                                {"$reduce": {
+                                    "input": "$code_list",
+                                    "initialValue": "",
+                                    "in": {"$concat": ["$$value", {"$cond": [{"$eq": ["$$value", ""]}, "", " / "]}, "$$this"]}
+                                }},
+                                ""
+                            ]
+                        }
+                    }},
+                    {"$project": {"_id": 0, "code": 1, "course_title": 1}}
+                ],
+                "as": "cc_courses"
+            }},
+
             {"$addFields": {
                 "department_display": _dept_name_expr(),
                 "name": _full_name_expr(),
@@ -325,6 +353,13 @@ async def facultymanagement_handler(
                         ],
                         "default": {"$ifNull": ["$employment_type", ""]}
                     }
+                },
+                "cc_display": {
+                    "$map": {
+                        "input": {"$ifNull": ["$cc_courses", []]},
+                        "as": "c",
+                        "in": {"code": "$$c.code", "title": "$$c.course_title"}
+                    }
                 }
             }},
             {"$project": {
@@ -337,7 +372,7 @@ async def facultymanagement_handler(
                 "status": "$status_display",
                 "position": 1,
                 "admin_position": 1,
-                "course_coordinator_of": 1,
+                "course_coordinator_of": "$cc_display",  # <-- final array [{code,title}]
                 "load": {
                     "teaching": {"$ifNull": ["$load.teaching", 0]},
                     "admin": {"$ifNull": ["$load.admin", 0]},
@@ -347,10 +382,11 @@ async def facultymanagement_handler(
             }},
             {"$limit": 1}
         ]
+
         prof = [p async for p in db[COL_FACULTY].aggregate(pipeline)]
         return {"ok": bool(prof), "profile": (prof[0] if prof else {})}
 
-    # ----- SCHEDULE: current/selected term sections -----
+    # ----- SCHEDULE -----
     if action == "schedule":
         if not facultyId:
             raise HTTPException(status_code=400, detail="facultyId is required.")
@@ -388,7 +424,7 @@ async def facultymanagement_handler(
                 for d in sorted(by_day.keys(), key=lambda k: WEEKDAY_ORDER.index(k) if k in WEEKDAY_ORDER else 99)]
         return {"ok": True, "term_id": termId, "days": days}
 
-    # ----- HISTORY: per AY grouped by term -----
+    # ----- HISTORY -----
     if action == "history":
         if not facultyId:
             raise HTTPException(status_code=400, detail="facultyId is required.")
@@ -404,7 +440,6 @@ async def facultymanagement_handler(
                  .sort([("term_number", 1)])]
         term_ids = [t["term_id"] for t in terms]
 
-        # use teaching_assignments if present, else sections
         names = await db.list_collection_names()
         col = COL_ASSIGNMENTS if COL_ASSIGNMENTS in names else COL_SECTIONS
 
