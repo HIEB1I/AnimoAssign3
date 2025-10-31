@@ -22,11 +22,11 @@ import OM_pred2 from "./pages/OM/OM_pred2";
 import OM_LoadReco from "./pages/OM/OM_LoadReco";
 
 // ----- Reports & Analytics sub-pages -----
-import OM_RP_FacultyTeachingHistory from "./pages/OM/OM_REPORTS_ANALYTICS/OM-RP_FacultyTeachingHistory";
-import OM_RP_CourseHistory from "./pages/OM/OM_REPORTS_ANALYTICS/OM-RP_CourseHistory";
-import OM_RP_DeloadingUtilization from "./pages/OM/OM_REPORTS_ANALYTICS/OM-RP_DeloadingUtilization";
-import OM_RP_AvailabilityForecasting from "./pages/OM/OM_REPORTS_ANALYTICS/OM-RP_AvailabilityForecasting";
-import OM_RP_LoadRisk from "./pages/OM/OM_REPORTS_ANALYTICS/OM-RP_LoadRisk";
+import OM_RP_FacultyTeachingHistory from "./pages/OM/OM_REPORTS_ANALYTICS/OM_RP_FacultyTeachingHistory";
+import OM_RP_CourseHistory from "./pages/OM/OM_REPORTS_ANALYTICS/OM_RP_CourseHistory";
+import OM_RP_DeloadingUtilization from "./pages/OM/OM_REPORTS_ANALYTICS/OM_RP_DeloadingUtilization";
+import OM_RP_AvailabilityForecasting from "./pages/OM/OM_REPORTS_ANALYTICS/OM_RP_AvailabilityForecasting";
+import OM_RP_LoadRisk from "./pages/OM/OM_REPORTS_ANALYTICS/OM_RP_LoadRisk";
 
 // ---------------- Student ----------------
 import STUDENT_Petition from "./pages/STUDENT/STUDENT_Petition";
