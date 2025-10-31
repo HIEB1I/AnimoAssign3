@@ -1,4 +1,4 @@
-# backend/app/OM/OM_REPORTS_ANALYTICS/OM_RP_LoadRisk.py
+# analytics/app/OM_REPORTS_ANALYTICS/OM_RP_LoadRisk.py
 from typing import Any, Dict, List
 from fastapi import APIRouter
 from datetime import datetime

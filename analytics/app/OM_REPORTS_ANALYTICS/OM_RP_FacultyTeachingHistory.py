@@ -1,6 +1,5 @@
 from typing import Any, Dict, List, Optional, Tuple
 from fastapi import APIRouter, Query, Body
-from datetime import datetime
 
 from ..main import db
 
@@ -98,7 +97,7 @@ async def analytics_faculty_teaching_history(
         meta: { academicYears: number[] }
       }
     """
-    # Decide AY
+    # Decide AY (default to latest)
     if acad_year_start is None:
         acad_year_start = await _latest_ay()
 
@@ -126,7 +125,7 @@ async def analytics_faculty_teaching_history(
         {"$unwind": {"path": "$u", "preserveNullAndEmptyArrays": True}},
         # Schedules
         {"$lookup": {"from": COL_SCHED, "localField": "sec.section_id", "foreignField": "section_id", "as": "scheds"}},
-        # Room & Campus will be handled when collapsing meetings (first/second meeting only)
+        # Room & Campus handled when collapsing meetings (first/second meeting only)
         {"$project": {
             "_id": 0,
             "faculty_id": "$faculty_id",
@@ -150,28 +149,22 @@ async def analytics_faculty_teaching_history(
 
     docs = [d async for d in db[COL_ASSIGN].aggregate(pipeline)]
 
-    # Optional search filter across faculty name + course fields + section code
+    # SEARCH: faculty-name ONLY (per request)
     q = (search or "").strip().lower()
     if q:
         def _hit(d: Dict[str, Any]) -> bool:
-            hay = " ".join([
-                str(d.get("faculty_name") or ""),
-                _normalize_course_code(d.get("course_code_raw")),
-                str(d.get("course_title") or ""),
-                str(d.get("section_code") or ""),
-            ]).lower()
-            return q in hay
+            name = str(d.get("faculty_name") or "").lower()
+            return q in name
         docs = [d for d in docs if _hit(d)]
 
     # Collapse meetings (up to two), fetch room numbers and room_type
-    # For performance: prefetch all schedule->room in-memory
-    # Build a small cache {section_id: [scheds...]} already present; we’ll enrich each sched with room details
-    room_ids = []
+    room_ids: List[str] = []
     for d in docs:
         for s in (d.get("scheds") or []):
             rid = s.get("room_id")
             if rid:
                 room_ids.append(rid)
+
     room_map: Dict[str, Dict[str, Any]] = {}
     if room_ids:
         room_docs = [r async for r in db[COL_ROOMS].find({"room_id": {"$in": list(set(room_ids))}},
