@@ -132,11 +132,6 @@ from .OM.OM_StudentPetition import router as om_studentpetition
 from .OM.OM_Inbox import router as om_inbox_router
 from .OM.OM_LoadAssignment import router as om_loadassignment_router
 from .OM.OM_ReportsAnalytics import router as om_reportsanalytics_router
-from .OM.OM_REPORTS_ANALYTICS.OM_RP_FacultyTeachingHistory import router as om_rp_teachhist_router
-from .OM.OM_REPORTS_ANALYTICS.OM_RP_CourseHistory import router as om_rp_coursehist_router
-from .OM.OM_REPORTS_ANALYTICS.OM_RP_DeloadingUtilization import router as om_rp_deload_router
-from .OM.OM_REPORTS_ANALYTICS.OM_RP_AvailabilityForecasting import router as om_rp_avail_router
-from .OM.OM_REPORTS_ANALYTICS.OM_RP_LoadRisk import router as om_rp_loadrisk_router
 
 from .APO.APO_PreEnlistment import router as preenlistment_router
 from .APO.APO_RoomAllocation import router as roomallocation_router
@@ -156,11 +151,6 @@ app.include_router(login_router, prefix="/api")
 app.include_router(om_inbox_router, prefix="/api")
 app.include_router(om_loadassignment_router, prefix="/api")
 app.include_router(om_reportsanalytics_router, prefix="/api")
-app.include_router(om_rp_teachhist_router, prefix="/api")
-app.include_router(om_rp_coursehist_router, prefix="/api")
-app.include_router(om_rp_deload_router, prefix="/api")
-app.include_router(om_rp_avail_router, prefix="/api")
-app.include_router(om_rp_loadrisk_router, prefix="/api")
 
 app.include_router(preenlistment_router, prefix="/api")
 app.include_router(roomallocation_router, prefix="/api")

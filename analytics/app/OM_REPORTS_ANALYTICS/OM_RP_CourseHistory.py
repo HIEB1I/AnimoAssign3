@@ -2,7 +2,7 @@
 from typing import Any, Dict, List, Optional, Tuple
 from fastapi import APIRouter, Query
 from datetime import datetime
-from ...main import db
+from ..main import db
 
 router = APIRouter(prefix="/analytics", tags=["analytics"])
 

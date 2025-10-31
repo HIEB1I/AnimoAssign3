@@ -1123,3 +1123,46 @@ export async function submitOmLoadAssignment(
   return data as { ok: boolean; rows: OmLoadRow[] };
 }
 
+/* =========================================================
+   ==============  OM: Reports & Analytics  ====================
+   ========================================================= */
+
+//Descriptive 1: Faculty Teaching History
+
+export async function fetchOmRpFacultyTeachingHistory(params: {
+  search?: string;
+  acad_year_start?: number;
+}) {
+  const base = (ANALYTICS_BASE || API_BASE).replace(/\/+$/, "");
+  const sp = new URLSearchParams();
+  if (params?.search) sp.set("search", params.search);
+  if (typeof params?.acad_year_start === "number") sp.set("acad_year_start", String(params.acad_year_start));
+  const url = `${base}/faculty-teaching-history?${sp.toString()}`;
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "{}",
+  });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json() as Promise<{
+    ok: boolean;
+    acad_year_start: number | null;
+    ay_label: string;
+    rows: Array<{
+      faculty_id: string;
+      faculty_name: string;
+      ay_label: string;
+      term: "Term 1" | "Term 2" | "Term 3" | string;
+      code: string;
+      title: string;
+      section: string;
+      mode?: string | null;
+      day1?: string | null;
+      room1?: string | null;
+      day2?: string | null;
+      room2?: string | null;
+      time?: string | null;
+    }>;
+    meta?: { academicYears?: number[] };
+  }>;
+}
