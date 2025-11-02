@@ -1,8 +1,8 @@
-# backend/app/OM/OM_REPORTS_ANALYTICS/OM_RP_CourseHistory.py
+# analytics/app/OM_REPORTS_ANALYTICS/OM_RP_CourseHistory.py
 from typing import Any, Dict, List, Optional, Tuple
 from fastapi import APIRouter, Query
 from datetime import datetime
-from ...main import db
+from ..main import db
 
 router = APIRouter(prefix="/analytics", tags=["analytics"])
 
