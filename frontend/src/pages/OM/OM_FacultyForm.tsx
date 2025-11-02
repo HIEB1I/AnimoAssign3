@@ -1,9 +1,9 @@
-import { useState, useEffect, useRef } from "react";
+// frontend/src/pages/OM/OM_FacultyForm.tsx
+import { useEffect, useRef, useState } from "react";
+import SelectBox from "../../component/SelectBox";
 import { cls } from "../../utilities/cls";
-import AppShell from "../../base/AppShell";
 import {
-  ChevronDown,
-  Search,
+  Search as SearchIcon,
   MoreVertical,
   Eye,
   GraduationCap,
@@ -11,90 +11,18 @@ import {
   Calendar,
   BookOpen,
 } from "lucide-react";
+import {
+  getOMFOptions,
+  listOMFFaculty,
+  getOMFPreference,
+  type OMFOptions,
+  type OMFRow,
+} from "../../api";
 
-/* ---------------- SelectBox ---------------- */
-function SelectBox({
-  value,
-  onChange,
-  options,
-  placeholder = "— Select —",
-  className = "",
-}: {
-  value: string;
-  onChange: (v: string) => void;
-  options: string[];
-  placeholder?: string;
-  className?: string;
-}) {
-  const [open, setOpen] = useState(false);
-  const [hover, setHover] = useState<number>(() =>
-    Math.max(0, options.findIndex((o) => o === value))
-  );
-  const btnRef = useRef<HTMLButtonElement>(null);
-  const listRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    const close = (e: MouseEvent) =>
-      open &&
-      !btnRef.current?.contains(e.target as Node) &&
-      !listRef.current?.contains(e.target as Node) &&
-      setOpen(false);
-    document.addEventListener("mousedown", close);
-    return () => document.removeEventListener("mousedown", close);
-  }, [open]);
-
-  return (
-    <div className={cls("relative min-w-[160px]", className)}>
-      <button
-        ref={btnRef}
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 pr-8 text-left text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30"
-      >
-        {value || <span className="text-gray-400">{placeholder}</span>}
-        <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-4 w-4 -translate-y-1/2" />
-      </button>
-
-      {open && (
-        <div
-          ref={listRef}
-          className="absolute z-20 mt-2 max-h-72 w-full overflow-auto rounded-xl border border-gray-300 bg-white shadow-xl"
-        >
-          {options.map((opt, i) => (
-            <button
-              key={opt}
-              onMouseEnter={() => setHover(i)}
-              onClick={() => {
-                onChange(opt);
-                setOpen(false);
-                btnRef.current?.focus();
-              }}
-              className={cls(
-                "block w-full px-4 py-2 text-left text-sm",
-                i === hover && "bg-emerald-50",
-                value === opt && "bg-emerald-100 text-emerald-800 font-medium"
-              )}
-            >
-              {opt}
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-/* ---------------- Dropdown Menu ---------------- */
-function ActionMenu({
-  onView,
-  disabled,
-}: {
-  onView: () => void;
-  disabled?: boolean;
-}) {
+/* ---- Row actions menu ---- */
+function ActionMenu({ onView }: { onView: () => void }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
-
   useEffect(() => {
     const close = (e: MouseEvent) =>
       open && !ref.current?.contains(e.target as Node) && setOpen(false);
@@ -105,26 +33,22 @@ function ActionMenu({
   return (
     <div ref={ref} className="relative">
       <button
-        onClick={() => !disabled && setOpen((v) => !v)}
-        disabled={disabled}
-        className={cls(
-          "rounded-full p-2",
-          disabled
-            ? "opacity-50 cursor-not-allowed"
-            : "hover:bg-gray-100 text-gray-700"
-        )}
+        onClick={() => setOpen((v) => !v)}
+        className="rounded-full p-2 hover:bg-gray-100 text-gray-700"
+        title="Actions"
+        aria-label="Actions"
       >
         <MoreVertical className="h-4 w-4" />
       </button>
 
       {open && (
-        <div className="absolute right-0 mt-2 w-44 rounded-lg border border-gray-200 bg-white shadow-xl py-1 text-left z-50">
+        <div className="absolute right-0 mt-2 w-48 rounded-xl border border-gray-200 bg-white shadow-xl py-1 text-left z-50">
           <button
             onClick={() => {
               setOpen(false);
               onView();
             }}
-            className="flex w-full items-center justify-start gap-2 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
+            className="flex w-full items-center gap-2 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
           >
             <Eye className="h-4 w-4" /> <span>View Preference</span>
           </button>
@@ -134,234 +58,270 @@ function ActionMenu({
   );
 }
 
-/* ---------------- Main ---------------- */
-export default function OM_FacForms() {
-  interface Faculty {
-    name: string;
-    email: string;
-    department: string;
-    type: string;
-    date: string;
-    status: string;
-  }
-
+/* ---------------- Page ---------------- */
+export default function OM_FacultyForm() {
+  // filters
   const [department, setDepartment] = useState("All Departments");
   const [status, setStatus] = useState("All Status");
   const [facultyType, setFacultyType] = useState("All Faculty Type");
+
+  // live search
+  const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
-  const [viewFaculty, setViewFaculty] = useState<Faculty | null>(null);
 
-  const departmentOptions = [
-    "All Departments",
-    "Software Technology",
-    "Computer Technology",
-    "Information Technology",
-  ];
+  // options
+  const [deptOptions, setDeptOptions] = useState<string[]>(["All Departments"]);
+  const [typeOptions, setTypeOptions] = useState<string[]>(["All Faculty Type"]);
+  const [statusOptions, setStatusOptions] = useState<string[]>(["All Status"]);
 
-  const statusOptions = ["All Status", "Submitted", "Not Submitted"];
-  const facultyTypeOptions = ["All Faculty Type", "Full-Time", "Part-Time"];
+  // header/term
+  const [activeTerm, setActiveTerm] = useState<OMFOptions["activeTerm"] | null>(null);
 
-  const [data] = useState<Faculty[]>([
-    {
-      name: "CABREDO, RAFAEL ANGISCO",
-      email: "rafael.cabredo@dlsu.edu.ph",
-      department: "Software Technology",
-      type: "Full-Time",
-      date: "08/13/2025",
-      status: "Submitted",
-    },
-    {
-      name: "NICDAO, DIOSDADO R. III",
-      email: "diosdado.nicdao@dlsu.edu.ph",
-      department: "Computer Technology",
-      type: "Full-Time",
-      date: "08/12/2025",
-      status: "Submitted",
-    },
-    {
-      name: "GONDA, RAPHAEL WILWAYCO",
-      email: "raphael.gonda@dlsu.edu.ph",
-      department: "Information Technology",
-      type: "Part-Time",
-      date: "08/12/2025",
-      status: "Not Submitted",
-    },
-  ]);
+  // table rows
+  const [rows, setRows] = useState<OMFRow[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState<string>("");
 
-  const filtered = data.filter(
-    (r) =>
-      (department === "All Departments" || r.department === department) &&
-      (status === "All Status" || r.status === status) &&
-      (facultyType === "All Faculty Type" || r.type === facultyType) &&
-      r.name.toLowerCase().includes(search.toLowerCase())
-  );
+  // modal
+  const [selected, setSelected] = useState<OMFRow | null>(null);
+  const [pref, setPref] = useState<any>(null);
+  const [prefLoading, setPrefLoading] = useState(false);
+
+  // Load dropdown options
+  useEffect(() => {
+    (async () => {
+      try {
+        const opt = await getOMFOptions();
+        if (!opt.ok) throw new Error("Failed to load options");
+        setDeptOptions(["All Departments", ...opt.departments]);
+        setTypeOptions(["All Faculty Type", ...opt.facultyTypes]);
+        setActiveTerm(opt.activeTerm || null);
+      } catch (e: any) {
+        setErr(e?.response?.data?.detail || e?.message || "Failed to load options.");
+      }
+    })();
+  }, []);
+
+  // Debounce search input
+  useEffect(() => {
+    const t = setTimeout(() => setSearch(searchInput.trim()), 300);
+    return () => clearTimeout(t);
+  }, [searchInput]);
+
+  // Fetch table rows when filters/search change
+  useEffect(() => {
+    (async () => {
+      try {
+        setLoading(true);
+        setErr("");
+        const { ok, rows } = await listOMFFaculty({
+          department, facultyType, status, search, termId: activeTerm?.term_id
+        });
+        if (!ok) throw new Error("Failed to load faculty preferences");
+        setRows(rows);
+        const unique = Array.from(new Set(rows.map(r => r.status).filter(Boolean)));
+        setStatusOptions(["All Status", ...unique.sort()]);
+      } catch (e: any) {
+        setRows([]);
+        setErr(e?.response?.data?.detail || e?.message || "Failed to load faculty preferences.");
+      } finally {
+        setLoading(false);
+      }
+    })();
+  }, [department, facultyType, status, search, activeTerm?.term_id]);
+
+  const openView = async (row: OMFRow) => {
+    setSelected(row);
+    setPref(null);
+    setPrefLoading(true);
+    try {
+      const { ok, preference } = await getOMFPreference(row.faculty_id, activeTerm?.term_id);
+      if (ok) setPref(preference);
+    } finally {
+      setPrefLoading(false);
+    }
+  };
+  const closeView = () => { setSelected(null); setPref(null); };
+
+  const fmtDate = (iso?: string) => {
+    if (!iso) return "N/A";               // <- per requirement
+    const d = new Date(iso);
+    return isNaN(d.getTime()) ? "N/A" : d.toLocaleDateString();
+  };
+
+  const headerLabel = activeTerm?.label || "—";
 
   return (
-    <AppShell>
-      <main className="w-full px-8 py-8">
-        {/* Header */}
-        <header className="mb-6 flex items-center justify-between">
-          <div>
-            <h1 className="text-2xl font-bold">Faculty Preferences</h1>
-            <p className="text-sm text-gray-600">
-              Faculty load assignment submissions for Term 1 AY 2025–2026
-            </p>
-          </div>
-          <p className="text-sm font-semibold text-red-600">
-            Due Date: <span className="text-gray-800">August 25, 2025</span>
+    <main className="w-full px-8 py-8">
+      {/* Header */}
+      <header className="mb-6 flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-bold">Faculty Preferences</h1>
+          <p className="text-sm text-gray-600">
+            Faculty load assignment submissions for {headerLabel}
           </p>
-        </header>
+        </div>
+        {activeTerm?.submission_deadline && (
+          <p className="text-sm font-semibold text-red-600">
+            Due Date: <span className="text-gray-800">{fmtDate(activeTerm.submission_deadline)}</span>
+          </p>
+        )}
+      </header>
 
-        {/* Filter Row */}
-        <div className="flex flex-wrap items-center gap-3 rounded-xl border border-gray-200 bg-white p-4 shadow-sm mb-6">
-          <div className="relative flex-1 min-w-[220px]">
-            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-500" />
-            <input
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search by name..."
-              className="w-full rounded-lg border border-gray-300 px-9 py-2 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30"
-            />
-          </div>
+      {err && (
+        <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+          {err}
+        </div>
+      )}
 
-          <SelectBox
-            value={department}
-            onChange={setDepartment}
-            options={departmentOptions}
-          />
-          <SelectBox value={status} onChange={setStatus} options={statusOptions} />
-          <SelectBox
-            value={facultyType}
-            onChange={setFacultyType}
-            options={facultyTypeOptions}
+      {/* Filters */}
+      <div className="flex flex-wrap items-center gap-3 rounded-xl border border-gray-200 bg-white p-4 shadow-sm mb-6">
+        <div className="relative flex-1 min-w-[260px]">
+          <SearchIcon className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-500" />
+          <input
+            value={searchInput}
+            onChange={(e) => setSearchInput(e.target.value)}
+            placeholder="Search by name or email…"
+            className="w-full rounded-lg border border-gray-300 px-9 py-2 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30"
           />
         </div>
 
-        {/* Table */}
-        <div className="border border-gray-200 bg-gray-50 shadow-sm overflow-visible">
-          <table className="w-full text-sm">
-            <thead className="bg-gray-50 border-b text-gray-700">
-              <tr>
-                <th className="text-left px-4 py-2">Faculty</th>
-                <th className="text-left px-4 py-2">Department</th>
-                <th className="text-center px-4 py-2">Faculty Type</th>
-                <th className="text-center px-4 py-2">Submission Date</th>
-                <th className="text-center px-4 py-2">Status</th>
-                <th className="text-center px-4 py-2">Actions</th>
-              </tr>
-            </thead>
+        <SelectBox value={department} onChange={setDepartment} options={deptOptions} />
+        <SelectBox value={status} onChange={setStatus} options={statusOptions} />
+        <SelectBox value={facultyType} onChange={setFacultyType} options={typeOptions} />
+      </div>
 
-            <tbody className="divide-y">
-              {filtered.map((r) => (
-                <tr key={r.name} className="hover:bg-gray-50">
+      {/* Table */}
+      <div className="border border-gray-200 bg-gray-50 shadow-sm overflow-visible rounded-xl">
+        <table className="w-full text-sm">
+          <thead className="bg-gray-50 border-b text-gray-700">
+            <tr>
+              <th className="text-left px-4 py-2">Faculty</th>
+              <th className="text-left px-4 py-2">Department</th>
+              <th className="text-center px-4 py-2">Faculty Type</th>
+              <th className="text-center px-4 py-2">Submission Date</th>
+              <th className="text-center px-4 py-2">Status</th>
+              <th className="text-center px-4 py-2">Actions</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y">
+            {loading ? (
+              <tr>
+                <td className="px-4 py-6 text-center text-gray-500" colSpan={6}>Loading…</td>
+              </tr>
+            ) : rows.length === 0 ? (
+              <tr>
+                <td className="px-4 py-6 text-center text-gray-500" colSpan={6}>No results</td>
+              </tr>
+            ) : (
+              rows.map((r) => (
+                <tr key={r.faculty_id} className="hover:bg-gray-50">
                   <td className="px-4 py-3 text-emerald-700 font-semibold">
                     {r.name}
                     <div className="text-xs text-gray-500">{r.email}</div>
                   </td>
-                  <td className="px-4 py-3">{r.department}</td>
-                  <td className="text-center">{r.type}</td>
-                  <td className="text-center">{r.date}</td>
+                  <td className="px-4 py-3">{r.department || "—"}</td>
+                  <td className="text-center">{r.type || "—"}</td>
+                  <td className="text-center">{fmtDate(r.submission_date)}</td>
                   <td className="text-center">
                     <span
                       className={cls(
                         "inline-block rounded-full px-3 py-1 text-xs font-semibold",
-                        r.status === "Submitted"
-                          ? "bg-emerald-100 text-emerald-700"
-                          : "bg-gray-100 text-gray-700"
+                        r.status === "Submitted" ? "bg-emerald-100 text-emerald-700" : "bg-gray-100 text-gray-700"
                       )}
                     >
-                      {r.status}
+                      {r.status || "—"}
                     </span>
                   </td>
                   <td className="text-center">
-                    <ActionMenu onView={() => setViewFaculty(r)} disabled={false} />
+                    <ActionMenu onView={() => openView(r)} />
                   </td>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              ))
+            )}
+          </tbody>
+        </table>
 
-          {/* ---------------- View Preference Modal ---------------- */}
-          {viewFaculty && (
-            <div className="fixed inset-0 z-[100] grid place-items-center bg-black/40 p-4">
-              <div className="w-full max-w-xl rounded-2xl bg-white p-8 shadow-2xl">
-                <h2 className="text-lg font-semibold text-emerald-700 mb-1">
-                  Faculty Preference
-                </h2>
-                <p className="text-sm text-gray-600 mb-6">
-                  Instructor:{" "}
-                  <span className="font-medium text-gray-800">
-                    {viewFaculty.name}
-                  </span>
-                </p>
+        {/* View Preference Modal */}
+        {selected && (
+          <div className="fixed inset-0 z-[100] grid place-items-center bg-black/40 p-4">
+            <div className="w-full max-w-xl rounded-2xl bg-white p-8 shadow-2xl">
+              <h2 className="text-lg font-semibold text-emerald-700 mb-1">Faculty Preference</h2>
+              <p className="text-sm text-gray-600 mb-6">
+                Instructor: <span className="font-medium text-gray-800">{selected.name}</span>
+              </p>
 
+              {prefLoading && <div className="text-sm text-gray-600">Loading preference…</div>}
+              {!prefLoading && !pref && <div className="text-sm text-gray-600">No preference record found for this term.</div>}
+
+              {!prefLoading && pref && (
                 <div className="grid grid-cols-2 gap-x-10 gap-y-6 text-sm">
-                  {/* Teaching Load */}
                   <div>
                     <h4 className="font-semibold flex items-center gap-2 mb-2 text-gray-800">
-                      <GraduationCap className="h-4 w-4 text-emerald-700" />
-                      Teaching Load
+                      <GraduationCap className="h-4 w-4 text-emerald-700" /> Teaching Load
                     </h4>
                     <p>Preferred Teaching Units</p>
-                    <p className="text-gray-500">3.0 units</p>
-                    <p className="mt-1">Maximum Teaching Units</p>
-                    <p className="text-gray-500">6.0 units</p>
+                    <p className="text-gray-500">{pref.teaching?.preferred_units ?? "—"}</p>
                     <p className="mt-1">Deloading</p>
-                    <p className="text-gray-500">Administrative (3 units)</p>
-                  </div>
-
-                  {/* Location and Mode */}
-                  <div>
-                    <h4 className="font-semibold flex items-center gap-2 mb-2 text-gray-800">
-                      <MapPin className="h-4 w-4 text-emerald-700" />
-                      Location and Mode
-                    </h4>
-                    <p>Campus</p>
-                    <p className="text-gray-500">Manila</p>
-                    <p className="mt-1">Mode of Learning</p>
-                    <p className="text-gray-500">Hybrid</p>
-                  </div>
-
-                  {/* Schedule */}
-                  <div>
-                    <h4 className="font-semibold flex items-center gap-2 mb-2 text-gray-800">
-                      <Calendar className="h-4 w-4 text-emerald-700" />
-                      Schedule
-                    </h4>
-                    <p>Days</p>
-                    <p className="text-gray-500">Tuesday, Friday, Saturday</p>
-                    <p className="mt-1">Time Slots</p>
                     <p className="text-gray-500">
-                      7:30–9:00, 12:45–14:15, 14:30–16:00
+                      {Array.isArray(pref.teaching?.deloading)
+                        ? pref.teaching?.deloading.join(", ")
+                        : (pref.teaching?.deloading ?? "—")}
                     </p>
                   </div>
 
-                  {/* Academic Specialization */}
                   <div>
                     <h4 className="font-semibold flex items-center gap-2 mb-2 text-gray-800">
-                      <BookOpen className="h-4 w-4 text-emerald-700" />
-                      Academic Specialization
+                      <MapPin className="h-4 w-4 text-emerald-700" /> Location and Mode
                     </h4>
-                    <p>Knowledge Area</p>
-                    <p className="text-gray-500">Computer Programming</p>
-                    <p className="mt-1">Courses</p>
-                    <p className="text-gray-500">CCPROG1, CCPROG2, CCPROG3</p>
+                    <p>Mode</p>
+                    <p className="text-gray-500">
+                      {typeof pref.location_mode?.mode === "object"
+                        ? JSON.stringify(pref.location_mode?.mode)
+                        : (pref.location_mode?.mode ?? "—")}
+                    </p>
+                  </div>
+
+                  <div>
+                    <h4 className="font-semibold flex items-center gap-2 mb-2 text-gray-800">
+                      <Calendar className="h-4 w-4 text-emerald-700" /> Schedule
+                    </h4>
+                    <p>Days</p>
+                    <p className="text-gray-500">{(pref.schedule?.days || []).length ? pref.schedule.days.join(", ") : "—"}</p>
+                    <p className="mt-1">Time Slots</p>
+                    <p className="text-gray-500">{(pref.schedule?.times || []).length ? pref.schedule.times.join(", ") : "—"}</p>
+                  </div>
+
+                  <div>
+                    <h4 className="font-semibold flex items-center gap-2 mb-2 text-gray-800">
+                      <BookOpen className="h-4 w-4 text-emerald-700" /> Academic Specialization
+                    </h4>
+                    <p>Courses</p>
+                    <p className="text-gray-500">
+                      {(pref.specialization?.courses || []).length ? pref.specialization.courses.join(", ") : "—"}
+                    </p>
+                  </div>
+
+                  <div className="col-span-2 mt-2">
+                    <h4 className="font-semibold mb-1">Submission</h4>
+                    <p className="text-gray-700">
+                      Status: <span className="font-medium">{pref.submission?.status ?? "Not Submitted"}</span>
+                      {"  "}•{"  "}
+                      Date: <span className="font-medium">{fmtDate(pref.submission?.date)}</span>
+                    </p>
                   </div>
                 </div>
+              )}
 
-                <div className="flex justify-end mt-8">
-                  <button
-                    onClick={() => setViewFaculty(null)}
-                    className="px-4 py-2 rounded-lg bg-gray-100 hover:bg-gray-200 text-sm"
-                  >
-                    Close
-                  </button>
-                </div>
+              <div className="flex justify-end mt-8">
+                <button onClick={closeView} className="px-4 py-2 rounded-lg bg-gray-100 hover:bg-gray-200 text-sm">
+                  Close
+                </button>
               </div>
             </div>
-          )}
-        </div>
-      </main>
-    </AppShell>
+          </div>
+        )}
+      </div>
+    </main>
   );
 }

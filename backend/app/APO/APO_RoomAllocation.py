@@ -130,10 +130,10 @@ def normalize_room_type(rt: str) -> str:
 
 def campus_section_prefix(campus_name: str) -> Optional[str]:
     n = (campus_name or "").lower()
+    if "laguna" in n or "canlubang" in n or "binan" in n or "biñan" in n:
+        return "XX"   # ← Laguna must be XX
     if "manila" in n or "taft" in n:
         return "S"
-    if "laguna" in n or "canlubang" in n or "binan" in n or "biñan" in n:
-        return "X"
     return None
 
 async def resolve_term_id_with_sections_fallback() -> Optional[str]:

@@ -1,5 +1,5 @@
 // frontend/src/api.ts
-import axios from "axios";
+import axios, { AxiosError } from "axios";
 
 /**
  * BASE is set by Vite:
@@ -419,76 +419,248 @@ export async function archiveApoPreenlistment(
 /* =========================================================
    ===============  APO: COURSE OFFERINGS  ==================
    ========================================================= */
-// tiny qs helper
-type Queryish = Record<string, string | number | boolean | undefined>;
-function qs(q: Queryish) {
-  const u = new URLSearchParams();
-  Object.entries(q).forEach(([k, v]) => {
-    if (v === undefined || v === null || v === "") return;
-    u.set(k, String(v));
-  });
-  return u.toString();
+
+/* ------------------------ qs helper ------------------------ */
+function q(obj: Record<string, any>) {
+  const params = Object.entries(obj)
+    .filter(([, v]) => v !== undefined && v !== null && v !== "")
+    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`)
+    .join("&");
+  return params ? `?${params}` : "";
 }
 
-export async function getApoCourseOfferings(
-  userId: string,
-  filters?: { level?: string; department_id?: string; batch_id?: string; program_id?: string }
-) {
-  const url = `${API_BASE}/apo/courseofferings?` + qs({ userId, ...filters });
-  const r = await fetch(url);
-  if (!r.ok) throw new Error(await r.text());
-  return r.json();
+/* --------------------- low-level HTTP ---------------------- */
+async function get<T>(url: string): Promise<T> {
+  const { data } = await axios.get<T>(url);
+  return data;
 }
+async function post<T>(url: string, body?: any): Promise<T> {
+  const { data } = await axios.post<T>(url, body);
+  return data;
+}
+
+/* ------------------ small utils / coercers ----------------- */
+function _clone<T>(x: T): T {
+  return x == null ? x : JSON.parse(JSON.stringify(x));
+}
+
+/** Normalize room sentinel values and number-ish fields before POSTing. */
+function _coerceOnline<T extends Record<string, any>>(payload: T): T {
+  const out = _clone(payload);
+
+  // Normalize slots
+  const slots = ["slot1", "slot2"] as const;
+  for (const key of slots) {
+    if (out[key]) {
+      const rid = out[key].room_id;
+      // Treat empty string as TBA -> null; preserve "ONLINE"
+      out[key].room_id = rid === "" ? null : rid ?? null;
+    }
+  }
+
+  // Normalize enrollment_cap (allow "" to mean clear/null)
+  if ("enrollment_cap" in out) {
+    const cap = out.enrollment_cap;
+    if (cap === "" || cap === undefined) (out as any).enrollment_cap = null;
+    else if (typeof cap !== "number") (out as any).enrollment_cap = Number(cap) || null;
+  }
+
+  return out;
+}
+
+/* ---------------------- shared types ----------------------- */
+export type ApiConflict = {
+  override_token: string;
+  violations: { code: string; level?: string; message: string; data?: any }[];
+  preview_changes?: any;
+};
+
+type GateError = { code?: "NEEDS_IMPORT" | "APPROVAL_REQUIRED"; message?: string };
+
+export type OfferingsQuery = {
+  view?: "offerings" | "curriculum";
+  level?: string;
+  department_id?: string;
+  batch_id?: string;
+  program_id?: string;
+};
+
+/* Robustly unwrap conflict payload whether server nests under detail.conflict or directly under detail */
+function _extractConflict(e: AxiosError<any>): ApiConflict | null {
+  const detail = e.response?.data?.detail;
+  const raw = detail?.conflict || detail;
+  if (!raw) return null;
+  const token = raw.override_token ?? detail?.override_token;
+  const violations = raw.violations ?? detail?.violations;
+  const preview = raw.preview_changes ?? raw.preview ?? detail?.preview_changes ?? detail?.preview;
+  if (!token && !violations) return null;
+  return {
+    override_token: token || "",
+    violations: Array.isArray(violations) ? violations : [],
+    preview_changes: preview,
+  };
+}
+
+/* =========================================================
+   ===============  APO: COURSE OFFERINGS  ==================
+   ========================================================= */
+
+export async function getApoCourseOfferings(userId: string, opts: OfferingsQuery = {}): Promise<any> {
+  const url = `${API_BASE}/apo/courseofferings${q({ userId, ...opts })}`;
+  return get<any>(url);
+}
+
+/* ------------------ Row ops with conflicts ----------------- */
+
+export type AddRowPayload = {
+  batch_id: string;
+  program_id?: string;
+  course_id: string;
+  enrollment_cap?: number | null;
+  remarks?: string;
+  slot1?: { room_id?: string | null };
+  slot2?: { room_id?: string | null };
+  section_code?: string;
+  override?: boolean;
+  override_token?: string;
+  override_reason?: string;
+  auto_approve?: boolean;
+};
 
 export async function addApoOfferingRow(
   userId: string,
-  data: {
-    batch_id: string;
-    course_id: string;
-    enrollment_cap?: number;
-    remarks?: string;
-    slot1?: { room_id?: string };
-    slot2?: { room_id?: string };
+  payload: AddRowPayload
+): Promise<{ ok: true; section_id: string } | { conflict: ApiConflict }> {
+  try {
+    const url = `${API_BASE}/apo/courseofferings${q({ userId, action: "addRow" })}`;
+    return await post(url, _coerceOnline(payload));
+  } catch (e) {
+    const err = e as AxiosError<any>;
+    if (err.response?.status === 409) {
+      const conflict = _extractConflict(err);
+      if (conflict) return { conflict };
+      const d = err.response?.data?.detail as GateError | undefined;
+      if (d) throw new Error(d.message || "Action blocked by planning rules.");
+    }
+    throw err;
   }
-) {
-  const url = `${API_BASE}/apo/courseofferings?` + qs({ userId, action: "addRow" });
-  const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) });
-  if (!r.ok) throw new Error(await r.text());
-  return r.json();
 }
+
+export type EditRowPayload = {
+  section_id: string;
+  section_code?: string;
+  /** allow "" to clear the cap (backend treats "" as null) */
+  enrollment_cap?: number | null | "";
+  remarks?: string;
+  slot1?: { room_id?: string | null };
+  slot2?: { room_id?: string | null };
+  override?: boolean;
+  override_token?: string;
+  override_reason?: string;
+};
 
 export async function editApoOfferingRow(
   userId: string,
-  data: {
-    section_id: string;
-    section_code?: string;
-    enrollment_cap?: number;
-    remarks?: string;
-    slot1?: { room_id?: string };
-    slot2?: { room_id?: string };
+  payload: EditRowPayload
+): Promise<{ ok: true; section_id: string } | { conflict: ApiConflict }> {
+  try {
+    const url = `${API_BASE}/apo/courseofferings${q({ userId, action: "editRow" })}`;
+    return await post(url, _coerceOnline(payload));
+  } catch (e) {
+    const err = e as AxiosError<any>;
+    if (err.response?.status === 409) {
+      const conflict = _extractConflict(err);
+      if (conflict) return { conflict };
+      const d = err.response?.data?.detail as GateError | undefined;
+      if (d) throw new Error(d.message || "Action blocked by planning rules.");
+    }
+    throw err;
   }
-) {
-  const url = `${API_BASE}/apo/courseofferings?` + qs({ userId, action: "editRow" });
-  const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) });
-  if (!r.ok) throw new Error(await r.text());
-  return r.json();
 }
 
-export async function deleteApoOfferingRow(userId: string, data: { section_id: string }) {
-  const url = `${API_BASE}/apo/courseofferings?` + qs({ userId, action: "deleteRow" });
-  const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) });
-  if (!r.ok) throw new Error(await r.text());
-  return r.json();
+export type DeleteRowPayload = {
+  section_id: string;
+  override?: boolean;
+  override_token?: string;
+  override_reason?: string;
+};
+
+export async function deleteApoOfferingRow(
+  userId: string,
+  payload: DeleteRowPayload
+): Promise<{ ok: true; deleted: number } | { conflict: ApiConflict }> {
+  try {
+    const url = `${API_BASE}/apo/courseofferings${q({ userId, action: "deleteRow" })}`;
+    return await post(url, _coerceOnline(payload));
+  } catch (e) {
+    const err = e as AxiosError<any>;
+    if (err.response?.status === 409) {
+      const conflict = _extractConflict(err);
+      if (conflict) return { conflict };
+      const d = err.response?.data?.detail as GateError | undefined;
+      if (d) throw new Error(d.message || "Action blocked by planning rules.");
+    }
+    throw err;
+  }
 }
+
+/* ----------------- Forward / Approve Plan ------------------ */
 
 export async function forwardApoCourseOfferings(
   userId: string,
-  data: { to: string; subject: string; message: string; attachment_html: string }
-) {
-  const url = `${API_BASE}/apo/courseofferings?` + qs({ userId, action: "forward" });
-  const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) });
-  if (!r.ok) throw new Error(await r.text());
-  return r.json();
+  payload: { to: string; subject?: string; message?: string; attachment_html?: string }
+): Promise<{ ok: true; queued: boolean; outbox_id: string }> {
+  const url = `${API_BASE}/apo/courseofferings${q({ userId, action: "forward" })}`;
+  return post(url, payload);
+}
+
+export async function approveApoOfferingsPlan(userId: string): Promise<{ ok: true; applied: number }> {
+  const url = `${API_BASE}/apo/courseofferings${q({ userId, action: "approvePlan" })}`;
+  return post(url);
+}
+
+/* ------------------ Curriculum operations ------------------ */
+
+export async function curriculumAddCourse(
+  userId: string,
+  payload: {
+    program_id: string;
+    batch_id: string;
+    course_id?: string;
+    new_course?: {
+      course_code: string;
+      course_title: string;
+      department_id: string;
+      /** label or code; backend accepts both */
+      program_level: string;
+      units?: number;
+    };
+  }
+): Promise<{ ok: true; course_id: string }> {
+  const url = `${API_BASE}/apo/courseofferings${q({ userId, action: "curriculumAddCourse" })}`;
+  return post(url, payload);
+}
+
+export async function curriculumEditCourse(
+  userId: string,
+  payload: {
+    program_id: string;
+    batch_id: string;
+    old_course_id: string;
+    new_course_id?: string;
+    update_course?: { course_title?: string; program_level?: string; units?: number | null };
+  }
+): Promise<{ ok: true; course_id: string }> {
+  const url = `${API_BASE}/apo/courseofferings${q({ userId, action: "curriculumEditCourse" })}`;
+  return post(url, payload);
+}
+
+export async function curriculumRemoveCourse(
+  userId: string,
+  payload: { program_id: string; batch_id: string; course_id: string }
+): Promise<{ ok: true; removed: number }> {
+  const url = `${API_BASE}/apo/courseofferings${q({ userId, action: "curriculumRemoveCourse" })}`;
+  return post(url, payload);
 }
 
 /* =========================================================
@@ -786,16 +958,17 @@ export async function getFacultyHistory(facultyId: string, acadYearStart?: numbe
 /* =========================================================
    ==============  OM: COURSE MANAGEMENT  =================
    ========================================================= */
+
 export type CMCourseRow = {
   course_id: string;
-  kac: string;
-  code: string;
+  kac: string;                                  // derived from kacs.course_list
+  code: string;                                 // joined course_code(s)
   title: string;
   units: number | string;
-  coordinator_name: string;                 // joined string (back-compat)
-  coordinator_email: string;                // first email (back-compat)
-  coordinators?: { name: string; email?: string }[]; // new: all coordinators
-  composition: string[];
+  coordinator_name: string;                     // back-compat (joined string)
+  coordinator_email: string;                    // back-compat (first email)
+  coordinators?: { name: string; email?: string }[]; // full list
+  composition: string[];                        // from sections -> assignments -> profiles -> users (active term)
   syllabus: string;
 };
 
@@ -830,6 +1003,70 @@ export async function getCMHeader(userEmail?: string, userId?: string) {
     params: { action: "header", userEmail, userId },
   });
   return data as { ok: boolean; profileName?: string; profileSubtitle?: string };
+}
+
+/* =========================================================
+   ==============  OM: FACULTY FORM  ===================
+   ========================================================= */
+export type OMFOptions = {
+  ok: boolean;
+  departments: string[];
+  facultyTypes: string[];
+  activeTerm: {
+    term_id?: string;
+    acad_year_start?: number;
+    term_number?: number;
+    label?: string;
+    submission_deadline?: string; // ISO
+  };
+};
+
+export type OMFRow = {
+  faculty_id: string;
+  name: string;
+  email: string;
+  department: string;
+  type: string;              // Full-Time | Part-Time
+  submission_date?: string;  // ISO (undefined => N/A)
+  status: string;            // Submitted | Not Submitted
+};
+
+export async function getOMFOptions(): Promise<OMFOptions> {
+  const { data } = await axios.post(`${API_BASE}/om/facultyforms`, {}, { params: { action: "options" } });
+  return data;
+}
+
+export async function listOMFFaculty(params: {
+  department?: string;
+  facultyType?: string;
+  status?: string;
+  search?: string;
+  termId?: string;
+}) {
+  const { department, facultyType, status, search, termId } = params || {};
+  const { data } = await axios.post(`${API_BASE}/om/facultyforms`, {}, {
+    params: { action: "list", department, facultyType, status, search, termId },
+  });
+  return data as { ok: boolean; rows: OMFRow[] };
+}
+
+export async function getOMFPreference(facultyId: string, termId?: string) {
+  const { data } = await axios.post(`${API_BASE}/om/facultyforms`, {}, {
+    params: { action: "view", facultyId, termId },
+  });
+  return data as {
+    ok: boolean;
+    preference: {
+      faculty_id: string;
+      name: string;
+      email: string;
+      teaching?: { preferred_units?: number; deloading?: any };
+      location_mode?: { mode?: any };
+      schedule?: { days?: string[]; times?: string[] };
+      specialization?: { courses?: string[] };
+      submission?: { status?: string; date?: string; notes?: string };
+    };
+  };
 }
 
 /* =========================================================
@@ -1071,4 +1308,3 @@ export async function submitOmLoadAssignment(
   });
   return data as { ok: boolean; rows: OmLoadRow[] };
 }
-

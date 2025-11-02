@@ -79,13 +79,8 @@ export default function App() {
           <Route path="/om/pred1" element={<OM_pred1 />} />
           <Route path="/om/pred2" element={<OM_pred2 />} />
           <Route path="/om/loadreco" element={<OM_LoadReco />} />
-          {/* 🔧 FIX: make the loose course-management path redirect into the shell */}
-          <Route
-            path="/om/course-management"
-            element={<Navigate to="/om/home/course-management" replace />}
-          />
+
           <Route path="/om/inbox" element={<OM_Inbox />} />
-          <Route path="/om/faculty-form" element={<OM_FacultyForm />} />
           <Route path="/om/class-retention" element={<OM_ClassRetention />} />
 
           {/* OM shell with children (ONE declaration only) */}
@@ -96,6 +91,7 @@ export default function App() {
 
             <Route path="faculty-management" element={<OM_FacultyManagement />} />
             <Route path="course-management" element={<OM_CourseManagement />} />
+            <Route path="faculty-form" element={<OM_FacultyForm />} />
             <Route path="student-petition" element={<OM_StudentPetition />} />
 
             {/* Reports & Analytics landing */}
@@ -112,6 +108,7 @@ export default function App() {
           {/* Redirects for old/external links -> new nested routes */}
           <Route path="/om/faculty-management" element={<Navigate to="/om/home/faculty-management" replace />} />
           <Route path="/om/course-management" element={<Navigate to="/om/home/course-management" replace />} />
+          <Route path="/om/faculty-form" element={<Navigate to="/om/home/faculty-form" replace />} />
           <Route path="/om/student-petition" element={<Navigate to="/om/home/student-petition" replace />} />
           <Route path="/om/reports-analytics" element={<Navigate to="/om/home/reports-analytics" replace />} />
           <Route path="/om/reports-analytics/teaching-history" element={<Navigate to="/om/home/reports-analytics/teaching-history" replace />} />

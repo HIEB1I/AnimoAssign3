@@ -16,6 +16,7 @@ COL_TERMS = "terms"
 COL_COURSES = "courses"
 COL_KACS = "kacs"
 COL_FACULTY = "faculty_profiles"
+COL_FACULTY_ASG = "faculty_assignments"
 COL_SECTIONS = "sections"
 
 
@@ -80,13 +81,10 @@ async def _user_scope(userId: Optional[str], userEmail: Optional[str]) -> Dict[s
             "dept_id": "$deptScope.id",
             "dept_name": {"$ifNull": ["$dept.department_name", "$dept.dept_name"]},
             "full_name": {
-                "$trim": {
-                    "input": {"$concat": [
-                        {"$ifNull": ["$first_name", ""]},
-                        " ",
-                        {"$ifNull": ["$last_name",  ""]}
-                    ]}
-                }
+                "$trim": {"input": {"$concat": [
+                    {"$ifNull": ["$first_name", ""]}, " ",
+                    {"$ifNull": ["$last_name",  ""]}
+                ]}}
             },
             "role_type": {"$ifNull": ["$role.role_type", ""]},
         }},
@@ -142,39 +140,7 @@ async def course_management(
     pipeline: List[Dict[str, Any]] = [
         {"$match": {"department_id": dept_id}},
 
-        # KAC id normalization and join
-        {"$addFields": {
-            "kac_raw": "$kac_id",
-            "kac_digits": {"$replaceAll": {"input": {"$ifNull": ["$kac_id", ""]}, "find": "KAC", "replacement": ""}},
-        }},
-        {"$addFields": {
-            "kac_pad": {
-                "$let": {
-                    "vars": {"padded": {"$concat": ["0000", "$kac_digits"]}},
-                    "in": {"$substr": ["$$padded", {"$subtract": [{"$strLenCP": "$$padded"}, 4]}, 4]}
-                }
-            }
-        }},
-        {"$addFields": {"kac_norm": {"$cond": [
-            {"$gt": [{"$strLenCP": "$kac_digits"}, 0]},
-            {"$concat": ["KAC", "$kac_pad"]},
-            "$kac_raw"
-        ]}}},
-
-        {"$lookup": {
-            "from": COL_KACS,
-            "let": {"raw": "$kac_raw", "norm": "$kac_norm"},
-            "pipeline": [
-                {"$match": {"$expr": {"$or": [
-                    {"$eq": ["$kac_id", "$$raw"]},
-                    {"$eq": ["$kac_id", "$$norm"]}
-                ]}}}
-            ],
-            "as": "kac"
-        }},
-        {"$unwind": {"path": "$kac", "preserveNullAndEmptyArrays": True}},
-
-        # Normalize course_code to array for composition join + build display code
+        # Normalize course_code -> array and display
         {"$addFields": {
             "code_list": {
                 "$cond": [
@@ -200,19 +166,17 @@ async def course_management(
             }
         }},
 
-        # ********** COORDINATORS (no unwind -> 1 row per course) **********
+        # Coordinators (string back-compat + full list)
         {"$addFields": {
             "coord_ids": {
                 "$cond": [
                     {"$isArray": "$course_coordinator"},
                     {"$ifNull": ["$course_coordinator", []]},
-                    {
-                        "$cond": [
-                            {"$gt": [{"$type": "$course_coordinator"}, "missing"]},
-                            [{"$ifNull": ["$course_coordinator", ""]}],
-                            []
-                        ]
-                    }
+                    {"$cond": [
+                        {"$ne": [{"$type": "$course_coordinator"}, "missing"]},
+                        [{"$ifNull": ["$course_coordinator", ""]}],
+                        []
+                    ]}
                 ]
             }
         }},
@@ -221,20 +185,13 @@ async def course_management(
             "let": {"ids": "$coord_ids"},
             "pipeline": [
                 {"$match": {"$expr": {"$in": ["$user_id", "$$ids"]}}},
-                {"$project": {
-                    "_id": 0,
-                    "first_name": 1,
-                    "last_name": 1,
-                    "email": 1
-                }},
-                {"$addFields": {
-                    "name": {
-                        "$trim": {"input": {"$concat": [
-                            {"$ifNull": ["$first_name", ""]}, " ",
-                            {"$ifNull": ["$last_name",  ""]}
-                        ]}}
-                    }
-                }},
+                {"$project": {"_id": 0, "first_name": 1, "last_name": 1, "email": 1}},
+                {"$addFields": {"name": {
+                    "$trim": {"input": {"$concat": [
+                        {"$ifNull": ["$first_name", ""]}, " ",
+                        {"$ifNull": ["$last_name",  ""]}
+                    ]}}
+                }}},
                 {"$project": {"first_name": 0, "last_name": 0}}
             ],
             "as": "coord_users"
@@ -247,56 +204,147 @@ async def course_management(
                     "in": {"name": "$$c.name", "email": {"$ifNull": ["$$c.email", ""]}}
                 }
             },
-            "coordinator_name": {  # joined (for search/back-compat)
+            "coordinator_name": {
                 "$reduce": {
-                    "input": {
-                        "$map": {"input": {"$ifNull": ["$coord_users", []]}, "as": "c", "in": "$$c.name"}
-                    },
+                    "input": {"$map": {"input": {"$ifNull": ["$coord_users", []]}, "as": "c", "in": "$$c.name"}},
                     "initialValue": "",
                     "in": {"$concat": ["$$value", {"$cond": [{"$eq": ["$$value", ""]}, "", "; "]}, "$$this"]}
                 }
             },
-            "coordinator_email": {  # first email (back-compat for single line UIs)
-                "$ifNull": [{"$first": "$coord_users.email"}, ""]
+            "coordinator_email": {"$ifNull": [{"$first": "$coord_users.email"}, ""]}
+        }},
+
+        # ---------- Teaching composition (primary path: courses.teaching_team → faculty_profiles → users)
+        {"$addFields": {
+            "team_ids": {
+                "$cond": [
+                    {"$isArray": "$teaching_team"},
+                    {"$filter": {
+                        "input": {"$ifNull": ["$teaching_team", []]},
+                        "as": "tid",
+                        "cond": {"$and": [
+                            {"$ne": ["$$tid", None]},
+                            {"$ne": ["$$tid", ""]}
+                        ]}
+                    }},
+                    []
+                ]
             }
         }},
 
-        # Teaching composition (optional) from sections in the active term
+        # ---------- Teaching composition (fallback path: sections → faculty_assignments → faculty_profiles)
         {"$lookup": {
             "from": COL_SECTIONS,
-            "let": {"codes": "$code_list"},
+            "let": {"cid": "$course_id", "codes": "$code_list"},
             "pipeline": [
                 {"$match": {"$expr": {"$and": [
-                    {"$in": ["$course_code", "$$codes"]},
-                    {"$eq": ["$term_id", term_id]}
+                    {"$eq": ["$term_id", term_id]},
+                    {"$or": [
+                        {"$eq": ["$course_id", "$$cid"]},
+                        {"$in": ["$course_code", {"$ifNull": ["$$codes", []]}]}
+                    ]}
                 ]}}},
-                {"$lookup": {
-                    "from": COL_FACULTY,
-                    "localField": "faculty_id",
-                    "foreignField": "faculty_id",
-                    "as": "fp"
-                }},
-                {"$unwind": {"path": "$fp", "preserveNullAndEmptyArrays": True}},
-                {"$lookup": {
-                    "from": COL_USERS,
-                    "localField": "fp.user_id",
-                    "foreignField": "user_id",
-                    "as": "fu"
-                }},
-                {"$unwind": {"path": "$fu", "preserveNullAndEmptyArrays": True}},
-                {"$addFields": {"_name": {
-                    "$trim": {"input": {"$concat": [
-                        {"$ifNull": ["$fu.first_name", ""]}, " ",
-                        {"$ifNull": ["$fu.last_name",  ""]}
-                    ]}}
-                }}},
-                {"$group": {"_id": None, "names": {"$addToSet": "$_name"}}}
+                {"$project": {"_id": 0, "section_id": 1}}
             ],
-            "as": "comp"
+            "as": "_secs"
         }},
         {"$addFields": {
-            "composition": {"$ifNull": [{"$first": "$comp.names"}, []]},
-            "kac_name": {"$ifNull": ["$kac.kac_name", "—"]},
+            "_sec_ids": {"$map": {"input": {"$ifNull": ["$_secs", []]}, "as": "s", "in": "$$s.section_id"}}
+        }},
+        {"$lookup": {
+            "from": COL_FACULTY_ASG,
+            "let": {"sids": "$_sec_ids"},
+            "pipeline": [
+                {"$match": {"$expr": {"$in": ["$section_id", {"$ifNull": ["$$sids", []]}]}}},
+                {"$project": {"_id": 0, "faculty_id": 1}}
+            ],
+            "as": "_asg"
+        }},
+        {"$addFields": {
+            "_fac_ids_from_sections": {
+                "$map": {"input": {"$ifNull": ["$_asg", []]}, "as": "a", "in": "$$a.faculty_id"}
+            }
+        }},
+        {"$addFields": {
+            "_fac_ids_from_sections": {
+                "$filter": {"input": {"$ifNull": ["$_fac_ids_from_sections", []]},
+                            "as": "id", "cond": {"$and": [
+                                {"$ne": ["$$id", None]},
+                                {"$ne": ["$$id", ""]}
+                            ]}}
+            }
+        }},
+
+        # Union of both sources of faculty_ids (prefer team_ids when present, but union is safe and dedupes)
+        {"$addFields": {
+            "_fac_ids_all": {"$setUnion": [
+                {"$ifNull": ["$team_ids", []]},
+                {"$ifNull": ["$_fac_ids_from_sections", []]}
+            ]}
+        }},
+
+        {"$lookup": {
+            "from": COL_FACULTY,
+            "let": {"fids": "$_fac_ids_all"},
+            "pipeline": [
+                {"$match": {"$expr": {"$in": ["$faculty_id", {"$ifNull": ["$$fids", []]}]}}},
+                {"$project": {"_id": 0, "faculty_id": 1, "user_id": 1}}
+            ],
+            "as": "_fp"
+        }},
+        {"$lookup": {
+            "from": COL_USERS,
+            "let": {"uids": {"$map": {"input": {"$ifNull": ["$_fp", []]}, "as": "f", "in": "$$f.user_id"}}},
+            "pipeline": [
+                {"$match": {"$expr": {"$in": ["$user_id", {"$ifNull": ["$$uids", []]}]}}},
+                {"$project": {"_id": 0, "first_name": 1, "last_name": 1}}
+            ],
+            "as": "_fu"
+        }},
+        {"$addFields": {
+            "composition": {
+                "$setUnion": [
+                    {"$map": {
+                        "input": {"$ifNull": ["$_fu", []]},
+                        "as": "u",
+                        "in": {"$trim": {"input": {"$concat": [
+                            {"$ifNull": ["$$u.first_name", ""]}, " ",
+                            {"$ifNull": ["$$u.last_name",  ""]}
+                        ]}}}
+                    }},
+                    []
+                ]
+            }
+        }},
+
+        # KAC mapping: via kacs.course_list contains this course_id (scoped by department)
+        {"$lookup": {
+            "from": COL_KACS,
+            "let": {"cid": "$course_id", "deptId": dept_id},
+            "pipeline": [
+                {"$match": {"$expr": {"$and": [
+                    {"$in": ["$$cid", {"$ifNull": ["$course_list", []]}]},
+                    {"$eq": ["$department_id", "$$deptId"]}
+                ]}}},
+                {"$project": {"_id": 0, "kac_name": 1}}
+            ],
+            "as": "_kacs"
+        }},
+        {"$addFields": {
+            "kac_names": {"$map": {"input": {"$ifNull": ["$_kacs", []]}, "as": "k", "in": "$$k.kac_name"}}
+        }},
+        {"$addFields": {
+            "kac_label": {
+                "$cond": [
+                    {"$gt": [{"$size": "$kac_names"}, 0]},
+                    {"$reduce": {
+                        "input": "$kac_names",
+                        "initialValue": "",
+                        "in": {"$concat": ["$$value", {"$cond": [{"$eq": ["$$value", ""]}, "", " / "]}, "$$this"]}
+                    }},
+                    "—"
+                ]
+            },
             "syllabus_display": {
                 "$cond": [
                     {"$or": [
@@ -309,32 +357,34 @@ async def course_management(
                     "$syllabus"
                 ]
             }
-        }},
+        }}
     ]
 
+    # Filter by cluster name (present if it's in kac_names)
     if cluster and cluster.strip() and cluster.strip().lower() != "all clusters":
-        pipeline.append({"$match": {"kac_name": cluster.strip()}})
+        pipeline.append({"$match": {"kac_names": cluster.strip()}})
 
+    # Search
     if search and search.strip():
         s = search.strip()
         pipeline.append({"$match": {"$or": [
             {"code_display": {"$regex": s, "$options": "i"}},
             {"course_title": {"$regex": s, "$options": "i"}},
             {"coordinator_name": {"$regex": s, "$options": "i"}},
-            {"kac_name": {"$regex": s, "$options": "i"}},
+            {"kac_label": {"$regex": s, "$options": "i"}},
         ]}})
 
     pipeline.extend([
         {"$project": {
             "_id": 0,
             "course_id": 1,
-            "kac": "$kac_name",
+            "kac": "$kac_label",
             "code": "$code_display",
             "title": "$course_title",
             "units": {"$ifNull": ["$units", ""]},
-            "coordinator_name": 1,          # joined string (back-compat)
-            "coordinator_email": 1,         # first email (back-compat)
-            "coordinators": 1,              # array of {name,email} for multi
+            "coordinator_name": 1,
+            "coordinator_email": 1,
+            "coordinators": 1,
             "composition": 1,
             "syllabus": "$syllabus_display",
         }},

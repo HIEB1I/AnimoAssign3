@@ -200,13 +200,21 @@ async def _apo_campus_label_for_user(user_id: str) -> Optional[str]:
 
 
 def _career_to_program_level(career: str) -> Optional[str]:
+    """
+    Map CSV 'Career' to internal program_level labels.
+
+    Requirements:
+    - UGS == Undergraduate (this CSV uses UGS, not UGB)
+    - GSM == Graduate Studies
+
+    We also accept a few common variants for robustness.
+    """
     c = (career or "").strip().upper()
-    if c == "UGB":
+    if c in {"UGS", "UGB", "UG", "UNDERGRAD", "UNDERGRADUATE"}:
         return "Undergraduate"
-    if c == "GSM":
+    if c in {"GSM", "GS", "GRAD", "GRADUATE", "GRADUATE STUDIES"}:
         return "Graduate Studies"
     return None
-
 
 # ----------------------------
 # Routes
