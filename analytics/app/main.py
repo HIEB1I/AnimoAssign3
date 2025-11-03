@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Literal
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -7,11 +7,11 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field
 
-from .db_async import fetch_teaching_history                # descriptive #1
-from .db_async import get_course_profile_for                # descriptive #2
-from .db_async import fetch_deloading_utilization           # descriptive #3
-from .db_async import build_faculty_availability_heatmap    # predictive #1
-from .db_async import run_pt_risk                           # predictive #2
+from .db_async import fetch_teaching_history                    # descriptive #1
+from .db_async import get_course_profile_for                    # descriptive #2
+from .db_async import fetch_deloading_utilization_term_paged    # descriptive #3
+from .db_async import build_faculty_availability_heatmap        # predictive #1
+from .db_async import run_pt_risk                               # predictive #2
 
 from collections import Counter
 import re
@@ -38,6 +38,8 @@ class IngestEvent(BaseModel):
     title: str = Field(..., min_length=1, max_length=200)
     created_at: Optional[str] = None  # ISO8601 from backend
 
+Direction = Literal["current", "next", "prev"]
+
 # ---- Root pages/APIs (Nginx strips /analytics → these root routes) ----   
 
 @app.get("/analytics/teaching-history")
@@ -51,11 +53,12 @@ async def course_profile_for(query: str = Query(..., description="course_id or c
     data = await get_course_profile_for(query)
     return JSONResponse(content=data)
 
-@app.get("/analytics/deloading-utilization")
-async def get_deloading_utilization(term: str | None = Query(None)):
-    results = await fetch_deloading_utilization(term)
-    print("term:", term, "| entries:", len(results))
-    return {"term": term, "count": len(results), "rows": results}
+@app.get("/analytics/deloadings/by-term")
+async def deloadings_by_term(
+    anchor_term_id: Optional[str] = Query(None),
+    direction: Direction = Query("current")
+):
+    return await fetch_deloading_utilization_term_paged(anchor_term_id, direction)
 
 @app.get("/analytics/faculty-availability-heatmap")
 async def faculty_availability_heatmap(

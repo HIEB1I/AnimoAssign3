@@ -383,45 +383,110 @@ async def get_course_profile_for(query: str) -> Dict[str, Any]:
     }
 
 # ------------------------------
-# Deloading Utilization Report
+# Deloading Utilization Report — term-paged + all terms
 # ------------------------------
-async def fetch_deloading_utilization(selected_term: str | None = None):
+from typing import Literal, Optional, Dict, Any, List
+Direction = Literal["current", "next", "prev"]
+
+async def fetch_deloading_utilization_term_paged(
+    anchor_term_id: Optional[str] = None,
+    direction: Direction = "current",
+) -> Dict[str, Any]:
     db = get_db()
-    deloadings = await db["deloadings"].find().to_list(None)
-    if not deloadings:
-        return []
 
-    results = []
+    # 1) Load and order all terms (ascending)
+    terms: List[Dict[str, Any]] = await db["terms"] \
+        .find({}, {"_id": 0}) \
+        .sort([("acad_year_start", 1), ("term_number", 1)]) \
+        .to_list(None)
 
+    if not terms:
+        return {
+            "term": None,
+            "rows": [],
+            "has_prev": False,
+            "has_next": False,
+            "terms": [],
+            "current_index": None,
+        }
+
+    # Pre-shape list for frontend (compact fields only)
+    terms_list = [
+        {
+            "term_id": t.get("term_id"),
+            "acad_year_start": t.get("acad_year_start"),
+            "term_number": t.get("term_number"),
+            "is_current": bool(t.get("is_current")),
+        }
+        for t in terms
+    ]
+
+    # 2) Pick anchor index (prefer current; else latest)
+    def find_term_index(tid: str) -> int:
+        for i, t in enumerate(terms):
+            if t.get("term_id") == tid:
+                return i
+        return -1
+
+    if anchor_term_id:
+        idx = find_term_index(anchor_term_id)
+        if idx < 0:
+            idx = len(terms) - 1
+    else:
+        current_idxs = [i for i, t in enumerate(terms) if t.get("is_current") is True]
+        idx = current_idxs[0] if current_idxs else (len(terms) - 1)
+
+    # 3) Apply direction
+    if direction == "next" and idx < len(terms) - 1:
+        idx += 1
+    elif direction == "prev" and idx > 0:
+        idx -= 1
+
+    target_term = terms[idx]
+    target_term_id = target_term.get("term_id")
+
+    # 4) Fetch deloadings for the target term
+    deloadings = await db["deloadings"].find({"term_id": target_term_id}).to_list(None)
+
+    # 5) Join lookups
+    rows: List[Dict[str, Any]] = []
     for d in deloadings:
-        faculty = await db["faculty_profiles"].find_one({"faculty_id": d["faculty_id"]})
+        faculty = await db["faculty_profiles"].find_one({"faculty_id": d.get("faculty_id")})
         if not faculty:
             continue
-
-        user = await db["users"].find_one({"user_id": faculty["user_id"]})
-        delo_type = await db["deloading_types"].find_one({"type_id": d["type_id"]})
-        start_term = await db["terms"].find_one({"term_id": d["start_term"]})
-        end_term = await db["terms"].find_one({"term_id": d["end_term"]})
-
-        # Optional filter by term range
-        if selected_term:
-            if not (start_term and end_term and start_term["term_id"] <= selected_term <= end_term["term_id"]):
-                continue
-
-        results.append({
-            "faculty_id": faculty["faculty_id"],
-            "faculty_name": f"{user.get('first_name', '')} {user.get('last_name', '')}".strip(),
-            "deloading_type": delo_type.get("type") if delo_type else None,
+        user = await db["users"].find_one({"user_id": faculty.get("user_id")})
+        dt = await db["deloading_types"].find_one({
+            "$or": [
+                {"type_id": d.get("type_id")},
+                {"deloadingtype_id": d.get("type_id")},
+            ]
+        })
+        rows.append({
+            "faculty_id": faculty.get("faculty_id"),
+            "faculty_name": (f"{(user or {}).get('first_name','')} {(user or {}).get('last_name','')}".strip() or None),
+            "deloading_type": (dt or {}).get("type"),
             "units_deloaded": d.get("units_deloaded"),
             "approval_status": d.get("approval_status"),
-            "start_term": start_term.get("term_id") if start_term else None,
-            "end_term": end_term.get("term_id") if end_term else None,
+            "term_id": target_term_id,
             "updated_at": d.get("updated_at"),
         })
 
-    # Sort results by faculty name ASC, then updated_at DESC
-    results.sort(key=lambda x: (x["faculty_name"], -(x["updated_at"].timestamp() if x.get("updated_at") else 0)))
-    return results
+    rows.sort(key=lambda x: (x.get("faculty_name") or "", -(x["updated_at"].timestamp() if x.get("updated_at") else 0)))
+
+    return {
+        "term": {
+            "term_id": target_term.get("term_id"),
+            "acad_year_start": target_term.get("acad_year_start"),
+            "term_number": target_term.get("term_number"),
+            "is_current": bool(target_term.get("is_current")),
+        },
+        "rows": rows,
+        "has_prev": idx > 0,
+        "has_next": idx < len(terms) - 1,
+        "terms": terms_list,         # <-- all terms for dropdown
+        "current_index": idx,        # <-- index of the term you're viewing
+    }
+
 
 # ------------------------------------------------------------------------------
 # Predictive #1

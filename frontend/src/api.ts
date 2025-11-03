@@ -205,12 +205,17 @@ export async function fetchCourseProfile(query: string) {
 }
 
 // Descriptive #3
-export async function fetchDeloadingUtilization(term?: string) {
-  const base = (ANALYTICS_BASE || API_BASE).replace(/\/+$/, "");
-  const url = `${base}/deloading-utilization${term ? `?term_id=${encodeURIComponent(term)}` : ""}`;
-  const r = await fetch(url);
-  if (!r.ok) throw new Error(await r.text());
-  return r.json();
+export async function fetchDeloadingsByTerm(
+  anchorTermId?: string,
+  direction: "current" | "next" | "prev" = "current"
+) {
+  const params = new URLSearchParams();
+  if (anchorTermId) params.set("anchor_term_id", anchorTermId);
+  if (direction) params.set("direction", direction);
+
+  const res = await fetch(`/analytics/deloadings/by-term?${params.toString()}`);
+  if (!res.ok) throw new Error(await res.text().catch(() => res.statusText));
+  return res.json();
 }
 
 // Predictive #1 (updated)
