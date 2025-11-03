@@ -23,7 +23,7 @@ import OM_LoadReco from "./pages/OM/OM_LoadReco";
 
 // ----- Reports & Analytics sub-pages -----
 import OM_RP_FacultyTeachingHistory from "@/pages/OM/OM_REPORTS_ANALYTICS/OM_RP_FacultyTeachingHistory";
-import OM_RP_CourseHistory from "@/pages/OM/OM_REPORTS_ANALYTICS/OM_RP_CourseHistory";
+import OM_RP_CourseHistory from "@/pages/OM/OM_REPORTS_ANALYTICS/OM_RP_CourseProfile";
 import OM_RP_DeloadingUtilization from "@/pages/OM/OM_REPORTS_ANALYTICS/OM_RP_DeloadingUtilization";
 import OM_RP_AvailabilityForecasting from "@/pages/OM/OM_REPORTS_ANALYTICS/OM_RP_AvailabilityForecasting";
 import OM_RP_LoadRisk from "@/pages/OM/OM_REPORTS_ANALYTICS/OM_RP_LoadRisk";

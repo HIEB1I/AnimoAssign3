@@ -98,6 +98,7 @@ export async function fetchCourseProfile(query: string) {
   return res.json();
 }
 
+
 // Descriptive #3
 export async function fetchDeloadingsByTerm(
   anchorTermId?: string,
