@@ -1,4 +1,4 @@
-# analytics/app/OM_REPORTS_ANALYTICS/OM_RP_CourseHistory.py
+# analytics/app/OM_REPORTS_ANALYTICS/OM_RP_CourseProfile.py
 from typing import Any, Dict, List, Optional, Tuple
 from fastapi import APIRouter, Query
 from datetime import datetime
@@ -54,8 +54,8 @@ def _ay_term_from_numbers(ay_start: Optional[int], term_number: Optional[int]) -
 # ---------------------------
 # Public Endpoint
 # ---------------------------
-@router.get("/course-history")
-async def course_history(
+@router.get("/course-profile")
+async def course_profile(
     course_code: Optional[str] = Query(None, description="Filter by course code (contains match)"),
     faculty_name: Optional[str] = Query(None, description="Filter by faculty display name (contains match)"),
     limit_courses: int = Query(200, ge=1, le=1000, description="Max number of distinct courses to return"),
@@ -74,7 +74,7 @@ async def course_history(
         ...
       ]
 
-    The shape purposely mirrors your front-end “OM-REPO-ANA_CourseHistory.tsx” sample
+    The shape purposely mirrors your front-end “OM-REPO-ANA_CourseProfile.tsx” sample
     so it can be bound directly without further transformation.
     """
 
@@ -233,7 +233,7 @@ async def course_history(
         c["history"].sort(key=hist_key, reverse=True)
 
     # ---- Sample block (hardcoded) so UI shows even with empty DB) ----
-    # Matches exactly your OM-REPO-ANA_CourseHistory.tsx MOCK_ROWS shape
+    # Matches exactly your OM-REPO-ANA_CourseProfile.tsx MOCK_ROWS shape
     sample: List[Dict[str, Any]] = [
         {
             "code": "CS 101",

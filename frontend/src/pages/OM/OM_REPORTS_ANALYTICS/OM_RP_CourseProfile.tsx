@@ -1,4 +1,4 @@
-// frontend/src/pages/OM/OM_REPORTS_ANALYTICS/OM_RP_CourseHistory.tsx
+// frontend/src/pages/OM/OM_REPORTS_ANALYTICS/OM_RP_CourseProfile.tsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { Search, ChevronDown, ArrowLeft } from "lucide-react";
@@ -139,7 +139,7 @@ function useDebouncedValue<T>(value: T, delay = 300) {
 }
 
 /* ---------- Page ---------- */
-export default function OM_RP_CourseHistory() {
+export default function OM_RP_CourseProfile() {
   // server data
   const [raw, setRaw] = useState<CourseItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -165,7 +165,7 @@ export default function OM_RP_CourseHistory() {
 
       try {
         // We fetch everything, then do AY/Term filtering+grouping client-side
-        const res = await fetch(`/api/analytics/course-history`, {
+        const res = await fetch(`/api/analytics/course-profile`, {
           signal: controller.signal,
           headers: { "Content-Type": "application/json" },
           credentials: "include",
@@ -258,7 +258,7 @@ export default function OM_RP_CourseHistory() {
   return (
     <div className="w-full px-8 py-8">
       {/* Header (matches ANA variant’s tone) */}
-      <h1 className="text-2xl font-bold mb-2">Course History</h1>
+      <h1 className="text-2xl font-bold mb-2">Course Profile</h1>
       <p className="text-sm text-gray-600 mb-6">View courses and the faculty who previously taught them.</p>
 
       {/* Filter Bar: Back + Search + AY + Term */}
@@ -301,7 +301,7 @@ export default function OM_RP_CourseHistory() {
       {/* Table: compact 4 columns + expandable chips */}
       <div className="overflow-x-auto rounded-xl border border-gray-200 bg-white shadow-sm">
         {loading ? (
-          <div className="px-4 py-10 text-center text-sm text-gray-600">Loading course history…</div>
+          <div className="px-4 py-10 text-center text-sm text-gray-600">Loading course profile…</div>
         ) : error ? (
           <div className="px-4 py-10 text-center text-sm text-red-600">Error: {error}</div>
         ) : (

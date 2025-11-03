@@ -180,15 +180,14 @@ async def pt_risk_endpoint(
 # These will live under the backend root; your nginx/Vite already forward /api/* here.
 # --------------------------------------------------------------------
 from .OM_REPORTS_ANALYTICS.OM_RP_FacultyTeachingHistory import router as om_rp_teachhist_router
-from .OM_REPORTS_ANALYTICS.OM_RP_CourseHistory import router as om_rp_coursehist_router
+from .OM_REPORTS_ANALYTICS.OM_RP_CourseProfile import router as om_rp_courseprof_router
 from .OM_REPORTS_ANALYTICS.OM_RP_DeloadingUtilization import router as om_rp_deload_router
 from .OM_REPORTS_ANALYTICS.OM_RP_AvailabilityForecasting import router as om_rp_avail_router
 from .OM_REPORTS_ANALYTICS.OM_RP_LoadRisk import router as om_rp_loadrisk_router
-from .OM_REPORTS_ANALYTICS.OM_RP_FacultyTeachingHistory import router as rp_fac_hist_router
 
 app.include_router(om_rp_teachhist_router, prefix="/api")
-app.include_router(om_rp_coursehist_router, prefix="/api")
+app.include_router(om_rp_courseprof_router, prefix="/api")
 app.include_router(om_rp_deload_router, prefix="/api")
 app.include_router(om_rp_avail_router, prefix="/api")
 app.include_router(om_rp_loadrisk_router, prefix="/api")
-app.include_router(rp_fac_hist_router)
+
