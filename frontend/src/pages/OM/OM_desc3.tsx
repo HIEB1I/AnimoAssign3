@@ -6,7 +6,7 @@ type Row = {
   faculty_name?: string;
   deloading_type?: string;
   units_deloaded?: number;
-  approval_status?: string;
+  notes?: string;
   term_id?: string;
   updated_at?: string | Date;
 };
@@ -51,11 +51,6 @@ export default function OM_DescPage3() {
     load("current");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  const termLabel = data?.term
-    ? `AY ${data.term.acad_year_start} • Term ${data.term.term_number}${data.term.is_current ? " (Current)" : ""
-    }`
-    : "—";
 
   return (
     <div
@@ -105,8 +100,7 @@ export default function OM_DescPage3() {
                 <th>Faculty Name</th>
                 <th>Deloading Type</th>
                 <th>Units</th>
-                <th>Status</th>
-                <th>Term</th>
+                <th>Notes</th>
                 <th>Last Updated</th>
               </tr>
             </thead>
@@ -116,13 +110,7 @@ export default function OM_DescPage3() {
                   <td>{r.faculty_name || "—"}</td>
                   <td>{r.deloading_type || "—"}</td>
                   <td>{r.units_deloaded ?? "—"}</td>
-                  <td>{r.approval_status || "—"}</td>
-                  <td>
-                    {(() => {
-                      const match = terms.find((t) => t.term_id === (r.term_id || data?.term?.term_id));
-                      return match ? `Term ${match.term_number}` : "—";
-                    })()}
-                  </td>
+                  <td>{r.notes || "—"}</td>
                   <td>{r.updated_at ? new Date(r.updated_at).toLocaleString() : "—"}</td>
                 </tr>
               ))}
@@ -165,12 +153,16 @@ export default function OM_DescPage3() {
             border: "1px solid #9ca3af",
           }}
         >
-          {terms.map((t) => (
-            <option key={t.term_id} value={t.term_id}>
-              {`AY ${t.acad_year_start} • Term ${t.term_number}${t.is_current ? " (Current)" : ""
+          {terms.map((t) => {
+            const ayEnd = t.acad_year_start + 1; // show "2025–2026"
+            return (
+              <option key={t.term_id} value={t.term_id}>
+                {`AY ${t.acad_year_start}–${ayEnd} • Term ${t.term_number}${
+                  t.is_current ? " (Current)" : ""
                 }`}
-            </option>
-          ))}
+              </option>
+            );
+          })}
         </select>
 
         <button

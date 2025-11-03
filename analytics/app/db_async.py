@@ -466,6 +466,7 @@ async def fetch_deloading_utilization_term_paged(
             "faculty_name": (f"{(user or {}).get('first_name','')} {(user or {}).get('last_name','')}".strip() or None),
             "deloading_type": (dt or {}).get("type"),
             "units_deloaded": d.get("units_deloaded"),
+            "notes": (d.get("notes") or d.get("deloading_notes") or "").strip() or None,
             "approval_status": d.get("approval_status"),
             "term_id": target_term_id,
             "updated_at": d.get("updated_at"),
@@ -486,7 +487,6 @@ async def fetch_deloading_utilization_term_paged(
         "terms": terms_list,         # <-- all terms for dropdown
         "current_index": idx,        # <-- index of the term you're viewing
     }
-
 
 # ------------------------------------------------------------------------------
 # Predictive #1
