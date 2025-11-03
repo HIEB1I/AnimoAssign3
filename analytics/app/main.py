@@ -1,10 +1,21 @@
 # analytics/app/main.py
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Literal
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse, JSONResponse
 from motor.motor_asyncio import AsyncIOMotorClient
+from pydantic import BaseModel, Field
+
+from .db_async import fetch_teaching_history                    # descriptive #1
+from .db_async import get_course_profile_for                    # descriptive #2
+from .db_async import fetch_deloading_utilization_term_paged    # descriptive #3
+from .db_async import build_faculty_availability_heatmap        # predictive #1
+from .db_async import run_pt_risk                               # predictive #2
+
+from collections import Counter
+import re
 
 from .config import get_settings
 
@@ -115,6 +126,53 @@ async def health_db():
     await client.admin.command("ping")
     return {"db": "ok"}
 
+@app.get("/analytics/teaching-history")
+async def get_teaching_history(faculty_id: str = Query(...)):
+    results = await fetch_teaching_history(faculty_id)
+    print("faculty_id:", faculty_id, "| documents found:", len(results))
+    return {"faculty_id": faculty_id, "count": len(results), "rows": results}
+
+@app.get("/analytics/course-profile-for")
+async def course_profile_for(query: str = Query(..., description="course_id or course_code")):
+    data = await get_course_profile_for(query)
+    return JSONResponse(content=data)
+
+@app.get("/analytics/deloadings/by-term")
+async def deloadings_by_term(
+    anchor_term_id: Optional[str] = Query(None),
+    direction: Direction = Query("current")
+):
+    return await fetch_deloading_utilization_term_paged(anchor_term_id, direction)
+
+@app.get("/analytics/faculty-availability-heatmap")
+async def faculty_availability_heatmap(
+    course_id: Optional[str] = Query(None),
+    dept_id: Optional[str] = Query(None),
+    threshold: float = Query(0.50),
+):
+    return await build_faculty_availability_heatmap(
+        course_id=course_id, dept_id=dept_id, threshold=threshold
+    )
+
+@app.get("/analytics/pt-risk")
+async def pt_risk_endpoint(
+    department_id: str = Query("DEPT0001"),
+    overload_allowance_units: int = Query(0, description="0 or 3"),
+    history_terms_for_experience: int = Query(3),
+    include_only_with_preferences: bool = Query(False),
+    allow_fallback_without_sections: bool = Query(False),
+):
+    try:
+        result = await run_pt_risk({
+            "DEPT_SCOPE": department_id,
+            "overload_allowance_units": overload_allowance_units,
+            "history_terms_for_experience": history_terms_for_experience,
+            "include_only_with_preferences": include_only_with_preferences,
+            "allow_fallback_without_sections": allow_fallback_without_sections,
+        })
+        return result
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
 
 # --------------------------------------------------------------------
 # Feature routers (NEW) – no path/routing changes needed
