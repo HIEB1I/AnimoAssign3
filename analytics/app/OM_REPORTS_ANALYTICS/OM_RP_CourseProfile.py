@@ -1,278 +1,253 @@
 # analytics/app/OM_REPORTS_ANALYTICS/OM_RP_CourseProfile.py
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
+
 from fastapi import APIRouter, Query
-from datetime import datetime
-from ..main import db
+from fastapi.responses import JSONResponse
 
-router = APIRouter(prefix="/analytics", tags=["analytics"])
+from ..db_async import get_db  # reuse the shared Mongo client
 
-COL_USERS = "users"
-COL_FACULTY = "faculty_profiles"
-COL_ASSIGN = "faculty_assignments"
-COL_SECTIONS = "sections"
-COL_SCHED = "section_schedules"
-COL_COURSES = "courses"
-COL_TERMS = "terms"
+router = APIRouter()
 
-async def _active_term() -> Dict[str, Any]:
-    """Same pattern as other analytics routes; used for header label only."""
-    t = await db[COL_TERMS].find_one(
-        {"$or": [{"status": "active"}, {"is_current": True}]},
-        {"_id": 0, "term_id": 1, "acad_year_start": 1, "term_number": 1},
-    )
-    return t or {}
-
-def _term_label(t: Dict[str, Any]) -> str:
-    if not t:
-        return ""
-    ay = t.get("acad_year_start")
-    tn = t.get("term_number")
-    if not ay or not tn:
-        return ""
-    return f"AY {ay}-{int(ay)+1} T{tn}"
-
-def _normalize_course_code(course_doc: Dict[str, Any]) -> str:
-    """Mirror the normalization seen elsewhere: array|string -> string."""
-    cc = (course_doc or {}).get("course_code")
-    if isinstance(cc, list):
-        return (cc[0] if cc else "") or ""
-    return cc or ""
-
-def _display_name(u: Dict[str, Any]) -> str:
-    """Trimmed 'First Last' like in existing routes."""
-    first = (u or {}).get("first_name") or ""
-    last = (u or {}).get("last_name") or ""
-    first = first.strip()
-    last = last.strip()
-    return f"{first} {last}".strip()
-
-def _ay_term_from_numbers(ay_start: Optional[int], term_number: Optional[int]) -> Tuple[str, str]:
-    if not ay_start or not term_number:
-        return ("", "")
-    return (f"AY {ay_start}-{ay_start + 1}", f"Term {int(term_number)}")
-
-# ---------------------------
-# Public Endpoint
-# ---------------------------
-@router.get("/course-profile")
-async def course_profile(
-    course_code: Optional[str] = Query(None, description="Filter by course code (contains match)"),
-    faculty_name: Optional[str] = Query(None, description="Filter by faculty display name (contains match)"),
-    limit_courses: int = Query(200, ge=1, le=1000, description="Max number of distinct courses to return"),
-) -> Dict[str, Any]:
+async def get_course_profile_for(query: str) -> Dict[str, Any]:
     """
-    Returns a list of courses with their historical offerings grouped as:
-      [
-        {
-          code: "CS 101",
-          title: "Intro to Programming",
-          history: [
-            { ay: "AY 2024–2025", term: "Term 1", faculty: "Alvarez, M." },
-            ...
-          ]
-        },
-        ...
-      ]
-
-    The shape purposely mirrors your front-end “OM-REPO-ANA_CourseProfile.tsx” sample
-    so it can be bound directly without further transformation.
+    Returns Course Profile payload for a given course_id or course_code.
+    (Moved from db_async.py to this module.)
     """
+    db = get_db()
+    q = (query or "").strip()
+    if not q:
+        return {"course_id": "", "title": "Not found"}
 
-    active = await _active_term()
+    # 1) find course by id OR element of course_code[] (case-insensitive)
+    course = await db.courses.find_one({
+        "$or": [
+            {"course_id":   {"$regex": f"^{q}$", "$options": "i"}},
+            {"course_code": {"$elemMatch": {"$regex": f"^{q}$", "$options": "i"}}},
+        ]
+    })
+    if not course:
+        return {"course_id": q, "title": "Not found"}
 
-    # ---- Stage 1: pull recent assignments + joins (course, section->term, faculty->user) ----
-    pipeline: List[Dict[str, Any]] = []
+    course_id   = course.get("course_id")
+    course_code = course.get("course_code") or []
+    title       = course.get("course_title") or course.get("title") or ""
 
-    # Join Section (for term_id; section_code if needed)
-    pipeline += [
-        {"$lookup": {"from": COL_SECTIONS, "localField": "section_id", "foreignField": "section_id", "as": "sec"}},
-        {"$unwind": {"path": "$sec", "preserveNullAndEmptyArrays": True}},
+    # KACs that include this course
+    kac_docs = await db.kacs.find(
+        {"course_list": course_id},
+        {"kac_id": 1, "course_list": 1}
+    ).to_list(None)
+
+    kac_ids = [k["kac_id"] for k in kac_docs]
+
+    # -------- Qualified faculty (union of: taught this course ∪ qualified via KAC) --------
+    qualified: List[Dict[str, Any]] = []
+    if kac_ids:
+        # A) taught THIS course
+        sec_ids = await db.sections.distinct("section_id", {"course_id": course_id})
+        taught_ids = set()
+        if sec_ids:
+            taught_ids = set(await db.faculty_assignments.distinct(
+                "faculty_id", {"section_id": {"$in": sec_ids}}
+            ))
+
+        # B) KAC-qualified
+        kac_qualified_ids = set(await db.faculty_profiles.distinct(
+            "faculty_id", {"qualified_kacs": {"$in": kac_ids}}
+        ))
+
+        fac_ids = sorted(taught_ids | kac_qualified_ids)
+        if fac_ids:
+            fps = await db.faculty_profiles.find(
+                {"faculty_id": {"$in": fac_ids}}, {"faculty_id": 1, "user_id": 1}
+            ).to_list(None)
+            prof_by_fid = {fp["faculty_id"]: fp for fp in fps}
+
+            user_ids = {fp.get("user_id") for fp in fps if fp.get("user_id")} | set(fac_ids)
+            users = await db.users.find(
+                {"user_id": {"$in": list(user_ids)}},
+                {"user_id": 1, "first_name": 1, "last_name": 1, "email": 1}
+            ).to_list(None)
+            user_by_uid = {u["user_id"]: u for u in users}
+
+            for fid in fac_ids:
+                uid = (prof_by_fid.get(fid) or {}).get("user_id") or fid
+                u = user_by_uid.get(uid, {})
+                source_bits = []
+                if fid in kac_qualified_ids:
+                    source_bits.append("Qualified KAC")
+                if fid in taught_ids:
+                    source_bits.append("Teaching History")
+
+                qualified.append({
+                    "faculty_id": fid,
+                    "first_name": u.get("first_name"),
+                    "last_name":  u.get("last_name"),
+                    "email":      u.get("email"),
+                    "source":     " & ".join(source_bits) if source_bits else "—",
+                })
+
+    # -------- Past instructors (aggregated) --------
+    past: List[Dict[str, Any]] = []
+    pipeline = [
+        {"$match": {"course_id": course_id}},
+        {"$lookup": {
+            "from": "faculty_assignments",
+            "localField": "section_id",
+            "foreignField": "section_id",
+            "as": "fa"
+        }},
+        {"$unwind": "$fa"},
+        {"$lookup": {
+            "from": "terms",
+            "localField": "term_id",
+            "foreignField": "term_id",
+            "as": "term"
+        }},
+        {"$unwind": {"path": "$term", "preserveNullAndEmptyArrays": True}},
+        {"$project": {
+            "_id": 0,
+            "faculty_id": "$fa.faculty_id",
+            "section_id": 1,
+            "section_code": 1,
+            "term_id": 1,
+            "acad_year_start": "$term.acad_year_start",
+            "term_number": "$term.term_number",
+        }},
+        {"$group": {
+            "_id": "$faculty_id",
+            "sections": {"$push": {
+                "course_code": course_code,
+                "section_id": "$section_id",
+                "section_code": "$section_code",
+                "term_id": "$term_id",
+                "acad_year_start": "$acad_year_start",
+                "term_number": "$term_number",
+            }},
+            "count": {"$sum": 1}
+        }},
+        {"$lookup": {
+            "from": "faculty_profiles",
+            "localField": "_id",
+            "foreignField": "faculty_id",
+            "as": "fp"
+        }},
+        {"$unwind": {"path": "$fp", "preserveNullAndEmptyArrays": True}},
+        {"$lookup": {
+            "from": "users",
+            "let": { "uid": "$fp.user_id", "fid": "$_id" },
+            "pipeline": [
+                { "$match": {
+                    "$expr": { "$or": [
+                        { "$eq": ["$user_id", "$$uid"] },
+                        { "$eq": ["$user_id", "$$fid"] }
+                    ]}
+                }},
+                { "$project": { "first_name": 1, "last_name": 1, "email": 1 } }
+            ],
+            "as": "user"
+        }},
+        {"$unwind": { "path": "$user", "preserveNullAndEmptyArrays": True }},
+        {"$project": {
+            "_id": 0,
+            "faculty_id": { "$toString": "$_id" },
+            "first_name": "$user.first_name",
+            "last_name":  "$user.last_name",
+            "email":      "$user.email",
+            "count": 1,
+            "sections": 1
+        }},
+        {"$sort": { "count": -1, "last_name": 1, "first_name": 1 }},
     ]
 
-    # Join Course (for code/title)
-    pipeline += [
-        {"$lookup": {"from": COL_COURSES, "localField": "sec.course_id", "foreignField": "course_id", "as": "course"}},
-        {"$unwind": {"path": "$course", "preserveNullAndEmptyArrays": True}},
-    ]
+    async for row in db.sections.aggregate(pipeline, allowDiskUse=True):
+        past.append({
+            "faculty_id": row["faculty_id"],
+            "first_name": row.get("first_name"),
+            "last_name":  row.get("last_name"),
+            "email":      row.get("email"),
+            "count":      row.get("count", 0),
+            "sections":   [
+                {
+                    "course_code": s.get("course_code") or [],
+                    "section_id": s.get("section_id"),
+                    "section_code": s.get("section_code"),
+                    "term_id": s.get("term_id"),
+                    "acad_year_start": s.get("acad_year_start"),
+                    "term_number": s.get("term_number"),
+                } for s in row.get("sections", [])
+            ]
+        })
 
-    # Join Faculty -> User (for display name)
-    pipeline += [
-        {"$lookup": {"from": COL_FACULTY, "localField": "faculty_id", "foreignField": "faculty_id", "as": "fac"}},
-        {"$unwind": {"path": "$fac", "preserveNullAndEmptyArrays": True}},
-        {"$lookup": {"from": COL_USERS, "localField": "fac.user_id", "foreignField": "user_id", "as": "u"}},
-        {"$unwind": {"path": "$u", "preserveNullAndEmptyArrays": True}},
-    ]
+    # -------- Preferences for current term --------
+    preferences: Any = "N/A"
+    current = await db.terms.find_one({"is_current": True}, {"term_id": 1})
+    prefs_list: List[Dict[str, Any]] = []
 
-    # Optional filters (contains match) based on display fields
-    match_stage: Dict[str, Any] = {}
-    if course_code:
-        match_stage["$expr"] = {
-            "$regexMatch": {
-                "input": {
-                    "$cond": [
-                        {"$isArray": "$course.course_code"},
-                        {"$ifNull": [{"$arrayElemAt": ["$course.course_code", 0]}, ""]},
-                        {"$ifNull": ["$course.course_code", ""]},
-                    ]
-                },
-                "regex": course_code,
-                "options": "i",
-            }
-        }
-    if faculty_name:
-        match_stage_fac = {
-            "$regexMatch": {
-                "input": {
-                    "$trim": {
-                        "input": {
-                            "$concat": [
-                                {"$ifNull": ["$u.first_name", ""]},
-                                {
-                                    "$cond": [
-                                        {
-                                            "$and": [
-                                                {"$ne": ["$u.first_name", None]},
-                                                {"$ne": ["$u.last_name", None]},
-                                            ]
-                                        },
-                                        " ",
-                                        "",
-                                    ]
-                                },
-                                {"$ifNull": ["$u.last_name", ""]},
-                            ]
-                        }
-                    }
-                },
-                "regex": faculty_name,
-                "options": "i",
-            }
-        }
-        if "$expr" in match_stage:
-            # combine both expr via $and
-            match_stage = {"$and": [ {"$expr": match_stage["$expr"]}, {"$expr": match_stage_fac} ]}
+    if current and kac_ids:
+        pipeline_prefs = [
+            {"$match": {
+                "term_id": current["term_id"],
+                "preferred_kacs": {"$in": kac_ids}
+            }},
+            {"$lookup": {
+                "from": "faculty_profiles",
+                "localField": "faculty_id",
+                "foreignField": "faculty_id",
+                "as": "fp"
+            }},
+            {"$unwind": {"path": "$fp", "preserveNullAndEmptyArrays": True}},
+            {"$lookup": {
+                "from": "users",
+                "let": {"uid": "$fp.user_id", "fid": "$faculty_id"},
+                "pipeline": [
+                    {"$match": {"$expr": {"$or": [
+                        {"$eq": ["$user_id", "$$uid"]},
+                        {"$eq": ["$user_id", "$$fid"]}
+                    ]}}},
+                    {"$project": {"first_name": 1, "last_name": 1, "email": 1}}
+                ],
+                "as": "user"
+            }},
+            {"$unwind": {"path": "$user", "preserveNullAndEmptyArrays": True}},
+            {"$project": {
+                "_id": 0,
+                "faculty_id": 1,
+                "first_name": "$user.first_name",
+                "last_name":  "$user.last_name",
+                "email":      "$user.email",
+            }},
+            {"$sort": {"last_name": 1, "first_name": 1}}
+        ]
+
+        async for row in db.faculty_preferences.aggregate(pipeline_prefs, allowDiskUse=True):
+            prefs_list.append({
+                "faculty_id": row.get("faculty_id"),
+                "first_name": row.get("first_name"),
+                "last_name":  row.get("last_name"),
+                "email":      row.get("email"),
+            })
+
+        if prefs_list:
+            preferences = prefs_list
         else:
-            match_stage["$expr"] = match_stage_fac
-
-    if match_stage:
-        pipeline.append({"$match": match_stage})
-
-    # Light sort & cap (newest created first)
-    pipeline += [{"$sort": {"_id": -1}}, {"$limit": 3000}]
-
-    # ---- Stage 2: stream and build grouped map in Python ----
-    # We'll memoize terms to avoid repeated lookups.
-    term_cache: Dict[Any, Tuple[str, str]] = {}
-
-    grouped: Dict[str, Dict[str, Any]] = {}  # key: course_code (display), value: { code, title, history: [...] }
-
-    async for it in db[COL_ASSIGN].aggregate(pipeline):
-        course_doc = it.get("course") or {}
-        code = _normalize_course_code(course_doc)
-        title = (course_doc.get("course_title") or "").strip()
-
-        # Faculty display
-        fac = _display_name(it.get("u") or {})
-        # Format: "LAST, F." if you prefer – but we keep "First Last" here to minimize assumptions.
-
-        # AY + Term
-        sec = it.get("sec") or {}
-        term_id = sec.get("term_id")
-        ay_label, term_label = "", ""
-        if term_id is not None:
-            if term_id in term_cache:
-                ay_label, term_label = term_cache[term_id]
-            else:
-                tdoc = await db[COL_TERMS].find_one(
-                    {"term_id": term_id}, {"_id": 0, "acad_year_start": 1, "term_number": 1}
-                )
-                ay_label, term_label = _ay_term_from_numbers(
-                    (tdoc or {}).get("acad_year_start"), (tdoc or {}).get("term_number")
-                )
-                term_cache[term_id] = (ay_label, term_label)
-
-        if not code:
-            # skip bad rows without a normalized course code
-            continue
-
-        entry = grouped.get(code) or {"code": code, "title": title, "history": []}
-        entry["title"] = entry["title"] or title  # fill if first time
-        # Append one history line
-        entry["history"].append(
-            {
-                "ay": ay_label or "",
-                "term": term_label or "",
-                "faculty": fac or "",
-            }
-        )
-        grouped[code] = entry
-
-        # Optional: stop if we already have enough distinct courses
-        if len(grouped) >= limit_courses:
-            # We still finish the current iteration; early cut would complicate streaming
-            pass
-
-    courses = list(grouped.values())
-    # Sort courses asc by code, keep each history newest-first by AY/Term (best-effort)
-    def hist_key(h: Dict[str, str]) -> Tuple[int, int]:
-        # Extract numbers for AY and Term safely
-        ay = h.get("ay", "")
-        term = h.get("term", "")
-        # ay like "AY 2024-2025"
-        try:
-            ay_start = int(ay.split()[1].split("–")[0].split("-")[0])
-        except Exception:
-            ay_start = -9999
-        try:
-            tnum = int(term.replace("Term", "").strip())
-        except Exception:
-            tnum = 99
-        return (ay_start, -tnum)
-
-    for c in courses:
-        c["history"].sort(key=hist_key, reverse=True)
-
-    # ---- Sample block (hardcoded) so UI shows even with empty DB) ----
-    # Matches exactly your OM-REPO-ANA_CourseProfile.tsx MOCK_ROWS shape
-    sample: List[Dict[str, Any]] = [
-        {
-            "code": "CS 101",
-            "title": "Introduction to Programming",
-            "history": [
-                {"ay": "AY 2024–2025", "term": "Term 1", "faculty": "Alvarez, M."},
-                {"ay": "AY 2024–2025", "term": "Term 2", "faculty": "Alvarez, M."},
-                {"ay": "AY 2023–2024", "term": "Term 3", "faculty": "Santos, R."},
-                {"ay": "AY 2022–2023", "term": "Term 1", "faculty": "Alvarez, M."},
-            ],
-        },
-        {
-            "code": "CS 201",
-            "title": "Data Structures",
-            "history": [
-                {"ay": "AY 2024–2025", "term": "Term 3", "faculty": "Lim, K."},
-                {"ay": "AY 2023–2024", "term": "Term 2", "faculty": "Tan, J."},
-            ],
-        },
-        {
-            "code": "IT 135",
-            "title": "Web Technologies",
-            "history": [
-                {"ay": "AY 2025–2026", "term": "Term 1", "faculty": "Reyes, P."},
-                {"ay": "AY 2024–2025", "term": "Term 2", "faculty": "Cruz, A."},
-                {"ay": "AY 2023–2024", "term": "Term 1", "faculty": "Cruz, A."},
-            ],
-        },
-    ]
-
-    # If the DB has nothing (common in early dev), feed sample to the UI
-    payload_courses = courses if len(courses) > 0 else sample
+            preferences = f"No faculty preference submissions yet for current term {current['term_id']}."
+    elif current and not kac_ids:
+        preferences = f"No matching KAC lists this course for current term {current['term_id']}."
+    else:
+        preferences = "No current term found."
 
     return {
-        "ok": True,
-        "meta": {"term_label": _term_label(active)},
-        "courses": payload_courses,
-        # always include sample for dev reference/inspection
-        "sample": sample,
-        "count": len(payload_courses),
-        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "course_id": course_id,
+        "course_code": course_code,
+        "title": title,
+        "qualified_faculty": qualified,
+        "past_instructors": past,
+        "preferences": preferences,
     }
+
+# HTTP endpoint (same URL your frontend calls)
+@router.get("/analytics/course-profile-for")
+async def course_profile_for(query: str = Query(..., description="course_id or course_code")):
+    data = await get_course_profile_for(query)
+    return JSONResponse(content=data)
