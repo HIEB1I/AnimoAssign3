@@ -8,10 +8,8 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field
 
-
 from .OM_REPORTS_ANALYTICS.OM_RP_DeloadingUtilization import fetch_deloading_utilization_term_paged  # descriptive #3
 
-from .db_async import build_faculty_availability_heatmap        # predictive #1
 from .db_async import run_pt_risk                               # predictive #2
 
 from collections import Counter
@@ -135,15 +133,6 @@ async def deloadings_by_term(
 ):
     return await fetch_deloading_utilization_term_paged(anchor_term_id, direction)
 
-@app.get("/analytics/faculty-availability-heatmap")
-async def faculty_availability_heatmap(
-    course_id: Optional[str] = Query(None),
-    dept_id: Optional[str] = Query(None),
-    threshold: float = Query(0.50),
-):
-    return await build_faculty_availability_heatmap(
-        course_id=course_id, dept_id=dept_id, threshold=threshold
-    )
 
 @app.get("/analytics/pt-risk")
 async def pt_risk_endpoint(
@@ -180,7 +169,7 @@ from .OM_REPORTS_ANALYTICS.OM_RP_LoadRisk import router as om_rp_loadrisk_router
 app.include_router(om_rp_teachhist_router)                 # no prefix
 app.include_router(om_rp_courseprof_router)                # ← remove prefix here
 app.include_router(om_rp_deload_router, prefix="/api")
-app.include_router(om_rp_avail_router, prefix="/api")
+app.include_router(om_rp_avail_router)  # exposes /analytics/faculty-availability-heatmap
 app.include_router(om_rp_loadrisk_router, prefix="/api")
 
 

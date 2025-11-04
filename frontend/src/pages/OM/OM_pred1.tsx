@@ -1,5 +1,5 @@
 // frontend/src/pages/OM/OM_pred1.tsx
-import React, { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { fetchFacultyAvailabilityHeatmap } from "@/api"; // returns Promise<T>
 

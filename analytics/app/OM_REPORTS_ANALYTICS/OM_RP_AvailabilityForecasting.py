@@ -1,124 +1,291 @@
 # analytics/app/OM_REPORTS_ANALYTICS/OM_RP_AvailabilityForecasting.py
-from typing import Any, Dict, List, Literal, Optional
-from fastapi import APIRouter
-from datetime import datetime
-from ..main import db
+from fastapi import APIRouter, Query
+from typing import Any, Dict, List, Optional, Tuple
 
-router = APIRouter(prefix="/analytics", tags=["analytics"])
+# Reuse the shared DB connection from db_async
+from ..db_async import get_db  # central client/db glue
 
-COL_TERMS = "terms"
+router = APIRouter(prefix="/analytics", tags=["Reports & Analytics"])
 
-DayPairId = Literal["mon_thu", "tue_fri", "wed_sat"]
+# ----------------------------- Helpers / Tunables -----------------------------
+DAY_CODES: List[str] = ["M", "T", "W", "H", "F", "S"]
+TIME_SLOTS: List[str] = [
+    "07:30-09:00","09:15-10:45","11:00-12:30",
+    "12:45-14:15","14:30-16:00","16:15-17:45",
+    "18:00-19:30","19:45-21:15",
+]
+DAY_MAP = {
+    "Mon": "M", "Monday": "M", "M": "M",
+    "Tue": "T", "Tues": "T", "Tuesday": "T", "T": "T",
+    "Wed": "W", "Wednesday": "W", "W": "W",
+    "Thu": "H", "Thur": "H", "Thurs": "H", "Thursday": "H", "H": "H",
+    "Fri": "F", "Friday": "F", "F": "F",
+    "Sat": "S", "Saturday": "S", "S": "S",
+}
+TOP_N_PER_FACULTY = 5
 
-async def _active_term() -> Dict[str, Any]:
-    t = await db[COL_TERMS].find_one(
-        {"$or": [{"status": "active"}, {"is_current": True}]},
-        {"_id": 0, "term_id": 1, "acad_year_start": 1, "term_number": 1},
-    )
-    return t or {}
+def _clamp(x: float, lo: float = 0.0, hi: float = 1.0) -> float:
+    return max(lo, min(hi, x))
 
-def _term_label(t: Dict[str, Any]) -> str:
-    if not t:
-        return ""
-    ay = t.get("acad_year_start")
-    tn = t.get("term_number")
-    if not ay or tn is None:
-        return ""
-    return f"AY {ay}-{int(ay) + 1} T{tn}"
+def _to_minutes_any(s: str) -> int:
+    v = str(s or "").strip()
+    if not v:
+        return 0
+    if ":" in v:
+        parts = v.split(":")
+        hh = int(parts[0] or 0); mm = int(parts[1] or 0)
+        return hh * 60 + mm
+    v = v.zfill(4)
+    hh, mm = int(v[:2]), int(v[2:])
+    return hh * 60 + mm
 
-@router.get("/availability-forecast")
-async def availability_forecast() -> Dict[str, Any]:
+def _range_to_minutes(rng: str) -> Tuple[int, int]:
+    parts = [p.strip() for p in str(rng).split("-")]
+    if len(parts) != 2:
+        return (0, 0)
+    return (_to_minutes_any(parts[0]), _to_minutes_any(parts[1]))
+
+def _overlaps(a_start: int, a_end: int, b_start: int, b_end: int) -> bool:
+    return max(a_start, b_start) < min(a_end, b_end)
+
+# Precompute canonical slot minute ranges
+SLOT_RANGES: List[Tuple[int, int]] = []
+for s in TIME_SLOTS:
+    a, b = [x.strip() for x in s.split("-")]
+    SLOT_RANGES.append((_to_minutes_any(a), _to_minutes_any(b)))
+
+async def _current_term(db) -> Optional[Dict[str, Any]]:
+    return await db.terms.find_one({"is_current": True})
+
+async def _ordered_terms(db) -> List[Dict[str, Any]]:
+    cur = db.terms.find({}).sort([("acad_year_start", 1), ("term_number", 1)])
+    return [t async for t in cur]
+
+async def _prev_n_terms(db, term_id: str, N: int) -> List[str]:
+    terms = await _ordered_terms(db)
+    ids = [t["term_id"] for t in terms]
+    if term_id not in ids:
+        return []
+    i = ids.index(term_id)
+    start = max(0, i - N)
+    return ids[start:i][::-1]  # newest first
+
+def _recency_weights(term_ids: List[str]) -> Dict[str, float]:
+    if not term_ids:
+        return {}
+    w = [0.6, 0.3, 0.1][:len(term_ids)]
+    newest_first = list(reversed(term_ids))
+    return {newest_first[i]: w[i] for i in range(len(newest_first))}
+
+# ------------------------ Core: availability heatmap --------------------------
+async def build_faculty_availability_heatmap(
+    course_id: Optional[str] = None,
+    dept_id: Optional[str] = None,
+    threshold: float = 0.50,
+) -> Dict[str, Any]:
     """
-    Returns sample forecast data for the Availability Forecasting UI.
-    Replace the 'sample_*' blocks with real computations when ready.
+    Returns a “propensity-to-assign” heatmap keyed by "D|HH:MM-HH:MM".
+    {
+      term_id, previous_term_for_prefs, history_terms, warnings: [...],
+      slots: {
+        "M|07:30-09:00": {
+          count: n,
+          list: [{ faculty_id, name, email, confidence_pct, reason, notes: [...] }]
+        },
+        ...
+      }
+    }
     """
-    active = await _active_term()
+    db = get_db()
 
-    # --- SAMPLE MASTER DATA (matches UI exactly) ---
-    day_pairs: List[Dict[str, str]] = [
-        {"id": "mon_thu", "label": "Mon–Thu"},
-        {"id": "tue_fri", "label": "Tue–Fri"},
-        {"id": "wed_sat", "label": "Wed–Sat"},
-    ]
+    cur = await _current_term(db)
+    if not cur:
+        return {"warnings": ["No current term found."], "slots": {}}
+    curr_term_id = cur.get("term_id") or cur.get("_id")
+    prev_term = curr_term_id  # use current term prefs (T) to forecast T+1
+    hist_terms = await _prev_n_terms(db, curr_term_id, 3)
+    weights = _recency_weights(hist_terms)
 
-    # keep labels tight like ANA variant (shorter for column widths)
-    time_slots: List[str] = [
-        "07:30 – 09:00",
-        "09:15 – 10:45",
-        "11:00 – 12:30",
-        "12:45 – 14:15",
-        "14:30 – 16:00",
-        "16:15 – 17:45",
-        "18:00 – 19:30",
-        "19:45 – 20:00",
-    ]
+    warnings: List[str] = []
+    if await db.faculty_preferences.count_documents({"term_id": curr_term_id}) == 0:
+        warnings.append(
+            f"Pre-survey mode: expecting current-term preferences ({curr_term_id}) for next-term forecast; "
+            "none found yet. Using assignment history only."
+        )
 
-    # per-daypair predicted availability counts (same as ANA mock)
-    forecast: Dict[DayPairId, List[int]] = {
-        "mon_thu": [19, 22, 25, 18, 13, 9, 5],
-        "tue_fri": [21, 26, 24, 19, 14, 10, 6],
-        "wed_sat": [10, 15, 19, 17, 16, 9, 4],
+    # Build empty grid
+    grid: Dict[Tuple[str, str], Dict[str, Any]] = {
+        (d, s): {"count": 0, "list": []} for d in DAY_CODES for s in TIME_SLOTS
     }
 
-    # Faculty by slot (available/unavailable) — excerpted from ANA mock
-    def F(id: str, name: str, email: str, p: float) -> Dict[str, Any]:
-        return {"id": id, "name": name, "email": email, "p": float(p)}
+    async for fp in db.faculty_profiles.find({}):
+        if dept_id and fp.get("department_id") != dept_id:
+            continue
+        if course_id:
+            kvals = set(fp.get("qualified_kacs", [])) | set(fp.get("course_ids", []))
+            if course_id not in kvals:
+                continue
 
-    faculty_by_slot: Dict[str, Dict[int, Dict[str, Any]]] = {
-        "mon_thu": {
-            0: {
-                "available": [
-                    F("FAC004", "Rafael Cabrero", "rafael.cabrero@dlsu.edu.ph", 0.86),
-                    F("FAC008", "Gregory Cu", "gregory.cu@dlsu.edu.ph", 0.79),
-                    F("FAC016", "Justine Go", "justine.go@dlsu.edu.ph", 0.73),
-                ],
-                "unavailable": [
-                    F("FAC010", "Neil Del Gallego", "neil.delgallego@dlsu.edu.ph", 0.22),
-                    F("FAC011", "Erica De Vera", "erica.devera@dlsu.edu.ph", 0.18),
-                ],
-            },
-            4: {
-                "available": [F("FAC002", "Arnulfo Azcarraga", "arnulfo.azcarraga@dlsu.edu.ph", 0.61)],
-                "unavailable": [F("FAC007", "Unisse Chu", "unisse.chu@dlsu.edu.ph", 0.31)],
-            },
-        },
-        "tue_fri": {
-            1: {
-                "available": [
-                    F("FAC005", "Charibeth Cheng", "charibeth.cheng@dlsu.edu.ph", 0.88),
-                    F("FAC006", "Shirley Chu", "shirley.chu@dlsu.edu.ph", 0.82),
-                ],
-                "unavailable": [F("FAC003", "Allan Borra", "allan.borra@dlsu.edu.ph", 0.27)],
-            }
-        },
-        "wed_sat": {
-            5: {
-                "available": [F("FAC004", "Rafael Cabrero", "rafael.cabrero@dlsu.edu.ph", 0.55)],
-                "unavailable": [F("FAC002", "Arnulfo Azcarraga", "arnulfo.azcarraga@dlsu.edu.ph", 0.29)],
-            }
-        },
-    }
+        fid = fp["faculty_id"]
 
-    # Unique faculty list for combobox
-    seen = {}
-    faculty_opts: List[Dict[str, str]] = []
-    for dp, by_idx in faculty_by_slot.items():
-        for idx, detail in by_idx.items():
-            for bucket in ("available", "unavailable"):
-                for f in detail.get(bucket, []):
-                    if f["id"] not in seen:
-                        seen[f["id"]] = 1
-                        faculty_opts.append({"id": f["id"], "name": f["name"], "email": f["email"]})
-    faculty_opts.sort(key=lambda x: x["name"])
+        # Candidate if (prev-term pref) OR (has history in last 3 terms)
+        has_prev_pref = await db.faculty_preferences.find_one(
+            {"faculty_id": fid, "term_id": prev_term}, projection={"_id": 1}
+        ) is not None
+        has_history_any = False
+        if hist_terms:
+            sec_ids_hist = await db.sections.distinct("section_id", {"term_id": {"$in": hist_terms}})
+            if sec_ids_hist:
+                has_history_any = await db.faculty_assignments.find_one(
+                    {"faculty_id": fid, "section_id": {"$in": sec_ids_hist}}, projection={"_id": 1}
+                ) is not None
+        if not (has_prev_pref or has_history_any):
+            continue
 
+        # Exclude if on approved leave this term
+        lv = await db.leaves.find_one({
+            "faculty_id": fid, "approval_status": "APPROVED",
+            "start_term_id": {"$lte": curr_term_id},
+            "end_term_id":   {"$gte": curr_term_id},
+        })
+        if lv:
+            continue
+
+        pref_curr = await db.faculty_preferences.find_one(
+            {"faculty_id": fid, "term_id": curr_term_id},
+            projection={"preferred_units": 1}
+        )
+        if pref_curr and int(pref_curr.get("preferred_units", 0)) == 0:
+            continue
+
+        # Display name/email
+        u = await db.users.find_one({"user_id": fp.get("user_id")}, {"first_name": 1, "last_name": 1, "email": 1})
+        if not u and fp.get("faculty_id"):
+            u = await db.users.find_one({"user_id": fp.get("faculty_id")}, {"first_name": 1, "last_name": 1, "email": 1})
+        name = f"{(u or {}).get('last_name','')}, {(u or {}).get('first_name','')}".strip(", ").strip() or fp.get("faculty_id")
+        email = (u or {}).get("email")
+
+        # History frequency (recency-weighted, counts multiplicity)
+        freq: Dict[Tuple[str, str], float] = {(d, s): 0.0 for d in DAY_CODES for s in TIME_SLOTS}
+        has_history_detailed = False
+        if hist_terms:
+            assigns = await db.faculty_assignments.find({"faculty_id": fid}).to_list(length=None)
+            if assigns:
+                section_ids = [a["section_id"] for a in assigns]
+                sec_map: Dict[str, str] = {}
+                async for sec in db.sections.find(
+                    {"section_id": {"$in": section_ids}, "term_id": {"$in": hist_terms}},
+                    {"section_id": 1, "term_id": 1}
+                ):
+                    sec_map[sec["section_id"]] = sec["term_id"]
+
+                if sec_map:
+                    has_history_detailed = True
+                    async for sc in db.section_schedules.find({"section_id": {"$in": list(sec_map.keys())}}):
+                        tid = sec_map.get(sc["section_id"])
+                        if not tid or tid not in weights:
+                            continue
+                        d_raw = sc.get("day")
+                        d = DAY_MAP.get(str(d_raw), d_raw)
+                        if d not in DAY_CODES:
+                            continue
+                        st_min = _to_minutes_any(sc.get("start_time"))
+                        et_min = _to_minutes_any(sc.get("end_time"))
+                        if st_min >= et_min:
+                            continue
+                        w = weights[tid]
+                        for idx, slot_label in enumerate(TIME_SLOTS):
+                            slot_st, slot_et = SLOT_RANGES[idx]
+                            if _overlaps(st_min, et_min, slot_st, slot_et):
+                                freq[(d, slot_label)] += w
+
+        # Preference reinforcement from previous term
+        pref_keys: set = set()
+        prev_doc = await db.faculty_preferences.find_one(
+            {"faculty_id": fid, "term_id": prev_term},
+            projection={"availability_days": 1, "preferred_times": 1}
+        )
+        if prev_doc:
+            days = [DAY_MAP.get(str(d), d) for d in (prev_doc.get("availability_days") or [])]
+            for rng in (prev_doc.get("preferred_times") or []):
+                st_min, et_min = _range_to_minutes(rng)
+                if st_min >= et_min:
+                    continue
+                for idx, label in enumerate(TIME_SLOTS):
+                    sst, setm = SLOT_RANGES[idx]
+                    if _overlaps(st_min, et_min, sst, setm):
+                        for d in days:
+                            if d in DAY_CODES:
+                                pref_keys.add((d, label))
+
+        # Score & keep Top-N
+        scored: List[Tuple[Tuple[str, str], float, str]] = []
+        for key in freq.keys():
+            f = freq.get(key, 0.0)
+            preferred = key in pref_keys
+            base = 0.30
+            pref_boost = 0.20 if preferred else 0.0
+            score = _clamp(base + pref_boost + _clamp(f, 0.0, 1.0) * 0.50, 0.0, 1.0)
+            if f > 0 and preferred: reason = "Commonly taught in recent terms & preferred last term"
+            elif f > 0:             reason = "Commonly taught in recent terms"
+            elif preferred:         reason = "Preferred in previous term"
+            else:                   reason = "Pattern signal"
+            scored.append((key, score, reason))
+
+        if not has_history_detailed and pref_keys:
+            for key in pref_keys:
+                score = _clamp(0.30 + 0.20, 0.0, 1.0)  # preference-only
+                scored.append((key, score, "Preferred in previous term"))
+
+        scored.sort(key=lambda x: x[1], reverse=True)
+        topN = scored[:TOP_N_PER_FACULTY]
+
+        notes = []
+        if not pref_curr: notes.append("No current-term preference on record.")
+        notes.append("No leaves recorded for this term.")
+        if has_prev_pref: notes.append("Candidate criterion: previous-term preference.")
+        if has_history_any: notes.append("Candidate criterion: has assignment history in last 3 terms.")
+
+        for (day, label), score, reason in topN:
+            if score < threshold:
+                continue
+            grid[(day, label)]["count"] += 1
+            grid[(day, label)]["list"].append({
+                "faculty_id": fid,
+                "name": name,
+                "email": email,
+                "confidence_pct": round(score * 100),
+                "reason": reason,
+                "notes": notes,
+            })
+
+    slots = { f"{d}|{s}": grid[(d, s)] for d in DAY_CODES for s in TIME_SLOTS }
     return {
-        "ok": True,
-        "meta": {"term_label": _term_label(active)},
-        "campuses": ["Manila", "Laguna"],
-        "dayPairs": day_pairs,
-        "timeSlots": time_slots,
-        "forecast": forecast,
-        "facultyBySlot": faculty_by_slot,
-        "facultyOptions": faculty_opts,
-        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "term_id": cur["term_id"],
+        "previous_term_for_prefs": prev_term,
+        "history_terms": hist_terms,
+        "warnings": warnings,
+        "slots": slots,
     }
+
+# ------------------------------- Route -----------------------------------------
+@router.get("/faculty-availability-heatmap")
+async def faculty_availability_heatmap_endpoint(
+    course_id: Optional[str] = Query(None),
+    dept_id: Optional[str] = Query(None),
+    threshold: float = Query(0.50),
+):
+    return await build_faculty_availability_heatmap(
+        course_id=course_id, dept_id=dept_id, threshold=threshold
+    )
+
+# add this alias just under the existing endpoint
+@router.get("/availability-forecast")
+async def availability_forecast_alias(
+    course_id: Optional[str] = Query(None),
+    dept_id: Optional[str] = Query(None),
+    threshold: float = Query(0.50),
+):
+    return await build_faculty_availability_heatmap(
+        course_id=course_id, dept_id=dept_id, threshold=threshold
+    )
