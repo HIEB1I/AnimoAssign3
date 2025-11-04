@@ -10,8 +10,6 @@ from pydantic import BaseModel, Field
 
 from .OM_REPORTS_ANALYTICS.OM_RP_DeloadingUtilization import fetch_deloading_utilization_term_paged  # descriptive #3
 
-from .db_async import run_pt_risk                               # predictive #2
-
 from collections import Counter
 import re
 
@@ -133,27 +131,6 @@ async def deloadings_by_term(
 ):
     return await fetch_deloading_utilization_term_paged(anchor_term_id, direction)
 
-
-@app.get("/analytics/pt-risk")
-async def pt_risk_endpoint(
-    department_id: str = Query("DEPT0001"),
-    overload_allowance_units: int = Query(0, description="0 or 3"),
-    history_terms_for_experience: int = Query(3),
-    include_only_with_preferences: bool = Query(False),
-    allow_fallback_without_sections: bool = Query(False),
-):
-    try:
-        result = await run_pt_risk({
-            "DEPT_SCOPE": department_id,
-            "overload_allowance_units": overload_allowance_units,
-            "history_terms_for_experience": history_terms_for_experience,
-            "include_only_with_preferences": include_only_with_preferences,
-            "allow_fallback_without_sections": allow_fallback_without_sections,
-        })
-        return result
-    except RuntimeError as e:
-        raise HTTPException(status_code=409, detail=str(e))
-
 # --------------------------------------------------------------------
 # Feature routers (NEW) – no path/routing changes needed
 # These will live under the backend root; your nginx/Vite already forward /api/* here.
@@ -170,6 +147,6 @@ app.include_router(om_rp_teachhist_router)                 # no prefix
 app.include_router(om_rp_courseprof_router)                # ← remove prefix here
 app.include_router(om_rp_deload_router, prefix="/api")
 app.include_router(om_rp_avail_router)  # exposes /analytics/faculty-availability-heatmap
-app.include_router(om_rp_loadrisk_router, prefix="/api")
+app.include_router(om_rp_loadrisk_router)
 
 

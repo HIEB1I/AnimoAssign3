@@ -1,462 +1,344 @@
 // frontend/src/pages/OM/OM_REPORTS_ANALYTICS/OM-RP_LoadRisk.tsx
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { RotateCcw, FileDown, ChevronLeft } from "lucide-react";
+import { ChevronLeft } from "lucide-react";
+import { fetchPTRisk } from "../../../api";
 
-/** -----------------------------------------------------------
- * Tiny utility (replaces cls() from ANA version)
- * ----------------------------------------------------------- */
-const cls = (...s: Array<string | false | undefined>) => s.filter(Boolean).join(" ");
-
-/** -----------------------------------------------------------
- * Types (mirrors ANA mock)
- * ----------------------------------------------------------- */
-type CourseRow = {
+/** ---------------- Types (from OM_pred2) ---------------- */
+type PTRow = {
   course_id: string;
   course_code: string;
-  course_name: string;
-  sections_planned: number;
-  cap_per_section: number;
-  forecast_enrollees: number;
-  qualified_ft_count: number;
-  qualified_pt_pool: number;
-  avg_sections_per_ft: number;
-  leave_probability: number;      // 0..1
-  historical_fill_rate: number;   // 0..1
-  program_area: string;
+  demand_sections: number;
+  ft_filled_sections: number;
+  pt_needed_sections: number;
+  risk: string;
+  confidence: string;
+  ft_assignees?: string[];
 };
 
-type ApiPayload = {
-  ok: boolean;
-  meta?: { term_label?: string };
-  courses: CourseRow[];
-  generated_at?: string;
+type PTResponse = {
+  department_id: string;
+  term_id: string;
+  rows: PTRow[];
+  summary: { total_pt_sections: number; estimated_pt_hires: number };
+  generated_at: string;
+  params: any;
 };
 
-/** -----------------------------------------------------------
- * Enrichment & metrics (same math as ANA)
- * ----------------------------------------------------------- */
-const clamp = (v: number, min = 0, max = 1) => Math.max(min, Math.min(max, v));
-const RISK_THRESHOLD = 0.45;
+/** ---------------- Tiny util ---------------- */
+const cls = (...s: Array<string | false | undefined>) => s.filter(Boolean).join(" ");
 
-type Enriched = CourseRow & {
-  reqSections: number;
-  ftCapacity: number;
-  ptCapacity: number;
-  gap: number;   // sections short (>= 0)
-  risk: number;  // 0..1
-};
-
-function computeRow(c: CourseRow): Enriched {
-  const reqSections = Math.ceil(c.forecast_enrollees / c.cap_per_section);
-  const effectiveFT = c.qualified_ft_count * (1 - clamp(c.leave_probability));
-  const ftCapacity = effectiveFT * c.avg_sections_per_ft;
-  const ptCapacity = c.qualified_pt_pool * 1; // 1 section per PT as in mock
-  const gapRaw = reqSections - (ftCapacity + ptCapacity);
-  const gap = Math.max(0, Math.round(gapRaw * 10) / 10);
-  const base = Math.tanh(gapRaw);
-  const difficulty = 1 - c.historical_fill_rate;
-  const risk = clamp(0.6 * base + 0.4 * difficulty);
-  return { ...c, reqSections, ftCapacity, ptCapacity, gap, risk };
+function badgeClasses(kind: "risk" | "confidence", value?: string) {
+  const v = (value || "").toLowerCase();
+  if (kind === "risk") {
+    if (v.includes("high")) return "bg-rose-100 text-rose-800 border border-rose-200";
+    if (v.includes("medium")) return "bg-amber-100 text-amber-800 border border-amber-200";
+    if (v.includes("low")) return "bg-emerald-100 text-emerald-800 border border-emerald-200";
+    return "bg-gray-100 text-gray-700 border border-gray-200";
+  }
+  // confidence
+  const n = parseInt(v, 10);
+  if (!isNaN(n)) {
+    if (n >= 80) return "bg-emerald-100 text-emerald-800 border border-emerald-200";
+    if (n >= 50) return "bg-amber-100 text-amber-800 border border-amber-200";
+    return "bg-gray-100 text-gray-700 border border-gray-200";
+  }
+  return "bg-gray-100 text-gray-700 border border-gray-200";
 }
 
-/** -----------------------------------------------------------
- * CSV helpers
- * ----------------------------------------------------------- */
-function toCsv(rows: Record<string, any>[]) {
-  if (!rows.length) return "";
-  const headers = Object.keys(rows[0]);
-  const esc = (v: any) => `"${String(v ?? "").replace(/"/g, '""')}"`;
-  const lines = [headers.join(","), ...rows.map((r) => headers.map((h) => esc(r[h])).join(","))];
-  return lines.join("\n");
-}
-function downloadCsv(filename: string, csv: string) {
-  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  a.click();
-  URL.revokeObjectURL(url);
-}
-
-/** -----------------------------------------------------------
- * Chart (vanilla SVG like ANA)
- * ----------------------------------------------------------- */
-type ChartDatum = { label: string; value: number }; // value in 0..100
-function renderBarChart(container: HTMLDivElement, data: ChartDatum[]) {
-  container.innerHTML = "";
-  const width = container.clientWidth || 900;
-  const height = container.clientHeight || 360;
-  const margin = { top: 10, right: 10, bottom: 80, left: 40 };
-  const w = width - margin.left - margin.right;
-  const h = height - margin.top - margin.bottom;
-
-  const maxVal = Math.max(100, ...data.map((d) => d.value));
-  const ticks = [0, 20, 40, 60, 80, 100];
-
-  const svgNS = "http://www.w3.org/2000/svg";
-  const svg = document.createElementNS(svgNS, "svg");
-  svg.setAttribute("width", String(width));
-  svg.setAttribute("height", String(height));
-
-  const g = document.createElementNS(svgNS, "g");
-  g.setAttribute("transform", `translate(${margin.left},${margin.top})`);
-  svg.appendChild(g);
-
-  // grid + y labels
-  ticks.forEach((t) => {
-    const y = h - (t / maxVal) * h;
-    const line = document.createElementNS(svgNS, "line");
-    line.setAttribute("x1", "0");
-    line.setAttribute("y1", String(y));
-    line.setAttribute("x2", String(w));
-    line.setAttribute("y2", String(y));
-    line.setAttribute("stroke", "#e5e7eb");
-    line.setAttribute("stroke-width", "1");
-    g.appendChild(line);
-
-    const txt = document.createElementNS(svgNS, "text");
-    txt.setAttribute("x", "-8");
-    txt.setAttribute("y", String(y + 4));
-    txt.setAttribute("text-anchor", "end");
-    txt.setAttribute("font-size", "10");
-    txt.setAttribute("fill", "#6b7280");
-    txt.textContent = String(t);
-    g.appendChild(txt);
-  });
-
-  // band scale
-  const n = data.length;
-  const padding = 0.2;
-  const band = w / n;
-  const barWidth = band * (1 - padding);
-
-  data.forEach((d, i) => {
-    const x = i * band + (band - barWidth) / 2;
-    const barHeight = (d.value / maxVal) * h;
-    const y = h - barHeight;
-
-    const rect = document.createElementNS(svgNS, "rect");
-    rect.setAttribute("x", String(x));
-    rect.setAttribute("y", String(y));
-    rect.setAttribute("width", String(barWidth));
-    rect.setAttribute("height", String(barHeight));
-    rect.setAttribute("fill", "#94b49f");
-    rect.setAttribute("rx", "6");
-
-    const title = document.createElementNS(svgNS, "title");
-    title.textContent = `${d.label}: ${d.value}%`;
-    rect.appendChild(title);
-
-    g.appendChild(rect);
-
-    const lbl = document.createElementNS(svgNS, "text");
-    lbl.setAttribute("x", String(x + barWidth / 2));
-    lbl.setAttribute("y", String(h + 12));
-    lbl.setAttribute("transform", `rotate(-40 ${x + barWidth / 2} ${h + 12})`);
-    lbl.setAttribute("text-anchor", "end");
-    lbl.setAttribute("font-size", "10");
-    lbl.setAttribute("fill", "#374151");
-    lbl.textContent = d.label;
-    g.appendChild(lbl);
-  });
-
-  const ytitle = document.createElementNS(svgNS, "text");
-  ytitle.setAttribute("x", String(-h / 2));
-  ytitle.setAttribute("y", "-28");
-  ytitle.setAttribute("transform", `rotate(-90)`);
-  ytitle.setAttribute("text-anchor", "middle");
-  ytitle.setAttribute("font-size", "10");
-  ytitle.setAttribute("fill", "#6b7280");
-  ytitle.textContent = "Risk (%)";
-  g.appendChild(ytitle);
-
-  container.appendChild(svg);
-}
-
-/** -----------------------------------------------------------
- * Component (no AppShell; inherits OM shell via Outlet)
- * ----------------------------------------------------------- */
+/** ---------------- Page ---------------- */
 export default function OM_RP_LoadRisk() {
-  // 'at' = At-Risk only, 'all' = All Courses
-  const [activeTab, setActiveTab] = useState<"at" | "all">("at");
-  const [seed, setSeed] = useState(0); // simple knob to simulate refresh
-  const [courses, setCourses] = useState<CourseRow[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
+  // knobs (ported from OM_pred2)
+  const [departmentId, setDepartmentId] = useState("DEPT0001");
+  const [overload, setOverload] = useState(0);
+  const [histK, setHistK] = useState(3);
+  const [onlyWithPrefs, setOnlyWithPrefs] = useState(false); // kept for future; UI stays hidden
+  const [allowFallback, setAllowFallback] = useState(false); // kept for future; UI stays hidden
 
-  const chartRef = useRef<HTMLDivElement>(null);
+  // data state
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [data, setData] = useState<PTResponse | null>(null);
 
-  useEffect(() => {
-    (async () => {
-      try {
-        setLoading(true);
-        const res = await fetch("/api/analytics/load-risk", {
-          headers: { "Content-Type": "application/json" },
-          credentials: "include",
-        });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const json: ApiPayload = await res.json();
-        if (!json.ok) throw new Error("Server returned ok=false");
-        setCourses(json.courses || []);
-      } catch (e: any) {
-        setError(e?.message || "Failed to load");
-      } finally {
-        setLoading(false);
-      }
-    })();
-  }, []);
-
-  // jitter like ANA so Refresh has visible effect
-  const rows = useMemo(() => {
-    const jitter = (v: number) => clamp(v + ((seed % 3) - 1) * 0.01); // -1%, 0, or +1%
-    return courses.map((r) => ({ ...r, leave_probability: jitter(r.leave_probability) }));
-  }, [courses, seed]);
-
-  const enriched = useMemo(() => rows.map(computeRow), [rows]);
-  const atRisk = useMemo(() => enriched.filter((r) => r.risk >= RISK_THRESHOLD), [enriched]);
-
-  const expectedGap = useMemo(
-    () => Math.max(0, Math.round(atRisk.reduce((s, r) => s + r.gap, 0) * 10) / 10),
-    [atRisk]
-  );
-  const fteNeed = useMemo(() => Math.max(0, Math.ceil(expectedGap / 4)), [expectedGap]);
-
-  const chartData = useMemo<ChartDatum[]>(
-    () => enriched.map((r) => ({ label: r.course_code, value: Math.round(r.risk * 100) })),
-    [enriched]
-  );
-
-  useEffect(() => {
-    const el = chartRef.current;
-    if (!el) return;
-    renderBarChart(el, chartData);
-    const onResize = () => renderBarChart(el, chartData);
-    window.addEventListener("resize", onResize);
-    return () => window.removeEventListener("resize", onResize);
-  }, [chartData]);
-
-  const currentRows = activeTab === "at" ? atRisk : enriched;
-
-  const handleRefresh = () => setSeed((s) => s + 1);
-
-  const handleExportCsv = () => {
-    const rowsForCsv = currentRows.map((r) => ({
-      course_code: r.course_code,
-      course_name: r.course_name,
-      program_area: r.program_area,
-      req_sections: r.reqSections,
-      planned_sections: r.sections_planned,
-      ft_capacity: Math.round(r.ftCapacity * 10) / 10,
-      pt_capacity: Math.round(r.ptCapacity * 10) / 10,
-      coverage_gap: r.gap,
-      historical_fill_rate_pct: Math.round(r.historical_fill_rate * 100),
-      leave_probability_pct: Math.round(r.leave_probability * 100),
-      risk_pct: Math.round(r.risk * 100),
-    }));
-    const csv = toCsv(rowsForCsv);
-    downloadCsv(
-      `load-risk_${activeTab === "at" ? "at-risk" : "all"}_${new Date().toISOString().slice(0, 10)}.csv`,
-      csv
-    );
+  const load = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const resp = await fetchPTRisk({
+        department_id: departmentId,
+        overload_allowance_units: overload,
+        history_terms_for_experience: histK,
+        include_only_with_preferences: onlyWithPrefs,
+        allow_fallback_without_sections: allowFallback,
+      });
+      setData(resp);
+    } catch (e: any) {
+      setError(e?.message || "Failed to load");
+      setData(null);
+    } finally {
+      setLoading(false);
+    }
   };
 
+  useEffect(() => {
+    // auto-load on mount
+    // eslint-disable-next-line @typescript-eslint/no-floating-promises
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const totals = useMemo(() => {
+    if (!data) return { demand: 0, ft: 0, pt: 0 };
+    const demand = data.rows.reduce((a, r) => a + r.demand_sections, 0);
+    const ft = data.rows.reduce((a, r) => a + r.ft_filled_sections, 0);
+    const pt = data.rows.reduce((a, r) => a + r.pt_needed_sections, 0);
+    return { demand, ft, pt };
+  }, [data]);
+
   return (
-    <div className="w-full px-8 py-8">
-      {/* Header */}
+    <div className="w-full max-w-[1400px] mx-auto px-8 py-8">
+      {/* Header and subtitle retained (DO NOT MODIFY) */}
       <h1 className="text-2xl font-bold mb-2">Faculty Load Risk Forecast</h1>
       <p className="text-sm text-gray-600 mb-6">
         Risk indicators for over/under-loading by course and estimated section coverage needs.
       </p>
 
-      {/* Filter Bar with Back + controls (matches ANA main content) */}
-      <div className="mb-6 flex flex-wrap items-center gap-3 rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
-        <Link
-          to="/om/home/reports-analytics"
-          className="inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm shadow-sm hover:bg-gray-50 active:bg-gray-100"
-        >
-          <ChevronLeft className="h-4 w-4" />
-          <span>Back</span>
-        </Link>
+      {/* -- Main content (in OM_RP aesthetic) -- */}
+      <div className="rounded-xl border border-gray-200 bg-white shadow-sm">
+        {/* Top Bar: Back + Filters (aligned & evenly spaced) */}
+        <div className="p-4 border-b border-gray-200">
+          <div className="flex flex-col gap-3">
+            <div className="flex items-center gap-3">
+              <Link
+                to="/om/home/reports-analytics"
+                className="inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm shadow-sm hover:bg-gray-50 active:bg-gray-100"
+                aria-label="Back"
+                title="Back"
+              >
+                <ChevronLeft className="h-4 w-4" />
+                <span>Back</span>
+              </Link>
+            </div>
 
-        <div className="ml-auto flex items-center gap-3">
-          <button
-            type="button"
-            onClick={handleRefresh}
-            className="inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm shadow-sm hover:bg-gray-50 active:bg-gray-100 focus:ring-2 focus:ring-emerald-500/30"
-            title="Refresh"
-          >
-            <RotateCcw className="h-4 w-4" />
-            <span>Refresh</span>
-          </button>
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4 items-end">
+              <div>
+                <label className="block text-xs text-gray-600 mb-1">Department</label>
+                <input
+                  value={departmentId}
+                  onChange={(e) => setDepartmentId(e.target.value)}
+                  placeholder="DEPT0001"
+                  className="w-full rounded-lg border border-gray-300 px-3.5 py-2 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30"
+                />
+              </div>
 
-          <button
-            type="button"
-            onClick={handleExportCsv}
-            className="inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm shadow-sm hover:bg-gray-50 active:bg-gray-100 focus:ring-2 focus:ring-emerald-500/30"
-            title="Export CSV"
-          >
-            <FileDown className="h-4 w-4" />
-            <span>Export CSV</span>
-          </button>
-        </div>
-      </div>
+              <div>
+                <label className="block text-xs text-gray-600 mb-1">Overload allowance (units)</label>
+                <select
+                  value={overload}
+                  onChange={(e) => setOverload(Number(e.target.value))}
+                  className="w-full rounded-lg border border-gray-300 px-3.5 py-2 text-sm shadow-sm bg-white focus:ring-2 focus:ring-emerald-500/30"
+                >
+                  <option value={0}>0</option>
+                  <option value={3}>3</option>
+                </select>
+              </div>
 
-      {/* KPI Cards */}
-      <div className="grid gap-4 md:grid-cols-3 mb-6">
-        <KpiCard
-          title="Predicted At-Risk Courses"
-          subtitle={`Risk ≥ ${Math.round(RISK_THRESHOLD * 100)}%`}
-          value={loading ? "…" : atRisk.length}
-        />
-        <KpiCard
-          title="Expected Section Deficit"
-          subtitle="Total sections short across at-risk courses"
-          value={loading ? "…" : expectedGap}
-        />
-        <KpiCard
-          title="Estimated Part-Timer Need"
-          subtitle="~1 FTE ≈ 4 sections"
-          value={loading ? "…" : `${fteNeed} FTE`}
-        />
-      </div>
+              <div>
+                <label className="block text-xs text-gray-600 mb-1">History window (terms)</label>
+                <input
+                  type="number"
+                  min={1}
+                  max={6}
+                  value={histK}
+                  onChange={(e) => setHistK(Number(e.target.value))}
+                  className="w-full rounded-lg border border-gray-300 px-3.5 py-2 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30"
+                />
+              </div>
 
-      {/* Chart */}
-      <div className="rounded-2xl bg-white shadow-sm border border-gray-200">
-        <div className="p-5">
-          <div className="flex items-center justify-between">
-            <div className="text-sm font-medium">Risk by Course</div>
-            <div className="text-xs text-gray-500">Risk = coverage gap + difficulty (scaled)</div>
-          </div>
-          <div className="mt-4">
-            {error ? (
-              <div className="px-3 py-10 text-sm text-red-600">{error}</div>
-            ) : (
-              <div ref={chartRef} className="w-full h-[360px]" />
-            )}
-          </div>
-        </div>
-      </div>
-
-      {/* Tabs + Table */}
-      <div className="rounded-2xl bg-white shadow-sm border border-gray-200 mt-6">
-        <div className="border-b flex">
-          <button
-            className={cls(
-              "w-1/2 p-3 text-sm font-semibold border-b-2",
-              activeTab === "at" ? "border-gray-900" : "border-transparent text-gray-500"
-            )}
-            onClick={() => setActiveTab("at")}
-          >
-            At-Risk
-          </button>
-          <button
-            className={cls(
-              "w-1/2 p-3 text-sm font-semibold border-b-2",
-              activeTab === "all" ? "border-gray-900" : "border-transparent text-gray-500"
-            )}
-            onClick={() => setActiveTab("all")}
-          >
-            All Courses
-          </button>
-        </div>
-
-        <div className="p-0">
-          {error ? (
-            <div className="px-4 py-6 text-sm text-red-600">{error}</div>
-          ) : (
-            <RiskTable rows={currentRows} />
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-/** -----------------------------------------------------------
- * Presentational bits
- * ----------------------------------------------------------- */
-function KpiCard({ title, value, subtitle }: { title: string; value: React.ReactNode; subtitle: string }) {
-  return (
-    <div className="rounded-2xl bg-white shadow-sm border border-gray-200">
-      <div className="p-5">
-        <div className="flex items-center justify-between">
-          <span className="text-sm text-gray-500">{title}</span>
-          <span aria-hidden>•</span>
-        </div>
-        <div className="text-3xl font-bold mt-3">{value}</div>
-        <p className="text-xs text-gray-500 mt-1">{subtitle}</p>
-      </div>
-    </div>
-  );
-}
-
-function RiskBadge({ v }: { v: number }) {
-  let chips = "bg-gray-200 text-gray-800";
-  if (v >= 0.7) chips = "bg-red-600 text-white";
-  else if (v >= RISK_THRESHOLD) chips = "bg-blue-100 text-blue-700";
-  return <span className={cls("px-2 py-1 rounded-xl text-xs font-semibold", chips)}>{Math.round(v * 100)}%</span>;
-}
-
-function RiskTable({ rows }: { rows: Enriched[] }) {
-  return (
-    <div className="overflow-auto">
-      <table className="w-full text-sm">
-        <thead className="bg-gray-100">
-          <tr>
-            <th className="p-3 text-left">Course</th>
-            <th className="p-3 text-center">Prog Area</th>
-            <th className="p-3 text-center">Sections (req/planned)</th>
-            <th className="p-3 text-center">FT capacity</th>
-            <th className="p-3 text-center">PT capacity</th>
-            <th className="p-3 text-center">Hist. Fill</th>
-            <th className="p-3 text-center">Leave Risk</th>
-            <th className="p-3 text-center">Coverage Gap</th>
-            <th className="p-3 text-center">Risk</th>
-            <th className="p-3 text-center">Action</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((r) => {
-            const action = r.gap > 0 ? `${Math.ceil(r.gap)} PT section${Math.ceil(r.gap) === 1 ? "" : "s"}` : "OK";
-            return (
-              <tr key={r.course_id} className="border-b hover:bg-gray-50">
-                <td className="p-3 font-medium text-left">
-                  {r.course_code}
-                  <div className="text-xs text-gray-500">{r.course_name}</div>
-                </td>
-                <td className="p-3 text-center">{r.program_area}</td>
-                <td className="p-3 text-center">
-                  {r.reqSections}/{r.sections_planned}
-                </td>
-                <td className="p-3 text-center">{Math.round(r.ftCapacity * 10) / 10}</td>
-                <td className="p-3 text-center">{Math.round(r.ptCapacity * 10) / 10}</td>
-                <td className="p-3 text-center">{Math.round(r.historical_fill_rate * 100)}%</td>
-                <td className="p-3 text-center">{Math.round(r.leave_probability * 100)}%</td>
-                <td className="p-3 text-center">{r.gap}</td>
-                <td className="p-3 text-center">
-                  <RiskBadge v={r.risk} />
-                </td>
-                <td className="p-3 text-center">
-                  {r.risk >= RISK_THRESHOLD ? (
-                    <button
-                      className={cls(
-                        "px-3 py-1 rounded-xl text-xs inline-flex items-center justify-center",
-                        r.gap > 0 ? "bg-blue-100 text-blue-700" : "bg-gray-200 text-gray-800"
-                      )}
-                    >
-                      {action}
-                    </button>
-                  ) : (
-                    <span className="text-xs text-gray-500">—</span>
+              <div className="flex gap-2 sm:justify-end">
+                <button
+                  disabled={loading}
+                  onClick={load}
+                  className={cls(
+                    "w-full sm:w-auto rounded-lg border px-4 py-2 text-sm font-semibold",
+                    loading
+                      ? "cursor-default border-emerald-200 bg-emerald-200 text-emerald-900"
+                      : "cursor-pointer border-emerald-500 bg-emerald-400 text-emerald-950 hover:bg-emerald-300"
                   )}
-                </td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
+                >
+                  {loading ? "Loading…" : "Run"}
+                </button>
+              </div>
+
+              {/* Keep for later if you re-enable:
+              <label className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={onlyWithPrefs}
+                  onChange={(e) => setOnlyWithPrefs(e.target.checked)}
+                  className="rounded border-gray-300"
+                />
+                Only FT with previous-term preferences
+              </label>
+
+              <label className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={allowFallback}
+                  onChange={(e) => setAllowFallback(e.target.checked)}
+                  className="rounded border-gray-300"
+                />
+                Allow demand fallback if no sections
+              </label>
+              */}
+            </div>
+          </div>
+        </div>
+
+        {/* Status / error rows */}
+        {error && (
+          <div className="px-4 py-3 text-sm text-red-700 bg-red-50 border-b border-red-200">{error}</div>
+        )}
+        {loading && <div className="px-4 py-4 text-sm text-gray-500">Loading…</div>}
+
+        {/* Summary band */}
+        {data && !loading && (
+          <div className="flex flex-wrap gap-4 items-center p-4 border-b border-gray-200 text-sm">
+            <div>
+              <span className="text-gray-600">Term:</span>{" "}
+              <span className="font-semibold text-gray-900">{data.term_id}</span>
+            </div>
+            <div>
+              <span className="text-gray-600">Dept:</span>{" "}
+              <span className="font-semibold text-gray-900">{data.department_id}</span>
+            </div>
+            <div>
+              <span className="text-gray-600">Generated:</span>{" "}
+              <span className="font-semibold text-gray-900">
+                {new Date(data.generated_at).toLocaleString()}
+              </span>
+            </div>
+            <div className="ml-auto">
+              <span className="text-gray-600">Summary:</span>{" "}
+              <span className="font-semibold text-gray-900">
+                PT Sections = {data.summary.total_pt_sections} • Est. PT Hires ={" "}
+                {data.summary.estimated_pt_hires}
+              </span>
+            </div>
+          </div>
+        )}
+
+        {/* Results table */}
+        {data && !loading && (
+            <div className="p-4">
+              <div className="overflow-x-auto rounded-xl border border-gray-200">
+                <table className="min-w-full table-fixed text-sm border-collapse">
+                  <colgroup>
+                    <col style={{ width: "22%" }} />
+                    <col style={{ width: "14%" }} />
+                    <col style={{ width: "14%" }} />
+                    <col style={{ width: "28%" }} />
+                    <col style={{ width: "10%" }} />
+                    <col style={{ width: "6%" }} />
+                    <col style={{ width: "6%" }} />
+                  </colgroup>
+
+                  <thead className="bg-gray-50 text-gray-700 text-xs uppercase tracking-wide sticky top-0 z-[1]">
+                    <tr>
+                      {[
+                        "Course",
+                        "Demand (secs)",
+                        "FT Filled (secs)",
+                        "FT Assignees",
+                        "PT Needed",
+                        "Risk",
+                        "Conf.",
+                      ].map((h) => (
+                        <th key={h} className="px-4 py-2.5 text-center font-semibold whitespace-nowrap border-b">
+                          {h}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+
+                  <tbody>
+                    {data.rows.map((r, i) => (
+                      <tr
+                        key={r.course_id}
+                        className={cls(
+                          i % 2 === 0 ? "bg-white" : "bg-gray-50",
+                          "text-gray-800 hover:bg-gray-100 transition"
+                        )}
+                      >
+                        <td className="px-4 py-2.5 text-left font-medium text-gray-900">{r.course_code}</td>
+                        <td className="px-4 py-2.5 text-center tabular-nums">{r.demand_sections}</td>
+                        <td className="px-4 py-2.5 text-center tabular-nums">{r.ft_filled_sections}</td>
+                        <td className="px-4 py-2.5">
+                          {r.ft_assignees && r.ft_assignees.length ? (
+                            <div className="flex flex-wrap gap-1 justify-center">
+                              {r.ft_assignees.map((n, idx) => (
+                                <span
+                                  key={idx}
+                                  className="inline-flex items-center rounded-full border border-gray-200 px-2.5 py-0.5 text-xs bg-white text-gray-700"
+                                  title={n}
+                                >
+                                  {n}
+                                </span>
+                              ))}
+                            </div>
+                          ) : (
+                            <div className="text-center text-gray-500">—</div>
+                          )}
+                        </td>
+                        <td className="px-4 py-2.5 text-center font-semibold tabular-nums">
+                          {r.pt_needed_sections}
+                        </td>
+                        <td className="px-4 py-2.5">
+                          <span className={cls("px-2 py-0.5 rounded-full text-xs inline-block text-center", badgeClasses("risk", r.risk))}>
+                            {r.risk || "—"}
+                          </span>
+                        </td>
+                        <td className="px-4 py-2.5">
+                          <span className={cls("px-2 py-0.5 rounded-full text-xs inline-block text-center", badgeClasses("confidence", r.confidence))}>
+                            {r.confidence || "—"}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+
+                  <tfoot>
+                    <tr>
+                      <td className="px-4 py-2.5 border-t-2 border-gray-300 font-bold text-left">TOTAL</td>
+                      <td className="px-4 py-2.5 border-t-2 border-gray-300 font-bold text-center tabular-nums">
+                        {totals.demand}
+                      </td>
+                      <td className="px-4 py-2.5 border-t-2 border-gray-300 font-bold text-center tabular-nums">
+                        {totals.ft}
+                      </td>
+                      <td className="px-4 py-2.5 border-t-2 border-gray-300" />
+                      <td className="px-4 py-2.5 border-t-2 border-gray-300 font-bold text-center tabular-nums">
+                        {totals.pt}
+                      </td>
+                      <td className="px-4 py-2.5 border-t-2 border-gray-300" />
+                      <td className="px-4 py-2.5 border-t-2 border-gray-300" />
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+
+              <div className="text-xs text-gray-500 mt-3">
+                Tip: sort by clicking column headers (use your table lib) or filter by course ID in the search above
+                (if you add a course filter).
+              </div>
+            </div>
+        )}
+
+        {/* Empty state */}
+        {!loading && !error && (!data || data.rows.length === 0) && (
+          <div className="px-4 py-6 text-center text-sm text-gray-500">No results.</div>
+        )}
+      </div>
     </div>
   );
 }
