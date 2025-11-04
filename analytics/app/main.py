@@ -9,7 +9,6 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field
 
 
-from .db_async import get_course_profile_for                    # descriptive #2
 from .db_async import fetch_deloading_utilization_term_paged    # descriptive #3
 from .db_async import build_faculty_availability_heatmap        # predictive #1
 from .db_async import run_pt_risk                               # predictive #2
@@ -127,10 +126,6 @@ async def health_db():
     await client.admin.command("ping")
     return {"db": "ok"}
 
-@app.get("/analytics/course-profile-for")
-async def course_profile_for(query: str = Query(..., description="course_id or course_code")):
-    data = await get_course_profile_for(query)
-    return JSONResponse(content=data)
 
 @app.get("/analytics/deloadings/by-term")
 async def deloadings_by_term(
@@ -180,7 +175,7 @@ from .OM_REPORTS_ANALYTICS.OM_RP_AvailabilityForecasting import router as om_rp_
 from .OM_REPORTS_ANALYTICS.OM_RP_LoadRisk import router as om_rp_loadrisk_router
 
 app.include_router(om_rp_teachhist_router)
-app.include_router(om_rp_courseprof_router, prefix="/api")
+app.include_router(om_rp_courseprof_router)
 app.include_router(om_rp_deload_router, prefix="/api")
 app.include_router(om_rp_avail_router, prefix="/api")
 app.include_router(om_rp_loadrisk_router, prefix="/api")
