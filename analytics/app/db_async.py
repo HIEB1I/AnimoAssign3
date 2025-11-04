@@ -1158,10 +1158,12 @@ async def run_pt_risk(
         allow_fallback=P["allow_fallback_without_sections"],
     )
 
-    prev1 = await prev_n_terms(db, curr_term_id, 1)
-    if not prev1:
-        raise RuntimeError("Cannot derive previous term for preferences.")
-    pref_term_id = prev1[0]
+    # prev1 = await prev_n_terms(db, curr_term_id, 1)
+    # if not prev1:
+    #     raise RuntimeError("Cannot derive previous term for preferences.")
+    # pref_term_id = prev1[0]
+
+    pref_term_id = curr_term_id  # use current term’s preferences (TERM0013 now)
 
     # Build capacity
     CAP = await build_capacity_map(
