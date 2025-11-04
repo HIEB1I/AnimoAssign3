@@ -1,218 +1,201 @@
 // frontend/src/pages/OM/OM_REPORTS_ANALYTICS/OM-RP_DeloadingUtilization.tsx
-import React, { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { ChevronLeft } from "lucide-react";
+import SelectBox from "../../../component/SelectBox";
+import { fetchDeloadingsByTerm } from "../../../api";
 
-/* ---------- small utility ---------- */
-const cls = (...s: (string | false | undefined)[]) => s.filter(Boolean).join(" ");
-
-/* ---------- Visual parts (mirrors ANA styling) ---------- */
-function KpiCard({ title, value, subtitle }: { title: string; value: React.ReactNode; subtitle?: string }) {
-  return (
-    <div className="rounded-2xl bg-white shadow-sm border border-gray-200">
-      <div className="p-5">
-        <div className="flex items-center justify-between">
-          <span className="text-sm text-gray-500">{title}</span>
-          <span aria-hidden>•</span>
-        </div>
-        <div className="text-3xl font-bold mt-3">{value}</div>
-        {subtitle ? <p className="text-xs text-gray-500 mt-1">{subtitle}</p> : null}
-      </div>
-    </div>
-  );
-}
-
-const TYPE_PALETTE = {
-  Admin: { bar: "bg-emerald-500", pill: "bg-emerald-100 text-emerald-800" },
-  Research: { bar: "bg-sky-500", pill: "bg-sky-100 text-sky-800" },
-  Others: { bar: "bg-amber-500", pill: "bg-amber-100 text-amber-800" },
-} as const;
-
-const normalizeType = (t = "") => {
-  const x = t.toLowerCase();
-  if (x.startsWith("admin")) return "Admin";
-  if (x.startsWith("research")) return "Research";
-  return "Others";
+type Row = {
+  faculty_name?: string;
+  deloading_type?: string;
+  units_deloaded?: number;
+  notes?: string;
+  term_id?: string;
+  updated_at?: string | Date;
 };
 
-function TypeBreakdownBar({ activeByType }: { activeByType: Record<string, number> }) {
-  const usedTotal = Object.values(activeByType).reduce((s, n) => s + n, 0);
-  const segments = [
-    { key: "Admin", value: activeByType.Admin || 0 },
-    { key: "Research", value: activeByType.Research || 0 },
-    { key: "Others", value: activeByType.Others || 0 },
-  ];
-  return (
-    <div className="mt-6 rounded-2xl border bg-white p-4 shadow-sm">
-      <div className="mb-3 flex items-center justify-between">
-        <h4 className="text-sm font-semibold text-gray-700">Units by Type (Used)</h4>
-        <div className="text-xs text-gray-400">Total {usedTotal}</div>
-      </div>
-      <div className="mb-2 h-3 w-full overflow-hidden rounded-full bg-gray-100 flex">
-        {segments.map(({ key, value }) => {
-          const width = usedTotal === 0 ? 0 : Math.round((value / usedTotal) * 100);
-          return (
-            <div key={key} className={cls(TYPE_PALETTE[key as keyof typeof TYPE_PALETTE].bar, "h-3")} style={{ width: `${width}%` }} />
-          );
-        })}
-      </div>
-      <div className="flex flex-wrap gap-2 text-xs">
-        {(["Admin", "Research", "Others"] as const).map((k) => (
-          <span key={k} className={cls("inline-flex items-center gap-2 rounded-full px-2.5 py-1", TYPE_PALETTE[k].pill)}>
-            <span className="inline-block h-2 w-2 rounded-full bg-current/50" />
-            {k}
-          </span>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
-  return (
-    <div className="rounded-2xl bg-white shadow-sm border border-gray-200 mt-6">
-      <div className="border-b px-5 py-3">
-        <h3 className="text-lg font-semibold">{title}</h3>
-      </div>
-      <div className="p-4">{children}</div>
-    </div>
-  );
-}
-
-/* ---------- types ---------- */
-type ActiveRow = { id: number; faculty: string; type: string; units: number; notes?: string; status?: string };
-
-type ApiPayload = {
-  ok: boolean;
-  meta?: { term_label?: string };
-  metrics: {
-    totalApproved: number;
-    facultyWithActive: number;
-    utilization: number;
-    usedUnits: number;
-    denom: number;
-    activeByType: Record<string, number>;
-  };
-  active: ActiveRow[];
+type TermLite = {
+  term_id: string;
+  acad_year_start: number;
+  term_number: number;
+  is_current?: boolean;
 };
 
-/* ---------- page ---------- */
+type Payload = {
+  term: TermLite | null;
+  rows: Row[];
+  has_prev: boolean;
+  has_next: boolean;
+  terms?: TermLite[];
+  current_index?: number;
+};
+
 export default function OM_RP_DeloadingUtilization() {
-  const [loading, setLoading] = useState(true);
+  const [data, setData] = useState<Payload | null>(null);
+  const [terms, setTerms] = useState<TermLite[]>([]);
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [active, setActive] = useState<ActiveRow[]>([]);
-  const [metrics, setMetrics] = useState<ApiPayload["metrics"]>({
-    totalApproved: 0,
-    facultyWithActive: 0,
-    utilization: 0,
-    usedUnits: 0,
-    denom: 0,
-    activeByType: { Admin: 0, Research: 0, Others: 0 },
-  });
+
+  function labelOf(t: TermLite) {
+    const ayEnd = t.acad_year_start + 1;
+    return `AY ${t.acad_year_start}–${ayEnd} • Term ${t.term_number}${t.is_current ? " (Current)" : ""}`;
+  }
+
+  const currentLabel = useMemo(
+    () => (data?.term ? labelOf(data.term) : ""),
+    [data?.term]
+  );
+
+  const termLabels = useMemo(() => terms.map(labelOf), [terms]);
+
+  async function load(
+    direction: "current" | "next" | "prev" = "current",
+    anchor?: string
+  ) {
+    try {
+      setLoading(true);
+      setError("");
+      const res = await fetchDeloadingsByTerm(anchor ?? data?.term?.term_id, direction);
+      setData(res);
+      if (Array.isArray(res.terms)) setTerms(res.terms);
+    } catch (err: any) {
+      setError(err?.message || "Failed to load.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  // Handle SelectBox change by mapping label -> term_id
+  const onSelectTerm = (label: string) => {
+    const idx = termLabels.indexOf(label);
+    if (idx >= 0 && terms[idx]) {
+      load("current", terms[idx].term_id);
+    }
+  };
 
   useEffect(() => {
-    (async () => {
-      try {
-        setLoading(true);
-        const res = await fetch("/api/analytics/deloading-utilization", {
-          headers: { "Content-Type": "application/json" },
-          credentials: "include",
-        });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const json: ApiPayload = await res.json();
-        if (!json.ok) throw new Error("Server returned ok=false");
-        setActive(json.active || []);
-        setMetrics(json.metrics);
-      } catch (e: any) {
-        setError(e?.message || "Failed to load");
-      } finally {
-        setLoading(false);
-      }
-    })();
+    load("current");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  // local recompute if user adjusts Units
-  const recomputed = useMemo(() => {
-    const totalApproved = active.reduce((s, r) => s + (Number(r.units) || 0), 0);
-    const facultyWithActive = active.length;
-    const usedUnits = totalApproved;
-    const denom = usedUnits;
-    const utilization = usedUnits > 0 ? 100 : 0;
-    const activeByType: Record<string, number> = { Admin: 0, Research: 0, Others: 0 };
-    for (const r of active) activeByType[normalizeType(r.type)] += Number(r.units) || 0;
-    return { totalApproved, facultyWithActive, utilization, usedUnits, denom, activeByType };
-  }, [active]);
-
-  const m = active.length ? recomputed : metrics;
-
-  const changeUnits = (id: number, value: string) =>
-    setActive((rows) => rows.map((r) => (r.id === id ? { ...r, units: Number(value) } : r)));
 
   return (
     <div className="w-full px-8 py-8">
-      {/* Header */}
-      <h1 className="text-2xl font-bold mb-2">Deloading Utilization Report</h1>
-      <p className="text-sm text-gray-600 mb-6">Monitor faculty deloading usage for the current term.</p>
+      {/* Header (match reference styling) */}
+      <h1 className="text-2xl font-bold mb-2">Deloading Utilization</h1>
+      <p className="text-sm text-gray-600 mb-6">
+        Historical and current deloading usage by faculty, term-paged.
+      </p>
 
-      {/* Filter bar with Back — same ANA vibe, but no independent AppShell */}
-      <div className="mb-6 flex flex-wrap items-center gap-3 rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
-        <Link
-          to="/om/home/reports-analytics"
-          className="inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm shadow-sm hover:bg-gray-50 active:bg-gray-100"
-        >
-          <ChevronLeft className="h-4 w-4" />
-          <span>Back</span>
-        </Link>
-        <div className="ml-auto" />
-      </div>
+      {/* Card wrapper (like the reference) */}
+      <div className="rounded-xl border border-gray-200 bg-white shadow-sm">
+        {/* Top bar: Back + pager/selector (styled like reference filter bar) */}
+        <div className="flex flex-wrap items-center gap-3 p-4 border-b border-gray-200">
+          <Link
+            to="/om/home/reports-analytics"
+            className="inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm shadow-sm hover:bg-gray-50 active:bg-gray-100"
+            aria-label="Back"
+            title="Back"
+          >
+            <ChevronLeft className="h-4 w-4" />
+            <span>Back</span>
+          </Link>
 
-      {/* KPI cards */}
-      <div className="grid gap-4 md:grid-cols-3 mb-2">
-        <KpiCard title="Total Approved Units (This Term)" value={m.totalApproved} />
-        <KpiCard title="Faculty with Active Deloadings" value={m.facultyWithActive} />
-        <KpiCard title="Utilization Rate" value={`${m.utilization}%`} subtitle={`${m.usedUnits} used of ${m.denom || 0} available`} />
-      </div>
+          {/* Pager / Term selector cluster */}
+          <div className="flex items-center gap-2 flex-1 min-w-[320px] justify-end">
+            <button
+              onClick={() => load("prev")}
+              disabled={!data?.has_prev || loading}
+              className={`rounded-lg border px-3 py-2 text-sm font-semibold ${
+                !data?.has_prev || loading
+                  ? "cursor-default border-gray-200 bg-gray-100 text-gray-500"
+                  : "cursor-pointer border-emerald-500 bg-emerald-400 text-emerald-950 hover:bg-emerald-300"
+              }`}
+              title="Previous term"
+            >
+              ← Prev
+            </button>
 
-      {/* Type breakdown */}
-      <TypeBreakdownBar activeByType={m.activeByType} />
+            {/* SelectBox styled dropdown (same component used in OM_FacultyManagement) */}
+            <div className="min-w-[260px]">
+              <SelectBox
+                value={currentLabel}
+                onChange={onSelectTerm}
+                options={termLabels}
+              />
+            </div>
 
-      {/* Table */}
-      <Section title="Faculty Deloading — Department Breakdown">
-        {loading ? (
-          <div className="p-4 text-sm text-gray-600">Loading…</div>
-        ) : error ? (
-          <div className="p-4 text-sm text-red-600">Error: {error}</div>
-        ) : (
-          <>
+            <button
+              onClick={() => load("next")}
+              disabled={!data?.has_next || loading}
+              className={`rounded-lg border px-3 py-2 text-sm font-semibold ${
+                !data?.has_next || loading
+                  ? "cursor-default border-gray-200 bg-gray-100 text-gray-500"
+                  : "cursor-pointer border-emerald-500 bg-emerald-400 text-emerald-950 hover:bg-emerald-300"
+              }`}
+              title="Next term"
+            >
+              Next →
+            </button>
+          </div>
+        </div>
+
+        {/* Status / error rows */}
+        {error && (
+          <div className="px-4 py-3 text-sm text-red-700 bg-red-50 border-b border-red-200">
+            {error}
+          </div>
+        )}
+        {loading && <div className="px-4 py-4 text-sm text-gray-500">Loading…</div>}
+
+        {/* Empty state */}
+        {!loading && (!data || data.rows.length === 0) && !error && (
+          <div className="px-4 py-6 text-center text-sm text-gray-500">
+            No deloadings recorded for this term.
+          </div>
+        )}
+
+        {/* Results table */}
+        {!loading && !!data?.rows?.length && (
+          <div className="p-4">
+            <div className="text-sm text-gray-600 mb-3">
+              Viewing{" "}
+              <span className="font-semibold text-gray-900">
+                {data?.term
+                  ? `AY ${data.term.acad_year_start}–${data.term.acad_year_start + 1} • Term ${data.term.term_number}`
+                  : "—"}
+              </span>
+            </div>
+
             <div className="overflow-x-auto">
-              <table className="w-full text-left text-sm">
-                <thead className="bg-gray-100">
-                  <tr className="text-gray-600">
-                    <th className="px-4 py-2">Faculty</th>
-                    <th className="px-4 py-2">Type of Deloading</th>
-                    <th className="px-4 py-2">Units</th>
-                    <th className="px-4 py-2">Notes</th>
-                    <th className="px-4 py-2">Status</th>
+              <table className="min-w-full table-fixed text-sm border-t border-gray-200">
+                <colgroup>
+                  <col style={{ width: "20%" }} />
+                  <col style={{ width: "20%" }} />
+                  <col style={{ width: "12%" }} />
+                  <col style={{ width: "28%" }} />
+                  <col style={{ width: "20%" }} />
+                </colgroup>
+                <thead className="bg-gray-50 text-gray-600 text-xs uppercase tracking-wide">
+                  <tr>
+                    {["Faculty Name", "Deloading Type", "Units", "Notes", "Last Updated"].map((h) => (
+                      <th key={h} className="px-3 py-2 text-center font-medium whitespace-nowrap">
+                        {h}
+                      </th>
+                    ))}
                   </tr>
                 </thead>
-                <tbody className="divide-y">
-                  {active.map((r) => (
-                    <tr key={r.id} className="hover:bg-gray-50/60">
-                      <td className="px-4 py-2 font-medium">{r.faculty}</td>
-                      <td className="px-4 py-2">{normalizeType(r.type)}</td>
-                      <td className="px-4 py-2">
-                        <input
-                          type="number"
-                          className="w-24 rounded border px-2 py-1"
-                          value={r.units}
-                          onChange={(e) => changeUnits(r.id, e.target.value)}
-                        />
-                      </td>
-                      <td className="px-4 py-2">{r.notes || "—"}</td>
-                      <td className="px-4 py-2">
-                        <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-emerald-700">
-                          {r.status || "Active"}
-                        </span>
+                <tbody>
+                  {data.rows.map((r, i) => (
+                    <tr
+                      key={`${r.faculty_name}-${r.deloading_type}-${i}`}
+                      className={i % 2 === 0 ? "bg-white text-gray-800" : "bg-gray-50 text-gray-800"}
+                    >
+                      <td className="px-3 py-2 text-center">{r.faculty_name || "—"}</td>
+                      <td className="px-3 py-2 text-center">{r.deloading_type || "—"}</td>
+                      <td className="px-3 py-2 text-center">{r.units_deloaded ?? "—"}</td>
+                      <td className="px-3 py-2 text-center">{r.notes || "—"}</td>
+                      <td className="px-3 py-2 text-center">
+                        {r.updated_at ? new Date(r.updated_at).toLocaleString() : "—"}
                       </td>
                     </tr>
                   ))}
@@ -220,15 +203,10 @@ export default function OM_RP_DeloadingUtilization() {
               </table>
             </div>
 
-            {/* Save (no-op for now) */}
-            <div className="mt-8 flex justify-end">
-              <button className="rounded-xl bg-emerald-600 px-5 py-2.5 text-sm font-medium text-white shadow hover:bg-emerald-700">
-                Save Changes
-              </button>
-            </div>
-          </>
+            {/* Bottom controls remain removed */}
+          </div>
         )}
-      </Section>
+      </div>
     </div>
   );
 }

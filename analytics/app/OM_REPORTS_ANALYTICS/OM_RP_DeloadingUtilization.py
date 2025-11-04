@@ -1,81 +1,118 @@
 # analytics/app/OM_REPORTS_ANALYTICS/OM_RP_DeloadingUtilization.py
-
-from typing import Any, Dict, List
+from typing import Optional, Literal, Dict, Any, List
 from fastapi import APIRouter
-from datetime import datetime
-from ..main import db
+from ..db_async import get_db  # reuse the shared Motor client helpers
 
-router = APIRouter(prefix="/analytics", tags=["analytics"])
+Direction = Literal["current", "next", "prev"]
+router = APIRouter(tags=["OM: Reports & Analytics – Deloading Utilization"])
 
-COL_TERMS = "terms"
-
-async def _active_term() -> Dict[str, Any]:
-    t = await db[COL_TERMS].find_one(
-        {"$or": [{"status": "active"}, {"is_current": True}]},
-        {"_id": 0, "term_id": 1, "acad_year_start": 1, "term_number": 1},
-    )
-    return t or {}
-
-def _term_label(t: Dict[str, Any]) -> str:
-    if not t:
-        return ""
-    ay = t.get("acad_year_start")
-    tn = t.get("term_number")
-    if not ay or tn is None:
-        return ""
-    return f"AY {ay}-{int(ay) + 1} T{tn}"
-
-def _normalize_type(t: str) -> str:
-    if not t:
-        return "Others"
-    x = t.lower()
-    if x.startswith("admin"):
-        return "Admin"
-    if x.startswith("research"):
-        return "Research"
-    return "Others"
-
-@router.get("/deloading-utilization")
-async def deloading_utilization() -> Dict[str, Any]:
+async def fetch_deloading_utilization_term_paged(
+    anchor_term_id: Optional[str] = None,
+    direction: Direction = "current",
+) -> Dict[str, Any]:
     """
-    Returns KPI metrics and a list of active deloadings.
-    Right now serves hardcoded sample data so the UI is populated even without DB rows.
+    Term-paged Deloading Utilization.
+    Lifted from db_async.py and moved here, unchanged in behavior.
     """
+    db = get_db()
 
-    # ---- SAMPLE DATA (shape mirrors the front-end expectation) ----
-    sample_active: List[Dict[str, Any]] = [
-        {"id": 1, "faculty": "Faculty #1", "type": "Administrative", "units": 6, "notes": "Dept. Chair — ST Department", "status": "Active"},
-        {"id": 2, "faculty": "Faculty #2", "type": "Research",       "units": 5, "notes": "Dissertation Writing",         "status": "Active"},
-        {"id": 3, "faculty": "Faculty #3", "type": "Extension",       "units": 3, "notes": "External Project Support",     "status": "Active"},
+    # 1) Load and order all terms (ascending)
+    terms: List[Dict[str, Any]] = await db["terms"] \
+        .find({}, {"_id": 0}) \
+        .sort([("acad_year_start", 1), ("term_number", 1)]) \
+        .to_list(None)
+
+    if not terms:
+        return {
+            "term": None,
+            "rows": [],
+            "has_prev": False,
+            "has_next": False,
+            "terms": [],
+            "current_index": None,
+        }
+
+    # Pre-shape list for frontend (compact fields only)
+    terms_list = [
+        {
+            "term_id": t.get("term_id"),
+            "acad_year_start": t.get("acad_year_start"),
+            "term_number": t.get("term_number"),
+            "is_current": bool(t.get("is_current")),
+        }
+        for t in terms
     ]
 
-    # In the future, you can replace the above with actual fetches from your deloading collection(s)
-    # and compute KPIs from DB rows.
+    # 2) Pick anchor index (prefer current; else latest)
+    def find_term_index(tid: str) -> int:
+        for i, t in enumerate(terms):
+            if t.get("term_id") == tid:
+                return i
+        return -1
 
-    # ---- Compute KPIs from sample (or DB when wired) ----
-    total_approved = sum(int(r.get("units", 0)) for r in sample_active)
-    faculty_with_active = len(sample_active)
-    used_units = total_approved
-    denom = used_units
-    utilization = 100 if used_units > 0 else 0
+    if anchor_term_id:
+        idx = find_term_index(anchor_term_id)
+        if idx < 0:
+            idx = len(terms) - 1
+    else:
+        current_idxs = [i for i, t in enumerate(terms) if t.get("is_current") is True]
+        idx = current_idxs[0] if current_idxs else (len(terms) - 1)
 
-    by_type: Dict[str, int] = {"Admin": 0, "Research": 0, "Others": 0}
-    for r in sample_active:
-        by_type[_normalize_type(str(r.get("type", "")))] += int(r.get("units", 0))
+    # 3) Apply direction
+    if direction == "next" and idx < len(terms) - 1:
+        idx += 1
+    elif direction == "prev" and idx > 0:
+        idx -= 1
 
-    active_term = await _active_term()
+    target_term = terms[idx]
+    target_term_id = target_term.get("term_id")
+
+    # 4) Fetch deloadings for the target term
+    deloadings = await db["deloadings"].find({"term_id": target_term_id}).to_list(None)
+
+    # 5) Join lookups
+    rows: List[Dict[str, Any]] = []
+    for d in deloadings:
+        faculty = await db["faculty_profiles"].find_one({"faculty_id": d.get("faculty_id")})
+        if not faculty:
+            continue
+        user = await db["users"].find_one({"user_id": faculty.get("user_id")})
+        dt = await db["deloading_types"].find_one({
+            "$or": [
+                {"type_id": d.get("type_id")},
+                {"deloadingtype_id": d.get("type_id")},
+            ]
+        })
+        rows.append({
+            "faculty_id": faculty.get("faculty_id"),
+            "faculty_name": (f"{(user or {}).get('first_name','')} {(user or {}).get('last_name','')}".strip() or None),
+            "deloading_type": (dt or {}).get("type"),
+            "units_deloaded": d.get("units_deloaded"),
+            "notes": (d.get("notes") or d.get("deloading_notes") or "").strip() or None,
+            "approval_status": d.get("approval_status"),
+            "term_id": target_term_id,
+            "updated_at": d.get("updated_at"),
+        })
+
+    # Sort: faculty_name asc, then most recent update
+    rows.sort(key=lambda x: (x.get("faculty_name") or "", -(x["updated_at"].timestamp() if x.get("updated_at") else 0)))
 
     return {
-        "ok": True,
-        "meta": {"term_label": _term_label(active_term)},
-        "metrics": {
-            "totalApproved": total_approved,
-            "facultyWithActive": faculty_with_active,
-            "utilization": utilization,
-            "usedUnits": used_units,
-            "denom": denom,
-            "activeByType": by_type,
+        "term": {
+            "term_id": target_term.get("term_id"),
+            "acad_year_start": target_term.get("acad_year_start"),
+            "term_number": target_term.get("term_number"),
+            "is_current": bool(target_term.get("is_current")),
         },
-        "active": sample_active,
-        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "rows": rows,
+        "has_prev": idx > 0,
+        "has_next": idx < len(terms) - 1,
+        "terms": terms_list,         # all terms for dropdown
+        "current_index": idx,        # index of the term you're viewing
     }
+
+# NOTE:
+# We are NOT declaring a duplicate route here because main.py already exposes
+# GET /analytics/deloadings/by-term that the frontend calls.
+# The router object is exported (keeps include_router() happy), and the
+# function above is imported by main.py to serve the existing path.
