@@ -9,7 +9,8 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field
 
 
-from .db_async import fetch_deloading_utilization_term_paged    # descriptive #3
+from .OM_REPORTS_ANALYTICS.OM_RP_DeloadingUtilization import fetch_deloading_utilization_term_paged  # descriptive #3
+
 from .db_async import build_faculty_availability_heatmap        # predictive #1
 from .db_async import run_pt_risk                               # predictive #2
 
@@ -168,15 +169,18 @@ async def pt_risk_endpoint(
 # Feature routers (NEW) – no path/routing changes needed
 # These will live under the backend root; your nginx/Vite already forward /api/* here.
 # --------------------------------------------------------------------
+# keep these imports
 from .OM_REPORTS_ANALYTICS.OM_RP_FacultyTeachingHistory import router as om_rp_teachhist_router
 from .OM_REPORTS_ANALYTICS.OM_RP_CourseProfile import router as om_rp_courseprof_router
 from .OM_REPORTS_ANALYTICS.OM_RP_DeloadingUtilization import router as om_rp_deload_router
 from .OM_REPORTS_ANALYTICS.OM_RP_AvailabilityForecasting import router as om_rp_avail_router
 from .OM_REPORTS_ANALYTICS.OM_RP_LoadRisk import router as om_rp_loadrisk_router
 
-app.include_router(om_rp_teachhist_router)
-app.include_router(om_rp_courseprof_router)
+# include routers
+app.include_router(om_rp_teachhist_router)                 # no prefix
+app.include_router(om_rp_courseprof_router)                # ← remove prefix here
 app.include_router(om_rp_deload_router, prefix="/api")
 app.include_router(om_rp_avail_router, prefix="/api")
 app.include_router(om_rp_loadrisk_router, prefix="/api")
+
 
