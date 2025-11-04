@@ -112,6 +112,7 @@ def _service_result(name: str, ok: bool, detail: str, latency_ms: Optional[float
         out["latencyMs"] = round(latency_ms, 2)
     return out
 
+Direction = Literal["current", "next", "prev"]
 
 # --------------------------------------------------------------------
 # System endpoints (keep your existing ones)
