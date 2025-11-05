@@ -14,246 +14,229 @@ COL_TERMS = "terms"
 COL_KACS = "kacs"
 COL_CAMPUSES = "campuses"
 
-# canonical bands (match UI)
-TIME_BANDS = ["07:30 - 09:00", "09:15 - 10:45", "11:00 - 12:30", "12:45 - 14:15", "14:30 - 16:00", "16:15 - 17:45", "18:00 - 19:30", "19:45 - 21:00"]
-DAYS = ["MTH", "TF", "WS", "SAT"]  # minimal example; UI expands anyway
-MODES = ["HYB", "ONL", "F2F"]  # use F2F, not FTF
+TIME_BANDS = [
+    "07:30 - 09:00","09:15 - 10:45","11:00 - 12:30","12:45 - 14:15",
+    "14:30 - 16:00","16:15 - 17:45","18:00 - 19:30","19:45 - 21:00"
+]
+MODES = ["HYB", "ONL", "F2F"]
 
 def _now_dt() -> datetime:
-    return datetime.now(timezone.utc)
+  return datetime.now(timezone.utc)
 
 async def _active_term() -> Dict[str, Any]:
-    t = await db[COL_TERMS].find_one(
-        {"$or": [{"status": "active"}, {"is_current": True}]},
-        {"_id": 0, "term_id": 1, "acad_year_start": 1, "term_number": 1},
-    )
-    return t or {}
+  t = await db[COL_TERMS].find_one(
+      {"$or": [{"status":"active"},{"is_current":True}]},
+      {"_id":0,"term_id":1,"acad_year_start":1,"term_number":1},
+  )
+  return t or {}
 
 async def _faculty_for_user(user_id: str) -> Optional[Dict[str, Any]]:
-    return await db[COL_FACPROF].find_one({"user_id": user_id}, {"_id": 0, "faculty_id": 1, "department_id": 1})
+  return await db[COL_FACPROF].find_one({"user_id": user_id}, {"_id":0,"faculty_id":1,"department_id":1})
 
 async def _next_pref_id() -> str:
-    doc = await db[COL_PREFS].find_one_and_update(
-        {"_id": "config"},
-        {"$setOnInsert": {"doc_type": "config"}, "$inc": {"next_seq": 1}},
-        upsert=True,
-        return_document=ReturnDocument.AFTER,
-    )
-    seq = int((doc or {}).get("next_seq", 1))
-    return f"PREF{seq:04d}"
+  doc = await db[COL_PREFS].find_one_and_update(
+      {"_id":"config"},
+      {"$setOnInsert":{"doc_type":"config"}, "$inc":{"next_seq":1}},
+      upsert=True, return_document=ReturnDocument.AFTER
+  )
+  seq = int((doc or {}).get("next_seq",1))
+  return f"PREF{seq:04d}"
 
 async def _resolve_kacs(codes_or_ids: List[str]) -> List[str]:
-    """Accept kac_id OR kac_code; return list of kac_id strings."""
-    if not codes_or_ids:
-        return []
-    q: List[Dict[str, Any]] = []
-    for v in codes_or_ids:
-        v = str(v).strip()
-        if not v:
-            continue
-        q.append({"kac_id": v})
-        q.append({"kac_code": v})
-    cur = db[COL_KACS].find({"$or": q}, {"_id": 0, "kac_id": 1})
-    ids: Set[str] = set()
-    async for row in cur:
-        ids.add(row.get("kac_id"))
-    return list(ids)
+  if not codes_or_ids: return []
+  ors = []
+  for v in codes_or_ids:
+    v = str(v).strip()
+    if not v: continue
+    ors.append({"kac_id": v})
+    ors.append({"kac_code": v})
+  cur = db[COL_KACS].find({"$or": ors}, {"_id":0,"kac_id":1})
+  ids: Set[str] = set()
+  async for row in cur:
+    if row.get("kac_id"): ids.add(row["kac_id"])
+  return list(ids)
 
 def _norm_mode(mode_in: Any) -> Dict[str, str]:
-    """
-    Accept dict or array of dicts with 'mode' & 'campus_id'.
-    Normalize codes to HYB/ONL/F2F and campus_id to str.
-    """
-    if isinstance(mode_in, list) and mode_in:
-        mode_in = mode_in[0]
-    if not isinstance(mode_in, dict):
-        mode_in = {}
-    m = str(mode_in.get("mode") or "HYB").upper()
-    # Accept FTF → F2F
-    if m == "FTF":
-        m = "F2F"
-    if m not in {"HYB", "ONL", "F2F"}:
-        m = "HYB"
-    cid = str(mode_in.get("campus_id") or "")
-    return {"mode": m, "campus_id": cid}
+  if isinstance(mode_in, list) and mode_in:
+    mode_in = mode_in[0]
+  if not isinstance(mode_in, dict):
+    mode_in = {}
+  m = str(mode_in.get("mode") or "HYB").upper()
+  if m == "FTF": m = "F2F"
+  if m not in {"HYB","ONL","F2F"}: m = "HYB"
+  cid = str(mode_in.get("campus_id") or "")
+  return {"mode": m, "campus_id": cid}
 
 def _canon_time_band(s: str) -> Optional[str]:
-    """
-    Normalize variants like '1245-1415' or '12:45-14:15' to '12:45 - 14:15'.
-    Return None if empty.
-    """
-    if not s:
-        return None
-    s = str(s).strip()
-    if " - " in s and ":" in s:
-        return s  # already canonical
-    # remove spaces
-    s = s.replace(" ", "")
-    # split by '-' or '–'
-    sep = "-" if "-" in s else "–" if "–" in s else None
-    if not sep:
-        return None
-    a, b = s.split(sep, 1)
-    def fix(t: str) -> Optional[str]:
-        t = t.strip()
-        if ":" in t and len(t) in (4,5):
-            # '7:30' or '07:30'
-            hh, mm = t.split(":")
-            hh = hh.zfill(2)
-            return f"{hh}:{mm}"
-        if len(t) == 4 and t.isdigit():
-            return f"{t[:2]}:{t[2:]}"
-        return None
-    A, B = fix(a), fix(b)
-    return f"{A} - {B}" if A and B else None
+  if not s: return None
+  s = str(s).strip()
+  if " - " in s and ":" in s:
+    return s
+  s = s.replace(" ", "")
+  sep = "-" if "-" in s else "–" if "–" in s else None
+  if not sep: return None
+  a, b = s.split(sep, 1)
+  def fix(t: str) -> Optional[str]:
+    t = t.strip()
+    if ":" in t and len(t) in (4,5):
+      hh, mm = t.split(":"); hh = hh.zfill(2); return f"{hh}:{mm}"
+    if len(t) == 4 and t.isdigit():
+      return f"{t[:2]}:{t[2:]}"
+    return None
+  A, B = fix(a), fix(b)
+  return f"{A} - {B}" if A and B else None
 
 def _canon_time_list(times: List[Any]) -> List[str]:
-    out: List[str] = []
-    for t in (times or []):
-        ct = _canon_time_band(str(t))
-        if ct:
-            out.append(ct)
-    return out
+  out: List[str] = []
+  for t in (times or []):
+    ct = _canon_time_band(str(t))
+    if ct: out.append(ct)
+  return out
 
 @router.post("/preferences")
 async def preferences_handler(
-    userId: str = Query(..., min_length=3),
-    action: str = Query("fetch", description="fetch | options | profile | submit"),
-    payload: Optional[Dict[str, Any]] = Body(None),
+  userId: str = Query(..., min_length=3),
+  action: str = Query("fetch", description="fetch | options | profile | submit"),
+  payload: Optional[Dict[str, Any]] = Body(None),
 ):
-    if action == "fetch":
-        fac = await _faculty_for_user(userId)
-        if not fac:
-            return {"ok": True, "preferences": []}
+  if action == "fetch":
+    fac = await _faculty_for_user(userId)
+    if not fac: return {"ok": True, "preferences": []}
 
-        pipeline: List[Dict[str, Any]] = [
-            {"$match": {"faculty_id": fac["faculty_id"], "pref_id": {"$exists": True}}},
-            # joins
-            {"$lookup": {"from": COL_TERMS, "localField": "term_id", "foreignField": "term_id", "as": "term"}},
-            {"$unwind": {"path": "$term", "preserveNullAndEmptyArrays": True}},
-            {"$lookup": {"from": COL_KACS, "localField": "preferred_kacs", "foreignField": "kac_id", "as": "kacs"}},
-            {"$lookup": {"from": COL_CAMPUSES, "localField": "mode.campus_id", "foreignField": "campus_id", "as": "camp"}},
-            {"$unwind": {"path": "$camp", "preserveNullAndEmptyArrays": True}},
-            {"$project": {
-                "_id": 0,
-                "pref_id": 1,
-                "faculty_id": 1,
-                "term_id": 1,
-                "preferred_units": 1,
-                "availability_days": 1,
-                "preferred_times": 1,
-                "preferred_kacs": {"$map": {"input": "$kacs", "as": "k",
-                    "in": {"kac_id": "$$k.kac_id", "kac_code": "$$k.kac_code", "kac_name": "$$k.kac_name"}}},
-                "mode": {"mode": "$mode.mode", "campus_id": "$mode.campus_id", "campus_name": "$camp.campus_name"},
-                "notes": 1,
-                "has_new_prep": 1,
-                "is_finished": 1,
-                "submitted_at": 1,
-                "term_number": "$term.term_number",
-                "acad_year_start": "$term.acad_year_start",
-            }},
-            {"$sort": {"submitted_at": -1}},
-        ]
-        rows = [r async for r in db[COL_PREFS].aggregate(pipeline)]
-        return {"ok": True, "preferences": rows}
+    pipeline = [
+      {"$match": {"faculty_id": fac["faculty_id"], "pref_id": {"$exists": True}}},
+      {"$lookup": {"from": COL_TERMS, "localField": "term_id", "foreignField": "term_id", "as": "term"}},
+      {"$unwind": {"path": "$term", "preserveNullAndEmptyArrays": True}},
+      {"$lookup": {"from": COL_KACS, "localField": "preferred_kacs", "foreignField": "kac_id", "as": "kacs"}},
+      {"$lookup": {"from": COL_CAMPUSES, "localField": "mode.campus_id", "foreignField": "campus_id", "as": "camp"}},
+      {"$unwind": {"path": "$camp", "preserveNullAndEmptyArrays": True}},
+      {"$project": {
+        "_id": 0,
+        "pref_id": 1, "faculty_id": 1, "term_id": 1,
+        "preferred_units": 1,
+        "availability_days": 1,
+        "preferred_times": 1,
+        "preferred_courses": 1,       # NEW
+        "deloading_data": 1,          # NEW
+        "preferred_kacs": {"$map": {"input": "$kacs", "as": "k",
+          "in": {"kac_id": "$$k.kac_id", "kac_code": "$$k.kac_code", "kac_name": "$$k.kac_name"}}},
+        "mode": {"mode": "$mode.mode", "campus_id": "$mode.campus_id", "campus_name": "$camp.campus_name"},
+        "notes": 1, "has_new_prep": 1, "is_finished": 1, "submitted_at": 1,
+        "term_number": "$term.term_number", "acad_year_start": "$term.acad_year_start",
+      }},
+      {"$sort": {"submitted_at": -1}},
+    ]
+    rows = [r async for r in db[COL_PREFS].aggregate(pipeline)]
+    return {"ok": True, "preferences": rows}
 
-    if action == "options":
-        kacs = [k async for k in db[COL_KACS].find({}, {"_id": 0, "kac_id": 1, "kac_code": 1, "kac_name": 1}).sort("kac_code", 1)]
-        camps = [c async for c in db[COL_CAMPUSES].find({}, {"_id": 0, "campus_id": 1, "campus_name": 1}).sort("campus_name", 1)]
-        return {"ok": True, "timeBands": TIME_BANDS, "days": DAYS, "modes": MODES, "kacs": kacs, "campuses": camps}
+  if action == "options":
+    kacs = [k async for k in db[COL_KACS].find({}, {"_id":0,"kac_id":1,"kac_code":1,"kac_name":1}).sort("kac_code", 1)]
+    camps = [c async for c in db[COL_CAMPUSES].find({}, {"_id":0,"campus_id":1,"campus_name":1}).sort("campus_name", 1)]
+    return {"ok": True, "timeBands": TIME_BANDS, "modes": MODES, "kacs": kacs, "campuses": camps}
 
-    if action == "profile":
-        u = await db[COL_USERS].find_one({"user_id": userId}, {"_id": 0, "first_name": 1, "last_name": 1})
-        fac = await _faculty_for_user(userId)
-        return {
-            "ok": bool(u),
-            "first_name": (u or {}).get("first_name", ""),
-            "last_name": (u or {}).get("last_name", ""),
-            "faculty_id": (fac or {}).get("faculty_id", ""),
-            "department_id": (fac or {}).get("department_id", ""),
-        }
+  if action == "profile":
+    u = await db[COL_USERS].find_one({"user_id": userId}, {"_id":0,"first_name":1,"last_name":1})
+    fac = await _faculty_for_user(userId)
+    return {
+      "ok": bool(u),
+      "first_name": (u or {}).get("first_name",""),
+      "last_name": (u or {}).get("last_name",""),
+      "faculty_id": (fac or {}).get("faculty_id",""),
+      "department_id": (fac or {}).get("department_id",""),
+    }
 
-    if action == "submit":
-        if not payload:
-            raise HTTPException(status_code=400, detail="Missing payload")
+  if action == "submit":
+    if not payload:
+      raise HTTPException(status_code=400, detail="Missing payload")
 
-        fac = await _faculty_for_user(userId)
-        if not fac:
-            raise HTTPException(status_code=400, detail="Faculty profile not found for user.")
+    fac = await _faculty_for_user(userId)
+    if not fac:
+      raise HTTPException(status_code=400, detail="Faculty profile not found for user.")
 
-        term_id = str(payload.get("term_id") or "").strip()
-        if not term_id:
-            active = await _active_term()
-            term_id = active.get("term_id", "")
-        if not term_id:
-            raise HTTPException(status_code=400, detail="Active term not found; cannot submit preferences.")
+    term_id = str(payload.get("term_id") or "").strip()
+    if not term_id:
+      active = await _active_term()
+      term_id = active.get("term_id","")
+    if not term_id:
+      raise HTTPException(status_code=400, detail="Active term not found; cannot submit preferences.")
 
-        # Required minimal fields
+    # Validation/coercion
+    try:
+      preferred_units = int(payload.get("preferred_units"))
+      if preferred_units < 0: raise ValueError()
+    except Exception:
+      raise HTTPException(status_code=400, detail="preferred_units must be a non-negative integer.")
+
+    availability_days = list(payload.get("availability_days") or [])
+    preferred_times = _canon_time_list(list(payload.get("preferred_times") or []))
+
+    preferred_kacs_in = list(payload.get("preferred_kacs") or [])
+    kac_ids = await _resolve_kacs([str(x) for x in preferred_kacs_in])
+
+    preferred_courses = [str(c) for c in list(payload.get("preferred_courses") or [])]  # NEW
+
+    deloading_in = list(payload.get("deloading_data") or [])  # NEW
+    deloading_data: List[Dict[str, Any]] = []
+    for d in deloading_in:
+      t = (d or {}).get("deloading_type")
+      u = (d or {}).get("units", 0)
+      if t:
         try:
-            preferred_units = int(payload.get("preferred_units"))
-            if preferred_units < 0:
-                raise ValueError()
+          u = int(u)
         except Exception:
-            raise HTTPException(status_code=400, detail="preferred_units must be a non-negative integer.")
+          u = 0
+        deloading_data.append({"deloading_type": str(t), "units": u})
 
-        availability_days = list(payload.get("availability_days") or [])
-        preferred_times_in = list(payload.get("preferred_times") or [])
-        preferred_times = _canon_time_list(preferred_times_in)
+    mode_in = _norm_mode(payload.get("mode"))
+    notes = str(payload.get("notes") or "")
 
-        preferred_kacs_in = list(payload.get("preferred_kacs") or [])  # codes or ids
-        has_new_prep = bool(payload.get("has_new_prep", False))
-        mode_in = _norm_mode(payload.get("mode"))  # {"mode": "HYB", "campus_id": "..."}
-        notes = str(payload.get("notes") or "")
+    existing = await db[COL_PREFS].find_one(
+      {"faculty_id": fac["faculty_id"], "term_id": term_id},
+      {"_id":0,"pref_id":1}
+    )
+    pref_id = existing["pref_id"] if existing else await _next_pref_id()
 
-        kac_ids = await _resolve_kacs([str(x) for x in preferred_kacs_in])
+    doc = {
+      "pref_id": pref_id,
+      "faculty_id": fac["faculty_id"],
+      "term_id": term_id,
+      "preferred_units": preferred_units,
+      "availability_days": availability_days,
+      "preferred_times": preferred_times,
+      "preferred_kacs": kac_ids,
+      "preferred_courses": preferred_courses,  # NEW
+      "deloading_data": deloading_data,        # NEW
+      "mode": {"mode": mode_in["mode"], "campus_id": mode_in["campus_id"]},
+      "notes": notes,
+      "has_new_prep": bool(payload.get("has_new_prep", False)),
+      "is_finished": bool(payload.get("is_finished", True)),
+      "submitted_at": _now_dt(),
+    }
 
-        # Upsert unique (faculty_id, term_id)
-        existing = await db[COL_PREFS].find_one({"faculty_id": fac["faculty_id"], "term_id": term_id}, {"_id": 0, "pref_id": 1})
-        if existing:
-            pref_id = existing["pref_id"]
-        else:
-            pref_id = await _next_pref_id()
+    await db[COL_PREFS].update_one(
+      {"faculty_id": fac["faculty_id"], "term_id": term_id},
+      {"$set": doc}, upsert=True
+    )
 
-        doc = {
-            "pref_id": pref_id,
-            "faculty_id": fac["faculty_id"],
-            "term_id": term_id,
-            "preferred_units": preferred_units,
-            "availability_days": availability_days,
-            "preferred_times": preferred_times,
-            "preferred_kacs": kac_ids,
-            "mode": {"mode": mode_in["mode"], "campus_id": mode_in["campus_id"]},
-            "notes": notes,
-            "has_new_prep": has_new_prep,
-            "is_finished": bool(payload.get("is_finished", True)),
-            "submitted_at": _now_dt(),
-        }
+    # Join for return
+    kacs = [k async for k in db[COL_KACS].find(
+      {"kac_id": {"$in": kac_ids}},
+      {"_id":0,"kac_id":1,"kac_code":1,"kac_name":1}
+    )]
+    camp = None
+    if doc["mode"].get("campus_id"):
+      camp = await db[COL_CAMPUSES].find_one(
+        {"campus_id": doc["mode"]["campus_id"]},
+        {"_id":0,"campus_name":1}
+      )
+    active = await _active_term()
 
-        await db[COL_PREFS].update_one(
-            {"faculty_id": fac["faculty_id"], "term_id": term_id},
-            {"$set": doc},
-            upsert=True,
-        )
+    return {"ok": True, "preference": {
+      **doc,
+      "preferred_kacs": kacs,
+      "mode": {"mode": doc["mode"]["mode"], "campus_id": doc["mode"]["campus_id"], "campus_name": (camp or {}).get("campus_name","")},
+      "term_number": active.get("term_number"),
+      "acad_year_start": active.get("acad_year_start"),
+    }}
 
-        # Join for display-return (include kac_name)
-        kacs = [k async for k in db[COL_KACS].find(
-            {"kac_id": {"$in": kac_ids}},
-            {"_id": 0, "kac_id": 1, "kac_code": 1, "kac_name": 1}
-        )]
-        camp = None
-        if doc["mode"].get("campus_id"):
-            camp = await db[COL_CAMPUSES].find_one(
-                {"campus_id": doc["mode"]["campus_id"]},
-                {"_id": 0, "campus_name": 1}
-            )
-        active = await _active_term()
-
-        return {"ok": True, "preference": {
-            **doc,
-            "preferred_kacs": kacs,
-            "mode": {"mode": doc["mode"]["mode"], "campus_id": doc["mode"]["campus_id"], "campus_name": (camp or {}).get("campus_name", "")},
-            "term_number": active.get("term_number"),
-            "acad_year_start": active.get("acad_year_start"),
-        }}
-
-    raise HTTPException(status_code=400, detail="Invalid action parameter.")
+  raise HTTPException(status_code=400, detail="Invalid action parameter.")

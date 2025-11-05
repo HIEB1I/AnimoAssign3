@@ -1,6 +1,6 @@
 // frontend/src/pages/FACULTY/FAC_Preferences.tsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { CalendarDays, MapPin, Monitor, BookOpen, Settings, Plus, X } from "lucide-react";
+import { CalendarDays, MapPin, Monitor, BookOpen, Settings } from "lucide-react";
 import {
   getFacultyPreferencesProfile,
   getFacultyPreferencesOptions,
@@ -398,6 +398,18 @@ const OPT = {
 /* ---------- types & local state ---------- */
 type DeloadRow = { type: string; units: number | null };
 
+/* NEW: define the missing types used by the editor */
+type DeloadingType = "Administrative" | "Research" | "Others";
+
+type DeloadingEntry = {
+  id: string;
+  type: DeloadingType | "";
+  units: number | null;
+  adminSubtype?: string;
+  otherText?: string;
+  researchRemarks?: string;
+};
+
 type SavedPrefs = {
   prefUnits: string;
   maxUnits: string;
@@ -408,7 +420,7 @@ type SavedPrefs = {
   campus: string;
   delivery: string;
   kac: KACKey[] | string[];
-  courses: string[];
+  courses: string[]; // ← now persisted via preferred_courses
   remarks: string;
 };
 
@@ -544,8 +556,92 @@ function Pills({ items }: { items: string[] }) {
   );
 }
 
+/* ---------- AE Line 1 Schedule (same as old file) ---------- */
+function AELine1Schedule() {
+  const ML = [
+    { trip: "AE 101", etd: "6:00 AM" },
+    { trip: "AE 102", etd: "7:30 AM" },
+    { trip: "AE 103", etd: "9:30 AM" },
+    { trip: "AE 104", etd: "11:00 AM" },
+    { trip: "AE 105", etd: "1:00 PM" },
+    { trip: "AE 106", etd: "2:30 PM" },
+    { trip: "AE 107", etd: "3:30 PM" },
+    { trip: "AE 108", etd: "5:10 PM" },
+    { trip: "AE 109", etd: "6:15 PM" },
+    { trip: "AE 110", etd: "7:45 PM" },
+  ];
+  const LM = [
+    { trip: "AE 151", etd: "5:45 AM" },
+    { trip: "AE 152", etd: "6:15 AM" },
+    { trip: "AE 153", etd: "7:00 AM" },
+    { trip: "AE 154", etd: "8:00 AM" },
+    { trip: "AE 155", etd: "9:00 AM" },
+    { trip: "AE 156", etd: "11:00 AM" },
+    { trip: "AE 157", etd: "1:00 PM" },
+    { trip: "AE 158", etd: "2:30 PM" },
+    { trip: "AE 159", etd: "3:30 PM" },
+    { trip: "AE 160", etd: "5:10 PM" },
+    { trip: "AE 161", etd: "6:15 PM" },
+    { trip: "AE 162", etd: "7:45 PM" },
+  ];
+  const rows = Math.max(ML.length, LM.length);
+  const get = (arr: { trip: string; etd: string }[], i: number) => arr[i] ?? { trip: "", etd: "" };
+
+  return (
+    <div className="overflow-hidden rounded-xl border border-neutral-200 bg-white text-[11px]">
+      <div className="bg-emerald-700 px-3 py-2 text-center font-semibold text-white">
+        <div className="text-xs font-bold leading-tight">DLSU – Laguna Campus</div>
+        <div className="mt-1 inline-block rounded px-2 py-0.5 text-[10px] font-extrabold tracking-wide bg-amber-300 text-emerald-900">
+          ARROWS EXPRESS
+        </div>
+        <div className="mt-1 text-[11px]">LINE 1 SCHEDULE</div>
+        <div className="text-[11px]">Monday – Saturday</div>
+      </div>
+
+      <div className="grid grid-cols-2 border-b border-neutral-300 bg-neutral-50 text-center text-[11px] font-semibold text-neutral-800">
+        <div className="border-r border-neutral-300 px-2 py-2">MANILA &gt; LAGUNA</div>
+        <div className="px-2 py-2">LAGUNA &gt; MANILA</div>
+      </div>
+
+      <table className="w-full text-[11px]">
+        <thead>
+          <tr className="bg-neutral-100 text-center text-[11px] text-neutral-800">
+            <th className="border-r border-neutral-300 px-2 py-1.5 font-semibold">Trip Number</th>
+            <th className="border-r border-neutral-300 px-2 py-1.5 font-semibold">ETD</th>
+            <th className="border-r border-neutral-300 px-2 py-1.5 font-semibold">Trip Number</th>
+            <th className="px-2 py-1.5 font-semibold">ETD</th>
+          </tr>
+        </thead>
+        <tbody>
+          {Array.from({ length: rows }).map((_, i) => {
+            const L = get(ML, i);
+            const R = get(LM, i);
+            return (
+              <tr key={i} className="odd:bg-white even:bg-neutral-50">
+                <td className="border-t border-r border-neutral-300 px-2 py-1.5 align-top text-center">{L.trip || "\u00A0"}</td>
+                <td className="border-t border-r border-neutral-300 px-2 py-1.5 align-top text-center">{L.etd || "\u00A0"}</td>
+                <td className="border-t border-r border-neutral-300 px-2 py-1.5 align-top text-center">{R.trip || "\u00A0"}</td>
+                <td className="border-t border-neutral-300 px-2 py-1.5 align-top text-center">{R.etd || "\u00A0"}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+
+      <div className="grid grid-cols-2 border-t border-neutral-300 bg-neutral-50 text-[10px]">
+        <div className="border-r border-neutral-300 px-2 py-2">
+          <span className="font-semibold">Pick-Up Point :</span> Southgate (LS Bldg.)
+        </div>
+        <div className="px-2 py-2">
+          <span className="font-semibold">Pick-Up Point :</span> East Canopy (MRR Bldg.)
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ===========================
-   EDIT FORM (moved to top-level)
+   EDIT FORM (top-level)
    =========================== */
 function EditForm({
   initial,
@@ -563,6 +659,65 @@ function EditForm({
   const [form, setForm] = useState<SavedPrefs>(initial);
   const { past: deadlinePassed } = useCountdown(deadlineISO);
 
+  // ---------- Deloading (rich UI) local state ----------
+  const [deloadingEntries, setDeloadingEntries] = useState<DeloadingEntry[]>(
+    () =>
+      form.noDeloading
+        ? []
+        : (form.deloadings || []).map((d, i) => ({
+            id: `d${i + 1}`,
+            type: (d.type as DeloadingType) || "",
+            units: d.units ?? null,
+          }))
+  );
+
+  const [deloadErrors, setDeloadErrors] = useState<Record<string, string>>({});
+  const setRowError = (id: string, msg: string) =>
+    setDeloadErrors((prev) => (msg ? { ...prev, [id]: msg } : (({ [id]: _, ...rest }) => rest)(prev)));
+
+  const isOtherish = (t: DeloadingType | "") => t === "Others";
+
+  const addDeloading = () =>
+    setDeloadingEntries((rows) => [
+      ...rows,
+      { id: crypto.randomUUID(), type: "", units: null, adminSubtype: "", otherText: "" },
+    ]);
+
+  const updateDeloading = (id: string, patch: Partial<DeloadingEntry>) =>
+    setDeloadingEntries((rows) => rows.map((r) => (r.id === id ? { ...r, ...patch } : r)));
+
+  const removeDeloading = (id: string) => {
+    setDeloadingEntries((rows) => rows.filter((r) => r.id !== id));
+    setRowError(id, "");
+  };
+
+  const validateDeloading = () => {
+    const next: Record<string, string> = {};
+    for (const d of deloadingEntries) {
+      if (!d.type) next[d.id] = "Please select a deloading type.";
+      if (isOtherish(d.type) && !d.otherText?.trim())
+        next[d.id] = (next[d.id] ? next[d.id] + " " : "") + "Please specify the ‘Other’ deloading type.";
+      if (d.type === "Administrative" && !d.adminSubtype?.trim())
+        next[d.id] = (next[d.id] ? next[d.id] + " " : "") + "Please specify the Admin Deloading Type.";
+      if (d.units == null || Number.isNaN(d.units))
+        next[d.id] = (next[d.id] ? next[d.id] + " " : "") + "Units are required.";
+      else if (d.type === "Research" && (d.units < 0 || d.units > 9))
+        next[d.id] = (next[d.id] ? next[d.id] + " " : "") + "Research units must be between 0 and 9.";
+      else if (d.units < 0)
+        next[d.id] = (next[d.id] ? next[d.id] + " " : "") + "Units cannot be negative.";
+    }
+    setDeloadErrors(next);
+    return Object.keys(next).length === 0;
+  };
+
+  // convert richer UI entries -> simple {type, units} array for payload
+  const materializeDeloadings = () =>
+    form.noDeloading
+      ? []
+      : deloadingEntries
+          .filter((d) => d.type && d.units != null)
+          .map((d) => ({ type: d.type, units: d.units ?? 0 }));
+
   const availableCourses = useMemo(
     () => (form.kac.length ? form.kac.flatMap((k) => KAC_COURSES[k as KACKey] ?? []) : []),
     [form.kac]
@@ -573,21 +728,12 @@ function EditForm({
   }, [availableCourses]);
 
   function toggleInArray(arr: string[], value: string): string[] {
-    return arr.includes(value) ? arr.filter((v: string) => v !== value) : [...arr, value];
+    return arr.includes(value) ? arr.filter((v) => v !== value) : [...arr, value];
   }
   const toggleMulti = (key: "days" | "timeSlots" | "courses", value: string) =>
     setForm((f) => ({ ...f, [key]: toggleInArray(f[key] as string[], value) }));
 
-  const addDeload = () =>
-    setForm((f) => ({
-      ...f,
-      noDeloading: false,
-      deloadings: [...f.deloadings, { type: OPT.deloading[0], units: 0 }],
-    }));
-
-  const removeDeload = (idx: number) =>
-    setForm((f) => ({ ...f, deloadings: f.deloadings.filter((_, i) => i !== idx) }));
-
+  // NOTE: previously this added a blank right column. Removed — no space unless we actually render AE content.
   const showAE = ["Laguna Campus", "Either Campus"].includes(form.campus);
 
   return (
@@ -710,80 +856,193 @@ function EditForm({
             </div>
           </div>
 
-          {/* deloading */}
-          <div className="grid grid-cols-1 gap-4">
-            <div>
-              <div className="mb-1 flex items-center justify-between">
-                <label className="block text-sm font-medium">Deloading</label>
-                <label className="flex items-center gap-2 text-xs">
-                  <input
-                    type="checkbox"
-                    className="accent-emerald-700"
-                    checked={form.noDeloading}
-                    onChange={(e) =>
-                      setForm((f) => ({
-                        ...f,
-                        noDeloading: e.target.checked,
-                        deloadings: e.target.checked
-                          ? []
-                          : f.deloadings.length
-                          ? f.deloadings
-                          : [{ type: OPT.deloading[0], units: 0 }],
-                      }))
+          {/* Deloading (rich UI -> saved as {type, units}) */}
+          <div className="space-y-3">
+            <div className="flex items-center justify-between">
+              <label className="block text-sm font-medium">Deloading</label>
+              <label className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  className="accent-emerald-700"
+                  checked={form.noDeloading}
+                  onChange={(e) => {
+                    setForm((f) => ({ ...f, noDeloading: e.target.checked }));
+                    if (e.target.checked) {
+                      setDeloadingEntries([]);
+                      setDeloadErrors({});
                     }
-                  />
-                  I have no deloading
-                </label>
+                  }}
+                />
+                I have no deloading
+              </label>
+            </div>
+
+            <div className="rounded-xl border border-neutral-200">
+              <div className="flex items-center justify-between border-b border-neutral-200 p-3">
+                <div className="text-sm text-neutral-600">
+                  Add entries for each deloading type you have (Administrative, Research, Others).
+                </div>
+                <button
+                  type="button"
+                  disabled={form.noDeloading}
+                  onClick={addDeloading}
+                  className={cls(
+                    "inline-flex h-8 items-center justify-center rounded-[10px] px-3 text-sm shadow",
+                    form.noDeloading ? "bg-neutral-200 text-neutral-500 cursor-not-allowed" : "bg-emerald-700 text-white hover:brightness-110"
+                  )}
+                >
+                  Add Deloading
+                </button>
               </div>
 
-              <div className={cls("space-y-2", form.noDeloading && "opacity-60 pointer-events-none")}>
-                {form.deloadings.map((row, i) => (
-                  <div key={`${i}-${row.type}`} className="grid grid-cols-[1fr_140px_36px] items-center gap-2">
-                    <Dropdown
-                      value={row.type}
-                      onChange={(v) =>
-                        setForm((f) => {
-                          const copy = [...f.deloadings];
-                          copy[i] = { ...copy[i], type: v };
-                          return { ...f, deloadings: copy };
-                        })
-                      }
-                      options={OPT.deloading as unknown as string[]}
-                    />
-                    <input
-                      type="number"
-                      min={0}
-                      step={1}
-                      className="w-full rounded-xl border border-neutral-300 bg-white px-3 py-2.5 text-sm shadow-sm outline-none"
-                      placeholder="Units"
-                      value={row.units ?? ""}
-                      onChange={(e) =>
-                        setForm((f) => {
-                          const copy = [...f.deloadings];
-                          copy[i] = {
-                            ...copy[i],
-                            units: e.target.value === "" ? null : Number(e.target.value),
-                          };
-                          return { ...f, deloadings: copy };
-                        })
-                      }
-                    />
-                    <button
-                      aria-label="Remove"
-                      onClick={() => removeDeload(i)}
-                      className="inline-flex h-9 w-9 items-center justify-center rounded-[10px] border border-neutral-200 bg-neutral-50 text-neutral-700 hover:bg-neutral-100 active:translate-y-[0.5px]"
-                    >
-                      <X className="h-4 w-4" />
-                    </button>
-                  </div>
-                ))}
+              <div className="divide-y divide-neutral-200">
+                {deloadingEntries.length === 0 && !form.noDeloading && (
+                  <div className="p-4 text-sm text-neutral-500">No deloading entries yet.</div>
+                )}
 
-                <button
-                  onClick={addDeload}
-                  className="mt-1 inline-flex h-8 items-center gap-2 rounded-[10px] border border-orange-300 bg-orange-50 px-3 text-xs font-medium text-orange-700 hover:bg-orange-100 active:translate-y-[0.5px]"
-                >
-                  <Plus className="h-4 w-4" /> Add deloading
-                </button>
+                {deloadingEntries.map((d) => {
+                  const err = deloadErrors[d.id];
+                  const isResearch = d.type === "Research";
+                  const showAdminSubtype = d.type === "Administrative";
+                  const showOtherText = d.type === "Others";
+                  return (
+                    <div key={d.id} className="p-4">
+                      <div className="grid grid-cols-1 gap-3 sm:grid-cols-12">
+                        {/* Type */}
+                        <div className="sm:col-span-4">
+                          <label className="mb-1 block text-sm font-medium">
+                            Type <span className="text-red-600">*</span>
+                          </label>
+                          <Dropdown
+                            value={d.type}
+                            onChange={(v) => {
+                              const t = v as DeloadingType;
+                              updateDeloading(d.id, {
+                                type: t,
+                                adminSubtype: t === "Administrative" ? (d.adminSubtype ?? "") : "",
+                                otherText: isOtherish(t) ? (d.otherText ?? "") : "",
+                                researchRemarks: t === "Research" ? (d.researchRemarks ?? "") : "",
+                              });
+                              setRowError(d.id, "");
+                            }}
+                            options={["Administrative", "Research", "Others"]}
+                          />
+                        </div>
+
+                        {/* Detail column */}
+                        <div className="sm:col-span-4">
+                          {showAdminSubtype && (
+                            <>
+                              <label className="mb-1 block text-sm font-medium">
+                                Admin Deloading Type <span className="text-red-600">*</span>
+                              </label>
+                              <input
+                                type="text"
+                                className={cls(
+                                  "w-full rounded-xl border bg-white px-3 py-2.5 text-sm shadow-sm outline-none",
+                                  err ? "border-red-300" : "border-neutral-300"
+                                )}
+                                placeholder="e.g., Program Chair, Coordinator"
+                                value={d.adminSubtype ?? ""}
+                                onChange={(e) => {
+                                  updateDeloading(d.id, { adminSubtype: e.target.value });
+                                  setRowError(d.id, "");
+                                }}
+                              />
+                            </>
+                          )}
+
+                          {showOtherText && (
+                            <>
+                              <label className="mb-1 block text-sm font-medium">
+                                Specify <span className="text-red-600">*</span>
+                              </label>
+                              <input
+                                type="text"
+                                className={cls(
+                                  "w-full rounded-xl border bg-white px-3 py-2.5 text-sm shadow-sm outline-none",
+                                  err ? "border-red-300" : "border-neutral-300"
+                                )}
+                                placeholder="Describe the deloading type"
+                                value={d.otherText ?? ""}
+                                onChange={(e) => {
+                                  updateDeloading(d.id, { otherText: e.target.value });
+                                  setRowError(d.id, "");
+                                }}
+                              />
+                            </>
+                          )}
+
+                          {isResearch && (
+                            <>
+                              <label className="mb-1 block text-sm font-medium">Research Remarks</label>
+                              <input
+                                type="text"
+                                className={cls(
+                                  "w-full rounded-xl border bg-white px-3 py-2.5 text-sm shadow-sm outline-none",
+                                  err ? "border-red-300" : "border-neutral-300"
+                                )}
+                                placeholder="e.g., Project name or focus"
+                                value={d.researchRemarks ?? ""}
+                                onChange={(e) => {
+                                  updateDeloading(d.id, { researchRemarks: e.target.value });
+                                  setRowError(d.id, "");
+                                }}
+                              />
+                            </>
+                          )}
+
+                          {!showAdminSubtype && !showOtherText && !isResearch && (
+                            <div className="h-[40px] sm:h-[42px]" aria-hidden />
+                          )}
+                        </div>
+
+                        {/* Units */}
+                        <div className="sm:col-span-3">
+                          <label className="mb-1 block text-sm font-medium">
+                            Units <span className="text-red-600">*</span>
+                          </label>
+                          <input
+                            type="number"
+                            min={0}
+                            max={isResearch ? 9 : undefined}
+                            step={1}
+                            className={cls(
+                              "w-full rounded-xl border bg-white px-3 py-2.5 text-sm shadow-sm outline-none",
+                              err ? "border-red-300" : "border-neutral-300"
+                            )}
+                            placeholder="Enter units"
+                            value={d.units ?? ""}
+                            onChange={(e) => {
+                              const val = e.target.value === "" ? null : Number(e.target.value);
+                              updateDeloading(d.id, { units: val });
+                              if (val == null) setRowError(d.id, "");
+                              else if (isResearch && (val < 0 || val > 9)) setRowError(d.id, "Research units must be between 0 and 9.");
+                              else if (val < 0) setRowError(d.id, "Units cannot be negative.");
+                              else setRowError(d.id, "");
+                            }}
+                          />
+                        </div>
+
+                        {/* Remove */}
+                        <div className="sm:col-span-1">
+                          <label className="mb-1 block text-sm font-medium invisible">Remove</label>
+                          <div className="flex items-center justify-end">
+                            <button
+                              type="button"
+                              onClick={() => removeDeloading(d.id)}
+                              className="inline-flex h-9 items-center justify-center rounded-[10px] border border-neutral-200 bg-neutral-50 px-3 text-sm hover:bg-neutral-100"
+                            >
+                              Remove
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+
+                      {err && <div className="mt-2 text-sm text-red-600">{err}</div>}
+                    </div>
+                  );
+                })}
               </div>
             </div>
           </div>
@@ -810,7 +1069,10 @@ function EditForm({
             </button>
             <button
               disabled={deadlinePassed}
-              onClick={() => onDraft(form)}
+              onClick={() => {
+                if (!form.noDeloading && !validateDeloading()) return;
+                onDraft({ ...form, deloadings: materializeDeloadings() });
+              }}
               className={cls(
                 "inline-flex h-9 items-center justify-center rounded-xl px-4 text-sm font-medium shadow active:translate-y-[0.5px]",
                 deadlinePassed ? "cursor-not-allowed bg-orange-200 text-white" : "bg-orange-500 text-white hover:brightness-110"
@@ -821,7 +1083,10 @@ function EditForm({
             </button>
             <button
               disabled={deadlinePassed}
-              onClick={() => onSave(form)}
+              onClick={() => {
+                if (!form.noDeloading && !validateDeloading()) return;
+                onSave({ ...form, deloadings: materializeDeloadings() });
+              }}
               className={cls(
                 "inline-flex h-9 items-center justify-center rounded-xl px-4 text-sm font-medium text-white shadow active:translate-y-[0.5px]",
                 deadlinePassed ? "cursor-not-allowed bg-emerald-300" : "bg-[#1F7A49] hover:brightness-[1.06]"
@@ -833,8 +1098,11 @@ function EditForm({
           </div>
         </div>
 
-        {/* Right column (reserved) */}
-        {showAE && <div className="hidden lg:block" />}
+        {showAE && (
+          <div className="block">
+            <AELine1Schedule />
+          </div>
+        )}
       </div>
     </div>
   );
@@ -852,15 +1120,13 @@ export default function FAC_Preferences() {
   const raw = JSON.parse(localStorage.getItem("animo.user") || "{}");
   const userId = raw.userId || raw.user_id || raw.id;
 
-  const [facultyId, setFacultyId] = useState<string | null>(null);
-
-  // Manila time deadline placeholder (banner)
+  // const [facultyId, setFacultyId] = useState<string | null>(null); // not used in UI
   const DEADLINE_ISO = "2025-11-15T17:00:00+08:00";
   const { past: deadlinePassedPage } = useCountdown(DEADLINE_ISO);
 
   // convert server response -> SavedPrefs
   function fromServerToSaved(latest: any): SavedPrefs {
-    const asArray = Array.isArray(latest?.deloading_data)
+    const deloadArr = Array.isArray(latest?.deloading_data)
       ? latest.deloading_data
       : latest?.deloading_data
       ? [latest.deloading_data]
@@ -868,13 +1134,13 @@ export default function FAC_Preferences() {
     return {
       prefUnits: String(latest?.preferred_units ?? 3),
       maxUnits: "15",
-      deloadings: asArray
+      deloadings: deloadArr
         .map((d: any) => ({
           type: d?.deloading_type ?? "Administrative",
           units: d?.units != null ? Number(d.units) : null,
         }))
         .filter((x: any) => x.type || x.units != null),
-      noDeloading: asArray.length === 0,
+      noDeloading: deloadArr.length === 0,
       days: expandDays(latest?.availability_days ?? []),
       timeSlots: Array.isArray(latest?.preferred_times) ? latest.preferred_times : [],
       campus: (() => {
@@ -894,7 +1160,8 @@ export default function FAC_Preferences() {
       kac: (latest?.preferred_kacs || [])
         .map((k: any) => k?.kac_name || k?.kac_code || k?.kac_id)
         .filter(Boolean),
-      courses: [], // not persisted today
+      // NEW: preferred_courses from server -> saved.courses
+      courses: Array.isArray(latest?.preferred_courses) ? latest.preferred_courses : [],
       remarks: latest?.notes ?? "",
     };
   }
@@ -907,7 +1174,7 @@ export default function FAC_Preferences() {
           getFacultyPreferencesProfile(userId),
           getFacultyPreferencesOptions(userId),
         ]);
-        setFacultyId(profile?.faculty_id || null);
+        // setFacultyId(profile?.faculty_id || null);
         setKacOptions((opts?.kacs || []) as any);
 
         const list = await getFacultyPreferencesList(userId);
@@ -960,18 +1227,25 @@ export default function FAC_Preferences() {
     preferred_units: Number(v.prefUnits),
     availability_days: compressDays(v.days),
     preferred_times: v.timeSlots,
-    preferred_kacs: (v.kac || []).map(nameToId),   // send IDs
-    mode: toModeObject(v),                         // single object
+    preferred_kacs: (v.kac || []).map(nameToId),     // send IDs
+    preferred_courses: v.courses,                    // NEW: persist courses
+    deloading_data: v.noDeloading
+      ? []
+      : (v.deloadings || [])
+          .filter((r) => r && r.type)
+          .map((r) => ({ deloading_type: r.type, units: r.units ?? 0 })), // NEW: persist deloading
+    mode: toModeObject(v),                           // single object
     notes: v.remarks,
     has_new_prep: false,
     is_finished: finished,
   });
 
-  async function afterSubmitRefresh(res: any) {
+  // ⬇️ CHANGE: Always refresh the Saved panel — even on drafts.
+  async function afterSubmitRefresh(res: any, _isFinal: boolean) {
     if (res?.ok && res?.preference) {
       const normalized = fromServerToSaved(res.preference);
-      setSaved(normalized);
-      setOpenEdit(false);
+      setSaved(normalized);          // ← update Saved panel for both Draft and Submit
+      setOpenEdit(false);            // close editor
       return;
     }
     throw new Error(res?.detail || "Save failed.");
@@ -981,7 +1255,7 @@ export default function FAC_Preferences() {
     try {
       const payload = toServerPayload(v, true);
       const res = await submitFacultyPreferences(userId, payload);
-      await afterSubmitRefresh(res);
+      await afterSubmitRefresh(res, true); // SUBMIT
     } catch (e: any) {
       alert(e?.response?.data?.detail || e?.message || "Failed to save preferences.");
     }
@@ -991,7 +1265,8 @@ export default function FAC_Preferences() {
     try {
       const payload = toServerPayload(v, false);
       const res = await submitFacultyPreferences(userId, payload);
-      await afterSubmitRefresh(res);
+      await afterSubmitRefresh(res, false); // DRAFT now also refreshes Saved panel
+      alert("Draft saved.");
     } catch (e: any) {
       alert(e?.response?.data?.detail || e?.message || "Failed to save draft.");
     }
@@ -1116,6 +1391,7 @@ export default function FAC_Preferences() {
                 )
               }
             />
+            {/* NEW: saved.courses now shown */}
             <Row label="Preferred Courses" value={<Pills items={saved.courses} />} />
           </div>
 
