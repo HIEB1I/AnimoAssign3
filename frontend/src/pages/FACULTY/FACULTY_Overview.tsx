@@ -13,6 +13,11 @@ import HistoryMain from "./FACULTY_History";
 import PreferencesContent from "./FACULTY_Preferences";
 import { InboxContent } from "./FACULTY_Inbox";
 
+// FACULTY_Overview.tsx (top of file)
+import { getActiveRole, setActiveRole, userIsChair } from "@/api";
+import { useNavigate } from "react-router-dom";
+
+
 /* =========================================
    0) Page
    ========================================= */
@@ -21,6 +26,18 @@ export default function FAC_Overview() {
   const [showInbox, setShowInbox] = useState(false); // NEW
   const [data, setData] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
+
+  const navigate = useNavigate();
+
+  // show only if: user is a chair AND they’re currently browsing as “faculty”
+  const canReturnToChair = userIsChair() && getActiveRole() === "faculty";
+
+  useEffect(() => {
+  if (userIsChair() && !getActiveRole()) {
+        setActiveRole("faculty");
+      }
+    }, []);
+
 
   // Expose a global helper so other components can open the inbox if needed
   useEffect(() => {
@@ -93,6 +110,21 @@ export default function FAC_Overview() {
         /* No need to pass handlers; we use window events */
       />
 
+      {canReturnToChair && (
+        <button
+          onClick={() => {
+            setActiveRole("chair");
+            navigate("/chair"); // cleaner landing to chair shell
+          }}
+          className="fixed bottom-4 right-4 z-[1000] rounded-full px-4 py-2 shadow-lg bg-emerald-600 text-white hover:bg-emerald-700 focus:outline-none"
+          aria-label="Back to Chair View"
+        >
+          Back to Chair View
+        </button>
+      )}
+
+
+
       {/* Hide Overview/History/Preferences when Inbox is open */}
       {!showInbox && (
         <Tabs
@@ -103,7 +135,7 @@ export default function FAC_Overview() {
         />
       )}
 
-      <main className="w-full p-6">
+      <main className="w-full p-6 pb-24"> 
         {/* If Inbox was requested via the TopBar icon, render it "like a tab" */}
         {showInbox ? (
           <InboxContent />

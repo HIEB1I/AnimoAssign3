@@ -1426,3 +1426,87 @@ export async function fetchOmRpFacultyTeachingHistory(params: {
     meta?: { academicYears?: number[] };
   }>;
 }
+
+/* =========================================================
+   ===============  CHAIR: MODULES (placeholders)  =========
+   ========================================================= */
+
+export async function getChairHeader(userId?: string) {
+  const params = new URLSearchParams();
+  if (userId) params.set("userId", userId);
+  params.set("action", "header");
+  const r = await fetch(join(API_BASE, `chair/plantilla?${params.toString()}`));
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+export async function chairFacultyList(userId: string) {
+  const { data } = await api.post(`/chair/faculty-management`, {}, {
+    params: { userId, action: "fetch" },
+  });
+  return data as { ok: boolean; rows: any[] };
+}
+
+export async function chairCourseList(userId: string) {
+  const { data } = await api.post(`/chair/course-management`, {}, {
+    params: { userId, action: "fetch" },
+  });
+  return data as { ok: boolean; rows: any[] };
+}
+
+export async function chairFacultyService(userId: string) {
+  const { data } = await api.post(`/chair/faculty-service`, {}, {
+    params: { userId, action: "fetch" },
+  });
+  return data as { ok: boolean; services: any[] };
+}
+
+export async function chairClassRetention(userId: string) {
+  const { data } = await api.post(`/chair/class-retention`, {}, {
+    params: { userId, action: "fetch" },
+  });
+  return data as { ok: boolean; rows: any[] };
+}
+
+export async function chairStudentPetitions(userId: string) {
+  const { data } = await api.post(`/chair/student-petitions`, {}, {
+    params: { userId, action: "fetch" },
+  });
+  return data as { ok: boolean; rows: any[] };
+}
+
+// ===== Role switching helpers (frontend only) =====
+export type ActiveRole = "chair" | "faculty";
+
+export function getActiveRole(): ActiveRole | null {
+  try {
+    const v = localStorage.getItem("animo.activeRole");
+    return (v === "chair" || v === "faculty") ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+export function setActiveRole(role: ActiveRole) {
+  try {
+    localStorage.setItem("animo.activeRole", role);
+  } catch {}
+}
+
+export function userHasRole(role: string): boolean {
+  try {
+    const u = JSON.parse(localStorage.getItem("animo.user") || "null");
+    const roles: string[] = Array.isArray(u?.roles) ? u.roles.map((r:string)=>r.toLowerCase()) : [];
+    return roles.includes(role.toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
+export function userIsChair(): boolean {
+  try {
+    const u = JSON.parse(localStorage.getItem("animo.user") || "null");
+    const roles: string[] = Array.isArray(u?.roles) ? u.roles : [];
+    return roles.some(r => /chair/i.test(String(r)));
+  } catch { return false; }
+}
