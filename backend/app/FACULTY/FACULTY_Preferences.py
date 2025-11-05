@@ -14,9 +14,10 @@ COL_TERMS = "terms"
 COL_KACS = "kacs"
 COL_CAMPUSES = "campuses"
 
-TIME_BANDS = ["07:30 - 09:00", "09:15 - 10:45", "11:00 - 12:30", "12:30 - 14:15", "14:30 - 16:00", "16:15 - 17:45", "18:00 - 19:30", "19:45 - 21:00"]
-DAYS = ["MTH", "TF", "WS", "SAT"]  # minimal example; adjust as needed
-MODES = ["HYB", "ONL", "FTF"]
+# canonical bands (match UI)
+TIME_BANDS = ["07:30 - 09:00", "09:15 - 10:45", "11:00 - 12:30", "12:45 - 14:15", "14:30 - 16:00", "16:15 - 17:45", "18:00 - 19:30", "19:45 - 21:00"]
+DAYS = ["MTH", "TF", "WS", "SAT"]  # minimal example; UI expands anyway
+MODES = ["HYB", "ONL", "F2F"]  # use F2F, not FTF
 
 def _now_dt() -> datetime:
     return datetime.now(timezone.utc)
@@ -42,13 +43,13 @@ async def _next_pref_id() -> str:
     return f"PREF{seq:04d}"
 
 async def _resolve_kacs(codes_or_ids: List[str]) -> List[str]:
-    """Accept either kac_id or kac_code; return list of kac_id strings."""
+    """Accept kac_id OR kac_code; return list of kac_id strings."""
     if not codes_or_ids:
         return []
     q: List[Dict[str, Any]] = []
     for v in codes_or_ids:
         v = str(v).strip()
-        if not v: 
+        if not v:
             continue
         q.append({"kac_id": v})
         q.append({"kac_code": v})
@@ -57,6 +58,62 @@ async def _resolve_kacs(codes_or_ids: List[str]) -> List[str]:
     async for row in cur:
         ids.add(row.get("kac_id"))
     return list(ids)
+
+def _norm_mode(mode_in: Any) -> Dict[str, str]:
+    """
+    Accept dict or array of dicts with 'mode' & 'campus_id'.
+    Normalize codes to HYB/ONL/F2F and campus_id to str.
+    """
+    if isinstance(mode_in, list) and mode_in:
+        mode_in = mode_in[0]
+    if not isinstance(mode_in, dict):
+        mode_in = {}
+    m = str(mode_in.get("mode") or "HYB").upper()
+    # Accept FTF → F2F
+    if m == "FTF":
+        m = "F2F"
+    if m not in {"HYB", "ONL", "F2F"}:
+        m = "HYB"
+    cid = str(mode_in.get("campus_id") or "")
+    return {"mode": m, "campus_id": cid}
+
+def _canon_time_band(s: str) -> Optional[str]:
+    """
+    Normalize variants like '1245-1415' or '12:45-14:15' to '12:45 - 14:15'.
+    Return None if empty.
+    """
+    if not s:
+        return None
+    s = str(s).strip()
+    if " - " in s and ":" in s:
+        return s  # already canonical
+    # remove spaces
+    s = s.replace(" ", "")
+    # split by '-' or '–'
+    sep = "-" if "-" in s else "–" if "–" in s else None
+    if not sep:
+        return None
+    a, b = s.split(sep, 1)
+    def fix(t: str) -> Optional[str]:
+        t = t.strip()
+        if ":" in t and len(t) in (4,5):
+            # '7:30' or '07:30'
+            hh, mm = t.split(":")
+            hh = hh.zfill(2)
+            return f"{hh}:{mm}"
+        if len(t) == 4 and t.isdigit():
+            return f"{t[:2]}:{t[2:]}"
+        return None
+    A, B = fix(a), fix(b)
+    return f"{A} - {B}" if A and B else None
+
+def _canon_time_list(times: List[Any]) -> List[str]:
+    out: List[str] = []
+    for t in (times or []):
+        ct = _canon_time_band(str(t))
+        if ct:
+            out.append(ct)
+    return out
 
 @router.post("/preferences")
 async def preferences_handler(
@@ -140,10 +197,12 @@ async def preferences_handler(
             raise HTTPException(status_code=400, detail="preferred_units must be a non-negative integer.")
 
         availability_days = list(payload.get("availability_days") or [])
-        preferred_times = list(payload.get("preferred_times") or [])
+        preferred_times_in = list(payload.get("preferred_times") or [])
+        preferred_times = _canon_time_list(preferred_times_in)
+
         preferred_kacs_in = list(payload.get("preferred_kacs") or [])  # codes or ids
         has_new_prep = bool(payload.get("has_new_prep", False))
-        mode_in = payload.get("mode") or {}  # {"mode": "HYB", "campus_id": "..."}
+        mode_in = _norm_mode(payload.get("mode"))  # {"mode": "HYB", "campus_id": "..."}
         notes = str(payload.get("notes") or "")
 
         kac_ids = await _resolve_kacs([str(x) for x in preferred_kacs_in])
@@ -163,7 +222,7 @@ async def preferences_handler(
             "availability_days": availability_days,
             "preferred_times": preferred_times,
             "preferred_kacs": kac_ids,
-            "mode": {"mode": str(mode_in.get("mode") or "HYB"), "campus_id": str(mode_in.get("campus_id") or "")},
+            "mode": {"mode": mode_in["mode"], "campus_id": mode_in["campus_id"]},
             "notes": notes,
             "has_new_prep": has_new_prep,
             "is_finished": bool(payload.get("is_finished", True)),
@@ -188,7 +247,6 @@ async def preferences_handler(
                 {"_id": 0, "campus_name": 1}
             )
         active = await _active_term()
-
 
         return {"ok": True, "preference": {
             **doc,
