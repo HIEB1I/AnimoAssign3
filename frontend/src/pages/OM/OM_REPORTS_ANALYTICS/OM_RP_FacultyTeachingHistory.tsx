@@ -1,218 +1,154 @@
-import { useEffect, useMemo, useState } from "react";
+// frontend/src/pages/OM_RP_FacultyTeachingHistory.tsx
+import React, { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { Search as SearchIcon, ChevronDown, ChevronLeft } from "lucide-react";
-import { fetchOmRpFacultyTeachingHistory } from "../../../api";
+import { Search as SearchIcon, ChevronLeft } from "lucide-react";
+import { fetchTeachingHistory, listFaculty } from "../../../api";
 
-/** ---------------- Tiny utils ---------------- */
-const cls = (...s: (string | false | undefined)[]) => s.filter(Boolean).join(" ");
+/** -----------------------------
+ * Types (unchanged, from OM_desc)
+ * ----------------------------- */
+type Schedule = {
+  day: string;
+  start_time: string;
+  end_time: string;
+  room?: string;
+  room_type?: string | null;
+};
 
-/** ---------------- Minimal Select ---------------- */
-function SelectBox({
-  value,
-  onChange,
-  options,
-  placeholder = "— Select —",
-  className = "min-w-[180px]",
-}: {
-  value: string;
-  onChange: (v: string) => void;
-  options: string[];
-  placeholder?: string;
-  className?: string;
-}) {
-  const [open, setOpen] = useState(false);
+type TeachingHistoryRow = {
+  term_name?: string;
+  course_code?: string;
+  course_title?: string;
+  section_code?: string;
+  units?: number;
+  modality?: string;
+  campus_id?: string;
+  schedule: Schedule[];
+};
+
+/** -----------------------------
+ * Helpers (UI-only)
+ * ----------------------------- */
+function hhmmRange(a?: string, b?: string) {
+  const A = (a || "").trim();
+  const B = (b || "").trim();
+  if (!A && !B) return "";
+  if (A && B) return `${A}–${B}`;
+  return A || B || "";
+}
+
+function flattenSlots(s: Schedule[] = []) {
+  // First two meeting patterns only to fit the table
+  const s1 = s[0];
+  const s2 = s[1];
+  return {
+    day1: s1?.day || "",
+    room1: s1?.room || "",
+    day2: s2?.day || "",
+    room2: s2?.room || "",
+    time: s1 ? hhmmRange(s1.start_time, s1.end_time) : "",
+  };
+}
+
+// Group rows by term label similar to "Term 1/2/3"
+function groupByTerm(rows: TeachingHistoryRow[]) {
+  const groups: Record<string, TeachingHistoryRow[]> = {};
+  for (const r of rows) {
+    const key = r.term_name || "Term 1";
+    if (!groups[key]) groups[key] = [];
+    groups[key].push(r);
+  }
+  return groups;
+}
+
+/** -----------------------------
+ * Main Page (UI refreshed)
+ * ----------------------------- */
+export default function OM_RP_FacultyTeachingHistory() {
   return (
-    <div className={`relative ${className}`}>
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 pr-8 text-left text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30"
-      >
-        {value || <span className="text-gray-400">{placeholder}</span>}
-        <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-4 w-4 -translate-y-1/2" />
-      </button>
+    <div className="w-full px-8 py-8">
+      {/* Header (keep your inherited header + subtitle) */}
+      <h1 className="text-2xl font-bold mb-2">Teaching History of Faculty</h1>
+      <p className="text-sm text-gray-600 mb-6">
+        Historical teaching loads and assignments by faculty member.
+      </p>
 
-      {open && (
-        <div className="absolute z-20 mt-2 max-h-72 w-full overflow-auto rounded-xl border border-gray-300 bg-white shadow-xl">
-          {options.map((opt) => (
-            <button
-              key={opt}
-              onClick={() => {
-                onChange(opt);
-                setOpen(false);
-              }}
-              className={`block w-full px-4 py-2 text-left text-sm hover:bg-emerald-50 ${
-                value === opt ? "bg-emerald-100 text-emerald-800 font-medium" : ""
-              }`}
-            >
-              {opt}
-            </button>
-          ))}
-        </div>
-      )}
+      {/* Ref-styled content */}
+      <TeachingHistorySearch />
     </div>
   );
 }
 
-/** ---------------- Types (replicate FM Teaching History) ---------------- */
-type HistRow = {
-  code: string;
-  title: string;
-  section: string;
-  mode?: string | null;
-  day1?: string | null;
-  room1?: string | null;
-  day2?: string | null;
-  room2?: string | null;
-  time?: string | null;
-  term?: string | null; // "Term 1" | "Term 2" | "Term 3"
-};
-
-// Group rows by Term 1/2/3 exactly like in FM
-function groupHistoryByTerm(rows: HistRow[]) {
-  const groups: Record<string, HistRow[]> = { "Term 1": [], "Term 2": [], "Term 3": [] };
-  rows.forEach((r) => {
-    const t = (r.term as string) || "Term 1";
-    if (!groups[t]) groups[t] = [];
-    groups[t].push(r);
-  });
-  return groups;
-}
-
-/** ---------------- Main ---------------- */
-export default function OM_RP_FacultyTeachingHistory() {
-  // local filters & state
-  const [searchInput, setSearchInput] = useState("");
-  const [search, setSearch] = useState("");
-  const [academicYear, setAcademicYear] = useState<string>(""); // default empty → set to latest AY after first fetch
-  const [openFaculties, setOpenFaculties] = useState<Set<string>>(new Set());
-
-  // data
-  const [rows, setRows] = useState<
-    Array<{
-      faculty_id: string;
-      faculty_name: string;
-      term: string;
-      code: string;
-      title: string;
-      section: string;
-      mode?: string | null;
-      day1?: string | null;
-      room1?: string | null;
-      day2?: string | null;
-      room2?: string | null;
-      time?: string | null;
-      ay_label?: string;
-    }>
-  >([]);
-  const [ayList, setAyList] = useState<number[]>([]);
+/** -----------------------------
+ * Teaching History Search Widget
+ * (UI-only changes; backend call unchanged)
+ * ----------------------------- */
+function TeachingHistorySearch() {
+  const [nameInput, setNameInput] = useState("");
+  const [selectedName, setSelectedName] = useState<string>("");
   const [loading, setLoading] = useState(false);
-  const [err, setErr] = useState<string>("");
+  const [rows, setRows] = useState<TeachingHistoryRow[]>([]);
+  const [error, setError] = useState<string | null>(null);
 
-  // Build AY dropdown (newest first) — NO "All Years"
-  const academicYearOptions = useMemo(() => {
-    const list = [...ayList].sort((a, b) => b - a);
-    return list.map((y) => `AY ${y}–${y + 1}`);
-  }, [ayList]);
+  function pickBestMatch(list: Array<{ faculty_id: string; name: string }>, q: string) {
+    if (!Array.isArray(list) || list.length === 0) return null;
+    const query = q.trim().toLowerCase();
+    // Prefer exact (case-insensitive) name match
+    const exact = list.find((r) => (r.name || "").trim().toLowerCase() === query);
+    if (exact) return exact;
+    // Else first item that contains the query
+    const partial = list.find((r) => (r.name || "").toLowerCase().includes(query));
+    if (partial) return partial;
+    // Fallback to first result
+    return list[0];
+  }
 
-  // Debounce search input to `search` (faculty name only)
-  useEffect(() => {
-    const t = setTimeout(() => setSearch(searchInput.trim()), 250);
-    return () => clearTimeout(t);
-  }, [searchInput]);
+  async function onSearch(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
+    setRows([]);
 
-  // Fetch from analytics (server can also filter by AY & search)
-  useEffect(() => {
-    (async () => {
-      try {
-        setLoading(true);
-        setErr("");
+    const q = (nameInput || "").trim();
+    if (!q) {
+      setError("Enter a faculty name.");
+      return;
+    }
 
-        // parse selected AY → acad_year_start number or undefined (let backend default to latest if undefined)
-        let ayStartNum: number | undefined = undefined;
-        const m = /^AY\s+(\d{4})/.exec(academicYear);
-        if (m) {
-          ayStartNum = parseInt(m[1], 10);
-        }
-
-        const res = await fetchOmRpFacultyTeachingHistory({
-          search: search || undefined, // server will search ONLY by faculty name (see backend change)
-          acad_year_start: ayStartNum,
-        });
-
-        setRows(res?.rows || []);
-        setAyList(res?.meta?.academicYears || []);
-
-        // If we don't have a selected AY yet, pick the latest from the response
-        if (!academicYear && res?.ay_label) {
-          setAcademicYear(res.ay_label);
-        }
-      } catch (e: any) {
-        setErr(e?.message || "Failed to load teaching history.");
+    setLoading(true);
+    try {
+      // 1) Resolve faculty name → faculty_id using OM: Faculty Directory search
+      const list = await listFaculty({ search: q }); // returns { ok, rows: FacultyRow[] }
+      const candidates = Array.isArray(list?.rows) ? list.rows : [];
+      const best = pickBestMatch(
+        candidates.map((r: any) => ({ faculty_id: r.faculty_id, name: r.name })),
+        q
+      );
+      if (!best) {
+        setSelectedName(q);
         setRows([]);
-      } finally {
-        setLoading(false);
+        setError("No matching faculty found.");
+        return;
       }
-    })();
-  }, [search, academicYear]);
 
-  // Client-side filter: enforce selected AY AND search by faculty name only
-  const filteredRows = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    const aySel = academicYear;
-    return (rows || []).filter((r) => {
-      if (aySel && r.ay_label !== aySel) return false; // must match selected AY
-      if (!q) return true;
-      const name = (r.faculty_name || "").toLowerCase();
-      return name.includes(q); // faculty-name-only search
-    });
-  }, [rows, search, academicYear]);
+      // 2) Fetch teaching history by resolved faculty_id
+      const data = await fetchTeachingHistory(best.faculty_id);
+      setRows(Array.isArray(data?.rows) ? data.rows : []);
+      setSelectedName(best.name || q);
+    } catch (err: any) {
+      setRows([]);
+      setSelectedName("");
+      setError(err?.message || "Search failed.");
+    } finally {
+      setLoading(false);
+    }
+  }
 
-  // unique faculty list (alphabetical)
-  const facultyNames = useMemo(() => {
-    const set = new Set((filteredRows || []).map((r) => r.faculty_name || ""));
-    return Array.from(set).sort((a, b) => a.localeCompare(b));
-  }, [filteredRows]);
-
-  // map -> { faculty_name -> HistRow[] } then render by term using FM helper
-  const rowsByFaculty = useMemo(() => {
-    const map = new Map<string, HistRow[]>();
-    (filteredRows || []).forEach((r) => {
-      const key = r.faculty_name || "";
-      if (!map.has(key)) map.set(key, []);
-      map.get(key)!.push({
-        code: r.code,
-        title: r.title,
-        section: r.section,
-        mode: r.mode,
-        day1: r.day1,
-        room1: r.room1,
-        day2: r.day2,
-        room2: r.room2,
-        time: r.time,
-        term: r.term as string,
-      });
-    });
-    return map;
-  }, [filteredRows]);
-
-  const toggleFaculty = (name: string) => {
-    setOpenFaculties((prev) => {
-      const next = new Set(prev);
-      if (next.has(name)) next.delete(name);
-      else next.add(name);
-      return next;
-    });
-  };
+  const grouped = useMemo(() => groupByTerm(rows || []), [rows]);
 
   return (
-    <div className="w-full px-8 py-8">
-      {/* Keep your existing header titles exactly */}
-      <h1 className="text-2xl font-bold mb-2">Teaching History of Faculty</h1>
-      <p className="text-sm text-gray-600 mb-6">Historical teaching loads and assignments by faculty member.</p>
-
-      {/* Filter Bar with Back (left) + Search + AY filter (right) */}
-      <div className="mb-6 flex flex-wrap items-center gap-3 rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
+    <div className="rounded-xl border border-gray-200 bg-white shadow-sm">
+      {/* Filter Bar (Back + Search) — button OUTSIDE the input */}
+      <div className="flex flex-wrap items-center gap-3 p-4 border-b border-gray-200">
         <Link
           to="/om/home/reports-analytics"
           className="inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm shadow-sm hover:bg-gray-50 active:bg-gray-100"
@@ -223,141 +159,138 @@ export default function OM_RP_FacultyTeachingHistory() {
           <span>Back</span>
         </Link>
 
-        <div className="relative flex-1 min-w-[240px]">
-          <SearchIcon className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-500" />
-          <input
-            value={searchInput}
-            onChange={(e) => setSearchInput(e.target.value)}
-            placeholder="Search by faculty name..."
-            className="w-full rounded-lg border border-gray-300 px-9 pr-9 py-2 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30"
-          />
-          {!!searchInput && (
-            <button
-              aria-label="Clear search"
-              title="Clear"
-              onClick={() => setSearchInput("")}
-              className="absolute right-2 top-1/2 -translate-y-1/2 inline-flex h-5 w-5 items-center justify-center rounded-full text-gray-500 hover:bg-gray-100"
-            >
-              ×
-            </button>
-          )}
-        </div>
+        <form onSubmit={onSearch} className="flex items-center gap-2 flex-1 min-w-[320px]">
+          <div className="relative flex-1">
+            <SearchIcon className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-500" />
+            <input
+              value={nameInput}
+              onChange={(e) => setNameInput(e.target.value)}
+              placeholder="Search by faculty name…"
+              className="w-full rounded-lg border border-gray-300 px-9 py-2 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30"
+            />
+            {!!nameInput && (
+              <button
+                type="button"
+                aria-label="Clear search"
+                title="Clear"
+                onClick={() => setNameInput("")}
+                className="absolute right-2 top-1/2 -translate-y-1/2 inline-flex h-5 w-5 items-center justify-center rounded-full text-gray-500 hover:bg-gray-100"
+              >
+                ×
+              </button>
+            )}
+          </div>
 
-        <SelectBox
-          value={academicYear}
-          onChange={setAcademicYear}
-          options={academicYearOptions}
-          placeholder="Select Academic Year"
-        />
+          {/* Search button OUTSIDE the input box */}
+          <button
+            type="submit"
+            disabled={loading}
+            className={`rounded-lg border px-4 py-2 text-sm font-semibold ${
+              loading
+                ? "cursor-default border-emerald-200 bg-emerald-200 text-emerald-900"
+                : "cursor-pointer border-emerald-500 bg-emerald-400 text-emerald-950 hover:bg-emerald-300"
+            }`}
+          >
+            {loading ? "Searching…" : "Search"}
+          </button>
+        </form>
       </div>
 
-      {/* Faculty list (alphabetical). Each item is expandable. */}
-      <div className="rounded-xl border border-gray-200 bg-white divide-y">
-        {err && <div className="p-4 text-sm text-red-700 bg-red-50 border-b border-red-200">{err}</div>}
-        {loading && <div className="p-6 text-center text-sm text-gray-500">Loading…</div>}
-        {!loading && facultyNames.length === 0 && (
-          <div className="p-6 text-center text-sm text-gray-500">No records match your filters.</div>
-        )}
+      {/* Status / error rows */}
+      {error && (
+        <div className="px-4 py-3 text-sm text-red-700 bg-red-50 border-b border-red-200">{error}</div>
+      )}
+      {loading && <div className="px-4 py-4 text-sm text-gray-500">Loading…</div>}
 
-        {!loading &&
-          facultyNames.map((name) => {
-            const isOpen = openFaculties.has(name);
-            const flatRows = rowsByFaculty.get(name) ?? [];
-            const groups = groupHistoryByTerm(flatRows); // ← same as FM
-            // Render per Term in FM’s exact columns (no AY column)
+      {/* Results */}
+      {!loading && rows.length === 0 && !error && (
+        <div className="px-4 py-6 text-center text-sm text-gray-500">
+          {!selectedName ? "No results yet. Enter a faculty name to search." : "No records found."}
+        </div>
+      )}
+
+      {/* Render tables by term — evenly spaced 8 columns (Mode removed) */}
+      {!loading && rows.length > 0 && (
+        <div className="p-4 space-y-6">
+          <div className="text-sm text-gray-600">
+            Showing results for{" "}
+            <span className="font-semibold text-gray-900">{selectedName || "—"}</span>
+          </div>
+
+          {(Object.keys(grouped).sort() as string[]).map((term) => {
+            const list = grouped[term] || [];
             return (
-              <div key={name}>
-                {/* Row header (button) */}
-                <button
-                  onClick={() => toggleFaculty(name)}
-                  className="w-full flex items-center justify-between gap-4 px-4 py-3 hover:bg-gray-50"
-                >
-                  <div className="flex items-center gap-3">
-                    <ChevronDown
-                      className={cls(
-                        "h-4 w-4 transition-transform duration-200",
-                        isOpen ? "rotate-180 text-emerald-700" : "rotate-0 text-gray-500"
+              <div key={term} className="rounded-xl border border-gray-200 overflow-hidden">
+                <div className="px-4 py-2 text-sm font-semibold text-emerald-700 bg-gray-50 border-b">
+                  {term}
+                </div>
+
+                <div className="overflow-x-auto">
+                  <table className="min-w-full table-fixed text-sm border-t border-gray-200">
+                    {/* 8 evenly spaced columns */}
+                    <colgroup>
+                      <col style={{ width: "12.5%" }} />
+                      <col style={{ width: "12.5%" }} />
+                      <col style={{ width: "12.5%" }} />
+                      <col style={{ width: "12.5%" }} />
+                      <col style={{ width: "12.5%" }} />
+                      <col style={{ width: "12.5%" }} />
+                      <col style={{ width: "12.5%" }} />
+                      <col style={{ width: "12.5%" }} />
+                    </colgroup>
+                    <thead className="bg-gray-50 text-gray-600 text-xs uppercase tracking-wide">
+                      <tr>
+                        {[
+                          "Course Code",
+                          "Course Title",
+                          "Section",
+                          "Day 1",
+                          "Room 1",
+                          "Day 2",
+                          "Room 2",
+                          "Time",
+                        ].map((h) => (
+                          <th key={h} className="px-3 py-2 text-center font-medium whitespace-nowrap">
+                            {h}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {list.length === 0 ? (
+                        <tr>
+                          <td colSpan={8} className="px-4 py-6 text-center text-sm text-gray-500">
+                            No records.
+                          </td>
+                        </tr>
+                      ) : (
+                        list.map((r, i) => {
+                          const slots = flattenSlots(r.schedule || []);
+                          return (
+                            <tr
+                              key={`${term}-${r.course_code}-${r.section_code}-${i}`}
+                              className={i % 2 === 0 ? "bg-white text-gray-800" : "bg-gray-50 text-gray-800"}
+                            >
+                              <td className="px-3 py-2 text-center">{r.course_code || ""}</td>
+                              <td className="px-3 py-2 text-center">{r.course_title || ""}</td>
+                              <td className="px-3 py-2 text-center">{r.section_code || ""}</td>
+                              <td className="px-3 py-2 text-center">{slots.day1}</td>
+                              <td className="px-3 py-2 text-center">{slots.room1}</td>
+                              <td className="px-3 py-2 text-center">{slots.day2}</td>
+                              <td className="px-3 py-2 text-center">{slots.room2}</td>
+                              <td className="px-3 py-2 text-center">{slots.time}</td>
+                            </tr>
+                          );
+                        })
                       )}
-                    />
-                    <span className="text-sm font-semibold text-gray-900">{name}</span>
-                  </div>
-                </button>
-
-                {/* Collapsible content */}
-                {isOpen && (
-                  <div className="px-4 pb-5 pt-1 space-y-6 bg-white">
-                    {(["Term 1", "Term 2", "Term 3"] as const).map((t) => (
-                      <div key={`${name}-${t}`} className="rounded-xl border border-gray-200 overflow-hidden">
-                        <div className="px-4 py-2 text-sm font-semibold text-emerald-700 bg-gray-50 border-b">{t}</div>
-
-                        <div className="overflow-x-auto">
-                          <table className="min-w-full table-fixed text-sm border-t border-gray-200">
-                            <colgroup>
-                              <col style={{ width: 110 }} />
-                              <col style={{ width: 240 }} />
-                              <col style={{ width: 90 }} />
-                              <col style={{ width: 100 }} />
-                              <col style={{ width: 70 }} />
-                              <col style={{ width: 110 }} />
-                              <col style={{ width: 70 }} />
-                              <col style={{ width: 110 }} />
-                              <col style={{ width: 130 }} />
-                            </colgroup>
-                            <thead className="bg-gray-50 text-gray-600 text-xs uppercase tracking-wide">
-                              <tr>
-                                {[
-                                  "Course Code",
-                                  "Course Title",
-                                  "Section",
-                                  "Mode",
-                                  "Day 1",
-                                  "Room 1",
-                                  "Day 2",
-                                  "Room 2",
-                                  "Time",
-                                ].map((h) => (
-                                  <th key={h} className="px-3 py-2 text-center font-medium whitespace-nowrap">
-                                    {h}
-                                  </th>
-                                ))}
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {(groups[t] ?? []).length === 0 ? (
-                                <tr>
-                                  <td colSpan={9} className="px-4 py-6 text-center text-sm text-gray-500">
-                                    No records.
-                                  </td>
-                                </tr>
-                              ) : (
-                                groups[t].map((r, i) => (
-                                  <tr
-                                    key={`${name}-${t}-${i}`}
-                                    className={cls("text-gray-800", i % 2 === 0 ? "bg-white" : "bg-gray-50")}
-                                  >
-                                    <td className="px-3 py-2 text-center">{r.code}</td>
-                                    <td className="px-3 py-2 text-center">{r.title}</td>
-                                    <td className="px-3 py-2 text-center">{r.section}</td>
-                                    <td className="px-3 py-2 text-center">{r.mode ?? ""}</td>
-                                    <td className="px-3 py-2 text-center">{r.day1 ?? ""}</td>
-                                    <td className="px-3 py-2 text-center">{r.room1 ?? ""}</td>
-                                    <td className="px-3 py-2 text-center">{r.day2 ?? ""}</td>
-                                    <td className="px-3 py-2 text-center">{r.room2 ?? ""}</td>
-                                    <td className="px-3 py-2 text-center">{r.time ?? ""}</td>
-                                  </tr>
-                                ))
-                              )}
-                            </tbody>
-                          </table>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
+                    </tbody>
+                  </table>
+                </div>
               </div>
             );
           })}
-      </div>
+        </div>
+      )}
     </div>
   );
 }

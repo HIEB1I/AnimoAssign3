@@ -1,0 +1,574 @@
+// src/pages/CHAIR/CHAIR_Plantilla.tsx
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { Outlet, useLocation, useNavigate } from "react-router-dom";
+import AppShell from "@/base/AppShell";
+import type { SidebarItem } from "@/base/Sidebar";
+import {
+  Users,
+  BookOpen,
+  FileText,
+  FilePlus,
+  BookMarked,
+  ListChecks,
+  CheckCheck,
+  Check,
+  FileSpreadsheet,
+} from "lucide-react";
+import jsPDF from "jspdf";
+import autoTable from "jspdf-autotable";
+import { setActiveRole, userHasRole } from "@/api";
+
+/* ---------------- Sidebar ---------------- */
+const ITEMS: SidebarItem[] = [
+  { label: "Plantilla", to: "/chair/plantilla", Icon: ListChecks },
+  { label: "Faculty Directory", to: "/chair/faculty-management", Icon: Users },
+  { label: "Course Management", to: "/chair/course-management", Icon: BookOpen },
+  { label: "Faculty Service", to: "/chair/faculty-service", Icon: FileText },
+  { label: "Student Petition", to: "/chair/student-petitions", Icon: FilePlus },
+  { label: "Class Retention", to: "/chair/class-retention", Icon: BookMarked },
+];
+
+/* ---------------- Utilities ---------------- */
+const cls = (...s: (string | false | null | undefined)[]) => s.filter(Boolean).join(" ");
+
+const normalizeDay = (s: string) => {
+  const toks = (s || "")
+    .toUpperCase()
+    .split(/[^A-Z]/g)
+    .filter(Boolean);
+  const map: Record<string, string> = {
+    M: "M",
+    T: "T",
+    W: "W",
+    H: "H", // DLSU Thu
+    TH: "H",
+    F: "F",
+    S: "S",
+    SU: "Su",
+    SUN: "Su",
+    SAT: "S",
+  };
+  return toks.map((t) => map[t] ?? t.charAt(0)).join(" / ");
+};
+
+const DayCell: React.FC<{ raw: string }> = ({ raw }) => (
+  <span data-raw-day={raw}>{normalizeDay(raw).replace(/ \/ /g, " / ")}</span>
+);
+
+/* ----------- Name helpers (mirror OM behavior) ----------- */
+const normalizeCommaName = (n: string) =>
+  String(n || "")
+    .replace(/^\s*([^,]+),\s*(.+)\s*$/, "$2 $1") // "Last, First [M]" → "First [M] Last"
+    .replace(/\s+/g, " ")
+    .trim();
+
+const hasTwoWords = (n: string) => /\S+\s+\S+/.test(n);
+
+/* ---------------- Types ---------------- */
+type PlantillaRow = {
+  faculty_name: string;
+  course_code: string;
+  section_code: string;
+  day_text: string;
+  time_text: string; // e.g. "9:15–10:45"
+  room_text: string; // e.g. "ONLINE" or "AG1901"
+  student_count: number | null;
+  lec_hours: number | null;
+  lab_hours: number | null;
+  student_units: number | null;
+  on_leave: string; // "Yes"/"N/A"
+  course_type: string; // "Core" | "Elective" | "Grad" | "N/A"
+  nature_teaching: number | null;
+  nature_admin: number | null;
+  nature_research: number | null;
+  nature_faculty_units: number | null;
+  premium_grad: number | null;
+  premium_4th_prep: number | null;
+  premium_overload: number | null;
+  remarks: string;
+};
+
+type HeaderResp = {
+  ok: boolean;
+  profileName?: string;
+  profileSubtitle?: string;
+  term_label?: string;
+  dept_label?: string;
+  plantilla_file?: string;
+};
+
+/* ---------------- Old table (refactored to accept rows) ---------------- */
+const DepartmentPlantilla: React.FC<{
+  deptLabel: string;
+  plantillaFile: string;
+  rows: PlantillaRow[];
+  termLabel?: string;
+}> = ({ deptLabel, plantillaFile, rows, termLabel }) => {
+  const [showApprovePrompt, setShowApprovePrompt] = useState(false);
+  const [isApproving, setIsApproving] = useState(false);
+  const [approved, setApproved] = useState(false);
+  const tableRef = useRef<HTMLTableElement | null>(null);
+
+  const handleExportPDF = () => {
+    const tbl = tableRef.current;
+    if (!tbl) return alert("No plantilla table found!");
+
+    const doc = new jsPDF({ orientation: "landscape", format: "a3" });
+    const generated = new Date().toLocaleString();
+
+    // Title + meta
+    doc.setFontSize(14);
+    doc.text(`Department Faculty Plantilla of CCS – ${deptLabel}`, 14, 14);
+    doc.setFontSize(10);
+    doc.text(termLabel || "Academic Year • Term", 14, 22);
+    doc.text(`File: ${plantillaFile}`, 14, 28);
+    doc.text(`Generated: ${generated}`, doc.internal.pageSize.getWidth() - 14, 28, { align: "right" });
+
+    // Build body rows from data
+    const body = rows.map((r) => [
+      r.faculty_name || "—",
+      r.course_code || "—",
+      r.section_code || "—",
+      r.day_text || "—",
+      r.time_text || "—",
+      r.room_text || "—",
+      r.student_count ?? "—",
+      r.lec_hours ?? "—",
+      r.lab_hours ?? "—",
+      r.student_units ?? "—",
+      r.on_leave || "N/A",
+      r.course_type || "N/A",
+      r.nature_teaching ?? "—",
+      r.nature_admin ?? "—",
+      r.nature_research ?? "—",
+      r.nature_faculty_units ?? "—",
+      r.premium_grad ?? "—",
+      r.premium_4th_prep ?? "—",
+      r.premium_overload ?? "—",
+      r.remarks || "—",
+    ]);
+
+    const headRow1 = [
+      { content: "Faculty", rowSpan: 2 },
+      { content: "Course", rowSpan: 2 },
+      { content: "Section", rowSpan: 2 },
+      { content: "Day", rowSpan: 2 },
+      { content: "Time", rowSpan: 2 },
+      { content: "Room", rowSpan: 2 },
+      { content: "No. of Students", rowSpan: 2 },
+      { content: "Lecture Hours", rowSpan: 2 },
+      { content: "Lab Hours", rowSpan: 2 },
+      { content: "Student Unit(s)", rowSpan: 2 },
+      { content: "On Leave", rowSpan: 2 },
+      { content: "Type of Course", rowSpan: 2 },
+      { content: "NATURE OF LOAD", colSpan: 4 },
+      { content: "PREMIUMS", colSpan: 3 },
+      { content: "Remarks", rowSpan: 2 },
+    ] as const;
+    const headRow2 = ["Teaching", "Admin", "Research", "Faculty Unit(s)", "Grad Load", "Premium 4th Prep", "Overload (NCA)"];
+
+    const pageW = doc.internal.pageSize.getWidth();
+    const margin = 14;
+    const usableW = pageW - margin * 2;
+    const P = (pct: number) => (usableW * pct) / 100;
+    const widths = [
+      P(9),  // Faculty
+      P(6),  // Course
+      P(4.5),
+      P(4),
+      P(6),
+      P(4.5),
+      P(4.5),
+      P(4.5),
+      P(4),
+      P(4.5),
+      P(4),
+      P(4.5),
+      P(4.5),
+      P(4.5),
+      P(4.5),
+      P(4),
+      P(4.5),
+      P(4.5),
+      P(4.5),
+      P(9.5),
+    ];
+
+    autoTable(doc, {
+      head: [headRow1 as any, headRow2],
+      body,
+      startY: 34,
+      margin: { left: margin, right: margin, top: 34, bottom: 18 },
+      theme: "grid",
+      styles: {
+        fontSize: 5,
+        cellPadding: { top: 2, right: 3, bottom: 2, left: 3 },
+        overflow: "linebreak",
+        lineWidth: 0.2,
+        lineColor: [217, 217, 217],
+      },
+      headStyles: {
+        fillColor: [244, 246, 250],
+        textColor: 31,
+        halign: "center",
+        valign: "middle",
+        fontStyle: "bold",
+      },
+      alternateRowStyles: { fillColor: [249, 250, 251] },
+      columnStyles: {
+        0: { cellWidth: widths[0], halign: "left", fontStyle: "bold", textColor: [13, 113, 74] },
+        1: { cellWidth: widths[1], halign: "center" },
+        2: { cellWidth: widths[2], halign: "center" },
+        3: { cellWidth: widths[3], halign: "center" },
+        4: { cellWidth: widths[4], halign: "center" },
+        5: { cellWidth: widths[5], halign: "center" },
+        6: { cellWidth: widths[6], halign: "center" },
+        7: { cellWidth: widths[7], halign: "center" },
+        8: { cellWidth: widths[8], halign: "center" },
+        9: { cellWidth: widths[9], halign: "center" },
+        10: { cellWidth: widths[10], halign: "center" },
+        11: { cellWidth: widths[11], halign: "center" },
+        12: { cellWidth: widths[12], halign: "center" },
+        13: { cellWidth: widths[13], halign: "center" },
+        14: { cellWidth: widths[14], halign: "center" },
+        15: { cellWidth: widths[15], halign: "center" },
+        16: { cellWidth: widths[16], halign: "center" },
+        17: { cellWidth: widths[17], halign: "center" },
+        18: { cellWidth: widths[18], halign: "center" },
+        19: { cellWidth: widths[19], halign: "left" },
+      },
+      didParseCell: (data: any) => {
+        if (data.section === "body") {
+          if (data.column.index === 0) {
+            data.cell.styles.fontStyle = "bold";
+            data.cell.styles.textColor = [13, 113, 74];
+            data.cell.styles.halign = "left";
+          }
+          if (data.column.index === 19) data.cell.styles.halign = "left";
+        }
+      },
+      didDrawPage: () => {
+        doc.setFontSize(8);
+        doc.text(
+          "Notes: Hours and units are computed based on official loading policies. Premiums apply per college guidelines.",
+          margin,
+          doc.internal.pageSize.getHeight() - 10
+        );
+      },
+    });
+
+    doc.save(plantillaFile);
+  };
+
+  const handleApprove = async () => {
+    setShowApprovePrompt(false);
+    setIsApproving(true);
+    try {
+      await fetch(`/api/chair/plantilla?action=approve`, { method: "POST" });
+      setApproved(true);
+      requestAnimationFrame(handleExportPDF);
+    } catch {
+      // Non-blocking for UI
+    } finally {
+      setIsApproving(false);
+    }
+  };
+
+  return (
+    <section className="mt-6">
+      <header className="mb-2">
+        <h2 className="text-xl font-semibold">
+          Department Faculty Plantilla of CCS – {deptLabel}
+          {termLabel ? ` · ${termLabel}` : ""}
+        </h2>
+      </header>
+
+      <div className="flex items-center justify-end gap-3 mt-4">
+        <button
+          onClick={() => setShowApprovePrompt(true)}
+          disabled={approved || isApproving}
+          aria-disabled={approved || isApproving}
+          className={cls(
+            "inline-flex items-center gap-2 rounded-md px-5 py-2 text-sm font-medium text-white",
+            approved || isApproving ? "bg-emerald-400 cursor-not-allowed opacity-70" : "bg-emerald-700 hover:brightness-110"
+          )}
+          title={approved ? "Already approved" : "Approve and export PDF"}
+        >
+          <CheckCheck className="h-4 w-4" />
+          {approved ? "Approved" : isApproving ? "Approving…" : "Approve"}
+        </button>
+
+        <button
+          onClick={handleExportPDF}
+          className="inline-flex items-center gap-2 rounded-md bg-blue-600 px-5 py-2 text-sm font-medium text-white hover:brightness-110"
+          title="Export plantilla as PDF"
+        >
+          <FileSpreadsheet className="h-4 w-4" />
+          Export PDF
+        </button>
+
+        {showApprovePrompt && (
+          <div className="fixed inset-0 z-[90] grid place-items-center bg-black/40 p-4">
+            <div className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-2xl">
+              <div className="mx-auto mb-4 grid h-16 w-16 place-items-center rounded-full border-2 border-emerald-600 text-emerald-700">
+                <Check className="h-8 w-8" strokeWidth={2.5} />
+              </div>
+              <h3 className="mb-2 text-center text-2xl font-semibold">Are you sure?</h3>
+              <p className="mx-auto mb-6 max-w-md text-center text-sm text-neutral-600">
+                Confirm this as the final <span className="font-semibold">Faculty Plantilla</span> for{" "}
+                <span className="font-semibold">{deptLabel}</span>. On confirm, the Approve button will be disabled and the PDF will open for printing.
+              </p>
+              <div className="flex justify-end gap-2">
+                <button
+                  onClick={() => setShowApprovePrompt(false)}
+                  className="rounded-lg border border-neutral-300 bg-neutral-100 px-4 py-2 text-sm hover:bg-neutral-200"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleApprove}
+                  className="rounded-lg bg-emerald-700 px-4 py-2 text-sm font-medium text-white hover:brightness-110"
+                >
+                  Yes, Approve & Export
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div className="mt-6 w-full max-w-[100vw] overflow-x-auto rounded-xl border border-gray-200 bg-white shadow-md p-2 md:p-3">
+        <table
+          ref={tableRef}
+          className="w-full table-auto text-[0.88rem] border-collapse border border-gray-200 leading-snug
+                  [&_th]:px-3 [&_th]:py-2 [&_th]:align-middle
+                  [&_td]:px-3 [&_td]:py-2 [&_td]:align-middle
+                  [&_thead_tr]:border-b [&_thead_tr]:border-gray-200
+                  [&_tbody_tr:nth-child(even)]:bg-gray-50
+                  [&_tbody_tr:hover]:bg-gray-100/60
+                  [&_td:first-child]:text-left [&_td:first-child]:font-medium [&_td:first-child]:text-emerald-700
+                  [&_th:first-child]:text-left [&_th:first-child]:font-semibold
+                  [&_td]:break-words [&_td]:tabular-nums [&_th]:tabular-nums
+                  [&_td:nth-child(4)]:whitespace-nowrap [&_td:nth-child(5)]:whitespace-nowrap [&_td:nth-child(6)]:whitespace-nowrap [&_td:nth-child(7)]:whitespace-nowrap
+                  [&_td:nth-child(n+8)]:text-center
+                  [&_th:last-child]:w-[28rem] [&_td:last-child]:w-[28rem]
+                  [&_td:last-child]:text-left [&_td:last-child]:align-top"
+        >
+          {/* Explicit 20 columns so rowSpan/colSpan align perfectly */}
+          <colgroup>
+            <col className="w-[14rem]" /> {/* 1 Faculty */}
+            <col className="w-[7.5rem]" />{/* 2 Course */}
+            <col className="w-[6rem]" />  {/* 3 Section */}
+            <col className="w-[6.5rem]" />{/* 4 Day */}
+            <col className="w-[8rem]" />  {/* 5 Time */}
+            <col className="w-[7rem]" />  {/* 6 Room */}
+            <col className="w-[8rem]" />  {/* 7 # Students */}
+            <col className="w-[7rem]" />  {/* 8 Lec Hrs */}
+            <col className="w-[6.5rem]" />{/* 9 Lab Hrs */}
+            <col className="w-[8rem]" />  {/* 10 Student Units */}
+            <col className="w-[6.5rem]" />{/* 11 On Leave */}
+            <col className="w-[8rem]" />  {/* 12 Type of Course */}
+            <col className="w-[6.5rem]" />{/* 13 Nature: Teach */}
+            <col className="w-[6.5rem]" />{/* 14 Nature: Admin */}
+            <col className="w-[7rem]" />  {/* 15 Nature: Research */}
+            <col className="w-[8rem]" />  {/* 16 Nature: Faculty Units */}
+            <col className="w-[7rem]" />  {/* 17 Premium: Grad */}
+            <col className="w-[9rem]" />  {/* 18 Premium: 4th Prep */}
+            <col className="w-[9rem]" />  {/* 19 Premium: Overload */}
+            <col className="w-[28rem]" /> {/* 20 Remarks */}
+          </colgroup>
+
+          <thead className="text-xs">
+            <tr className="bg-gray-50 text-gray-700 text-center border-b">
+              <th rowSpan={2} className="px-3 py-2 font-semibold text-left whitespace-nowrap">Faculty</th>
+              <th rowSpan={2} className="px-3 py-2 font-semibold whitespace-nowrap">Course</th>
+              <th rowSpan={2} className="px-3 py-2 font-semibold whitespace-nowrap">Section</th>
+              <th rowSpan={2} className="px-3 py-2 font-semibold whitespace-nowrap">Day</th>
+              <th rowSpan={2} className="px-3 py-2 font-semibold whitespace-nowrap">Time</th>
+              <th rowSpan={2} className="px-3 py-2 font-semibold whitespace-nowrap">Room</th>
+              <th rowSpan={2} className="px-2 py-2 font-semibold whitespace-nowrap">No. of Students</th>
+              <th rowSpan={2} className="px-2 py-2 font-semibold whitespace-nowrap">Lecture Hours</th>
+              <th rowSpan={2} className="px-2 py-2 font-semibold whitespace-nowrap">Lab Hours</th>
+              <th rowSpan={2} className="px-2 py-2 font-semibold whitespace-nowrap">Student Unit(s)</th>
+              <th rowSpan={2} className="px-2 py-2 font-semibold whitespace-nowrap">On Leave</th>
+              <th rowSpan={2} className="px-2 py-2 font-semibold whitespace-nowrap">Type of Course</th>
+              <th colSpan={4} className="px-3 py-2 font-semibold border-l border-gray-300">NATURE OF LOAD</th>
+              <th colSpan={3} className="px-3 py-2 font-semibold border-l border-gray-300">PREMIUMS</th>
+              <th rowSpan={2} className="px-3 py-2 font-semibold">Remarks</th>
+            </tr>
+            <tr className="bg-gray-50 text-gray-700 text-center border-b">
+              <th className="px-2 py-2 font-semibold whitespace-nowrap">Teaching</th>
+              <th className="px-2 py-2 font-semibold whitespace-nowrap">Admin</th>
+              <th className="px-2 py-2 font-semibold whitespace-nowrap">Research</th>
+              <th className="px-2 py-2 font-semibold whitespace-nowrap">Faculty Unit(s)</th>
+              <th className="px-2 py-2 font-semibold whitespace-nowrap">Grad Load</th>
+              <th className="px-2 py-2 font-semibold whitespace-nowrap">Premium 4th Prep</th>
+              <th className="px-2 py-2 font-semibold whitespace-nowrap">Overload (NCA)</th>
+            </tr>
+          </thead>
+
+          <tbody className="divide-y text-center">
+            {/* rows mapped elsewhere */}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+};
+
+/* ---------------- Page shell (new nav + data fetch) ---------------- */
+export default function CHAIR_Plantilla() {
+  // pull name/role just like OM does (localStorage)
+  const session = useMemo(() => {
+    try {
+      return JSON.parse(localStorage.getItem("animo.user") || "null");
+    } catch {
+      return null;
+    }
+  }, []);
+
+  // Make a robust display name from the session data (mirror OM)
+  const displayName = useMemo(() => {
+    const s = session || {};
+    // accept either camelCase or snake_case from localStorage
+    const first = (s.firstName ?? s.first_name ?? "").toString().trim();
+    const middle = (s.middleName ?? s.middle_name ?? "").toString().trim();
+    const last = (s.lastName ?? s.last_name ?? "").toString().trim();
+    const rawFull = normalizeCommaName((s.fullName ?? s.full_name ?? "").toString().trim());
+
+    // Prefer a true full name (≥2 words) from storage
+    if (hasTwoWords(rawFull)) return rawFull;
+
+    // Else compose from parts; ensures last name appears
+    const composed = [first, middle, last].filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
+    return composed || rawFull || " ";
+  }, [session]);
+
+  const userId = session?.userId || "";
+  const canSwitchToFaculty = userHasRole("faculty");
+
+  const loc = useLocation();
+  const isRootChair = /^\/chair(\/home)?$/.test(loc.pathname);
+  const isPlantilla = /^\/chair\/plantilla$/.test(loc.pathname);
+  const navigate = useNavigate();
+
+  // header/profile from backend
+  const [header, setHeader] = useState<HeaderResp>({
+    ok: true,
+    profileName: displayName || " ",
+    profileSubtitle: "Department Chair",
+  });
+
+  // plantilla rows (DB-backed)
+  const [rows, setRows] = useState<PlantillaRow[]>([]);
+
+  // topbar inbox behavior (same event OM uses)
+  useEffect(() => {
+    const toInbox = () => navigate("/chair/inbox");
+    window.addEventListener("om:openInbox" as any, toInbox);
+    return () => window.removeEventListener("om:openInbox" as any, toInbox);
+  }, [navigate]);
+
+  // default landing
+  useEffect(() => {
+    if (isRootChair) navigate("/chair/plantilla", { replace: true });
+  }, [isRootChair, navigate]);
+
+  // fetch header + plantilla rows
+  useEffect(() => {
+    (async () => {
+      try {
+        const params = new URLSearchParams();
+        if (userId) params.set("userId", userId);
+        params.set("action", "header");
+
+        const rh = await fetch(`/api/chair/plantilla?${params.toString()}`);
+        const hdr: HeaderResp = await rh.json();
+
+        if (hdr?.ok) {
+          setHeader((prev) => {
+            // accept server-provided full name variants; normalize "Last, First"
+            const serverFull = normalizeCommaName(
+              String((hdr as any).profileName ?? (hdr as any).full_name ?? "")
+            );
+
+            // Pick the best available:
+            // 1) Server full name if it looks complete (≥2 words)
+            // 2) LocalStorage-computed displayName (already normalized)
+            // 3) Previous header name / a single space
+            const bestName = hasTwoWords(serverFull)
+              ? serverFull
+              : hasTwoWords(displayName)
+              ? displayName
+              : (serverFull || displayName || prev.profileName || " ");
+
+            return {
+              ...prev,
+              ...hdr,
+              profileName: bestName,
+            };
+          });
+        }
+      } catch {
+        /* non-blocking */
+      }
+
+      try {
+        const params = new URLSearchParams();
+        if (userId) params.set("userId", userId);
+        params.set("action", "fetch");
+        const rr = await fetch(`/api/chair/plantilla?${params.toString()}`);
+        const data = await rr.json();
+        if (data?.ok && Array.isArray(data.rows)) setRows(data.rows as PlantillaRow[]);
+      } catch {
+        setRows([]);
+      }
+    })();
+  }, [userId, displayName]);
+
+  const switchToFaculty = () => {
+    setActiveRole("faculty");
+    navigate("/faculty/overview");
+  };
+
+  return (
+    <AppShell
+      topbarProfileName={header.profileName || " "}
+      topbarProfileSubtitle={header.profileSubtitle || " "}
+      sidebarItems={ITEMS}
+    >
+      {/* Floating switch button */}
+      {canSwitchToFaculty && (
+        <button
+          onClick={switchToFaculty}
+          title="Switch to faculty view"
+          className="fixed right-4 top-[72px] z-40 rounded-full bg-emerald-600 px-4 py-2 text-sm font-semibold text-white shadow hover:brightness-110 focus:outline-none focus:ring-2 focus:ring-emerald-400"
+        >
+          Switch to Faculty View
+        </button>
+      )}
+
+      {/* Children */}
+      <Outlet />
+
+      {/* Plantilla tab content (OM-like header + data table) */}
+      {isPlantilla && (
+        <main className="w-full px-8 py-8">
+          <header className="mb-6 flex items-start justify-between">
+            <div>
+              <h1 className="text-2xl font-bold">Plantilla</h1>
+              <p className="text-sm text-gray-600">Manage and review faculty plantilla submissions</p>
+            </div>
+          </header>
+
+          <DepartmentPlantilla
+            deptLabel={header.dept_label || "Department"}
+            plantillaFile={header.plantilla_file || "Faculty_Plantilla.pdf"}
+            rows={rows}
+            termLabel={header.term_label}
+          />
+        </main>
+      )}
+    </AppShell>
+  );
+}

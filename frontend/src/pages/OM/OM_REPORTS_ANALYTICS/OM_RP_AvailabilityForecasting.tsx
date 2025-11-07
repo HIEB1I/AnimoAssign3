@@ -1,12 +1,35 @@
 // frontend/src/pages/OM/OM_REPORTS_ANALYTICS/OM-RP_AvailabilityForecasting.tsx
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { ChevronDown, ChevronLeft } from "lucide-react";
+import { fetchFacultyAvailabilityHeatmap } from "../../../api";
 import { Link } from "react-router-dom";
-import { ChevronDown, ChevronLeft, FileDown, X, Search } from "lucide-react";
 
 /* ---------------- Small helpers ---------------- */
 const cls = (...s: (string | false | undefined)[]) => s.filter(Boolean).join(" ");
 
-/* ---------------- SelectBox (same look as ANA) ---------------- */
+/* ---------------- Reusable UI bits (match OM_RP pages) ---------------- */
+function Card({ className = "", children }: { className?: string; children: any }) {
+  return (
+    <div className={cls("bg-white rounded-xl border border-gray-200 shadow-sm", className)}>
+      {children}
+    </div>
+  );
+}
+
+function WarningPanel({ warnings }: { warnings: string[] }) {
+  if (!warnings?.length) return null;
+  return (
+    <Card className="p-3 w-full">
+      <div className="text-sm space-y-1 text-amber-800">
+        {warnings.map((w, i) => (
+          <div key={i}>⚠️ {w}</div>
+        ))}
+      </div>
+    </Card>
+  );
+}
+
+/* ---------------- Lightweight SelectBox ---------------- */
 function SelectBox({
   value,
   onChange,
@@ -25,47 +48,44 @@ function SelectBox({
   const listRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    const close = (e: MouseEvent) =>
-      open &&
-      !btnRef.current?.contains(e.target as Node) &&
-      !listRef.current?.contains(e.target as Node) &&
-      setOpen(false);
-    document.addEventListener("mousedown", close);
-    return () => document.removeEventListener("mousedown", close);
-  }, [open]);
+    const close = (e: MouseEvent) => {
+      if (!btnRef.current?.contains(e.target as Node) && !listRef.current?.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener("click", close);
+    return () => document.removeEventListener("click", close);
+  }, []);
 
   return (
-    <div className={cls("relative min-w-[180px]", className)}>
+    <div className={cls("relative", className)}>
       <button
         ref={btnRef}
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 pr-8 text-left text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30"
+        onClick={() => setOpen((o) => !o)}
+        className="w-full rounded-lg border border-gray-300 px-3.5 py-2 text-sm flex items-center justify-between bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-emerald-500/30"
       >
         {value || <span className="text-gray-400">{placeholder}</span>}
-        <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-4 w-4 -translate-y-1/2" />
+        <ChevronDown className="w-4 h-4 text-gray-500" />
       </button>
-
       {open && (
         <div
           ref={listRef}
-          className="absolute z-20 mt-2 max-h-72 w-full overflow-auto rounded-xl border border-gray-300 bg-white shadow-xl"
+          className="absolute z-10 mt-1 w-full bg-white border border-gray-200 rounded-lg shadow-lg overflow-hidden"
         >
           {options.map((opt) => (
-            <button
+            <div
               key={opt}
               onClick={() => {
                 onChange(opt);
                 setOpen(false);
-                btnRef.current?.focus();
               }}
               className={cls(
-                "block w-full px-4 py-2 text-left text-sm hover:bg-emerald-50",
-                value === opt && "bg-emerald-100 text-emerald-800 font-medium"
+                "px-3.5 py-2 text-sm cursor-pointer hover:bg-gray-50",
+                opt === value && "bg-gray-50 font-medium"
               )}
             >
               {opt}
-            </button>
+            </div>
           ))}
         </div>
       )}
@@ -73,601 +93,345 @@ function SelectBox({
   );
 }
 
-/* ---------------- Faculty Combobox (ANA-style) ---------------- */
-function FacultyCombobox({
-  value,
-  onChange,
-  options,
-  placeholder = "Search faculty…",
-  className = "",
-}: {
-  value: string | null;
-  onChange: (v: string | null) => void;
-  options: { id: string; name: string; email: string }[];
-  placeholder?: string;
-  className?: string;
-}) {
-  const [open, setOpen] = useState(false);
-  const [query, setQuery] = useState("");
-  const [hoverIndex, setHoverIndex] = useState<number>(-1);
-  const wrapRef = useRef<HTMLDivElement>(null);
+/* ================= Heatmap logic ================= */
+type DayCode = "M" | "T" | "W" | "H" | "F" | "S";
+type SlotKey = `${DayCode}|${string}`;
 
-  useEffect(() => {
-    const close = (e: MouseEvent) =>
-      open &&
-      !wrapRef.current?.contains(e.target as Node) &&
-      setOpen(false);
-    document.addEventListener("mousedown", close);
-    return () => document.removeEventListener("mousedown", close);
-  }, [open]);
-
-  const selected = useMemo(
-    () => options.find((o) => o.id === value) || null,
-    [options, value]
-  );
-
-  const filtered = useMemo(() => {
-    const q = (selected ? selected.name : query).trim().toLowerCase();
-    if (!q) return options.slice(0, 50);
-    return options.filter((o) => o.name.toLowerCase().includes(q)).slice(0, 50);
-  }, [options, query, selected]);
-
-  const commit = (id: string | null) => {
-    onChange(id);
-    setOpen(false);
-    if (!id) setQuery("");
-  };
-
-  const onKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (!open && (e.key === "ArrowDown" || e.key === "Enter")) {
-      setOpen(true);
-      return;
-    }
-    if (!open) return;
-    if (e.key === "ArrowDown") {
-      e.preventDefault();
-      setHoverIndex((i) => Math.min((i < 0 ? -1 : i) + 1, filtered.length - 1));
-    } else if (e.key === "ArrowUp") {
-      e.preventDefault();
-      setHoverIndex((i) => Math.max((i < 0 ? filtered.length : i) - 1, 0));
-    } else if (e.key === "Enter") {
-      e.preventDefault();
-      if (hoverIndex >= 0 && filtered[hoverIndex]) commit(filtered[hoverIndex].id);
-    } else if (e.key === "Escape") {
-      setOpen(false);
-    }
-  };
-
-  return (
-    <div ref={wrapRef} className={cls("relative", className)}>
-      <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-500" />
-      <input
-        onFocus={() => setOpen(true)}
-        onKeyDown={onKeyDown}
-        value={selected ? selected.name : query}
-        onChange={(e) => {
-          if (selected) onChange(null);
-          setQuery(e.target.value);
-        }}
-        placeholder={placeholder}
-        className="w-full rounded-lg border border-gray-300 px-9 py-2 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30"
-      />
-      {(selected || query) && (
-        <button
-          type="button"
-          onClick={() => commit(null)}
-          className="absolute right-2 top-1/2 -translate-y-1/2 rounded-md px-2 py-0.5 text-xs text-gray-600 hover:bg-gray-100"
-          aria-label="Clear"
-          title="Clear"
-        >
-          ✕
-        </button>
-      )}
-
-      {open && !selected && (
-        <div className="absolute z-20 mt-2 max-h-72 w-full overflow-auto rounded-xl border border-gray-300 bg-white shadow-xl">
-          {filtered.length ? (
-            filtered.map((opt, idx) => {
-              const active = idx === hoverIndex;
-              return (
-                <button
-                  key={opt.id}
-                  onMouseEnter={() => setHoverIndex(idx)}
-                  onMouseLeave={() => setHoverIndex(-1)}
-                  onClick={() => commit(opt.id)}
-                  className={cls(
-                    "block w-full px-4 py-2 text-left text-sm",
-                    active ? "bg-emerald-50" : "hover:bg-emerald-50"
-                  )}
-                >
-                  <div className="font-medium">{opt.name}</div>
-                </button>
-              );
-            })
-          ) : (
-            <div className="px-4 py-3 text-sm text-gray-500">No matches</div>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-/* ---------------- Types from API ---------------- */
-type DayPairId = "mon_thu" | "tue_fri" | "wed_sat";
-type DayPair = { id: DayPairId; label: string };
-
-type FacultyEntry = { id: string; name: string; email: string; p: number };
-type SlotDetail = { available: FacultyEntry[]; unavailable: FacultyEntry[] };
-type FacultyBySlot = Partial<Record<DayPairId, Partial<Record<number, SlotDetail>>>>;
-
-type ApiPayload = {
-  ok: boolean;
-  meta?: { term_label?: string };
-  campuses: string[];
-  dayPairs: DayPair[];
-  timeSlots: string[];
-  forecast: Record<DayPairId, number[]>;
-  facultyBySlot: FacultyBySlot;
-  facultyOptions: { id: string; name: string; email: string }[];
+type HeatPerson = {
+  faculty_id: string;
+  name: string;
+  email?: string;
+  confidence_pct: number;
+  reason: string;
+  notes?: string[];
 };
 
-/* ---------------- Palette & helpers ---------------- */
-const maxForecast = (data: Record<string, number[]>) => Math.max(0, ...Object.values(data).flat());
+type HeatSlot = { count: number; list: HeatPerson[] };
 
-const classForValue = (v: number, max: number) => {
-  if (max === 0 || v === 0) return "bg-[#FCF8E8] text-slate-900"; // None
-  const ratio = v / max;
-  if (ratio >= 0.67) return "bg-[#94B49F] text-slate-900"; // High
-  if (ratio >= 0.34) return "bg-[#ECB390] text-slate-900"; // Medium
-  return "bg-[#DF7861] text-white"; // Low
+type AvailabilityHeatmap = {
+  term_id: string;
+  previous_term_for_prefs?: string | null;
+  history_terms: string[];
+  warnings: string[];
+  slots: Record<SlotKey, HeatSlot>;
 };
 
-function buildFacultyIndex(data: FacultyBySlot) {
-  const index = new Map<string, Array<{ dp: DayPairId; i: number }>>();
-  (Object.keys(data) as DayPairId[]).forEach((dp) => {
-    const byIdx = data[dp] || {};
-    Object.keys(byIdx).forEach((k) => {
-      const i = Number(k);
-      const detail = byIdx[i]!;
-      (detail.available || []).forEach((f) => {
-        const arr = index.get(f.id) || [];
-        arr.push({ dp, i });
-        index.set(f.id, arr);
-      });
-    });
-  });
-  return index;
+const DAY_PAIRS: [DayCode, DayCode][] = [
+  ["M", "H"],
+  ["T", "F"],
+  ["W", "S"],
+];
+
+const TIME_ROWS = [
+  "07:30-09:00",
+  "09:15-10:45",
+  "11:00-12:30",
+  "12:45-14:15",
+  "14:30-16:00",
+  "16:15-17:45",
+  "18:00-19:30",
+  "19:45-21:15",
+] as const;
+
+function getSingleCell(data: AvailabilityHeatmap | null, day: DayCode, slot: string): HeatSlot {
+  if (!data) return { count: 0, list: [] };
+  const key = `${day}|${slot}` as SlotKey;
+  return data.slots?.[key] || { count: 0, list: [] };
 }
 
-/* ---------------- Page ---------------- */
+function mergePairCells(a: HeatSlot, b: HeatSlot): HeatSlot {
+  const byId = new Map<string, HeatPerson>();
+  for (const p of [...a.list, ...b.list]) {
+    const prev = byId.get(p.faculty_id);
+    if (!prev || (p.confidence_pct ?? 0) > (prev.confidence_pct ?? 0)) {
+      byId.set(p.faculty_id, p);
+    }
+  }
+  return {
+    count: byId.size,
+    list: Array.from(byId.values()).sort((x, y) => y.confidence_pct - x.confidence_pct),
+  };
+}
+
+/** A soft emerald ramp for counts → background */
+function colorForCount(count: number, min: number, max: number) {
+  if (count <= 0 || max <= 0) return "#F2F4F7"; // light gray
+  const span = Math.max(1, max - min);
+  const ratio = (count - min) / span;
+
+  const steps = ["#ecfdf5", "#d1fae5", "#a7f3d0", "#6ee7b7", "#34d399", "#10b981", "#059669"];
+  const idx = Math.min(steps.length - 1, Math.max(0, Math.floor(ratio * (steps.length - 1))));
+  return steps[idx];
+}
+
+function usePairMinMax(data: AvailabilityHeatmap | null) {
+  return useMemo(() => {
+    if (!data) return { pairMin: 0, pairMax: 0 };
+    const counts: number[] = [];
+    for (const slot of TIME_ROWS) {
+      for (const [d1, d2] of DAY_PAIRS) {
+        const merged = mergePairCells(getSingleCell(data, d1, slot), getSingleCell(data, d2, slot));
+        counts.push(merged.count);
+      }
+    }
+    if (!counts.length) return { pairMin: 0, pairMax: 0 };
+    return { pairMin: Math.min(...counts), pairMax: Math.max(...counts) };
+  }, [data]);
+}
+
+/* ---------------- Main Page ---------------- */
 export default function OM_RP_AvailabilityForecasting() {
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
+  // UI-only controls; inherited header/subtitle remain in the shell
+  const [term, setTerm] = useState("2025 Term 1");
+  const [course, setCourse] = useState("");
 
-  const [termLabel, setTermLabel] = useState<string>("");
-  const [campus, setCampus] = useState<string>("");
+  const [data, setData] = useState<AvailabilityHeatmap | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  const [dayPairs, setDayPairs] = useState<DayPair[]>([]);
-  const [timeSlots, setTimeSlots] = useState<string[]>([]);
-  const [forecast, setForecast] = useState<Record<DayPairId, number[]>>({
-    mon_thu: [],
-    tue_fri: [],
-    wed_sat: [],
-  });
-  const [facultyBySlot, setFacultyBySlot] = useState<FacultyBySlot>({});
-  const [facultyOptions, setFacultyOptions] = useState<{ id: string; name: string; email: string }[]>([]);
+  const [active, setActive] = useState<{ d1: DayCode; d2: DayCode; slot: string } | null>(null);
+  const title = "Faculty Propensity-to-Assign — Top 5 per Faculty (Pre-Survey)";
+  const subtitle = "Numbers show how many faculty have this paired slot in their top 5 strongest slots.";
+  const right = <div className="hidden sm:block text-xs text-zinc-400"></div>;
 
-  const [selectedFacultyId, setSelectedFacultyId] = useState<string | null>(null);
+  async function loadHeatmap() {
+    setLoading(true);
+    setError(null);
+    try {
+      const payload = await fetchFacultyAvailabilityHeatmap<AvailabilityHeatmap>(
+        course ? { course_id: course } : undefined
+      );
+      setData(payload);
+    } catch (e: any) {
+      setError(e?.message || "Failed to load.");
+      setData(null);
+    } finally {
+      setLoading(false);
+    }
+  }
 
   useEffect(() => {
-    (async () => {
-      try {
-        setLoading(true);
-        const res = await fetch("/api/analytics/availability-forecast", {
-          headers: { "Content-Type": "application/json" },
-          credentials: "include",
-        });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const json: ApiPayload = await res.json();
-        if (!json.ok) throw new Error("Server returned ok=false");
+    loadHeatmap();
+  }, [course, term]); // eslint-disable-line react-hooks/exhaustive-deps
 
-        setTermLabel(json.meta?.term_label || "");
-        setCampus(json.campuses?.[0] || "Manila");
-        setDayPairs(json.dayPairs || []);
-        setTimeSlots(json.timeSlots || []);
-        setForecast(json.forecast || { mon_thu: [], tue_fri: [], wed_sat: [] });
-        setFacultyBySlot(json.facultyBySlot || {});
-        setFacultyOptions(json.facultyOptions || []);
-      } catch (e: any) {
-        setError(e?.message || "Failed to load");
-      } finally {
-        setLoading(false);
-      }
-    })();
-  }, []);
+  const { pairMin, pairMax } = usePairMinMax(data);
 
-  const maxVal = useMemo(() => maxForecast(forecast), [forecast]);
-  const facultyIndex = useMemo(() => buildFacultyIndex(facultyBySlot), [facultyBySlot]);
-
-  const matchSet = useMemo(() => {
-    if (!selectedFacultyId) return null;
-    const entries = facultyIndex.get(selectedFacultyId) || [];
-    return new Set(entries.map((e) => `${e.dp}|${e.i}`));
-  }, [selectedFacultyId, facultyIndex]);
-
-  const isCellMatch = (dp: DayPairId, i: number) => {
-    if (!matchSet) return true;
-    return matchSet.has(`${dp}|${i}`);
-  };
-
-  // modal state
-  const [open, setOpen] = useState(false);
-  const [activePair, setActivePair] = useState<DayPairId | null>(null);
-  const [activePairLabel, setActivePairLabel] = useState<string>("");
-  const [activeIndex, setActiveIndex] = useState<number>(0);
-  const [activeValue, setActiveValue] = useState<number>(0);
-
-  const openModal = (dp: DayPairId, dpLabel: string, idx: number, value: number) => {
-    setActivePair(dp);
-    setActivePairLabel(dpLabel);
-    setActiveIndex(idx);
-    setActiveValue(value);
-    setOpen(true);
-  };
-  const closeModal = () => setOpen(false);
-
-  // low coverage list (ratio < 0.34)
-  const lowCoverage = useMemo(() => {
-    const lows: { dp: DayPairId; dpLabel: string; i: number; t: string; v: number }[] = [];
-    for (const dp of dayPairs) {
-      for (let i = 0; i < timeSlots.length; i++) {
-        const v = forecast[dp.id]?.[i] ?? 0;
-        if (maxVal > 0 && v / maxVal < 0.34) lows.push({ dp: dp.id, dpLabel: dp.label, i, t: timeSlots[i], v });
-      }
-    }
-    return lows.sort((a, b) => a.v - b.v);
-  }, [dayPairs, timeSlots, forecast, maxVal]);
-
-  const activeAvail = activePair ? facultyBySlot?.[activePair]?.[activeIndex]?.available ?? [] : [];
-  const activeUnavail = activePair ? facultyBySlot?.[activePair]?.[activeIndex]?.unavailable ?? [] : [];
-
-  const selectedFaculty = useMemo(
-    () => (selectedFacultyId ? facultyOptions.find((o) => o.id === selectedFacultyId) || null : null),
-    [selectedFacultyId, facultyOptions]
-  );
-
-  const handleExportCsv = () => {
-    const rows: (string | number)[][] = [
-      ["Term", termLabel || "—"],
-      ["Campus", campus || "—"],
-      selectedFacultyId ? ["Faculty Filter", selectedFacultyId] : [],
-      [],
-      ["Day Pair", "Time Slot", "Predicted Available"],
-    ].filter((r) => r.length) as (string | number)[][];
-
-    for (const dp of dayPairs) {
-      for (let i = 0; i < timeSlots.length; i++) {
-        const match =
-          !selectedFacultyId ||
-          (facultyBySlot?.[dp.id]?.[i]?.available || []).some((f) => f.id === selectedFacultyId);
-        if (match) rows.push([dp.label, timeSlots[i], forecast[dp.id]?.[i] ?? 0]);
-      }
-    }
-    const csv = rows.map((r) => r.join(",")).join("\n");
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `availability-forecast-${(termLabel || "term").replace(/\s+/g, "_")}-${campus}${
-      selectedFacultyId ? `-${selectedFacultyId}` : ""
-    }.csv`;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
-  };
-
-  // esc to close modal
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, []);
+  const modalData = useMemo(() => {
+    if (!active || !data) return null;
+    const merged = mergePairCells(getSingleCell(data, active.d1, active.slot), getSingleCell(data, active.d2, active.slot));
+    const notes = Array.from(new Set(merged.list.flatMap((p) => p.notes || [])));
+    return { dayLabel: `${active.d1}–${active.d2}`, slot: active.slot, cell: merged, notes };
+  }, [active, data]);
 
   return (
-    <div className="w-full px-8 py-8">
-      {/* Header */}
-      <header className="mb-2 flex flex-wrap items-end justify-between gap-2">
+    // CENTER + MAX WIDTH CONTAINER
+    <div className="w-full max-w-[1400px] mx-auto px-4 sm:px-6 lg:px-8 py-8">
+      <div className="flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
         <div>
-          <h1 className="text-2xl font-bold">Faculty Availability Forecast (Pre-Survey)</h1>
-          <p className="text-sm text-gray-600">
-            Predictive forecast {termLabel ? <>for <strong>{termLabel}</strong></> : null}
-          </p>
+          <h1 className="text-xl sm:text-2xl font-semibold tracking-tight">{title}</h1>
+          {subtitle && <p className="text-sm text-zinc-500">{subtitle}</p>}
         </div>
-      </header>
+        {right}
+      </div>
+
+      <div className="w-full px-4 sm:px-6 lg:px-8 py-6 space-y-6">
+      </div>
 
       {/* Filter Bar */}
-      <div className="mb-4 flex flex-wrap items-center gap-3 rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
-        <Link
-          to="/om/home/reports-analytics"
-          className="inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm shadow-sm hover:bg-gray-50 active:bg-gray-100"
-        >
-          <ChevronLeft className="h-4 w-4" />
-          <span>Back</span>
-        </Link>
-
-        <FacultyCombobox
-          value={selectedFacultyId}
-          onChange={setSelectedFacultyId}
-          options={facultyOptions}
-          className="flex-1 min-w-[240px]"
-        />
-
-        <div className="ml-auto flex items-center gap-3">
-          <SelectBox
-            value={campus}
-            onChange={setCampus}
-            options={["Manila", "Laguna"]}
-            placeholder="— Campus —"
-            className="min-w-[180px]"
-          />
-          <button
-            type="button"
-            onClick={handleExportCsv}
-            className="inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm shadow-sm hover:bg-gray-50 active:bg-gray-100 focus:ring-2 focus:ring-emerald-500/30"
-            aria-label="Export CSV"
-            title="Export CSV"
+      <Card className="p-4 mb-4 w-full">
+        <div className="flex flex-wrap items-center gap-3">
+          <Link
+            to="/om/home/reports-analytics"
+            className="inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm shadow-sm hover:bg-gray-50 active:bg-gray-100"
+            aria-label="Back"
+            title="Back"
           >
-            <FileDown className="h-4 w-4" />
-            <span>Export CSV</span>
-          </button>
-        </div>
-      </div>
+            <ChevronLeft className="h-4 w-4" />
+            <span>Back</span>
+          </Link>
+          <div className="min-w-[220px]">
+            <SelectBox value={term} onChange={setTerm} options={["2025 Term 1", "2024 Term 3", "2024 Term 2"]} />
+          </div>
 
-      {/* Heatmap */}
-      <section className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
-        {loading ? (
-          <div className="py-10 text-center text-sm text-gray-600">Loading forecast…</div>
-        ) : error ? (
-          <div className="py-10 text-center text-sm text-red-600">Error: {error}</div>
-        ) : (
-          <>
-            <div className="overflow-x-auto">
-              <table className="w-full border-separate border-spacing-0">
-                <colgroup>
-                  <col className="w-[112px] min-w-[112px] max-w-[112px]" />
-                  <col />
-                  <col />
-                  <col />
-                </colgroup>
-
-                <thead>
-                  <tr>
-                    <th className="p-1.5 text-center align-middle text-[10px] uppercase tracking-wide text-gray-500 whitespace-nowrap">
-                      Time Slot
-                    </th>
-                    {dayPairs.map((dp) => (
-                      <th
-                        key={dp.id}
-                        className="p-2 text-left text-[11px] uppercase tracking-wide text-gray-500"
-                      >
-                        {dp.label}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-
-                <tbody>
-                  {timeSlots.map((slot, i) => (
-                    <tr key={i} className="align-top">
-                      <td className="p-1.5 w-[112px] text-center align-middle text-xs font-medium whitespace-nowrap">
-                        {slot}
-                      </td>
-
-                      {dayPairs.map((dp) => {
-                        const v = forecast[dp.id]?.[i] ?? 0;
-                        const top = facultyBySlot?.[dp.id]?.[i]?.available?.[0] ?? null;
-                        const tooltip = `Pred. faculty: ${v}${top ? ` | Top: ${top.name} (${top.p.toFixed(2)})` : ""}`;
-                        const match = isCellMatch(dp.id, i);
-
-                        return (
-                          <td key={dp.id} className="p-2">
-                            <button
-                              type="button"
-                              title={tooltip}
-                              aria-label={tooltip}
-                              onClick={() => match && openModal(dp.id, dp.label, i, v)}
-                              disabled={!match}
-                              className={cls(
-                                "slotbtn relative grid h-12 w-full place-items-center rounded-xl text-center shadow-[inset_0_0_0_1px_rgba(255,255,255,0.12)] focus:outline-none",
-                                classForValue(v, maxVal),
-                                match
-                                  ? "focus:ring-2 focus:ring-emerald-500/30"
-                                  : "opacity-40 grayscale pointer-events-none"
-                              )}
-                            >
-                              <div className="text-base font-extrabold leading-none">{v}</div>
-                              <div className="text-[10px] opacity-90">pred. faculty</div>
-                              {selectedFacultyId && match && (
-                                <span className="pointer-events-none absolute inset-0 rounded-xl ring-2 ring-emerald-400/50" />
-                              )}
-                            </button>
-                          </td>
-                        );
-                      })}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-
-            {/* Legend */}
-            <div className="mt-3 flex flex-wrap items-center gap-4 text-xs text-gray-600">
-              <span className="inline-flex items-center gap-2">
-                <i className="h-3.5 w-3.5 rounded-md border border-black/5 bg-[#94B49F]"></i> High
-              </span>
-              <span className="inline-flex items-center gap-2">
-                <i className="h-3.5 w-3.5 rounded-md border border-black/5 bg-[#ECB390]"></i> Medium
-              </span>
-              <span className="inline-flex items-center gap-2">
-                <i className="h-3.5 w-3.5 rounded-md border border-black/5 bg-[#DF7861]"></i> Low
-              </span>
-              <span className="inline-flex items-center gap-2">
-                <i className="h-3.5 w-3.5 rounded-md border border-black/5 bg-[#FCF8E8]"></i> None
-              </span>
-              {selectedFaculty && (
-                <span className="inline-flex items-center gap-2">
-                  <i className="h-3.5 w-3.5 rounded-md border border-emerald-300 ring-2 ring-emerald-400/50"></i>{" "}
-                  {selectedFaculty.name} available
-                </span>
-              )}
-            </div>
-
-            <p className="mt-2 text-xs text-gray-500">
-              Numbers represent predicted counts prior to new preference forms. Click a cell to see faculty names with confidence.
-            </p>
-          </>
-        )}
-      </section>
-
-      {/* Low-coverage pill */}
-      <div className="mt-3 flex justify-end">
-        <div
-          className={cls(
-            "inline-flex items-center gap-2 rounded-xl border px-3 py-2 text-sm shadow-sm",
-            lowCoverage.length
-              ? "border-amber-200 bg-amber-50 text-amber-800"
-              : "border-emerald-200 bg-emerald-50 text-emerald-700"
-          )}
-          role="status"
-          aria-live="polite"
-        >
-          {lowCoverage.length ? (
-            <>
-              <span>{lowCoverage.length} low-coverage slots detected.</span>
+          <div className="relative w-full sm:w-[28rem]">
+            <input
+              className="w-full rounded-lg border border-gray-300 px-3.5 py-2 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30"
+              placeholder="Filter by course ID (qualified only)"
+              value={course}
+              onChange={(e) => setCourse(e.target.value.trim())}
+              aria-label="Filter by course ID"
+            />
+            {!!course && (
               <button
                 type="button"
-                onClick={() =>
-                  openModal(lowCoverage[0].dp, lowCoverage[0].dpLabel, lowCoverage[0].i, lowCoverage[0].v)
-                }
-                className="rounded-md border border-amber-300 bg-white px-2 py-1 text-xs hover:bg-amber-100"
+                onClick={() => setCourse("")}
+                className="absolute right-2 top-1/2 -translate-y-1/2 inline-flex h-5 w-5 items-center justify-center rounded-full text-gray-500 hover:bg-gray-100"
+                aria-label="Clear filter"
+                title="Clear"
               >
-                View first
+                ×
               </button>
-            </>
-          ) : (
-            <span>No low-coverage windows detected.</span>
-          )}
+            )}
+          </div>
+
+          <div className="ml-auto text-sm text-gray-600">
+            Term scope: <span className="font-semibold text-emerald-700">Pre-survey</span>
+          </div>
         </div>
-      </div>
+      </Card>
+
+      <WarningPanel warnings={data?.warnings || []} />
+
+      {loading && (
+        <Card className="overflow-hidden w-full">
+          <div className="animate-pulse">
+            <div className="h-10 bg-gray-50 border-b border-gray-100" />
+            {[...Array(6)].map((_, i) => (
+              <div key={i} className="h-12 border-t border-gray-100 bg-gray-50/80" />
+            ))}
+          </div>
+        </Card>
+      )}
+
+      {error && (
+        <div className="px-4 py-3 text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg">{error}</div>
+      )}
+
+      {data && !loading && (
+        <Card className="overflow-x-auto w-full">
+          {/* Legend / scale */}
+          <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 border-b border-gray-200">
+            <div className="text-sm text-gray-600">
+              Numbers show how many faculty have the paired slot in their top 5 strongest slots.
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-gray-500">Min</span>
+              <div className="h-3 w-24 rounded bg-gradient-to-r from-[#ecfdf5] via-[#6ee7b7] to-[#059669]" />
+              <span className="text-xs text-gray-500">Max</span>
+              <span className="ml-3 text-xs text-gray-500">
+                ({pairMin}–{pairMax})
+              </span>
+            </div>
+          </div>
+
+          {/* Heatmap table (full width, centered within card) */}
+          <div className="w-full">
+            <table className="w-full table-fixed border-separate border-spacing-0 text-sm">
+              {/* Fix first column width; remaining columns flex */}
+              <colgroup>
+                <col style={{ width: 160 }} />
+                <col />
+                <col />
+                <col />
+              </colgroup>
+
+              <thead className="sticky top-0 z-[1] bg-white">
+                <tr>
+                  <th className="text-left px-3 py-2 border-b border-gray-200 sticky left-0 bg-white">
+                    Time ↓ / Day →
+                  </th>
+                  {DAY_PAIRS.map(([d1, d2]) => (
+                    <th key={`${d1}${d2}`} className="text-center px-3 py-2 border-b border-gray-200 text-emerald-700">
+                      {d1}–{d2}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+
+              <tbody>
+                {TIME_ROWS.map((slot) => (
+                  <tr key={slot}>
+                    <th className="text-right px-3 py-2 border-r border-gray-100 whitespace-nowrap sticky left-0 bg-white">
+                      {slot}
+                    </th>
+                    {DAY_PAIRS.map(([d1, d2]) => {
+                      const merged = mergePairCells(
+                        getSingleCell(data, d1, slot),
+                        getSingleCell(data, d2, slot)
+                      );
+                      const bg = colorForCount(merged.count, pairMin, pairMax);
+                      const darkText = merged.count <= Math.max(1, Math.round(pairMax * 0.35));
+                      return (
+                        <td
+                          key={`${d1}${d2}-${slot}`}
+                          onClick={() => setActive({ d1, d2, slot })}
+                          className="text-center align-middle border border-gray-100 cursor-pointer"
+                          style={{
+                            background: bg,
+                            color: darkText ? "#0b3d2e" : "white",
+                            fontWeight: 700,
+                            borderRadius: 10,
+                            height: 56, // taller for readability on wide screens
+                          }}
+                          title={`${d1}–${d2} • ${slot} • ${merged.count}`}
+                        >
+                          {merged.count}
+                          <div className={cls("text-[11px]", darkText ? "opacity-80" : "opacity-95")}>faculty</div>
+                        </td>
+                      );
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+
+            <div className="text-[12px] text-gray-600 mt-2 px-3 pb-3">
+              Click a cell to see predicted faculty and confidence.
+            </div>
+          </div>
+        </Card>
+      )}
 
       {/* Modal */}
-      {open && activePair && (
+      {modalData && (
         <div
-          className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 p-3 sm:items-center"
-          onClick={(e) => {
-            if (e.target === e.currentTarget) closeModal();
-          }}
-          aria-hidden={false}
+          role="dialog"
+          aria-modal="true"
+          className="fixed inset-0 bg-black/40 flex items-center justify-center z-50"
+          onClick={() => setActive(null)}
         >
-          <div className="w-full max-w-[640px] overflow-hidden rounded-2xl bg-white shadow-2xl">
-            <div className="flex items-center justify-between border-b border-gray-200 px-4 py-3">
-              <div>
-                <div className="text-[11px] font-medium uppercase tracking-wide text-gray-500">
-                  {activePairLabel}
-                </div>
-                <div className="text-sm font-semibold text-slate-800">
-                  {timeSlots[activeIndex]} • Pred: {activeValue}
-                </div>
+          <div
+            className="w-full max-w-3xl bg-white rounded-2xl shadow-2xl overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-4 py-3 border-b border-gray-100 font-semibold">
+              {modalData.dayLabel} · {modalData.slot} · Pred: {modalData.cell.count}
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 max-h-[70vh] overflow-auto">
+              <div className="p-4 border-r border-gray-100">
+                <div className="font-semibold text-emerald-700 mb-2">Predicted Available</div>
+                {modalData.cell.list.length === 0 && <div className="text-gray-500">None</div>}
+                {modalData.cell.list.slice(0, 100).map((p) => (
+                  <div key={p.faculty_id} className="flex items-center justify-between py-1.5">
+                    <span title={p.email ? `${p.name} · ${p.email}` : p.name}>{p.name}</span>
+                    <span className="text-gray-700">{p.confidence_pct}%</span>
+                  </div>
+                ))}
+                {modalData.cell.list.length > 100 && (
+                  <div className="text-xs text-gray-500 mt-2">
+                    Showing first 100 of {modalData.cell.list.length}. Refine filter to narrow results.
+                  </div>
+                )}
               </div>
+              <div className="p-4">
+                <div className="font-semibold text-emerald-700 mb-2">Notes</div>
+                {modalData.notes.length === 0 && <div className="text-gray-500">—</div>}
+                {modalData.notes.map((n, i) => (
+                  <div key={i} className="text-gray-700 py-0.5">
+                    • {n}
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="px-4 py-3 border-t border-gray-100 flex justify-end">
               <button
-                onClick={closeModal}
-                className="rounded-md p-1.5 text-gray-600 hover:bg-gray-100"
-                aria-label="Close"
+                onClick={() => setActive(null)}
+                className="px-3 py-1.5 rounded-lg border border-gray-300 text-sm hover:bg-gray-50"
               >
-                <X className="h-5 w-5" />
+                Close
               </button>
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2">
-              {/* Available */}
-              <div className="min-w-0 border-b border-gray-200 p-4 sm:border-b-0 sm:border-r">
-                <div className="mb-2 flex items-center justify-between">
-                  <strong className="text-sm">Predicted Available</strong>
-                  <span className="rounded-full border border-gray-300 px-2 py-0.5 text-[11px] text-gray-600">
-                    {activeAvail.length}
-                  </span>
-                </div>
-                <ul className="max-h-64 space-y-1 overflow-auto text-sm">
-                  {activeAvail.map((f) => {
-                    const isSelected = selectedFacultyId === f.id;
-                    return (
-                      <li
-                        key={f.id}
-                        className={cls(
-                          "flex items-center justify-between gap-2 rounded-md px-1 py-0.5",
-                          isSelected ? "bg-emerald-50 font-medium text-emerald-900" : ""
-                        )}
-                      >
-                        <span className="truncate">{f.name}</span>
-                        <span className="text-xs text-gray-500">{Math.round(f.p * 100)}%</span>
-                      </li>
-                    );
-                  })}
-                  {!activeAvail.length && <li className="text-sm text-gray-500">No predictions available.</li>}
-                </ul>
-                <div className="mt-3 flex flex-wrap gap-2">
-                  <button
-                    type="button"
-                    onClick={async () => {
-                      const text = activeAvail.map((f) => `${f.name} <${f.email}>`).join(", ");
-                      try {
-                        await navigator.clipboard.writeText(text);
-                      } catch {
-                        window.prompt("Copy the list below:", text);
-                      }
-                    }}
-                    className="rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm hover:bg-gray-50"
-                  >
-                    Copy names/emails
-                  </button>
-                </div>
-              </div>
-
-              {/* Unavailable */}
-              <div className="min-w-0 p-4">
-                <div className="mb-2 flex items-center justify-between">
-                  <strong className="text-sm">Likely Unavailable</strong>
-                  <span className="rounded-full border border-gray-300 px-2 py-0.5 text-[11px] text-gray-600">
-                    {activeUnavail.length}
-                  </span>
-                </div>
-                <ul className="max-h-64 space-y-1 overflow-auto text-sm">
-                  {activeUnavail.map((f) => (
-                    <li key={f.id} className="flex items-center justify-between gap-2">
-                      <span className="truncate">{f.name}</span>
-                      <span className="text-xs text-gray-500">{Math.round(f.p * 100)}%</span>
-                    </li>
-                  ))}
-                  {!activeUnavail.length && <li className="text-sm text-gray-500">No predictions available.</li>}
-                </ul>
-                <div className="mt-3 flex flex-wrap gap-2">
-                  <button
-                    type="button"
-                    onClick={closeModal}
-                    className="rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm hover:bg-gray-50"
-                  >
-                    Close
-                  </button>
-                </div>
-              </div>
-            </div>
-
-            <div className="border-t border-gray-200 px-4 py-3 text-xs text-gray-500">
-              Tip: Export CSV respects the current faculty filter.
             </div>
           </div>
         </div>

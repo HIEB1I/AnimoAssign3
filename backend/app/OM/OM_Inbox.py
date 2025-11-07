@@ -1,15 +1,15 @@
-# backend/app/OM/OM_Inbox.py
+# backend/app/CHAIR/CHAIR_Inbox.py
 from fastapi import APIRouter, Query
 from ..main import db
 
-router = APIRouter(prefix="/om", tags=["om"])
+router = APIRouter(prefix="/chair", tags=["chair"])
 
 @router.get("/inbox")
-async def get_om_inbox(userId: str = Query(...)):
+async def get_chair_inbox(userId: str = Query(...)):
     """
-    Office Manager Inbox feed, mirroring Faculty's /faculty/inbox pattern.
-    Returns messages for the given userId from the 'om_inbox' collection.
-    Document shape is flexible; UI maps common fields: id, from, email, subject, preview/body, receivedAt.
+    Chair Inbox feed, mirroring OM's /om/inbox.
+    Returns messages for userId from 'chair_inbox'.
+    UI expects: id, from, email, subject, preview/body, receivedAt.
     """
-    inbox = await db.om_inbox.find({"user_id": userId}, {"_id": 0}).to_list(None)
+    inbox = await db.chair_inbox.find({"user_id": userId}, {"_id": 0}).to_list(None)
     return {"ok": True, "inbox": inbox or []}

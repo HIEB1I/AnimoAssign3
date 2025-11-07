@@ -1,10 +1,17 @@
 # analytics/app/main.py
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Literal
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse, JSONResponse
 from motor.motor_asyncio import AsyncIOMotorClient
+from pydantic import BaseModel, Field
+
+from .OM_REPORTS_ANALYTICS.OM_RP_DeloadingUtilization import fetch_deloading_utilization_term_paged  # descriptive #3
+
+from collections import Counter
+import re
 
 from .config import get_settings
 
@@ -101,6 +108,7 @@ def _service_result(name: str, ok: bool, detail: str, latency_ms: Optional[float
         out["latencyMs"] = round(latency_ms, 2)
     return out
 
+Direction = Literal["current", "next", "prev"]
 
 # --------------------------------------------------------------------
 # System endpoints (keep your existing ones)
@@ -116,20 +124,29 @@ async def health_db():
     return {"db": "ok"}
 
 
+@app.get("/analytics/deloadings/by-term")
+async def deloadings_by_term(
+    anchor_term_id: Optional[str] = Query(None),
+    direction: Direction = Query("current")
+):
+    return await fetch_deloading_utilization_term_paged(anchor_term_id, direction)
+
 # --------------------------------------------------------------------
 # Feature routers (NEW) – no path/routing changes needed
 # These will live under the backend root; your nginx/Vite already forward /api/* here.
 # --------------------------------------------------------------------
+# keep these imports
 from .OM_REPORTS_ANALYTICS.OM_RP_FacultyTeachingHistory import router as om_rp_teachhist_router
-from .OM_REPORTS_ANALYTICS.OM_RP_CourseHistory import router as om_rp_coursehist_router
+from .OM_REPORTS_ANALYTICS.OM_RP_CourseProfile import router as om_rp_courseprof_router
 from .OM_REPORTS_ANALYTICS.OM_RP_DeloadingUtilization import router as om_rp_deload_router
 from .OM_REPORTS_ANALYTICS.OM_RP_AvailabilityForecasting import router as om_rp_avail_router
 from .OM_REPORTS_ANALYTICS.OM_RP_LoadRisk import router as om_rp_loadrisk_router
-from .OM_REPORTS_ANALYTICS.OM_RP_FacultyTeachingHistory import router as rp_fac_hist_router
 
-app.include_router(om_rp_teachhist_router, prefix="/api")
-app.include_router(om_rp_coursehist_router, prefix="/api")
+# include routers
+app.include_router(om_rp_teachhist_router)                 # no prefix
+app.include_router(om_rp_courseprof_router)                # ← remove prefix here
 app.include_router(om_rp_deload_router, prefix="/api")
-app.include_router(om_rp_avail_router, prefix="/api")
-app.include_router(om_rp_loadrisk_router, prefix="/api")
-app.include_router(rp_fac_hist_router)
+app.include_router(om_rp_avail_router)  # exposes /analytics/faculty-availability-heatmap
+app.include_router(om_rp_loadrisk_router)
+
+

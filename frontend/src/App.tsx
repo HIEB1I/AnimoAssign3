@@ -23,7 +23,7 @@ import OM_LoadReco from "./pages/OM/OM_LoadReco";
 
 // ----- Reports & Analytics sub-pages -----
 import OM_RP_FacultyTeachingHistory from "@/pages/OM/OM_REPORTS_ANALYTICS/OM_RP_FacultyTeachingHistory";
-import OM_RP_CourseHistory from "@/pages/OM/OM_REPORTS_ANALYTICS/OM_RP_CourseHistory";
+import OM_RP_CourseHistory from "@/pages/OM/OM_REPORTS_ANALYTICS/OM_RP_CourseProfile";
 import OM_RP_DeloadingUtilization from "@/pages/OM/OM_REPORTS_ANALYTICS/OM_RP_DeloadingUtilization";
 import OM_RP_AvailabilityForecasting from "@/pages/OM/OM_REPORTS_ANALYTICS/OM_RP_AvailabilityForecasting";
 import OM_RP_LoadRisk from "@/pages/OM/OM_REPORTS_ANALYTICS/OM_RP_LoadRisk";
@@ -45,6 +45,15 @@ import ADMIN_Inbox from "./pages/ADMIN/ADMIN_Inbox";
 import APO_PreEnlistment from "./pages/APO/APO_PreEnlistment";
 import APO_CourseOfferings from "./pages/APO/APO_CourseOfferings";
 import APO_RoomAllocation from "./pages/APO/APO_RoomAllocation";
+
+// ---------------- CHAIR ----------------
+import CHAIR_Plantilla from "./pages/CHAIR/CHAIR_Plantilla";
+import CHAIR_FacultyManagement from "./pages/CHAIR/CHAIR_FacultyManagement";
+import CHAIR_CourseManagement from "./pages/CHAIR/CHAIR_CourseManagement";
+import CHAIR_FacultyService from "./pages/CHAIR/CHAIR_FacultyService";
+import CHAIR_StudentPetition from "./pages/CHAIR/CHAIR_StudentPetition";
+import CHAIR_ClassRetention from "./pages/CHAIR/CHAIR_ClassRetention";
+import CHAIR_Inbox from "./pages/CHAIR/CHAIR_Inbox"; 
 
 const base = (import.meta.env.BASE_URL || "/").replace(/\/$/, "");
 
@@ -105,7 +114,7 @@ export default function App() {
             <Route path="reports-analytics/load-risk" element={<OM_RP_LoadRisk />} />
           </Route>
 
-          {/* Redirects for old/external links -> new nested routes */}
+          {/* Redirects for old/external OM links -> new nested routes */}
           <Route path="/om/faculty-management" element={<Navigate to="/om/home/faculty-management" replace />} />
           <Route path="/om/course-management" element={<Navigate to="/om/home/course-management" replace />} />
           <Route path="/om/faculty-form" element={<Navigate to="/om/home/faculty-form" replace />} />
@@ -135,7 +144,21 @@ export default function App() {
           <Route path="/admin" element={<ADMIN />} />
           <Route path="/admin/inbox" element={<ADMIN_Inbox />} />
 
-          {/* Authenticated wildcard: unknown paths for logged-in users go home */}
+          <Route path="/chair" element={<CHAIR_Plantilla />}>
+            {/* Parent landing */}
+            <Route index element={<div />} />
+            <Route path="plantilla" element={<div />} />
+
+            {/* Children per mapping */}
+            <Route path="faculty-management" element={<CHAIR_FacultyManagement />} />
+            <Route path="course-management" element={<CHAIR_CourseManagement />} />
+            <Route path="faculty-service" element={<CHAIR_FacultyService />} />
+            <Route path="student-petitions" element={<CHAIR_StudentPetition />} />
+            <Route path="class-retention" element={<CHAIR_ClassRetention />} />
+          </Route>
+          <Route path="/chair/inbox" element={<CHAIR_Inbox />} />
+
+          {/* Authenticated wildcard: unknown paths for logged-in users go OM home */}
           <Route path="*" element={<Navigate to="/om/home" replace />} />
         </Route>
 

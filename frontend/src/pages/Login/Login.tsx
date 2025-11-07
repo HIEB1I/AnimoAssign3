@@ -26,12 +26,13 @@ const Login: React.FC = () => {
         navigate("/apo/preenlistment", { replace: true });
       } else if (roles.includes("office manager")) {
         navigate("/om/load-assignment", { replace: true });
+      } else if (roles.includes("deparment chair")) {
+        navigate("/chair", { replace: true });
       } else if (roles.includes("faculty")) {
         navigate("/faculty/overview", { replace: true });
       } else if (roles.includes("student")) {
         navigate("/student/petition", { replace: true });
       } else if (roles.includes("dean")) {
-        navigate("/dean/dashboard", { replace: true });
       } else {
         navigate("/om/home", { replace: true });
       }

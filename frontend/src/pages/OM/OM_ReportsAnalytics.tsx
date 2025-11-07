@@ -36,7 +36,7 @@ const INSIGHT_CARDS: CardItem[] = [
     },
   },
   {
-    title: "Course History",
+    title: "Course Profile",
     to: "course-history",
     Icon: Layers,
     accent: {

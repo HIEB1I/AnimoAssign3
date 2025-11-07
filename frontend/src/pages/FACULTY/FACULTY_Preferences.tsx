@@ -1,16 +1,17 @@
-// frontend/src/pages/FACULTY/Faculty_Preferences.tsx
-import React, { useEffect, useMemo, useState } from "react";
-import { CalendarDays, MapPin, Monitor, BookOpen, Settings, Plus, Check, PencilLine } from "lucide-react";
-
+// frontend/src/pages/FACULTY/FAC_Preferences.tsx
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { CalendarDays, MapPin, Monitor, BookOpen, Settings } from "lucide-react";
 import {
-  getFacultyPreferencesList,
+  getFacultyPreferencesProfile,
   getFacultyPreferencesOptions,
+  getFacultyPreferencesList,
   submitFacultyPreferences,
 } from "../../api";
 
-/* ---------- tiny utils (same style as FAC_History) ---------- */
+/* ---------- tiny utils ---------- */
 const cls = (...s: (string | false | undefined)[]) => s.filter(Boolean).join(" ");
 
+/* ---------- tag pill ---------- */
 const TAG_STYLES = {
   emerald: "bg-emerald-50 text-emerald-700 border-emerald-200",
   amber: "bg-amber-50 text-amber-700 border-amber-200",
@@ -37,91 +38,415 @@ function Tag({
   );
 }
 
-function FieldLabel({ children }: { children: React.ReactNode }) {
-  return <div className="text-[12.5px] font-medium text-gray-500">{children}</div>;
-}
-
-function FieldValue({ children }: { children: React.ReactNode }) {
-  return <div className="mt-1 text-[14.5px] text-gray-900">{children}</div>;
-}
-
-function SectionCard({
-  icon,
-  title,
-  children,
-  className = "",
+/* ---------- multi-select Dropdown ---------- */
+function MultiSelectDropdown({
+  values,
+  onChange,
+  options,
+  className = "w-full",
+  placeholder = "— Select options —",
+  maxPreview = 2,
 }: {
-  icon: React.ReactNode;
-  title: string;
-  children?: React.ReactNode;
+  values: string[];
+  onChange: (v: string[]) => void;
+  options: readonly string[];
   className?: string;
+  placeholder?: string;
+  maxPreview?: number;
 }) {
+  const [open, setOpen] = useState(false);
+  const [hover, setHover] = useState(0);
+  const btnRef = useRef<HTMLButtonElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const close = (e: MouseEvent) =>
+      open &&
+      !btnRef.current?.contains(e.target as Node) &&
+      !listRef.current?.contains(e.target as Node) &&
+      setOpen(false);
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [open]);
+
+  const toggle = (opt: string) =>
+    onChange(values.includes(opt) ? values.filter((v) => v !== opt) : [...values, opt]);
+
+  const label =
+    values.length === 0 ? (
+      <span className="text-gray-400">{placeholder}</span>
+    ) : values.length <= maxPreview ? (
+      values.join(", ")
+    ) : (
+      `${values.slice(0, maxPreview).join(", ")} +${values.length - maxPreview} more`
+    );
+
+  const onKey = (e: React.KeyboardEvent) => {
+    if (!open && ["ArrowDown", "Enter", " "].includes(e.key)) {
+      e.preventDefault();
+      setOpen(true);
+      return;
+    }
+    if (!open) return;
+    if (e.key === "Escape") {
+      e.preventDefault();
+      setOpen(false);
+      btnRef.current?.focus();
+    }
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setHover((i) => (i + 1) % options.length);
+    }
+    if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setHover((i) => (i - 1 + options.length) % options.length);
+    }
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      toggle(options[hover]);
+    }
+  };
+
   return (
-    <section className={cls("rounded-xl border border-gray-200 bg-white p-5", className)}>
-      <div className="mb-4 flex items-center gap-2">
-        <span className="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-emerald-50 text-emerald-700">
-          {icon}
-        </span>
-        <h3 className="text-[15px] font-semibold text-gray-900">{title}</h3>
-      </div>
-      {children}
-    </section>
+    <div className={cls("relative", className)} onKeyDown={onKey}>
+      <button
+        ref={btnRef}
+        onClick={() => setOpen((v) => !v)}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        className={cls(
+          "w-full rounded-xl border border-gray-200 bg-white py-2.5 pl-3 pr-10 text-left text-sm shadow-sm outline-none",
+          "hover:bg-gray-50 focus:ring-2 focus:ring-emerald-500/30"
+        )}
+      >
+        {label}
+        <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2">▾</span>
+      </button>
+
+      {open && (
+        <div
+          ref={listRef}
+          role="listbox"
+          className="absolute z-20 mt-2 max-h-80 w-full overflow-auto rounded-2xl border border-gray-300 bg-white shadow-lg"
+        >
+          {options.map((opt, i) => {
+            const checked = values.includes(opt);
+            return (
+              <button
+                key={opt}
+                role="option"
+                aria-selected={checked}
+                onMouseEnter={() => setHover(i)}
+                onClick={() => toggle(opt)}
+                className={cls(
+                  "flex w-full items-center gap-3 px-4 py-3 text-left text-sm",
+                  i === hover && "bg-emerald-50"
+                )}
+              >
+                <input type="checkbox" readOnly checked={checked} className="accent-emerald-700" />
+                <span>{opt}</span>
+              </button>
+            );
+          })}
+          {values.length > 0 && (
+            <div className="flex items-center justify-between border-t border-gray-200 px-4 py-2">
+              <button
+                className="text-xs text-emerald-700 hover:underline"
+                onClick={() => onChange([])}
+              >
+                Clear all
+              </button>
+              <span className="text-xs text-gray-500">{values.length} selected</span>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 
-/* =========================================================
-   ==============  DATA TYPES (UI local state)  ============
-   ========================================================= */
-type CourseLite = { course_id: string; course_code?: string | string[]; course_title?: string };
+/* ---------- single Dropdown ---------- */
+function Dropdown({
+  value,
+  onChange,
+  options,
+  className = "w-full",
+  placeholder = "— Select an option —",
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  options: readonly string[];
+  className?: string;
+  placeholder?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const [hover, setHover] = useState(() => Math.max(0, options.findIndex((o) => o === value)));
+  const btnRef = useRef<HTMLButtonElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
 
-type Options = {
-  days: string[];
-  timeBands: string[];
-  kacs: { kac_id: string; kac_code?: string; kac_name?: string }[];
-  campuses: { campus_id: string; campus_name: string }[];
-  deloading_types: { deloadingtype_id: string; type: string }[];
-  coursesByKac?: Record<string, CourseLite[]>;
+  useEffect(
+    () => setHover(Math.max(0, options.findIndex((o) => o === value))),
+    [value, options]
+  );
+  useEffect(() => {
+    const close = (e: MouseEvent) =>
+      open &&
+      !btnRef.current?.contains(e.target as Node) &&
+      !listRef.current?.contains(e.target as Node) &&
+      setOpen(false);
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [open]);
+
+  const onKey = (e: React.KeyboardEvent) => {
+    if (!open && ["ArrowDown", "Enter", " "].includes(e.key)) {
+      e.preventDefault();
+      setOpen(true);
+      return;
+    }
+    if (!open) return;
+    if (e.key === "Escape") {
+      e.preventDefault();
+      setOpen(false);
+      btnRef.current?.focus();
+    }
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setHover((i) => (i + 1) % options.length);
+    }
+    if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setHover((i) => (i - 1 + options.length) % options.length);
+    }
+    if (e.key === "Enter") {
+      e.preventDefault();
+      onChange(options[hover] ?? options[0]);
+      setOpen(false);
+      btnRef.current?.focus();
+    }
+  };
+
+  return (
+    <div className={cls("relative", className)} onKeyDown={onKey}>
+      <button
+        ref={btnRef}
+        onClick={() => setOpen((v) => !v)}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        className={cls(
+          "w-full rounded-xl border border-gray-200 bg-white py-2.5 pl-3 pr-10 text-left text-sm shadow-sm outline-none",
+          "hover:bg-gray-50 focus:ring-2 focus:ring-emerald-500/30"
+        )}
+      >
+        {value || <span className="text-gray-400">{placeholder}</span>}
+        <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2">▾</span>
+      </button>
+      {open && (
+        <div
+          ref={listRef}
+          role="listbox"
+          className="absolute z-20 mt-2 max-h-80 w-full overflow-auto rounded-2xl border border-gray-300 bg-white shadow-lg"
+        >
+          {options.map((opt, i) => (
+            <button
+              key={opt}
+              role="option"
+              aria-selected={value === opt}
+              onMouseEnter={() => setHover(i)}
+              onClick={() => {
+                onChange(opt);
+                setOpen(false);
+                btnRef.current?.focus();
+              }}
+              className={cls(
+                "block w-full px-4 py-3 text-left text-sm",
+                i === hover && "bg-emerald-50"
+              )}
+            >
+              {opt}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ---------- KAC → courses map ---------- */
+type KACKey =
+  | "Computer Architecture & Organization"
+  | "Computational Thinking"
+  | "Computing Ethics"
+  | "CS Math"
+  | "Data Structures, Algorithms, Complexity, Automata Theory"
+  | "Information And Network Security"
+  | "Information Management And Databases"
+  | "Intelligent Systems (AI/ML)"
+  | "Network Communications And Cloud Computing"
+  | "Object Oriented Programming And Software Design"
+  | "OS & Parallel/Distributed Computing"
+  | "Procedural Programming"
+  | "Research Methods, Technopreneurship & Innovation"
+  | "Software Engineering & UI/UX"
+  | "Theory Of Programming Languages And Compilers"
+  | "Web And Mobile Development";
+
+const KAC_COURSES: Record<KACKey, string[]> = {
+  "Computer Architecture & Organization": [
+    "CCICOMP",
+    "CSARCH1/2",
+    "LBYARCH",
+    "CEPARCO",
+    "ITCMSY1/2",
+    "LBYCMSY",
+    "Electives",
+  ],
+  "Computational Thinking": ["EMTC1CT", "IECMPTK"],
+  "Computing Ethics": [
+    "CS RESEARCH ETHICS",
+    "Data Privacy And Security",
+    "Informed Consent And Data Usage",
+    "Algorithmic Bias And Fairness",
+    "Ethical Data Sharing And Collaboration",
+  ],
+  "CS Math": ["CCDSTRU", "CSMODEL", "GD-MATH", "CE-MATH"],
+  "Data Structures, Algorithms, Complexity, Automata Theory": [
+    "CCDSALG",
+    "GDDASGO",
+    "CSALGCM",
+    "STALGCM",
+  ],
+  "Information And Network Security": [
+    "CSSECUR",
+    "CSSECDV",
+    "ISSECUR",
+    "ITSECUR",
+    "ITSECWB",
+    "NSSECU1/2/3",
+  ],
+  "Information Management And Databases": ["CCINFOM", "GDINFMG", "STADVDB", "ISINFOM", "ISPRENL"],
+  "Intelligent Systems (AI/ML)": ["CSINTSY", "STINTSY", "GDINTAI", "MACHLRN"],
+  "Network Communications And Cloud Computing": [
+    "NSCOM01/2/3",
+    "ITNET01/2/3/4",
+    "LBYNET1/2/3/4",
+    "CSNETWK",
+    "GDNETWK",
+    "ITSYSAD",
+    "CLOUDCO",
+    "STCLOUD",
+  ],
+  "Object Oriented Programming And Software Design": ["CCPROG3", "GDPROG3", "DSGNPAT"],
+  "OS & Parallel/Distributed Computing": ["CSOPESY", "STDISCM", "NSDSYST", "NSAPDEV"],
+  "Procedural Programming": ["CCPROG1", "CCPROG2", "GDPROG1", "GDPROG2", "MTPROG1", "MTPROG2"],
+  "Research Methods, Technopreneurship & Innovation": [
+    "STMETRE",
+    "CCINOV8",
+    "CAP-IE1",
+    "CAP-IE2",
+    "CAP-IE3",
+    "CERESME",
+    "NERESME",
+  ],
+  "Software Engineering & UI/UX": ["CSSWENG", "STSWENG", "STHCIUX", "ITISHCI", "IEUI-UX"],
+  "Theory Of Programming Languages And Compilers": ["CSADPRG", "COMPILE", "CMPILER"],
+  "Web And Mobile Development": [
+    "CCAPDEV",
+    "MOBDEVE",
+    "MOBICOM",
+    "ITISDEV",
+    "ITISSES",
+    "IT-PROG",
+    "Web/Mobile Electives",
+  ],
 };
 
-type PrefDoc = {
-  pref_id?: string;
-  faculty_id?: string;
-  preferred_units?: number;
-  availability_days?: string[]; // stored compressed e.g. ["MTH","TF"]
-  preferred_times?: string[];
-  preferred_kacs?: { kac_id?: string; kac_code?: string; kac_name?: string }[]; // enriched from API
-  preferred_courses?: CourseLite[]; // enriched by backend (codes/titles)
-  mode?: { mode?: string; campus_id?: string; campus_name?: string } | null;
-  deloading_data?: { deloading_type: string; units: string; deloading_type_name?: string }[];
-  notes?: string;
-  has_new_prep?: boolean;
-  is_finished?: boolean;
-  submitted_at?: string;
-  term_id?: string;
-  status?: string;
+const KAC_OPTIONS = Object.keys(KAC_COURSES) as KACKey[];
+
+/* ---------- option lists ---------- */
+const OPT = {
+  prefUnits: ["3", "6", "9", "12", "15"],
+  maxUnits: ["12", "15", "18"],
+  delivery: [
+    "Face-to-Face Only",
+    "Fully Online",
+    "Hybrid - Manila Campus Only",
+    "Hybrid - Laguna Campus Only",
+    "Hybrid - Any Campus",
+  ],
+  campus: ["Manila Campus", "Laguna Campus", "Either Campus"],
+  days: ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"],
+  timeSlots: [
+    "07:30 - 09:00",
+    "09:15 - 10:45",
+    "11:00 - 12:30",
+    "12:45 - 14:15",
+    "14:30 - 16:00",
+    "16:15 - 17:45",
+    "18:00 - 19:30",
+    "19:45 - 21:00",
+  ],
+  deloading: [
+    "Administrative",
+    "Commisioned-work",
+    "Curriculum & Instruction",
+    "Graduate Studies",
+    "Research",
+  ],
+} as const;
+
+/* ---------- types & local state ---------- */
+type DeloadRow = { type: string; units: number | null };
+
+/* NEW: define the missing types used by the editor */
+type DeloadingType = "Administrative" | "Research" | "Others";
+
+type DeloadingEntry = {
+  id: string;
+  type: DeloadingType | "";
+  units: number | null;
+  adminSubtype?: string;
+  otherText?: string;
+  researchRemarks?: string;
 };
 
-type RowDeload = { type?: string; adminType?: string; units?: number | string };
-
-type FormState = {
-  prefUnits: number | string;
-  maxUnits: number | string; // display only; not sent
+type SavedPrefs = {
+  prefUnits: string;
+  maxUnits: string;
+  deloadings: DeloadRow[];
+  noDeloading: boolean;
   days: string[];
   timeSlots: string[];
-  kac: string[]; // store selected KAC names for display; map to IDs on submit
-  preferredCourses: string[]; // store course_id(s)
-  deliveryMode?: "Face-to-Face Only" | "Hybrid" | "Fully Online";
-  campus?: string;
-  remarks?: string;
-  deloadings: RowDeload[];
-  noDeloading?: boolean;
+  campus: string;
+  delivery: string;
+  kac: KACKey[] | string[];
+  courses: string[]; // ← now persisted via preferred_courses
+  remarks: string;
 };
 
-/* =========================================================
-   ====================  HELPERS  ==========================
-   ========================================================= */
+const initialSaved: SavedPrefs = {
+  prefUnits: "3",
+  maxUnits: "15",
+  deloadings: [],
+  noDeloading: true,
+  days: [],
+  timeSlots: [],
+  campus: "Either Campus",
+  delivery: "Face-to-Face Only",
+  kac: [],
+  courses: [],
+  remarks: "",
+};
 
-// DB stores sequences like ["MTH", "TF"]; UI needs full names
+/* ---------- helpers to map UI <-> DB ---------- */
+const DAY_TO_LETTER: Record<string, "M" | "T" | "W" | "H" | "F" | "S"> = {
+  Monday: "M",
+  Tuesday: "T",
+  Wednesday: "W",
+  Thursday: "H",
+  Friday: "F",
+  Saturday: "S",
+};
 const LETTER_TO_DAY: Record<string, string> = {
   M: "Monday",
   T: "Tuesday",
@@ -130,849 +455,957 @@ const LETTER_TO_DAY: Record<string, string> = {
   F: "Friday",
   S: "Saturday",
 };
-const DAY_TO_LETTER: Record<string, string> = Object.fromEntries(Object.entries(LETTER_TO_DAY).map(([k, v]) => [v, k]));
-const DAY_ORDER = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 
-function expandDays(seq: string[] = []): string[] {
-  const out: string[] = [];
-  (seq || []).forEach((chunk) => {
-    (chunk || "").split("").forEach((ch) => {
-      const name = LETTER_TO_DAY[ch] || ch;
-      if (name && !out.includes(name)) out.push(name);
-    });
-  });
-  return out.sort((a, b) => DAY_ORDER.indexOf(a) - DAY_ORDER.indexOf(b));
-}
-
-function compressDays(full: string[]): string[] {
-  const letters = [...new Set(full.map((d) => DAY_TO_LETTER[d] || d))]
-    .filter(Boolean)
-    .sort((a, b) => "MTWHFS".indexOf(a) - "MTWHFS".indexOf(b));
+function compressDays(days: string[]): string[] {
+  const order = ["M", "T", "W", "H", "F", "S"];
+  const letters = days.map((d) => DAY_TO_LETTER[d]).sort((a, b) => order.indexOf(a) - order.indexOf(b));
   const out: string[] = [];
   let buf: string[] = [];
-  const idx = (x: string) => "MTWHFS".indexOf(x);
-  letters.forEach((ch) => {
-    if (!buf.length) {
-      buf.push(ch);
-      return;
-    }
-    if (idx(ch) - idx(buf[buf.length - 1]) === 1) {
-      buf.push(ch);
-    } else {
+  const isAdj = (a: string, b: string) => order.indexOf(b) - order.indexOf(a) === 1;
+  for (let i = 0; i < letters.length; i++) {
+    if (buf.length === 0) buf.push(letters[i]);
+    else if (isAdj(buf[buf.length - 1], letters[i])) buf.push(letters[i]);
+    else {
       out.push(buf.join(""));
-      buf = [ch];
+      buf = [letters[i]];
     }
-  });
+  }
   if (buf.length) out.push(buf.join(""));
   return out;
 }
 
-function toModeLabel(code?: string) {
-  const C = (code || "").toUpperCase();
-  if (C === "F2F") return "Face-to-Face Only";
-  if (C === "ONL") return "Fully Online";
-  if (C === "HYB") return "Hybrid";
-  return "";
+function expandDays(groups: string[]): string[] {
+  const out: string[] = [];
+  groups.forEach((g) => g.split("").forEach((ch) => out.push(LETTER_TO_DAY[ch])));
+  const order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+  return Array.from(new Set(out)).sort((a, b) => order.indexOf(a) - order.indexOf(b));
 }
 
-function modeFromLabel(label?: string): "F2F" | "ONL" | "HYB" | undefined {
-  if (!label) return undefined;
-  if (label === "Face-to-Face Only") return "F2F";
-  if (label === "Fully Online") return "ONL";
-  if (label === "Hybrid") return "HYB";
-  return undefined;
-}
-
-/* =========================================================
-   ==================  MAIN COMPONENT  =====================
-   ========================================================= */
-
-export default function Faculty_Preferences() {
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [edit, setEdit] = useState(false);
-
-  const [options, setOptions] = useState<Options>({
-    days: ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"],
-    timeBands: [
-      "07:30 - 09:00",
-      "09:15 - 10:45",
-      "11:00 - 12:30",
-      "12:45 - 14:15",
-      "14:30 - 16:00",
-      "16:15 - 17:45",
-      "18:00 - 19:30",
-      "19:45 - 21:00",
-    ],
-    kacs: [],
-    campuses: [],
-    deloading_types: [],
-    coursesByKac: {},
-  });
-
-  const [doc, setDoc] = useState<PrefDoc | null>(null);
-  const [form, setForm] = useState<FormState>({
-    prefUnits: "",
-    maxUnits: 15,
-    days: [],
-    timeSlots: [],
-    kac: [],
-    preferredCourses: [], // <-- REQUIRED in initial state
-    deliveryMode: undefined,
-    campus: undefined,
-    remarks: "",
-    deloadings: [{ type: undefined, adminType: undefined, units: "" }],
-    noDeloading: false,
-  });
-
-  const userId = useMemo(() => {
-    try {
-      const raw = localStorage.getItem("session");
-      const s = raw ? JSON.parse(raw) : null;
-      return s?.userId || s?.user?.userId || "";
-    } catch {
-      return "";
-    }
-  }, []);
-
-  // ---------- map KAC name -> id (for submit) ----------
-  const kacNameToId = (name?: string) =>
-    options.kacs.find((k) => k.kac_name === name)?.kac_id ||
-    options.kacs.find((k) => k.kac_code === name)?.kac_id ||
-    name ||
-    "";
-
-  // ---------- map Deloading type name -> id (for submit) ----------
-  const deloadTypeNameToId = (name?: string) =>
-    options.deloading_types.find((t) => t.type === name)?.deloadingtype_id || name || "";
-
-  // ---------- initial load ----------
+/* ---------- countdown hook ---------- */
+function useCountdown(targetISO: string) {
+  const [now, setNow] = useState<number>(() => Date.now());
   useEffect(() => {
-    (async () => {
-      try {
-        setLoading(true);
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+  const target = new Date(targetISO).getTime();
+  const diff = Math.max(0, target - now);
+  const past = now > target;
+  const d = Math.floor(diff / (1000 * 60 * 60 * 24));
+  const h = Math.floor((diff / (1000 * 60 * 60)) % 24);
+  const m = Math.floor((diff / (1000 * 60)) % 60);
+  const s = Math.floor((diff / 1000) % 60);
+  const label = past ? "Deadline passed" : `${d}d ${h}h ${m}m ${s}s`;
+  return { past, label };
+}
 
-        // options
-        const o = await getFacultyPreferencesOptions(userId);
-        setOptions({
-          days: o?.days || options.days,
-          timeBands: o?.timeBands || options.timeBands,
-          kacs: o?.kacs || [],
-          campuses: o?.campuses || [],
-          deloading_types: o?.deloading_types || [],
-          coursesByKac: o?.coursesByKac || {},
-        });
-
-        // latest pref
-        const r = await getFacultyPreferencesList(userId);
-        const pref: PrefDoc | undefined = (r?.preferences || [])[0];
-        if (pref) {
-          setDoc(pref);
-          setForm((f) => ({
-            ...f,
-            prefUnits: pref.preferred_units ?? "",
-            maxUnits: 15,
-            days: expandDays(pref.availability_days || []),
-            timeSlots: pref.preferred_times || [],
-            kac: (pref.preferred_kacs || []).map((k) => k.kac_name || k.kac_code || k.kac_id || "").filter(Boolean),
-            deliveryMode: (toModeLabel(pref.mode?.mode) || undefined) as FormState["deliveryMode"],
-            campus: pref.mode?.campus_name || undefined,
-            remarks: pref.notes || "",
-            noDeloading: !((pref.deloading_data || []).length),
-            deloadings:
-              pref.deloading_data && pref.deloading_data.length
-                ? pref.deloading_data.map((d) => ({
-                    type: d.deloading_type_name || d.deloading_type,
-                    units: Number(d.units || "0"),
-                  }))
-                : [{ type: undefined, adminType: undefined, units: "" }],
-            preferredCourses: (pref.preferred_courses || []).map((c) => c.course_id).filter(Boolean),
-          }));
-        } else {
-          setDoc(null);
-        }
-      } catch (e) {
-        console.error(e);
-      } finally {
-        setLoading(false);
-      }
-    })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [userId]);
-
-  // When entering edit mode, ensure form mirrors latest doc
-  const enterEdit = () => {
-    if (doc) {
-      setForm({
-        prefUnits: doc.preferred_units ?? "",
-        maxUnits: 15,
-        days: expandDays(doc.availability_days || []),
-        timeSlots: doc.preferred_times || [],
-        kac: (doc.preferred_kacs || []).map((k) => k.kac_name || k.kac_code || k.kac_id || "").filter(Boolean),
-        deliveryMode: (toModeLabel(doc.mode?.mode) || undefined) as
-          | "Face-to-Face Only"
-          | "Hybrid"
-          | "Fully Online"
-          | undefined,
-        campus: doc.mode?.campus_name || options.campuses[0]?.campus_name,
-        preferredCourses: (doc.preferred_courses || []).map((c) => c.course_id).filter(Boolean),
-        remarks: doc.notes || "",
-        noDeloading: !((doc.deloading_data || []).length),
-        deloadings:
-          doc.deloading_data && doc.deloading_data.length
-            ? doc.deloading_data.map((d) => ({
-                type: d.deloading_type_name || d.deloading_type,
-                units: Number(d.units || "0"),
-              }))
-            : [{ type: undefined, adminType: undefined, units: "" }],
-      });
-    }
-    setEdit(true);
-  };
-
-  // ---------- payload mapping ----------
-  const toModeObject = (v: FormState) => {
-    const code = modeFromLabel(v.deliveryMode);
-    const campus = options.campuses.find((c) => c.campus_name === v.campus)?.campus_id;
-    if (!code && !campus) return undefined; // omit
-    return { mode: code, campus_id: campus };
-  };
-
-  const buildSubmitPayload = (v: FormState, finished: boolean) => {
-    const mode = toModeObject(v);
-    const base: any = {
-      preferred_units: Number(v.prefUnits),
-      availability_days: compressDays(v.days),
-      preferred_times: v.timeSlots,
-      preferred_kacs: (v.kac || []).map(kacNameToId),
-      notes: v.remarks,
-      has_new_prep: false,
-      is_finished: finished,
-      deloading_data: v.noDeloading
-        ? []
-        : (v.deloadings || [])
-            .filter((r) => r.type && r.units != null)
-            .map((r) => ({ deloading_type: deloadTypeNameToId(r.type), units: String(r.units ?? "0") })),
-      preferred_courses: v.preferredCourses || [],
-    };
-    if (mode) base.mode = mode; // omit when undefined
-    return base;
-  };
-
-  const onSave = async (finished: boolean) => {
-    try {
-      setSaving(true);
-      const payload = buildSubmitPayload(form, finished);
-      const res = await submitFacultyPreferences(userId, payload);
-      // refresh display after save
-      const r = await getFacultyPreferencesList(userId);
-      const pref: PrefDoc | undefined = (r?.preferences || [])[0];
-      setDoc(pref || null);
-      setEdit(false);
-      return res;
-    } catch (e) {
-      console.error(e);
-      alert(String(e));
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  /* =========================================================
-     ====================  RENDER  ===========================
-     ========================================================= */
-
-  if (loading) {
-    return (
-      <div className="rounded-xl border border-gray-200 bg-white p-6 text-gray-500">
-        Loading preferences…
+/* ---------- top-level components that must NOT remount ---------- */
+function DeadlineBanner({ deadlineISO, className }: { deadlineISO: string; className?: string }) {
+  const { past, label } = useCountdown(deadlineISO);
+  return (
+    <div
+      className={cls(
+        "mb-4 flex items-start gap-3 rounded-xl border p-4",
+        past ? "border-red-300 bg-red-50 text-red-800" : "border-amber-300 bg-amber-50 text-amber-900",
+        className
+      )}
+    >
+      <div className={cls("mt-0.5 h-2.5 w-2.5 shrink-0 rounded-full", past ? "bg-red-500" : "bg-amber-500")} />
+      <div className="text-sm">
+        <div className="font-semibold">{past ? "Editing Locked" : "Submission Deadline Approaching"}</div>
+        <div className="mt-0.5">
+          Deadline: <span className="font-medium">{new Date(deadlineISO).toLocaleString()}</span>
+          {" • "}
+          <span className={cls("font-bold", past ? "text-red-700" : "text-amber-700")}>{label}</span>
+        </div>
+        {!past && <div className="mt-1 text-[12px] opacity-80">Please finalize before the deadline. Drafts are allowed until lock.</div>}
       </div>
-    );
-  }
+    </div>
+  );
+}
+
+function SectionTitle({ icon: Icon, children }: { icon: any; children: React.ReactNode }) {
+  return (
+    <div className="mb-2 flex items-center gap-2 text-[13px] font-semibold text-emerald-800">
+      <Icon className="h-4 w-4" />
+      {children}
+    </div>
+  );
+}
+
+function Row({ label, value }: { label: string; value: React.ReactNode }) {
+  return (
+    <div className="mb-2">
+      <div className="text-[12px] text-neutral-500">{label}</div>
+      <div className="mt-1 text-sm text-neutral-900">{value}</div>
+    </div>
+  );
+}
+
+function Pills({ items }: { items: string[] }) {
+  return !items?.length ? (
+    <span className="text-neutral-400">—</span>
+  ) : (
+    <div className="flex flex-wrap gap-1.5">
+      {items.map((v) => (
+        <Tag key={v} tone="gray">
+          {v}
+        </Tag>
+      ))}
+    </div>
+  );
+}
+
+/* ---------- AE Line 1 Schedule (same as old file) ---------- */
+function AELine1Schedule() {
+  const ML = [
+    { trip: "AE 101", etd: "6:00 AM" },
+    { trip: "AE 102", etd: "7:30 AM" },
+    { trip: "AE 103", etd: "9:30 AM" },
+    { trip: "AE 104", etd: "11:00 AM" },
+    { trip: "AE 105", etd: "1:00 PM" },
+    { trip: "AE 106", etd: "2:30 PM" },
+    { trip: "AE 107", etd: "3:30 PM" },
+    { trip: "AE 108", etd: "5:10 PM" },
+    { trip: "AE 109", etd: "6:15 PM" },
+    { trip: "AE 110", etd: "7:45 PM" },
+  ];
+  const LM = [
+    { trip: "AE 151", etd: "5:45 AM" },
+    { trip: "AE 152", etd: "6:15 AM" },
+    { trip: "AE 153", etd: "7:00 AM" },
+    { trip: "AE 154", etd: "8:00 AM" },
+    { trip: "AE 155", etd: "9:00 AM" },
+    { trip: "AE 156", etd: "11:00 AM" },
+    { trip: "AE 157", etd: "1:00 PM" },
+    { trip: "AE 158", etd: "2:30 PM" },
+    { trip: "AE 159", etd: "3:30 PM" },
+    { trip: "AE 160", etd: "5:10 PM" },
+    { trip: "AE 161", etd: "6:15 PM" },
+    { trip: "AE 162", etd: "7:45 PM" },
+  ];
+  const rows = Math.max(ML.length, LM.length);
+  const get = (arr: { trip: string; etd: string }[], i: number) => arr[i] ?? { trip: "", etd: "" };
 
   return (
-    <div className="rounded-xl border border-gray-200 bg-white p-6">
-      <div className="mb-6 flex items-center justify-between">
-        <div>
-          <h2 className="text-[20px] font-semibold text-gray-900">Faculty Preferences</h2>
-          <div className="text-[13px] text-gray-500">
-            Configure your teaching preferences for the upcoming term
-          </div>
+    <div className="overflow-hidden rounded-xl border border-neutral-200 bg-white text-[11px]">
+      <div className="bg-emerald-700 px-3 py-2 text-center font-semibold text-white">
+        <div className="text-xs font-bold leading-tight">DLSU – Laguna Campus</div>
+        <div className="mt-1 inline-block rounded px-2 py-0.5 text-[10px] font-extrabold tracking-wide bg-amber-300 text-emerald-900">
+          ARROWS EXPRESS
         </div>
-        {!edit ? (
-          <button
-            onClick={enterEdit}
-            className="inline-flex items-center gap-2 rounded-lg bg-emerald-700 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-emerald-800"
-          >
-            <Settings className="h-4 w-4" />
-            Edit Preferences
-          </button>
-        ) : (
-          <div className="flex gap-2">
+        <div className="mt-1 text-[11px]">LINE 1 SCHEDULE</div>
+        <div className="text-[11px]">Monday – Saturday</div>
+      </div>
+
+      <div className="grid grid-cols-2 border-b border-neutral-300 bg-neutral-50 text-center text-[11px] font-semibold text-neutral-800">
+        <div className="border-r border-neutral-300 px-2 py-2">MANILA &gt; LAGUNA</div>
+        <div className="px-2 py-2">LAGUNA &gt; MANILA</div>
+      </div>
+
+      <table className="w-full text-[11px]">
+        <thead>
+          <tr className="bg-neutral-100 text-center text-[11px] text-neutral-800">
+            <th className="border-r border-neutral-300 px-2 py-1.5 font-semibold">Trip Number</th>
+            <th className="border-r border-neutral-300 px-2 py-1.5 font-semibold">ETD</th>
+            <th className="border-r border-neutral-300 px-2 py-1.5 font-semibold">Trip Number</th>
+            <th className="px-2 py-1.5 font-semibold">ETD</th>
+          </tr>
+        </thead>
+        <tbody>
+          {Array.from({ length: rows }).map((_, i) => {
+            const L = get(ML, i);
+            const R = get(LM, i);
+            return (
+              <tr key={i} className="odd:bg-white even:bg-neutral-50">
+                <td className="border-t border-r border-neutral-300 px-2 py-1.5 align-top text-center">{L.trip || "\u00A0"}</td>
+                <td className="border-t border-r border-neutral-300 px-2 py-1.5 align-top text-center">{L.etd || "\u00A0"}</td>
+                <td className="border-t border-r border-neutral-300 px-2 py-1.5 align-top text-center">{R.trip || "\u00A0"}</td>
+                <td className="border-t border-neutral-300 px-2 py-1.5 align-top text-center">{R.etd || "\u00A0"}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+
+      <div className="grid grid-cols-2 border-t border-neutral-300 bg-neutral-50 text-[10px]">
+        <div className="border-r border-neutral-300 px-2 py-2">
+          <span className="font-semibold">Pick-Up Point :</span> Southgate (LS Bldg.)
+        </div>
+        <div className="px-2 py-2">
+          <span className="font-semibold">Pick-Up Point :</span> East Canopy (MRR Bldg.)
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ===========================
+   EDIT FORM (top-level)
+   =========================== */
+function EditForm({
+  initial,
+  onClose,
+  onSave,
+  onDraft,
+  deadlineISO,
+}: {
+  initial: SavedPrefs;
+  onClose: () => void;
+  onSave: (v: SavedPrefs) => void;
+  onDraft: (v: SavedPrefs) => void;
+  deadlineISO: string;
+}) {
+  const [form, setForm] = useState<SavedPrefs>(initial);
+  const { past: deadlinePassed } = useCountdown(deadlineISO);
+
+  // ---------- Deloading (rich UI) local state ----------
+  const [deloadingEntries, setDeloadingEntries] = useState<DeloadingEntry[]>(
+    () =>
+      form.noDeloading
+        ? []
+        : (form.deloadings || []).map((d, i) => ({
+            id: `d${i + 1}`,
+            type: (d.type as DeloadingType) || "",
+            units: d.units ?? null,
+          }))
+  );
+
+  const [deloadErrors, setDeloadErrors] = useState<Record<string, string>>({});
+  const setRowError = (id: string, msg: string) =>
+    setDeloadErrors((prev) => (msg ? { ...prev, [id]: msg } : (({ [id]: _, ...rest }) => rest)(prev)));
+
+  const isOtherish = (t: DeloadingType | "") => t === "Others";
+
+  const addDeloading = () =>
+    setDeloadingEntries((rows) => [
+      ...rows,
+      { id: crypto.randomUUID(), type: "", units: null, adminSubtype: "", otherText: "" },
+    ]);
+
+  const updateDeloading = (id: string, patch: Partial<DeloadingEntry>) =>
+    setDeloadingEntries((rows) => rows.map((r) => (r.id === id ? { ...r, ...patch } : r)));
+
+  const removeDeloading = (id: string) => {
+    setDeloadingEntries((rows) => rows.filter((r) => r.id !== id));
+    setRowError(id, "");
+  };
+
+  const validateDeloading = () => {
+    const next: Record<string, string> = {};
+    for (const d of deloadingEntries) {
+      if (!d.type) next[d.id] = "Please select a deloading type.";
+      if (isOtherish(d.type) && !d.otherText?.trim())
+        next[d.id] = (next[d.id] ? next[d.id] + " " : "") + "Please specify the ‘Other’ deloading type.";
+      if (d.type === "Administrative" && !d.adminSubtype?.trim())
+        next[d.id] = (next[d.id] ? next[d.id] + " " : "") + "Please specify the Admin Deloading Type.";
+      if (d.units == null || Number.isNaN(d.units))
+        next[d.id] = (next[d.id] ? next[d.id] + " " : "") + "Units are required.";
+      else if (d.type === "Research" && (d.units < 0 || d.units > 9))
+        next[d.id] = (next[d.id] ? next[d.id] + " " : "") + "Research units must be between 0 and 9.";
+      else if (d.units < 0)
+        next[d.id] = (next[d.id] ? next[d.id] + " " : "") + "Units cannot be negative.";
+    }
+    setDeloadErrors(next);
+    return Object.keys(next).length === 0;
+  };
+
+  // convert richer UI entries -> simple {type, units} array for payload
+  const materializeDeloadings = () =>
+    form.noDeloading
+      ? []
+      : deloadingEntries
+          .filter((d) => d.type && d.units != null)
+          .map((d) => ({ type: d.type, units: d.units ?? 0 }));
+
+  const availableCourses = useMemo(
+    () => (form.kac.length ? form.kac.flatMap((k) => KAC_COURSES[k as KACKey] ?? []) : []),
+    [form.kac]
+  );
+
+  useEffect(() => {
+    setForm((f) => ({ ...f, courses: f.courses.filter((c) => availableCourses.includes(c)) }));
+  }, [availableCourses]);
+
+  function toggleInArray(arr: string[], value: string): string[] {
+    return arr.includes(value) ? arr.filter((v) => v !== value) : [...arr, value];
+  }
+  const toggleMulti = (key: "days" | "timeSlots" | "courses", value: string) =>
+    setForm((f) => ({ ...f, [key]: toggleInArray(f[key] as string[], value) }));
+
+  // NOTE: previously this added a blank right column. Removed — no space unless we actually render AE content.
+  const showAE = ["Laguna Campus", "Either Campus"].includes(form.campus);
+
+  return (
+    <div className="w-full">
+      <div className="mb-4">
+        <h3 className="text-lg font-bold text-neutral-900">Edit Faculty Preferences</h3>
+        <p className="text-sm text-neutral-500">Update your teaching preferences for the upcoming term</p>
+      </div>
+
+      <DeadlineBanner deadlineISO={deadlineISO} />
+
+      <div className={cls("grid grid-cols-1 gap-6", showAE && "lg:grid-cols-[1fr_minmax(200px,400px)]")}>
+        {/* Left column */}
+        <div className="space-y-5 rounded-xl border border-neutral-200 bg-white p-5">
+          {/* units */}
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <div>
+              <label className="mb-1 block text-sm font-medium">Preferred Teaching Units</label>
+              <Dropdown
+                value={form.prefUnits}
+                onChange={(v) => setForm({ ...form, prefUnits: v })}
+                options={OPT.prefUnits}
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-sm font-medium">Maximum Teaching Units</label>
+              <Dropdown
+                value={form.maxUnits}
+                onChange={(v) => setForm({ ...form, maxUnits: v })}
+                options={OPT.maxUnits}
+              />
+            </div>
+          </div>
+
+          {/* days + time */}
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <div>
+              <label className="mb-1 block text-sm font-medium">Preferred Teaching Days</label>
+              <div className="grid grid-cols-2 gap-2">
+                {OPT.days.map((d) => (
+                  <label key={d} className="flex items-center gap-2 text-sm">
+                    <input
+                      type="checkbox"
+                      className="accent-emerald-700"
+                      checked={form.days.includes(d)}
+                      onChange={() => toggleMulti("days", d)}
+                    />
+                    {d}
+                  </label>
+                ))}
+              </div>
+            </div>
+
+            <div>
+              <label className="mb-1 block text-sm font-medium">Preferred Time Slots</label>
+              <div className="grid grid-cols-1 gap-1.5">
+                {OPT.timeSlots.map((t) => (
+                  <label key={t} className="flex items-center gap-2 text-sm">
+                    <input
+                      type="checkbox"
+                      className="accent-emerald-700"
+                      checked={form.timeSlots.includes(t)}
+                      onChange={() => toggleMulti("timeSlots", t)}
+                    />
+                    {t}
+                  </label>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* mode & campus */}
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <div>
+              <label className="mb-1 block text-sm font-medium">Preferred Delivery Mode</label>
+              <Dropdown
+                value={form.delivery}
+                onChange={(v) => setForm({ ...form, delivery: v })}
+                options={OPT.delivery}
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-sm font-medium">Campus Preference</label>
+              <Dropdown
+                value={form.campus}
+                onChange={(v) => setForm({ ...form, campus: v })}
+                options={OPT.campus}
+              />
+            </div>
+          </div>
+
+          {/* KAC & courses */}
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <div>
+              <label className="mb-1 block text-sm font-medium">Knowledge Area Cluster (KAC)</label>
+              <MultiSelectDropdown
+                values={form.kac as string[]}
+                onChange={(v) => setForm({ ...form, kac: v as KACKey[] })}
+                options={KAC_OPTIONS}
+                placeholder="— Select one or more KACs —"
+              />
+            </div>
+
+            <div>
+              <label className="mb-1 block text-sm font-medium">Preferred Courses</label>
+              <div className="grid grid-cols-1 gap-1.5">
+                {(availableCourses.length ? availableCourses : ["— Choose a KAC first —"]).map((c) => (
+                  <label key={c} className="flex items-center gap-2 text-sm">
+                    <input
+                      type="checkbox"
+                      className="accent-emerald-700"
+                      disabled={!availableCourses.includes(c)}
+                      checked={form.courses.includes(c)}
+                      onChange={() => toggleMulti("courses", c)}
+                    />
+                    {c}
+                  </label>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* Deloading (rich UI -> saved as {type, units}) */}
+          <div className="space-y-3">
+            <div className="flex items-center justify-between">
+              <label className="block text-sm font-medium">Deloading</label>
+              <label className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  className="accent-emerald-700"
+                  checked={form.noDeloading}
+                  onChange={(e) => {
+                    setForm((f) => ({ ...f, noDeloading: e.target.checked }));
+                    if (e.target.checked) {
+                      setDeloadingEntries([]);
+                      setDeloadErrors({});
+                    }
+                  }}
+                />
+                I have no deloading
+              </label>
+            </div>
+
+            <div className="rounded-xl border border-neutral-200">
+              <div className="flex items-center justify-between border-b border-neutral-200 p-3">
+                <div className="text-sm text-neutral-600">
+                  Add entries for each deloading type you have (Administrative, Research, Others).
+                </div>
+                <button
+                  type="button"
+                  disabled={form.noDeloading}
+                  onClick={addDeloading}
+                  className={cls(
+                    "inline-flex h-8 items-center justify-center rounded-[10px] px-3 text-sm shadow",
+                    form.noDeloading ? "bg-neutral-200 text-neutral-500 cursor-not-allowed" : "bg-emerald-700 text-white hover:brightness-110"
+                  )}
+                >
+                  Add Deloading
+                </button>
+              </div>
+
+              <div className="divide-y divide-neutral-200">
+                {deloadingEntries.length === 0 && !form.noDeloading && (
+                  <div className="p-4 text-sm text-neutral-500">No deloading entries yet.</div>
+                )}
+
+                {deloadingEntries.map((d) => {
+                  const err = deloadErrors[d.id];
+                  const isResearch = d.type === "Research";
+                  const showAdminSubtype = d.type === "Administrative";
+                  const showOtherText = d.type === "Others";
+                  return (
+                    <div key={d.id} className="p-4">
+                      <div className="grid grid-cols-1 gap-3 sm:grid-cols-12">
+                        {/* Type */}
+                        <div className="sm:col-span-4">
+                          <label className="mb-1 block text-sm font-medium">
+                            Type <span className="text-red-600">*</span>
+                          </label>
+                          <Dropdown
+                            value={d.type}
+                            onChange={(v) => {
+                              const t = v as DeloadingType;
+                              updateDeloading(d.id, {
+                                type: t,
+                                adminSubtype: t === "Administrative" ? (d.adminSubtype ?? "") : "",
+                                otherText: isOtherish(t) ? (d.otherText ?? "") : "",
+                                researchRemarks: t === "Research" ? (d.researchRemarks ?? "") : "",
+                              });
+                              setRowError(d.id, "");
+                            }}
+                            options={["Administrative", "Research", "Others"]}
+                          />
+                        </div>
+
+                        {/* Detail column */}
+                        <div className="sm:col-span-4">
+                          {showAdminSubtype && (
+                            <>
+                              <label className="mb-1 block text-sm font-medium">
+                                Admin Deloading Type <span className="text-red-600">*</span>
+                              </label>
+                              <input
+                                type="text"
+                                className={cls(
+                                  "w-full rounded-xl border bg-white px-3 py-2.5 text-sm shadow-sm outline-none",
+                                  err ? "border-red-300" : "border-neutral-300"
+                                )}
+                                placeholder="e.g., Program Chair, Coordinator"
+                                value={d.adminSubtype ?? ""}
+                                onChange={(e) => {
+                                  updateDeloading(d.id, { adminSubtype: e.target.value });
+                                  setRowError(d.id, "");
+                                }}
+                              />
+                            </>
+                          )}
+
+                          {showOtherText && (
+                            <>
+                              <label className="mb-1 block text-sm font-medium">
+                                Specify <span className="text-red-600">*</span>
+                              </label>
+                              <input
+                                type="text"
+                                className={cls(
+                                  "w-full rounded-xl border bg-white px-3 py-2.5 text-sm shadow-sm outline-none",
+                                  err ? "border-red-300" : "border-neutral-300"
+                                )}
+                                placeholder="Describe the deloading type"
+                                value={d.otherText ?? ""}
+                                onChange={(e) => {
+                                  updateDeloading(d.id, { otherText: e.target.value });
+                                  setRowError(d.id, "");
+                                }}
+                              />
+                            </>
+                          )}
+
+                          {isResearch && (
+                            <>
+                              <label className="mb-1 block text-sm font-medium">Research Remarks</label>
+                              <input
+                                type="text"
+                                className={cls(
+                                  "w-full rounded-xl border bg-white px-3 py-2.5 text-sm shadow-sm outline-none",
+                                  err ? "border-red-300" : "border-neutral-300"
+                                )}
+                                placeholder="e.g., Project name or focus"
+                                value={d.researchRemarks ?? ""}
+                                onChange={(e) => {
+                                  updateDeloading(d.id, { researchRemarks: e.target.value });
+                                  setRowError(d.id, "");
+                                }}
+                              />
+                            </>
+                          )}
+
+                          {!showAdminSubtype && !showOtherText && !isResearch && (
+                            <div className="h-[40px] sm:h-[42px]" aria-hidden />
+                          )}
+                        </div>
+
+                        {/* Units */}
+                        <div className="sm:col-span-3">
+                          <label className="mb-1 block text-sm font-medium">
+                            Units <span className="text-red-600">*</span>
+                          </label>
+                          <input
+                            type="number"
+                            min={0}
+                            max={isResearch ? 9 : undefined}
+                            step={1}
+                            className={cls(
+                              "w-full rounded-xl border bg-white px-3 py-2.5 text-sm shadow-sm outline-none",
+                              err ? "border-red-300" : "border-neutral-300"
+                            )}
+                            placeholder="Enter units"
+                            value={d.units ?? ""}
+                            onChange={(e) => {
+                              const val = e.target.value === "" ? null : Number(e.target.value);
+                              updateDeloading(d.id, { units: val });
+                              if (val == null) setRowError(d.id, "");
+                              else if (isResearch && (val < 0 || val > 9)) setRowError(d.id, "Research units must be between 0 and 9.");
+                              else if (val < 0) setRowError(d.id, "Units cannot be negative.");
+                              else setRowError(d.id, "");
+                            }}
+                          />
+                        </div>
+
+                        {/* Remove */}
+                        <div className="sm:col-span-1">
+                          <label className="mb-1 block text-sm font-medium invisible">Remove</label>
+                          <div className="flex items-center justify-end">
+                            <button
+                              type="button"
+                              onClick={() => removeDeloading(d.id)}
+                              className="inline-flex h-9 items-center justify-center rounded-[10px] border border-neutral-200 bg-neutral-50 px-3 text-sm hover:bg-neutral-100"
+                            >
+                              Remove
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+
+                      {err && <div className="mt-2 text-sm text-red-600">{err}</div>}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+
+          {/* remarks */}
+          <div>
+            <label className="mb-1 block text-sm font-medium">Special Remarks</label>
+            <textarea
+              rows={4}
+              className="w-full resize-y rounded-xl border border-neutral-300 p-2 text-sm"
+              placeholder="Any special circumstances, research project name, or any additional information…"
+              value={form.remarks}
+              onChange={(e) => setForm({ ...form, remarks: e.target.value })}
+            />
+          </div>
+
+          {/* actions */}
+          <div className="flex items-center justify-end gap-2 pt-1">
             <button
-              onClick={() => setEdit(false)}
-              className="inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+              onClick={onClose}
+              className="inline-flex h-9 items-center justify-center rounded-xl border border-neutral-200 bg-neutral-100 px-4 text-sm text-slate-900 shadow-sm hover:bg-neutral-200/70 active:translate-y-[0.5px]"
             >
               Cancel
             </button>
             <button
-              disabled={saving}
-              onClick={() => onSave(true)}
+              disabled={deadlinePassed}
+              onClick={() => {
+                if (!form.noDeloading && !validateDeloading()) return;
+                onDraft({ ...form, deloadings: materializeDeloadings() });
+              }}
               className={cls(
-                "inline-flex items-center gap-2 rounded-lg bg-emerald-700 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-emerald-800",
-                saving && "opacity-70"
+                "inline-flex h-9 items-center justify-center rounded-xl px-4 text-sm font-medium shadow active:translate-y-[0.5px]",
+                deadlinePassed ? "cursor-not-allowed bg-orange-200 text-white" : "bg-orange-500 text-white hover:brightness-110"
               )}
+              title={deadlinePassed ? "Deadline passed — editing locked" : "Save a draft (not final)"}
             >
-              <Check className="h-4 w-4" />
+              Save Draft
+            </button>
+            <button
+              disabled={deadlinePassed}
+              onClick={() => {
+                if (!form.noDeloading && !validateDeloading()) return;
+                onSave({ ...form, deloadings: materializeDeloadings() });
+              }}
+              className={cls(
+                "inline-flex h-9 items-center justify-center rounded-xl px-4 text-sm font-medium text-white shadow active:translate-y-[0.5px]",
+                deadlinePassed ? "cursor-not-allowed bg-emerald-300" : "bg-[#1F7A49] hover:brightness-[1.06]"
+              )}
+              title={deadlinePassed ? "Deadline passed — editing locked" : "Save and finalize"}
+            >
               Save Preferences
             </button>
           </div>
+        </div>
+
+        {showAE && (
+          <div className="block">
+            <AELine1Schedule />
+          </div>
         )}
       </div>
-
-      {/* Grid layout mirrors your original FAC_Preferences UI */}
-      {!edit ? (
-        <SavedView doc={doc} />
-      ) : (
-        <EditView form={form} setForm={setForm} options={options} />
-      )}
     </div>
   );
 }
 
-/* =========================================================
-   =====================  SAVED VIEW  ======================
-   ========================================================= */
+/* ===========================
+   MAIN COMPONENT
+   =========================== */
+export default function FAC_Preferences() {
+  const [saved, setSaved] = useState<SavedPrefs>(initialSaved);
+  const [openEdit, setOpenEdit] = useState(false);
+  const [kacOptions, setKacOptions] = useState<Array<{kac_id:string; kac_code:string; kac_name:string}>>([]);
+  const [loading, setLoading] = useState(true);
 
-function SavedView({ doc }: { doc: PrefDoc | null }) {
-  const delivery = toModeLabel(doc?.mode?.mode);
-  const campus = doc?.mode?.campus_name;
+  const raw = JSON.parse(localStorage.getItem("animo.user") || "{}");
+  const userId = raw.userId || raw.user_id || raw.id;
 
-  return (
-    <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
-      {/* Teaching Load */}
-      <SectionCard icon={<BookOpen className="h-4 w-4" />} title="Teaching Load">
-        <div className="space-y-4">
-          <div>
-            <FieldLabel>Preferred Teaching Units</FieldLabel>
-            <FieldValue>{doc?.preferred_units ?? "—"} units</FieldValue>
-          </div>
+  // const [facultyId, setFacultyId] = useState<string | null>(null); // not used in UI
+  const DEADLINE_ISO = "2025-11-15T17:00:00+08:00";
+  const { past: deadlinePassedPage } = useCountdown(DEADLINE_ISO);
 
-          <div>
-            <FieldLabel>Maximum Teaching Units</FieldLabel>
-            <FieldValue>15.0 units</FieldValue>
-          </div>
+  // convert server response -> SavedPrefs
+  function fromServerToSaved(latest: any): SavedPrefs {
+    const deloadArr = Array.isArray(latest?.deloading_data)
+      ? latest.deloading_data
+      : latest?.deloading_data
+      ? [latest.deloading_data]
+      : [];
+    return {
+      prefUnits: String(latest?.preferred_units ?? 3),
+      maxUnits: "15",
+      deloadings: deloadArr
+        .map((d: any) => ({
+          type: d?.deloading_type ?? "Administrative",
+          units: d?.units != null ? Number(d.units) : null,
+        }))
+        .filter((x: any) => x.type || x.units != null),
+      noDeloading: deloadArr.length === 0,
+      days: expandDays(latest?.availability_days ?? []),
+      timeSlots: Array.isArray(latest?.preferred_times) ? latest.preferred_times : [],
+      campus: (() => {
+        const cname = latest?.mode?.campus_name;
+        if (!cname) return "Either Campus";
+        if (/manila/i.test(cname)) return "Manila Campus";
+        if (/laguna/i.test(cname)) return "Laguna Campus";
+        return "Either Campus";
+      })(),
+      delivery: (() => {
+        const code = String(latest?.mode?.mode || "").toUpperCase();
+        if (code === "ONL") return "Fully Online";
+        if (code === "F2F") return "Face-to-Face Only";
+        if (code === "HYB") return "Hybrid - Any Campus";
+        return "Face-to-Face Only";
+      })(),
+      kac: (latest?.preferred_kacs || [])
+        .map((k: any) => k?.kac_name || k?.kac_code || k?.kac_id)
+        .filter(Boolean),
+      // NEW: preferred_courses from server -> saved.courses
+      courses: Array.isArray(latest?.preferred_courses) ? latest.preferred_courses : [],
+      remarks: latest?.notes ?? "",
+    };
+  }
 
-          <div>
-            <FieldLabel>Deloading</FieldLabel>
-            <FieldValue>
-              {(doc?.deloading_data || []).length ? (
-                <div className="flex flex-wrap gap-2">
-                  {(doc?.deloading_data || []).map((d, i) => (
-                    <div key={i} className="flex items-center gap-2">
-                      <Tag tone="gray">
-                        {d.deloading_type_name || d.deloading_type}
-                      </Tag>
-                      <span className="text-[13px] text-gray-700">{Number(d.units || "0")} units</span>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <span className="text-[13px] text-gray-400">No deloading</span>
-              )}
-            </FieldValue>
-          </div>
-        </div>
-      </SectionCard>
+  useEffect(() => {
+    (async () => {
+      try {
+        if (!userId) { setLoading(false); return; }
+        const [profile, opts] = await Promise.all([
+          getFacultyPreferencesProfile(userId),
+          getFacultyPreferencesOptions(userId),
+        ]);
+        // setFacultyId(profile?.faculty_id || null);
+        setKacOptions((opts?.kacs || []) as any);
 
-      {/* Location & Mode */}
-      <SectionCard icon={<MapPin className="h-4 w-4" />} title="Location & Mode">
-        <div className="space-y-4">
-          <div>
-            <FieldLabel>Campus Preference</FieldLabel>
-            <FieldValue>
-              {campus ? <Tag tone="blue">{campus}</Tag> : <span className="text-[13px] text-gray-400">—</span>}
-            </FieldValue>
-          </div>
+        const list = await getFacultyPreferencesList(userId);
+        const latest = (list?.preferences || [])[0];
+        if (latest) setSaved(fromServerToSaved(latest));
+      } catch (e: any) {
+        alert(`Failed to load preferences: ${e?.message || e}`);
+      } finally {
+        setLoading(false);
+      }
+    })();
+  }, [userId]);
 
-          <div>
-            <FieldLabel>Delivery Mode</FieldLabel>
-            <FieldValue>
-              {delivery ? <Tag tone="blue">{delivery}</Tag> : <span className="text-[13px] text-gray-400">—</span>}
-            </FieldValue>
-          </div>
-        </div>
-      </SectionCard>
-
-      {/* Schedule Preferences */}
-      <SectionCard icon={<CalendarDays className="h-4 w-4" />} title="Schedule Preferences" className="md:col-span-1">
-        <div className="space-y-4">
-          <div>
-            <FieldLabel>Preferred Days</FieldLabel>
-            <FieldValue>
-              {(doc?.availability_days || []).length ? (
-                <div className="flex flex-wrap gap-2">
-                  {expandDays(doc?.availability_days || []).map((d) => (
-                    <Tag key={d} tone="gray">
-                      {d}
-                    </Tag>
-                  ))}
-                </div>
-              ) : (
-                <span className="text-[13px] text-gray-400">—</span>
-              )}
-            </FieldValue>
-          </div>
-
-          <div>
-            <FieldLabel>Preferred Time Slots</FieldLabel>
-            <FieldValue>
-              {(doc?.preferred_times || []).length ? (
-                <div className="flex flex-wrap gap-2">
-                  {(doc?.preferred_times || []).map((t) => (
-                    <Tag key={t} tone="gray">
-                      {t}
-                    </Tag>
-                  ))}
-                </div>
-              ) : (
-                <span className="text-[13px] text-gray-400">—</span>
-              )}
-            </FieldValue>
-          </div>
-        </div>
-      </SectionCard>
-
-      {/* Academic Specialization */}
-      <SectionCard icon={<Monitor className="h-4 w-4" />} title="Academic Specialization" className="md:col-span-1">
-        <div className="space-y-4">
-          <div>
-            <FieldLabel>Knowledge Areas</FieldLabel>
-            <FieldValue>
-              {(doc?.preferred_kacs || []).length ? (
-                <div className="flex flex-wrap gap-2">
-                  {(doc?.preferred_kacs || []).map((k, i) => (
-                    <Tag key={i}>{k.kac_name || k.kac_code || k.kac_id}</Tag>
-                  ))}
-                </div>
-              ) : (
-                <span className="text-[13px] text-gray-400">—</span>
-              )}
-            </FieldValue>
-          </div>
-
-          <div>
-            <FieldLabel>Preferred Courses</FieldLabel>
-            <FieldValue>
-              {(doc?.preferred_courses || []).length ? (
-                <div className="flex flex-wrap gap-2">
-                  {(doc?.preferred_courses || []).map((c) => (
-                    <Tag key={c.course_id} tone="gray">
-                      {(Array.isArray(c.course_code) ? c.course_code?.[0] : c.course_code) || c.course_id}
-                    </Tag>
-                  ))}
-                </div>
-              ) : (
-                <span className="text-[13px] text-gray-400">—</span>
-              )}
-            </FieldValue>
-          </div>
-        </div>
-      </SectionCard>
-
-      {/* Remarks */}
-      <SectionCard icon={<PencilLine className="h-4 w-4" />} title="Remarks" className="md:col-span-2">
-        <div className="text-[14px] text-gray-800">{doc?.notes || "—"}</div>
-      </SectionCard>
-    </div>
+  const coherentInitial: SavedPrefs = useMemo(
+    () => ({
+      ...saved,
+      courses:
+        saved.courses.length && saved.kac.length
+          ? saved.courses
+          : saved.kac.length
+          ? [KAC_COURSES[(saved.kac[0] as KACKey) as keyof typeof KAC_COURSES]?.[0] ?? ""].filter(Boolean)
+          : [],
+    }),
+    [saved]
   );
-}
 
-/* =========================================================
-   =====================  EDIT VIEW  =======================
-   ========================================================= */
+  const nameToId = (name: string) => {
+    const hit = kacOptions.find(k => (k.kac_name || "").toLowerCase() === name.toLowerCase());
+    return hit?.kac_id || name; // fallback
+  };
 
-function EditView({
-  form,
-  setForm,
-  options,
-}: {
-  form: FormState;
-  setForm: React.Dispatch<React.SetStateAction<FormState>>;
-  options: Options;
-}) {
-  // ----- handlers -----
-  const toggleDay = (day: string) =>
-    setForm((f) => ({
-      ...f,
-      days: f.days.includes(day) ? f.days.filter((d) => d !== day) : [...f.days, day],
-    }));
+  const deliveryToCode = (delivery: string | undefined) => {
+    if (!delivery) return null;
+    const s = delivery.toLowerCase();
+    if (s.includes("online")) return "ONL";
+    if (s.includes("face-to-face") || s.includes("face to face") || s.includes("f2f")) return "F2F";
+    if (s.includes("hybrid")) return "HYB";
+    return null;
+  };
 
-  const toggleTime = (slot: string) =>
-    setForm((f) => ({
-      ...f,
-      timeSlots: f.timeSlots.includes(slot) ? f.timeSlots.filter((t) => t !== slot) : [...f.timeSlots, slot],
-    }));
+  const toModeObject = (v: SavedPrefs) => {
+    const code = (deliveryToCode(v.delivery) || "F2F").toUpperCase();
+    if (code === "ONL") return { mode: "ONL", campus_id: "" };
+    if (/laguna/i.test(v.campus)) return { mode: code, campus_id: "CMPS0002" };
+    if (/manila/i.test(v.campus)) return { mode: code, campus_id: "CMPS0001" };
+    return { mode: code, campus_id: "" };
+  };
 
-  const toggleKac = (name: string) =>
-    setForm((f) => ({
-      ...f,
-      kac: f.kac.includes(name) ? f.kac.filter((k) => k !== name) : [...f.kac, name],
-      // clear preferred courses that no longer belong to any selected KAC
-      preferredCourses: (f.preferredCourses || []).filter((cid) => {
-        const selIds = (f.kac.includes(name) ? f.kac : [...f.kac, name]) // optimistic
-          .map((nm) =>
-            options.kacs.find((k) => k.kac_name === nm)?.kac_id ||
-            options.kacs.find((k) => k.kac_code === nm)?.kac_id ||
-            nm
-          );
-        const allowed = new Set(
-          selIds.flatMap((id) => (options.coursesByKac?.[id] || []).map((c) => c.course_id))
-        );
-        return allowed.has(cid);
-      }),
-    }));
-
-  const addDeloadRow = () =>
-    setForm((f) => ({
-      ...f,
-      deloadings: [...f.deloadings, { type: undefined, adminType: undefined, units: "" }],
-    }));
-
-  const removeDeloadRow = (idx: number) =>
-    setForm((f) => ({
-      ...f,
-      deloadings: f.deloadings.filter((_, i) => i !== idx),
-    }));
-
-  const updateDeloadRow = (idx: number, patch: Partial<RowDeload>) =>
-    setForm((f) => ({
-      ...f,
-      deloadings: f.deloadings.map((r, i) => (i === idx ? { ...r, ...patch } : r)),
-    }));
-
-  const allDays = options.days || [];
-  const allSlots = options.timeBands || [];
-  const kacNames = (options.kacs || []).map((k) => k.kac_name || k.kac_code || k.kac_id).filter(Boolean);
-  const campusNames = (options.campuses || []).map((c) => c.campus_name);
-  const deloadTypeNames = (options.deloading_types || []).map((t) => t.type);
-
-  // ----- KAC → Courses (computed once per render) -----
-  const kacNameToIdLocal = (name: string) =>
-    options.kacs.find((k) => k.kac_name === name)?.kac_id ||
-    options.kacs.find((k) => k.kac_code === name)?.kac_id ||
-    name;
-
-  const selectedKacIds = (form.kac || []).map((name) => kacNameToIdLocal(name));
-  const courseGroups: CourseLite[] = selectedKacIds
-    .map((id) => options.coursesByKac?.[id] || [])
-    .flat();
-  const selectedCourseIds = new Set(form.preferredCourses || []);
-
-  // quick lookup for tags in the preview area
-  const courseById = new Map<string, CourseLite>();
-  courseGroups.forEach((c) => {
-    courseById.set(c.course_id, c);
+  const toServerPayload = (v: SavedPrefs, finished: boolean) => ({
+    preferred_units: Number(v.prefUnits),
+    availability_days: compressDays(v.days),
+    preferred_times: v.timeSlots,
+    preferred_kacs: (v.kac || []).map(nameToId),     // send IDs
+    preferred_courses: v.courses,                    // NEW: persist courses
+    deloading_data: v.noDeloading
+      ? []
+      : (v.deloadings || [])
+          .filter((r) => r && r.type)
+          .map((r) => ({ deloading_type: r.type, units: r.units ?? 0 })), // NEW: persist deloading
+    mode: toModeObject(v),                           // single object
+    notes: v.remarks,
+    has_new_prep: false,
+    is_finished: finished,
   });
 
-  return (
-    <form className="grid grid-cols-2 gap-6 max-[900px]:grid-cols-1">
-      {/* Preferred Teaching Units / Max Units */}
-      <section className="rounded-xl border border-gray-200 bg-white p-5">
-        <div className="mb-4 grid grid-cols-2 gap-4">
-          <div>
-            <div className="mb-1 text-[12.5px] font-medium text-gray-500">Preferred Teaching Units</div>
-            <input
-              type="number"
-              value={form.prefUnits}
-              onChange={(e) => setForm((f) => ({ ...f, prefUnits: e.target.value }))}
-              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-emerald-600"
-              placeholder="Enter units"
-            />
-          </div>
-          <div>
-            <div className="mb-1 text-[12.5px] font-medium text-gray-500">Maximum Teaching Units</div>
-            <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-700">15</div>
-          </div>
-        </div>
+  // ⬇️ CHANGE: Always refresh the Saved panel — even on drafts.
+  async function afterSubmitRefresh(res: any, _isFinal: boolean) {
+    if (res?.ok && res?.preference) {
+      const normalized = fromServerToSaved(res.preference);
+      setSaved(normalized);          // ← update Saved panel for both Draft and Submit
+      setOpenEdit(false);            // close editor
+      return;
+    }
+    throw new Error(res?.detail || "Save failed.");
+  }
 
-        {/* Days and Time Slots */}
-        <div className="grid grid-cols-2 gap-4">
-          <div>
-            <div className="mb-1 text-[12.5px] font-medium text-gray-500">Preferred Teaching Days</div>
-            <div className="grid grid-cols-1 gap-1">
-              {allDays.map((d) => (
-                <label key={d} className="flex items-center gap-2 text-[13px]">
-                  <input
-                    type="checkbox"
-                    checked={form.days.includes(d)}
-                    onChange={() => toggleDay(d)}
-                  />
-                  {d}
-                </label>
-              ))}
-            </div>
-          </div>
+  const handleSave = async (v: SavedPrefs) => {
+    try {
+      const payload = toServerPayload(v, true);
+      const res = await submitFacultyPreferences(userId, payload);
+      await afterSubmitRefresh(res, true); // SUBMIT
+    } catch (e: any) {
+      alert(e?.response?.data?.detail || e?.message || "Failed to save preferences.");
+    }
+  };
 
-          <div>
-            <div className="mb-1 text-[12.5px] font-medium text-gray-500">Preferred Time Slots</div>
-            <div className="grid grid-cols-1 gap-1">
-              {allSlots.map((t) => (
-                <label key={t} className="flex items-center gap-2 text-[13px]">
-                  <input
-                    type="checkbox"
-                    checked={form.timeSlots.includes(t)}
-                    onChange={() => toggleTime(t)}
-                  />
-                  {t}
-                </label>
-              ))}
-            </div>
-          </div>
+  const handleDraft = async (v: SavedPrefs) => {
+    try {
+      const payload = toServerPayload(v, false);
+      const res = await submitFacultyPreferences(userId, payload);
+      await afterSubmitRefresh(res, false); // DRAFT now also refreshes Saved panel
+      alert("Draft saved.");
+    } catch (e: any) {
+      alert(e?.response?.data?.detail || e?.message || "Failed to save draft.");
+    }
+  };
+
+  if (loading) {
+    return (
+      <section className="mx-auto w-full max-w-screen-2xl px-4">
+        <div className="rounded-xl border border-neutral-200 bg-white p-5 text-sm text-neutral-600">
+          Loading preferences…
         </div>
       </section>
+    );
+  }
 
-      {/* Delivery Mode / Campus / KAC + Courses */}
-      <section className="rounded-xl border border-gray-200 bg-white p-5">
-        <div className="grid grid-cols-2 gap-4">
-          <div>
-            <div className="mb-1 text-[12.5px] font-medium text-gray-500">Preferred Delivery Mode</div>
-            <select
-              value={form.deliveryMode || ""}
-              onChange={(e) =>
-                setForm((f) => ({
-                  ...f,
-                  deliveryMode: ((e.target.value as any) || undefined) as
-                    | "Face-to-Face Only"
-                    | "Hybrid"
-                    | "Fully Online"
-                    | undefined,
-                }))
-              }
-              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-emerald-600"
-            >
-              <option value="">— Select —</option>
-              <option>Face-to-Face Only</option>
-              <option>Hybrid</option>
-              <option>Fully Online</option>
-            </select>
-          </div>
-
-          <div>
-            <div className="mb-1 text-[12.5px] font-medium text-gray-500">Campus Preference</div>
-            <select
-              value={form.campus || ""}
-              onChange={(e) => setForm((f) => ({ ...f, campus: e.target.value }))}
-              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-emerald-600"
-            >
-              <option value="">— Select —</option>
-              {campusNames.map((c) => (
-                <option key={c}>{c}</option>
-              ))}
-            </select>
-          </div>
-
-          <div className="col-span-2">
-            <div className="mb-2 text-[12.5px] font-medium text-gray-500">Knowledge Area Cluster (KAC)</div>
-            <div className="flex flex-wrap gap-2">
-              {kacNames.map((name) => {
-                const active = form.kac.includes(name);
-                return (
-                  <button
-                    type="button"
-                    key={name}
-                    onClick={() => toggleKac(name)}
-                    className={cls(
-                      "rounded-full border px-3 py-1 text-[12px]",
-                      active ? "border-emerald-300 bg-emerald-50 text-emerald-700" : "border-gray-300 text-gray-600 hover:bg-gray-50"
-                    )}
-                  >
-                    {name}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-
-          <div className="col-span-2">
-            <div className="mb-2 text-[12.5px] font-medium text-gray-500">Preferred Courses</div>
-            {courseGroups.length ? (
-              <div className="grid grid-cols-1 gap-1">
-                {courseGroups.map((c: CourseLite) => {
-                  const id = c.course_id;
-                  const code = Array.isArray(c.course_code) ? c.course_code?.[0] : c.course_code || id;
-                  const title = c.course_title || "";
-                  const checked = selectedCourseIds.has(id);
-                  return (
-                    <label key={id} className="flex items-center gap-2 text-[13px]">
-                      <input
-                        type="checkbox"
-                        checked={checked}
-                        onChange={() =>
-                          setForm((f) => {
-                            const next = new Set(f.preferredCourses || []);
-                            if (next.has(id)) next.delete(id);
-                            else next.add(id);
-                            return { ...f, preferredCourses: Array.from(next) };
-                          })
-                        }
-                      />
-                      <span className="font-medium">{code}</span>
-                      <span className="text-gray-500">— {title}</span>
-                    </label>
-                  );
-                })}
-              </div>
-            ) : (
-              <div className="text-[13px] text-gray-400">Select at least one KAC to see its courses.</div>
-            )}
-          </div>
-        </div>
-      </section>
-
-      {/* Deloading */}
-      <section className="rounded-xl border border-gray-200 bg-white p-5">
-        <div className="mb-3 text-[12.5px] font-medium text-gray-500">Deloading</div>
-
-        <div className="mb-3 flex items-center gap-2">
-          <label className="flex items-center gap-2 text-[13px]">
-            <input
-              type="checkbox"
-              checked={!!form.noDeloading}
-              onChange={(e) => setForm((f) => ({ ...f, noDeloading: e.target.checked }))}
-            />
-            I have no deloading
-          </label>
-        </div>
-
-        {!form.noDeloading && (
-          <div className="space-y-2">
-            {(form.deloadings || []).map((row, idx) => (
-              <div key={idx} className="grid grid-cols-[1fr_1fr_120px_80px] items-center gap-2 max-[900px]:grid-cols-1">
-                <div>
-                  <div className="mb-1 text-[12.5px] font-medium text-gray-500">Type *</div>
-                  <select
-                    value={row.type || ""}
-                    onChange={(e) => updateDeloadRow(idx, { type: e.target.value })}
-                    className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-emerald-600"
-                    required
-                  >
-                    <option value="">— Select —</option>
-                    {deloadTypeNames.map((n) => (
-                      <option key={n}>{n}</option>
-                    ))}
-                    <option>Other</option>
-                  </select>
-                </div>
-
-                <div>
-                  <div className="mb-1 text-[12.5px] font-medium text-gray-500">Admin Deloading Type *</div>
-                  <input
-                    type="text"
-                    value={row.adminType || (row.type === "Administrative" ? "Program Chair" : "")}
-                    onChange={(e) => updateDeloadRow(idx, { adminType: e.target.value })}
-                    placeholder="e.g., Program Chair"
-                    className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-emerald-600"
-                    required
-                  />
-                </div>
-
-                <div>
-                  <div className="mb-1 text-[12.5px] font-medium text-gray-500">Units *</div>
-                  <input
-                    type="number"
-                    value={row.units ?? ""}
-                    onChange={(e) => updateDeloadRow(idx, { units: e.target.value })}
-                    className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-emerald-600"
-                    required
-                  />
-                </div>
-
-                <div className="flex items-end justify-end pb-0.5">
-                  <button
-                    type="button"
-                    onClick={() => removeDeloadRow(idx)}
-                    className="inline-flex items-center justify-center rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
-                  >
-                    Remove
-                  </button>
-                </div>
-              </div>
-            ))}
-
-            <div className="pt-1">
-              <button
-                type="button"
-                onClick={addDeloadRow}
-                className="inline-flex items-center gap-2 rounded-lg bg-emerald-700 px-3 py-1.5 text-[13px] font-medium text-white hover:bg-emerald-800"
-              >
-                <Plus className="h-4 w-4" />
-                Add Deloading
-              </button>
-            </div>
-          </div>
-        )}
-      </section>
-
-      {/* Remarks */}
-      <section className="rounded-xl border border-gray-200 bg-white p-5">
-        <div className="mb-1 text-[12.5px] font-medium text-gray-500">Special Remarks</div>
-        <textarea
-          rows={4}
-          value={form.remarks || ""}
-          onChange={(e) => setForm((f) => ({ ...f, remarks: e.target.value }))}
-          className="h-[120px] w-full resize-none rounded-lg border border-gray-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-emerald-600"
-          placeholder="Add any additional notes…"
+  if (openEdit) {
+    return (
+      <section className="mx-auto w-full max-w-screen-2xl px-4">
+        <EditForm
+          initial={coherentInitial}
+          onClose={() => setOpenEdit(false)}
+          onSave={handleSave}
+          onDraft={handleDraft}
+          deadlineISO={DEADLINE_ISO}
         />
       </section>
+    );
+  }
 
-      {/* Academic Specialization display helper (keeps visual parity) */}
-      <div className="col-span-2">
-        <SectionCard icon={<Monitor className="h-4 w-4" />} title="Academic Specialization">
-          <div className="space-y-4">
-            <div>
-              <FieldLabel>Knowledge Areas</FieldLabel>
-              <FieldValue>
-                {(form.kac || []).length ? (
-                  <div className="flex flex-wrap gap-2">
-                    {form.kac.map((n) => (
-                      <Tag key={n}>{n}</Tag>
+  /* -------------------- SAVED VIEW -------------------- */
+  return (
+    <section className="mx-auto w-full max-w-screen-2xl px-4">
+      <DeadlineBanner deadlineISO={DEADLINE_ISO} />
+
+      <div className="rounded-xl border border-neutral-200 bg-white p-5">
+        {/* header row */}
+        <div className="mb-4 flex items-start justify-between">
+          <div>
+            <h2 className="text-[15px] font-semibold text-neutral-900">Faculty Preferences</h2>
+            <p className="mt-0.5 text-sm text-neutral-500">
+              Configure your teaching preferences for the upcoming term
+            </p>
+          </div>
+
+          <button
+            disabled={deadlinePassedPage}
+            onClick={() => setOpenEdit(true)}
+            className={cls(
+              "inline-flex h-8 items-center gap-2 rounded-xl px-3 text-[13px] font-medium text-white shadow",
+              deadlinePassedPage ? "cursor-not-allowed bg-emerald-300" : "bg-emerald-700 hover:brightness-110"
+            )}
+            title={deadlinePassedPage ? "Deadline passed — editing locked" : "Edit preferences"}
+          >
+            <Settings className="h-4 w-4" />
+            Edit Preferences
+          </button>
+        </div>
+
+        {/* two-column sections */}
+        <div className="grid grid-cols-1 gap-x-8 gap-y-6 lg:grid-cols-2">
+          {/* Teaching Load (left) */}
+          <div>
+            <SectionTitle icon={BookOpen}>Teaching Load</SectionTitle>
+            <Row label="Preferred Teaching Units" value={<Tag tone="gray">{saved.prefUnits} units</Tag>} />
+            <Row label="Maximum Teaching Units" value={<Tag tone="gray">{saved.maxUnits} units</Tag>} />
+            <Row
+              label="Deloading"
+              value={
+                saved.noDeloading || saved.deloadings.length === 0 ? (
+                  <span className="text-neutral-400">None</span>
+                ) : (
+                  <div className="flex flex-col gap-1">
+                    {saved.deloadings.map((r, i) => (
+                      <div key={i} className="text-sm">
+                        <Tag tone="gray">{r.type}</Tag>{" "}
+                        <Tag tone="gray">{(r.units ?? 0) + " units"}</Tag>
+                      </div>
+                    ))}
+                  </div>
+                )
+              }
+            />
+            <div className="mt-3 border-b border-neutral-200" />
+          </div>
+
+          {/* Location & Mode (right) */}
+          <div>
+            <SectionTitle icon={MapPin}>Location &amp; Mode</SectionTitle>
+            <Row label="Campus Preference" value={<Tag tone="gray">{saved.campus || "—"}</Tag>} />
+            <Row
+              label="Delivery Mode"
+              value={
+                saved.delivery ? <Tag tone="gray">{saved.delivery}</Tag> : <span className="text-neutral-400">—</span>
+              }
+            />
+            <div className="mt-3 border-b border-transparent lg:border-b-0" />
+          </div>
+
+          {/* Schedule Preferences */}
+          <div>
+            <SectionTitle icon={CalendarDays}>Schedule Preferences</SectionTitle>
+            <Row label="Preferred Days" value={<Pills items={saved.days} />} />
+            <Row label="Preferred Time Slots" value={<Pills items={saved.timeSlots} />} />
+          </div>
+
+          {/* Academic Specialization */}
+          <div>
+            <SectionTitle icon={Monitor}>Academic Specialization</SectionTitle>
+            <Row
+              label="Knowledge Areas"
+              value={
+                (saved.kac || []).length ? (
+                  <div className="flex flex-wrap gap-1.5">
+                    {saved.kac.map((k: any) => (
+                      <Tag key={String(k)} tone="blue">
+                        {String(k)}
+                      </Tag>
                     ))}
                   </div>
                 ) : (
-                  <span className="text-[13px] text-gray-400">—</span>
-                )}
-              </FieldValue>
-            </div>
+                  <span className="text-neutral-400">—</span>
+                )
+              }
+            />
+            {/* NEW: saved.courses now shown */}
+            <Row label="Preferred Courses" value={<Pills items={saved.courses} />} />
+          </div>
 
-            <div>
-              <FieldLabel>Preferred Courses</FieldLabel>
-              <FieldValue>
-                {(form.preferredCourses || []).length ? (
-                  <div className="flex flex-wrap gap-2">
-                    {(form.preferredCourses || []).map((cid) => {
-                      const c = courseById.get(cid);
-                      const code = c
-                        ? (Array.isArray(c.course_code) ? c.course_code?.[0] : c.course_code) || c.course_id
-                        : cid;
-                      return (
-                        <Tag key={cid} tone="gray">
-                          {code}
-                        </Tag>
-                      );
-                    })}
-                  </div>
-                ) : (
-                  <span className="text-[13px] text-gray-400">—</span>
-                )}
-              </FieldValue>
+          {/* Remarks */}
+          <div className="lg:col-span-2">
+            <SectionTitle icon={BookOpen}>Remarks</SectionTitle>
+            <div className="text-sm text-neutral-800">
+              {saved.remarks?.trim() || <span className="text-neutral-400">No remarks</span>}
             </div>
           </div>
-        </SectionCard>
+        </div>
       </div>
-    </form>
+    </section>
   );
 }
 
-// keep alias if other files import it
-export const PreferencesContent = Faculty_Preferences;
+export const PreferencesContent = FAC_Preferences;

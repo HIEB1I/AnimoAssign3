@@ -92,23 +92,46 @@ export async function fetchTeachingHistory(facultyId: string) {
 }
 
 // Descriptive #2
-export async function fetchCourseProfiles(termId: string) {
-  const url = `${API_BASE.replace(/\/+$/, "")}/course-profiles?term_id=${encodeURIComponent(termId)}`;
-  const r = await fetch(url);
-  if (!r.ok) throw new Error(await r.text());
-  return r.json();
+export async function fetchCourseProfile(query: string) {
+  const res = await fetch(`/analytics/course-profile-for?query=${encodeURIComponent(query)}`);
+  if (!res.ok) throw new Error(await res.text().catch(() => res.statusText));
+  return res.json();
 }
+
 
 // Descriptive #3
-export async function fetchDeloadingUtilization(term?: string) {
-  const base = (ANALYTICS_BASE || API_BASE).replace(/\/+$/, "");
-  const url = `${base}/deloading-utilization${term ? `?term_id=${encodeURIComponent(term)}` : ""}`;
-  const r = await fetch(url);
-  if (!r.ok) throw new Error(await r.text());
-  return r.json();
+export async function fetchDeloadingsByTerm(
+  anchorTermId?: string,
+  direction: "current" | "next" | "prev" = "current"
+) {
+  const params = new URLSearchParams();
+  if (anchorTermId) params.set("anchor_term_id", anchorTermId);
+  if (direction) params.set("direction", direction);
+
+  const res = await fetch(`/analytics/deloadings/by-term?${params.toString()}`);
+  if (!res.ok) throw new Error(await res.text().catch(() => res.statusText));
+  return res.json();
 }
 
-// Predictive #1
+// Predictive #1 (updated)
+export async function fetchFacultyAvailabilityHeatmap<T = unknown>(params?: {
+  course_id?: string;
+  dept_id?: string;
+  threshold?: number; // default handled server-side (e.g., 0.50)
+}): Promise<T> {
+  const qs = new URLSearchParams();
+  if (params?.course_id) qs.set("course_id", params.course_id);
+  if (params?.dept_id) qs.set("dept_id", params.dept_id);
+  if (params?.threshold !== undefined) qs.set("threshold", String(params.threshold));
+
+  const url =
+    `${ANALYTICS_BASE.replace(/\/+$/, "")}/faculty-availability-heatmap` +
+    (qs.toString() ? `?${qs.toString()}` : "");
+
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(await r.text());
+  return (await r.json()) as T;
+}
 
 // Predictive #2
 export async function fetchPTRisk(params: {
@@ -126,7 +149,7 @@ export async function fetchPTRisk(params: {
   if (params.include_only_with_preferences != null) sp.set("include_only_with_preferences", String(params.include_only_with_preferences));
   if (params.allow_fallback_without_sections != null) sp.set("allow_fallback_without_sections", String(params.allow_fallback_without_sections));
 
-  const url = `${base}/analytics/pt-risk?${sp.toString()}`;
+  const url = `${base}/pt-risk?${sp.toString()}`;
   const r = await fetch(url);
   if (!r.ok) throw new Error(await r.text());
   return r.json();
@@ -1452,4 +1475,88 @@ export async function fetchOmRpFacultyTeachingHistory(params: {
     }>;
     meta?: { academicYears?: number[] };
   }>;
+}
+
+/* =========================================================
+   ===============  CHAIR: MODULES (placeholders)  =========
+   ========================================================= */
+
+export async function getChairHeader(userId?: string) {
+  const params = new URLSearchParams();
+  if (userId) params.set("userId", userId);
+  params.set("action", "header");
+  const r = await fetch(join(API_BASE, `chair/plantilla?${params.toString()}`));
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+export async function chairFacultyList(userId: string) {
+  const { data } = await api.post(`/chair/faculty-management`, {}, {
+    params: { userId, action: "fetch" },
+  });
+  return data as { ok: boolean; rows: any[] };
+}
+
+export async function chairCourseList(userId: string) {
+  const { data } = await api.post(`/chair/course-management`, {}, {
+    params: { userId, action: "fetch" },
+  });
+  return data as { ok: boolean; rows: any[] };
+}
+
+export async function chairFacultyService(userId: string) {
+  const { data } = await api.post(`/chair/faculty-service`, {}, {
+    params: { userId, action: "fetch" },
+  });
+  return data as { ok: boolean; services: any[] };
+}
+
+export async function chairClassRetention(userId: string) {
+  const { data } = await api.post(`/chair/class-retention`, {}, {
+    params: { userId, action: "fetch" },
+  });
+  return data as { ok: boolean; rows: any[] };
+}
+
+export async function chairStudentPetitions(userId: string) {
+  const { data } = await api.post(`/chair/student-petitions`, {}, {
+    params: { userId, action: "fetch" },
+  });
+  return data as { ok: boolean; rows: any[] };
+}
+
+// ===== Role switching helpers (frontend only) =====
+export type ActiveRole = "chair" | "faculty";
+
+export function getActiveRole(): ActiveRole | null {
+  try {
+    const v = localStorage.getItem("animo.activeRole");
+    return (v === "chair" || v === "faculty") ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+export function setActiveRole(role: ActiveRole) {
+  try {
+    localStorage.setItem("animo.activeRole", role);
+  } catch {}
+}
+
+export function userHasRole(role: string): boolean {
+  try {
+    const u = JSON.parse(localStorage.getItem("animo.user") || "null");
+    const roles: string[] = Array.isArray(u?.roles) ? u.roles.map((r:string)=>r.toLowerCase()) : [];
+    return roles.includes(role.toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
+export function userIsChair(): boolean {
+  try {
+    const u = JSON.parse(localStorage.getItem("animo.user") || "null");
+    const roles: string[] = Array.isArray(u?.roles) ? u.roles : [];
+    return roles.some(r => /chair/i.test(String(r)));
+  } catch { return false; }
 }
