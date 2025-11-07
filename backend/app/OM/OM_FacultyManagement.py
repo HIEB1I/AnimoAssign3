@@ -290,7 +290,7 @@ async def facultymanagement_handler(
                 "name": 1,
                 "email": "$email_display",
                 "department": "$department_display",
-                "position": 1,
+                "position": {"$ifNull": ["$position", {"$ifNull": ["$fac_position", ""]}]},
                 "teaching_units": "$teaching_units_display",
                 "faculty_type": "$faculty_type_display",
                 "status": "$status_display",
@@ -406,7 +406,7 @@ async def facultymanagement_handler(
                 "department": "$department_display",
                 "faculty_type": "$faculty_type_display",
                 "status": "$status_display",
-                "position": 1,
+                "position": {"$ifNull": ["$position", {"$ifNull": ["$fac_position", ""]}]},
                 "admin_position": 1,
                 "course_coordinator_of": "$cc_display",  # <-- final array [{code,title}]
                 "load": {

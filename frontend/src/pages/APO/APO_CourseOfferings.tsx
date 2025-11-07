@@ -1,4 +1,3 @@
-// frontend/src/pages/APO/CourseOfferingsPage.tsx
 import React, { useEffect, useMemo, useState } from "react";
 import {
   Edit,
@@ -49,11 +48,95 @@ const filterRoomsByCap = (options: RoomOption[], cap?: number | null) => {
 };
 
 const cls = (...s: (string | false | undefined)[]) => s.filter(Boolean).join(" ");
+
+// Display: "HH:MM" or "—"
 const fmtTime = (s?: string) => {
   const t = (s || "").replace(/\D/g, "");
   if (t.length !== 4) return s || "—";
   return `${t.slice(0, 2)}:${t.slice(2)}`;
 };
+
+// Allow user to type anything; coerce to exactly HHMM on save
+const toHHMM = (s?: string) => {
+  const t = (s || "").replace(/\D/g, "").slice(0, 4);
+  if (t.length === 4) return t;          // H1H2M1M2
+  if (t.length === 3) return `0${t}`;    // H M M -> 0HMM
+  if (t.length === 2) return `${t}00`;   // HH   -> HH00
+  if (t.length === 1) return `0${t}00`;  // H    -> 0H00
+  return "";
+};
+
+// exactly HHMM check
+const isFullTime = (s?: string) => ((s || "").replace(/\D/g, "")).length === 4;
+
+// allow partial typing (0..4 digits)
+const sanitizeTime = (s?: string) => (s || "").replace(/\D/g, "").slice(0, 4);
+
+// A slot can only receive a room if it has day + full HHMM times
+const slotReady = (s?: { day?: Day | ""; start_time?: string; end_time?: string }) =>
+  !!(s && s.day && isFullTime(s.start_time) && isFullTime(s.end_time));
+
+const compactSlot = (
+  s?: { day?: Day | ""; start_time?: string; end_time?: string; room_id?: string },
+  allowRoomOnly: boolean = false
+) => {
+  if (!s) return undefined;
+
+  const day = (s.day || "") as Day | "";
+  const start = sanitizeTime(s.start_time);
+  const end = sanitizeTime(s.end_time);
+  const hasAny = !!(day || start || end || s.room_id);
+
+  if (!hasAny) return undefined;
+
+  // GE: accept room-only update
+  if (allowRoomOnly && s.room_id && !(day && isFullTime(start) && isFullTime(end))) {
+    return { room_id: s.room_id };
+  }
+
+  // Non-GE (or GE with full schedule): require complete slot
+  if (!(day && isFullTime(start) && isFullTime(end))) return undefined;
+
+  const out: any = { day, start_time: start, end_time: end };
+  if (s.room_id) out.room_id = s.room_id;
+  return out;
+};
+
+// strict (non-GE) slot: require day + full start + full end, optional room
+const compactSlotStrict = (
+  s?: { day?: Day | ""; start_time?: string; end_time?: string; room_id?: string }
+) => {
+  if (!s) return undefined;
+  const day = (s.day || "") as Day | "";
+  const start = sanitizeTime(s.start_time);
+  const end = sanitizeTime(s.end_time);
+  if (!(day && isFullTime(start) && isFullTime(end))) return undefined;
+  const out: any = { day, start_time: start, end_time: end };
+  if (s.room_id) out.room_id = s.room_id;
+  return out;
+};
+
+// GE slot: allow partial updates, only send the keys that are actually provided
+const compactSlotGE = (
+  s?: { day?: Day | ""; start_time?: string; end_time?: string; room_id?: string }
+) => {
+  if (!s) return undefined;
+  const out: any = {};
+  const st = toHHMM(s.start_time);
+  const en = toHHMM(s.end_time);
+  if ((s.day || "") as Day | "") out.day = s.day;
+  if (st) out.start_time = st;
+  if (en) out.end_time = en;
+  // allow clearing or setting room; empty string is normalized to null in api.ts
+  if (s.room_id !== undefined) out.room_id = s.room_id;
+  return Object.keys(out).length ? out : undefined;
+};
+const stripRoomsOnAdd = (d: AddDraft): AddDraft => ({
+  ...d,
+  slot1: { room_id: "" },
+  slot2: { room_id: "" },
+});
+
 const normCode = (s?: string) =>
   (s || "")
     .trim()
@@ -61,12 +144,51 @@ const normCode = (s?: string) =>
     .replace(/\s+/g, " ")
     .replace(/^ID\s*(\d+)$/, "ID $1");
 
-type Day = "Monday" | "Tuesday" | "Wednesday" | "Thursday" | "Friday" | "Saturday";
+const isGEType = (t?: string) => {
+  const s = String(t || "").trim().toLowerCase();
+  return s.startsWith("ge") || s.includes("general education") || /^ge[\s/_-]/.test(s);
+};
+
+/** Elective helpers (robust and tolerant of label variations) */
+const isElectivePlaceholderType = (type?: string, code?: string, title?: string) => {
+  const tt = (type || "").toLowerCase().trim();
+  if (tt.includes("elective course")) return false;   // never treat specific electives as placeholders
+  if (tt === "elective") return true;                 // explicit placeholder type
+
+  const cc = (code || "").toUpperCase();
+  const ti = (title || "").toLowerCase();
+  // heuristics for placeholders like ITELEC1/2/etc.
+  const looksLikePlaceholderCode = /\bELEC\d*\b/.test(cc);
+  const titleMentionsElective = ti.includes("elective");
+  return looksLikePlaceholderCode || titleMentionsElective;
+};
+
+const isSpecificElectiveType = (type?: string) => {
+  const tt = typeOf(type).toLowerCase().trim();
+  return tt === "elective course" || tt.includes("elective course") || tt.includes("specific elective");
+};
+const parseBatchNumber = (batchCode?: string) => {
+  const m = (batchCode || "").match(/(\d+)/);
+  return m ? parseInt(m[1], 10) : 0;
+};
+
+const DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"] as const;
+type Day = (typeof DAYS)[number];
+
+// Soft, neutral inputs for edit/add rows
+const SOFT_INPUT =
+  "w-full min-w-0 rounded-lg border border-gray-300 bg-white px-2.5 py-2 text-sm shadow-sm " +
+  "focus:outline-none focus:ring-2 focus:ring-emerald-200 focus:border-emerald-300";
+
+const SOFT_SELECT =
+  "block w-full min-w-0 max-w-full appearance-none rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm " +
+  "shadow-sm outline-none focus:ring-2 focus:ring-emerald-200 focus:border-emerald-300";
 
 /* ---------------------------------- types ---------------------------------- */
 
 type OfferingRow = {
   program_no: string;
+  block_index?: number;
   batch: { batch_id: string; batch_code: string; batch_number?: number | null };
   program: { program_id?: string; program_code?: string };
   course: {
@@ -77,11 +199,26 @@ type OfferingRow = {
     program_level_label?: string;
     department_id?: string;
     department_name?: string;
+    type_of_course?: string | null;
   };
   section: { section_id: string; section_code: string; enrollment_cap: number | null; remarks: string };
   faculty: { faculty_id?: string | null; user_id?: string | null; faculty_name: string };
-  slot1?: { schedule_id?: string; day: Day | ""; start_time: string; end_time: string; room_id?: string; room_number?: string };
-  slot2?: { schedule_id?: string; day: Day | ""; start_time: string; end_time: string; room_id?: string; room_number?: string };
+  slot1?: {
+    schedule_id?: string;
+    day: Day | "";
+    start_time: string;
+    end_time: string;
+    room_id?: string;
+    room_number?: string;
+  };
+  slot2?: {
+    schedule_id?: string;
+    day: Day | "";
+    start_time: string;
+    end_time: string;
+    room_id?: string;
+    room_number?: string;
+  };
   sizing: {
     preenlistment_total: number;
     cohort_estimate: number;
@@ -98,10 +235,21 @@ type OfferingRow = {
     batch_id?: string;
     program_id?: string;
     section_id?: string;
+    elective_placeholder_course_id?: string;
   };
 };
 
-type CourseOption = { course_id: string; course_code: string; course_title: string };
+type CourseOption = {
+  course_id: string;
+  course_code: string | string[]; // tolerate array or string
+  course_title: string;
+  type_of_course?: string | null;
+};
+
+const codeOf = (v: unknown) =>
+  Array.isArray(v) ? String(v[0] ?? "") : String(v ?? "");
+const titleOf = (v: unknown) => String(v ?? "");
+const typeOf = (v: unknown) => String(v ?? "");
 
 type PlanningChange =
   | {
@@ -125,6 +273,7 @@ type OfferingsResponse = {
   };
   rows: OfferingRow[];
   course_options_by_group: Record<string, CourseOption[]>;
+  all_specific_electives?: CourseOption[];
   room_options: RoomOption[];
   planning?: {
     needs_import: boolean;
@@ -160,6 +309,7 @@ type DeptCourseOption = {
   program_level?: string;
   program_level_code?: string;
   units?: number | null;
+  type_of_course?: string | null;
 };
 type CurriculumResponse = {
   campus: { campus_id: string; campus_name: string };
@@ -184,14 +334,36 @@ type AddDraft = {
   slot2?: { room_id?: string };
   section_code?: string;
   auto_approve?: boolean;
+
+  /* Elective fields (reflected to backend) */
+  for_placeholder_course_id?: string;
+  specific_course_id?: string;
 };
+
+// EXTENDED: allow GE to update everything
 type EditDraft = {
   section_id: string;
   section_code?: string;
   enrollment_cap?: number | "";
   remarks?: string;
-  slot1?: { room_id?: string };
-  slot2?: { room_id?: string };
+
+  faculty_name?: string;
+
+  slot1?: {
+    day?: Day | "";
+    start_time?: string; // "HHMM"
+    end_time?: string; // "HHMM"
+    room_id?: string;
+  };
+  slot2?: {
+    day?: Day | "";
+    start_time?: string;
+    end_time?: string;
+    room_id?: string;
+  };
+
+  for_placeholder_course_id?: string;
+  specific_course_id?: string;
 };
 type DelDraft = { section_id: string };
 
@@ -228,22 +400,35 @@ export default function CourseOfferingsPage() {
   const [currSearch, setCurrSearch] = useState("");
 
   // per-program add selection (code-only select still stores course_id)
-  const [currAddSel, setCurrAddSel] = useState<Record<string, string>>({}); // program_id -> selected course_id
+  const [currAddSel, setCurrAddSel] = useState<Record<string, string>>({});
 
   // Offerings collapse state (keyed by "ID::PROGRAM")
   const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
 
+const idToCode = useMemo(() => {
+  const m: Record<string, string> = {};
+  (rows || []).forEach((r) => {
+    m[r.course.course_id] = codeOf(r.course.course_code as any);
+  });
+  Object.values(data?.course_options_by_group || {}).forEach((arr) => {
+    (arr || []).forEach((o) => {
+      if (o?.course_id) m[o.course_id] = codeOf(o.course_code as any);
+    });
+  });
+  return m;
+}, [rows, data?.course_options_by_group]);
+
+
   const user = useMemo(() => {
     const raw = localStorage.getItem("animo.user");
     return raw ? JSON.parse(raw) : null;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   const fullName = user?.fullName ?? "APO";
   const roleName = useMemo(() => {
     if (!user?.roles) return "Academic Programming Officer";
     return (user.roles as string[]).some((r) => /^apo\b/i.test(r))
       ? "Academic Programming Officer"
-      : user.roles[0] || "User";
+      : (user.roles[0] as string) || "User";
   }, [user]);
   const campusLabel = data?.campus?.campus_name || curr?.campus?.campus_name || "";
 
@@ -273,7 +458,7 @@ export default function CourseOfferingsPage() {
       const { deptId, progId, bId } = resolveFilterIds();
       const resp = await getApoCourseOfferings(user.userId, {
         view: "offerings",
-        level: level === "All Levels" ? undefined : level,
+        level: level === "All Levels" ? undefined : normalizeLevel(level),
         department_id: deptId,
         program_id: progId,
         batch_id: bId,
@@ -313,18 +498,36 @@ export default function CourseOfferingsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [level, departmentName, programCode, batchCode]);
 
-  /* -------------------------- offerings: gating flags ------------------------- */
+  /* -------------------------- planning banner only -------------------------- */
 
   const blockedByImport = view === "offerings" && !!data?.planning?.needs_import;
-  const blockedByApproval = view === "offerings" && !blockedByImport && !!data?.planning?.approval_required;
+  // Show banner, but do NOT block editing
+  const showApprovalBanner = view === "offerings" && !blockedByImport && !!data?.planning?.approval_required;
 
   const [showForward, setShowForward] = useState(false);
   const [showPlanModal, setShowPlanModal] = useState(false);
-  useEffect(() => {
-    if (blockedByApproval) setShowPlanModal(true);
-  }, [blockedByApproval]);
 
   /* --------------------------------- filters -------------------------------- */
+  const normalizeLevel = (v?: string) => {
+  const t = String(v || "").trim().toLowerCase();
+  if (t === "gs" || t.startsWith("graduate")) return "Graduate Studies";
+  if (t === "ug" || t.startsWith("undergraduate")) return "Undergraduate";
+  return String(v || "");
+  };
+  const levelOptions = useMemo(() => {
+    // Normalize anything the backend sends so “Graduate” and “Graduate Studies” collapse
+    const fromServer = (data?.filters.levels || []).map(normalizeLevel);
+    const s = new Set(fromServer);
+
+    // Make sure the two expected labels always exist
+    s.add("Undergraduate");
+    if ((data?.campus?.campus_name || "").toUpperCase() === "MANILA") {
+      s.add("Graduate Studies"); // never add the bare “Graduate”
+    }
+
+    return ["All Levels", ...Array.from(s)];
+  }, [data?.filters.levels, data?.campus?.campus_name]);
+
 
   const idOptions = useMemo(() => {
     const seen = new Set<string>();
@@ -349,8 +552,7 @@ export default function CourseOfferingsPage() {
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     if (!q) return rows;
-    const hit = (s?: string | number | null) =>
-      (s === 0 ? "0" : (s || "")).toString().toLowerCase().includes(q);
+    const hit = (s?: string | number | null) => (s === 0 ? "0" : (s || "")).toString().toLowerCase().includes(q);
     return rows.filter((r) => {
       const { course: c, section: sec, faculty: f, slot1: s1, slot2: s2 } = r;
       return (
@@ -398,19 +600,44 @@ export default function CourseOfferingsPage() {
   const [editing, setEditing] = useState<{ row: OfferingRow; draft: EditDraft } | null>(null);
 
   const startEdit = (row: OfferingRow) => {
-    if (blockedByImport || blockedByApproval) return;
+    if (blockedByImport) return; // only block when import not done
     if (!row.section.section_id) return;
-    setEditing({
-      row,
-      draft: {
-        section_id: row.section.section_id,
-        section_code: row.section.section_code,
-        enrollment_cap: row.section.enrollment_cap ?? "",
-        remarks: row.section.remarks ?? "",
-        slot1: { room_id: row.slot1?.room_id ?? "" },
-        slot2: { room_id: row.slot2?.room_id ?? "" },
-      },
-    });
+  const rowIsPlaceholder = isElectivePlaceholderType(
+    row.course.type_of_course || "",
+    row.course.course_code,
+    row.course.course_title
+  );
+  const rowIsSpecificElective = isSpecificElectiveType(row.course.type_of_course || "");
+
+  // Prefer backend-provided parent id; else, if this row is a placeholder, the row's own id is the parent.
+  const electiveParentId =
+    row.links?.elective_placeholder_course_id ||
+    (rowIsPlaceholder ? row.course.course_id : undefined);
+
+  // If this row is already a specific elective, prefill the specific id to the current course id
+  const currentSpecificId = rowIsSpecificElective ? row.course.course_id : undefined;
+
+  setEditing({
+    row,
+    draft: {
+      section_id: row.section.section_id,
+      section_code: row.section.section_code,
+      enrollment_cap: row.section.enrollment_cap ?? "",
+      remarks: row.section.remarks ?? "",
+      faculty_name: row.faculty?.faculty_name || "UNASSIGNED",
+      slot1: row.slot1
+        ? { day: (row.slot1.day as Day | ""), start_time: row.slot1.start_time, end_time: row.slot1.end_time, room_id: row.slot1.room_id || "" }
+        : undefined,
+      slot2: row.slot2
+        ? { day: (row.slot2.day as Day | ""), start_time: row.slot2.start_time, end_time: row.slot2.end_time, room_id: row.slot2.room_id || "" }
+        : undefined,
+
+
+      // NEW: seed elective editing fields
+      for_placeholder_course_id: electiveParentId,
+      specific_course_id: currentSpecificId,
+    },
+  });
   };
 
   const handleConflict = (action: ActionKind, apiConflict: ApiConflict, original: any) => {
@@ -428,18 +655,139 @@ export default function CourseOfferingsPage() {
       reason: "",
     });
   };
+const facultyIndexByName = useMemo(() => {
+  const m: Record<string, { user_id?: string; faculty_id?: string }> = {};
+  (data?.rows || []).forEach(r => {
+    const name = (r.faculty?.faculty_name || "").trim().toLowerCase();
+    if (!name) return;
+    // prefer user_id if present
+    m[name] = {
+      user_id: r.faculty?.user_id || m[name]?.user_id,
+      faculty_id: r.faculty?.faculty_id || m[name]?.faculty_id,
+    };
+  });
+  return m;
+}, [data?.rows]);
 
-  const saveEdit = async () => {
-    if (!editing || !user?.userId) return;
-    const basePayload: any = { ...editing.draft, course_id: editing.row.course.course_id };
-    const res = await editApoOfferingRow(user.userId, basePayload as any);
-    if ("conflict" in res) {
-      handleConflict("edit", res.conflict, basePayload);
-      return;
-    }
-    await loadOfferings();
-    setEditing(null);
+const addOptionsTypeById = useMemo(() => {
+  const m: Record<string, string> = {};
+  Object.values(data?.course_options_by_group || {}).forEach((arr) => {
+    (arr || []).forEach((o) => {
+      if (o?.course_id) m[o.course_id] = ((o.type_of_course as string) || "").toLowerCase();
+    });
+  });
+  return m;
+}, [data?.course_options_by_group]);
+const codeText = (v: string | string[] | null | undefined) =>
+  Array.isArray(v) ? (v[0] ?? "") : (v ?? "");
+
+// prefer server-provided global list if present
+const allSpecificElectives: CourseOption[] = useMemo(() => {
+  const fromServer = (data?.all_specific_electives || [])
+    .filter(o => isSpecificElectiveType(o.type_of_course || ""))
+    .map(o => ({ ...o, course_code: codeText(o.course_code) })); // normalize
+
+  if (fromServer.length) {
+    return [...fromServer].sort((a,b)=>codeText(a.course_code).localeCompare(codeText(b.course_code)));
+  }
+
+  // fallback: derive from grouped options
+  const seen = new Set<string>();
+  const out: CourseOption[] = [];
+  Object.values(data?.course_options_by_group || {}).forEach(arr => {
+    (arr || []).forEach((o: any) => {
+      const t = String(o?.type_of_course || "").toLowerCase().trim();
+      if (!(t === "elective course" || t.includes("elective course"))) return;
+      const id = String(o?.course_id || "");
+      if (!id || seen.has(id)) return;
+      seen.add(id);
+      out.push({
+        course_id: id,
+        course_code: codeText(o?.course_code),
+        course_title: String(o?.course_title || ""),
+        type_of_course: String(o?.type_of_course || ""),
+      });
+    });
+  });
+  return out.sort((a,b)=>codeText(a.course_code).localeCompare(codeText(b.course_code)));
+}, [data?.all_specific_electives, data?.course_options_by_group]);
+
+const saveEdit = async () => {
+  if (!editing || !user?.userId) return;
+
+  const isGE = isGEType(editing.row?.course?.type_of_course || "");
+
+  const payload: any = {
+    section_id: editing.draft.section_id,
+    section_code: editing.draft.section_code,
+    enrollment_cap: editing.draft.enrollment_cap === "" ? null : editing.draft.enrollment_cap,
+    remarks: editing.draft.remarks,
+    course_id: editing.row.course.course_id,
+
+    // GE accepts partial slot updates
+    slot1: isGE ? compactSlotGE(editing.draft.slot1) : compactSlotStrict(editing.draft.slot1),
+    slot2: isGE ? compactSlotGE(editing.draft.slot2) : compactSlotStrict(editing.draft.slot2),
+
+    // Elective mapping passthrough
+    for_placeholder_course_id: editing.draft.for_placeholder_course_id,
+    specific_course_id: editing.draft.specific_course_id,
+
+    // Key: tell backend to bypass planning conflicts for GE
+    ...(isGE ? { auto_override: true } : {})
   };
+
+  // ------- NEW: faculty resolution for GE -------
+  if (isGE) {
+    const raw = (editing.draft.faculty_name || "").trim();
+    if (!raw || raw.toUpperCase() === "UNASSIGNED") {
+      payload.faculty_user_id = null;
+      payload.faculty_id = null;
+    } else {
+      const hit = facultyIndexByName[raw.toLowerCase()];
+      if (hit?.user_id || hit?.faculty_id) {
+        if (hit.user_id) payload.faculty_user_id = hit.user_id;
+        if (hit.faculty_id) payload.faculty_id = hit.faculty_id;
+      }
+      // If not found, do not send faculty_* to avoid 422
+    }
+  }
+  // ----------------------------------------------
+
+  // Remove undefined slots so we don’t overwrite accidentally
+  if (payload.slot1 === undefined) delete payload.slot1;
+  if (payload.slot2 === undefined) delete payload.slot2;
+
+  try {
+    let res: any = await editApoOfferingRow(user.userId, payload);
+
+    if ("conflict" in res) {
+      if (!isGE) {
+        handleConflict("edit", res.conflict, payload);
+        return;
+      }
+      // Extremely rare for GE after auto_override; still handle
+      const ov = await editApoOfferingRow(user.userId, {
+        ...payload,
+        override: true,
+        override_token: res.conflict.override_token,
+        override_reason: "GE edit – relax planning rules",
+      } as any);
+      if ("conflict" in ov) {
+        handleConflict("edit", ov.conflict, payload);
+        return;
+      }
+    }
+
+    // UX: close editor right away for GE; then refresh list
+    if (isGE) setEditing(null);
+    await loadOfferings();
+    if (!isGE) setEditing(null);
+  } catch (e: any) {
+    alert(e?.message || "Failed to save changes.");
+    // Don’t trap you in edit if GE save hiccups
+    if (isGE) setEditing(null);
+  }
+};
 
   /* ----------------------------- offerings: add row ----------------------------- */
 
@@ -459,26 +807,63 @@ export default function CourseOfferingsPage() {
     slot2: { room_id: "" },
   });
   const [addCourseCode, setAddCourseCode] = useState<string>("— Select a course —");
+  const [addElectiveSpecificId, setAddElectiveSpecificId] = useState<string>(""); // UI-only helper
   const [adding, setAdding] = useState(false);
 
-  const SAFE_AUTO_CODES = new Set([
-    "NO_ROOM_SET",
-    "SEAT_DEFICIT",
-    "PREFIX_MISMATCH",
-    "CODE_WITHOUT_NUMBER",
-    "PLAN_NOT_APPROVED",
-  ]);
-
   const doAdd = async () => {
-    if (blockedByImport || blockedByApproval) return;
-    if (!user?.userId || !addDraft.course_id) return;
+    if (blockedByImport) return;
+    if (!user?.userId) return;
+
+    const effectiveCourseId = addDraft.specific_course_id || addDraft.course_id;
+    if (!effectiveCourseId) return;
+
+    const isElectiveFlow = !!addDraft.for_placeholder_course_id;
+    if (isElectiveFlow && !addDraft.specific_course_id) {
+      alert("Please choose the Specific Elective to offer.");
+      return;
+    }
+
     setAdding(true);
     try {
-      const base = { ...addDraft };
+      const courseType = addOptionsTypeById[effectiveCourseId] || "";
+      const isGE = isGEType(courseType);
+
+      // --- NEW: If we started from a placeholder row, REPLACE it via EDIT ---
+      if (isElectiveFlow && addAnchorSectionId) {
+        const editPayload: EditDraft & { course_id?: string } = {
+          section_id: addAnchorSectionId,
+          // keep existing section fields as-is; we only switch the course mapping
+          for_placeholder_course_id: addDraft.for_placeholder_course_id,
+          specific_course_id: addDraft.specific_course_id,
+        };
+        // also send course_id to the specific to make the row display as the chosen elective
+        (editPayload as any).course_id = effectiveCourseId;
+
+        const res = await editApoOfferingRow(user.userId, editPayload as any);
+        if ("conflict" in res) {
+          const ov = await editApoOfferingRow(user.userId, {
+            ...editPayload,
+            override: true,
+            override_token: res.conflict.override_token,
+            override_reason: "Elective replacement",
+          } as any);
+          if ("conflict" in ov) {
+            handleConflict("edit", ov.conflict, editPayload);
+            return;
+          }
+        }
+      } else {
+      // normal, non-elective add flow
+      const base: AddDraft = stripRoomsOnAdd({
+        ...addDraft,
+        course_id: effectiveCourseId,
+        auto_approve: isGE,
+      });
       const res = await addApoOfferingRow(user.userId, base);
       if ("conflict" in res) {
-        const allSafe = (res.conflict.violations || []).every((v) => SAFE_AUTO_CODES.has(v.code));
-        if (!allSafe) {
+        const SAFE_AUTO_CODES = new Set(["NO_ROOM_SET","SEAT_DEFICIT","PREFIX_MISMATCH","CODE_WITHOUT_NUMBER","PLAN_NOT_APPROVED"]);
+        const canAuto = isGE || (res.conflict.violations || []).every((v) => SAFE_AUTO_CODES.has(v.code));
+        if (!canAuto) {
           handleConflict("add", res.conflict, base);
           return;
         }
@@ -486,16 +871,21 @@ export default function CourseOfferingsPage() {
           ...base,
           override: true,
           override_token: res.conflict.override_token,
-          override_reason: "Proceed despite planning warnings",
-        });
+          override_reason: isGE ? "GE course – relax planning rules" : "Proceed despite planning warnings",
+        } as any);
         if ("conflict" in ov) {
           handleConflict("add", ov.conflict, base);
           return;
         }
       }
+    }
+
+
       await loadOfferings();
       setAddAnchorKey(null);
+      setAddAnchorSectionId(null);         // NEW: clear anchor
       setAddCourseCode("— Select a course —");
+      setAddElectiveSpecificId("");
       setAddDraft({
         batch_id: "",
         program_id: "",
@@ -511,7 +901,7 @@ export default function CourseOfferingsPage() {
   };
 
   const doDelete = async (row: OfferingRow) => {
-    if (blockedByImport || blockedByApproval) return;
+    if (blockedByImport) return;
     if (!user?.userId || !row.section.section_id) return;
     if (!confirm("Delete this section? This cannot be undone.")) return;
     setRows((prev) => prev.filter((r) => r.section.section_id !== row.section.section_id));
@@ -528,14 +918,12 @@ export default function CourseOfferingsPage() {
 
   const currPrograms = useMemo(() => {
     const arr = (curr?.items || []).map((i) => ({ id: i.program_id, code: i.program_code }));
-    const uniq = arr.filter((x, idx) => arr.findIndex((a) => a.id === x.id) === idx);
-    return uniq;
+    return arr.filter((x, idx) => arr.findIndex((a) => a.id === x.id) === idx);
   }, [curr?.items]);
 
   const currBatches = useMemo(() => {
     const arr = (curr?.items || []).map((i) => ({ id: i.batch_id, code: i.batch_code }));
-    const uniq = arr.filter((x, idx) => arr.findIndex((a) => a.id === x.id) === idx);
-    return uniq;
+    return arr.filter((x, idx) => arr.findIndex((a) => a.id === x.id) === idx);
   }, [curr?.items]);
 
   const selectedProgramId = useMemo(() => {
@@ -548,38 +936,79 @@ export default function CourseOfferingsPage() {
     return currBatches.find((b) => normCode(b.code) === normCode(batchCode))?.id;
   }, [batchCode, currBatches]);
 
-  const selectedDeptName = useMemo(() => {
-    if (!selectedProgramId) return "—";
-    const item = (curr?.items || []).find((i) => i.program_id === selectedProgramId);
-    return item?.department_name || "—";
-  }, [selectedProgramId, curr?.items]);
-
   const optionsByProgram: Record<string, DeptCourseOption[]> = curr?.course_options_by_program || {};
 
-  // map per-program items (filtered by program/batch)
-  const columns = useMemo(() => {
+  /* ===== New: Curriculum grouped by ID (batch), sorted by numeric ID ascending) ===== */
+  type BatchGroup = {
+    batch_id: string;
+    batch_code: string;
+    batch_number: number;
+    programs: Record<string, CurriculumItem>; // program_id -> item merged
+  };
+  const curriculumByBatch = useMemo(() => {
+    const map: Record<string, BatchGroup> = {};
+    for (const it of curr?.items || []) {
+      if (selectedProgramId && it.program_id !== selectedProgramId) continue;
+      if (selectedBatchId && it.batch_id !== selectedBatchId) continue;
+
+      const bkey = normCode(it.batch_code);
+      if (!map[bkey]) {
+        map[bkey] = {
+          batch_id: it.batch_id,
+          batch_code: bkey,
+          batch_number: parseBatchNumber(it.batch_code),
+          programs: {},
+        };
+      }
+      if (!map[bkey].programs[it.program_id]) {
+        map[bkey].programs[it.program_id] = { ...it, courses: [...it.courses] };
+      } else {
+        map[bkey].programs[it.program_id].courses.push(...it.courses);
+      }
+    }
+
+    // de-dup + sort per program
+    Object.values(map).forEach((grp) => {
+      Object.keys(grp.programs).forEach((pid) => {
+        const seen = new Set<string>();
+        grp.programs[pid].courses = grp.programs[pid].courses
+          .filter((c) => (seen.has(c.course_id) ? false : (seen.add(c.course_id), true)))
+          .sort((a, b) => a.code.localeCompare(b.code));
+      });
+    });
+
+    // turn into ordered array
+    const arr = Object.values(map).sort((a, b) => a.batch_number - b.batch_number);
+    return arr;
+  }, [curr?.items, selectedProgramId, selectedBatchId]);
+
+  // For "single-batch" view we still need per-program map + consistent order
+  const singleBatchPrograms = useMemo(() => {
+    if (!selectedBatchId) return {};
     const map: Record<string, CurriculumItem> = {};
     for (const i of curr?.items || []) {
-      if (selectedBatchId && i.batch_id !== selectedBatchId) continue;
+      if (i.batch_id !== selectedBatchId) continue;
       if (selectedProgramId && i.program_id !== selectedProgramId) continue;
       if (!map[i.program_id]) map[i.program_id] = { ...i, courses: [...i.courses] };
       else map[i.program_id].courses = [...map[i.program_id].courses, ...i.courses];
     }
-    for (const k of Object.keys(map)) {
+    Object.keys(map).forEach((pid) => {
       const seen = new Set<string>();
-      map[k].courses = map[k].courses
+      map[pid].courses = map[pid].courses
         .filter((c) => (seen.has(c.course_id) ? false : (seen.add(c.course_id), true)))
         .sort((a, b) => a.code.localeCompare(b.code));
-    }
+    });
     return map;
   }, [curr?.items, selectedBatchId, selectedProgramId]);
 
-  const programOrder = useMemo(
-    () => Object.keys(columns).sort((a, b) => (columns[a]?.program_code || "").localeCompare(columns[b]?.program_code || "")),
-    [columns]
+  const singleBatchProgramOrder = useMemo(
+    () =>
+      Object.keys(singleBatchPrograms).sort((a, b) =>
+        (singleBatchPrograms[a]?.program_code || "").localeCompare(singleBatchPrograms[b]?.program_code || "")
+      ),
+    [singleBatchPrograms]
   );
 
-  // Build whitelist: which course_ids belong to each program’s overall curriculum (across all terms)
   const eligibleCourseIdsByProgram = useMemo(() => {
     const m: Record<string, Set<string>> = {};
     (curr?.items || []).forEach((it) => {
@@ -632,6 +1061,7 @@ export default function CourseOfferingsPage() {
     await curriculumRemoveCourse(user.userId, { program_id, batch_id, course_id });
     await loadCurriculum();
   };
+  const [addAnchorSectionId, setAddAnchorSectionId] = useState<string | null>(null);
 
   /* ----------------------------------- UI ----------------------------------- */
 
@@ -647,6 +1077,32 @@ export default function CourseOfferingsPage() {
         ]}
       />
 
+      {/* View toggle moved OUTSIDE the toolbar */}
+      <div className="px-6 pt-4 w-full">
+        <div className="flex items-center justify-start">
+          <div className="inline-flex overflow-hidden rounded-lg border border-emerald-700">
+            <button
+              onClick={() => setView("offerings")}
+              className={cls(
+                "px-3 py-1.5 text-sm font-medium",
+                view === "offerings" ? "bg-emerald-700 text-white" : "bg-white text-emerald-700"
+              )}
+            >
+              Course Offerings
+            </button>
+            <button
+              onClick={() => setView("curriculum")}
+              className={cls(
+                "px-3 py-1.5 text-sm font-medium border-l border-emerald-700",
+                view === "curriculum" ? "bg-emerald-700 text-white" : "bg-white text-emerald-700"
+              )}
+            >
+              Curriculum
+            </button>
+          </div>
+        </div>
+      </div>
+
       <main className="p-6 w-full">
         {/* toolbar */}
         <div className="flex flex-wrap items-center gap-3 rounded-xl border border-gray-200 bg-white p-4 shadow-sm mb-6">
@@ -660,43 +1116,10 @@ export default function CourseOfferingsPage() {
             />
           </div>
 
-          <div className="ml-auto flex items-center gap-3">
-            <div className="inline-flex overflow-hidden rounded-lg border border-emerald-700">
-              <button
-                onClick={() => setView("offerings")}
-                className={cls(
-                  "px-3 py-1.5 text-sm font-medium",
-                  view === "offerings" ? "bg-emerald-700 text-white" : "bg-white text-emerald-700"
-                )}
-              >
-                Offerings
-              </button>
-              <button
-                onClick={() => setView("curriculum")}
-                className={cls(
-                  "px-3 py-1.5 text-sm font-medium border-l border-emerald-700",
-                  view === "curriculum" ? "bg-emerald-700 text-white" : "bg-white text-emerald-700"
-                )}
-              >
-                Curriculum
-              </button>
-            </div>
-
-            {view === "offerings" && (
-              <button
-                onClick={() => setShowForward(true)}
-                className="inline-flex items-center gap-2 rounded-md bg-emerald-700 px-4 py-2 text-sm font-medium text-white shadow-sm"
-              >
-                <Send className="h-4 w-4" />
-                Forward
-              </button>
-            )}
-          </div>
-
           {/* Offerings filters */}
           {view === "offerings" && (
             <>
-              <SelectBox value={level} onChange={(v: string) => setLevel(v)} options={["All Levels", ...(data?.filters.levels || [])]} />
+              <SelectBox value={level} onChange={(v: string) => setLevel(v)} options={levelOptions} />
               <SelectBox
                 value={departmentName}
                 onChange={(v: string) => setDepartmentName(v)}
@@ -710,7 +1133,18 @@ export default function CourseOfferingsPage() {
               />
             </>
           )}
-
+          {/* Right side of toolbar now ONLY holds Forward (if you want it here) */}
+          <div className="ml-auto flex items-center gap-3">
+            {view === "offerings" && (
+              <button
+                onClick={() => setShowForward(true)}
+                className="inline-flex items-center gap-2 rounded-md bg-emerald-700 px-4 py-2 text-sm font-medium text-white shadow-sm"
+              >
+                <Send className="h-4 w-4" />
+                Forward
+              </button>
+            )}
+          </div>
           {/* Curriculum filters */}
           {view === "curriculum" && (
             <>
@@ -730,9 +1164,6 @@ export default function CourseOfferingsPage() {
                 }}
                 options={["All ID", ...currBatches.map((b) => b.code)]}
               />
-              <div className="text-sm text-neutral-700">
-                <span className="font-medium text-emerald-800">Department:</span> {selectedDeptName}
-              </div>
             </>
           )}
         </div>
@@ -760,7 +1191,7 @@ export default function CourseOfferingsPage() {
                   </div>
                 </div>
               )}
-              {!data.planning.needs_import && data.planning.approval_required && (
+              {showApprovalBanner && (
                 <div className="mb-4 rounded-lg border border-blue-300 bg-blue-50 px-3 py-2 text-blue-900">
                   <div className="flex items-center justify-between gap-3">
                     <div className="font-medium">Planning updates are ready</div>
@@ -781,8 +1212,13 @@ export default function CourseOfferingsPage() {
             <>
               {blockedByImport ? (
                 <div className="rounded-xl border border-dashed border-amber-300 bg-amber-50 p-8 text-center text-amber-900">
-                  <p className="text-sm">Pre-Enlistment count and statistics are required before planning course offerings.</p>
-                  <a href="/apo/preenlistment" className="mt-3 inline-flex items-center gap-2 rounded-md bg-amber-600 px-3 py-1.5 text-sm font-medium text-white shadow-sm">
+                  <p className="text-sm">
+                    Pre-Enlistment count and statistics are required before planning course offerings.
+                  </p>
+                  <a
+                    href="/apo/preenlistment"
+                    className="mt-3 inline-flex items-center gap-2 rounded-md bg-amber-600 px-3 py-1.5 text-sm font-medium text-white shadow-sm"
+                  >
                     Go to Pre-Enlistment
                   </a>
                 </div>
@@ -857,8 +1293,14 @@ export default function CourseOfferingsPage() {
                                   <tbody>
                                     {list.map((r) => {
                                       const isEditing = editing?.row.section.section_id === r.section.section_id;
-                                      const canEditDelete = !!r.section.section_id && !blockedByApproval;
+                                      const canEditDelete = !!r.section.section_id; // no approval gate
                                       const rowKey = rowKeyOf(r);
+                                      const ge = isGEType(r.course.type_of_course || "");
+                                      const rowIsElective = isElectivePlaceholderType(
+                                        r.course.type_of_course || "",
+                                        r.course.course_code,
+                                        r.course.course_title
+                                      );
 
                                       const suggestion =
                                         r.sizing?.deficit > 0 || (r.sizing?.suggest_additional || 0) > 0 ? (
@@ -873,13 +1315,16 @@ export default function CourseOfferingsPage() {
                                               Planned cap: <strong>{r.sizing.planned_capacity}</strong>
                                             </span>
                                             {r.sizing.deficit > 0 && <span className="text-red-600 mr-3">Deficit: {r.sizing.deficit}</span>}
-                                            {r.sizing.suggest_additional > 0 && <span className="text-emerald-700">Suggest +{r.sizing.suggest_additional} section(s)</span>}
+                                            {r.sizing.suggest_additional > 0 && (
+                                              <span className="text-emerald-700">Suggest +{r.sizing.suggest_additional} section(s)</span>
+                                            )}
                                           </div>
                                         ) : null;
 
-                                      const RoomSelect: React.FC<{ value?: string; onChange: (v: string) => void }> = ({
+                                      const RoomSelect: React.FC<{ value?: string; onChange: (v: string) => void; disabled?: boolean }> = ({
                                         value,
                                         onChange,
+                                        disabled,
                                       }) => {
                                         const rooms = filterRoomsByCap(data?.room_options || []);
                                         return (
@@ -887,8 +1332,10 @@ export default function CourseOfferingsPage() {
                                             <select
                                               value={value ?? ""}
                                               onChange={(e) => onChange(e.target.value)}
-                                              className="block w-full min-w-0 max-w-full appearance-none rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm leading-tight outline-none focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500"
+                                              className={SOFT_SELECT + (disabled ? " opacity-60 cursor-not-allowed" : "")}
+                                              disabled={!!disabled}
                                             >
+                                              <option value="">{disabled ? "— Set Day & Time first —" : "— Select room —"}</option>
                                               {rooms.map((o) => (
                                                 <option key={(o.room_id || "TBA") + o.room_number} value={o.room_id}>
                                                   {o.room_number}
@@ -899,12 +1346,27 @@ export default function CourseOfferingsPage() {
                                           </div>
                                         );
                                       };
-
                                       const viewRow = (
                                         <tr key={(r.section.section_id || r.course.course_id) + "-v"} className="hover:bg-neutral-50">
-                                          <td className="px-3 py-2 border border-gray-300">{r.program_no}</td>
+                                          <td className="px-3 py-2 border border-gray-300">
+                                            {(r.program?.program_code || "—") +
+                                              "-" +
+                                              (typeof r.block_index === "number" ? r.block_index : 1)}
+                                          </td>
                                           <td className="px-3 py-2 border border-gray-300 align-top">
-                                            <div className="font-semibold text-emerald-700 break-words">{r.course.course_code}</div>
+                                            <div className="font-semibold text-emerald-700 break-words">
+                                              {r.course.course_code}{" "}
+                                              {isGEType(r.course.type_of_course || "") && (
+                                                <span className="ml-1 inline-block rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700 align-middle">
+                                                  GE
+                                                </span>
+                                              )}
+                                              {(rowIsElective || isSpecificElectiveType(r.course.type_of_course || "")) && (
+                                                <span className="ml-1 inline-block rounded bg-indigo-100 px-1.5 py-0.5 text-[10px] font-semibold text-indigo-700 align-middle">
+                                                  Elective
+                                                </span>
+                                              )}
+                                            </div>
                                             <div className="text-xs text-gray-500 leading-snug break-words whitespace-normal">
                                               {r.course.course_title}
                                             </div>
@@ -919,119 +1381,419 @@ export default function CourseOfferingsPage() {
                                           <td className="px-3 py-2 border border-gray-300">{r.slot1?.day || "—"}</td>
                                           <td className="px-3 py-2 border border-gray-300">{fmtTime(r.slot1?.start_time)}</td>
                                           <td className="px-3 py-2 border border-gray-300">{fmtTime(r.slot1?.end_time)}</td>
-                                          <td className="px-3 py-2 border border-gray-300">
-                                            {r.slot1?.room_number || r.slot1?.room_id || "—"}
-                                          </td>
+                                          <td className="px-3 py-2 border border-gray-300">{r.slot1?.room_number || r.slot1?.room_id || "—"}</td>
                                           <td className="px-3 py-2 border border-gray-300">{r.slot2?.day || "—"}</td>
                                           <td className="px-3 py-2 border border-gray-300">{fmtTime(r.slot2?.start_time)}</td>
                                           <td className="px-3 py-2 border border-gray-300">{fmtTime(r.slot2?.end_time)}</td>
-                                          <td className="px-3 py-2 border border-gray-300">
-                                            {r.slot2?.room_number || r.slot2?.room_id || "—"}
-                                          </td>
+                                          <td className="px-3 py-2 border border-gray-300">{r.slot2?.room_number || r.slot2?.room_id || "—"}</td>
                                           <td className="px-3 py-2 border border-gray-300">{r.section.enrollment_cap ?? "—"}</td>
                                           <td className="px-3 py-2 border border-gray-300">{r.section.remarks || "—"}</td>
                                           <td className="px-3 py-2 border border-gray-300">
                                             <div className="flex flex-wrap gap-2">
-                                              {blockedByApproval ? (
-                                                <button
-                                                  onClick={() => setShowPlanModal(true)}
-                                                  className={cls(
-                                                    "rounded-md border px-2 py-1 text-xs font-medium",
-                                                    "border-emerald-700 text-emerald-700 hover:bg-emerald-50"
-                                                  )}
-                                                >
-                                                  Review plan
-                                                </button>
-                                              ) : (
+                                              {canEditDelete && (
                                                 <>
-                                                  {canEditDelete && (
-                                                    <>
-                                                      <button className="text-emerald-700 hover:text-emerald-900" title="Edit" onClick={() => startEdit(r)}>
-                                                        <Edit className="h-4 w-4" />
-                                                      </button>
-                                                      <button className="text-red-500 hover:text-red-700" title="Delete" onClick={() => doDelete(r)}>
-                                                        <Trash2 className="h-4 w-4" />
-                                                      </button>
-                                                    </>
-                                                  )}
-                                                  {!blockedByApproval && (
-                                                    <button
-                                                      className="text-emerald-700 hover:text-emerald-900"
-                                                      title="Add row (create section)"
-                                                      onClick={() => {
-                                                        setAddAnchorKey(rowKey);
-                                                        setAddCourseCode("— Select a course —");
-                                                        setAddDraft({
-                                                          batch_id: r.batch.batch_id,
-                                                          program_id: r.program.program_id,
-                                                          course_id: "",
-                                                          enrollment_cap: r.section.enrollment_cap ?? 20,
-                                                          remarks: "",
-                                                          slot1: { room_id: "" },
-                                                          slot2: { room_id: "" },
-                                                        });
-                                                      }}
-                                                    >
-                                                      <Plus className="h-4 w-4" />
-                                                    </button>
-                                                  )}
+                                                  <button
+                                                    className="text-emerald-700 hover:text-emerald-900"
+                                                    title="Edit"
+                                                    onClick={() => startEdit(r)}
+                                                  >
+                                                    <Edit className="h-4 w-4" />
+                                                  </button>
+                                                  <button
+                                                    className="text-red-500 hover:text-red-700"
+                                                    title="Delete"
+                                                    onClick={() => doDelete(r)}
+                                                  >
+                                                    <Trash2 className="h-4 w-4" />
+                                                  </button>
                                                 </>
                                               )}
+                                              <button
+                                                className="text-emerald-700 hover:text-emerald-900"
+                                                title="Add row (create section)"
+                                                onClick={() => {
+                                                  setAddAnchorKey(rowKey);
+                                                  setAddElectiveSpecificId("");
+                                                  const elective = isElectivePlaceholderType(
+                                                    r.course.type_of_course || "",
+                                                    r.course.course_code,
+                                                    r.course.course_title
+                                                  );
+                                                  setAddCourseCode(elective ? r.course.course_code : "— Select a course —");
+
+                                                  // NEW: remember the row we’re acting on (so we can REPLACE it)
+                                                  setAddAnchorSectionId(elective ? (r.section.section_id || null) : null);
+
+                                                  setAddDraft({
+                                                    batch_id: r.batch.batch_id,
+                                                    program_id: r.program.program_id,
+                                                    course_id: elective ? r.course.course_id : "",
+                                                    for_placeholder_course_id: elective ? r.course.course_id : undefined,
+                                                    specific_course_id: undefined,
+                                                    enrollment_cap: r.section.enrollment_cap ?? 20,
+                                                    remarks: "",
+                                                    slot1: { room_id: "" },
+                                                    slot2: { room_id: "" },
+                                                  });
+                                                }}
+
+                                              >
+                                                <Plus className="h-4 w-4" />
+                                              </button>
                                             </div>
                                           </td>
                                         </tr>
                                       );
 
                                       const editRow = (
-                                        <tr key={r.section.section_id + "-e"} className="bg-emerald-50/40">
-                                          <td className="px-3 py-2 border border-gray-300">{r.program_no}</td>
-                                          <td className="px-3 py-2 border border-gray-300 align-top">
+                                        <tr
+                                          key={r.section.section_id + "-e"}
+                                          className="bg-white"
+                                          style={{ boxShadow: "0 2px 10px rgba(0,0,0,0.05)" }}
+                                        >
+                                          <td className="px-3 py-2 border border-gray-200 bg-white">
+                                            {(r.program?.program_code || "—") +
+                                              "-" +
+                                              (typeof r.block_index === "number" ? r.block_index : 1)}
+                                          </td>
+                                          <td className="px-3 py-2 border border-gray-200 bg-white align-top">
                                             <div className="font-semibold text-emerald-700 break-words">{r.course.course_code}</div>
                                             <div className="text-xs text-gray-500 leading-snug break-words whitespace-normal">
                                               {r.course.course_title}
                                             </div>
+
+                                            {(() => {
+                                              const isPlaceholder = isElectivePlaceholderType(
+                                                r.course.type_of_course || "",
+                                                r.course.course_code,
+                                                r.course.course_title
+                                              );
+                                              const isSpecific = isSpecificElectiveType(r.course.type_of_course || "");
+                                              const hasParent = !!(r.links?.elective_placeholder_course_id || (isPlaceholder ? r.course.course_id : ""));
+                                              const electiveEditable = isPlaceholder || isSpecific || hasParent;
+
+                                              if (!electiveEditable) return null;
+
+                                              // prefer server-provided list; fall back to derived list already computed
+                                              const specificList = (data?.all_specific_electives || allSpecificElectives || []).filter(o =>
+                                                isSpecificElectiveType(o.type_of_course || "")
+                                              );
+
+                                              const currentSpecific = editing?.draft.specific_course_id || (isSpecific ? r.course.course_id : "");
+                                              const parentId =
+                                                editing?.draft.for_placeholder_course_id ||
+                                                r.links?.elective_placeholder_course_id ||
+                                                (isPlaceholder ? r.course.course_id : "");
+
+                                              return (
+                                                <div className="mt-2">
+                                                  <label className="text-xs font-medium text-slate-700 mb-1 block">Specific Elective</label>
+                                                  <div className="relative">
+                                                    <select
+                                                      className={SOFT_SELECT}
+                                                      value={currentSpecific || ""}
+                                                      onChange={(e) => {
+                                                        const sid = e.target.value || "";
+                                                        setEditing((p) =>
+                                                          p && {
+                                                            ...p,
+                                                            draft: {
+                                                              ...p.draft,
+                                                              // keep parent linkage if we know it
+                                                              for_placeholder_course_id: parentId || undefined,
+                                                              specific_course_id: sid || undefined,
+                                                            },
+                                                          }
+                                                        );
+                                                      }}
+                                                    >
+                                                      <option value="">— Select specific elective —</option>
+                                                      {specificList.map((opt) => {
+                                                        const code = codeOf(opt.course_code);
+                                                        return (
+                                                          <option key={opt.course_id} value={opt.course_id}>
+                                                            {code} • {opt.course_title}
+                                                          </option>
+                                                        );
+                                                      })}
+                                                    </select>
+                                                    <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-500" />
+                                                  </div>
+                                                </div>
+                                              );
+                                            })()}
                                           </td>
-                                          <td className="px-3 py-2 border border-gray-300">
+
+                                          {/* Section code */}
+                                          <td className="px-3 py-2 border border-gray-200 bg-white">
                                             <input
                                               value={editing?.draft.section_code || ""}
-                                              onChange={(e) => setEditing((p) => p && { ...p, draft: { ...p.draft, section_code: e.target.value } })}
-                                              className="w-full min-w-0 rounded-md border px-2 py-1 text-sm"
+                                              onChange={(e) =>
+                                                setEditing((p) => p && { ...p, draft: { ...p.draft, section_code: e.target.value } })
+                                              }
+                                              className={SOFT_INPUT}
                                             />
                                           </td>
-                                          <td className="px-3 py-2 border border-gray-300">{r.faculty.faculty_name || "UNASSIGNED"}</td>
-                                          <td className="px-3 py-2 border border-gray-300">{r.slot1?.day || "—"}</td>
-                                          <td className="px-3 py-2 border border-gray-300">{fmtTime(r.slot1?.start_time)}</td>
-                                          <td className="px-3 py-2 border border-gray-300">{fmtTime(r.slot1?.end_time)}</td>
-                                          <td className="px-3 py-2 border border-gray-300 relative overflow-visible">
-                                            <RoomSelect value={editing?.draft.slot1?.room_id || ""} onChange={(v) => setEditing((p) => p && { ...p, draft: { ...p.draft, slot1: { room_id: v } } })} />
+
+                                          {/* Faculty - editable if GE */}
+                                          <td className="px-3 py-2 border border-gray-200 bg-white">
+                                            {ge ? (
+                                              <input
+                                                value={editing?.draft.faculty_name || ""}
+                                                onChange={(e) =>
+                                                  setEditing((p) => p && { ...p, draft: { ...p.draft, faculty_name: e.target.value } })
+                                                }
+                                                placeholder="Faculty name"
+                                                className={SOFT_INPUT}
+                                              />
+                                            ) : (
+                                              <span className={r.faculty.faculty_name === "UNASSIGNED" ? "text-red-600 font-medium" : ""}>
+                                                {r.faculty.faculty_name || "UNASSIGNED"}
+                                              </span>
+                                            )}
                                           </td>
-                                          <td className="px-3 py-2 border border-gray-300">{r.slot2?.day || "—"}</td>
-                                          <td className="px-3 py-2 border border-gray-300">{fmtTime(r.slot2?.start_time)}</td>
-                                          <td className="px-3 py-2 border border-gray-300">{fmtTime(r.slot2?.end_time)}</td>
-                                          <td className="px-3 py-2 border border-gray-300 relative overflow-visible">
-                                            <RoomSelect value={editing?.draft.slot2?.room_id || ""} onChange={(v) => setEditing((p) => p && { ...p, draft: { ...p.draft, slot2: { room_id: v } } })} />
+
+                                          {/* Slot 1: Day / Start / End / Room */}
+                                          <td className="px-3 py-2 border border-gray-200 bg-white">
+                                            {ge ? (
+                                              <div className="relative">
+                                                <select
+                                                  value={editing?.draft.slot1?.day || ""}
+                                                  onChange={(e) =>
+                                                    setEditing(
+                                                      (p) =>
+                                                        p &&
+                                                        {
+                                                          ...p,
+                                                          draft: {
+                                                            ...p.draft,
+                                                            slot1: { ...(p.draft.slot1 || {}), day: e.target.value as Day | "" },
+                                                          },
+                                                        }
+                                                    )
+                                                  }
+                                                  className={SOFT_SELECT}
+                                                >
+                                                  <option value="">—</option>
+                                                  {DAYS.map((d) => (
+                                                    <option key={d} value={d}>
+                                                      {d}
+                                                    </option>
+                                                  ))}
+                                                </select>
+                                                <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-500" />
+                                              </div>
+                                            ) : (
+                                              r.slot1?.day || "—"
+                                            )}
                                           </td>
-                                          <td className="px-3 py-2 border border-gray-300">
+                                          <td className="px-3 py-2 border border-gray-200 bg-white">
+                                            {ge ? (
+                                              <input
+                                                value={editing?.draft.slot1?.start_time || ""}
+                                                onChange={(e) =>
+                                                  setEditing(
+                                                    (p) =>
+                                                      p &&
+                                                      {
+                                                        ...p,
+                                                        draft: {
+                                                          ...p.draft,
+                                                          slot1: { ...(p.draft.slot1 || {}), start_time: sanitizeTime(e.target.value) },
+                                                        },
+                                                      }
+                                                  )
+                                                }
+                                                placeholder="HHMM"
+                                                className={SOFT_INPUT}
+                                              />
+
+                                            ) : (
+                                              fmtTime(r.slot1?.start_time)
+                                            )}
+                                          </td>
+                                          <td className="px-3 py-2 border border-gray-200 bg-white">
+                                            {ge ? (
+                                            <input
+                                              value={editing?.draft.slot1?.end_time || ""}
+                                              onChange={(e) =>
+                                                setEditing(
+                                                  (p) =>
+                                                    p &&
+                                                    {
+                                                      ...p,
+                                                      draft: {
+                                                        ...p.draft,
+                                                        slot1: { ...(p.draft.slot1 || {}), end_time: sanitizeTime(e.target.value) },
+                                                      },
+                                                    }
+                                                )
+                                              }
+                                              placeholder="HHMM"
+                                              className={SOFT_INPUT}
+                                            />
+
+                                            ) : (
+                                              fmtTime(r.slot1?.end_time)
+                                            )}
+                                          </td>
+                                          <td className="px-3 py-2 border border-gray-200 bg-white relative overflow-visible">
+                                          <RoomSelect
+                                            value={editing?.draft.slot1?.room_id || ""}
+                                            disabled={ge ? false : !slotReady(editing?.draft.slot1)}
+                                            onChange={(v) =>
+                                              setEditing(
+                                                (p) => p && {
+                                                  ...p,
+                                                  draft: {
+                                                    ...p.draft,
+                                                    // Make sure slot object exists so GE can store room-only
+                                                    slot1: { ...(p.draft.slot1 || {}), room_id: v }
+                                                  }
+                                                }
+                                              )
+                                            }
+                                          />
+                                          </td>
+
+
+                                          {/* Slot 2: Day / Start / End / Room */}
+                                          <td className="px-3 py-2 border border-gray-200 bg-white">
+                                            {ge ? (
+                                              <div className="relative">
+                                                <select
+                                                  value={editing?.draft.slot2?.day || ""}
+                                                  onChange={(e) =>
+                                                    setEditing(
+                                                      (p) =>
+                                                        p &&
+                                                        {
+                                                          ...p,
+                                                          draft: {
+                                                            ...p.draft,
+                                                            slot2: { ...(p.draft.slot2 || {}), day: e.target.value as Day | "" },
+                                                          },
+                                                        }
+                                                    )
+                                                  }
+                                                  className={SOFT_SELECT}
+                                                >
+                                                  <option value="">—</option>
+                                                  {DAYS.map((d) => (
+                                                    <option key={d} value={d}>
+                                                      {d}
+                                                    </option>
+                                                  ))}
+                                                </select>
+                                                <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-500" />
+                                              </div>
+                                            ) : (
+                                              r.slot2?.day || "—"
+                                            )}
+                                          </td>
+                                          <td className="px-3 py-2 border border-gray-200 bg-white">
+                                            {ge ? (
+                                              <input
+                                                value={editing?.draft.slot2?.start_time || ""}
+                                                onChange={(e) =>
+                                                  setEditing(
+                                                    (p) =>
+                                                      p &&
+                                                      {
+                                                        ...p,
+                                                        draft: {
+                                                          ...p.draft,
+                                                          slot2: { ...(p.draft.slot2 || {}), start_time: sanitizeTime(e.target.value) },
+                                                        },
+                                                      }
+                                                  )
+                                                }
+                                                placeholder="HHMM"
+                                                className={SOFT_INPUT}
+                                              />
+
+                                            ) : (
+                                              fmtTime(r.slot2?.start_time)
+                                            )}
+                                          </td>
+                                          <td className="px-3 py-2 border border-gray-200 bg-white">
+                                            {ge ? (
+                                              <input
+                                                value={editing?.draft.slot2?.end_time || ""}
+                                                onChange={(e) =>
+                                                  setEditing(
+                                                    (p) =>
+                                                      p &&
+                                                      {
+                                                        ...p,
+                                                        draft: {
+                                                          ...p.draft,
+                                                          slot2: { ...(p.draft.slot2 || {}), end_time: sanitizeTime(e.target.value) },
+                                                        },
+                                                      }
+                                                  )
+                                                }
+                                                placeholder="HHMM"
+                                                className={SOFT_INPUT}
+                                              />
+
+                                            ) : (
+                                              fmtTime(r.slot2?.end_time)
+                                            )}
+                                          </td>
+                                          <td className="px-3 py-2 border border-gray-200 bg-white relative overflow-visible">
+                                          <RoomSelect
+                                            value={editing?.draft.slot2?.room_id || ""}
+                                            disabled={ge ? false : !slotReady(editing?.draft.slot2)}
+                                            onChange={(v) =>
+                                              setEditing(
+                                                (p) => p && {
+                                                  ...p,
+                                                  draft: {
+                                                    ...p.draft,
+                                                    // Make sure slot object exists so GE can store room-only
+                                                    slot2: { ...(p.draft.slot2 || {}), room_id: v }
+                                                  }
+                                                }
+                                              )
+                                            }
+                                          />
+                                          </td>
+
+
+                                          {/* Capacity */}
+                                          <td className="px-3 py-2 border border-gray-200 bg-white">
                                             <input
                                               value={editing?.draft.enrollment_cap ?? ""}
                                               onChange={(e) => {
                                                 const v = e.target.value;
                                                 setEditing((p) =>
-                                                  p ? { ...p, draft: { ...p.draft, enrollment_cap: v === "" ? "" : Number(v) } } : p
+                                                  p
+                                                    ? {
+                                                        ...p,
+                                                        draft: { ...p.draft, enrollment_cap: v === "" ? "" : Number(v) },
+                                                      }
+                                                    : p
                                                 );
                                               }}
                                               placeholder="(blank to clear)"
-                                              className="w-full min-w-0 rounded-md border px-2 py-1 text-sm"
+                                              className={SOFT_INPUT}
                                             />
                                           </td>
-                                          <td className="px-3 py-2 border border-gray-300">
+
+                                          {/* Remarks */}
+                                          <td className="px-3 py-2 border border-gray-200 bg-white">
                                             <input
                                               value={editing?.draft.remarks || ""}
-                                              onChange={(e) => setEditing((p) => p && { ...p, draft: { ...p.draft, remarks: e.target.value } })}
-                                              className="w-full min-w-0 rounded-md border px-2 py-1 text-sm"
+                                              onChange={(e) =>
+                                                setEditing((p) => p && { ...p, draft: { ...p.draft, remarks: e.target.value } })
+                                              }
+                                              className={SOFT_INPUT}
                                             />
                                           </td>
-                                          <td className="px-3 py-2 border border-gray-300">
+
+                                          {/* Actions */}
+                                          <td className="px-3 py-2 border border-gray-200 bg-white">
                                             <div className="flex items-center gap-2">
                                               <button
                                                 onClick={saveEdit}
@@ -1052,95 +1814,190 @@ export default function CourseOfferingsPage() {
                                         </tr>
                                       );
 
+                                      /* ---------- Inline Add Row (with Elective support) ---------- */
                                       const addInline =
-                                        addAnchorKey === rowKey && !blockedByApproval && (
-                                          <tr key={(r.section.section_id || r.course.course_id) + "-a"} className="bg-emerald-50/60">
-                                            <td className="px-3 py-2 border border-gray-300">{r.program_no}</td>
-                                            <td className="px-3 py-2 border border-gray-300 align-top">
+                                        addAnchorKey === rowKey && (
+                                          <tr
+                                            key={(r.section.section_id || r.course.course_id) + "-a"}
+                                            className="bg-white"
+                                            style={{ boxShadow: "0 2px 10px rgba(0,0,0,0.05)" }}
+                                          >
+                                            <td className="px-3 py-2 border border-gray-200 bg-white">
+                                              {(r.program?.program_code || "—") +
+                                                "-" +
+                                                (typeof r.block_index === "number" ? r.block_index : 1)}
+                                            </td>
+                                            <td className="px-3 py-2 border border-gray-200 bg-white align-top">
                                               {(() => {
-                                                const groupKey = `${r.batch.batch_id}|${r.program.program_id}`;
-                                                const groupOptions: CourseOption[] = data?.course_options_by_group?.[groupKey] || [];
-                                                const codes = ["— Select a course —", ...groupOptions.map((o) => o.course_code)];
-                                                const codeToId: Record<string, string> = {};
-                                                const codeToTitle: Record<string, string> = {};
-                                                groupOptions.forEach((o) => {
-                                                  codeToId[o.course_code] = o.course_id;
-                                                  codeToTitle[o.course_code] = o.course_title;
-                                                });
+                                                  const groupKey = `${r.batch.batch_id}|${r.program.program_id}`;
+                                                  const groupOptions: CourseOption[] = data?.course_options_by_group?.[groupKey] || [];
+                                                  const codes = [
+                                                    "— Select a course —",
+                                                    ...groupOptions
+                                                      .filter((o) => !isSpecificElectiveType(o.type_of_course || "")) // hide "Elective Course"
+                                                      .map((o) => codeOf(o.course_code)),
+                                                  ];
+
+                                                  const codeToId: Record<string, string> = {};
+                                                  const codeToTitle: Record<string, string> = {};
+                                                  const codeToType: Record<string, string> = {};
+                                                  groupOptions.forEach((o) => {
+                                                    const c = codeOf(o.course_code);
+                                                    codeToId[c] = o.course_id;
+                                                    codeToTitle[c] = titleOf(o.course_title);
+                                                    codeToType[c] = (o.type_of_course as string) || "";
+                                                  });
+
+                                                  const rowIsElective = isElectivePlaceholderType(
+                                                    r.course.type_of_course || "",
+                                                    r.course.course_code as any,
+                                                    r.course.course_title
+                                                  );
+                                                  
+                                                  let specificElectives = groupOptions.filter(o => isSpecificElectiveType(o.type_of_course || ""));
+                                                  if (specificElectives.length === 0) {
+                                                    specificElectives = (data?.all_specific_electives || allSpecificElectives)
+                                                      .filter(o => isSpecificElectiveType(o.type_of_course || ""));
+                                                  }
+
+                                                    const selectedType = codeToType[addCourseCode] || "";
+                                                    const isGE = isGEType(selectedType);
                                                 return (
                                                   <>
+                                                    {/* Primary course select (disabled if this row is a placeholder elective) */}
                                                     <div className="mb-2">
                                                       <SelectBox
                                                         value={addCourseCode}
                                                         onChange={(v: string) => {
+                                                          if (rowIsElective) return; // fixed to the placeholder course
                                                           setAddCourseCode(v);
+                                                          setAddElectiveSpecificId("");
                                                           setAddDraft((p: AddDraft) => ({
                                                             ...p,
                                                             batch_id: r.batch.batch_id,
                                                             program_id: r.program.program_id,
                                                             course_id: codeToId[v] || "",
+                                                            for_placeholder_course_id: undefined,
+                                                            specific_course_id: undefined,
                                                           }));
                                                         }}
                                                         options={codes}
+                                                        disabled={rowIsElective}
                                                       />
                                                     </div>
-                                                    <div className="text-xs text-neutral-600">{codeToTitle[addCourseCode] || "—"}</div>
+                                                    <div className="text-xs text-neutral-600 flex items-center gap-2 mb-2">
+                                                      <span className="truncate">
+                                                        {rowIsElective
+                                                          ? r.course.course_title
+                                                          : codeToTitle[addCourseCode] || "—"}
+                                                      </span>
+                                                      {isGE && (
+                                                        <span className="inline-block rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700">
+                                                          GE
+                                                        </span>
+                                                      )}
+                                                      {rowIsElective && (
+                                                        <span className="inline-block rounded bg-indigo-100 px-1.5 py-0.5 text-[10px] font-semibold text-indigo-700">
+                                                          Elective
+                                                        </span>
+                                                      )}
+                                                    </div>
+
+                                                    {/* Secondary select only for Elective placeholders (choose Specific Elective) */}
+                                                    {rowIsElective && (
+                                                      <div className="mb-2">
+                                                        <label className="text-xs font-medium text-slate-700 mb-1 block">
+                                                          Specific Elective
+                                                        </label>
+                                                        <div className="relative">
+                                                          <select
+                                                            className={SOFT_SELECT}
+                                                            value={addElectiveSpecificId}
+                                                            onChange={(e) => {
+                                                              const sid = e.target.value;
+                                                              setAddElectiveSpecificId(sid);
+                                                              setAddDraft((p) => ({
+                                                                ...p,
+                                                                // tie the pair for backend
+                                                                for_placeholder_course_id: r.course.course_id,
+                                                                specific_course_id: sid || undefined,
+                                                                // also align course_id to specific elective for compatibility
+                                                                course_id: sid || "",
+                                                              }));
+                                                            }}
+                                                          >
+                                                          <option value="">— Select specific elective —</option>
+                                                          {specificElectives.map((opt) => {
+                                                            const code = codeOf(opt.course_code);
+                                                            return (
+                                                              <option value={opt.course_id} key={opt.course_id}>
+                                                                {code} • {opt.course_title}
+                                                              </option>
+                                                            );
+                                                          })}
+                                                          </select>
+                                                          <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-500" />
+                                                        </div>
+                                                      </div>
+                                                    )}
                                                   </>
                                                 );
                                               })()}
                                             </td>
-                                            <td className="px-3 py-2 border border-gray-300">Auto</td>
-                                            <td className="px-3 py-2 border border-gray-300">UNASSIGNED</td>
-                                            <td className="px-3 py-2 border border-gray-300">—</td>
-                                            <td className="px-3 py-2 border border-gray-300">—</td>
-                                            <td className="px-3 py-2 border border-gray-300">—</td>
-                                            <td className="px-3 py-2 border border-gray-300">
+                                            <td className="px-3 py-2 border border-gray-200 bg-white">Auto</td>
+                                            <td className="px-3 py-2 border border-gray-200 bg-white">UNASSIGNED</td>
+                                            <td className="px-3 py-2 border border-gray-200 bg-white">—</td>
+                                            <td className="px-3 py-2 border border-gray-200 bg-white">—</td>
+                                            <td className="px-3 py-2 border border-gray-200 bg-white">—</td>
+                                            <td className="px-3 py-2 border border-gray-200 bg-white">
                                               <select
                                                 value={addDraft.slot1?.room_id || ""}
                                                 onChange={(e) => setAddDraft((p) => ({ ...p, slot1: { room_id: e.target.value } }))}
-                                                className="block w-full rounded-md border px-2 py-1 text-sm"
+                                                className={SOFT_SELECT + " opacity-60 cursor-not-allowed"}
+                                                disabled={true} // no day/time fields in Add row; force disabled
                                               >
-                                                {filterRoomsByCap(data?.room_options || [], addDraft.enrollment_cap).map((o) => (
-                                                  <option key={(o.room_id || "TBA") + o.room_number} value={o.room_id}>
-                                                    {o.room_number}
-                                                  </option>
-                                                ))}
+                                                <option value="">— Set Day & Time in Edit —</option>
                                               </select>
                                             </td>
-                                            <td className="px-3 py-2 border border-gray-300">—</td>
-                                            <td className="px-3 py-2 border border-gray-300">—</td>
-                                            <td className="px-3 py-2 border border-gray-300">—</td>
-                                            <td className="px-3 py-2 border border-gray-300">
+
+                                            <td className="px-3 py-2 border border-gray-200 bg-white">—</td>
+                                            <td className="px-3 py-2 border border-gray-200 bg-white">—</td>
+                                            <td className="px-3 py-2 border border-gray-200 bg-white">—</td>
+                                            <td className="px-3 py-2 border border-gray-200 bg-white">
                                               <select
                                                 value={addDraft.slot2?.room_id || ""}
                                                 onChange={(e) => setAddDraft((p) => ({ ...p, slot2: { room_id: e.target.value } }))}
-                                                className="block w-full rounded-md border px-2 py-1 text-sm"
+                                                className={SOFT_SELECT + " opacity-60 cursor-not-allowed"}
+                                                disabled={true}
                                               >
-                                                {filterRoomsByCap(data?.room_options || [], addDraft.enrollment_cap).map((o) => (
-                                                  <option key={(o.room_id || "TBA") + o.room_number} value={o.room_id}>
-                                                    {o.room_number}
-                                                  </option>
-                                                ))}
+                                                <option value="">— Set Day & Time in Edit —</option>
                                               </select>
                                             </td>
-                                            <td className="px-3 py-2 border border-gray-300">
+
+                                            <td className="px-3 py-2 border border-gray-200 bg-white">
                                               <input
                                                 value={addDraft.enrollment_cap ?? 20}
                                                 onChange={(e) => setAddDraft((p) => ({ ...p, enrollment_cap: Number(e.target.value || 0) }))}
-                                                className="w-full min-w-0 rounded-md border px-2 py-1 text-sm"
+                                                className={SOFT_INPUT}
                                               />
                                             </td>
-                                            <td className="px-3 py-2 border border-gray-300">
+                                            <td className="px-3 py-2 border border-gray-200 bg-white">
                                               <input
                                                 value={addDraft.remarks || ""}
                                                 onChange={(e) => setAddDraft((p) => ({ ...p, remarks: e.target.value }))}
-                                                className="w-full min-w-0 rounded-md border px-2 py-1 text-sm"
+                                                className={SOFT_INPUT}
                                               />
                                             </td>
-                                            <td className="px-3 py-2 border border-gray-300">
+                                            <td className="px-3 py-2 border border-gray-200 bg-white">
                                               <div className="flex justify-start gap-2">
                                                 <button
-                                                  disabled={adding || !addDraft.course_id}
+                                                  disabled={
+                                                    adding ||
+                                                    !(
+                                                      addDraft.specific_course_id || // elective case
+                                                      addDraft.course_id // non-elective
+                                                    )
+                                                  }
                                                   onClick={doAdd}
                                                   className={cls(
                                                     "flex h-8 w-8 items-center justify-center rounded-full border-2",
@@ -1151,7 +2008,10 @@ export default function CourseOfferingsPage() {
                                                   <Check className="h-4 w-4" strokeWidth={2.5} />
                                                 </button>
                                                 <button
-                                                  onClick={() => setAddAnchorKey(null)}
+                                                  onClick={() => {
+                                                    setAddAnchorKey(null);
+                                                    setAddElectiveSpecificId("");
+                                                  }}
                                                   className="flex h-8 w-8 items-center justify-center rounded-full border-2 border-red-600 text-red-600 hover:bg-red-50"
                                                   title="Cancel"
                                                 >
@@ -1165,7 +2025,7 @@ export default function CourseOfferingsPage() {
                                       return (
                                         <React.Fragment key={r.section.section_id || r.course.course_id}>
                                           {isEditing ? editRow : viewRow}
-                                          {!blockedByApproval && addInline}
+                                          {addInline}
                                         </React.Fragment>
                                       );
                                     })}
@@ -1186,196 +2046,390 @@ export default function CourseOfferingsPage() {
           {/* ------------------------------ Curriculum ----------------------------- */}
           {view === "curriculum" && (
             <div className="rounded-xl border border-gray-300 bg-white shadow-sm overflow-hidden">
-              <div className="bg-[#21C85A] text-white px-4 py-3 text-center font-semibold">
+              {/* Header follows selection state */}
+              <div className="bg-emerald-700 text-white px-4 py-3 text-center font-semibold">
                 {selectedBatchId
-                  ? `ID ${(curr?.items || [])
-                      .find((i) => i.batch_id === selectedBatchId)
-                      ?.batch_code?.replace(/^ID\s*/i, "") || "—"}`
+                  ? `ID ${
+                      (curr?.items || [])
+                        .find((i) => i.batch_id === selectedBatchId)
+                        ?.batch_code?.replace(/^ID\s*/i, "") || "—"
+                    }`
                   : "Curriculum"}
               </div>
 
-              {/* column grid */}
-              <div className="p-3 overflow-x-auto">
-                <div
-                  className="grid gap-4"
-                  style={{
-                    gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))",
-                  }}
-                >
-                  {programOrder.map((pid) => {
-                    const itm = columns[pid];
-                    const programCode = itm?.program_code || "—";
-                    const deptId = itm?.department_id || "";
-                    const canAdd = !!selectedBatchId;
-                    const opts = optionsByProgram[pid] || [];
-                    const selectedId = currAddSel[pid] || "";
+              {/* ===== When a specific ID is selected: render only that ID's programs ===== */}
+              {selectedBatchId ? (
+                <div className="p-3 overflow-x-auto">
+                  <div
+                    className="grid gap-4"
+                    style={{ gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))" }}
+                  >
+                    {singleBatchProgramOrder.map((pid) => {
+                      const itm = singleBatchPrograms[pid];
+                      if (!itm) return null;
 
-                    // Filter the available options to the program’s overall curriculum (codes only)
-                    const allowedIds = eligibleCourseIdsByProgram[pid] || new Set<string>();
-                    const filteredOpts = (opts || []).filter((o) => allowedIds.has(o.course_id));
+                      const programCode = itm?.program_code || "—";
+                      const deptId = itm?.department_id || "";
+                      const canAdd = !!selectedBatchId;
+                      const opts = optionsByProgram[pid] || [];
+                      const selectedId = currAddSel[pid] || "";
 
-                    // Build code <-> id maps
-                    const codeOptions = filteredOpts.map((o) => o.course_code);
-                    const codeToId: Record<string, string> = {};
-                    const idToCode: Record<string, string> = {};
-                    filteredOpts.forEach((o) => {
-                      codeToId[o.course_code] = o.course_id;
-                      idToCode[o.course_id] = o.course_code;
-                    });
+                      const allowedIds = eligibleCourseIdsByProgram[pid] || new Set<string>();
+                      const filteredOpts = (opts || []).filter((o) => allowedIds.has(o.course_id));
 
-                    // SelectBox shows a label; we keep label as code
-                    const selectedLabel = selectedId ? idToCode[selectedId] || "— Add course —" : "— Add course —";
+                      const codeOptions = filteredOpts.map((o) => o.course_code);
+                      const codeToId: Record<string, string> = {};
+                      const idToCode: Record<string, string> = {};
+                      filteredOpts.forEach((o) => {
+                        codeToId[o.course_code] = o.course_id;
+                        idToCode[o.course_id] = o.course_code;
+                      });
 
-                    const filteredCourses = (itm?.courses || []).filter((c) => {
-                      if (!currSearch.trim()) return true;
-                      const q = currSearch.toLowerCase();
-                      return c.code.toLowerCase().includes(q) || c.title.toLowerCase().includes(q);
-                    });
+                      const selectedLabel = selectedId ? idToCode[selectedId] || "— Add course —" : "— Add course —";
 
-                    return (
-                      <div key={pid} className="rounded-lg border border-gray-200">
-                        {/* header with add controls */}
-                        <div className="flex items-center justify-between gap-2 border-b bg-gray-50 px-3 py-2">
-                          <div className="font-semibold text-emerald-800 truncate" title={programCode}>
-                            {programCode}
-                          </div>
+                      const filteredCourses = (itm?.courses || []).filter((c) => {
+                        if (!currSearch.trim()) return true;
+                        const q = currSearch.toLowerCase();
+                        return c.code.toLowerCase().includes(q) || c.title.toLowerCase().includes(q);
+                      });
 
-                          <div className="flex items-center gap-2 w-full max-w-full">
-                            <div className="w-full min-w-0">
-                              <SelectBox
-                                value={selectedLabel}
-                                onChange={(label: string) => {
-                                  const cid = codeToId[label] || "";
-                                  setCurrAddSel((p) => ({ ...p, [pid]: cid }));
-                                }}
-                                options={["— Add course —", ...codeOptions]}
-                              />
+                      return (
+                        <div key={pid} className="rounded-lg border border-gray-200 overflow-hidden">
+                          {/* header with add controls */}
+                          <div className="flex items-center justify-between gap-2 border-b bg-gray-50 px-3 py-2">
+                            <div className="font-semibold text-emerald-800 truncate" title={programCode}>
+                              {programCode}
                             </div>
 
-                            <button
-                              className="inline-flex items-center gap-2 rounded-md bg-emerald-700 px-3 py-1.5 text-sm font-medium text-white shadow-sm"
-                              disabled={!canAdd || !selectedId}
-                              onClick={() => {
-                                if (!selectedBatchId || !selectedId) return;
-                                handleCurrAdd(pid, selectedBatchId, selectedId);
-                              }}
-                            >
-                              <Plus className="h-4 w-4" />
-                              Add
-                            </button>
+                            <div className="flex items-center gap-2 w-full max-w-full">
+                              <div className="w-full min-w-0">
+                                <SelectBox
+                                  value={selectedLabel}
+                                  onChange={(label: string) => {
+                                    const cid = codeToId[label] || "";
+                                    setCurrAddSel((p) => ({ ...p, [pid]: cid }));
+                                  }}
+                                  options={["— Add course —", ...codeOptions]}
+                                />
+                              </div>
 
-                            <button
-                              className="inline-flex items-center gap-2 rounded-md border border-emerald-700 px-3 py-1.5 text-sm font-medium text-emerald-700"
-                              onClick={() => {
-                                if (!selectedBatchId) return;
-                                const code = prompt("New course code:")?.trim();
-                                const title = code ? prompt("Course title:")?.trim() : "";
-                                const level = title ? prompt("Program level (Undergraduate or Graduate Studies):")?.trim() : "";
-                                const unitsStr = level ? prompt("Units (number):")?.trim() : "";
-                                const unitsNum = unitsStr ? Number(unitsStr) : undefined;
-                                if (!code || !title || !level) return;
-                                handleCurrAddCustom(pid, selectedBatchId, {
-                                  course_code: normCode(code),
-                                  course_title: title!,
-                                  department_id: deptId,
-                                  program_level: level!,
-                                  units: isNaN(unitsNum as number) ? undefined : (unitsNum as number),
-                                });
-                              }}
-                            >
-                              <Plus className="h-4 w-4" />
-                              Custom
-                            </button>
+                              <button
+                                className="inline-flex items-center gap-2 rounded-md bg-emerald-700 px-3 py-1.5 text-sm font-medium text-white shadow-sm"
+                                disabled={!canAdd || !selectedId}
+                                onClick={() => {
+                                  if (!selectedBatchId || !selectedId) return;
+                                  handleCurrAdd(pid, selectedBatchId, selectedId);
+                                }}
+                              >
+                                <Plus className="h-4 w-4" />
+                                Add
+                              </button>
+
+                              <button
+                                className="inline-flex items-center gap-2 rounded-md border border-emerald-700 px-3 py-1.5 text-sm font-medium text-emerald-700"
+                                onClick={() => {
+                                  if (!selectedBatchId) return;
+                                  const code = prompt("New course code:")?.trim();
+                                  const title = code ? prompt("Course title:")?.trim() : "";
+                                  const level = title
+                                    ? prompt("Program level (Undergraduate or Graduate Studies):")?.trim()
+                                    : "";
+                                  const unitsStr = level ? prompt("Units (number):")?.trim() : "";
+                                  const unitsNum = unitsStr ? Number(unitsStr) : undefined;
+                                  if (!code || !title || !level) return;
+                                  handleCurrAddCustom(pid, selectedBatchId, {
+                                    course_code: normCode(code),
+                                    course_title: title!,
+                                    department_id: deptId,
+                                    program_level: level!,
+                                    units: isNaN(unitsNum as number) ? undefined : (unitsNum as number),
+                                  });
+                                }}
+                              >
+                                <Plus className="h-4 w-4" />
+                                Custom
+                              </button>
+                            </div>
                           </div>
-                        </div>
 
-                        {/* body: course cards */}
-                        <div className="divide-y">
-                          {filteredCourses.length === 0 && (
-                            <div className="px-3 py-6 text-sm text-neutral-500 text-center">No courses.</div>
-                          )}
+                          {/* body: course cards */}
+                          <div className="divide-y">
+                            {filteredCourses.length === 0 && (
+                              <div className="px-3 py-6 text-sm text-neutral-500 text-center">No courses.</div>
+                            )}
 
-                          {filteredCourses.map((c) => {
-                            const units = typeof c.units === "number" ? c.units : null;
+                            {filteredCourses.map((c) => {
+                              const units = typeof c.units === "number" ? c.units : null;
 
-                            // replacement menu: codes only, filtered to allowedIds
-                            const allowedForReplace = (opts || []).filter((o) => allowedIds.has(o.course_id));
-                            const replaceCodes = allowedForReplace.map((o) => o.course_code);
-                            const replaceCodeToId: Record<string, string> = {};
-                            allowedForReplace.forEach((o) => (replaceCodeToId[o.course_code] = o.course_id));
-                            const replacePlaceholder = "Edit…";
+                              const allowedForReplace = (opts || []).filter((o) => (eligibleCourseIdsByProgram[pid] || new Set()).has(o.course_id));
+                              const replaceCodes = allowedForReplace.map((o) => o.course_code);
+                              const replaceCodeToId: Record<string, string> = {};
+                              allowedForReplace.forEach((o) => (replaceCodeToId[o.course_code] = o.course_id));
+                              const replacePlaceholder = "Edit…";
 
-                            return (
-                              <div key={c.course_id} className="px-3 py-2 bg-white">
-                                <div className="flex items-start justify-between gap-3">
-                                  <div className="min-w-0">
-                                    <div className="font-semibold text-emerald-700 break-words">{c.code}</div>
-                                    <div className="text-[11px] text-neutral-600 truncate" title={c.title}>
-                                      {c.title}
+                              return (
+                                <div key={c.course_id} className="px-3 py-2 bg-white">
+                                  <div className="flex items-start justify-between gap-3">
+                                    <div className="min-w-0">
+                                      <div className="font-semibold text-emerald-700 break-words">{c.code}</div>
+                                      <div className="text-[11px] text-neutral-600 truncate" title={c.title}>
+                                        {c.title}
+                                      </div>
+                                    </div>
+                                    <div className="flex items-center gap-3">
+                                      <input
+                                        type="number"
+                                        step="0.5"
+                                        defaultValue={units ?? ""}
+                                        placeholder="units"
+                                        className="h-9 w-16 rounded border px-2 text-sm text-center"
+                                        onBlur={(e) => {
+                                          if (!selectedBatchId) return;
+                                          const v = e.currentTarget.value.trim();
+                                          const num = v === "" ? null : Number(v);
+                                          if (v === "" || !isNaN(num!)) {
+                                            handleCurrEditUnits(pid, selectedBatchId, c.course_id, num);
+                                          }
+                                        }}
+                                      />
+                                      <button
+                                        className="text-red-500 hover:text-red-700"
+                                        title="Remove"
+                                        onClick={() => selectedBatchId && handleCurrRemove(pid, selectedBatchId, c.course_id)}
+                                      >
+                                        <Trash2 className="h-4 w-4" />
+                                      </button>
                                     </div>
                                   </div>
-                                  <div className="flex items-center gap-3">
-                                    <input
-                                      type="number"
-                                      step="0.5"
-                                      defaultValue={units ?? ""}
-                                      placeholder="units"
-                                      className="h-9 w-16 rounded border px-2 text-sm text-center"
-                                      onBlur={(e) => {
-                                        if (!selectedBatchId) return;
-                                        const v = e.currentTarget.value.trim();
-                                        const num = v === "" ? null : Number(v);
-                                        if (v === "" || !isNaN(num!)) {
-                                          handleCurrEditUnits(pid, selectedBatchId, c.course_id, num);
-                                        }
+
+                                  {/* replace via SelectBox (codes only) */}
+                                  <div className="mt-2 w-full min-w-0">
+                                    <SelectBox
+                                      value={replacePlaceholder}
+                                      onChange={(label: string) => {
+                                        if (label === replacePlaceholder) return;
+                                        const newId = replaceCodeToId[label];
+                                        if (!newId || !selectedBatchId) return;
+                                        handleCurrReplace(pid, selectedBatchId, c.course_id, newId);
                                       }}
+                                      options={[replacePlaceholder, ...replaceCodes]}
                                     />
-                                    <button
-                                      className="text-red-500 hover:text-red-700"
-                                      title="Remove"
-                                      onClick={() => selectedBatchId && handleCurrRemove(pid, selectedBatchId, c.course_id)}
-                                    >
-                                      <Trash2 className="h-4 w-4" />
-                                    </button>
                                   </div>
                                 </div>
+                              );
+                            })}
 
-                                {/* replace via SelectBox (codes only, fits column) */}
-                                <div className="mt-2 w-full min-w-0">
-                                  <SelectBox
-                                    value={replacePlaceholder}
-                                    onChange={(label: string) => {
-                                      if (label === replacePlaceholder) return;
-                                      const newId = replaceCodeToId[label];
-                                      if (!newId || !selectedBatchId) return;
-                                      handleCurrReplace(pid, selectedBatchId, c.course_id, newId);
-                                      // keep placeholder as value so it doesn't stretch layout
-                                    }}
-                                    options={[replacePlaceholder, ...replaceCodes]}
-                                  />
-                                </div>
+                            {/* footer: total units */}
+                            <div className="px-3 py-2 bg-emerald-50">
+                              <div className="flex items-center justify-between font-semibold text-emerald-800">
+                                <span>Total</span>
+                                <span>
+                                  {filteredCourses.reduce((s, c) => s + (typeof c.units === "number" ? c.units : 0), 0)}
+                                </span>
                               </div>
-                            );
-                          })}
-
-                          {/* footer: total units */}
-                          <div className="px-3 py-2 bg-emerald-50">
-                            <div className="flex items-center justify-between font-semibold text-emerald-800">
-                              <span>Total</span>
-                              <span>
-                                {filteredCourses.reduce(
-                                  (s, c) => s + (typeof c.units === "number" ? c.units : 0),
-                                  0
-                                )}
-                              </span>
                             </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              ) : (
+                /* ===== All IDs view: grouped by ID, sorted by numeric ID ===== */
+                <div className="divide-y">
+                  {curriculumByBatch.length === 0 && (
+                    <div className="px-3 py-6 text-sm text-neutral-500 text-center">No curriculum data.</div>
+                  )}
+
+                  {curriculumByBatch.map((grp) => {
+                    const programList = Object.values(grp.programs).sort((a, b) =>
+                      (a.program_code || "").localeCompare(b.program_code || "")
+                    );
+                    return (
+                      <div key={grp.batch_id} className="overflow-hidden">
+                        <div className="bg-emerald-600 text-white px-4 py-2 font-semibold text-center">
+                          {grp.batch_code}
+                        </div>
+                        <div className="p-3 overflow-x-auto">
+                          <div
+                            className="grid gap-4"
+                            style={{ gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))" }}
+                          >
+                            {programList.map((itm) => {
+                              const pid = itm.program_id;
+                              const programCode = itm?.program_code || "—";
+                              const deptId = itm?.department_id || "";
+                              const opts = optionsByProgram[pid] || [];
+                              const selectedId = currAddSel[pid] || "";
+
+                              const allowedIds = eligibleCourseIdsByProgram[pid] || new Set<string>();
+                              const filteredOpts = (opts || []).filter((o) => allowedIds.has(o.course_id));
+
+                              const codeOptions = filteredOpts.map((o) => o.course_code);
+                              const codeToId: Record<string, string> = {};
+                              const idToCode: Record<string, string> = {};
+                              filteredOpts.forEach((o) => {
+                                codeToId[o.course_code] = o.course_id;
+                                idToCode[o.course_id] = o.course_code;
+                              });
+
+                              const selectedLabel = selectedId ? idToCode[selectedId] || "— Add course —" : "— Add course —";
+
+                              const filteredCourses = (itm?.courses || []).filter((c) => {
+                                if (!currSearch.trim()) return true;
+                                const q = currSearch.toLowerCase();
+                                return c.code.toLowerCase().includes(q) || c.title.toLowerCase().includes(q);
+                              });
+
+                              return (
+                                <div key={pid} className="rounded-lg border border-gray-200 overflow-hidden">
+                                  {/* header with add controls */}
+                                  <div className="flex items-center justify-between gap-2 border-b bg-gray-50 px-3 py-2">
+                                    <div className="font-semibold text-emerald-800 truncate" title={programCode}>
+                                      {programCode}
+                                    </div>
+
+                                    <div className="flex items-center gap-2 w-full max-w-full">
+                                      <div className="w-full min-w-0">
+                                        <SelectBox
+                                          value={selectedLabel}
+                                          onChange={(label: string) => {
+                                            const cid = codeToId[label] || "";
+                                            setCurrAddSel((p) => ({ ...p, [pid]: cid }));
+                                          }}
+                                          options={["— Add course —", ...codeOptions]}
+                                        />
+                                      </div>
+
+                                      <button
+                                        className="inline-flex items-center gap-2 rounded-md bg-emerald-700 px-3 py-1.5 text-sm font-medium text-white shadow-sm"
+                                        disabled={!grp.batch_id || !selectedId}
+                                        onClick={() => {
+                                          if (!grp.batch_id || !selectedId) return;
+                                          handleCurrAdd(pid, grp.batch_id, selectedId);
+                                        }}
+                                      >
+                                        <Plus className="h-4 w-4" />
+                                        Add
+                                      </button>
+
+                                      <button
+                                        className="inline-flex items-center gap-2 rounded-md border border-emerald-700 px-3 py-1.5 text-sm font-medium text-emerald-700"
+                                        onClick={() => {
+                                          const code = prompt("New course code:")?.trim();
+                                          const title = code ? prompt("Course title:")?.trim() : "";
+                                          const level = title
+                                            ? prompt("Program level (Undergraduate or Graduate Studies):")?.trim()
+                                            : "";
+                                          const unitsStr = level ? prompt("Units (number):")?.trim() : "";
+                                          const unitsNum = unitsStr ? Number(unitsStr) : undefined;
+                                          if (!code || !title || !level) return;
+                                          handleCurrAddCustom(pid, grp.batch_id, {
+                                            course_code: normCode(code),
+                                            course_title: title!,
+                                            department_id: deptId,
+                                            program_level: level!,
+                                            units: isNaN(unitsNum as number) ? undefined : (unitsNum as number),
+                                          });
+                                        }}
+                                      >
+                                        <Plus className="h-4 w-4" />
+                                        Custom
+                                      </button>
+                                    </div>
+                                  </div>
+
+                                  {/* body: course cards */}
+                                  <div className="divide-y">
+                                    {filteredCourses.length === 0 && (
+                                      <div className="px-3 py-6 text-sm text-neutral-500 text-center">No courses.</div>
+                                    )}
+
+                                    {filteredCourses.map((c) => {
+                                      const units = typeof c.units === "number" ? c.units : null;
+
+                                      const allowedForReplace = (opts || []).filter((o) =>
+                                        (eligibleCourseIdsByProgram[pid] || new Set()).has(o.course_id)
+                                      );
+                                      const replaceCodes = allowedForReplace.map((o) => o.course_code);
+                                      const replaceCodeToId: Record<string, string> = {};
+                                      allowedForReplace.forEach((o) => (replaceCodeToId[o.course_code] = o.course_id));
+                                      const replacePlaceholder = "Edit…";
+
+                                      return (
+                                        <div key={c.course_id} className="px-3 py-2 bg-white">
+                                          <div className="flex items-start justify-between gap-3">
+                                            <div className="min-w-0">
+                                              <div className="font-semibold text-emerald-700 break-words">{c.code}</div>
+                                              <div className="text-[11px] text-neutral-600 truncate" title={c.title}>
+                                                {c.title}
+                                              </div>
+                                            </div>
+                                            <div className="flex items-center gap-3">
+                                              <input
+                                                type="number"
+                                                step="0.5"
+                                                defaultValue={units ?? ""}
+                                                placeholder="units"
+                                                className="h-9 w-16 rounded border px-2 text-sm text-center"
+                                                onBlur={(e) => {
+                                                  const v = e.currentTarget.value.trim();
+                                                  const num = v === "" ? null : Number(v);
+                                                  if (v === "" || !isNaN(num!)) {
+                                                    handleCurrEditUnits(pid, grp.batch_id, c.course_id, num);
+                                                  }
+                                                }}
+                                              />
+                                              <button
+                                                className="text-red-500 hover:text-red-700"
+                                                title="Remove"
+                                                onClick={() => handleCurrRemove(pid, grp.batch_id, c.course_id)}
+                                              >
+                                                <Trash2 className="h-4 w-4" />
+                                              </button>
+                                            </div>
+                                          </div>
+
+                                          {/* replace via SelectBox (codes only) */}
+                                          <div className="mt-2 w-full min-w-0">
+                                            <SelectBox
+                                              value={replacePlaceholder}
+                                              onChange={(label: string) => {
+                                                if (label === replacePlaceholder) return;
+                                                const newId = replaceCodeToId[label];
+                                                if (!newId) return;
+                                                handleCurrReplace(pid, grp.batch_id, c.course_id, newId);
+                                              }}
+                                              options={[replacePlaceholder, ...replaceCodes]}
+                                            />
+                                          </div>
+                                        </div>
+                                      );
+                                    })}
+
+                                    {/* footer: total units */}
+                                    <div className="px-3 py-2 bg-emerald-50">
+                                      <div className="flex items-center justify-between font-semibold text-emerald-800">
+                                        <span>Total</span>
+                                        <span>
+                                          {filteredCourses.reduce(
+                                            (s, c) => s + (typeof c.units === "number" ? c.units : 0),
+                                            0
+                                          )}
+                                        </span>
+                                      </div>
+                                    </div>
+                                  </div>
+                                </div>
+                              );
+                            })}
                           </div>
                         </div>
                       </div>
                     );
                   })}
                 </div>
-              </div>
+              )}
             </div>
           )}
           {/* ---------------------------- /Curriculum ---------------------------- */}
@@ -1406,7 +2460,9 @@ export default function CourseOfferingsPage() {
                         {(data?.planning?.pending_changes || []).map((c, i) => (
                           <tr key={i} className="odd:bg-white even:bg-slate-50">
                             <td className="px-3 py-2 border border-gray-300">{c.type}</td>
-                            <td className="px-3 py-2 border border-gray-300">{(c as any).course_id || "—"}</td>
+                            <td className="px-3 py-2 border border-gray-300">
+                              {idToCode[(c as any).course_id] || (c as any).course_code || "—"}
+                            </td>
                             <td className="px-3 py-2 border border-gray-300">
                               {"by_sections" in c && typeof (c as any).by_sections === "number"
                                 ? `± ${(c as any).by_sections} section(s)`
@@ -1481,7 +2537,7 @@ export default function CourseOfferingsPage() {
           </>
         )}
 
-        {/* Conflict modal (works for add/edit/delete) */}
+        {/* Conflict modal */}
         {!!conflict && (
           <div className="fixed inset-0 z-[100] grid place-items-center bg-black/40 p-4">
             <div className="w-full max-w-xl rounded-2xl bg-white p-6 shadow-2xl">
@@ -1540,8 +2596,8 @@ export default function CourseOfferingsPage() {
                     if (conflict.action === "add") {
                       res = await addApoOfferingRow(user.userId, overridePayload);
                     } else if (conflict.action === "edit") {
-                      if (!overridePayload.course_id && editing?.row?.course?.course_id) {
-                        overridePayload.course_id = editing.row.course.course_id;
+                      if (!(overridePayload as any).course_id && editing?.row?.course?.course_id) {
+                        (overridePayload as any).course_id = editing.row.course.course_id;
                       }
                       res = await editApoOfferingRow(user.userId, overridePayload);
                     } else {

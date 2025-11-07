@@ -419,6 +419,42 @@ export async function archiveApoPreenlistment(
 /* =========================================================
    ===============  APO: COURSE OFFERINGS  ==================
    ========================================================= */
+export type SlotPayload = {
+  room_id?: string | null;
+  day?: string;         // "Monday" .. "Saturday"
+  start_time?: string;  // "HHMM" (you can also send "HH:MM" if your backend normalizes)
+  end_time?: string;    // "HHMM"
+};
+
+export type EditRowPayload = {
+  section_id: string;
+  course_id?: string; // helps backend resolve type quickly
+
+  section_code?: string;
+  enrollment_cap?: number | null | "";
+  remarks?: string;
+
+  // rooms always allowed; day/time honored by backend only for GE/SHS
+  slot1?: SlotPayload;
+  slot2?: SlotPayload;
+
+  // inline course edits (allowed for all types)
+  update_course?: { course_code?: string; course_title?: string };
+
+  // Elective support: link placeholder + choose specific elective
+  for_placeholder_course_id?: string;
+  specific_course_id?: string;
+
+  // GE/SHS only (backend will ignore if not allowed)
+  faculty_user_id?: string | null;
+  faculty_id?: string | null;
+
+  // existing override fields
+  override?: boolean;
+  override_token?: string;
+  override_reason?: string;
+  auto_override?: boolean;
+};
 
 /* ------------------------ qs helper ------------------------ */
 function q(obj: Record<string, any>) {
@@ -460,11 +496,20 @@ function _coerceOnline<T extends Record<string, any>>(payload: T): T {
 
   // Normalize enrollment_cap (allow "" to mean clear/null)
   if ("enrollment_cap" in out) {
-    const cap = out.enrollment_cap;
+    const cap = (out as any).enrollment_cap;
     if (cap === "" || cap === undefined) (out as any).enrollment_cap = null;
     else if (typeof cap !== "number") (out as any).enrollment_cap = Number(cap) || null;
   }
 
+  return out;
+}
+
+/** Backward-compat: if callers still send auto_approve, forward it as auto_override. */
+function _applyAutoOverride<T extends Record<string, any>>(payload: T): T {
+  const out = _clone(payload);
+  if ((out as any).auto_override == null && (out as any).auto_approve != null) {
+    (out as any).auto_override = (out as any).auto_approve;
+  }
   return out;
 }
 
@@ -484,16 +529,23 @@ export type OfferingsQuery = {
   batch_id?: string;
   program_id?: string;
 };
+function normalizeLevelForQuery(level?: string) {
+  const s = String(level || "").trim().toLowerCase();
+  if (!s || s === "all levels") return undefined;
+  if (/(^ug\b)|undergrad|undergraduate/.test(s)) return "UG";
+  if (/^gs\b|gsm|grad|graduate/.test(s)) return "GS";
+  return undefined;
+}
 
 /* Robustly unwrap conflict payload whether server nests under detail.conflict or directly under detail */
 function _extractConflict(e: AxiosError<any>): ApiConflict | null {
-  const detail = e.response?.data?.detail;
-  const raw = detail?.conflict || detail;
-  if (!raw) return null;
-  const token = raw.override_token ?? detail?.override_token;
-  const violations = raw.violations ?? detail?.violations;
-  const preview = raw.preview_changes ?? raw.preview ?? detail?.preview_changes ?? detail?.preview;
-  if (!token && !violations) return null;
+  const root = e.response?.data ?? {};
+  const detail = root.detail ?? root;                 // accept both shapes
+  const raw = detail.conflict ?? detail;              // conflict may be nested or be the actual object
+  const token = raw.override_token ?? detail.override_token ?? root.override_token;
+  const violations = raw.violations ?? detail.violations ?? root.violations;
+  const preview = raw.preview_changes ?? raw.preview ?? detail.preview_changes ?? root.preview_changes;
+  if (!token && !Array.isArray(violations)) return null;
   return {
     override_token: token || "",
     violations: Array.isArray(violations) ? violations : [],
@@ -506,7 +558,9 @@ function _extractConflict(e: AxiosError<any>): ApiConflict | null {
    ========================================================= */
 
 export async function getApoCourseOfferings(userId: string, opts: OfferingsQuery = {}): Promise<any> {
-  const url = `${API_BASE}/apo/courseofferings${q({ userId, ...opts })}`;
+  const { level, ...rest } = opts;
+  const level_code = normalizeLevelForQuery(level);
+  const url = `${API_BASE}/apo/courseofferings${q({ userId, ...rest, level, level_code })}`;
   return get<any>(url);
 }
 
@@ -515,7 +569,12 @@ export async function getApoCourseOfferings(userId: string, opts: OfferingsQuery
 export type AddRowPayload = {
   batch_id: string;
   program_id?: string;
-  course_id: string;
+
+  /** Normal path uses course_id. Elective path uses for_placeholder_course_id + specific_course_id. */
+  course_id?: string;
+  for_placeholder_course_id?: string;
+  specific_course_id?: string;
+
   enrollment_cap?: number | null;
   remarks?: string;
   slot1?: { room_id?: string | null };
@@ -524,6 +583,9 @@ export type AddRowPayload = {
   override?: boolean;
   override_token?: string;
   override_reason?: string;
+
+  /** Backend expects auto_override; keep auto_approve for back-compat in callers. */
+  auto_override?: boolean;
   auto_approve?: boolean;
 };
 
@@ -533,7 +595,7 @@ export async function addApoOfferingRow(
 ): Promise<{ ok: true; section_id: string } | { conflict: ApiConflict }> {
   try {
     const url = `${API_BASE}/apo/courseofferings${q({ userId, action: "addRow" })}`;
-    return await post(url, _coerceOnline(payload));
+    return await post(url, _coerceOnline(_applyAutoOverride(payload)));
   } catch (e) {
     const err = e as AxiosError<any>;
     if (err.response?.status === 409) {
@@ -546,26 +608,13 @@ export async function addApoOfferingRow(
   }
 }
 
-export type EditRowPayload = {
-  section_id: string;
-  section_code?: string;
-  /** allow "" to clear the cap (backend treats "" as null) */
-  enrollment_cap?: number | null | "";
-  remarks?: string;
-  slot1?: { room_id?: string | null };
-  slot2?: { room_id?: string | null };
-  override?: boolean;
-  override_token?: string;
-  override_reason?: string;
-};
-
 export async function editApoOfferingRow(
   userId: string,
   payload: EditRowPayload
 ): Promise<{ ok: true; section_id: string } | { conflict: ApiConflict }> {
   try {
     const url = `${API_BASE}/apo/courseofferings${q({ userId, action: "editRow" })}`;
-    return await post(url, _coerceOnline(payload));
+    return await post(url, _coerceOnline(_applyAutoOverride(payload)));
   } catch (e) {
     const err = e as AxiosError<any>;
     if (err.response?.status === 409) {
@@ -1201,6 +1250,7 @@ export async function getFacultyOverview(userId: string) {
    ========================================================= */
 // Mirrors Student Petition API shape (POST + ?action=*)
 
+/* NB: kept unchanged from your original types */
 export type FacultyHistoryRow = {
   // Stored IDs (not all may exist in sample data)
   assignment_id: string;
