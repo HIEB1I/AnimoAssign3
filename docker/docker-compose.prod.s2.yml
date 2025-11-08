@@ -9,8 +9,6 @@ services:
     volumes:
       - mongo_secondary_data:/data/db
       - /opt/secrets/animoassign/mongo-keyfile:/run/secrets/mongo-keyfile:ro
-    ports:
-      - "27017:27017" 
     network_mode: host
     restart: unless-stopped
 
