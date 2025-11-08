@@ -1240,7 +1240,7 @@ export default function FAC_Preferences() {
     is_finished: finished,
   });
 
-  // ⬇️ CHANGE: Always refresh the Saved panel — even on drafts.
+  // CHANGE: Always refresh the Saved panel — even on drafts.
   async function afterSubmitRefresh(res: any, _isFinal: boolean) {
     if (res?.ok && res?.preference) {
       const normalized = fromServerToSaved(res.preference);

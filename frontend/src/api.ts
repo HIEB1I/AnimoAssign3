@@ -19,7 +19,6 @@ function join(a: string, b: string) {
  * - Else, join it under BASE (so "/staging/" -> "/staging/api").
  * - If no override is provided, use the given default path.
  */
-
 function resolveBase(override: string | undefined, defaultPath: string): string {
   if (override && /^https?:\/\//i.test(override)) return override.replace(/\/+$/, "");
   const path = (override && override.length ? override : defaultPath)
@@ -63,11 +62,8 @@ export async function login(email: string): Promise<LoginResponse> {
    ========================================================= */
 // Types kept for localStorage consumers
 // export type LoginResponse = { userId: string; email: string; fullName: string; roles: string[] };
-
-
-// Optional: build a start URL (used by Login.tsx directly, but you can import this too)
 // export function googleStartUrl(returnTo: string) {
-// return join(API_BASE, `auth/google/start?return_to=${encodeURIComponent(returnTo)}`);
+//   return join(API_BASE, `auth/google/start?return_to=${encodeURIComponent(returnTo)}`);
 // }
 
 export async function fetchOmHome(userId: string) {
@@ -91,13 +87,15 @@ export async function fetchTeachingHistory(facultyId: string) {
   return r.json();
 }
 
-// Descriptive #2
+// Descriptive #2 (use ANALYTICS_BASE, not absolute path)
 export async function fetchCourseProfile(query: string) {
-  const res = await fetch(`/analytics/course-profile-for?query=${encodeURIComponent(query)}`);
+  const url = `${ANALYTICS_BASE.replace(/\/+$/, "")}/course-profile-for?query=${encodeURIComponent(
+    query
+  )}`;
+  const res = await fetch(url);
   if (!res.ok) throw new Error(await res.text().catch(() => res.statusText));
   return res.json();
 }
-
 
 // Descriptive #3
 export async function fetchDeloadingsByTerm(
@@ -108,7 +106,8 @@ export async function fetchDeloadingsByTerm(
   if (anchorTermId) params.set("anchor_term_id", anchorTermId);
   if (direction) params.set("direction", direction);
 
-  const res = await fetch(`/analytics/deloadings/by-term?${params.toString()}`);
+  const url = `${ANALYTICS_BASE.replace(/\/+$/, "")}/deloadings/by-term?${params.toString()}`;
+  const res = await fetch(url);
   if (!res.ok) throw new Error(await res.text().catch(() => res.statusText));
   return res.json();
 }
@@ -136,18 +135,25 @@ export async function fetchFacultyAvailabilityHeatmap<T = unknown>(params?: {
 // Predictive #2
 export async function fetchPTRisk(params: {
   department_id?: string;
-  overload_allowance_units?: number;       // 0 or 3
-  history_terms_for_experience?: number;   // default 3
+  overload_allowance_units?: number; // 0 or 3
+  history_terms_for_experience?: number; // default 3
   include_only_with_preferences?: boolean; // default false
   allow_fallback_without_sections?: boolean; // default false
 }) {
-  const base = (typeof ANALYTICS_BASE !== "undefined" ? ANALYTICS_BASE : API_BASE).replace(/\/+$/, "");
+  const base = (typeof ANALYTICS_BASE !== "undefined" ? ANALYTICS_BASE : API_BASE).replace(
+    /\/+$/,
+    ""
+  );
   const sp = new URLSearchParams();
   if (params.department_id) sp.set("department_id", params.department_id);
-  if (params.overload_allowance_units != null) sp.set("overload_allowance_units", String(params.overload_allowance_units));
-  if (params.history_terms_for_experience != null) sp.set("history_terms_for_experience", String(params.history_terms_for_experience));
-  if (params.include_only_with_preferences != null) sp.set("include_only_with_preferences", String(params.include_only_with_preferences));
-  if (params.allow_fallback_without_sections != null) sp.set("allow_fallback_without_sections", String(params.allow_fallback_without_sections));
+  if (params.overload_allowance_units != null)
+    sp.set("overload_allowance_units", String(params.overload_allowance_units));
+  if (params.history_terms_for_experience != null)
+    sp.set("history_terms_for_experience", String(params.history_terms_for_experience));
+  if (params.include_only_with_preferences != null)
+    sp.set("include_only_with_preferences", String(params.include_only_with_preferences));
+  if (params.allow_fallback_without_sections != null)
+    sp.set("allow_fallback_without_sections", String(params.allow_fallback_without_sections));
 
   const url = `${base}/pt-risk?${sp.toString()}`;
   const r = await fetch(url);
@@ -169,16 +175,12 @@ export type FacultyProfile = {
 };
 
 // Communicated with OM_LoadReco.tsx & analytics reco
-
 export async function getOneFacultyProfile(): Promise<FacultyProfile> {
   // Resolve under current BASE (handles /staging/ automatically)
   const url = join(BASE, "/analytics/om/loadreco");
   const { data } = await axios.get(url);
   return data;
 }
-
-
-
 
 /* =========================================================
    ===============  ADMIN: MANAGEMENT  =====================
@@ -296,8 +298,8 @@ export type PreenlistmentCountDoc = {
   campus_id?: string;
   course_id?: string;
   preenlistment_code?: string;
-  career: string;                 // UGB / GSM as provided
-  count: number;                  // ← backend guarantees this from preenlistment_count
+  career: string; // UGB / GSM as provided
+  count: number; // ← backend guarantees this from preenlistment_count
   course_code?: string;
   campus_name?: "MANILA" | "LAGUNA";
   college_code?: string;
@@ -306,7 +308,7 @@ export type PreenlistmentCountDoc = {
   is_archived?: boolean;
   created_at?: string;
   updated_at?: string;
-  acad_group?: string;            // CSV 'Acad Group' or college_code fallback
+  acad_group?: string; // CSV 'Acad Group' or college_code fallback
 };
 
 export type PreenlistmentStatDoc = {
@@ -347,8 +349,8 @@ export type ApoPreenlistmentResponse = {
 
 export type CountCsvRow = {
   Code?: string;
-  Career: string;          // UGB / GSM
-  "Acad Group": string;    // CCS (display)
+  Career: string; // UGB / GSM
+  "Acad Group": string; // CCS (display)
   Campus: "MANILA" | "LAGUNA";
   "Course Code": string;
   Count: number | string;
@@ -440,43 +442,69 @@ export async function archiveApoPreenlistment(
 }
 
 /* =========================================================
-   ===============  APO: COURSE OFFERINGS  ==================
+   ===============  APO: COURSE OFFERINGS  =================
    ========================================================= */
+
 export type SlotPayload = {
   room_id?: string | null;
-  day?: string;         // "Monday" .. "Saturday"
-  start_time?: string;  // "HHMM" (you can also send "HH:MM" if your backend normalizes)
-  end_time?: string;    // "HHMM"
+  day?: string; // "Monday" .. "Saturday"
+  start_time?: string; // "HHMM" or "HH:MM" (we normalize to HHMM when posting)
+  end_time?: string; // "HHMM" or "HH:MM"
 };
 
 export type EditRowPayload = {
   section_id: string;
-  course_id?: string; // helps backend resolve type quickly
+  course_id?: string;
 
   section_code?: string;
   enrollment_cap?: number | null | "";
   remarks?: string;
 
-  // rooms always allowed; day/time honored by backend only for GE/SHS
+  // for quick inline assignment updates
+  faculty_name?: string;
+
   slot1?: SlotPayload;
   slot2?: SlotPayload;
 
-  // inline course edits (allowed for all types)
   update_course?: { course_code?: string; course_title?: string };
 
-  // Elective support: link placeholder + choose specific elective
+  // Electives handling (placeholder -> specific course)
   for_placeholder_course_id?: string;
   specific_course_id?: string;
 
-  // GE/SHS only (backend will ignore if not allowed)
   faculty_user_id?: string | null;
   faculty_id?: string | null;
 
-  // existing override fields
   override?: boolean;
   override_token?: string;
   override_reason?: string;
   auto_override?: boolean;
+};
+
+export type AddRowPayload = {
+  batch_id: string;
+  program_id?: string;
+
+  /** Normal path uses course_id. Elective path uses for_placeholder_course_id + specific_course_id. */
+  course_id?: string;
+  for_placeholder_course_id?: string;
+  specific_course_id?: string;
+
+  enrollment_cap?: number | null;
+  remarks?: string;
+
+  // GE/SHS may send time-only or time+room on create; limited types must send room+valid time.
+  slot1?: SlotPayload;
+  slot2?: SlotPayload;
+
+  section_code?: string;
+  override?: boolean;
+  override_token?: string;
+  override_reason?: string;
+
+  /** Backend expects auto_override; keep auto_approve for back-compat in callers. */
+  auto_override?: boolean;
+  auto_approve?: boolean;
 };
 
 /* ------------------------ qs helper ------------------------ */
@@ -503,25 +531,63 @@ function _clone<T>(x: T): T {
   return x == null ? x : JSON.parse(JSON.stringify(x));
 }
 
-/** Normalize room sentinel values and number-ish fields before POSTing. */
+function _normTime(t?: any): string | undefined {
+  if (t == null) return undefined;
+  const s = String(t).trim();
+  if (!s) return undefined;
+  if (/^\d{4}$/.test(s)) return s;
+  // accept "HH:MM" or "H:MM"
+  const m = /^(\d{1,2}):(\d{2})$/.exec(s);
+  if (m) {
+    const hh = m[1].padStart(2, "0");
+    const mm = m[2];
+    return `${hh}${mm}`;
+  }
+  // fallback: strip non-digits and pad if it looks like time
+  const digits = s.replace(/\D+/g, "");
+  if (digits.length === 3) return `0${digits}`; // "730" -> "0730"
+  if (digits.length === 4) return digits;
+  return undefined;
+}
+
+/** Normalize room sentinel values and number-ish fields before POSTing. Also normalize slot times. */
 function _coerceOnline<T extends Record<string, any>>(payload: T): T {
   const out = _clone(payload);
+  const o = out as unknown as Record<string, any>; // ← use this for writes
 
   // Normalize slots
   const slots = ["slot1", "slot2"] as const;
   for (const key of slots) {
-    if (out[key]) {
-      const rid = out[key].room_id;
-      // Treat empty string as TBA -> null; preserve "ONLINE"
-      out[key].room_id = rid === "" ? null : rid ?? null;
+    if (o[key]) {
+      const slot: Record<string, any> = { ...o[key] };
+
+      if (Object.prototype.hasOwnProperty.call(slot, "room_id")) {
+        slot.room_id = slot.room_id === "" ? null : slot.room_id;
+      }
+
+      if (Object.prototype.hasOwnProperty.call(slot, "start_time")) {
+        const n = _normTime(slot.start_time);
+        if (n != null) slot.start_time = n;
+        else delete slot.start_time;
+      }
+
+      if (Object.prototype.hasOwnProperty.call(slot, "end_time")) {
+        const n = _normTime(slot.end_time);
+        if (n != null) slot.end_time = n;
+        else delete slot.end_time;
+      }
+
+      const hasKeys = Object.keys(slot).length > 0;
+      if (hasKeys) o[key] = slot; // ← write via `o`
+      else delete o[key]; // ← delete via `o`
     }
   }
 
   // Normalize enrollment_cap (allow "" to mean clear/null)
-  if ("enrollment_cap" in out) {
-    const cap = (out as any).enrollment_cap;
-    if (cap === "" || cap === undefined) (out as any).enrollment_cap = null;
-    else if (typeof cap !== "number") (out as any).enrollment_cap = Number(cap) || null;
+  if ("enrollment_cap" in o) {
+    const cap = o.enrollment_cap;
+    if (cap === "" || cap === undefined) o.enrollment_cap = null;
+    else if (typeof cap !== "number") o.enrollment_cap = Number(cap) || null;
   }
 
   return out;
@@ -563,8 +629,8 @@ function normalizeLevelForQuery(level?: string) {
 /* Robustly unwrap conflict payload whether server nests under detail.conflict or directly under detail */
 function _extractConflict(e: AxiosError<any>): ApiConflict | null {
   const root = e.response?.data ?? {};
-  const detail = root.detail ?? root;                 // accept both shapes
-  const raw = detail.conflict ?? detail;              // conflict may be nested or be the actual object
+  const detail = root.detail ?? root; // accept both shapes
+  const raw = detail.conflict ?? detail; // conflict may be nested or be the actual object
   const token = raw.override_token ?? detail.override_token ?? root.override_token;
   const violations = raw.violations ?? detail.violations ?? root.violations;
   const preview = raw.preview_changes ?? raw.preview ?? detail.preview_changes ?? root.preview_changes;
@@ -576,53 +642,54 @@ function _extractConflict(e: AxiosError<any>): ApiConflict | null {
   };
 }
 
-/* =========================================================
-   ===============  APO: COURSE OFFERINGS  ==================
-   ========================================================= */
+/* ===================== Course Offerings API ===================== */
 
-export async function getApoCourseOfferings(userId: string, opts: OfferingsQuery = {}): Promise<any> {
+export async function getApoCourseOfferings(
+  userId: string,
+  opts: OfferingsQuery = {}
+): Promise<any> {
   const { level, ...rest } = opts;
   const level_code = normalizeLevelForQuery(level);
   const url = `${API_BASE}/apo/courseofferings${q({ userId, ...rest, level, level_code })}`;
   return get<any>(url);
 }
 
-/* ------------------ Row ops with conflicts ----------------- */
-
-export type AddRowPayload = {
-  batch_id: string;
-  program_id?: string;
-
-  /** Normal path uses course_id. Elective path uses for_placeholder_course_id + specific_course_id. */
-  course_id?: string;
-  for_placeholder_course_id?: string;
-  specific_course_id?: string;
-
-  enrollment_cap?: number | null;
-  remarks?: string;
-  slot1?: { room_id?: string | null };
-  slot2?: { room_id?: string | null };
-  section_code?: string;
-  override?: boolean;
-  override_token?: string;
-  override_reason?: string;
-
-  /** Backend expects auto_override; keep auto_approve for back-compat in callers. */
-  auto_override?: boolean;
-  auto_approve?: boolean;
-};
-
+/** Add row (capacity defaults server-side to courses.max_enrollee if not provided). */
 export async function addApoOfferingRow(
   userId: string,
   payload: AddRowPayload
 ): Promise<{ ok: true; section_id: string } | { conflict: ApiConflict }> {
+  const url = `${API_BASE}/apo/courseofferings${q({ userId, action: "addRow" })}`;
+  const body = _coerceOnline(_applyAutoOverride(payload));
+
   try {
-    const url = `${API_BASE}/apo/courseofferings${q({ userId, action: "addRow" })}`;
-    return await post(url, _coerceOnline(_applyAutoOverride(payload)));
+    return await post<{ ok: true; section_id: string }>(url, body);
   } catch (e) {
     const err = e as AxiosError<any>;
     if (err.response?.status === 409) {
       const conflict = _extractConflict(err);
+
+      // If caller asked for auto-override (e.g., GE), retry once with override token.
+      if (conflict && (body as any).auto_override) {
+        try {
+          return await post<{ ok: true; section_id: string }>(url, {
+            ...(body as any),
+            override: true,
+            override_token: conflict.override_token,
+            override_reason: (body as any).override_reason || "Auto-override add",
+          });
+        } catch (e2) {
+          const err2 = e2 as AxiosError<any>;
+          if (err2.response?.status === 409) {
+            const conflict2 = _extractConflict(err2);
+            if (conflict2) return { conflict: conflict2 };
+            const d2 = err2.response?.data?.detail as GateError | undefined;
+            if (d2) throw new Error(d2.message || "Action blocked by planning rules.");
+          }
+          throw err2;
+        }
+      }
+
       if (conflict) return { conflict };
       const d = err.response?.data?.detail as GateError | undefined;
       if (d) throw new Error(d.message || "Action blocked by planning rules.");
@@ -631,19 +698,30 @@ export async function addApoOfferingRow(
   }
 }
 
+/** Edit row (capacity updates will be saved to sections.enrollment_cap). */
 export async function editApoOfferingRow(
   userId: string,
   payload: EditRowPayload
 ): Promise<{ ok: true; section_id: string } | { conflict: ApiConflict }> {
+  const url = `${API_BASE}/apo/courseofferings${q({ userId, action: "editRow" })}`;
+  const body = _coerceOnline(_applyAutoOverride(payload));
   try {
-    const url = `${API_BASE}/apo/courseofferings${q({ userId, action: "editRow" })}`;
-    return await post(url, _coerceOnline(_applyAutoOverride(payload)));
+    return await post(url, body);
   } catch (e) {
     const err = e as AxiosError<any>;
     if (err.response?.status === 409) {
       const conflict = _extractConflict(err);
+      // If editor asked for auto_override → retry with override token automatically
+      if (conflict && (body as any).auto_override) {
+        return await post(url, {
+          ...(body as any),
+          override: true,
+          override_token: conflict.override_token,
+          override_reason: (body as any).override_reason || "GE free-form edit",
+        });
+      }
       if (conflict) return { conflict };
-      const d = err.response?.data?.detail as GateError | undefined;
+      const d = err.response?.data?.detail as { message?: string } | undefined;
       if (d) throw new Error(d.message || "Action blocked by planning rules.");
     }
     throw err;
@@ -676,8 +754,7 @@ export async function deleteApoOfferingRow(
   }
 }
 
-/* ----------------- Forward / Approve Plan ------------------ */
-
+/* ---- Plan routing ---- */
 export async function forwardApoCourseOfferings(
   userId: string,
   payload: { to: string; subject?: string; message?: string; attachment_html?: string }
@@ -686,13 +763,14 @@ export async function forwardApoCourseOfferings(
   return post(url, payload);
 }
 
-export async function approveApoOfferingsPlan(userId: string): Promise<{ ok: true; applied: number }> {
+export async function approveApoOfferingsPlan(
+  userId: string
+): Promise<{ ok: true; applied: number }> {
   const url = `${API_BASE}/apo/courseofferings${q({ userId, action: "approvePlan" })}`;
   return post(url);
 }
 
-/* ------------------ Curriculum operations ------------------ */
-
+/* ---- Curriculum ops (used in offerings "Curriculum" view) ---- */
 export async function curriculumAddCourse(
   userId: string,
   payload: {
@@ -733,6 +811,49 @@ export async function curriculumRemoveCourse(
 ): Promise<{ ok: true; removed: number }> {
   const url = `${API_BASE}/apo/courseofferings${q({ userId, action: "curriculumRemoveCourse" })}`;
   return post(url, payload);
+}
+
+/* ---- Electives helper endpoints (placeholder → specific) ---- */
+export async function getElectiveOptions(
+  userId: string,
+  placeholder_course_id: string
+): Promise<{ ok: boolean; options: Array<{ course_id: string; course_code: string; course_title: string }> }> {
+  const url = `${API_BASE}/apo/courseofferings${q({
+    userId,
+    action: "electiveOptions",
+    placeholder_course_id,
+  })}`;
+  return get(url);
+}
+
+/* ---- Eligible rooms for a section (capacity + room_type guard) ---- */
+export type EligibleRoomsParams = {
+  section_id?: string;
+  enrollment_cap?: number;
+  room_type?: string;
+  campus_id?: string;
+  // optional time filter (if backend supports clash checks)
+  day?: string;
+  start_time?: string;
+  end_time?: string;
+};
+export async function getEligibleRoomsForOffering(
+  userId: string,
+  params: EligibleRoomsParams
+): Promise<
+  { ok: boolean; rooms: Array<{ room_id: string; room_number: string; room_type: string; capacity: number; building?: string }> }
+> {
+  const qp = { ...params };
+  // normalize times if present
+  if (qp.start_time) qp.start_time = _normTime(qp.start_time) || qp.start_time;
+  if (qp.end_time) qp.end_time = _normTime(qp.end_time) || qp.end_time;
+
+  const url = `${API_BASE}/apo/courseofferings${q({
+    userId,
+    action: "eligibleRooms",
+    ...qp,
+  })}`;
+  return get(url);
 }
 
 /* =========================================================
@@ -782,14 +903,19 @@ export type RoomAllocationResponse = {
   rooms: RoomWithSchedule[];
   sections: SectionDoc[];
   sectionSchedules: SectionScheduleDoc[];
-  facultyBySection: Record<string, { faculty_id: string; user_id: string; faculty_name: string }>;
+  facultyBySection: Record<
+    string,
+    { faculty_id: string; user_id: string; faculty_name: string }
+  >;
   courses?: { course_id: string; course_code: string[] | string }[];
 };
 
 const base = API_BASE.replace(/\/$/, "");
 
 export async function getApoRoomAllocation(userId: string): Promise<RoomAllocationResponse> {
-  const r = await fetch(`${base}/apo/roomallocation?${new URLSearchParams({ userId }).toString()}`);
+  const r = await fetch(
+    `${base}/apo/roomallocation?${new URLSearchParams({ userId }).toString()}`
+  );
   if (!r.ok) throw new Error(await r.text());
   return r.json();
 }
@@ -883,7 +1009,7 @@ export type PetitionView = {
   course_title: string;
   reason: string;
   status: string;
-  remarks?: string;            // may be empty
+  remarks?: string; // may be empty
   submitted_at: string;
   acad_year_start?: number | string;
   term_number?: number;
@@ -892,13 +1018,15 @@ export type PetitionView = {
 
 export type PetitionSubmitPayload = {
   department: string;
-  courseCode: string;   // ONLY code
-  reason: string;       // must be one of options.reasons
+  courseCode: string; // ONLY code
+  reason: string; // must be one of options.reasons
   studentNumber: string;
   degree: string;
 };
 
-export async function getStudentPetitions(userId: string): Promise<{ ok: boolean; petitions: PetitionView[] }> {
+export async function getStudentPetitions(
+  userId: string
+): Promise<{ ok: boolean; petitions: PetitionView[] }> {
   const { data } = await axios.post(`${API_BASE}/student/petition`, {}, {
     params: { userId, action: "fetch" },
   });
@@ -962,7 +1090,7 @@ export type FacultyRow = {
   position?: string;
   teaching_units: string | number;
   faculty_type: string; // Full-Time | Part-Time
-  status: string;       // Active | On Leave
+  status: string; // Active | On Leave
 };
 
 export type FMOptions = {
@@ -1013,7 +1141,6 @@ export async function getFacultyProfile(facultyId: string) {
   };
 }
 
-
 export async function getFacultySchedule(
   facultyId: string,
   termId?: string
@@ -1044,7 +1171,7 @@ export async function getFacultyHistory(
   term?: string | null;
 }> }> {
   const params: Record<string, any> = { action: "history", facultyId };
-  if (typeof termOrAy === "number") params.acadYearStart = termOrAy;  // AY start (e.g., 2024)
+  if (typeof termOrAy === "number") params.acadYearStart = termOrAy; // AY start (e.g., 2024)
   else if (typeof termOrAy === "string" && termOrAy) params.termId = termOrAy;
 
   const { data } = await axios.post(`${API_BASE}/om/facultymanagement`, {}, { params });
@@ -1054,7 +1181,7 @@ export async function getFacultyHistory(
   const termsObj = data?.terms || {};
   Object.entries(termsObj).forEach(([termKey, list]) => {
     const termMatch = /Term\s*([123])/i.exec(termKey);
-    const termLabel = termMatch ? `Term ${termMatch[1]}` : (termKey.includes("Term") ? termKey : "Term 1");
+    const termLabel = termMatch ? `Term ${termMatch[1]}` : termKey.includes("Term") ? termKey : "Term 1";
     (list as any[]).forEach((r) => {
       teaching_history.push({
         code: r.code ?? r.course_code ?? "",
@@ -1084,14 +1211,14 @@ export async function getFacultyHistory(
 
 export type CMCourseRow = {
   course_id: string;
-  kac: string;                                  // derived from kacs.course_list
-  code: string;                                 // joined course_code(s)
+  kac: string; // derived from kacs.course_list
+  code: string; // joined course_code(s)
   title: string;
   units: number | string;
-  coordinator_name: string;                     // back-compat (joined string)
-  coordinator_email: string;                    // back-compat (first email)
+  coordinator_name: string; // back-compat (joined string)
+  coordinator_email: string; // back-compat (first email)
   coordinators?: { name: string; email?: string }[]; // full list
-  composition: string[];                        // from sections -> assignments -> profiles -> users (active term)
+  composition: string[]; // from sections -> assignments -> profiles -> users (active term)
   syllabus: string;
 };
 
@@ -1149,9 +1276,9 @@ export type OMFRow = {
   name: string;
   email: string;
   department: string;
-  type: string;              // Full-Time | Part-Time
-  submission_date?: string;  // ISO (undefined => N/A)
-  status: string;            // Submitted | Not Submitted
+  type: string; // Full-Time | Part-Time
+  submission_date?: string; // ISO (undefined => N/A)
+  status: string; // Submitted | Not Submitted
 };
 
 export async function getOMFOptions(): Promise<OMFOptions> {
@@ -1273,7 +1400,6 @@ export async function getFacultyOverview(userId: string) {
    ========================================================= */
 // Mirrors Student Petition API shape (POST + ?action=*)
 
-/* NB: kept unchanged from your original types */
 export type FacultyHistoryRow = {
   // Stored IDs (not all may exist in sample data)
   assignment_id: string;
@@ -1287,11 +1413,11 @@ export type FacultyHistoryRow = {
   course_code?: string | string[];
   course_title?: string;
   section_code?: string;
-  day_time?: string;          // e.g. "M 07:30–09:00; H 07:30–09:00"
-  room_label?: string;        // "A1101 (Classroom)" or "Online" / "TBA"
-  campus_name?: string;       // MUST be present even if Online/TBA
-  term_label?: string;        // e.g. "AY 2024–2025 T1"
-  created_at?: string;        // for sorting on UI
+  day_time?: string; // e.g. "M 07:30–09:00; H 07:30–09:00"
+  room_label?: string; // "A1101 (Classroom)" or "Online" / "TBA"
+  campus_name?: string; // MUST be present even if Online/TBA
+  term_label?: string; // e.g. "AY 2024–2025 T1"
+  created_at?: string; // for sorting on UI
 };
 
 export type FacultyHistoryProfile = {
@@ -1301,7 +1427,6 @@ export type FacultyHistoryProfile = {
 };
 
 export type FacultyHistoryOptions = {
-  // keep minimal; extend later if needed
   statuses?: string[];
 };
 
@@ -1334,7 +1459,6 @@ export async function submitFacultyHistory(userId: string, payload: Record<strin
   return data as FacultyHistoryRow;
 }
 
-
 /* =========================================================
    ============  FACULTY: PREFERENCES  =====================
    ========================================================= */
@@ -1363,7 +1487,9 @@ export async function submitFacultyPreferences(
     availability_days: string[];
     preferred_times: string[];
     preferred_kacs: string[]; // IDs (preferred) or names; backend normalizes
-    mode?: { mode?: string; campus_id?: string } | { mode?: string; campus_id?: string }[]; // accepts single or array
+    mode?:
+      | { mode?: string; campus_id?: string }
+      | { mode?: string; campus_id?: string }[]; // accepts single or array
     deloading_data?: { deloading_type?: string; units?: string | number }[];
     preferred_courses?: string[]; // <— add this
     notes?: string;
@@ -1372,7 +1498,6 @@ export async function submitFacultyPreferences(
     term_id?: string;
   }
 ) {
-
   const { data } = await axios.post(`${API_BASE}/faculty/preferences`, payload, {
     params: { userId, action: "submit" },
   });
@@ -1423,10 +1548,7 @@ export async function getOmLoadAssignmentProfile(userId: string) {
   return data;
 }
 
-export async function submitOmLoadAssignment(
-  userId: string,
-  payload: { rows: OmLoadRow[] }
-) {
+export async function submitOmLoadAssignment(userId: string, payload: { rows: OmLoadRow[] }) {
   const { data } = await axios.post(`${API_BASE}/om/loadassignment`, payload, {
     params: { userId, action: "submit" },
   });
@@ -1437,8 +1559,7 @@ export async function submitOmLoadAssignment(
    ==============  OM: Reports & Analytics  ====================
    ========================================================= */
 
-//Descriptive 1: Faculty Teaching History
-
+// Descriptive 1: Faculty Teaching History
 export async function fetchOmRpFacultyTeachingHistory(params: {
   search?: string;
   acad_year_start?: number;
@@ -1446,7 +1567,8 @@ export async function fetchOmRpFacultyTeachingHistory(params: {
   const base = (ANALYTICS_BASE || API_BASE).replace(/\/+$/, "");
   const sp = new URLSearchParams();
   if (params?.search) sp.set("search", params.search);
-  if (typeof params?.acad_year_start === "number") sp.set("acad_year_start", String(params.acad_year_start));
+  if (typeof params?.acad_year_start === "number")
+    sp.set("acad_year_start", String(params.acad_year_start));
   const url = `${base}/faculty-teaching-history?${sp.toString()}`;
   const r = await fetch(url, {
     method: "POST",
@@ -1531,7 +1653,7 @@ export type ActiveRole = "chair" | "faculty";
 export function getActiveRole(): ActiveRole | null {
   try {
     const v = localStorage.getItem("animo.activeRole");
-    return (v === "chair" || v === "faculty") ? v : null;
+    return v === "chair" || v === "faculty" ? v : null;
   } catch {
     return null;
   }
@@ -1546,7 +1668,7 @@ export function setActiveRole(role: ActiveRole) {
 export function userHasRole(role: string): boolean {
   try {
     const u = JSON.parse(localStorage.getItem("animo.user") || "null");
-    const roles: string[] = Array.isArray(u?.roles) ? u.roles.map((r:string)=>r.toLowerCase()) : [];
+    const roles: string[] = Array.isArray(u?.roles) ? u.roles.map((r: string) => r.toLowerCase()) : [];
     return roles.includes(role.toLowerCase());
   } catch {
     return false;
@@ -1557,6 +1679,8 @@ export function userIsChair(): boolean {
   try {
     const u = JSON.parse(localStorage.getItem("animo.user") || "null");
     const roles: string[] = Array.isArray(u?.roles) ? u.roles : [];
-    return roles.some(r => /chair/i.test(String(r)));
-  } catch { return false; }
+    return roles.some((r) => /chair/i.test(String(r)));
+  } catch {
+    return false;
+  }
 }
