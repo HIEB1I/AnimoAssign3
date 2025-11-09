@@ -392,22 +392,27 @@ async def get_room_allocation(userId: str = Query(..., min_length=3)):
     default_open_days = default_open_days_for_campus(campus.get("campus_name", ""))
 
     def allowed_cells_for_room(rid: str) -> List[Dict[str, Any]]:
-        allowed_keys = set()
+        # 1) Always include already-assigned cells (scoped + out-of-scope)
+        assigned_keys = {
+            (s["day"], s["time_band"])
+            for s in section_scheds_for_grid
+            if s.get("room_id") == rid
+        }
 
-        # always include already-assigned cells
-        for s in section_scheds_for_grid:
-            if s.get("room_id") == rid:
-                allowed_keys.add((s["day"], s["time_band"]))
+        # 2) Saved availability placeholders (normalized days)
+        avail_for_room = [a for a in availability if a["room_id"] == rid]
+        saved_avail_keys = {(a["day"], a["time_band"]) for a in avail_for_room}
+        saved_days = {a["day"] for a in avail_for_room}  # e.g., {"Monday"} if you only edited Monday
 
-        # explicit availability placeholders
-        for a in availability:
-            if a["room_id"] == rid:
-                allowed_keys.add((a["day"], a["time_band"]))
+        allowed_keys = set(assigned_keys) | saved_avail_keys
 
-        # default campus open days
+        # 3) Day-scoped default overlay:
+        #    For campus default-open days that have *no* saved availability yet,
+        #    still show the defaults so they don't disappear after editing another day.
         for d in default_open_days:
-            for tb in TIME_BANDS:
-                allowed_keys.add((d, tb))
+            if d not in saved_days:
+                for tb in TIME_BANDS:
+                    allowed_keys.add((d, tb))
 
         out = []
         for k, cell in schedule_by_room[rid].items():
@@ -486,7 +491,30 @@ async def post_room_allocation(
             "created_at": now(),
             "updated_at": now(),
         }
+
+        # ↓↓↓ STAYS **INSIDE** addRoom ↓↓↓
         await db[COL_ROOMS].insert_one(doc)
+
+        # --- Seed initial availability so defaults are recorded once ---
+        campus_name = campus.get("campus_name", "")
+        seed_days = default_open_days_for_campus(campus_name)
+        seed_docs = []
+        for d in seed_days:
+            day_code = denormalize_day(d)
+            for tb in TIME_BANDS:
+                st, et = parse_band(tb)
+                seed_docs.append({
+                    "schedule_id": f"AVAIL-{rid}-{day_code}-{st}-{et}",
+                    "day": day_code,
+                    "start_time": st,
+                    "end_time": et,
+                    "room_id": rid,
+                    "created_at": now(),
+                    "updated_at": now(),
+                })
+        if seed_docs:
+            await db[COL_SCHEDS].insert_many(seed_docs, ordered=False)
+
         return {"ok": True, "room_id": rid}
 
     if action == "updateRoom":
