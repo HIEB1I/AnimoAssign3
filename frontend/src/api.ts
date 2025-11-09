@@ -1365,6 +1365,32 @@ export async function getCMHeader(userEmail?: string, userId?: string) {
   return data as { ok: boolean; profileName?: string; profileSubtitle?: string };
 }
 
+// === CHAIR: COURSE MANAGEMENT (mirrors OM) ===
+export async function getChairCMOptions(userEmail?: string, userId?: string): Promise<CMOptions> {
+  const { data } = await axios.post(`${API_BASE}/chair/course-management`, {}, {
+    params: { action: "options", userEmail, userId },
+  });
+  return data as CMOptions;
+}
+
+export async function listChairCMCourses(params: {
+  userEmail?: string; userId?: string; cluster?: string; search?: string;
+}) {
+  const { userEmail, userId, cluster, search } = params || {};
+  const { data } = await axios.post(`${API_BASE}/chair/course-management`, {}, {
+    params: { action: "list", userEmail, userId, cluster, search },
+  });
+  return data as { ok: boolean; rows: CMCourseRow[]; term?: any };
+}
+
+export async function getChairCMHeader(userEmail?: string, userId?: string) {
+  const { data } = await axios.post(`${API_BASE}/chair/course-management`, {}, {
+    params: { action: "header", userEmail, userId },
+  });
+  return data as { ok: boolean; profileName?: string; profileSubtitle?: string };
+}
+
+
 /* =========================================================
    ==============  OM: FACULTY FORM  ===================
    ========================================================= */
@@ -1475,6 +1501,55 @@ export async function bulkForwardOMSP(course_ids: string[], status?: string) {
   });
   return data as { ok: boolean; matched: number; modified: number; status: string };
 }
+
+/* =========================================================
+   ==============  CHAIR: STUDENT PETITIONS  ===============
+   ========================================================= */
+
+export type ChairPetitionRow = {
+  course_id: string;
+  course_code: string;
+  course_title: string;
+  count: number;
+  status: string;
+  remarks?: string;
+};
+
+export type ChairPetitionOptions = {
+  ok: boolean;
+  statuses: string[];
+  activeTerm: { term_id: string; acad_year_start?: number; term_number?: number };
+};
+
+export async function getChairSPOptions() {
+  const { data } = await axios.post(`${API_BASE}/chair/student-petitions`, {}, {
+    params: { action: "options" },
+  });
+  return data as ChairPetitionOptions;
+}
+
+export async function listChairSP(params: { status?: string; search?: string; userId?: string } = {}) {
+  const { status = "", search = "", userId } = params;
+  const { data } = await axios.post(`${API_BASE}/chair/student-petitions`, {}, {
+    params: { action: "list", status, search, userId },
+  });
+  return data as { ok: boolean; rows: ChairPetitionRow[]; term_id: string };
+}
+
+export async function updateChairSPCourse(course_id: string, payload: { status?: string; remarks?: string }) {
+  const { data } = await axios.post(`${API_BASE}/chair/student-petitions`, payload, {
+    params: { action: "update", courseId: course_id },
+  });
+  return data as { ok: boolean; matched: number; modified: number };
+}
+
+export async function bulkForwardChairSP(course_ids: string[], status?: string) {
+  const { data } = await axios.post(`${API_BASE}/chair/student-petitions`, { course_ids, status }, {
+    params: { action: "bulkForward" },
+  });
+  return data as { ok: boolean; matched: number; modified: number; status: string };
+}
+
 
 /* =========================================================
    ===============  FACULTY: OVERVIEW  =====================
@@ -1793,4 +1868,28 @@ export function userIsChair(): boolean {
   } catch {
     return false;
   }
+}
+
+
+/** Update coordinators & teaching team by names. Backend resolves user/faculty IDs. */
+export async function updateChairCoursePeople(
+  course_id: string,
+  payload: {
+    coordinators?: { first_name: string; last_name: string }[];
+    teaching_team?: { first_name: string; last_name: string }[];
+    userId?: string;
+    userEmail?: string;
+  }
+): Promise<{
+  ok: boolean;
+  updated?: number;
+  message?: string;
+  coordinators?: { name: string; email?: string }[];
+  teaching_team?: { name: string }[];
+}> {
+  const params: Record<string, any> = { action: "editPeople", courseId: course_id };
+  if (payload.userId) params.userId = payload.userId;
+  if (payload.userEmail) params.userEmail = payload.userEmail;
+  const { data } = await axios.post(`${API_BASE}/chair/course-management`, payload, { params });
+  return data;
 }

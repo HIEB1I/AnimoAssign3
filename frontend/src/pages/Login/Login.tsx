@@ -19,22 +19,34 @@ const Login: React.FC = () => {
     setError(null);
     try {
       const user: LoginResponse = await apiLogin(email.trim());
-      localStorage.setItem("animo.user", JSON.stringify(user));
-
       const roles = (user.roles || []).map((r) => r.toLowerCase());
+
+      // Decide destination based on roles
+      let dest: string | null = null;
       if (roles.includes("apo")) {
-        navigate("/apo/preenlistment", { replace: true });
+        dest = "/apo/preenlistment";
       } else if (roles.includes("office manager")) {
-        navigate("/om/load-assignment", { replace: true });
-      } else if (roles.includes("deparment chair")) {
-        navigate("/chair", { replace: true });
+        dest = "/om/load-assignment";
+      } else if (roles.includes("department chair") || roles.includes("deparment chair")) {
+        dest = "/chair";
       } else if (roles.includes("faculty")) {
-        navigate("/faculty/overview", { replace: true });
+        dest = "/faculty/overview";
       } else if (roles.includes("student")) {
-        navigate("/student/petition", { replace: true });
+        dest = "/student/petition";
+      } else if (roles.includes("admin")) {
+        dest = "/admin";
       } else if (roles.includes("dean")) {
+        // set your dean landing here if needed
+        dest = null;
+      }
+
+      if (dest) {
+        // Only persist user if we have a valid landing
+        localStorage.setItem("animo.user", JSON.stringify(user));
+        navigate(dest, { replace: true });
       } else {
-        navigate("/om/home", { replace: true });
+        // Stay on login and show an error
+        setError("Your account has no valid role configured. Please contact the administrator.");
       }
     } catch (err: any) {
       setError(err?.message || "Login failed");
@@ -48,14 +60,16 @@ const Login: React.FC = () => {
       <div className="hidden sm:flex flex-1 items-center justify-center">
         <div className="relative px-6">
           <img src={AA_Logo} alt="AnimoAssign Logo" className="w-[750px] h-[150px]" />
-          <p className="absolute left-[115px] top-[125px] text-white text-xl font-normal">Delivering schedules that work for all.</p>
+          <p className="absolute left-[115px] top-[125px] text-white text-xl font-normal">
+            Delivering schedules that work for all.
+          </p>
         </div>
       </div>
 
       <div className="min-h-screen bg-[#F5F5F5] shadow-xl ml-auto flex items-center justify-center w-full sm:w-1/2 lg:w-[520px] 2xl:w-[560px] p-6 sm:p-8">
         <div className="bg-white rounded-2xl shadow-xl w-full max-w-md p-6 sm:p-8">
           <div className="mb-6 sm:mb-8">
-            <h2 className="text-2xl sm:3xl font-bold">Log In</h2>
+            <h2 className="text-2xl sm:text-3xl font-bold">Log In</h2>
             <div className="h-1 w-16 sm:w-20 bg-[#21804A] rounded mt-2" />
           </div>
 
@@ -84,7 +98,11 @@ const Login: React.FC = () => {
                   onChange={(e) => setPassword(e.target.value)}
                   autoComplete="current-password"
                 />
-                <button type="button" onClick={() => setShowPw((s) => !s)} className="absolute inset-y-0 right-0 pr-3 flex items-center">
+                <button
+                  type="button"
+                  onClick={() => setShowPw((s) => !s)}
+                  className="absolute inset-y-0 right-0 pr-3 flex items-center"
+                >
                   {showPw ? <Eye className="h-5 w-5 text-gray-500" /> : <EyeOff className="h-5 w-5 text-gray-500" />}
                 </button>
               </div>
@@ -92,7 +110,11 @@ const Login: React.FC = () => {
 
             {error && <div className="text-sm text-red-600 text-center">{error}</div>}
 
-            <button type="submit" disabled={loading} className="w-full py-3 rounded-xl bg-[#21804A] text-white font-semibold shadow hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-[#21804A] disabled:opacity-60">
+            <button
+              type="submit"
+              disabled={loading}
+              className="w-full py-3 rounded-xl bg-[#21804A] text-white font-semibold shadow hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-[#21804A] disabled:opacity-60"
+            >
               {loading ? "Logging in…" : "Login"}
             </button>
 
