@@ -893,37 +893,7 @@ export default function FACULTY_Preferences() {
     };
   };
 
-<<<<<<< Updated upstream
-  const toModeObject = (v: SavedPrefs) => {
-    const code = (deliveryToCode(v.delivery) || "F2F").toUpperCase();
-    if (code === "ONL") return { mode: "ONL", campus_id: "" };
-    if (/laguna/i.test(v.campus)) return { mode: code, campus_id: "CMPS0002" };
-    if (/manila/i.test(v.campus)) return { mode: code, campus_id: "CMPS0001" };
-    return { mode: code, campus_id: "" };
-  };
-
-  const toServerPayload = (v: SavedPrefs, finished: boolean) => ({
-    preferred_units: Number(v.prefUnits),
-    availability_days: compressDays(v.days),
-    preferred_times: v.timeSlots,
-    preferred_kacs: (v.kac || []).map(nameToId),     // send IDs
-    preferred_courses: v.courses,                    // NEW: persist courses
-    deloading_data: v.noDeloading
-      ? []
-      : (v.deloadings || [])
-          .filter((r) => r && r.type)
-          .map((r) => ({ deloading_type: r.type, units: r.units ?? 0 })), // NEW: persist deloading
-    mode: toModeObject(v),                           // single object
-    notes: v.remarks,
-    has_new_prep: false,
-    is_finished: finished,
-  });
-
-  // CHANGE: Always refresh the Saved panel — even on drafts.
-  async function afterSubmitRefresh(res: any, _isFinal: boolean) {
-=======
   async function afterSubmitRefresh(res: any) {
->>>>>>> Stashed changes
     if (res?.ok && res?.preference) {
       const normalized = fromServerToSaved(res.preference);
       setSaved(normalized);
