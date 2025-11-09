@@ -17,8 +17,8 @@ services:
     image: mongo:7
     command: ["mongod","--replSet","animoassignRS","--bind_ip_all","--auth","--keyFile","/run/secrets/mongo-keyfile"]
     environment:
-      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME}
-      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD}
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_INITDB_ROOT_USERNAME:-animo_root}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD:-DLSU1234!}
     volumes:
       - mongo_tertiary_data:/data/db
       - /opt/secrets/animoassign/mongo-keyfile:/run/secrets/mongo-keyfile:ro
