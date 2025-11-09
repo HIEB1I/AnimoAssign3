@@ -1,4 +1,5 @@
 # analytics/app/OM_REPORTS_ANALYTICS/OM_RP_FacultyTeachingHistory.py
+
 from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Query
 
@@ -7,13 +8,11 @@ from ..db_async import get_db  # reuse the shared Mongo client/db
 
 router = APIRouter(tags=["OM Reports • Faculty Teaching History"])
 
-# ---------- helpers (ported from db_async) ----------
 def _fmt_hhmm(raw: Optional[str]) -> str:
-    """'730' → '07:30', '900' → '09:00'."""
     s = (raw or "").strip()
     if not s:
         return ""
-    s = s.zfill(4)  # '730' -> '0730'
+    s = s.zfill(4)
     return f"{s[:-2]}:{s[-2:]}"
 
 def _derive_room_type_from_room(room_value: Optional[str]) -> Optional[str]:
@@ -24,17 +23,15 @@ def _derive_room_type_from_room(room_value: Optional[str]) -> Optional[str]:
         return None
     return "Classroom"
 
-# ---------- core query (ported from db_async) ----------
+def _ay_label(start: Optional[int]) -> Optional[str]:
+    if start is None:
+        return None
+    try:
+        return f"AY {start}–{start + 1}"
+    except Exception:
+        return None
+
 async def fetch_teaching_history(faculty_id: str) -> List[Dict[str, Any]]:
-    """
-    Joins by business keys (section_id, course_id, term_id).
-    Collections:
-      - faculty_assignments
-      - sections
-      - courses
-      - terms
-      - section_schedules
-    """
     db = get_db()
 
     assignments = await db["faculty_assignments"] \
@@ -75,9 +72,21 @@ async def fetch_teaching_history(faculty_id: str) -> List[Dict[str, Any]]:
                 return val[0] if val else None
             return val
 
+        ay_start: Optional[int] = term.get("acad_year_start") if term else None
+        ay_label = _ay_label(ay_start)
+        term_number: Optional[int] = term.get("term_number") if term else None
+
         results.append({
+            # keep raw ids if you still need them downstream
             "term_id": term["term_id"] if term else None,
-            "term_name": (term["term_id"] if term else None),
+
+            # <<< changed: use Academic Year for display/grouping >>>
+            "term_name": ay_label or "AY N/A",
+
+            # optional extras (not required by your UI, but handy)
+            "acad_year_start": ay_start,
+            "term_number": term_number,
+
             "course_code": _course_code(course.get("course_code") if course else None),
             "course_title": course.get("course_title") if course else None,
             "section_code": section.get("section_code"),
@@ -87,14 +96,15 @@ async def fetch_teaching_history(faculty_id: str) -> List[Dict[str, Any]]:
             "schedule": formatted_sched,
         })
 
+    # sort by academic year then term number then course/section
     results.sort(key=lambda r: (
-        (r.get("term_name") or ""),
+        r.get("acad_year_start") if r.get("acad_year_start") is not None else -1,
+        r.get("term_number") if r.get("term_number") is not None else -1,
         (r.get("course_code") or ""),
         (r.get("section_code") or ""),
     ))
     return results
 
-# ---------- router endpoint (same URL shape used by frontend) ----------
 @router.get("/analytics/teaching-history")
 async def get_teaching_history(faculty_id: str = Query(...)):
     rows = await fetch_teaching_history(faculty_id)
