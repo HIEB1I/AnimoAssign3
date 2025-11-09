@@ -1162,12 +1162,6 @@ if (isGE) {
     await loadCurriculum();
   };
 
-  const handleCurrReplace = async (program_id: string, batch_id: string, old_course_id: string, new_course_id: string) => {
-    if (!user?.userId) return;
-    await curriculumEditCourse(user.userId, { program_id, batch_id, old_course_id, new_course_id } as any);
-    await loadCurriculum();
-  };
-
   const handleCurrEditUnits = async (program_id: string, batch_id: string, course_id: string, units: number | null) => {
     if (!user?.userId) return;
     await curriculumEditCourse(user.userId, {
@@ -1259,13 +1253,13 @@ if (isGE) {
           {/* Right side of toolbar */}
           <div className="ml-auto flex items-center gap-3">
             {view === "offerings" && (
-              <button
-                onClick={() => setShowForward(true)}
-                className="inline-flex items-center gap-2 rounded-md bg-emerald-700 px-4 py-2 text-sm font-medium text-white shadow-sm"
-              >
-                <Send className="h-4 w-4" />
-                Forward
-              </button>
+          <button
+            onClick={() => setShowForward(true)}
+            className="inline-flex items-center gap-2 rounded-md bg-emerald-700 px-4 py-2 text-sm font-medium text-white shadow-sm"
+          >
+            <Send className="h-4 w-4" />
+            Submit for Scheduling
+          </button>
             )}
           </div>
           {/* Curriculum filters */}
@@ -2345,10 +2339,8 @@ if (isGE) {
                                 const allowedForReplace = (opts || []).filter((o) =>
                                   (eligibleCourseIdsByProgram[pid] || new Set()).has(o.course_id)
                                 );
-                                const replaceCodes = allowedForReplace.map((o) => o.course_code);
                                 const replaceCodeToId: Record<string, string> = {};
                                 allowedForReplace.forEach((o) => (replaceCodeToId[o.course_code] = o.course_id));
-                                const replacePlaceholder = "Edit…";
 
                                 return (
                                   <div key={c.course_id} className="px-3 py-2 bg-white">
@@ -2432,22 +2424,17 @@ if (isGE) {
                             {programList.map((itm) => {
                               const pid = itm.program_id;
                               const programCode = itm?.program_code || "—";
-                              const deptId = itm?.department_id || "";
                               const opts = optionsByProgram[pid] || [];
-                              const selectedId = currAddSel[pid] || "";
 
                               const allowedIds = eligibleCourseIdsByProgram[pid] || new Set<string>();
                               const filteredOpts = (opts || []).filter((o) => allowedIds.has(o.course_id));
 
-                              const codeOptions = filteredOpts.map((o) => o.course_code);
                               const codeToId: Record<string, string> = {};
                               const idToCode: Record<string, string> = {};
                               filteredOpts.forEach((o) => {
                                 codeToId[o.course_code] = o.course_id;
                                 idToCode[o.course_id] = o.course_code;
                               });
-
-                              const selectedLabel = selectedId ? idToCode[selectedId] || "— Add course —" : "— Add course —";
 
                               const filteredCourses = (itm?.courses || []).filter((c) => {
                                 if (!currSearch.trim()) return true;
@@ -2498,10 +2485,8 @@ if (isGE) {
                                       const allowedForReplace = (opts || []).filter((o) =>
                                         (eligibleCourseIdsByProgram[pid] || new Set()).has(o.course_id)
                                       );
-                                      const replaceCodes = allowedForReplace.map((o) => o.course_code);
                                       const replaceCodeToId: Record<string, string> = {};
                                       allowedForReplace.forEach((o) => (replaceCodeToId[o.course_code] = o.course_id));
-                                      const replacePlaceholder = "Edit…";
 
                                       return (
                                         <div key={c.course_id} className="px-3 py-2 bg-white">
@@ -2648,25 +2633,22 @@ if (isGE) {
       )}
 
       {/* ----------------------------- Forward Modal ----------------------------- */}
-      {showForward && (
-        <ForwardModal
-          onClose={() => setShowForward(false)}
-          onSubmit={async (note) => {
-            if (!user?.userId) return;
-            try {
-              await forwardApoCourseOfferings(user.userId, {
-                to: "", // leave empty if backend resolves recipients
-                subject: `Course Offerings – ${data?.term_label || ""}`,
-                message: note,
-              });
-              setShowForward(false);
-              alert("Plan forwarded.");
-            } catch (e: any) {
-              alert(e?.message || "Failed to forward.");
-            }
-          }}
-        />
-      )}
+     {showForward && (
+      <SubmitModal
+        onClose={() => setShowForward(false)}
+        onSubmit={async (note) => {
+          if (!user?.userId) return;
+          await forwardApoCourseOfferings(user.userId, {
+            to: "scheduling",
+            subject: `Submit for Scheduling — ${data?.term_label || ""}`,
+            message: note,
+            exclude_conflicts: true,
+          });
+          setShowForward(false);
+          alert("Submitted to Scheduling. Conflicted sections remain visible on the APO side.");
+        }}
+      />
+    )}
 
       {/* --------------------------- Planning Review Modal --------------------------- */}
       {showPlanModal && data?.planning && (
@@ -2701,7 +2683,7 @@ if (isGE) {
 }
 
 /* --------------------------- Small helper components --------------------------- */
-const ForwardModal: React.FC<{
+const SubmitModal: React.FC<{
   onClose: () => void;
   onSubmit: (note: string) => void | Promise<void>;
 }> = ({ onClose, onSubmit }) => {
@@ -2710,16 +2692,17 @@ const ForwardModal: React.FC<{
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
       <div className="w-full max-w-lg rounded-xl bg-white shadow-xl border border-gray-200">
-        <div className="border-b px-4 py-3 font-semibold">Forward Plan</div>
+        <div className="border-b px-4 py-3 font-semibold">Submit for Scheduling</div>
         <div className="p-4 space-y-2">
           <div className="text-sm text-slate-700">
-            Add an optional note before forwarding the course offerings plan for review/approval.
+            This hands the plan to the Office Manager to assign faculty and schedules.
+            Conflicted sections are kept on your (APO) side and are not included in the submission.
           </div>
           <textarea
             className="w-full rounded border px-3 py-2 text-sm min-h-[120px]"
             value={note}
             onChange={(e) => setNote(e.target.value)}
-            placeholder="Optional note to reviewers…"
+            placeholder="Optional note…"
           />
         </div>
         <div className="flex items-center justify-end gap-2 border-t px-4 py-3">
@@ -2738,8 +2721,7 @@ const ForwardModal: React.FC<{
               }
             }}
           >
-            <Send className="inline-block h-4 w-4 mr-1 align-[-2px]" />
-            Forward
+            Submit
           </button>
         </div>
       </div>

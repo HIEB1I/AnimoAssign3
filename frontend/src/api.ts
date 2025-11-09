@@ -841,13 +841,20 @@ export async function deleteApoOfferingRow(
 }
 
 /* ---- Plan routing ---- */
-export async function forwardApoCourseOfferings(
+export function forwardApoCourseOfferings(
   userId: string,
-  payload: { to: string; subject?: string; message?: string; attachment_html?: string }
-): Promise<{ ok: true; queued: boolean; outbox_id: string }> {
-  const url = `${API_BASE}/apo/courseofferings${q({ userId, action: "forward" })}`;
-  return post(url, payload);
+  payload: {
+    to?: string;
+    subject?: string;
+    message?: string;
+    exclude_conflicts?: boolean; // <-- add this
+  }
+) {
+  return axios
+    .post(join(API_BASE, `/apo/forward/${userId}`), payload)
+    .then(r => r.data);
 }
+
 
 export async function approveApoOfferingsPlan(
   userId: string
