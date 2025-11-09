@@ -23,6 +23,7 @@ import {
   curriculumAddCourse,
   curriculumEditCourse,
   curriculumRemoveCourse,
+  getElectiveOptions,                 // <-- ADD THIS
   type ApiConflict,
 } from "../../api";
 
@@ -30,7 +31,13 @@ import {
 const DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"] as const;
 type Day = (typeof DAYS)[number];
 
-type RoomOption = { room_id: string; room_number: string; capacity?: number | null; room_type?: string | null };
+type RoomOption = {
+  room_id: string;
+  room_number: string;
+  capacity?: number | null;
+  room_type?: string | null;
+  building?: string;            
+};
 
 const filterRoomsByCap = (options: RoomOption[], cap?: number | null) => {
   const c = typeof cap === "number" ? cap : 0;
@@ -439,6 +446,8 @@ export default function CourseOfferingsPage() {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
   const [conflict, setConflict] = useState<ConflictState | null>(null);
+  const [globalElectives, setGlobalElectives] = useState<CourseOption[]>([]);
+  const [electiveOptionsCache, setElectiveOptionsCache] = useState<Record<string, CourseOption[]>>({});
 // ---------- RoomSelectBox (SelectBox-powered) ----------
 const RoomSelectBox: React.FC<{
   rooms: RoomOption[];
@@ -448,7 +457,10 @@ const RoomSelectBox: React.FC<{
   onChange: (roomId: string | null) => void;
 }> = ({ rooms, value, disabled, className, onChange }) => {
   const items = useMemo(
-    () => rooms.map(r => ({ id: r.room_id, label: r.room_number })),
+    () => rooms.map(r => ({
+      id: r.room_id,
+      label: r.building ? `${r.building} ${r.room_number}` : r.room_number
+    })),
     [rooms]
   );
 
@@ -495,6 +507,20 @@ const RoomSelectBox: React.FC<{
       : (user.roles[0] as string) || "User";
   }, [user]);
   const campusLabel = data?.campus?.campus_name || curr?.campus?.campus_name || "";
+  // --- Electives: per-placeholder fetch helper ---
+  async function ensureElectiveOptionsFor(placeholderId?: string) {
+    if (!user?.userId || !placeholderId) return;
+    if (electiveOptionsCache[placeholderId]) return;
+
+    const { options } = await getElectiveOptions(user.userId, placeholderId);
+    const list = (options || []).map(o => ({
+      ...o,
+      course_code: Array.isArray(o.course_code) ? (o.course_code[0] ?? "") : (o.course_code ?? ""),
+      type_of_course: "Elective Course",
+    }));
+
+    setElectiveOptionsCache(prev => ({ ...prev, [placeholderId]: list }));
+  }
 
   /* ---------------------------------- load ---------------------------------- */
 
@@ -514,28 +540,46 @@ const RoomSelectBox: React.FC<{
     return { deptId, progId, bId };
   };
 
-  const loadOfferings = async () => {
-    if (!user?.userId) return;
-    setLoading(true);
-    setErr(null);
-    try {
-      const { deptId, progId, bId } = resolveFilterIds();
-      const resp = await getApoCourseOfferings(user.userId, {
-        view: "offerings",
-        level: level === "All Levels" ? undefined : normalizeLevel(level),
-        department_id: deptId,
-        program_id: progId,
-        batch_id: bId,
-      });
-      setData(resp as OfferingsResponse);
-      setRows((resp as OfferingsResponse).rows);
-    } catch (e: any) {
-      setErr(e?.message || "Failed to load course offerings.");
-      setRows([]);
-    } finally {
-      setLoading(false);
+const loadOfferings = async () => {
+  if (!user?.userId) return;
+  setLoading(true);
+  setErr(null);
+  try {
+    const { deptId, progId, bId } = resolveFilterIds();
+    const resp = await getApoCourseOfferings(user.userId, {
+      view: "offerings",
+      level: level === "All Levels" ? undefined : normalizeLevel(level),
+      department_id: deptId,
+      program_id: progId,
+      batch_id: bId,
+    });
+    setData(resp as OfferingsResponse);
+    setRows((resp as OfferingsResponse).rows);
+
+    // NEW: if backend didn't send a global list, fetch it using getElectiveOptions
+    const hasServerList =
+      Array.isArray((resp as any).all_specific_electives) &&
+      (resp as any).all_specific_electives.length > 0;
+
+    if (!hasServerList) {
+      const r = await getElectiveOptions(user.userId); // <-- now actually used
+      const list = (r?.options ?? []).map(o => ({
+        ...o,
+        course_code: Array.isArray(o.course_code) ? (o.course_code[0] ?? "") : (o.course_code ?? ""),
+        type_of_course: "Elective Course",
+      }));
+      setGlobalElectives(list);
+    } else {
+      setGlobalElectives([]); // prefer server-provided list
     }
-  };
+  } catch (e: any) {
+    setErr(e?.message || "Failed to load course offerings.");
+    setRows([]);
+  } finally {
+    setLoading(false);
+  }
+};
+
 
   const loadCurriculum = async () => {
     if (!user?.userId) return;
@@ -678,6 +722,9 @@ const RoomSelectBox: React.FC<{
       row.links?.elective_placeholder_course_id ||
       (rowIsPlaceholder ? row.course.course_id : undefined);
 
+    // NEW: prefetch list for this specific placeholder (if any)
+    ensureElectiveOptionsFor(electiveParentId);
+
     // If this row is already a specific elective, prefill the specific id to the current course id
     const currentSpecificId = rowIsSpecificElective ? row.course.course_id : undefined;
 
@@ -758,35 +805,39 @@ const RoomSelectBox: React.FC<{
     Array.isArray(v) ? (v[0] ?? "") : (v ?? "");
 
   // prefer server-provided global list if present
-  const allSpecificElectives: CourseOption[] = useMemo(() => {
-    const fromServer = (data?.all_specific_electives || [])
-      .filter(o => isSpecificElectiveType(o.type_of_course || ""))
-      .map(o => ({ ...o, course_code: codeText(o.course_code) })); // normalize
+const allSpecificElectives: CourseOption[] = useMemo(() => {
+  const fromServer = (data?.all_specific_electives || [])
+    .filter(o => isSpecificElectiveType(o.type_of_course || ""))
+    .map(o => ({ ...o, course_code: codeText(o.course_code) }));
 
-    if (fromServer.length) {
-      return [...fromServer].sort((a,b)=>codeText(a.course_code).localeCompare(codeText(b.course_code)));
-    }
+  // Prefer server list; otherwise use globalElectives fetched via getElectiveOptions
+  const primary = fromServer.length ? fromServer : globalElectives;
 
-    // fallback: derive from grouped options
-    const seen = new Set<string>();
-    const out: CourseOption[] = [];
-    Object.values(data?.course_options_by_group || {}).forEach(arr => {
-      (arr || []).forEach((o: any) => {
-        const t = String(o?.type_of_course || "").toLowerCase().trim();
-        if (!(t === "elective course" || t.includes("elective course"))) return;
-        const id = String(o?.course_id || "");
-        if (!id || seen.has(id)) return;
-        seen.add(id);
-        out.push({
-          course_id: id,
-          course_code: codeText(o?.course_code),
-          course_title: String(o?.course_title || ""),
-          type_of_course: String(o?.type_of_course || ""),
-        });
+  if (primary.length) {
+    return [...primary].sort((a,b)=>codeText(a.course_code).localeCompare(codeText(b.course_code)));
+  }
+
+  // last resort: derive from grouped options
+  const seen = new Set<string>();
+  const out: CourseOption[] = [];
+  Object.values(data?.course_options_by_group || {}).forEach(arr => {
+    (arr || []).forEach((o: any) => {
+      const t = String(o?.type_of_course || "").toLowerCase().trim();
+      if (!(t === "elective course" || t.includes("elective course"))) return;
+      const id = String(o?.course_id || "");
+      if (!id || seen.has(id)) return;
+      seen.add(id);
+      out.push({
+        course_id: id,
+        course_code: codeText(o?.course_code),
+        course_title: String(o?.course_title || ""),
+        type_of_course: String(o?.type_of_course || ""),
       });
     });
-    return out.sort((a,b)=>codeText(a.course_code).localeCompare(codeText(b.course_code)));
-  }, [data?.all_specific_electives, data?.course_options_by_group]);
+  });
+  return out.sort((a,b)=>codeText(a.course_code).localeCompare(codeText(b.course_code)));
+}, [data?.all_specific_electives, data?.course_options_by_group, globalElectives]);
+
 
 const saveEdit = async () => {
   if (!editing || !user?.userId) return;
@@ -1517,16 +1568,28 @@ if (isGE) {
 
                                               if (!electiveEditable) return null;
 
-                                              // prefer server-provided list; fall back to derived list already computed
-                                              const specificList = (data?.all_specific_electives || allSpecificElectives || []).filter(o =>
-                                                isSpecificElectiveType(o.type_of_course || "")
-                                              );
+                                              // Prefer the server list if it exists and has items; else fallback to derived list
+                                              const preferServer =
+                                              Array.isArray(data?.all_specific_electives) && data!.all_specific_electives!.length > 0
+                                                ? data!.all_specific_electives!
+                                                : allSpecificElectives;
 
-                                              const currentSpecific = editing?.draft.specific_course_id || (isSpecific ? r.course.course_id : "");
-                                              const parentId =
-                                                editing?.draft.for_placeholder_course_id ||
-                                                r.links?.elective_placeholder_course_id ||
-                                                (isPlaceholder ? r.course.course_id : "");
+                                            const parentId =
+                                              editing?.draft.for_placeholder_course_id ||
+                                              r.links?.elective_placeholder_course_id ||
+                                              (isPlaceholder ? r.course.course_id : "");
+
+                                            // NEW: prefer per-placeholder cache, else the global list
+                                            const sourceList =
+                                              (parentId && electiveOptionsCache[parentId]) ||
+                                              preferServer;
+
+                                            const specificList = (sourceList || []).filter((o) =>
+                                              isSpecificElectiveType(o.type_of_course || "")
+                                            );
+
+                                            const currentSpecific = editing?.draft.specific_course_id || (isSpecific ? r.course.course_id : "");
+
 
                                               return (
                                                 <div className="mt-2">
@@ -1904,12 +1967,26 @@ if (isGE) {
                                                     r.course.course_code as any,
                                                     r.course.course_title
                                                   );
+                                                  let specificElectives = groupOptions.filter((o) =>
+                                                    isSpecificElectiveType(o.type_of_course || "")
+                                                  );
 
-                                                  let specificElectives = groupOptions.filter(o => isSpecificElectiveType(o.type_of_course || ""));
-                                                  if (specificElectives.length === 0) {
-                                                    specificElectives = (data?.all_specific_electives || allSpecificElectives)
-                                                      .filter(o => isSpecificElectiveType(o.type_of_course || ""));
-                                                  }
+                                                  const parentId = r.course.course_id; // placeholder row's course_id
+
+                                                  // NEW: prefetch and prefer per-placeholder cache
+                                                  if (parentId) ensureElectiveOptionsFor(parentId);
+
+                                                  const preferServer =
+                                                    Array.isArray(data?.all_specific_electives) && data!.all_specific_electives!.length > 0
+                                                      ? data!.all_specific_electives!
+                                                      : allSpecificElectives;
+
+                                                  specificElectives =
+                                                    (parentId && electiveOptionsCache[parentId]) ||
+                                                    specificElectives.length
+                                                      ? specificElectives
+                                                      : preferServer.filter((o) => isSpecificElectiveType(o.type_of_course || ""));
+
 
                                                   const selectedType = codeToType[addCourseCode] || "";
                                                   const isGE = isGEType(selectedType);
@@ -2129,176 +2206,182 @@ if (isGE) {
                     className="grid gap-4"
                     style={{ gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))" }}
                   >
-                    {Object.keys(singleBatchPrograms).sort((a, b) =>
-                      (singleBatchPrograms[a]?.program_code || "").localeCompare(singleBatchPrograms[b]?.program_code || "")
-                    ).map((pid) => {
-                      const itm = (singleBatchPrograms as any)[pid] as CurriculumItem | undefined;
-                      if (!itm) return null;
+                    {Object.keys(singleBatchPrograms)
+                      .sort((a, b) =>
+                        (singleBatchPrograms[a]?.program_code || "").localeCompare(
+                          singleBatchPrograms[b]?.program_code || ""
+                        )
+                      )
+                      .map((pid) => {
+                        const itm = (singleBatchPrograms as any)[pid] as CurriculumItem | undefined;
+                        if (!itm) return null;
 
-                      const programCode = itm?.program_code || "—";
-                      const deptId = itm?.department_id || "";
-                      const canAdd = !!selectedBatchId;
-                      const opts = optionsByProgram[pid] || [];
-                      const selectedId = currAddSel[pid] || "";
+                        const programCode = itm?.program_code || "—";
+                        const deptId = itm?.department_id || "";
+                        const canAdd = !!selectedBatchId;
+                        const opts = optionsByProgram[pid] || [];
+                        const selectedId = currAddSel[pid] || "";
 
-                      const allowedIds = eligibleCourseIdsByProgram[pid] || new Set<string>();
-                      const filteredOpts = (opts || []).filter((o) => allowedIds.has(o.course_id));
+                        const allowedIds = eligibleCourseIdsByProgram[pid] || new Set<string>();
+                        const filteredOpts = (opts || []).filter((o) => allowedIds.has(o.course_id));
 
-                      const codeOptions = filteredOpts.map((o) => o.course_code);
-                      const codeToId: Record<string, string> = {};
-                      const idToCode: Record<string, string> = {};
-                      filteredOpts.forEach((o) => {
-                        codeToId[o.course_code] = o.course_id;
-                        idToCode[o.course_id] = o.course_code;
-                      });
+                        const codeOptions = filteredOpts.map((o) => o.course_code);
+                        const codeToId: Record<string, string> = {};
+                        const idToCode: Record<string, string> = {};
+                        filteredOpts.forEach((o) => {
+                          codeToId[o.course_code] = o.course_id;
+                          idToCode[o.course_id] = o.course_code;
+                        });
 
-                      const selectedLabel = selectedId ? idToCode[selectedId] || "— Add course —" : "— Add course —";
+                        const selectedLabel = selectedId ? idToCode[selectedId] || "— Add course —" : "— Add course —";
 
-                      const filteredCourses = (itm?.courses || []).filter((c) => {
-                        if (!currSearch.trim()) return true;
-                        const q = currSearch.toLowerCase();
-                        return c.code.toLowerCase().includes(q) || c.title.toLowerCase().includes(q);
-                      });
+                        const filteredCourses = (itm?.courses || []).filter((c) => {
+                          if (!currSearch.trim()) return true;
+                          const q = currSearch.toLowerCase();
+                          return c.code.toLowerCase().includes(q) || c.title.toLowerCase().includes(q);
+                        });
 
-                      return (
-                        <div key={pid} className="rounded-lg border border-gray-200 overflow-hidden">
-                          {/* header with add controls */}
-                          <div className="flex items-center justify-between gap-2 border-b bg-gray-50 px-3 py-2">
-                            <div className="font-semibold text-emerald-800 truncate" title={programCode}>
-                              {programCode}
-                            </div>
-
-                            <div className="flex items-center gap-2 w-full max-w-full">
-                              <div className="w-full min-w-0">
-                                <SelectBox
-                                  value={selectedLabel}
-                                  onChange={(label: string) => {
-                                    const cid = codeToId[label] || "";
-                                    setCurrAddSel((p) => ({ ...p, [pid]: cid }));
-                                  }}
-                                  options={["— Add course —", ...codeOptions]}
-                                />
+                        return (
+                          <div key={pid} className="rounded-lg border border-gray-200 overflow-hidden">
+                            {/* header with add controls */}
+                            <div className="flex items-center justify-between gap-2 border-b bg-gray-50 px-3 py-2">
+                              <div className="font-semibold text-emerald-800 truncate" title={programCode}>
+                                {programCode}
                               </div>
 
-                              <button
-                                className="inline-flex items-center gap-2 rounded-md bg-emerald-700 px-3 py-1.5 text-sm font-medium text-white shadow-sm"
-                                disabled={!canAdd || !selectedId}
-                                onClick={() => {
-                                  if (!selectedBatchId || !selectedId) return;
-                                  handleCurrAdd(pid, selectedBatchId, selectedId);
-                                }}
-                              >
-                                <Plus className="h-4 w-4" />
-                                Add
-                              </button>
+                              <div className="flex items-center gap-2 w-full max-w-full">
+                                <div className="w-full min-w-0">
+                                  <SelectBox
+                                    value={selectedLabel}
+                                    onChange={(label: string) => {
+                                      const cid = codeToId[label] || "";
+                                      setCurrAddSel((p) => ({ ...p, [pid]: cid }));
+                                    }}
+                                    options={["— Add course —", ...codeOptions]}
+                                  />
+                                </div>
 
-                              <button
-                                className="inline-flex items-center gap-2 rounded-md border border-emerald-700 px-3 py-1.5 text-sm font-medium text-emerald-700"
-                                onClick={() => {
-                                  if (!selectedBatchId) return;
-                                  const code = prompt("New course code:")?.trim();
-                                  const title = code ? prompt("Course title:")?.trim() : "";
-                                  const level = title
-                                    ? prompt("Program level (Undergraduate or Graduate Studies):")?.trim()
-                                    : "";
-                                  const unitsStr = level ? prompt("Units (number):")?.trim() : "";
-                                  const unitsNum = unitsStr ? Number(unitsStr) : undefined;
-                                  if (!code || !title || !level) return;
-                                  handleCurrAddCustom(pid, selectedBatchId, {
-                                    course_code: normCode(code),
-                                    course_title: title!,
-                                    department_id: deptId,
-                                    program_level: level!,
-                                    units: isNaN(unitsNum as number) ? undefined : (unitsNum as number),
-                                  });
-                                }}
-                              >
-                                <Plus className="h-4 w-4" />
-                                Custom
-                              </button>
+                                <button
+                                  className="inline-flex items-center gap-2 rounded-md bg-emerald-700 px-3 py-1.5 text-sm font-medium text-white shadow-sm"
+                                  disabled={!canAdd || !selectedId}
+                                  onClick={() => {
+                                    if (!selectedBatchId || !selectedId) return;
+                                    handleCurrAdd(pid, selectedBatchId, selectedId);
+                                  }}
+                                >
+                                  <Plus className="h-4 w-4" />
+                                  Add
+                                </button>
+
+                                <button
+                                  className="inline-flex items-center gap-2 rounded-md border border-emerald-700 px-3 py-1.5 text-sm font-medium text-emerald-700"
+                                  onClick={() => {
+                                    if (!selectedBatchId) return;
+                                    const code = prompt("New course code:")?.trim();
+                                    const title = code ? prompt("Course title:")?.trim() : "";
+                                    const level = title
+                                      ? prompt("Program level (Undergraduate or Graduate Studies):")?.trim()
+                                      : "";
+                                    const unitsStr = level ? prompt("Units (number):")?.trim() : "";
+                                    const unitsNum = unitsStr ? Number(unitsStr) : undefined;
+                                    if (!code || !title || !level) return;
+                                    handleCurrAddCustom(pid, selectedBatchId, {
+                                      course_code: normCode(code),
+                                      course_title: title!,
+                                      department_id: deptId,
+                                      program_level: level!,
+                                      units: isNaN(unitsNum as number) ? undefined : (unitsNum as number),
+                                    });
+                                  }}
+                                >
+                                  <Plus className="h-4 w-4" />
+                                  Custom
+                                </button>
+                              </div>
                             </div>
-                          </div>
 
-                          {/* body: course cards */}
-                          <div className="divide-y">
-                            {filteredCourses.length === 0 && (
-                              <div className="px-3 py-6 text-sm text-neutral-500 text-center">No courses.</div>
-                            )}
+                            {/* body: course cards */}
+                            <div className="divide-y">
+                              {filteredCourses.length === 0 && (
+                                <div className="px-3 py-6 text-sm text-neutral-500 text-center">No courses.</div>
+                              )}
 
-                            {filteredCourses.map((c) => {
-                              const units = typeof c.units === "number" ? c.units : null;
+                              {filteredCourses.map((c) => {
+                                const units = typeof c.units === "number" ? c.units : null;
 
-                              const allowedForReplace = (opts || []).filter((o) => (eligibleCourseIdsByProgram[pid] || new Set()).has(o.course_id));
-                              const replaceCodes = allowedForReplace.map((o) => o.course_code);
-                              const replaceCodeToId: Record<string, string> = {};
-                              allowedForReplace.forEach((o) => (replaceCodeToId[o.course_code] = o.course_id));
-                              const replacePlaceholder = "Edit…";
+                                const allowedForReplace = (opts || []).filter((o) =>
+                                  (eligibleCourseIdsByProgram[pid] || new Set()).has(o.course_id)
+                                );
+                                const replaceCodes = allowedForReplace.map((o) => o.course_code);
+                                const replaceCodeToId: Record<string, string> = {};
+                                allowedForReplace.forEach((o) => (replaceCodeToId[o.course_code] = o.course_id));
+                                const replacePlaceholder = "Edit…";
 
-                              return (
-                                <div key={c.course_id} className="px-3 py-2 bg-white">
-                                  <div className="flex items-start justify-between gap-3">
-                                    <div className="min-w-0">
-                                      <div className="font-semibold text-emerald-700 break-words">{c.code}</div>
-                                      <div className="text-[11px] text-neutral-600 truncate" title={c.title}>
-                                        {c.title}
+                                return (
+                                  <div key={c.course_id} className="px-3 py-2 bg-white">
+                                    <div className="flex items-start justify-between gap-3">
+                                      <div className="min-w-0">
+                                        <div className="font-semibold text-emerald-700 break-words">{c.code}</div>
+                                        <div className="text-[11px] text-neutral-600 truncate" title={c.title}>
+                                          {c.title}
+                                        </div>
+                                      </div>
+                                      <div className="flex items-center gap-3">
+                                        <input
+                                          type="number"
+                                          step="0.5"
+                                          defaultValue={units ?? ""}
+                                          placeholder="units"
+                                          className="h-9 w-16 rounded border px-2 text-sm text-center"
+                                          onBlur={(e) => {
+                                            if (!selectedBatchId) return;
+                                            const v = e.currentTarget.value.trim();
+                                            const num = v === "" ? null : Number(v);
+                                            if (v === "" || !isNaN(num!)) {
+                                              handleCurrEditUnits(pid, selectedBatchId, c.course_id, num);
+                                            }
+                                          }}
+                                        />
+                                        <button
+                                          className="text-red-500 hover:text-red-700"
+                                          title="Remove"
+                                          onClick={() => selectedBatchId && handleCurrRemove(pid, selectedBatchId, c.course_id)}
+                                        >
+                                          <Trash2 className="h-4 w-4" />
+                                        </button>
                                       </div>
                                     </div>
-                                    <div className="flex items-center gap-3">
-                                      <input
-                                        type="number"
-                                        step="0.5"
-                                        defaultValue={units ?? ""}
-                                        placeholder="units"
-                                        className="h-9 w-16 rounded border px-2 text-sm text-center"
-                                        onBlur={(e) => {
-                                          if (!selectedBatchId) return;
-                                          const v = e.currentTarget.value.trim();
-                                          const num = v === "" ? null : Number(v);
-                                          if (v === "" || !isNaN(num!)) {
-                                            handleCurrEditUnits(pid, selectedBatchId, c.course_id, num);
-                                          }
+
+                                    {/* replace via SelectBox (codes only) */}
+                                    <div className="mt-2 w-full min-w-0">
+                                      <SelectBox
+                                        value={replacePlaceholder}
+                                        onChange={(label: string) => {
+                                          if (label === replacePlaceholder) return;
+                                          const newId = replaceCodeToId[label];
+                                          if (!newId || !selectedBatchId) return;
+                                          handleCurrReplace(pid, selectedBatchId, c.course_id, newId);
                                         }}
+                                        options={[replacePlaceholder, ...replaceCodes]}
                                       />
-                                      <button
-                                        className="text-red-500 hover:text-red-700"
-                                        title="Remove"
-                                        onClick={() => selectedBatchId && handleCurrRemove(pid, selectedBatchId, c.course_id)}
-                                      >
-                                        <Trash2 className="h-4 w-4" />
-                                      </button>
                                     </div>
                                   </div>
+                                );
+                              })}
 
-                                  {/* replace via SelectBox (codes only) */}
-                                  <div className="mt-2 w-full min-w-0">
-                                    <SelectBox
-                                      value={replacePlaceholder}
-                                      onChange={(label: string) => {
-                                        if (label === replacePlaceholder) return;
-                                        const newId = replaceCodeToId[label];
-                                        if (!newId || !selectedBatchId) return;
-                                        handleCurrReplace(pid, selectedBatchId, c.course_id, newId);
-                                      }}
-                                      options={[replacePlaceholder, ...replaceCodes]}
-                                    />
-                                  </div>
+                              {/* footer: total units */}
+                              <div className="px-3 py-2 bg-emerald-50">
+                                <div className="flex items-center justify-between font-semibold text-emerald-800">
+                                  <span>Total</span>
+                                  <span>
+                                    {filteredCourses.reduce((s, c) => s + (typeof c.units === "number" ? c.units : 0), 0)}
+                                  </span>
                                 </div>
-                              );
-                            })}
-
-                            {/* footer: total units */}
-                            <div className="px-3 py-2 bg-emerald-50">
-                              <div className="flex items-center justify-between font-semibold text-emerald-800">
-                                <span>Total</span>
-                                <span>
-                                  {filteredCourses.reduce((s, c) => s + (typeof c.units === "number" ? c.units : 0), 0)}
-                                </span>
                               </div>
                             </div>
                           </div>
-                        </div>
-                      );
-                    })}
+                        );
+                      })}
                   </div>
                 </div>
               ) : (
@@ -2344,373 +2427,379 @@ if (isGE) {
 
                               const filteredCourses = (itm?.courses || []).filter((c) => {
                                 if (!currSearch.trim()) return true;
-                              const q = currSearch.toLowerCase();
-                              return c.code.toLowerCase().includes(q) || c.title.toLowerCase().includes(q);
+                                const q = currSearch.toLowerCase();
+                                return c.code.toLowerCase().includes(q) || c.title.toLowerCase().includes(q);
                               });
-                          return (
-                            <div key={pid} className="rounded-lg border border-gray-200 overflow-hidden">
-                              {/* header with add controls */}
-                              <div className="flex items-center justify-between gap-2 border-b bg-gray-50 px-3 py-2">
-                                <div className="font-semibold text-emerald-800 truncate" title={programCode}>
-                                  {programCode}
-                                </div>
 
-                                <div className="flex items-center gap-2 w-full max-w-full">
-                                  <div className="w-full min-w-0">
-                                    <SelectBox
-                                      value={selectedLabel}
-                                      onChange={(label: string) => {
-                                        const cid = codeToId[label] || "";
-                                        setCurrAddSel((p) => ({ ...p, [pid]: cid }));
-                                      }}
-                                      options={["— Add course —", ...codeOptions]}
-                                    />
-                                  </div>
+                              return (
+                                <div key={pid} className="rounded-lg border border-gray-200 overflow-hidden">
+                                  {/* header with add controls */}
+                                  <div className="flex items-center justify-between gap-2 border-b bg-gray-50 px-3 py-2">
+                                    <div className="font-semibold text-emerald-800 truncate" title={programCode}>
+                                      {programCode}
+                                    </div>
 
-                                  <button
-                                    className="inline-flex items-center gap-2 rounded-md bg-emerald-700 px-3 py-1.5 text-sm font-medium text-white shadow-sm"
-                                    disabled={!grp.batch_id || !selectedId}
-                                    onClick={() => {
-                                      if (!grp.batch_id || !selectedId) return;
-                                      handleCurrAdd(pid, grp.batch_id, selectedId);
-                                    }}
-                                  >
-                                    <Plus className="h-4 w-4" />
-                                    Add
-                                  </button>
-
-                                  <button
-                                    className="inline-flex items-center gap-2 rounded-md border border-emerald-700 px-3 py-1.5 text-sm font-medium text-emerald-700"
-                                    onClick={() => {
-                                      const code = prompt("New course code:")?.trim();
-                                      const title = code ? prompt("Course title:")?.trim() : "";
-                                      const level = title
-                                        ? prompt("Program level (Undergraduate or Graduate Studies):")?.trim()
-                                        : "";
-                                      const unitsStr = level ? prompt("Units (number):")?.trim() : "";
-                                      const unitsNum = unitsStr ? Number(unitsStr) : undefined;
-                                      if (!code || !title || !level || !grp.batch_id) return;
-                                      handleCurrAddCustom(pid, grp.batch_id, {
-                                        course_code: normCode(code),
-                                        course_title: title!,
-                                        department_id: deptId,
-                                        program_level: level!,
-                                        units: isNaN(unitsNum as number) ? undefined : (unitsNum as number),
-                                      });
-                                    }}
-                                  >
-                                    <Plus className="h-4 w-4" />
-                                    Custom
-                                  </button>
-                                </div>
-                              </div>
-
-                              {/* body: course cards */}
-                              <div className="divide-y">
-                                {filteredCourses.length === 0 && (
-                                  <div className="px-3 py-6 text-sm text-neutral-500 text-center">No courses.</div>
-                                )}
-
-                                {filteredCourses.map((c) => {
-                                  const units = typeof c.units === "number" ? c.units : null;
-
-                                  const allowedForReplace = (opts || []).filter((o) =>
-                                    (eligibleCourseIdsByProgram[pid] || new Set()).has(o.course_id)
-                                  );
-                                  const replaceCodes = allowedForReplace.map((o) => o.course_code);
-                                  const replaceCodeToId: Record<string, string> = {};
-                                  allowedForReplace.forEach((o) => (replaceCodeToId[o.course_code] = o.course_id));
-                                  const replacePlaceholder = "Edit…";
-
-                                  return (
-                                    <div key={c.course_id} className="px-3 py-2 bg-white">
-                                      <div className="flex items-start justify-between gap-3">
-                                        <div className="min-w-0">
-                                          <div className="font-semibold text-emerald-700 break-words">{c.code}</div>
-                                          <div className="text-[11px] text-neutral-600 truncate" title={c.title}>
-                                            {c.title}
-                                          </div>
-                                        </div>
-                                        <div className="flex items-center gap-3">
-                                          <input
-                                            type="number"
-                                            step="0.5"
-                                            defaultValue={units ?? ""}
-                                            placeholder="units"
-                                            className="h-9 w-16 rounded border px-2 text-sm text-center"
-                                            onBlur={(e) => {
-                                              const v = e.currentTarget.value.trim();
-                                              const num = v === "" ? null : Number(v);
-                                              if (v === "" || !isNaN(num!)) {
-                                                handleCurrEditUnits(pid, grp.batch_id, c.course_id, num);
-                                              }
-                                            }}
-                                          />
-                                          <button
-                                            className="text-red-500 hover:text-red-700"
-                                            title="Remove"
-                                            onClick={() => handleCurrRemove(pid, grp.batch_id, c.course_id)}
-                                          >
-                                            <Trash2 className="h-4 w-4" />
-                                          </button>
-                                        </div>
-                                      </div>
-
-                                      {/* replace via SelectBox (codes only) */}
-                                      <div className="mt-2 w-full min-w-0">
+                                    <div className="flex items-center gap-2 w-full max-w-full">
+                                      <div className="w-full min-w-0">
                                         <SelectBox
-                                          value={replacePlaceholder}
+                                          value={selectedLabel}
                                           onChange={(label: string) => {
-                                            if (label === replacePlaceholder) return;
-                                            const newId = replaceCodeToId[label];
-                                            if (!newId) return;
-                                            handleCurrReplace(pid, grp.batch_id, c.course_id, newId);
+                                            const cid = codeToId[label] || "";
+                                            setCurrAddSel((p) => ({ ...p, [pid]: cid }));
                                           }}
-                                          options={[replacePlaceholder, ...replaceCodes]}
+                                          options={["— Add course —", ...codeOptions]}
                                         />
                                       </div>
-                                    </div>
-                                  );
-                                })}
 
-                                {/* footer: total units */}
-                                <div className="px-3 py-2 bg-emerald-50">
-                                  <div className="flex items-center justify-between font-semibold text-emerald-800">
-                                    <span>Total</span>
-                                    <span>
-                                      {filteredCourses.reduce((s, c) => s + (typeof c.units === "number" ? c.units : 0), 0)}
-                                    </span>
+                                      <button
+                                        className="inline-flex items-center gap-2 rounded-md bg-emerald-700 px-3 py-1.5 text-sm font-medium text-white shadow-sm"
+                                        disabled={!grp.batch_id || !selectedId}
+                                        onClick={() => {
+                                          if (!grp.batch_id || !selectedId) return;
+                                          handleCurrAdd(pid, grp.batch_id, selectedId);
+                                        }}
+                                      >
+                                        <Plus className="h-4 w-4" />
+                                        Add
+                                      </button>
+
+                                      <button
+                                        className="inline-flex items-center gap-2 rounded-md border border-emerald-700 px-3 py-1.5 text-sm font-medium text-emerald-700"
+                                        onClick={() => {
+                                          const code = prompt("New course code:")?.trim();
+                                          const title = code ? prompt("Course title:")?.trim() : "";
+                                          const level = title
+                                            ? prompt("Program level (Undergraduate or Graduate Studies):")?.trim()
+                                            : "";
+                                          const unitsStr = level ? prompt("Units (number):")?.trim() : "";
+                                          const unitsNum = unitsStr ? Number(unitsStr) : undefined;
+                                          if (!code || !title || !level || !grp.batch_id) return;
+                                          handleCurrAddCustom(pid, grp.batch_id, {
+                                            course_code: normCode(code),
+                                            course_title: title!,
+                                            department_id: deptId,
+                                            program_level: level!,
+                                            units: isNaN(unitsNum as number) ? undefined : (unitsNum as number),
+                                          });
+                                        }}
+                                      >
+                                        <Plus className="h-4 w-4" />
+                                        Custom
+                                      </button>
+                                    </div>
+                                  </div>
+
+                                  {/* body: course cards */}
+                                  <div className="divide-y">
+                                    {filteredCourses.length === 0 && (
+                                      <div className="px-3 py-6 text-sm text-neutral-500 text-center">No courses.</div>
+                                    )}
+
+                                    {filteredCourses.map((c) => {
+                                      const units = typeof c.units === "number" ? c.units : null;
+
+                                      const allowedForReplace = (opts || []).filter((o) =>
+                                        (eligibleCourseIdsByProgram[pid] || new Set()).has(o.course_id)
+                                      );
+                                      const replaceCodes = allowedForReplace.map((o) => o.course_code);
+                                      const replaceCodeToId: Record<string, string> = {};
+                                      allowedForReplace.forEach((o) => (replaceCodeToId[o.course_code] = o.course_id));
+                                      const replacePlaceholder = "Edit…";
+
+                                      return (
+                                        <div key={c.course_id} className="px-3 py-2 bg-white">
+                                          <div className="flex items-start justify-between gap-3">
+                                            <div className="min-w-0">
+                                              <div className="font-semibold text-emerald-700 break-words">{c.code}</div>
+                                              <div className="text-[11px] text-neutral-600 truncate" title={c.title}>
+                                                {c.title}
+                                              </div>
+                                            </div>
+                                            <div className="flex items-center gap-3">
+                                              <input
+                                                type="number"
+                                                step="0.5"
+                                                defaultValue={units ?? ""}
+                                                placeholder="units"
+                                                className="h-9 w-16 rounded border px-2 text-sm text-center"
+                                                onBlur={(e) => {
+                                                  const v = e.currentTarget.value.trim();
+                                                  const num = v === "" ? null : Number(v);
+                                                  if (v === "" || !isNaN(num!)) {
+                                                    handleCurrEditUnits(pid, grp.batch_id, c.course_id, num);
+                                                  }
+                                                }}
+                                              />
+                                              <button
+                                                className="text-red-500 hover:text-red-700"
+                                                title="Remove"
+                                                onClick={() => handleCurrRemove(pid, grp.batch_id, c.course_id)}
+                                              >
+                                                <Trash2 className="h-4 w-4" />
+                                              </button>
+                                            </div>
+                                          </div>
+
+                                          {/* replace via SelectBox (codes only) */}
+                                          <div className="mt-2 w-full min-w-0">
+                                            <SelectBox
+                                              value={replacePlaceholder}
+                                              onChange={(label: string) => {
+                                                if (label === replacePlaceholder) return;
+                                                const newId = replaceCodeToId[label];
+                                                if (!newId) return;
+                                                handleCurrReplace(pid, grp.batch_id, c.course_id, newId);
+                                              }}
+                                              options={[replacePlaceholder, ...replaceCodes]}
+                                            />
+                                          </div>
+                                        </div>
+                                      );
+                                    })}
+
+                                    {/* footer: total units */}
+                                    <div className="px-3 py-2 bg-emerald-50">
+                                      <div className="flex items-center justify-between font-semibold text-emerald-800">
+                                        <span>Total</span>
+                                        <span>
+                                          {filteredCourses.reduce(
+                                            (s, c) => s + (typeof c.units === "number" ? c.units : 0),
+                                            0
+                                          )}
+                                        </span>
+                                      </div>
+                                    </div>
                                   </div>
                                 </div>
-                              </div>
-                            </div>
-                          );
-                        })}
+                              );
+                            })}
+                          </div>
+                        </div>
                       </div>
-                    </div>
-                  </div>
-                );
-              })}
+                    );
+                  })}
+                </div>
+              )}
             </div>
           )}
         </div>
+      </main>
+
+      {/* ----------------------------- Conflict Modal ----------------------------- */}
+      {conflict && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="w-full max-w-2xl rounded-xl bg-white shadow-xl border border-gray-200">
+            <div className="flex items-center gap-2 border-b px-4 py-3">
+              <AlertTriangle className="h-5 w-5 text-amber-600" />
+              <div className="font-semibold">Conflicts detected</div>
+            </div>
+            <div className="p-4 max-h-[70vh] overflow-auto space-y-3">
+              <div className="text-sm">
+                The system found some issues with your change. You can review the details below and choose to override if
+                appropriate.
+              </div>
+              <div className="rounded border border-amber-200 bg-amber-50 p-3">
+                <ul className="list-disc pl-5 text-sm text-amber-900 space-y-1">
+                  {conflict.violations.map((v, i) => (
+                    <li key={i}>
+                      <span className="font-medium">{v.code}</span>: {v.message}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+              {conflict.preview && (
+                <div>
+                  <div className="text-xs font-semibold text-slate-700 mb-1">Preview of changes</div>
+                  <pre className="text-xs bg-slate-50 border rounded p-2 overflow-auto">
+{JSON.stringify(conflict.preview, null, 2)}
+                  </pre>
+                </div>
+              )}
+              <div>
+                <label className="text-xs font-semibold text-slate-700 mb-1 block">Override reason (optional)</label>
+                <input
+                  className="w-full rounded border px-3 py-2 text-sm"
+                  value={conflict.reason}
+                  onChange={(e) => setConflict({ ...conflict, reason: e.target.value })}
+                  placeholder="e.g., Proceed despite planning warnings"
+                />
+              </div>
+            </div>
+            <div className="flex items-center justify-end gap-2 border-t px-4 py-3">
+              <button
+                className="rounded-md border px-3 py-1.5 text-sm"
+                onClick={() => setConflict(null)}
+              >
+                Cancel
+              </button>
+              <button
+                className="rounded-md bg-emerald-700 px-3 py-1.5 text-sm font-medium text-white"
+                onClick={async () => {
+                  if (!conflict || !user?.userId) return;
+                  const ov = {
+                    override: true,
+                    override_token: conflict.token,
+                    override_reason: conflict.reason || "Proceed with override",
+                  } as any;
+
+                  try {
+                    if (conflict.action === "add") {
+                      await addApoOfferingRow(user.userId, { ...(conflict.original as any), ...ov });
+                    } else if (conflict.action === "edit") {
+                      await editApoOfferingRow(user.userId, { ...(conflict.original as any), ...ov });
+                    } else if (conflict.action === "delete") {
+                      await deleteApoOfferingRow(user.userId, { ...(conflict.original as any), ...ov });
+                    }
+                    setConflict(null);
+                    await loadOfferings();
+                  } catch (e: any) {
+                    alert(e?.message || "Failed to apply override.");
+                  }
+                }}
+              >
+                Override &amp; Apply
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ----------------------------- Forward Modal ----------------------------- */}
+      {showForward && (
+        <ForwardModal
+          onClose={() => setShowForward(false)}
+          onSubmit={async (note) => {
+            if (!user?.userId) return;
+            try {
+              await forwardApoCourseOfferings(user.userId, {
+                to: "", // leave empty if backend resolves recipients
+                subject: `Course Offerings – ${data?.term_label || ""}`,
+                message: note,
+              });
+              setShowForward(false);
+              alert("Plan forwarded.");
+            } catch (e: any) {
+              alert(e?.message || "Failed to forward.");
+            }
+          }}
+        />
+      )}
+
+      {/* --------------------------- Planning Review Modal --------------------------- */}
+      {showPlanModal && data?.planning && (
+        <PlanReviewModal
+          changes={data.planning.pending_changes || []}
+          onClose={() => setShowPlanModal(false)}
+          onApprove={async () => {
+            if (!user?.userId) return;
+            try {
+              await approveApoOfferingsPlan(user.userId);
+              setShowPlanModal(false);
+              await loadOfferings();
+            } catch (e: any) {
+              alert(e?.message || "Failed to approve plan.");
+            }
+          }}
+        />
       )}
     </div>
-  </main>
+  );
+}
 
-  {/* ----------------------------- Conflict Modal ----------------------------- */}
-  {conflict && (
+/* --------------------------- Small helper components --------------------------- */
+const ForwardModal: React.FC<{
+  onClose: () => void;
+  onSubmit: (note: string) => void | Promise<void>;
+}> = ({ onClose, onSubmit }) => {
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+  return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-      <div className="w-full max-w-2xl rounded-xl bg-white shadow-xl border border-gray-200">
-        <div className="flex items-center gap-2 border-b px-4 py-3">
-          <AlertTriangle className="h-5 w-5 text-amber-600" />
-          <div className="font-semibold">Conflicts detected</div>
-        </div>
-        <div className="p-4 max-h-[70vh] overflow-auto space-y-3">
-          <div className="text-sm">
-            The system found some issues with your change. You can review the details below and choose to override if
-            appropriate.
+      <div className="w-full max-w-lg rounded-xl bg-white shadow-xl border border-gray-200">
+        <div className="border-b px-4 py-3 font-semibold">Forward Plan</div>
+        <div className="p-4 space-y-2">
+          <div className="text-sm text-slate-700">
+            Add an optional note before forwarding the course offerings plan for review/approval.
           </div>
-          <div className="rounded border border-amber-200 bg-amber-50 p-3">
-            <ul className="list-disc pl-5 text-sm text-amber-900 space-y-1">
-              {conflict.violations.map((v, i) => (
-                <li key={i}>
-                  <span className="font-medium">{v.code}</span>: {v.message}
-                </li>
-              ))}
-            </ul>
-          </div>
-          {conflict.preview && (
-            <div>
-              <div className="text-xs font-semibold text-slate-700 mb-1">Preview of changes</div>
-              <pre className="text-xs bg-slate-50 border rounded p-2 overflow-auto">
-{JSON.stringify(conflict.preview, null, 2)}
-</pre>
-</div>
-)}
-          <div>
-            <label className="text-xs font-semibold text-slate-700 mb-1 block">Override reason (optional)</label>
-            <input
-              className="w-full rounded border px-3 py-2 text-sm"
-              value={conflict.reason}
-              onChange={(e) => setConflict({ ...conflict, reason: e.target.value })}
-              placeholder="e.g., Proceed despite planning warnings"
-            />
-          </div>
+          <textarea
+            className="w-full rounded border px-3 py-2 text-sm min-h-[120px]"
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+            placeholder="Optional note to reviewers…"
+          />
         </div>
         <div className="flex items-center justify-end gap-2 border-t px-4 py-3">
-          <button
-            className="rounded-md border px-3 py-1.5 text-sm"
-            onClick={() => setConflict(null)}
-          >
+          <button className="rounded-md border px-3 py-1.5 text-sm" onClick={onClose}>
             Cancel
           </button>
           <button
-            className="rounded-md bg-emerald-700 px-3 py-1.5 text-sm font-medium text-white"
+            disabled={busy}
+            className="rounded-md bg-emerald-700 px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50"
             onClick={async () => {
-              if (!conflict || !user?.userId) return;
-              const ov = {
-                override: true,
-                override_token: conflict.token,
-                override_reason: conflict.reason || "Proceed with override",
-              } as any;
-
+              setBusy(true);
               try {
-                if (conflict.action === "add") {
-                  await addApoOfferingRow(user.userId, { ...(conflict.original as any), ...ov });
-                } else if (conflict.action === "edit") {
-                  await editApoOfferingRow(user.userId, { ...(conflict.original as any), ...ov });
-                } else if (conflict.action === "delete") {
-                  await deleteApoOfferingRow(user.userId, { ...(conflict.original as any), ...ov });
-                }
-                setConflict(null);
-                await loadOfferings();
-              } catch (e: any) {
-                alert(e?.message || "Failed to apply override.");
+                await onSubmit(note);
+              } finally {
+                setBusy(false);
               }
             }}
           >
-            Override &amp; Apply
+            <Send className="inline-block h-4 w-4 mr-1 align-[-2px]" />
+            Forward
           </button>
         </div>
       </div>
     </div>
-  )}
-
-  {/* ----------------------------- Forward Modal ----------------------------- */}
-  {showForward && (
-    <ForwardModal
-      onClose={() => setShowForward(false)}
-      onSubmit={async (note) => {
-        if (!user?.userId) return;
-        try {
-          await forwardApoCourseOfferings(user.userId, {
-            to: "", // leave empty if backend resolves recipients
-            subject: `Course Offerings – ${data?.term_label || ""}`,
-            message: note,
-          });
-          setShowForward(false);
-          alert("Plan forwarded.");
-        } catch (e: any) {
-          alert(e?.message || "Failed to forward.");
-        }
-      }}
-    />
-  )}
-
-  {/* --------------------------- Planning Review Modal --------------------------- */}
-  {showPlanModal && data?.planning && (
-    <PlanReviewModal
-      changes={data.planning.pending_changes || []}
-      onClose={() => setShowPlanModal(false)}
-      onApprove={async () => {
-        if (!user?.userId) return;
-        try {
-          await approveApoOfferingsPlan(user.userId);
-          setShowPlanModal(false);
-          await loadOfferings();
-        } catch (e: any) {
-          alert(e?.message || "Failed to approve plan.");
-        }
-      }}
-    />
-  )}
-</div>
-);
-}
-/* --------------------------- Small helper components --------------------------- */
-const ForwardModal: React.FC<{
-onClose: () => void;
-onSubmit: (note: string) => void | Promise<void>;
-}> = ({ onClose, onSubmit }) => {
-const [note, setNote] = useState("");
-const [busy, setBusy] = useState(false);
-return (
-<div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-<div className="w-full max-w-lg rounded-xl bg-white shadow-xl border border-gray-200">
-<div className="border-b px-4 py-3 font-semibold">Forward Plan</div>
-<div className="p-4 space-y-2">
-<div className="text-sm text-slate-700">
-Add an optional note before forwarding the course offerings plan for review/approval.
-</div>
-<textarea
-className="w-full rounded border px-3 py-2 text-sm min-h-[120px]"
-value={note}
-onChange={(e) => setNote(e.target.value)}
-placeholder="Optional note to reviewers…"
-/>
-</div>
-<div className="flex items-center justify-end gap-2 border-t px-4 py-3">
-<button className="rounded-md border px-3 py-1.5 text-sm" onClick={onClose}>
-Cancel
-</button>
-<button
-disabled={busy}
-className="rounded-md bg-emerald-700 px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50"
-onClick={async () => {
-setBusy(true);
-try {
-await onSubmit(note);
-} finally {
-setBusy(false);
-}
-}}
->
-<Send className="inline-block h-4 w-4 mr-1 align-[-2px]" />
-Forward
-</button>
-</div>
-</div>
-</div>
-);
+  );
 };
+
 const PlanReviewModal: React.FC<{
-changes: PlanningChange[];
-onClose: () => void;
-onApprove: () => void | Promise<void>;
+  changes: PlanningChange[];
+  onClose: () => void;
+  onApprove: () => void | Promise<void>;
 }> = ({ changes, onClose, onApprove }) => {
-const [busy, setBusy] = useState(false);
-return (
-<div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-<div className="w-full max-w-3xl rounded-xl bg-white shadow-xl border border-gray-200">
-<div className="border-b px-4 py-3 font-semibold">Review Planning Updates</div>
-<div className="p-4 max-h-[70vh] overflow-auto">
-{changes.length === 0 ? (
-<div className="text-sm text-slate-700">No pending changes.</div>
-) : (
-<ul className="space-y-3">
-{changes.map((ch, i) => (
-<li key={i} className="rounded border p-3">
-<div className="text-sm font-semibold">{ch.type}</div>
-<pre className="text-xs bg-slate-50 border rounded p-2 mt-2 overflow-auto">
+  const [busy, setBusy] = useState(false);
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+      <div className="w-full max-w-3xl rounded-xl bg-white shadow-xl border border-gray-200">
+        <div className="border-b px-4 py-3 font-semibold">Review Planning Updates</div>
+        <div className="p-4 max-h-[70vh] overflow-auto">
+          {changes.length === 0 ? (
+            <div className="text-sm text-slate-700">No pending changes.</div>
+          ) : (
+            <ul className="space-y-3">
+              {changes.map((ch, i) => (
+                <li key={i} className="rounded border p-3">
+                  <div className="text-sm font-semibold">{ch.type}</div>
+                  <pre className="text-xs bg-slate-50 border rounded p-2 mt-2 overflow-auto">
 {JSON.stringify(ch, null, 2)}
-</pre>
-</li>
-))}
-</ul>
-)}
-</div>
-<div className="flex items-center justify-end gap-2 border-t px-4 py-3">
-<button className="rounded-md border px-3 py-1.5 text-sm" onClick={onClose}>
-Close
-</button>
-<button
-disabled={busy || changes.length === 0}
-className="rounded-md bg-emerald-700 px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50"
-onClick={async () => {
-setBusy(true);
-try {
-await onApprove();
-} finally {
-setBusy(false);
-}
-}}
->
-<Check className="inline-block h-4 w-4 mr-1 align-[-2px]" />
-Approve
-</button>
-</div>
-</div>
-</div>
-);
+                  </pre>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+        <div className="flex items-center justify-end gap-2 border-t px-4 py-3">
+          <button className="rounded-md border px-3 py-1.5 text-sm" onClick={onClose}>
+            Close
+          </button>
+          <button
+            disabled={busy || changes.length === 0}
+            className="rounded-md bg-emerald-700 px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50"
+            onClick={async () => {
+              setBusy(true);
+              try {
+                await onApprove();
+              } finally {
+                setBusy(false);
+              }
+            }}
+          >
+            <Check className="inline-block h-4 w-4 mr-1 align-[-2px]" />
+            Approve
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 };

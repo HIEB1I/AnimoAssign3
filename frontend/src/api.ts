@@ -445,6 +445,20 @@ export async function archiveApoPreenlistment(
    ===============  APO: COURSE OFFERINGS  =================
    ========================================================= */
 
+// --- Electives result typing (global pool comes from backend) ---
+export type SpecificElective = {
+  course_id: string;
+  course_code: string | string[];
+  course_title: string;
+};
+
+export type ApoOfferingsResponse = {
+  rows: any[];
+  course_options_by_group?: Record<string, any[]>;
+  all_specific_electives?: SpecificElective[]; // backend may omit; we’ll default it
+  [k: string]: any;
+};
+
 export type SlotPayload = {
   room_id?: string | null;
   day?: string; // "Monday" .. "Saturday"
@@ -483,28 +497,31 @@ export type EditRowPayload = {
 
 export type AddRowPayload = {
   batch_id: string;
-  program_id?: string;
+  program_id: string;
 
-  /** Normal path uses course_id. Elective path uses for_placeholder_course_id + specific_course_id. */
-  course_id?: string;
-  for_placeholder_course_id?: string;
-  specific_course_id?: string;
-
-  enrollment_cap?: number | null;
-  remarks?: string;
-
-  // GE/SHS may send time-only or time+room on create; limited types must send room+valid time.
-  slot1?: SlotPayload;
-  slot2?: SlotPayload;
+  // one of these paths will be used:
+  course_id?: string;                       // normal (non-elective) OR placeholder w/o resolving
+  for_placeholder_course_id?: string;       // elective: placeholder (e.g. ITELEC1)
+  specific_course_id?: string;              // elective: chosen specific (e.g. ISDESTH)
 
   section_code?: string;
+  enrollment_cap?: number | "";
+  remarks?: string;
+
+  // optional inline schedule + faculty (unchanged)
+  slot1?: SlotPayload;
+  slot2?: SlotPayload;
+  faculty_user_id?: string | null;
+  faculty_id?: string | null;
+  faculty_name?: string;
+
+  // GE/relaxed rules
+  auto_override?: boolean;                  // <-- ADD THIS
+
+  // overrides (unchanged)
   override?: boolean;
   override_token?: string;
   override_reason?: string;
-
-  /** Backend expects auto_override; keep auto_approve for back-compat in callers. */
-  auto_override?: boolean;
-  auto_approve?: boolean;
 };
 
 /* ------------------------ qs helper ------------------------ */
@@ -561,43 +578,78 @@ function _coerceOnline<T extends Record<string, any>>(payload: T): T {
     if (o[key]) {
       const slot: Record<string, any> = { ...o[key] };
 
+      // Normalize room: "" -> null (explicit clear)
       if (Object.prototype.hasOwnProperty.call(slot, "room_id")) {
         slot.room_id = slot.room_id === "" ? null : slot.room_id;
       }
 
+      // Normalize times to HHMM (delete if invalid)
       if (Object.prototype.hasOwnProperty.call(slot, "start_time")) {
         const n = _normTime(slot.start_time);
         if (n != null) slot.start_time = n;
         else delete slot.start_time;
       }
-
       if (Object.prototype.hasOwnProperty.call(slot, "end_time")) {
         const n = _normTime(slot.end_time);
         if (n != null) slot.end_time = n;
         else delete slot.end_time;
       }
 
+      // NEW: drop purely-empty placeholders (only { room_id: null })
+      if (Object.keys(slot).length === 1 && "room_id" in slot && slot.room_id === null) {
+        delete o[key];
+        continue;
+      }
+
       const hasKeys = Object.keys(slot).length > 0;
-      if (hasKeys) o[key] = slot; // ← write via `o`
-      else delete o[key]; // ← delete via `o`
+      if (hasKeys) o[key] = slot;  // write via `o`
+      else delete o[key];          // delete via `o`
     }
   }
 
   // Normalize enrollment_cap (allow "" to mean clear/null)
   if ("enrollment_cap" in o) {
     const cap = o.enrollment_cap;
-    if (cap === "" || cap === undefined) o.enrollment_cap = null;
-    else if (typeof cap !== "number") o.enrollment_cap = Number(cap) || null;
+    if (cap === "" || cap === undefined) {
+      o.enrollment_cap = null;
+    } else if (typeof cap !== "number") {
+      const n = Number(cap);
+      o.enrollment_cap = Number.isFinite(n) ? n : null;
+    }
   }
 
-  return out;
+  return out; // ← IMPORTANT
 }
 
-/** Backward-compat: if callers still send auto_approve, forward it as auto_override. */
+
+/** Backward-compat + safe defaults for auto-override */
 function _applyAutoOverride<T extends Record<string, any>>(payload: T): T {
   const out = _clone(payload);
-  if ((out as any).auto_override == null && (out as any).auto_approve != null) {
+  // --- CHANGE #1: provide safe defaults ---
+  if ((out as any).auto_override == null) {
+    (out as any).auto_override = true;
+  }
+  if ((out as any).override_reason == null) {
+    (out as any).override_reason = "Proceed (UI)";
+  }
+  // Legacy flag still respected if present
+  if ((out as any).auto_approve != null) {
     (out as any).auto_override = (out as any).auto_approve;
+  }
+  return out;
+}
+/** If choosing a specific elective, never send course_id alongside it. */
+function _sanitizeElectiveIntent<
+  T extends { specific_course_id?: string; course_id?: string; for_placeholder_course_id?: string }
+>(payload: T): T {
+  const out = _clone(payload);
+  // Normalize empty strings to undefined
+  if ((out as any).specific_course_id === "") delete (out as any).specific_course_id;
+  if ((out as any).for_placeholder_course_id === "") delete (out as any).for_placeholder_course_id;
+
+  // Avoid conflicting intent: drop course_id if a specific elective is chosen
+  if ((out as any).specific_course_id) {
+    delete (out as any).course_id;
   }
   return out;
 }
@@ -647,29 +699,47 @@ function _extractConflict(e: AxiosError<any>): ApiConflict | null {
 export async function getApoCourseOfferings(
   userId: string,
   opts: OfferingsQuery = {}
-): Promise<any> {
+): Promise<ApoOfferingsResponse> {
   const { level, ...rest } = opts;
   const level_code = normalizeLevelForQuery(level);
   const url = `${API_BASE}/apo/courseofferings${q({ userId, ...rest, level, level_code })}`;
-  return get<any>(url);
-}
 
+  const data = await get<ApoOfferingsResponse>(url);
+
+  // Safe default + light coercion for course_code (string[] -> first string)
+  const list = Array.isArray(data.all_specific_electives) ? data.all_specific_electives : [];
+  data.all_specific_electives = list.map((e) => ({
+    ...e,
+    course_code: Array.isArray(e.course_code) ? (e.course_code[0] ?? "") : (e.course_code ?? ""),
+  }));
+
+  return data;
+}
+export function electivesToOptions(resp?: ApoOfferingsResponse) {
+  const arr = resp?.all_specific_electives ?? [];
+  return arr.map((e) => ({
+    value: e.course_id,
+    label: `${e.course_code} — ${e.course_title}`,
+  }));
+}
 /** Add row (capacity defaults server-side to courses.max_enrollee if not provided). */
 export async function addApoOfferingRow(
   userId: string,
   payload: AddRowPayload
 ): Promise<{ ok: true; section_id: string } | { conflict: ApiConflict }> {
   const url = `${API_BASE}/apo/courseofferings${q({ userId, action: "addRow" })}`;
-  const body = _coerceOnline(_applyAutoOverride(payload));
 
+  // NEW: make elective intent unambiguous before coercion/override defaults
+  const sanitized = _sanitizeElectiveIntent(payload);
+
+  const body = _coerceOnline(_applyAutoOverride(sanitized));
   try {
     return await post<{ ok: true; section_id: string }>(url, body);
   } catch (e) {
+    // (keep the rest of your conflict handling exactly as-is)
     const err = e as AxiosError<any>;
     if (err.response?.status === 409) {
       const conflict = _extractConflict(err);
-
-      // If caller asked for auto-override (e.g., GE), retry once with override token.
       if (conflict && (body as any).auto_override) {
         try {
           return await post<{ ok: true; section_id: string }>(url, {
@@ -689,7 +759,6 @@ export async function addApoOfferingRow(
           throw err2;
         }
       }
-
       if (conflict) return { conflict };
       const d = err.response?.data?.detail as GateError | undefined;
       if (d) throw new Error(d.message || "Action blocked by planning rules.");
@@ -698,35 +767,52 @@ export async function addApoOfferingRow(
   }
 }
 
+
 /** Edit row (capacity updates will be saved to sections.enrollment_cap). */
 export async function editApoOfferingRow(
   userId: string,
   payload: EditRowPayload
 ): Promise<{ ok: true; section_id: string } | { conflict: ApiConflict }> {
   const url = `${API_BASE}/apo/courseofferings${q({ userId, action: "editRow" })}`;
-  const body = _coerceOnline(_applyAutoOverride(payload));
+
+  // NEW: make elective intent unambiguous before coercion/override defaults
+  const sanitized = _sanitizeElectiveIntent(payload);
+
+  const body = _coerceOnline(_applyAutoOverride(sanitized));
   try {
     return await post(url, body);
   } catch (e) {
+    // (keep the rest exactly as-is)
     const err = e as AxiosError<any>;
     if (err.response?.status === 409) {
       const conflict = _extractConflict(err);
-      // If editor asked for auto_override → retry with override token automatically
       if (conflict && (body as any).auto_override) {
-        return await post(url, {
-          ...(body as any),
-          override: true,
-          override_token: conflict.override_token,
-          override_reason: (body as any).override_reason || "GE free-form edit",
-        });
+        try {
+          return await post(url, {
+            ...(body as any),
+            override: true,
+            override_token: conflict.override_token,
+            override_reason: (body as any).override_reason || "Proceed with seat-deficit override",
+          });
+        } catch (e2) {
+          const err2 = e2 as AxiosError<any>;
+          if (err2.response?.status === 409) {
+            const conflict2 = _extractConflict(err2);
+            if (conflict2) return { conflict: conflict2 };
+            const d2 = err2.response?.data?.detail as GateError | undefined;
+            if (d2) throw new Error(d2.message || "Action blocked by planning rules.");
+          }
+          throw err2;
+        }
       }
       if (conflict) return { conflict };
-      const d = err.response?.data?.detail as { message?: string } | undefined;
+      const d = err.response?.data?.detail as GateError | undefined;
       if (d) throw new Error(d.message || "Action blocked by planning rules.");
     }
     throw err;
   }
 }
+
 
 export type DeleteRowPayload = {
   section_id: string;
@@ -816,8 +902,8 @@ export async function curriculumRemoveCourse(
 /* ---- Electives helper endpoints (placeholder → specific) ---- */
 export async function getElectiveOptions(
   userId: string,
-  placeholder_course_id: string
-): Promise<{ ok: boolean; options: Array<{ course_id: string; course_code: string; course_title: string }> }> {
+  placeholder_course_id?: string
+): Promise<{ ok: boolean; options: Array<{ course_id: string; course_code: string | string[]; course_title: string }> }> {
   const url = `${API_BASE}/apo/courseofferings${q({
     userId,
     action: "electiveOptions",
