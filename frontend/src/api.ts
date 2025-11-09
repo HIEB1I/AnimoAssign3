@@ -1759,3 +1759,27 @@ export function userIsChair(): boolean {
     return false;
   }
 }
+
+
+/** Update coordinators & teaching team by names. Backend resolves user/faculty IDs. */
+export async function updateChairCoursePeople(
+  course_id: string,
+  payload: {
+    coordinators?: { first_name: string; last_name: string }[];
+    teaching_team?: { first_name: string; last_name: string }[];
+    userId?: string;
+    userEmail?: string;
+  }
+): Promise<{
+  ok: boolean;
+  updated?: number;
+  message?: string;
+  coordinators?: { name: string; email?: string }[];
+  teaching_team?: { name: string }[];
+}> {
+  const params: Record<string, any> = { action: "editPeople", courseId: course_id };
+  if (payload.userId) params.userId = payload.userId;
+  if (payload.userEmail) params.userEmail = payload.userEmail;
+  const { data } = await axios.post(`${API_BASE}/chair/course-management`, payload, { params });
+  return data;
+}

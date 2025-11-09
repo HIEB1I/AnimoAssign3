@@ -1,6 +1,5 @@
-# backend/app/CHAIR/CHAIR_CourseManagement.py
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, HTTPException, Query, Body
 from ..main import db
@@ -38,11 +37,6 @@ async def _active_term() -> Dict[str, Any]:
 
 
 async def _user_scope(userId: Optional[str], userEmail: Optional[str]) -> Dict[str, Any]:
-    """
-    Resolve department scope for the user. Primary path = role_assignments.scope(type=department).
-    Fallback path = faculty_profiles.department_id joined to departments.
-    Uses only Mongo operators compatible with 4.4+ (no array-style $first).
-    """
     if not userId and not userEmail:
         return {}
 
@@ -57,19 +51,16 @@ async def _user_scope(userId: Optional[str], userEmail: Optional[str]) -> Dict[s
             "as": "ra"
         }},
         {"$unwind": {"path": "$ra", "preserveNullAndEmptyArrays": True}},
-        # deptScope = first element of filtered ra.scope where type == "department"
         {"$addFields": {
             "deptScope": {
                 "$let": {
-                    "vars": {
-                        "arr": {
-                            "$filter": {
-                                "input": {"$ifNull": ["$ra.scope", []]},
-                                "as": "s",
-                                "cond": {"$eq": ["$$s.type", "department"]}
-                            }
+                    "vars": { "arr": {
+                        "$filter": {
+                            "input": {"$ifNull": ["$ra.scope", []]},
+                            "as": "s",
+                            "cond": {"$eq": ["$$s.type", "department"]}
                         }
-                    },
+                    }},
                     "in": {"$arrayElemAt": ["$$arr", 0]}
                 }
             },
@@ -105,7 +96,6 @@ async def _user_scope(userId: Optional[str], userEmail: Optional[str]) -> Dict[s
     head = [x async for x in db[COL_USERS].aggregate(pipe)]
     meta = head[0] if head else {}
 
-    # Fallback: infer department from faculty_profiles if role scope not wired yet
     if meta and not meta.get("dept_id") and meta.get("user_id"):
         fp = await db[COL_FACULTY].find_one(
             {"user_id": meta["user_id"]},
@@ -122,17 +112,75 @@ async def _user_scope(userId: Optional[str], userEmail: Optional[str]) -> Dict[s
     return meta
 
 
+# ---- helpers for edit ----
+async def _find_user_ids_by_names(pairs: List[Dict[str, str]], prefer_dept_id: Optional[str]) -> List[Tuple[str, str]]:
+    results: List[Tuple[str, str]] = []
+    for p in pairs:
+        fn = (p.get("first_name") or "").strip()
+        ln = (p.get("last_name") or "").strip()
+        if not fn and not ln:
+            continue
+
+        q: Dict[str, Any] = {}
+        if fn:
+            q["first_name"] = {"$regex": f"^{fn}$", "$options": "i"}
+        if ln:
+            q["last_name"] = {"$regex": f"^{ln}$", "$options": "i"}
+
+        candidates = await db[COL_USERS].find(q, {"_id": 0, "user_id": 1, "email": 1}).to_list(50)
+        if not candidates:
+            q2 = {
+                "$or": [
+                    {"first_name": {"$regex": f"^{fn}\\b", "$options": "i"}},
+                    {"last_name": {"$regex": f"\\b{ln}$", "$options": "i"}},
+                ]
+            }
+            candidates = await db[COL_USERS].find(q2, {"_id": 0, "user_id": 1, "email": 1}).to_list(50)
+
+        if not candidates:
+            continue
+
+        if prefer_dept_id:
+            uids = [c["user_id"] for c in candidates if c.get("user_id")]
+            if uids:
+                fps = await db[COL_FACULTY].find(
+                    {"user_id": {"$in": uids}, "department_id": prefer_dept_id},
+                    {"_id": 0, "user_id": 1}
+                ).to_list(50)
+                preferred_uids = {x["user_id"] for x in fps}
+                preferred = [c for c in candidates if c["user_id"] in preferred_uids]
+                if preferred:
+                    uid = preferred[0]["user_id"]; email = preferred[0].get("email") or ""
+                    results.append((uid, email))
+                    continue
+
+        uid = candidates[0]["user_id"]; email = candidates[0].get("email") or ""
+        results.append((uid, email))
+    return results
+
+
+async def _user_ids_to_faculty_ids(user_ids: List[str]) -> List[str]:
+    if not user_ids:
+        return []
+    fps = await db[COL_FACULTY].find(
+        {"user_id": {"$in": user_ids}},
+        {"_id": 0, "faculty_id": 1}
+    ).to_list(200)
+    return [x["faculty_id"] for x in fps if x.get("faculty_id")]
+
+
 @router.post("/course-management")
 async def course_management(
-    action: str = Query("list", description="header | options | list"),
+    action: str = Query("list", description="header | options | list | editPeople"),
     userEmail: Optional[str] = Query(None),
     userId: Optional[str] = Query(None),
     cluster: Optional[str] = Query(None),
     search: Optional[str] = Query(None),
+    courseId: Optional[str] = Query(None),
     payload: Optional[Dict[str, Any]] = Body(None),
 ):
     try:
-        if action not in {"header", "options", "list"}:
+        if action not in {"header", "options", "list", "editPeople"}:
             raise HTTPException(status_code=400, detail="Invalid action.")
 
         meta = await _user_scope(userId, userEmail)
@@ -146,8 +194,8 @@ async def course_management(
                 subtitle = (subtitle + " | " + meta["dept_name"]).strip(" |")
             return {"ok": True, "profileName": meta.get("full_name", ""), "profileSubtitle": subtitle}
 
-        # options/list require a department
-        if action in {"options", "list"} and not meta.get("dept_id"):
+        # options/list/editPeople require a department
+        if action in {"options", "list", "editPeople"} and not meta.get("dept_id"):
             raise HTTPException(status_code=400, detail="User department not found.")
 
         # ----- OPTIONS -----
@@ -159,6 +207,74 @@ async def course_management(
             clusters = [c for c in clusters if c]
             return {"ok": True, "clusters": clusters, "activeTerm": await _active_term()}
 
+        # ----- EDIT PEOPLE -----
+        if action == "editPeople":
+            if not courseId:
+                raise HTTPException(status_code=400, detail="Missing courseId.")
+            dept_id = meta["dept_id"]
+
+            course = await db[COL_COURSES].find_one(
+                {"course_id": courseId, "department_id": dept_id},
+                {"_id": 0, "course_id": 1, "department_id": 1, "course_title": 1}
+            )
+            if not course:
+                raise HTTPException(status_code=404, detail="Course not found for department.")
+
+            p = payload or {}
+            coord_pairs = p.get("coordinators") or []
+            team_pairs = p.get("teaching_team") or []
+
+            coord_resolved = await _find_user_ids_by_names(coord_pairs, dept_id)
+            coord_user_ids = [u for (u, _email) in coord_resolved]
+            coord_emails = {u: e for (u, e) in coord_resolved}
+
+            team_user_ids = [u for (u, _e) in await _find_user_ids_by_names(team_pairs, dept_id)]
+            team_faculty_ids = await _user_ids_to_faculty_ids(team_user_ids)
+
+            update_doc: Dict[str, Any] = {}
+            update_doc["course_coordinator"] = coord_user_ids
+            update_doc["teaching_team"] = team_faculty_ids
+
+            result = await db[COL_COURSES].update_one(
+                {"course_id": courseId},
+                {"$set": update_doc, "$setOnInsert": {"updated_at": _now()}}
+            )
+            if result.matched_count == 0:
+                raise HTTPException(status_code=404, detail="Course not found.")
+
+            coord_users = []
+            if coord_user_ids:
+                cu = await db[COL_USERS].find(
+                    {"user_id": {"$in": coord_user_ids}},
+                    {"_id": 0, "first_name": 1, "last_name": 1, "email": 1}
+                ).to_list(100)
+                for u in cu:
+                    name = f"{(u.get('first_name') or '').strip()} {(u.get('last_name') or '').strip()}".strip()
+                    coord_users.append({"name": name, "email": (u.get("email") or coord_emails.get(u.get("user_id",""), ""))})
+
+            team_display = []
+            if team_faculty_ids:
+                fps = await db[COL_FACULTY].find(
+                    {"faculty_id": {"$in": team_faculty_ids}},
+                    {"_id": 0, "user_id": 1}
+                ).to_list(200)
+                uids = [f.get("user_id") for f in fps if f.get("user_id")]
+                if uids:
+                    us = await db[COL_USERS].find(
+                        {"user_id": {"$in": uids}},
+                        {"_id": 0, "first_name": 1, "last_name": 1}
+                    ).to_list(200)
+                    for u in us:
+                        name = f"{(u.get('first_name') or '').strip()} {(u.get('last_name') or '').strip()}".strip()
+                        team_display.append({"name": name})
+
+            return {
+                "ok": True,
+                "updated": int(result.modified_count),
+                "coordinators": coord_users,
+                "teaching_team": team_display,
+            }
+
         # ----- LIST -----
         term = await _active_term()
         term_id = term.get("term_id", "")
@@ -166,8 +282,6 @@ async def course_management(
 
         pipeline: List[Dict[str, Any]] = [
             {"$match": {"department_id": dept_id}},
-
-            # Normalize course_code -> array + display
             {"$addFields": {
                 "code_list": {
                     "$cond": [
@@ -192,8 +306,6 @@ async def course_management(
                     ]
                 }
             }},
-
-            # Coordinator IDs (support array or single)
             {"$addFields": {
                 "coord_ids": {
                     "$cond": [
@@ -235,7 +347,6 @@ async def course_management(
                         "in": {"name": "$$c.name", "email": {"$ifNull": ["$$c.email", ""]}}
                     }
                 },
-                # MongoDB 4.4-safe: use arrayElemAt instead of array-style $first
                 "coordinator_email": {"$ifNull": [{"$arrayElemAt": ["$coord_users.email", 0]}, ""]},
                 "coordinator_name": {
                     "$reduce": {
@@ -245,8 +356,6 @@ async def course_management(
                     }
                 }
             }},
-
-            # sections → assignments → faculty names as fallback composition
             {"$lookup": {
                 "from": COL_SECTIONS,
                 "let": {"cid": "$course_id", "codes": "$code_list"},
@@ -306,19 +415,17 @@ async def course_management(
                 "composition": {
                     "$setUnion": [
                         {"$map": {
-                            "input": {"$ifNull": ["$_fu", []]},
+                            "input": {"$ifNull": ["$_fu", []]},   # <-- fixed: added $
                             "as": "u",
                             "in": {"$trim": {"input": {"$concat": [
-                                {"$ifNull": ["$$u.first_name", ""]}, " ",
-                                {"$ifNull": ["$$u.last_name",  ""]}
+                                {"$ifNull": ["$$u.first_name", ""]}, " ",   # <-- fixed: $$u
+                                {"$ifNull": ["$$u.last_name",  ""]}         # <-- fixed: $$u
                             ]}}}
                         }},
                         []
                     ]
                 }
             }},
-
-            # KAC mapping
             {"$lookup": {
                 "from": COL_KACS,
                 "let": {"cid": "$course_id", "deptId": dept_id},
@@ -392,8 +499,6 @@ async def course_management(
         return {"ok": True, "rows": rows, "term": term}
 
     except HTTPException:
-        # re-throw HTTPExceptions as-is
         raise
     except Exception as e:
-        # helpful error to surface the underlying problem instead of a generic 500
         raise HTTPException(status_code=400, detail=f"CHAIR course-management failed: {e}")
