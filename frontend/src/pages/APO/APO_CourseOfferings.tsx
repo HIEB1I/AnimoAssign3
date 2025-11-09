@@ -23,7 +23,8 @@ import {
   curriculumAddCourse,
   curriculumEditCourse,
   curriculumRemoveCourse,
-  getElectiveOptions,                 // <-- ADD THIS
+  getElectiveOptions,
+  searchCourseCatalog,      
   type ApiConflict,
 } from "../../api";
 
@@ -491,7 +492,12 @@ const RoomSelectBox: React.FC<{
 
   // per-program add selection (code-only select still stores course_id)
   const [currAddSel, setCurrAddSel] = useState<Record<string, string>>({});
-
+  const [editorState, setEditorState] = useState<{
+    open: boolean;
+    program_id?: string;
+    program_code?: string;
+    batch_id?: string;
+  } | null>(null);
   // Offerings collapse state (keyed by "ID::PROGRAM")
   const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
 
@@ -2201,10 +2207,15 @@ if (isGE) {
 
               {/* Single ID view */}
               {selectedBatchId ? (
-                <div className="p-3 overflow-x-auto">
+                <div className="p-3"> {/* remove overflow-x-auto so grid can wrap */}
                   <div
                     className="grid gap-4"
-                    style={{ gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))" }}
+                    style={{
+                      gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))",
+                      alignItems: "start",
+                      width: "100%",
+                      boxSizing: "border-box",
+                    }}
                   >
                     {Object.keys(singleBatchPrograms)
                       .sort((a, b) =>
@@ -2242,14 +2253,20 @@ if (isGE) {
                         });
 
                         return (
-                          <div key={pid} className="rounded-lg border border-gray-200 overflow-hidden">
+                          <div
+                            key={pid}
+                            className="rounded-lg border border-gray-200 overflow-hidden"
+                            style={{ minWidth: 0, width: "100%", boxSizing: "border-box" }}
+                          >
                             {/* header with add controls */}
                             <div className="flex items-center justify-between gap-2 border-b bg-gray-50 px-3 py-2">
-                              <div className="font-semibold text-emerald-800 truncate" title={programCode}>
-                                {programCode}
+                              {/* let the label take space; allow ellipsis only when needed */}
+                              <div className="font-semibold text-emerald-800 flex-1 min-w-0 pr-2 break-words whitespace-normal">
+                                <span className="block" title={programCode}>{programCode}</span>
                               </div>
 
-                              <div className="flex items-center gap-2 w-full max-w-full">
+                              {/* controls should not claim the whole row */}
+                              <div className="flex items-center gap-2 flex-none min-w-[280px]" style={{ minWidth: 0 }}>
                                 <div className="w-full min-w-0">
                                   <SelectBox
                                     value={selectedLabel}
@@ -2297,6 +2314,22 @@ if (isGE) {
                                   <Plus className="h-4 w-4" />
                                   Custom
                                 </button>
+                                <button
+                                  className="inline-flex items-center gap-2 rounded-md bg-emerald-700 px-3 py-1.5 text-sm font-medium text-white shadow-sm"
+                                  onClick={() =>
+                                    setEditorState({
+                                      open: true,
+                                      program_id: pid,
+                                      program_code: programCode,
+                                      batch_id: selectedBatchId!,   // single-ID view
+                                    })
+                                  }
+                                  title="Edit program courses"
+                                >
+                                  <Edit className="h-4 w-4" />
+                                  Edit
+                                </button>
+
                               </div>
                             </div>
 
@@ -2351,20 +2384,6 @@ if (isGE) {
                                         </button>
                                       </div>
                                     </div>
-
-                                    {/* replace via SelectBox (codes only) */}
-                                    <div className="mt-2 w-full min-w-0">
-                                      <SelectBox
-                                        value={replacePlaceholder}
-                                        onChange={(label: string) => {
-                                          if (label === replacePlaceholder) return;
-                                          const newId = replaceCodeToId[label];
-                                          if (!newId || !selectedBatchId) return;
-                                          handleCurrReplace(pid, selectedBatchId, c.course_id, newId);
-                                        }}
-                                        options={[replacePlaceholder, ...replaceCodes]}
-                                      />
-                                    </div>
                                   </div>
                                 );
                               })}
@@ -2400,11 +2419,16 @@ if (isGE) {
                         <div className="bg-emerald-600 text-white px-4 py-2 font-semibold text-center">
                           {grp.batch_code}
                         </div>
-                        <div className="p-3 overflow-x-auto">
-                          <div
-                            className="grid gap-4"
-                            style={{ gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))" }}
-                          >
+                          <div className="p-3">
+                            <div
+                              className="grid gap-4"
+                              style={{
+                                gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))",
+                                alignItems: "start",
+                                width: "100%",
+                                boxSizing: "border-box",
+                              }}
+                            >
                             {programList.map((itm) => {
                               const pid = itm.program_id;
                               const programCode = itm?.program_code || "—";
@@ -2432,59 +2456,32 @@ if (isGE) {
                               });
 
                               return (
-                                <div key={pid} className="rounded-lg border border-gray-200 overflow-hidden">
+                                  <div
+                                    key={pid}
+                                    className="rounded-lg border border-gray-200 overflow-hidden"
+                                    style={{ minWidth: 0, width: "100%", boxSizing: "border-box" }}
+                                  >
                                   {/* header with add controls */}
                                   <div className="flex items-center justify-between gap-2 border-b bg-gray-50 px-3 py-2">
-                                    <div className="font-semibold text-emerald-800 truncate" title={programCode}>
-                                      {programCode}
+                                    <div className="font-semibold text-emerald-800 flex-1 min-w-0 pr-2 break-words whitespace-normal">
+                                      <span className="block" title={programCode}>{programCode}</span>
                                     </div>
 
-                                    <div className="flex items-center gap-2 w-full max-w-full">
-                                      <div className="w-full min-w-0">
-                                        <SelectBox
-                                          value={selectedLabel}
-                                          onChange={(label: string) => {
-                                            const cid = codeToId[label] || "";
-                                            setCurrAddSel((p) => ({ ...p, [pid]: cid }));
-                                          }}
-                                          options={["— Add course —", ...codeOptions]}
-                                        />
-                                      </div>
-
+                                    <div className="flex items-center gap-2 flex-none min-w-[280px]" style={{ minWidth: 0 }}>
                                       <button
                                         className="inline-flex items-center gap-2 rounded-md bg-emerald-700 px-3 py-1.5 text-sm font-medium text-white shadow-sm"
-                                        disabled={!grp.batch_id || !selectedId}
-                                        onClick={() => {
-                                          if (!grp.batch_id || !selectedId) return;
-                                          handleCurrAdd(pid, grp.batch_id, selectedId);
-                                        }}
+                                        onClick={() =>
+                                          setEditorState({
+                                            open: true,
+                                            program_id: pid,
+                                            program_code: programCode,
+                                            batch_id: grp.batch_id,       // all-IDs view
+                                          })
+                                        }
+                                        title="Edit program courses"
                                       >
-                                        <Plus className="h-4 w-4" />
-                                        Add
-                                      </button>
-
-                                      <button
-                                        className="inline-flex items-center gap-2 rounded-md border border-emerald-700 px-3 py-1.5 text-sm font-medium text-emerald-700"
-                                        onClick={() => {
-                                          const code = prompt("New course code:")?.trim();
-                                          const title = code ? prompt("Course title:")?.trim() : "";
-                                          const level = title
-                                            ? prompt("Program level (Undergraduate or Graduate Studies):")?.trim()
-                                            : "";
-                                          const unitsStr = level ? prompt("Units (number):")?.trim() : "";
-                                          const unitsNum = unitsStr ? Number(unitsStr) : undefined;
-                                          if (!code || !title || !level || !grp.batch_id) return;
-                                          handleCurrAddCustom(pid, grp.batch_id, {
-                                            course_code: normCode(code),
-                                            course_title: title!,
-                                            department_id: deptId,
-                                            program_level: level!,
-                                            units: isNaN(unitsNum as number) ? undefined : (unitsNum as number),
-                                          });
-                                        }}
-                                      >
-                                        <Plus className="h-4 w-4" />
-                                        Custom
+                                        <Edit className="h-4 w-4" />
+                                        Edit
                                       </button>
                                     </div>
                                   </div>
@@ -2538,20 +2535,6 @@ if (isGE) {
                                                 <Trash2 className="h-4 w-4" />
                                               </button>
                                             </div>
-                                          </div>
-
-                                          {/* replace via SelectBox (codes only) */}
-                                          <div className="mt-2 w-full min-w-0">
-                                            <SelectBox
-                                              value={replacePlaceholder}
-                                              onChange={(label: string) => {
-                                                if (label === replacePlaceholder) return;
-                                                const newId = replaceCodeToId[label];
-                                                if (!newId) return;
-                                                handleCurrReplace(pid, grp.batch_id, c.course_id, newId);
-                                              }}
-                                              options={[replacePlaceholder, ...replaceCodes]}
-                                            />
                                           </div>
                                         </div>
                                       );
@@ -2611,7 +2594,7 @@ if (isGE) {
                 <div>
                   <div className="text-xs font-semibold text-slate-700 mb-1">Preview of changes</div>
                   <pre className="text-xs bg-slate-50 border rounded p-2 overflow-auto">
-{JSON.stringify(conflict.preview, null, 2)}
+                    {JSON.stringify(conflict.preview, null, 2)}
                   </pre>
                 </div>
               )}
@@ -2702,6 +2685,17 @@ if (isGE) {
           }}
         />
       )}
+      {editorState?.open && curr && (
+        <ProgramCoursesEditor
+          userId={user?.userId}                 // ← add this
+          programId={editorState.program_id!}
+          programCode={editorState.program_code!}
+          batchId={editorState.batch_id!}
+          allItems={curr.items}
+          onClose={() => setEditorState(null)}
+          onChanged={async () => { await loadCurriculum(); setEditorState(null); }}
+        />
+      )}
     </div>
   );
 }
@@ -2772,7 +2766,7 @@ const PlanReviewModal: React.FC<{
                 <li key={i} className="rounded border p-3">
                   <div className="text-sm font-semibold">{ch.type}</div>
                   <pre className="text-xs bg-slate-50 border rounded p-2 mt-2 overflow-auto">
-{JSON.stringify(ch, null, 2)}
+                    {JSON.stringify(ch, null, 2)}
                   </pre>
                 </li>
               ))}
@@ -2797,6 +2791,242 @@ const PlanReviewModal: React.FC<{
           >
             <Check className="inline-block h-4 w-4 mr-1 align-[-2px]" />
             Approve
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+type ProgramCoursesEditorProps = {
+  userId?: string;
+  programId: string;
+  programCode: string;
+  batchId: string;
+  allItems: CurriculumItem[];
+  onClose: () => void;
+  onChanged: () => void | Promise<void>;
+};
+
+const ProgramCoursesEditor: React.FC<ProgramCoursesEditorProps> = ({
+  userId,
+  programId,
+  programCode,
+  batchId,
+  allItems,
+  onClose,
+  onChanged,
+}) => {
+  // Build a merged “base” curriculum entry (program+batch)
+  const base = useMemo(() => {
+    const merged: CurriculumItem = {
+      program_id: programId,
+      program_code: programCode,
+      department_id: "",
+      department_name: "",
+      batch_id: batchId,
+      batch_code: "",
+      courses: [],
+    };
+    (allItems || []).forEach((i) => {
+      if (i.program_id === programId && i.batch_id === batchId) {
+        merged.department_id ||= i.department_id;
+        merged.department_name ||= i.department_name || "";
+        merged.batch_code ||= i.batch_code;
+        merged.courses.push(...i.courses);
+      }
+    });
+    const seen = new Set<string>();
+    merged.courses = merged.courses
+      .filter((c) => (seen.has(c.course_id) ? false : (seen.add(c.course_id), true)))
+      .sort((a, b) => a.code.localeCompare(b.code));
+    return merged;
+  }, [programId, batchId, programCode, allItems]);
+
+  const [current, setCurrent] = useState(base.courses);
+  const currentIds = useMemo(() => new Set(current.map((c) => c.course_id)), [current]);
+
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState<any[]>([]);
+  const [suggestions, setSuggestions] = useState<any[]>([]);
+  const [busy, setBusy] = useState(false);
+
+  // Initial suggestions (wildcard search → fallback to curriculum options)
+  useEffect(() => {
+    (async () => {
+      if (!userId) return;
+      let out: any[] = [];
+      try {
+        const r = await searchCourseCatalog(userId, { q: "*", limit: 40 });
+        out = Array.isArray(r?.results) ? r.results : [];
+      } catch {}
+      if (!out.length) {
+        // fallback: reuse curriculum options
+        const resp: any = await getApoCourseOfferings(userId, { view: "curriculum" });
+        const opts: any[] = resp?.course_options_by_program?.[programId] || [];
+        out = opts.map((o) => ({
+          course_id: o.course_id,
+          course_code: o.course_code,
+          course_title: o.course_title,
+          department_id: o.department_id,
+          units: o.units,
+          program_level: o.program_level,
+        }));
+      }
+      setSuggestions(out);
+    })();
+  }, [userId, programId]);
+
+  // Debounced live search (only if 2+ chars)
+  useEffect(() => {
+    const t = setTimeout(async () => {
+      if (!userId) return;
+      const q = query.trim();
+      if (q.length < 2) return setResults([]);
+      try {
+        const { results } = await searchCourseCatalog(userId, { q, limit: 40 });
+        setResults(results || []);
+      } catch {
+        setResults([]);
+      }
+    }, 250);
+    return () => clearTimeout(t);
+  }, [query, userId]);
+
+  const list = results.length ? results : suggestions;
+
+  const adds = useMemo(() => {
+    const baseIds = new Set(base.courses.map((c) => c.course_id));
+    return current.filter((c) => !baseIds.has(c.course_id));
+  }, [base.courses, current]);
+
+  const removes = useMemo(() => {
+    const nowIds = new Set(current.map((c) => c.course_id));
+    return base.courses.filter((c) => !nowIds.has(c.course_id));
+  }, [base.courses, current]);
+
+  const save = async () => {
+    if (!userId) return;
+    setBusy(true);
+    try {
+      for (const r of removes) {
+        await curriculumRemoveCourse(userId, {
+          program_id: programId,
+          batch_id: batchId,
+          course_id: r.course_id,
+        } as any);
+      }
+      for (const a of adds) {
+        await curriculumAddCourse(userId, {
+          program_id: programId,
+          batch_id: batchId,
+          course_id: a.course_id,
+        } as any);
+      }
+      await onChanged();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+      <div className="w-full max-w-5xl rounded-xl bg-white shadow-xl border border-gray-200">
+        <div className="flex items-center justify-between border-b px-4 py-3">
+          <div className="font-semibold">
+            Edit Curriculum — {programCode} • {base.batch_code || "ID"}
+          </div>
+          <button className="rounded-md border px-3 py-1.5 text-sm" onClick={onClose}>
+            Close
+          </button>
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 p-4">
+          {/* Current courses */}
+          <div className="rounded-lg border">
+            <div className="px-3 py-2 bg-gray-50 font-semibold">Current courses</div>
+            <div className="max-h-[60vh] overflow-auto divide-y">
+              {current.length === 0 && <div className="p-3 text-sm text-neutral-500">No courses.</div>}
+              {current.map((c) => (
+                <div key={c.course_id} className="p-3 flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="font-semibold text-emerald-700">{c.code}</div>
+                    <div className="text-[11px] text-neutral-600 truncate" title={c.title}>
+                      {c.title}
+                    </div>
+                  </div>
+                  <button
+                    className="text-red-600 hover:text-red-800"
+                    title="Remove"
+                    onClick={() => setCurrent((prev) => prev.filter((x) => x.course_id !== c.course_id))}
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Global catalog search */}
+          <div className="rounded-lg border">
+            <div className="px-3 py-2 bg-gray-50 font-semibold">Add from catalog</div>
+            <div className="p-3">
+              <input
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="Type code or title to search all courses…"
+                className="w-full rounded-lg border px-3 py-2 text-sm"
+              />
+            </div>
+            <div className="max-h-[52vh] overflow-auto divide-y">
+              {list.map((r) => {
+                const inCurr = currentIds.has(r.course_id);
+                return (
+                  <div key={r.course_id} className="p-3 flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="font-semibold text-emerald-700">{String(r.course_code)}</div>
+                      <div className="text-[11px] text-neutral-600 truncate" title={r.course_title}>
+                        {r.course_title}
+                      </div>
+                    </div>
+                    <button
+                      disabled={inCurr}
+                      className={`rounded-md border px-2 py-1 text-sm ${inCurr ? "opacity-50" : "text-emerald-700"}`}
+                      onClick={() => {
+                        if (inCurr) return;
+                        setCurrent((prev) => [
+                          ...prev,
+                          {
+                            course_id: r.course_id,
+                            code: String(r.course_code),
+                            title: r.course_title,
+                            department_id: r.department_id || base.department_id,
+                            units: typeof r.units === "number" ? r.units : null,
+                            program_level: r.program_level || "",
+                            source: "DB",
+                          },
+                        ]);
+                      }}
+                    >
+                      {inCurr ? "Added" : "Add"}
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+
+        <div className="flex items-center justify-end gap-2 border-t px-4 py-3">
+          <button className="rounded-md border px-3 py-1.5 text-sm" onClick={onClose}>
+            Cancel
+          </button>
+          <button
+            disabled={busy || (adds.length === 0 && removes.length === 0)}
+            className="rounded-md bg-emerald-700 px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50"
+            onClick={save}
+          >
+            <Check className="inline-block h-4 w-4 mr-1 align-[-2px]" />
+            Save changes
           </button>
         </div>
       </div>

@@ -941,7 +941,24 @@ export async function getEligibleRoomsForOffering(
   })}`;
   return get(url);
 }
-
+export async function searchCourseCatalog(
+  userId: string,
+  params: { q?: string; limit?: number; department_id?: string; program_level?: string } = {}
+) {
+  const body = { action: "courseCatalog", ...params };
+  const { data } = await axios.post(join(BASE, "apo"), body, {
+    headers: { "x-user-id": userId }, // keep your existing header convention if any
+  });
+  return data as { ok: boolean; results: Array<{
+    course_id: string;
+    course_code: string;
+    course_title: string;
+    department_id?: string;
+    program_level?: string;
+    units?: number | null;
+    type_of_course?: string | null;
+  }> };
+}
 /* =========================================================
    ===============  APO: ROOM ALLOCATION  ==================
    ========================================================= */

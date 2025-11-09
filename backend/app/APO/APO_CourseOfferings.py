@@ -2043,6 +2043,11 @@ async def get_course_offerings(
             "pending_changes": pending if approval_required else []
         }
     }
+async def _normalize_code(v):
+    # course_code may be a string or array in your DB
+    if isinstance(v, list):
+        return v[0] if v else ""
+    return v or ""
 
 # ---------- POST ----------
 @router.post("/courseofferings")
@@ -2067,7 +2072,45 @@ async def post_course_offerings(
         raise HTTPException(status_code=400, detail="Unable to resolve APO campus from role_assignments.")
     campus = await campus_meta(campus_id)
     prefix_default = campus_section_prefix(campus.get("campus_name", "")) or ""
+    
+    if action == "courseCatalog":
+        q = (payload or {}).get("q", "") or ""
+        limit = int((payload or {}).get("limit", 50))
+        department_id = (payload or {}).get("department_id") or None
+        program_level = (payload or {}).get("program_level") or None
 
+        flt: Dict[str, Any] = {}
+        if department_id:
+            flt["department_id"] = department_id
+        if program_level:
+            flt["program_level"] = program_level
+
+        # search by code (string or array) OR title
+        if q:
+            rx = {"$regex": re.escape(q), "$options": "i"}
+            flt["$or"] = [
+                {"course_code": rx},        # string form
+                {"course_code.0": rx},      # array form (first element)
+                {"course_title": rx},
+            ]
+
+        proj = {
+            "_id": 0,
+            "course_id": 1,
+            "course_code": 1,
+            "course_title": 1,
+            "department_id": 1,
+            "program_level": 1,
+            "units": 1,
+            "type_of_course": 1,
+        }
+
+        rows = list(db[COL_COURSES].find(flt, proj).limit(limit))
+        # normalize course_code to string for UI consistency
+        for r in rows:
+            r["course_code"] = _normalize_code(r.get("course_code"))
+        return {"ok": True, "results": rows}
+    
     if action == "forward":
         if not payload:
             raise HTTPException(status_code=400, detail="Missing payload.")
