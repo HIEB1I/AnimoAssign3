@@ -88,9 +88,18 @@ jobs:
             git remote set-url origin https://github.com/HIEB1I/AnimoAssign3.git
 
             git fetch --all --prune
-            git checkout staging
-            git pull --ff-only
 
+            # --- Force-sync staging to remote, with a quick backup of any local commits ---
+            if ! git merge-base --is-ancestor HEAD origin/staging; then
+              ts=$(date +%Y%m%d-%H%M%S)
+              echo "::warning ::Local staging diverged; backing up to /opt/AnimoAssign3-staging-backup-$ts.bundle and hard-resetting."
+              git bundle create "/opt/AnimoAssign3-staging-backup-$ts.bundle" --all || true
+            fi
+
+            git checkout -B staging origin/staging
+            git reset --hard origin/staging
+            git clean -fdx
+            
             # Paths (pin to the files you actually have)
             FILE=docker/docker-compose.staging.yml
             ENVF=docker/staging.env
