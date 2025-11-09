@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import Papa, { type ParseResult } from "papaparse";
+import Papa from "papaparse";
 import { Pencil, Check, Upload, Archive, Download } from "lucide-react";
 import TopBar from "../../component/TopBar";
 import Tabs from "../../component/Tabs";
@@ -198,19 +198,19 @@ export default function APO_PreEnlistment() {
   const handleImportCourses = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file || !user?.userId) return;
-    Papa.parse<CountCsvRow>(file, {
+    Papa.parse(file, {
       header: true,
       skipEmptyLines: true,
-      complete: async (results: ParseResult<CountCsvRow>) => {
-        const rows = results.data
-          .map((r) => {
+     complete: async (results: any) => {
+      const typed = ((results?.data ?? []) as CountCsvRow[])
+        .map((r) => {
             if (!r.Campus && campusName) (r as any).Campus = campusName;
             return r;
           })
           .filter((r) => r["Course Code"] && r.Career && r.Campus && r.Count !== undefined);
         await importApoPreenlistment(
           user.userId,
-          rows,
+          typed,
           [],
           undefined,
           { replaceCount: true },
@@ -224,15 +224,15 @@ export default function APO_PreEnlistment() {
   const handleImportStats = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file || !user?.userId) return;
-    Papa.parse<StatCsvRow>(file, {
+    Papa.parse(file, {
       header: true,
       skipEmptyLines: true,
-      complete: async (results: ParseResult<StatCsvRow>) => {
-        const rows = results.data.filter((r) => !!r.Program);
-        await importApoPreenlistment(
-          user.userId,
-          [],
-          rows,
+    complete: async (results: any) => {
+      const typed = (results?.data ?? []) as StatCsvRow[];
+      await importApoPreenlistment(
+        user.userId,
+        [],
+        typed,
           undefined,
           { replaceStats: true },
           campusName || undefined

@@ -181,7 +181,7 @@ const OPT = {
 } as const;
 
 /* ---------- helpers for unit label <-> number ---------- */
-const UNITS_LABELS = ["0.0","3.0","6.0","9.0","12.0","15.0","18.0"];
+//const UNITS_LABELS = ["0.0","3.0","6.0","9.0","12.0","15.0","18.0"];
 const toLabel = (n: number) => {
   const s = (Number(n).toFixed(1));
   const base = `${s} units`;
@@ -404,6 +404,7 @@ const prefUnitOptions = useMemo(() => {
     return { ok: true };
   }
 
+  /*
   // payload helpers
   const deliveryToCode = (delivery?: string | null) => {
     if (!delivery) return null;
@@ -412,14 +413,16 @@ const prefUnitOptions = useMemo(() => {
     if (s.includes("face-to-face") || s.includes("face to face") || s.includes("f2f")) return "F2F";
     if (s.includes("hybrid")) return "HYB";
     return null;
-  };
+  };*/
+
+  /*
   const toModeObject = (v: SavedPrefs) => {
     const code = (deliveryToCode(v.delivery) || "F2F").toUpperCase();
     if (code === "ONL") return { mode: "ONL", campus_id: "" };
     if (/laguna/i.test(v.campus)) return { mode: code, campus_id: "CMPS0002" };
     if (/manila/i.test(v.campus)) return { mode: code, campus_id: "CMPS0001" };
     return { mode: code, campus_id: "" };
-  };
+  };*/
 
   const availableCourses = useMemo(
     () => (form.kac.length ? form.kac.flatMap((k) => KAC_COURSES[k as KACKey] ?? []) : []),
