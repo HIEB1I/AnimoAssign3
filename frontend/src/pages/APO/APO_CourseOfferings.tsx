@@ -1214,7 +1214,7 @@ if (isGE) {
                 view === "curriculum" ? "bg-emerald-700 text-white" : "bg-white text-emerald-700"
               )}
             >
-              Curriculum
+              List of Courses
             </button>
           </div>
         </div>
@@ -1289,7 +1289,7 @@ if (isGE) {
         <div className="rounded-xl bg-white shadow-sm border border-gray-200 p-4 sm:p-6 w-full" data-course-offerings>
           <div className="flex items-center justify-between mb-3 sm:mb-4">
             <div>
-              <h2 className="text-lg font-bold">{view === "curriculum" ? "Curriculum" : "Course Offerings"}</h2>
+              <h2 className="text-lg font-bold">{view === "curriculum" ? "List of Courses" : "Course Offerings"}</h2>
               <p className="text-sm text-gray-500">{loading ? "Loading…" : data?.term_label || curr?.term_label || ""}</p>
               {err && <p className="text-sm text-red-600">{err}</p>}
             </div>
@@ -2196,7 +2196,7 @@ if (isGE) {
                         .find((i) => i.batch_id === selectedBatchId)
                         ?.batch_code?.replace(/^ID\s*/i, "") || "—"
                     }`
-                  : "Curriculum"}
+                  : "List of Courses"}
               </div>
 
               {/* Single ID view */}
@@ -2277,7 +2277,7 @@ if (isGE) {
                                   disabled={!canAdd || !selectedId}
                                   onClick={() => {
                                     if (!selectedBatchId || !selectedId) return;
-                                    handleCurrAdd(pid, selectedBatchId, selectedId);
+                                    handleCurrAdd(pid, itm.batch_id, selectedId);
                                   }}
                                 >
                                   <Plus className="h-4 w-4" />
@@ -2462,7 +2462,7 @@ if (isGE) {
                                             open: true,
                                             program_id: pid,
                                             program_code: programCode,
-                                            batch_id: grp.batch_id,       // all-IDs view
+                                            batch_id: itm.batch_id,      // all-IDs view
                                           })
                                         }
                                         title="Edit program courses"
@@ -2508,14 +2508,14 @@ if (isGE) {
                                                   const v = e.currentTarget.value.trim();
                                                   const num = v === "" ? null : Number(v);
                                                   if (v === "" || !isNaN(num!)) {
-                                                    handleCurrEditUnits(pid, grp.batch_id, c.course_id, num);
+                                                    handleCurrEditUnits(pid, itm.batch_id, c.course_id, num);
                                                   }
                                                 }}
                                               />
                                               <button
                                                 className="text-red-500 hover:text-red-700"
                                                 title="Remove"
-                                                onClick={() => handleCurrRemove(pid, grp.batch_id, c.course_id)}
+                                                onClick={() => handleCurrRemove(pid, itm.batch_id, c.course_id)}
                                               >
                                                 <Trash2 className="h-4 w-4" />
                                               </button>
@@ -2915,7 +2915,7 @@ const ProgramCoursesEditor: React.FC<ProgramCoursesEditorProps> = ({
       <div className="w-full max-w-5xl rounded-xl bg-white shadow-xl border border-gray-200">
         <div className="flex items-center justify-between border-b px-4 py-3">
           <div className="font-semibold">
-            Edit Curriculum — {programCode} • {base.batch_code || "ID"}
+            Edit Courses to Take — {programCode} • {base.batch_code || "ID"}
           </div>
           <button className="rounded-md border px-3 py-1.5 text-sm" onClick={onClose}>
             Close
