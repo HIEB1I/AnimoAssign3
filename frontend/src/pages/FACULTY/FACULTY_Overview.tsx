@@ -11,6 +11,7 @@ import TopBar from "../../component/TopBar";
 import Tabs from "../../component/Tabs";
 import HistoryMain from "./FACULTY_History";
 import PreferencesContent from "./FACULTY_Preferences";
+import DeloadingsContent from "./FACULTY_Deloadings";
 import { InboxContent } from "./FACULTY_Inbox";
 
 // FACULTY_Overview.tsx (top of file)
@@ -22,7 +23,7 @@ import { useNavigate } from "react-router-dom";
    0) Page
    ========================================= */
 export default function FAC_Overview() {
-  const [tab, setTab] = useState<"Overview" | "History" | "Preferences">("Overview");
+  const [tab, setTab] = useState<"Overview" | "History" | "Preferences" | "Deloadings">("Overview");
   const [showInbox, setShowInbox] = useState(false); // NEW
   const [data, setData] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
@@ -131,7 +132,7 @@ export default function FAC_Overview() {
           mode="state"
           activeTab={tab}
           onTabChange={(newTab) => setTab(newTab as typeof tab)}
-          items={[{ label: "Overview" }, { label: "History" }, { label: "Preferences" }]}
+          items={[{ label: "Overview" }, { label: "History" }, { label: "Preferences" }, { label: "Deloadings" }]}
         />
       )}
 
@@ -150,6 +151,7 @@ export default function FAC_Overview() {
             )}
             {tab === "History" && <HistoryMain />}
             {tab === "Preferences" && <PreferencesContent />}
+            {tab === "Deloadings" && <DeloadingsContent />}
           </>
         )}
       </main>

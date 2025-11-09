@@ -142,6 +142,7 @@ from .FACULTY.FACULTY_Overview import router as facultyoverview_router
 from .FACULTY.FACULTY_Preferences import router as faculty_prefs_router
 from .FACULTY.FACULTY_History import router as faculty_history_router
 from .FACULTY.FACULTY_Inbox import router as faculty_inbox_router
+from .FACULTY.FACULTY_Deloadings import router as faculty_deloadings_router
 
 from .CHAIR.CHAIR_Plantilla import router as chair_plantilla_router
 from .CHAIR.CHAIR_FacultyManagement import router as chair_facultymanagement_router
@@ -174,6 +175,7 @@ app.include_router(facultyoverview_router, prefix="/api")
 app.include_router(faculty_prefs_router, prefix="/api")
 app.include_router(faculty_history_router, prefix="/api")
 app.include_router(faculty_inbox_router, prefix="/api")
+app.include_router(faculty_deloadings_router, prefix="/api")
 
 app.include_router(admin_router, prefix="/api")
 app.include_router(admin_inbox_router, prefix="/api")
