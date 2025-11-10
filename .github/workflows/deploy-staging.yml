@@ -76,9 +76,9 @@ jobs:
               mkdir -p /opt/AnimoAssign3-staging
               cd /opt/AnimoAssign3-staging
               git clone https://github.com/HIEB1I/AnimoAssign3.git .
+            else
+              cd /opt/AnimoAssign3-staging
             fi
-
-            cd /opt/AnimoAssign3-staging
 
             # Pull via HTTPS (no SSH needed on server)
             unset GIT_SSH_COMMAND || true
@@ -89,56 +89,53 @@ jobs:
 
             git fetch --all --prune
 
-            # --- Force-sync staging to remote, with a quick backup of any local commits ---
+            # --- Force-sync staging to remote, with a backup if there are local commits
             if ! git merge-base --is-ancestor HEAD origin/staging; then
               ts=$(date +%Y%m%d-%H%M%S)
               echo "::warning ::Local staging diverged; backing up to /opt/AnimoAssign3-staging-backup-$ts.bundle and hard-resetting."
               git bundle create "/opt/AnimoAssign3-staging-backup-$ts.bundle" --all || true
             fi
-
             git checkout -B staging origin/staging
             git reset --hard origin/staging
 
-            # keep artifacts OUTSIDE the repo to avoid git clean issues
-            ART=/opt/AnimoAssign3-staging-data/tmp
-            mkdir -p "$ART" && chmod 755 "$ART"
-            
-            git clean -fdx
+            # ---------- Artifacts directory (outside repo), with fallback ----------
+            ART="/opt/AnimoAssign3-staging-data/tmp"
+            if ! mkdir -p "$ART" 2>/dev/null; then
+              # no permission under /opt — fall back to $HOME
+              ART="$HOME/animoassign-staging-data/tmp"
+              mkdir -p "$ART"
+              echo "::notice ::Using user-writable artifacts dir: $ART"
+            fi
+            chmod 755 "$ART"
+            # ----------------------------------------------------------------------
 
-            # Paths (pin to the files you actually have)
+            # Don't let git clean touch repo/tmp (might contain uploaded dumps)
+            git clean -fdx -e tmp/** || true
+
+            # Compose files
             FILE=docker/docker-compose.staging.yml
             ENVF=docker/staging.env
             [ -f "$FILE" ] || { echo "Compose file not found: $FILE"; exit 1; }
             [ -f "$ENVF" ] || { echo "Env file not found: $ENVF"; exit 1; }
 
             export COMPOSE_PROJECT_NAME=animo_staging
-            NET="${COMPOSE_PROJECT_NAME}_default"
 
-            # Export env vars so compose substitution never warns
-            set -a
-            . "$ENVF"
-            set +a
+            # Export env vars for compose substitution
+            set -a; . "$ENVF"; set +a
 
-            # ---- PRE-CLEAN ONCE to absorb legacy containers (name conflicts)
+            # Clean once to absorb legacy containers
             docker compose -f "$FILE" --env-file "$ENVF" down --remove-orphans || true
             for c in backend-stg analytics-stg frontend-stg mongo-stg; do
               docker rm -f "$c" 2>/dev/null || true
             done
-            # ----
 
-            # After one clean run, you may switch to this "steady-state" line instead:
-            # docker compose -f "$FILE" --env-file "$ENVF" up -d --build --remove-orphans
-
+            # Recreate services
             docker compose -f "$FILE" --env-file "$ENVF" up -d --build
 
-            # Health checks INSIDE the compose network (no host port needed)
-            # Health checks: use the right network for each service
-            # --- Health checks with retry on the correct networks ---
+            # Health checks inside networks
             DEF_NET="${COMPOSE_PROJECT_NAME}_default"
-            EXT_NET="docker_animoassign"   # matches networks.animoassign.name in compose
-
+            EXT_NET="docker_animoassign"
             curl_wait() {
-              # usage: curl_wait <network> <url> <compose_service_name> [retries]
               local net="$1" url="$2" svc="$3" tries="${4:-40}" i=0
               while true; do
                 if docker run --rm --network "$net" curlimages/curl:8.10.1 -fsS "$url" >/dev/null 2>&1; then
@@ -148,18 +145,14 @@ jobs:
                 i=$((i+1))
                 if [ "$i" -ge "$tries" ]; then
                   echo "::error ::$svc did not become ready at $url"
-                  # show last logs for that compose service (service name, not container_name)
                   docker compose -f "$FILE" logs --tail=200 "$svc" || true
                   exit 1
                 fi
                 sleep 3
               done
             }
-
             curl_wait "$DEF_NET" http://backend-stg:8000/health   backend
             curl_wait "$DEF_NET" http://analytics-stg:8000/health analytics
             curl_wait "$EXT_NET" http://frontend-stg              frontend-stg
-            # -------------------------------------------------------
-
 
             docker system prune -f
