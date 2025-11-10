@@ -247,38 +247,44 @@ jobs:
 
             docker compose -f "$FILE" --env-file "$ENVF" up -d --build --remove-orphans
 
-            wait_primary 180
-
-            docker exec -i mongo-secondary mongosh \
-            -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" \
-            --authenticationDatabase admin --quiet --eval '
-              const s=rs.status();
-              printjson(s.members.map(m=>({host:m.name,state:m.stateStr,self:!!m.self})));
-            '
-
-            docker exec -i mongo-secondary mongosh \
-            -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" \
-            --authenticationDatabase admin --quiet --eval 'db.hello().isWritablePrimary'
-
+            # Wait for a PRIMARY (up to ~6 minutes)
+            i=0; tries=180
+            while true; do
+              if docker exec -i mongo-secondary mongosh \
+                -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" \
+                --authenticationDatabase admin --quiet \
+                --eval 'const s=rs.status(); if (s.ok===1 && s.members && s.members.some(m=>m.stateStr==="PRIMARY")) quit(0); quit(1);' >/dev/null 2>&1
+              then
+                echo "::notice ::Replica set has a PRIMARY"
+                break
+              fi
+              i=$((i+1)); if [ "$i" -ge "$tries" ]; then
+                echo "::error ::No PRIMARY elected"
+                docker logs mongo-secondary | tail -n 200 || true
+                exit 1
+              fi
+              sleep 2
+            done
+            
             # Show what's running (helps catch name mismatches)
             echo "== compose ps =="; docker compose -f "$FILE" ps
             echo "== container names =="; docker ps --format '{{.Names}}'
 
-            # 1) ping the DB
             docker exec -i mongo-secondary mongosh \
               -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" \
               --authenticationDatabase admin --quiet \
-              --eval 'db.runCommand({ping:1})' || {
+              --eval "db.runCommand({ping:1})" || {
                 echo "::error ::mongo-secondary ping failed"
                 docker logs mongo-secondary | tail -n 200 || true
                 exit 1
-            }
+              }
 
-            # 2) list DBs (admin auth)
             docker exec -i mongo-secondary mongosh \
               -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" \
-              --authenticationDatabase admin --quiet \
-              --eval 'db.adminCommand({ listDatabases: 1, nameOnly: true })' || true
+              --authenticationDatabase admin --quiet --eval "
+                const s=rs.status();
+                printjson(s.members.map(m=>({host:m.name,state:m.stateStr,self:!!m.self})));
+              " || true
 
             # Probe from inside each container's netns (no DNS/network guessing)
             curl_in() { # usage: curl_in <container> <url> <svc> [tries]
