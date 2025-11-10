@@ -147,8 +147,8 @@ jobs:
               done
             }
 
-            curl_wait "$DEF_NET" http://backend-primary:8000/health   backend
-            curl_wait "$DEF_NET" http://analytics-primary:8000/health analytics
+            curl_wait "$DEF_NET" http://backend-primary:8000/health   backend-primary
+            curl_wait "$DEF_NET" http://analytics-primary:8000/health analytics-primary
             curl_wait "$EXT_NET" http://frontend-primary/              frontend-primary 
 
             if docker ps --format '{{.Names}}' | grep -q '^nginx-primary$'; then
@@ -251,27 +251,26 @@ jobs:
 
             sleep 5
 
-            probe_exec() {
-              local cname="$1" url="$2" svc="$3" tries="${4:-90}" i=0
+            curl_wait() {
+              local net="$1" url="$2" svc="$3" tries="${4:-40}" i=0
               while true; do
-                if docker exec "$cname" sh -lc 'command -v curl >/dev/null || (apk add --no-cache curl >/dev/null 2>&1 || apt-get update >/dev/null 2>&1 && apt-get install -y curl >/dev/null 2>&1); curl -fsS '"$url"' >/dev/null'; then
-                  echo "::notice ::$svc healthy at $url (inside $cname)"
+                if docker run --rm --network "$net" curlimages/curl:8.10.1 -fsS "$url" >/dev/null 2>&1; then
+                  echo "::notice ::$svc healthy at $url"
                   break
                 fi
-                i=$((i+1)); [ "$i" -ge "$tries" ] && {
+                i=$((i+1))
+                if [ "$i" -ge "$tries" ]; then
                   echo "::error ::$svc did not become ready at $url"
-                  docker logs "$cname" --tail=200 || true
+                  docker compose -f "$FILE" logs --tail=200 "$svc" || true
                   exit 1
-                }
-                sleep 2
+                fi
+                sleep 3
               done
             }
 
-            # use this instead of curl_wait for backend/analytics:
-            probe_exec backend-primary  http://127.0.0.1:8000/health backend
-            probe_exec analytics-primary http://127.0.0.1:8000/health analytics
-            # keep frontend check via EXT_NET or just reload nginx and rely on it
-            curl_wait "$EXT_NET" http://frontend-secondary/              frontend-primary
+            curl_wait "$DEF_NET" http://backend-secondary:8000/health   backend
+            curl_wait "$DEF_NET" http://analytics-secondary:8000/health analytics
+            curl_wait "$EXT_NET" http://frontend-secondary/              frontend-secondary
 
             if docker ps --format '{{.Names}}' | grep -q '^nginx-secondary$'; then
               docker exec nginx-secondary nginx -t
