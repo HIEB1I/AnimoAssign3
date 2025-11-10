@@ -247,22 +247,19 @@ jobs:
 
             docker compose -f "$FILE" --env-file "$ENVF" up -d --build --remove-orphans
 
-            wait_primary() {
-              local tries="${1:-120}" i=0
-              while true; do
-                if docker exec -i mongo-secondary mongosh \
-                  -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" \
-                  --authenticationDatabase admin --quiet \
-                  --eval 'const s=rs.status(); if (s.ok===1 && s.members && s.members.some(m=>m.stateStr==="PRIMARY")) quit(0); quit(1);' >/dev/null 2>&1
-                then
-                  echo "::notice ::Replica set has a PRIMARY"
-                  break
-                fi
-                i=$((i+1)); [ "$i" -ge "$tries" ] && { echo "::error ::No PRIMARY elected"; docker logs mongo-secondary | tail -n 200 || true; exit 1; }
-                sleep 2
-              done
-            }
-            
+            wait_primary 180
+
+            docker exec -i mongo-secondary mongosh \
+            -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" \
+            --authenticationDatabase admin --quiet --eval '
+              const s=rs.status();
+              printjson(s.members.map(m=>({host:m.name,state:m.stateStr,self:!!m.self})));
+            '
+
+            docker exec -i mongo-secondary mongosh \
+            -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" \
+            --authenticationDatabase admin --quiet --eval 'db.hello().isWritablePrimary'
+
             # Show what's running (helps catch name mismatches)
             echo "== compose ps =="; docker compose -f "$FILE" ps
             echo "== container names =="; docker ps --format '{{.Names}}'
