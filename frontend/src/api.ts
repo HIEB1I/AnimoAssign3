@@ -1818,6 +1818,96 @@ export async function chairFacultyService(userId: string) {
   return data as { ok: boolean; services: any[] };
 }
 
+// frontend/src/api.ts
+// -----------------------------------------------------------------------------
+// ADDITIONS for Faculty Service (kept near the other CHAIR helpers)
+// -----------------------------------------------------------------------------
+
+export type ToDept = "Information Technology" | "Computer Technology";
+export type DayShort = "M" | "T" | "W" | "H" | "F" | "S";
+export type FacultyLite = {
+  faculty_id?: string;
+  first_name?: string;
+  last_name?: string;
+  email?: string;
+};
+
+export type FacultyServiceRow = {
+  id?: string;
+  fs_id?: string;
+  course_code: string;
+  course_title: string;
+  units: number | null;
+  from_department: "Software Technology";
+  to_department: ToDept;
+  faculty: FacultyLite;
+  day1: DayShort | "";
+  begin1: string | "";
+  end1: string | "";
+  day2: DayShort | "";
+  begin2: string | "";
+  end2: string | "";
+  remarks: string;
+  status?: "draft" | "sent" | "responded";
+  created_at?: string;
+  updated_at?: string;
+};
+
+export async function getFSOptions(params?: { q?: string; toDepartment?: ToDept }) {
+  const sp = new URLSearchParams();
+  if (params?.q) sp.set("q", params.q);
+  if (params?.toDepartment) sp.set("toDepartment", params.toDepartment);
+  const { data } = await api.get(`/chair/faculty-service/options?${sp.toString()}`);
+  return data as {
+    ok: boolean;
+    courses: Array<{ code: string; title: string; units?: number }>;
+    departments: ToDept[];
+    timeSlots: string[];
+    days: DayShort[];
+    from: "Software Technology";
+    facultyOptions?: Array<{ faculty_id: string; first_name: string; last_name: string; email?: string; label: string }>;
+  };
+}
+
+export async function listFacultyService(params?: { status?: string; dept?: string; search?: string }) {
+  const sp = new URLSearchParams();
+  if (params?.status) sp.set("status", params.status);
+  if (params?.dept) sp.set("dept", params.dept);
+  if (params?.search) sp.set("search", params.search);
+  const { data } = await api.get(`/chair/faculty-service/list?${sp.toString()}`);
+  return data as { ok: boolean; rows: FacultyServiceRow[] };
+}
+
+export async function createFacultyService(payload: {
+  course_code: string;
+  course_title?: string;
+  units?: number | null;
+  to_department: ToDept;
+}) {
+  const { data } = await api.post(`/chair/faculty-service/create`, payload);
+  return data as { ok: boolean; row: FacultyServiceRow };
+}
+
+export async function sendFacultyService(fs_id: string) {
+  const { data } = await api.post(`/chair/faculty-service/send/${encodeURIComponent(fs_id)}`);
+  return data as { ok: boolean; row: FacultyServiceRow };
+}
+
+export async function respondFacultyService(fs_id: string, payload: {
+  faculty: FacultyLite;
+  day1?: DayShort | "";
+  begin1?: string | "";
+  end1?: string | "";
+  day2?: DayShort | "";
+  begin2?: string | "";
+  end2?: string | "";
+  remarks?: string;
+}) {
+  const { data } = await api.post(`/chair/faculty-service/respond/${encodeURIComponent(fs_id)}`, payload);
+  return data as { ok: boolean; row: FacultyServiceRow };
+}
+
+
 export async function chairClassRetention(userId: string) {
   const { data } = await api.post(`/chair/class-retention`, {}, {
     params: { userId, action: "fetch" },
