@@ -16,14 +16,12 @@ jobs:
       - uses: actions/checkout@v4
         with: { ref: main }
 
-      # (Optional) quick FE build so you catch compile issues before shipping
       - name: Frontend build
         working-directory: frontend
         run: |
           npm ci
           npm run build
 
-      # (Optional) backend/analytics sanity tests (best-effort, won’t fail pipeline)
       - name: Backend tests (best-effort)
         working-directory: backend
         run: |
@@ -37,124 +35,200 @@ jobs:
           pytest -q || true
 
   deploy-s1:
-    name: Deploy S1 (primary)
     needs: build-test
     runs-on: ubuntu-latest
+    env:
+      S1_HOST: ${{ secrets.S1_HOST }}
+      S1_PORT: ${{ secrets.S1_PORT }}
+      S1_USER: ${{ secrets.S1_USER }}
+      S1_KEY:  ${{ secrets.S1_KEY }}
     steps:
       - name: Validate S1 secrets
         run: |
           for v in S1_HOST S1_PORT S1_USER S1_KEY; do
-            test -n "${{ secrets[$v] }}" || { echo "::error ::Missing secret $v"; exit 1; }
+            [ -n "${!v}" ] || { echo "::error ::$v is empty. Set it in Settings → Secrets → Actions."; exit 1; }
           done
+          echo "S1 → $S1_USER@$S1_HOST:$S1_PORT"
 
       - name: Trust S1 host key
         run: |
           mkdir -p ~/.ssh
-          ssh-keyscan -p "${{ secrets.S1_PORT }}" "${{ secrets.S1_HOST }}" >> ~/.ssh/known_hosts
+          ssh-keyscan -p "$S1_PORT" "$S1_HOST" >> ~/.ssh/known_hosts
 
-      - name: Deploy to S1
+      - name: Deploy to S1 (prod)
         uses: appleboy/ssh-action@v1.0.3
         with:
-          host:     ${{ secrets.S1_HOST }}
-          port:     ${{ secrets.S1_PORT }}
-          username: ${{ secrets.S1_USER }}
-          key:      ${{ secrets.S1_KEY }}
+          host:     ${{ env.S1_HOST }}
+          port:     ${{ env.S1_PORT }}
+          username: ${{ env.S1_USER }}
+          key:      ${{ env.S1_KEY }}
           script: |
             set -Eeuo pipefail
 
             REPO_DIR=/opt/AnimoAssign3
-            COMPOSE_FILE=docker/docker-compose.prod.s1.yml
-            ENVF=docker/.env
-            export COMPOSE_PROJECT_NAME=animo_prod_s1
+            DATA_DIR=/opt/AnimoAssign3-prod-data
+            FILE=docker/docker-compose.prod.s1.yml
+            ENVF=docker/prod.s1.env
 
-            # Ensure checkout exists, use HTTPS (no SSH needed on server)
-            if [ ! -d "$REPO_DIR/.git" ]; then
-              mkdir -p "$REPO_DIR"
-              git clone https://github.com/HIEB1I/AnimoAssign3.git "$REPO_DIR"
-            fi
-            cd "$REPO_DIR"
-            unset GIT_SSH_COMMAND || true
+            mkdir -p "$REPO_DIR" "$DATA_DIR/tmp"
+            cd "$REPO_DIR" || exit 1
+
+            git config --global --add safe.directory "$REPO_DIR"
             git config --global url.https://github.com/.insteadof git@github.com:
             git config --global url.https://github.com/.insteadof ssh://git@github.com/
-            git config --global --add safe.directory "$REPO_DIR"
-            git remote set-url origin https://github.com/HIEB1I/AnimoAssign3.git
+
+            if [ ! -d .git ]; then
+              git clone https://github.com/HIEB1I/AnimoAssign3.git .
+            fi
+
             git fetch --all --prune
-            git checkout main
-            git pull --ff-only
 
-            # Network used by nginx and app containers
-            docker network inspect docker_animoassign >/dev/null 2>&1 || docker network create docker_animoassign
+            if ! git merge-base --is-ancestor HEAD origin/main; then
+              ts=$(date +%Y%m%d-%H%M%S)
+              echo "::warning ::Local 'main' diverged; bundling to $DATA_DIR/backup-$ts.bundle"
+              git bundle create "$DATA_DIR/backup-$ts.bundle" --all || true
+            fi
 
-            # Sanity checks
-            [ -f "$COMPOSE_FILE" ] || { echo "Missing $COMPOSE_FILE"; exit 1; }
-            [ -f "$ENVF" ]         || { echo "Missing $ENVF"; exit 1; }
+            git checkout -B main origin/main
+            git reset --hard origin/main
+            git clean -fdx
 
-            # Recreate changed services only; never delete volumes
-            docker compose -f "$COMPOSE_FILE" --env-file "$ENVF" up -d --build --remove-orphans
+            [ -f "$FILE" ] || { echo "Compose file not found: $FILE"; exit 1; }
+            [ -f "$ENVF" ] || { echo "Env file not found: $ENVF"; exit 1; }
 
-            # Health checks (S1 exposes 18000/18100/18080)
-            docker run --rm curlimages/curl:8.10.1 -fsS  http://127.0.0.1:18000/health  >/dev/null && echo "::notice ::S1 backend healthy"
-            docker run --rm curlimages/curl:8.10.1 -fsS  http://127.0.0.1:18100/health  >/dev/null && echo "::notice ::S1 analytics healthy"
-            docker run --rm curlimages/curl:8.10.1 -fsSI http://127.0.0.1:18080        | head -n1
+            export COMPOSE_PROJECT_NAME=animo_prod_s1
+            DEF_NET="${COMPOSE_PROJECT_NAME}_default"
+            EXT_NET="docker_animoassign"
 
-            # Light cleanup (images only; keeps volumes)
-            docker image prune -f || true
+            set -a
+            . "$ENVF"
+            set +a
+
+            docker compose -f "$FILE" --env-file "$ENVF" up -d --build --remove-orphans
+
+            curl_wait() {
+              local net="$1" url="$2" svc="$3" tries="${4:-40}" i=0
+              while true; do
+                if docker run --rm --network "$net" curlimages/curl:8.10.1 -fsS "$url" >/dev/null 2>&1; then
+                  echo "::notice ::$svc healthy at $url"
+                  break
+                fi
+                i=$((i+1))
+                if [ "$i" -ge "$tries" ]; then
+                  echo "::error ::$svc did not become ready at $url"
+                  docker compose -f "$FILE" logs --tail=200 "$svc" || true
+                  exit 1
+                fi
+                sleep 3
+              done
+            }
+
+            curl_wait "$DEF_NET" http://backend-primary:8000/health   backend
+            curl_wait "$DEF_NET" http://analytics-primary:8000/health analytics
+            curl_wait "$EXT_NET" http://frontend-primary/              frontend-primary
+
+            if docker ps --format '{{.Names}}' | grep -q '^nginx-primary$'; then
+              docker exec nginx-primary nginx -t
+              docker exec nginx-primary nginx -s reload || true
+            fi
+
+            docker system prune -f || true
 
   deploy-s2:
-    name: Deploy S2 (backup)
-    needs: build-test
+    needs: deploy-s1
     runs-on: ubuntu-latest
+    env:
+      S2_HOST: ${{ secrets.S2_HOST }}
+      S2_PORT: ${{ secrets.S2_PORT }}
+      S2_USER: ${{ secrets.S2_USER }}
+      S2_KEY:  ${{ secrets.S2_KEY }}
     steps:
       - name: Validate S2 secrets
         run: |
           for v in S2_HOST S2_PORT S2_USER S2_KEY; do
-            test -n "${{ secrets[$v] }}" || { echo "::error ::Missing secret $v"; exit 1; }
+            [ -n "${!v}" ] || { echo "::error ::$v is empty. Set it in Settings → Secrets → Actions."; exit 1; }
           done
+          echo "S2 → $S2_USER@$S2_HOST:$S2_PORT"
 
       - name: Trust S2 host key
         run: |
           mkdir -p ~/.ssh
-          ssh-keyscan -p "${{ secrets.S2_PORT }}" "${{ secrets.S2_HOST }}" >> ~/.ssh/known_hosts
+          ssh-keyscan -p "$S2_PORT" "$S2_HOST" >> ~/.ssh/known_hosts
 
-      - name: Deploy to S2
+      - name: Deploy to S2 (prod)
         uses: appleboy/ssh-action@v1.0.3
         with:
-          host:     ${{ secrets.S2_HOST }}
-          port:     ${{ secrets.S2_PORT }}
-          username: ${{ secrets.S2_USER }}
-          key:      ${{ secrets.S2_KEY }}
+          host:     ${{ env.S2_HOST }}
+          port:     ${{ env.S2_PORT }}
+          username: ${{ env.S2_USER }}
+          key:      ${{ env.S2_KEY }}
           script: |
             set -Eeuo pipefail
 
             REPO_DIR=/opt/AnimoAssign3
-            COMPOSE_FILE=docker/docker-compose.prod.s2.yml
-            ENVF=docker/.env
-            export COMPOSE_PROJECT_NAME=animo_prod_s2
+            DATA_DIR=/opt/AnimoAssign3-prod-data
+            FILE=docker/docker-compose.prod.s2.yml
+            ENVF=docker/prod.s2.env
 
-            if [ ! -d "$REPO_DIR/.git" ]; then
-              mkdir -p "$REPO_DIR"
-              git clone https://github.com/HIEB1I/AnimoAssign3.git "$REPO_DIR"
-            fi
-            cd "$REPO_DIR"
-            unset GIT_SSH_COMMAND || true
+            mkdir -p "$REPO_DIR" "$DATA_DIR/tmp"
+            cd "$REPO_DIR" || exit 1
+
+            git config --global --add safe.directory "$REPO_DIR"
             git config --global url.https://github.com/.insteadof git@github.com:
             git config --global url.https://github.com/.insteadof ssh://git@github.com/
-            git config --global --add safe.directory "$REPO_DIR"
-            git remote set-url origin https://github.com/HIEB1I/AnimoAssign3.git
+
+            if [ ! -d .git ]; then
+              git clone https://github.com/HIEB1I/AnimoAssign3.git .
+            fi
+
             git fetch --all --prune
-            git checkout main
-            git pull --ff-only
+            if ! git merge-base --is-ancestor HEAD origin/main; then
+              ts=$(date +%Y%m%d-%H%M%S)
+              echo "::warning ::Local 'main' diverged; bundling to $DATA_DIR/backup-$ts.bundle"
+              git bundle create "$DATA_DIR/backup-$ts.bundle" --all || true
+            fi
 
-            docker network inspect docker_animoassign >/dev/null 2>&1 || docker network create docker_animoassign
+            git checkout -B main origin/main
+            git reset --hard origin/main
+            git clean -fdx
 
-            [ -f "$COMPOSE_FILE" ] || { echo "Missing $COMPOSE_FILE"; exit 1; }
-            [ -f "$ENVF" ]         || { echo "Missing $ENVF"; exit 1; }
+            [ -f "$FILE" ] || { echo "Compose file not found: $FILE"; exit 1; }
+            [ -f "$ENVF" ] || { echo "Env file not found: $ENVF"; exit 1; }
 
-            docker compose -f "$COMPOSE_FILE" --env-file "$ENVF" up -d --build --remove-orphans
+            export COMPOSE_PROJECT_NAME=animo_prod_s2
+            DEF_NET="${COMPOSE_PROJECT_NAME}_default"
+            EXT_NET="docker_animoassign"
 
-            # Health checks (S2 backup ports: 28000/28100/28080 per your nginx upstream)
-            docker run --rm curlimages/curl:8.10.1 -fsS  http://127.0.0.1:28000/health  >/dev/null && echo "::notice ::S2 backend healthy"
-            docker run --rm curlimages/curl:8.10.1 -fsS  http://127.0.0.1:28100/health  >/dev/null && echo "::notice ::S2 analytics healthy"
-            docker run --rm curlimages/curl:8.10.1 -fsSI http://127.0.0.1:28080        | head -n1
+            set -a
+            . "$ENVF"
+            set +a
 
-            docker image prune -f || true
+            docker compose -f "$FILE" --env-file "$ENVF" up -d --build --remove-orphans
+
+            curl_wait() {
+              local net="$1" url="$2" svc="$3" tries="${4:-40}" i=0
+              while true; do
+                if docker run --rm --network "$net" curlimages/curl:8.10.1 -fsS "$url" >/dev/null 2>&1; then
+                  echo "::notice ::$svc healthy at $url"
+                  break
+                fi
+                i=$((i+1))
+                if [ "$i" -ge "$tries" ]; then
+                  echo "::error ::$svc did not become ready at $url"
+                  docker compose -f "$FILE" logs --tail=200 "$svc" || true
+                  exit 1
+                fi
+                sleep 3
+              done
+            }
+
+            curl_wait "$DEF_NET" http://backend-secondary:8000/health   backend
+            curl_wait "$DEF_NET" http://analytics-secondary:8000/health analytics
+            curl_wait "$EXT_NET" http://frontend-secondary/              frontend-secondary
+
+            if docker ps --format '{{.Names}}' | grep -q '^nginx-secondary$'; then
+              docker exec nginx-secondary nginx -t
+              docker exec nginx-secondary nginx -s reload || true
+            fi
+
+            docker system prune -f || true
