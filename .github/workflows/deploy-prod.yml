@@ -112,6 +112,24 @@ jobs:
 
             docker compose -f "$FILE" --env-file "$ENVF" up -d --build --remove-orphans
 
+            wait_primary() {
+              local tries="${1:-120}" i=0
+              while true; do
+                if docker exec -i mongo-primary mongosh \
+                  -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" \
+                  --authenticationDatabase admin --quiet --eval '
+                    const h = db.adminCommand({hello:1});
+                    if (h.isWritablePrimary) { quit(0); } quit(1);
+                  ' >/dev/null 2>&1; then
+                  echo "::notice ::Mongo PRIMARY is writable"
+                  break
+                fi
+                i=$((i+1)); [ "$i" -ge "$tries" ] && { echo "::error ::No PRIMARY elected"; docker logs mongo-primary | tail -n 200 || true; exit 1; }
+                sleep 2
+              done
+            }
+            wait_primary 120
+
             # show what actually came up (helps catch name mismatches fast)
             echo "== compose ps =="; docker compose -f "$FILE" ps
             echo "== container names =="; docker ps --format '{{.Names}}'
