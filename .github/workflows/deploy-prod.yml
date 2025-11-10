@@ -55,6 +55,19 @@ jobs:
           mkdir -p ~/.ssh
           ssh-keyscan -p "$S1_PORT" "$S1_HOST" >> ~/.ssh/known_hosts
 
+      - name: Debug user & /opt perms (S1)
+          uses: appleboy/ssh-action@v1.0.3
+          with:
+            host:     ${{ secrets.S1_HOST }}
+            port:     ${{ secrets.S1_PORT }}
+            username: ${{ secrets.S1_USER }}
+            key:      ${{ secrets.S1_KEY }}
+            script: |
+              whoami
+              id
+              ls -ld /opt
+              touch /opt/probe 2>&1 || true
+
       - name: Deploy to S1 (prod)
         uses: appleboy/ssh-action@v1.0.3
         with:
