@@ -68,7 +68,7 @@ jobs:
             REPO_DIR=/opt/AnimoAssign3
             DATA_DIR=/opt/AnimoAssign3-prod-data
             FILE=docker/docker-compose.prod.s1.yml
-            ENVF=docker/prod.s1.env
+            ENVF=docker/.env
 
             mkdir -p "$REPO_DIR" "$DATA_DIR/tmp"
             cd "$REPO_DIR" || exit 1
