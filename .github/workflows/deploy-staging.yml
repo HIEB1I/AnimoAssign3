@@ -98,8 +98,13 @@ jobs:
 
             git checkout -B staging origin/staging
             git reset --hard origin/staging
-            git clean -fdx
+
+            # keep artifacts OUTSIDE the repo to avoid git clean issues
+            ART=/opt/AnimoAssign3-staging-data/tmp
+            mkdir -p "$ART" && chmod 755 "$ART"
             
+            git clean -fdx
+
             # Paths (pin to the files you actually have)
             FILE=docker/docker-compose.staging.yml
             ENVF=docker/staging.env
