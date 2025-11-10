@@ -104,7 +104,7 @@ jobs:
             . "$ENVF"
             set +a
 
-            # --- One-time-safe pre-clean to absorb legacy containers ----
+            # --- One-time-safe pre-clean to absorb legacy containers ---
             # S1 names:
             for c in mongo-primary backend-primary analytics-primary frontend-primary; do
               docker rm -f "$c" 2>/dev/null || true
@@ -117,18 +117,16 @@ jobs:
               while true; do
                 if docker exec -i mongo-primary mongosh \
                   -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" \
-                  --authenticationDatabase admin --quiet --eval '
-                    const h = db.adminCommand({hello:1});
-                    if (h.isWritablePrimary) { quit(0); } quit(1);
-                  ' >/dev/null 2>&1; then
-                  echo "::notice ::Mongo PRIMARY is writable"
+                  --authenticationDatabase admin --quiet \
+                  --eval 'const s=rs.status(); if (s.ok===1 && s.members && s.members.some(m=>m.stateStr==="PRIMARY")) quit(0); quit(1);' >/dev/null 2>&1
+                then
+                  echo "::notice ::Replica set has a PRIMARY"
                   break
                 fi
                 i=$((i+1)); [ "$i" -ge "$tries" ] && { echo "::error ::No PRIMARY elected"; docker logs mongo-primary | tail -n 200 || true; exit 1; }
                 sleep 2
               done
             }
-            wait_primary 120
 
             # show what actually came up (helps catch name mismatches fast)
             echo "== compose ps =="; docker compose -f "$FILE" ps
@@ -249,6 +247,22 @@ jobs:
 
             docker compose -f "$FILE" --env-file "$ENVF" up -d --build --remove-orphans
 
+            wait_primary() {
+              local tries="${1:-120}" i=0
+              while true; do
+                if docker exec -i mongo-secondary mongosh \
+                  -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" \
+                  --authenticationDatabase admin --quiet \
+                  --eval 'const s=rs.status(); if (s.ok===1 && s.members && s.members.some(m=>m.stateStr==="PRIMARY")) quit(0); quit(1);' >/dev/null 2>&1
+                then
+                  echo "::notice ::Replica set has a PRIMARY"
+                  break
+                fi
+                i=$((i+1)); [ "$i" -ge "$tries" ] && { echo "::error ::No PRIMARY elected"; docker logs mongo-secondary | tail -n 200 || true; exit 1; }
+                sleep 2
+              done
+            }
+            
             # Show what's running (helps catch name mismatches)
             echo "== compose ps =="; docker compose -f "$FILE" ps
             echo "== container names =="; docker ps --format '{{.Names}}'
