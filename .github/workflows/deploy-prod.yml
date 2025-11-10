@@ -268,8 +268,8 @@ jobs:
               done
             }
 
-            curl_wait "$DEF_NET" http://backend-secondary:8000/health   backend
-            curl_wait "$DEF_NET" http://analytics-secondary:8000/health analytics
+            curl_wait "$DEF_NET" http://backend-secondary:8000/health   backend-primary
+            curl_wait "$DEF_NET" http://analytics-secondary:8000/health analytics-primary
             curl_wait "$EXT_NET" http://frontend-secondary/              frontend-primary
 
             if docker ps --format '{{.Names}}' | grep -q '^nginx-secondary$'; then
