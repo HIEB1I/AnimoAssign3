@@ -952,20 +952,62 @@ export async function searchCourseCatalog(
   userId: string,
   params: { q?: string; limit?: number; department_id?: string; program_level?: string } = {}
 ) {
-  const body = { action: "courseCatalog", ...params };
-  const { data } = await axios.post(join(BASE, "apo"), body, {
-    headers: { "x-user-id": userId }, // keep your existing header convention if any
-  });
-  return data as { ok: boolean; results: Array<{
-    course_id: string;
-    course_code: string;
-    course_title: string;
-    department_id?: string;
-    program_level?: string;
-    units?: number | null;
-    type_of_course?: string | null;
-  }> };
+  const url = `${API_BASE}/apo/courseofferings?${new URLSearchParams({
+    userId,
+    action: "courseCatalog",
+    ...(params.q ? { q: params.q } : {}),
+    ...(params.limit != null ? { limit: String(params.limit) } : {}),
+    ...(params.department_id ? { department_id: params.department_id } : {}),
+    ...(params.program_level ? { program_level: params.program_level } : {}),
+  }).toString()}`;
+
+  const { data } = await axios.post(url, {}); // backend reads action from query
+  return data as {
+    ok: boolean;
+    results: Array<{
+      course_id: string;
+      course_code: string | string[]; // backend may return array
+      course_title: string;
+      department_id?: string;
+      program_level?: string;
+      units?: number | null;
+      type_of_course?: string | null;
+    }>;
+  };
 }
+
+export async function createCatalogCourse(userId: string, payload: CreateCoursePayload) {
+  const url = join(API_BASE, "apo/courseofferings"); // same base/path family as catalog.search
+  const { data } = await axios.post(
+    `${url}?userId=${encodeURIComponent(userId)}&action=catalog.create`,
+    payload
+  );
+  return data; // { ok: true, course: {...} }
+}
+
+// --- Types ---
+export type CreateCoursePayload = {
+  department_id: string;
+  program_level: "UGS" | "GS";           // UGS = Undergraduate, GS = Graduate Studies
+  course_code: string;
+  course_title: string;
+  units?: number | null;
+  type_of_course?: string | null;        // e.g., "Elective Course", "GE", "Major"
+  description?: string;
+  room_type?: string | null;             // e.g., "Classroom", "Comlab"
+  capacity?: number | null;              // max_enrollee
+  min_enrollee?: number | null;
+};
+
+export type CourseCatalogItem = {
+  course_id: string;
+  course_code: string | string[];
+  course_title: string;
+  department_id?: string;
+  program_level?: string;                // "UGS" | "GS" | human label
+  units?: number | null;
+  type_of_course?: string | null;
+};
 /* =========================================================
    ===============  APO: ROOM ALLOCATION  ==================
    ========================================================= */
