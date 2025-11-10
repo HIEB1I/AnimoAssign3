@@ -104,7 +104,7 @@ jobs:
             . "$ENVF"
             set +a
 
-            # --- One-time-safe pre-clean to absorb legacy containers ---
+            # --- One-time-safe pre-clean to absorb legacy containers ----
             # S1 names:
             for c in mongo-primary backend-primary analytics-primary frontend-primary; do
               docker rm -f "$c" 2>/dev/null || true
