@@ -125,6 +125,8 @@ jobs:
             # 2) check DBs present
             docker exec -i mongo-primary mongosh --quiet --eval 'db.getMongo().getDBNames()'
 
+            sleep 5
+
             curl_wait() {
               local net="$1" url="$2" svc="$3" tries="${4:-40}" i=0
               while true; do
