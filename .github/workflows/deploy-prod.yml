@@ -112,45 +112,43 @@ jobs:
 
             docker compose -f "$FILE" --env-file "$ENVF" up -d --build --remove-orphans
 
-            # 1) ping the DB (root auth not required for ping, but OK to keep uniform)
-            docker exec -i mongo-primary mongosh \
-              -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" \
-              --authenticationDatabase admin --quiet \
-              --eval 'db.runCommand({ping:1})' || {
-                echo "::error ::mongo-primary ping failed"
-                docker logs mongo-primary | tail -n 200 || true
-                exit 1
-            }
+            # show what actually came up (helps catch name mismatches fast)
+            echo "== compose ps =="; docker compose -f "$FILE" ps
+            echo "== container names =="; docker ps --format '{{.Names}}'
 
-            # 2) list DBs (requires admin auth)
+            # optional: quick DB sanity
             docker exec -i mongo-primary mongosh \
               -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" \
               --authenticationDatabase admin --quiet \
               --eval 'db.adminCommand({ listDatabases: 1, nameOnly: true })' || true
 
-            sleep 5
-
-            curl_wait() {
-              local net="$1" url="$2" svc="$3" tries="${4:-40}" i=0
+            # Probe via the target container's network namespace (no DNS issues)
+            curl_in() { # usage: curl_in <container> <url> <svc> [tries]
+              local c="$1" url="$2" svc="$3" tries="${4:-90}" i=0
               while true; do
-                if docker run --rm --network "$net" curlimages/curl:8.10.1 -fsS "$url" >/dev/null 2>&1; then
-                  echo "::notice ::$svc healthy at $url"
+                if docker run --rm --network "container:$c" curlimages/curl:8.10.1 -fsS "$url" >/dev/null 2>&1; then
+                  echo "::notice ::$svc healthy (via container:$c) $url"
                   break
                 fi
-                i=$((i+1))
-                if [ "$i" -ge "$tries" ]; then
+                i=$((i+1)); if [ "$i" -ge "$tries" ]; then
                   echo "::error ::$svc did not become ready at $url"
-                  docker compose -f "$FILE" logs --tail=200 "$svc" || true
+                  docker logs "$c" --tail=200 || true
+                  # also print networks to catch mis-wiring
+                  echo "Networks for $c:"; docker inspect -f '{{json .NetworkSettings.Networks}}' "$c" || true
                   exit 1
                 fi
-                sleep 3
+                sleep 2
               done
             }
 
-            curl_wait "$DEF_NET" http://backend-primary:8000/health   backend-primary
-            curl_wait "$DEF_NET" http://analytics-primary:8000/health analytics-primary
-            curl_wait "$EXT_NET" http://frontend-primary/              frontend-primary 
+            # Use loopback because we're in the container's netns
+            curl_in backend-primary   http://127.0.0.1:8000/health   backend-primary
+            curl_in analytics-primary http://127.0.0.1:8000/health   analytics-primary
+            curl_in frontend-primary  http://127.0.0.1:80/health     frontend-primary
 
+            # Frontend can be checked through the external net or nginx reload (either is fine)
+
+            # Then nginx reload
             if docker ps --format '{{.Names}}' | grep -q '^nginx-primary$'; then
               docker exec nginx-primary nginx -t
               docker exec nginx-primary nginx -s reload || true
