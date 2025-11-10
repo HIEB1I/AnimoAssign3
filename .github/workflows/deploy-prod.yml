@@ -112,18 +112,21 @@ jobs:
 
             docker compose -f "$FILE" --env-file "$ENVF" up -d --build --remove-orphans
 
-            # Compose network from your script:
-            DEF_NET="${COMPOSE_PROJECT_NAME}_default"
-
-            # 1) ping the DB
-            docker exec -i mongo-primary mongosh --quiet --eval 'db.runCommand({ping:1})' || {
-              echo "::error ::mongo-primary ping failed"
-              docker logs mongo-primary | tail -n 200 || true
-              exit 1
+            # 1) ping the DB (root auth not required for ping, but OK to keep uniform)
+            docker exec -i mongo-primary mongosh \
+              -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" \
+              --authenticationDatabase admin --quiet \
+              --eval 'db.runCommand({ping:1})' || {
+                echo "::error ::mongo-primary ping failed"
+                docker logs mongo-primary | tail -n 200 || true
+                exit 1
             }
 
-            # 2) check DBs present
-            docker exec -i mongo-primary mongosh --quiet --eval 'db.getMongo().getDBNames()'
+            # 2) list DBs (requires admin auth)
+            docker exec -i mongo-primary mongosh \
+              -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" \
+              --authenticationDatabase admin --quiet \
+              --eval 'db.adminCommand({ listDatabases: 1, nameOnly: true })' || true
 
             sleep 5
 
@@ -146,7 +149,7 @@ jobs:
 
             curl_wait "$DEF_NET" http://backend-primary:8000/health   backend
             curl_wait "$DEF_NET" http://analytics-primary:8000/health analytics
-            curl_wait "$EXT_NET" http://frontend-primary/              frontend-primary
+            curl_wait "$EXT_NET" http://frontend-primary/              frontend-primary 
 
             if docker ps --format '{{.Names}}' | grep -q '^nginx-primary$'; then
               docker exec nginx-primary nginx -t
@@ -230,13 +233,23 @@ jobs:
 
             docker compose -f "$FILE" --env-file "$ENVF" up -d --build --remove-orphans
 
-            docker exec -i mongo-secondary mongosh --quiet --eval 'db.runCommand({ping:1})' || {
-              echo "::error ::mongo-secondary ping failed"
-              docker logs mongo-secondary | tail -n 200 || true
-              exit 1
+            # 1) ping the DB (root auth not required for ping, but OK to keep uniform)
+            docker exec -i mongo-secondary mongosh \
+              -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" \
+              --authenticationDatabase admin --quiet \
+              --eval 'db.runCommand({ping:1})' || {
+                echo "::error ::mongo-secondary ping failed"
+                docker logs mongo-secondary | tail -n 200 || true
+                exit 1
             }
 
-            docker exec -i mongo-secondary mongosh --quiet --eval 'db.getMongo().getDBNames()'
+            # 2) list DBs (requires admin auth)
+            docker exec -i mongo-secondary mongosh \
+              -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" \
+              --authenticationDatabase admin --quiet \
+              --eval 'db.adminCommand({ listDatabases: 1, nameOnly: true })' || true
+
+            sleep 5
 
             curl_wait() {
               local net="$1" url="$2" svc="$3" tries="${4:-40}" i=0
@@ -257,7 +270,7 @@ jobs:
 
             curl_wait "$DEF_NET" http://backend-secondary:8000/health   backend
             curl_wait "$DEF_NET" http://analytics-secondary:8000/health analytics
-            curl_wait "$EXT_NET" http://frontend-secondary/              frontend-secondary
+            curl_wait "$EXT_NET" http://frontend-secondary/              frontend-primary
 
             if docker ps --format '{{.Names}}' | grep -q '^nginx-secondary$'; then
               docker exec nginx-secondary nginx -t
