@@ -727,17 +727,31 @@ def _faculty_priority_key_for_course(f: dict, cap: int) -> tuple[int, int]:
     return (-cap, ft_rank)
 
 # ------------------------------ PHASE 5 ------------------------------
-# Protection pools: per-course "coordinator" and dynamic "Top-K"
 def _coordinator_for_course(ctx: ContextA, cid: str) -> list[str]:
     c = (ctx.courses or {}).get(cid) or {}
-    val = c.get("course_coordinator")
-    if not val:
+    raw = c.get("course_coordinator") or c.get("coordinator_faculty_id") or c.get("coordinator")
+    if not raw:
         return []
-    if isinstance(val, list):
-        return [v for v in val if isinstance(v, str) and v]
-    if isinstance(val, str):
-        return [val]
-    return []
+
+    vals = raw if isinstance(raw, list) else [raw]
+    # build user_id -> faculty_id map
+    uid_to_fid = {f.get("user_id"): f.get("faculty_id") for f in ctx.faculty if f.get("user_id") and f.get("faculty_id")}
+    out: list[str] = []
+    for v in vals:
+        if not isinstance(v, str) or not v:
+            continue
+        if v.startswith("USR"):           # looks like user_id
+            fid = uid_to_fid.get(v)
+            if fid:
+                out.append(fid)
+        else:
+            out.append(v)                 # assume already a faculty_id
+    # unique, preserve order
+    seen = set(); ret = []
+    for fid in out:
+        if fid and fid not in seen:
+            seen.add(fid); ret.append(fid)
+    return ret
 
 def _compute_topk_for_course(by_course: dict, cid: str, candidates: list[dict], max_topk: int = 5) -> list[str]:
     """
@@ -748,12 +762,68 @@ def _compute_topk_for_course(by_course: dict, cid: str, candidates: list[dict], 
     k = max(1, min(max_topk, n_sections, len(candidates)))
     return [c["faculty_id"] for c in candidates[:k]]
 
+def _effective_kacs_for_faculty(ctx: ContextA, f: dict) -> set[str]:
+    """
+    Return the union of a faculty’s preferred and qualified KACs.
+    Used for solo-KAC detection.
+    """
+    fid = f.get("faculty_id")
+    prefs = set((ctx.prefs_by_faculty.get(fid) or {}).get("preferred_kacs") or [])
+    qual = set(f.get("qualified_kacs") or f.get("kac_ids") or [])
+    return prefs | qual
+
 def _apply_protection_tags(by_course: dict, cid: str, coord_ids: list[str], topk_ids: list[str]) -> None:
+    """
+    Phase 5: Tag protected faculty for this course.
+    Structure: by_course[cid]["protection_tags"] = { faculty_id: ["coordinator","topK", ...] }
+    Handles both list and set types safely.
+    """
     tags = (by_course.setdefault(cid, {})).setdefault("protection_tags", {})
-    for fid in coord_ids:
-        tags.setdefault(fid, set()).add("coordinator")
-    for fid in topk_ids:
-        tags.setdefault(fid, set()).add("topK")
+
+    def _as_set(x):
+        if isinstance(x, set):
+            return x
+        if isinstance(x, list):
+            return set(x)
+        return set()
+
+    # add coordinator tags
+    for fid in coord_ids or []:
+        cur = _as_set(tags.get(fid))
+        cur.add("coordinator")
+        tags[fid] = cur
+
+    # add Top-K tags
+    for fid in topk_ids or []:
+        cur = _as_set(tags.get(fid))
+        cur.add("topK")
+        tags[fid] = cur
+
+    # normalize sets → lists for JSON safety
+    by_course[cid]["protection_tags"] = {fid: sorted(list(_as_set(v))) for fid, v in tags.items()}
+
+def _apply_solo_kac_tags(ctx: ContextA, by_course: dict, cid: str, candidates: list[dict], course_kacs: set[str]) -> None:
+    """
+    Phase 5: If a candidate has exactly one effective KAC and that KAC is in this course's KACs,
+    tag them as 'soloKAC' so later phases can protect/prioritize them for this KAC.
+    """
+    if not course_kacs:
+        return
+    tags = (by_course.setdefault(cid, {})).setdefault("protection_tags", {})
+    for c in candidates:
+        fid = c.get("faculty_id")
+        if not fid:
+            continue
+        # pull the original faculty/profile doc from ctx
+        fdoc = next((x for x in ctx.faculty if x.get("faculty_id") == fid), None)
+        if not fdoc:
+            continue
+        eff = _effective_kacs_for_faculty(ctx, fdoc)
+        if len(eff) == 1:
+            sk = next(iter(eff))
+            if sk in course_kacs:
+                tags.setdefault(fid, set()).add("soloKAC")
+    # normalize sets → lists
     by_course[cid]["protection_tags"] = {fid: sorted(list(v)) for fid, v in tags.items()}
 # --------------------------- END PHASE 5 -----------------------------
 
@@ -769,19 +839,26 @@ def _course_sections(ctx: ContextA, by_course: dict, cid: str) -> list[str]:
     # preserve stable section order within a course
     return list(by_course.get(cid, {}).get("sections", []))
 
-def _promote_coordinators_first(by_course: dict, cid: str, cand_list: list[dict]) -> list[dict]:
+def _promote_protected_first(by_course: dict, cid: str, cand_list: list[dict]) -> list[dict]:
     """
-    If course has coordinators in protection_tags, promote them to the front while
-    preserving the relative order among coordinators and among non-coordinators.
+    Phase 6A: Promote protected candidates:
+      1) coordinators, then
+      2) soloKAC,
+    preserving relative order inside each bucket and overall stability.
     """
     tags = (by_course.get(cid, {}).get("protection_tags", {})) or {}
-    coord_ids = {fid for fid, tg in tags.items() if "coordinator" in tg}
-    if not coord_ids:
-        return cand_list
-    coords, others = [], []
+    def has(fid: str, tag: str) -> bool:
+        return tag in (tags.get(fid) or [])
+    coords, solos, others = [], [], []
     for c in cand_list:
-        (coords if c.get("faculty_id") in coord_ids else others).append(c)
-    return coords + others
+        fid = c.get("faculty_id")
+        if fid and has(fid, "coordinator"):
+            coords.append(c)
+        elif fid and has(fid, "soloKAC"):
+            solos.append(c)
+        else:
+            others.append(c)
+    return coords + solos + others
 
 async def run_milestone_c_phase6a(term_id: str, db, department_id: str | None = None) -> dict:
     """
@@ -797,6 +874,23 @@ async def run_milestone_c_phase6a(term_id: str, db, department_id: str | None = 
     phase5 = await run_milestone_b(term_id, db, department_id)
     by_course = phase5.get("by_course", {})
     course_order = phase5.get("courses_order", []) or (ctx.course_order or [])
+    
+    # ----- Phase 6A KAC coverage bookkeeping (prioritize higher KACs) -----
+    # total sections per KAC (from phase3 kac_stats), and per-KAC assigned so far
+    kac_total_sections: dict[str, int] = {}
+    kac_assigned: dict[str, int] = {}
+
+    # build course -> primary KAC map (choose the first KAC if multiple)
+    course_to_primary_kac: dict[str, str] = {}
+    for cid2 in course_order:
+        kset = (getattr(ctx, "course_to_kacs", {}) or {}).get(cid2) or set()
+        if kset:
+            course_to_primary_kac[cid2] = next(iter(sorted(kset)))  # stable pick
+    # fill totals from ctx.kac_stats if available
+    for kid, ks in (getattr(ctx, "kac_stats", {}) or {}).items():
+        kac_total_sections[kid] = int(ks.get("sections") or 0)
+        kac_assigned[kid] = 0
+
 
     # capacities (preferred_units → remaining_units → default)
     caps = _faculty_capacities(ctx)
@@ -815,7 +909,15 @@ async def run_milestone_c_phase6a(term_id: str, db, department_id: str | None = 
 
         # candidate list — already ranked; coordinators (if any) go first
         cand_list = list(by_course.get(cid, {}).get("candidates", []))
-        cand_list = _promote_coordinators_first(by_course, cid, cand_list)
+        cand_list = _promote_protected_first(by_course, cid, cand_list)
+
+        # Precompute solo-KAC ownership for each faculty (for quick lookup)
+        solo_kac_of_faculty: dict[str, str] = {}
+        for course_id, info in by_course.items():
+            tags = (info or {}).get("protection_tags", {}) or {}
+            for fid_tag, taglist in tags.items():
+                if "soloKAC" in (taglist or []) and fid_tag not in solo_kac_of_faculty:
+                    solo_kac_of_faculty[fid_tag] = course_to_primary_kac.get(course_id)
 
         # exhaust top candidate's units across the course before moving to next
         for c in cand_list:
@@ -826,6 +928,20 @@ async def run_milestone_c_phase6a(term_id: str, db, department_id: str | None = 
             if cap < units_per_sec:
                 continue
 
+            # --- solo-KAC guard (reserve for their own KAC until covered) ---
+            solo_kac_id = solo_kac_of_faculty.get(fid)
+
+            current_kac = course_to_primary_kac.get(cid)
+            if solo_kac_id and current_kac != solo_kac_id:
+                total = int(kac_total_sections.get(solo_kac_id, 0))
+                done  = int(kac_assigned.get(solo_kac_id, 0))
+                # threshold (e.g., 80%): allow spillover after coverage ratio is reached
+                SOLO_KAC_RELEASE_RATIO = 0.80
+                if total > 0:
+                    covered = (done / total) >= SOLO_KAC_RELEASE_RATIO
+                    if not covered:
+                        continue
+
             # Assign as many unassigned sections of this course as capacity allows
             i = 0
             while i < len(sec_ids) and cap >= units_per_sec:
@@ -833,20 +949,28 @@ async def run_milestone_c_phase6a(term_id: str, db, department_id: str | None = 
                 if sid in assigned:
                     i += 1
                     continue
+
                 # (Phase 6A skips time/day; campus/mode already gated in Phase 5)
                 assigned[sid] = {
                     "section_id": sid,
                     "course_id": cid,
                     "faculty_id": fid,
-                    "faculty": c.get("name",""),
+                    "faculty": c.get("name", ""),
                     "status": "Pending",
                 }
                 cap -= units_per_sec
                 caps[fid] = cap
                 per_course_assigned[cid] = per_course_assigned.get(cid, 0) + 1
+
+                # ---- KAC coverage++ for the course's primary KAC  ----
+                pk = course_to_primary_kac.get(cid)
+                if pk:
+                    kac_assigned[pk] = kac_assigned.get(pk, 0) + 1
+                # ------------------------------------------------------
+
                 i += 1
 
-            # refresh remaining unassigned list for this course
+            # refresh remaining unassigned list for this course (important!)
             sec_ids = [sid for sid in sec_ids if sid not in assigned]
             if not sec_ids:
                 break
@@ -880,8 +1004,10 @@ async def run_milestone_c_phase6a(term_id: str, db, department_id: str | None = 
     debug6a = {
         "phase6a_assigned_total": len(assignments),
         "phase6a_per_course": per_course_assigned,
+        "phase6a_per_kac": {k: {"assigned": int(kac_assigned.get(k, 0)), "total": int(kac_total_sections.get(k, 0))}
+                            for k in sorted(set(kac_total_sections) | set(kac_assigned))},
         "phase6a_caps_left": {k: int(v) for k, v in caps.items()},
-        "phase6a_faculty_debug": phase6a_faculty_debug,   # NEW detailed list
+        "phase6a_faculty_debug": phase6a_faculty_debug,
     }
 
     # Keep by_course and earlier debug fields for inspection
@@ -978,30 +1104,6 @@ async def run_milestone_b(term_id: str, db, department_id: str | None = None) ->
                 continue
             dbg_campus_mode_ok += 1
 
-            # (D) If any section already has real schedules, require at least one overlap with pref windows
-            sec_ids = by_course[cid]["sections"]
-            sec_has_sched = any(ctx.schedules_by_section.get(sid) for sid in sec_ids)
-            if sec_has_sched:
-                pref_windows = []
-                for t in (fpref.get("preferred_times") or []):
-                    if "-" in t:
-                        a, b = t.split("-", 1)
-                        pref_windows.append((a.replace(":", ""), b.replace(":", "")))
-                if pref_windows:
-                    ok_overlap = False
-                    for sid in sec_ids[:2]:
-                        for sch in (ctx.schedules_by_section.get(sid) or []):
-                            stt = str(sch.get("start_time") or sch.get("start") or "").replace(":", "")
-                            ett = str(sch.get("end_time") or sch.get("end") or "").replace(":", "")
-                            if not (stt and ett):
-                                continue
-                            for ps, pe in pref_windows:
-                                if int(ps) < int(ett) and int(stt) < int(pe):
-                                    ok_overlap = True; break
-                            if ok_overlap: break
-                        if ok_overlap: break
-                    if not ok_overlap:
-                        continue
             dbg_time_ok += 1
 
             # (E) Course-aware scoring
@@ -1046,6 +1148,7 @@ async def run_milestone_b(term_id: str, db, department_id: str | None = None) ->
         # normalize Top-K (dedup while preserving order)
         topk_ids = list(dict.fromkeys(topk_ids))
 
+        _apply_solo_kac_tags(ctx, by_course, cid, cands, course_kacs)
         _apply_protection_tags(by_course, cid, coord_ids, topk_ids)
         # --------------------------- END PHASE 5 -----------------------------
 
