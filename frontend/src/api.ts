@@ -182,6 +182,38 @@ export async function getOneFacultyProfile(): Promise<FacultyProfile> {
   return data;
 }
 
+export type Status = "" | "Confirmed" | "Pending" | "Unassigned" | "Conflict";
+
+export type Row = {
+  id: string;
+  course: string;
+  title: string;
+  units: number | "";
+  section: string;
+  faculty: string;
+  day1: string; begin1: string; end1: string; room1: string;
+  day2: string; begin2: string; end2: string; room2: string;
+  capacity: number | "";
+  status: Status;
+  conflictNote?: string;
+  editable?: boolean;
+};
+
+
+export type LoadAssignmentResponse = {
+  term: string;
+  rows: Row[];
+};
+
+// // Automatically generate load recommendations (auto-assign)
+// export async function runOmAutoAssign({ user_id, department_id }: {user_id: string; department_id?: string}) {
+//   const base = (typeof API_BASE !== "undefined" ? API_BASE : "").replace(/\/+$/,"");
+//   const url = `${base}/om/load-assignment/run?user_id=${encodeURIComponent(user_id)}${department_id ? `&department_id=${encodeURIComponent(department_id)}` : ""}`;
+//   const r = await fetch(url, { method: "POST" });
+//   if (!r.ok) throw new Error(await r.text());
+//   return r.json() as Promise<{ term: string; rows: Row[] }>;
+// }
+
 /* =========================================================
    ===============  ADMIN: MANAGEMENT  =====================
    ========================================================= */
@@ -1527,19 +1559,19 @@ export type OmLoadRow = {
   conflictNote?: string;
 };
 
-export async function getOmLoadAssignmentList(userId: string) {
-  const { data } = await axios.post(`${API_BASE}/om/loadassignment`, {}, {
-    params: { userId, action: "fetch" },
-  });
-  return data as { term?: string; rows: OmLoadRow[] };
-}
+// export async function getOmLoadAssignmentList(userId: string) {
+//   const { data } = await axios.post(`${API_BASE}/om/loadassignment`, {}, {
+//     params: { userId, action: "fetch" },
+//   });
+//   return data as { term?: string; rows: OmLoadRow[] };
+// }
 
-export async function getOmLoadAssignmentOptions(userId: string) {
-  const { data } = await axios.post(`${API_BASE}/om/loadassignment`, {}, {
-    params: { userId, action: "options" },
-  });
-  return data;
-}
+// export async function getOmLoadAssignmentOptions(userId: string) {
+//   const { data } = await axios.post(`${API_BASE}/om/loadassignment`, {}, {
+//     params: { userId, action: "options" },
+//   });
+//   return data;
+// }
 
 export async function getOmLoadAssignmentProfile(userId: string) {
   const { data } = await axios.post(`${API_BASE}/om/loadassignment`, {}, {
@@ -1553,6 +1585,29 @@ export async function submitOmLoadAssignment(userId: string, payload: { rows: Om
     params: { userId, action: "submit" },
   });
   return data as { ok: boolean; rows: OmLoadRow[] };
+}
+
+/** List all sections for the current term (no algorithm) */
+export async function getOmLoadAssignmentList(user_id: string) {
+  const base = (typeof API_BASE !== "undefined" ? API_BASE : "").replace(/\/+$/, "");
+  const url = `${base}/om/load-assignment/list?user_id=${encodeURIComponent(user_id)}`;
+  const r = await fetch(url, { method: "GET" });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json() as Promise<{ term: string; rows: OmLoadRow[] }>;
+}
+
+/** Auto-assign algorithm run (fill faculty/day/time/room) */
+export async function runOmAutoAssign(params: {
+  user_id: string;
+  department_id?: string;
+}) {
+  const base = (typeof API_BASE !== "undefined" ? API_BASE : "").replace(/\/+$/, "");
+  const qs = new URLSearchParams({ user_id: params.user_id });
+  if (params.department_id) qs.set("department_id", params.department_id);
+  const url = `${base}/om/load-assignment/run?${qs.toString()}`;
+  const r = await fetch(url, { method: "POST" });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json() as Promise<{ term: string; rows: OmLoadRow[] }>;
 }
 
 /* =========================================================

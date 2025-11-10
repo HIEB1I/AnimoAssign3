@@ -1,13 +1,13 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Outlet, useLocation } from "react-router-dom";
 import AppShell from "../../base/AppShell";
+import { runOmAutoAssign } from "../../api.ts"; // adjust path to your api.ts
 
 import {
   getOmLoadAssignmentList,
-  getOmLoadAssignmentProfile,   // ← add this
+  getOmLoadAssignmentProfile, // ← add this
   submitOmLoadAssignment,
 } from "../../api";
-
 
 import { cls } from "../../utilities/cls";
 import {
@@ -43,7 +43,10 @@ function SelectBox({
 }) {
   const [open, setOpen] = useState(false);
   const [hover, setHover] = useState<number>(() =>
-    Math.max(0, options.findIndex((o) => o === value))
+    Math.max(
+      0,
+      options.findIndex((o) => o === value)
+    )
   );
   const btnRef = useRef<HTMLButtonElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
@@ -363,15 +366,30 @@ const ApproveModal = ({
         <div className="mx-auto mb-4 grid h-16 w-16 place-items-center rounded-full border-2 border-emerald-600 text-emerald-700">
           <Check className="h-8 w-8" strokeWidth={2.5} />
         </div>
-        <h3 className="mb-2 text-center text-2xl font-semibold">Are you sure?</h3>
+        <h3 className="mb-2 text-center text-2xl font-semibold">
+          Are you sure?
+        </h3>
         <p className="mx-auto mb-6 max-w-md text-center text-sm text-neutral-600">
-          Please confirm that this is the final <span className="font-semibold">Faculty Load
-          Assignment</span> to be submitted to the <span className="font-semibold">Office Assistant</span>.
-          Once submitted, this action cannot be undone and the button will be disabled.
+          Please confirm that this is the final{" "}
+          <span className="font-semibold">Faculty Load Assignment</span> to be
+          submitted to the{" "}
+          <span className="font-semibold">Office Assistant</span>. Once
+          submitted, this action cannot be undone and the button will be
+          disabled.
         </p>
         <div className="flex justify-end gap-2">
-          <button onClick={onClose} className="rounded-lg border border-neutral-300 bg-neutral-100 px-4 py-2 text-sm hover:bg-neutral-200">Cancel</button>
-          <button onClick={onApprove} className="rounded-lg bg-emerald-700 px-4 py-2 text-sm font-medium text-white hover:brightness-110">Yes, I Approve</button>
+          <button
+            onClick={onClose}
+            className="rounded-lg border border-neutral-300 bg-neutral-100 px-4 py-2 text-sm hover:bg-neutral-200"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={onApprove}
+            className="rounded-lg bg-emerald-700 px-4 py-2 text-sm font-medium text-white hover:brightness-110"
+          >
+            Yes, I Approve
+          </button>
         </div>
       </div>
     </div>
@@ -404,12 +422,16 @@ const SendModal = ({
             Teaching Load Assignments for Term 1, AY 2025 - 2026
           </h3>
           <div className="mt-0.5 text-[11px] text-gray-600">
-            To: {Array.from(new Set(rows.map((r) => r.faculty || "Unassigned"))).join(", ")}
+            To:{" "}
+            {Array.from(
+              new Set(rows.map((r) => r.faculty || "Unassigned"))
+            ).join(", ")}
           </div>
         </div>
 
         <p className="mt-5 text-[13px] text-gray-700">
-          Please let me know if the following teaching load below is acceptable to you:
+          Please let me know if the following teaching load below is acceptable
+          to you:
         </p>
 
         <div className="mt-4">
@@ -428,8 +450,12 @@ const SendModal = ({
               </colgroup>
               <thead className="bg-gray-50 text-gray-700">
                 <tr className="[&>th]:border-b [&>th]:border-gray-200">
-                  <th className="px-4 py-3 text-left font-semibold">Course Code</th>
-                  <th className="px-4 py-3 text-left font-semibold">Course Title</th>
+                  <th className="px-4 py-3 text-left font-semibold">
+                    Course Code
+                  </th>
+                  <th className="px-4 py-3 text-left font-semibold">
+                    Course Title
+                  </th>
                   <th className="px-4 py-3 text-left font-semibold">Section</th>
                   <th className="px-4 py-3 text-left font-semibold">Units</th>
                   <th className="px-4 py-3 text-left font-semibold">Campus</th>
@@ -444,29 +470,59 @@ const SendModal = ({
                   <React.Fragment key={faculty}>
                     {manyGroups && (
                       <tr className="bg-white">
-                        <td colSpan={9} className="px-4 pt-5 pb-2 text-[12px] font-semibold text-gray-900">
+                        <td
+                          colSpan={9}
+                          className="px-4 pt-5 pb-2 text-[12px] font-semibold text-gray-900"
+                        >
                           {faculty}
                         </td>
                       </tr>
                     )}
                     {items.map((r) => (
-                      <tr key={r.id} className={cls("bg-white", "[&>td]:border-t [&>td]:border-gray-100")}>
-                        <td className="px-4 py-3 align-middle">{r.course || "—"}</td>
-                        <td className="px-4 py-3 align-middle truncate">{r.title || "—"}</td>
-                        <td className="px-4 py-3 align-middle">{r.section || "—"}</td>
-                        <td className="px-4 py-3 align-middle">{r.units !== "" ? String(r.units) : "—"}</td>
-                        <td className="px-4 py-3 align-middle text-gray-800">—</td>
-                        <td className="px-4 py-3 align-middle text-gray-800">—</td>
-                        <td className="px-4 py-3 align-middle">{r.day1 || "—"}</td>
-                        <td className="px-4 py-3 align-middle">{r.room1 || "—"}</td>
-                        <td className="px-4 py-3 align-middle">{timeRange(r.begin1, r.end1)}</td>
+                      <tr
+                        key={r.id}
+                        className={cls(
+                          "bg-white",
+                          "[&>td]:border-t [&>td]:border-gray-100"
+                        )}
+                      >
+                        <td className="px-4 py-3 align-middle">
+                          {r.course || "—"}
+                        </td>
+                        <td className="px-4 py-3 align-middle truncate">
+                          {r.title || "—"}
+                        </td>
+                        <td className="px-4 py-3 align-middle">
+                          {r.section || "—"}
+                        </td>
+                        <td className="px-4 py-3 align-middle">
+                          {r.units !== "" ? String(r.units) : "—"}
+                        </td>
+                        <td className="px-4 py-3 align-middle text-gray-800">
+                          —
+                        </td>
+                        <td className="px-4 py-3 align-middle text-gray-800">
+                          —
+                        </td>
+                        <td className="px-4 py-3 align-middle">
+                          {r.day1 || "—"}
+                        </td>
+                        <td className="px-4 py-3 align-middle">
+                          {r.room1 || "—"}
+                        </td>
+                        <td className="px-4 py-3 align-middle">
+                          {timeRange(r.begin1, r.end1)}
+                        </td>
                       </tr>
                     ))}
                   </React.Fragment>
                 ))}
                 {rows.length === 0 && (
                   <tr>
-                    <td colSpan={9} className="px-4 py-8 text-center text-sm text-gray-500">
+                    <td
+                      colSpan={9}
+                      className="px-4 py-8 text-center text-sm text-gray-500"
+                    >
                       No rows selected.
                     </td>
                   </tr>
@@ -477,8 +533,16 @@ const SendModal = ({
         </div>
 
         <div className="mt-6 flex items-center justify-end gap-2">
-          <button onClick={onClose} className="rounded-lg border border-neutral-300 bg-neutral-100 px-4 py-2 text-sm hover:bg-neutral-200">Cancel</button>
-          <button onClick={onClose} className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:brightness-110">
+          <button
+            onClick={onClose}
+            className="rounded-lg border border-neutral-300 bg-neutral-100 px-4 py-2 text-sm hover:bg-neutral-200"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={onClose}
+            className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:brightness-110"
+          >
             <Send className="h-4 w-4" />
             Send
           </button>
@@ -508,7 +572,9 @@ const RequestChangeModal = ({
           <X className="h-5 w-5 text-gray-500" />
         </button>
 
-        <h3 className="text-lg font-semibold text-emerald-700 mb-4">Request for Change</h3>
+        <h3 className="text-lg font-semibold text-emerald-700 mb-4">
+          Request for Change
+        </h3>
         <div className="text-sm text-gray-600 mb-4">
           From: <span className="font-semibold">{from}</span>
         </div>
@@ -524,7 +590,9 @@ const RequestChangeModal = ({
           </div>
           <div>
             <div className="font-semibold text-gray-900">Other remarks</div>
-            <div className="text-gray-700">Other commitments to that timeframe.</div>
+            <div className="text-gray-700">
+              Other commitments to that timeframe.
+            </div>
           </div>
         </div>
 
@@ -536,9 +604,16 @@ const RequestChangeModal = ({
         />
 
         <div className="flex justify-end gap-2">
-          <button className="px-4 py-2 rounded-lg bg-red-600 text-white text-sm">Reject</button>
-          <button className="px-4 py-2 rounded-lg bg-emerald-700 text-white text-sm">Approve</button>
-          <button className="px-4 py-2 rounded-lg bg-blue-600 text-white text-sm" onClick={onClose}>
+          <button className="px-4 py-2 rounded-lg bg-red-600 text-white text-sm">
+            Reject
+          </button>
+          <button className="px-4 py-2 rounded-lg bg-emerald-700 text-white text-sm">
+            Approve
+          </button>
+          <button
+            className="px-4 py-2 rounded-lg bg-blue-600 text-white text-sm"
+            onClick={onClose}
+          >
             Reply
           </button>
         </div>
@@ -549,19 +624,47 @@ const RequestChangeModal = ({
 /* ---------------- Main ---------------- */
 export default function OM_LoadAssignment() {
   // Session (DB-driven, no hardcodes)
-  const session: { userId?: string; fullName?: string; roles?: string[] } | null = (() => {
-    try { return JSON.parse(localStorage.getItem("animo.user") || "null"); } catch { return null; }
+  const session: {
+    userId?: string;
+    fullName?: string;
+    roles?: string[];
+  } | null = (() => {
+    try {
+      return JSON.parse(localStorage.getItem("animo.user") || "null");
+    } catch {
+      return null;
+    }
   })();
 
   const userId = session?.userId || "";
 
+  const [isAssigning, setIsAssigning] = useState(false);
+
+  async function runAutoAssign() {
+    if (!userId) return;
+    try {
+      setIsAssigning(true);
+      const res = await runOmAutoAssign({ user_id: userId });
+      setRows(Array.isArray(res?.rows) ? res.rows : []);
+      setTerm(typeof res?.term === "string" ? res.term : "");
+      setMode("run");
+      setApproved(false);
+    } catch (e) {
+      console.error(e);
+      alert(`Auto-assign failed: ${String(e)}`);
+    } finally {
+      setIsAssigning(false);
+    }
+  }
+
   const normRoles = (session?.roles || []).map((r) =>
-  String(r).toLowerCase().replace(/\s+/g, "_")
+    String(r).toLowerCase().replace(/\s+/g, "_")
   );
-  
 
   // TopBar profile from DB (fallback to session)
-  const [profileName, setProfileName] = useState<string>(session?.fullName || "");
+  const [profileName, setProfileName] = useState<string>(
+    session?.fullName || ""
+  );
   const [profileSubtitle, setProfileSubtitle] = useState<string>("");
 
   // Term label from backend (no hardcoding)
@@ -575,22 +678,24 @@ export default function OM_LoadAssignment() {
         // p: { ok: boolean; staff_id?: string; position_title?: string }
 
         // ✅ 2) Updated role/subtitle logic (replaces the old session?.roles check)
-        if (normRoles.includes("office_manager") || normRoles.includes("role0006")) {
+        if (
+          normRoles.includes("office_manager") ||
+          normRoles.includes("role0006")
+        ) {
           setProfileSubtitle("Office Manager");
         } else if (p?.position_title) {
           setProfileSubtitle(p.position_title);
         }
 
         // ✅ 3) Updated name fallback logic (after subtitle)
-        if (!profileName) setProfileName(p?.full_name || session?.fullName || "");
-        
+        if (!profileName)
+          setProfileName(p?.full_name || session?.fullName || "");
       } catch {
         /* ignore; non-blocking for UI */
       }
     })();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userId]);
-
 
   const [search, setSearch] = useState("");
   const [rows, setRows] = useState<Row[]>([]);
@@ -624,7 +729,9 @@ export default function OM_LoadAssignment() {
   }, []);
 
   const setCell = <K extends keyof Row>(id: string, key: K, val: Row[K]) =>
-    setRows((prev) => prev.map((r) => (r.id === id ? { ...r, [key]: val } : r)));
+    setRows((prev) =>
+      prev.map((r) => (r.id === id ? { ...r, [key]: val } : r))
+    );
 
   const filtered = rows.filter((r) => {
     const s = search.trim().toLowerCase();
@@ -636,15 +743,18 @@ export default function OM_LoadAssignment() {
     );
   });
 
-  const allSelected = isRunning && filtered.length > 0 && filtered.every((r) => r.selected);
+  const allSelected =
+    isRunning && filtered.length > 0 && filtered.every((r) => r.selected);
   const toggleSelectAll = (checked: boolean) =>
     setRows((prev) =>
-      prev.map((r) => (filtered.some((fr) => fr.id === r.id) ? { ...r, selected: checked } : r))
+      prev.map((r) =>
+        filtered.some((fr) => fr.id === r.id) ? { ...r, selected: checked } : r
+      )
     );
   const selectedRows = rows.filter((r) => r.selected);
   const anySelected = selectedRows.length > 0;
 
-    const loadFromServer = async () => {
+  const loadFromServer = async () => {
     if (!userId) return;
     const res = await getOmLoadAssignmentList(userId);
     setRows(Array.isArray(res?.rows) ? res.rows : []);
@@ -652,8 +762,6 @@ export default function OM_LoadAssignment() {
     setMode("run");
     setApproved(false);
   };
-
-
 
   const addRow = () => {
     setRows((prev) => [
@@ -734,23 +842,21 @@ export default function OM_LoadAssignment() {
       <>—</>
     );
 
-    const facultyOptions = useMemo(() => {
+  const facultyOptions = useMemo(() => {
     // strictly DB-derived: only from fetched rows
     const set = new Set<string>();
     rows.forEach((r) => r.faculty && set.add(r.faculty));
     return Array.from(set).sort();
-    }, [rows]);
-
+  }, [rows]);
 
   return (
-      <AppShell
+    <AppShell
       // make TopBar’s Inbox icon open our OM Inbox-as-tab
       topbarProfileName={profileName || " "}
       topbarProfileSubtitle={profileSubtitle || " "}
       // @ts-ignore
       topbarInboxEvent="om:openInbox"
     >
-
       {/* If Inbox is opened from the TopBar, show it like a tab */}
       {showInbox ? (
         <OMInboxContent />
@@ -762,416 +868,467 @@ export default function OM_LoadAssignment() {
           {/* Show the main Load Assignment UI only on /om or /om/load-assignment */}
           {isIndex && (
             <main className="w-full px-8 py-8">
-          <header className="mb-6 flex items-start justify-between">
-            <div>
-              <h1 className="text-2xl font-bold">
-                Load Assignment <span className="text-gray-400">|</span>{" "}
-                <span className="font-black">{term}</span>
-              </h1>
-              <p className="text-sm text-gray-600">
-                Manage course assignments and faculty workload distribution
-              </p>
-            </div>
-          </header>
-
-          <div className="mb-6 flex flex-wrap items-center gap-3 rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
-            <div className="relative flex-1 min-w-[260px]">
-              <SearchIcon className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-500" />
-              <input
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder="Search by course, section, or faculty..."
-                className="w-full rounded-lg border border-gray-300 px-9 py-2 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30"
-              />
-            </div>
-
-            <div className="ml-auto flex items-center gap-2">
-              <button
-                disabled={!hasReco || approved}
-                className={cls(
-                  "inline-flex items-center gap-2 rounded-md px-3.5 py-2 text-sm font-medium shadow-sm",
-                  hasReco && !approved
-                    ? "bg-gray-800 text-white hover:brightness-110"
-                    : "bg-gray-200 text-gray-500 cursor-not-allowed"
-                )}
-                title={
-                  !hasReco
-                    ? "No recommendations to save yet"
-                    : approved
-                    ? "Already approved"
-                    : "Save Draft"
-                }
-              >
-                <Save className="h-4 w-4" />
-                Save Draft
-              </button>
-              <button
-                disabled={!hasReco || approved}
-                onClick={() => setShowApprove(true)}
-                className={cls(
-                  "inline-flex items-center gap-2 rounded-md px-3.5 py-2 text-sm font-medium shadow-sm",
-                  hasReco && !approved
-                    ? "bg-emerald-700 text-white hover:brightness-110"
-                    : "bg-gray-200 text-gray-500 cursor-not-allowed"
-                )}
-                title={
-                  !hasReco
-                    ? "No recommendations to approve yet"
-                    : approved
-                    ? "Already approved"
-                    : "Approve"
-                }
-              >
-                <CheckCheck className="h-4 w-4" />
-                Approve
-              </button>
-            </div>
-          </div>
-
-          <div className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
-            <div className="flex items-center justify-between px-4 pt-4">
-              <h2 className="text-lg font-semibold">Load Recommendations</h2>
-
-              {!isRunning ? (
-                <div className="flex items-center gap-2">
-                  <button className="inline-flex items-center gap-2 rounded-md bg-emerald-700 px-3.5 py-2 text-sm font-medium text-white shadow-sm hover:brightness-110">
-                    <Upload className="h-4 w-4" />
-                    Import CSV
-                  </button>
-                  <button
-                    onClick={loadFromServer}
-                    className="inline-flex items-center gap-2 rounded-md border border-emerald-700 text-emerald-800 bg-white px-3.5 py-2 text-sm font-medium hover:bg-emerald-50"
-                  >
-                    <Play className="h-4 w-4" />
-                    Run
-                  </button>
+              <header className="mb-6 flex items-start justify-between">
+                <div>
+                  <h1 className="text-2xl font-bold">
+                    Load Assignment <span className="text-gray-400">|</span>{" "}
+                    <span className="font-black">{term}</span>
+                  </h1>
+                  <p className="text-sm text-gray-600">
+                    Manage course assignments and faculty workload distribution
+                  </p>
                 </div>
-              ) : (
-                <div className="flex items-center gap-2">
+              </header>
+
+              <div className="mb-6 flex flex-wrap items-center gap-3 rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
+                <div className="relative flex-1 min-w-[260px]">
+                  <SearchIcon className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-500" />
+                  <input
+                    value={search}
+                    onChange={(e) => setSearch(e.target.value)}
+                    placeholder="Search by course, section, or faculty..."
+                    className="w-full rounded-lg border border-gray-300 px-9 py-2 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30"
+                  />
+                </div>
+
+                <div className="ml-auto flex items-center gap-2">
                   <button
-                    disabled={!anySelected}
-                    onClick={() => setShowSend(true)}
+                    disabled={!hasReco || approved}
                     className={cls(
                       "inline-flex items-center gap-2 rounded-md px-3.5 py-2 text-sm font-medium shadow-sm",
-                      anySelected
-                        ? "bg-blue-600 text-white hover:brightness-110"
+                      hasReco && !approved
+                        ? "bg-gray-800 text-white hover:brightness-110"
                         : "bg-gray-200 text-gray-500 cursor-not-allowed"
                     )}
-                    title={anySelected ? "Send to selected faculty" : "Select at least one row"}
+                    title={
+                      !hasReco
+                        ? "No recommendations to save yet"
+                        : approved
+                        ? "Already approved"
+                        : "Save Draft"
+                    }
                   >
-                    <Send className="h-4 w-4" />
-                    To Faculty
+                    <Save className="h-4 w-4" />
+                    Save Draft
                   </button>
                   <button
-                    onClick={loadFromServer}
-                    className="inline-flex items-center gap-2 rounded-md border border-gray-300 bg-white px-3.5 py-2 text-sm font-medium hover:bg-gray-50"
+                    disabled={!hasReco || approved}
+                    onClick={() => setShowApprove(true)}
+                    className={cls(
+                      "inline-flex items-center gap-2 rounded-md px-3.5 py-2 text-sm font-medium shadow-sm",
+                      hasReco && !approved
+                        ? "bg-emerald-700 text-white hover:brightness-110"
+                        : "bg-gray-200 text-gray-500 cursor-not-allowed"
+                    )}
+                    title={
+                      !hasReco
+                        ? "No recommendations to approve yet"
+                        : approved
+                        ? "Already approved"
+                        : "Approve"
+                    }
                   >
-                    <RefreshCcw className="h-4 w-4" />
-                    Refresh
+                    <CheckCheck className="h-4 w-4" />
+                    Approve
                   </button>
                 </div>
-              )}
-            </div>
+              </div>
 
-            <div className="overflow-x-auto overflow-y-auto max-h-[58vh] mt-3">
-              <table className="min-w-full text-sm table-fixed">
-                <colgroup>
-                  <col className="w-[46px]" />
-                  <col className="w-[160px]" />
-                  <col className="w-[26%]" />
-                  <col className="w-[70px]" />
-                  <col className="w-[80px]" />
-                  <col className="w-[18%]" />
-                  <col className="w-[72px]" />
-                  <col className="w-[96px]" />
-                  <col className="w-[96px]" />
-                  <col className="w-[96px]" />
-                  <col className="w-[72px]" />
-                  <col className="w-[96px]" />
-                  <col className="w-[96px]" />
-                  <col className="w-[96px]" />
-                  <col className="w-[80px]" />
-                  <col className="w-[100px]" />
-                  <col className="w-[110px]" />
-                </colgroup>
+              <div className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
+                <div className="flex items-center justify-between px-4 pt-4">
+                  <h2 className="text-lg font-semibold">
+                    Load Recommendations
+                  </h2>
 
-                <thead className="bg-gray-50 border-y text-gray-700">
-                  <tr className="whitespace-nowrap">
-                    <th className="px-3 py-2 text-center">
-                      {isRunning && (
-                        <input
-                          type="checkbox"
-                          checked={allSelected}
-                          onChange={(e) => toggleSelectAll(e.target.checked)}
-                          className="rounded border-gray-300 text-emerald-600 focus:ring-emerald-500"
-                          title="Select all"
-                        />
-                      )}
-                    </th>
-                    <th className="text-left px-4 py-2">Course & Title</th>
-                    <th className="text-center px-2 py-2">Units</th>
-                    <th className="text-center px-2 py-2">Section</th>
-                    <th className="text-left px-4 py-2">Faculty</th>
-                    <th className="text-center px-2 py-2">Day 1</th>
-                    <th className="text-center px-2 py-2">Begin 1</th>
-                    <th className="text-center px-2 py-2">End 1</th>
-                    <th className="text-center px-2 py-2">Room 1</th>
-                    <th className="text-center px-2 py-2">Day 2</th>
-                    <th className="text-center px-2 py-2">Begin 2</th>
-                    <th className="text-center px-2 py-2">End 2</th>
-                    <th className="text-center px-2 py-2">Room 2</th>
-                    <th className="text-center px-2 py-2">Capacity</th>
-                    <th className="text-center px-2 py-2">Status</th>
-                    <th className="text-center px-2 py-2">Actions</th>
-                  </tr>
-                </thead>
+                  {!isRunning ? (
+                    <div className="flex items-center gap-2">
+                      <button className="inline-flex items-center gap-2 rounded-md bg-emerald-700 px-3.5 py-2 text-sm font-medium text-white shadow-sm hover:brightness-110">
+                        <Upload className="h-4 w-4" />
+                        Import CSV
+                      </button>
+                      <button
+                        onClick={loadFromServer}
+                        className="inline-flex items-center gap-2 rounded-md border border-emerald-700 text-emerald-800 bg-white px-3.5 py-2 text-sm font-medium hover:bg-emerald-50"
+                      >
+                        <Play className="h-4 w-4" />
+                        Run
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-2">
+                      <button
+                        disabled={!anySelected}
+                        onClick={() => setShowSend(true)}
+                        className={cls(
+                          "inline-flex items-center gap-2 rounded-md px-3.5 py-2 text-sm font-medium shadow-sm",
+                          anySelected
+                            ? "bg-blue-600 text-white hover:brightness-110"
+                            : "bg-gray-200 text-gray-500 cursor-not-allowed"
+                        )}
+                        title={
+                          anySelected
+                            ? "Send to selected faculty"
+                            : "Select at least one row"
+                        }
+                      >
+                        <Send className="h-4 w-4" />
+                        To Faculty
+                      </button>
+                      <button
+                        onClick={loadFromServer}
+                        className="inline-flex items-center gap-2 rounded-md border border-gray-300 bg-white px-3.5 py-2 text-sm font-medium hover:bg-gray-50"
+                      >
+                        <RefreshCcw className="h-4 w-4" />
+                        Refresh
+                      </button>
+                    </div>
+                  )}
+                </div>
 
-                <tbody className="divide-y">
-                  {filtered.map((r, idx) => {
-                    const e = getEditFlags(r);
-                    const unread = r.status === "Pending";
-                    return (
-                      <tr key={r.id} className="hover:bg-gray-50 whitespace-nowrap">
-                        <td className="px-3 py-2 text-center">
+                <div className="overflow-x-auto overflow-y-auto max-h-[58vh] mt-3">
+                  <table className="min-w-full text-sm table-fixed">
+                    <colgroup>
+                      <col className="w-[46px]" />
+                      <col className="w-[160px]" />
+                      <col className="w-[26%]" />
+                      <col className="w-[70px]" />
+                      <col className="w-[80px]" />
+                      <col className="w-[18%]" />
+                      <col className="w-[72px]" />
+                      <col className="w-[96px]" />
+                      <col className="w-[96px]" />
+                      <col className="w-[96px]" />
+                      <col className="w-[72px]" />
+                      <col className="w-[96px]" />
+                      <col className="w-[96px]" />
+                      <col className="w-[96px]" />
+                      <col className="w-[80px]" />
+                      <col className="w-[100px]" />
+                      <col className="w-[110px]" />
+                    </colgroup>
+
+                    <thead className="bg-gray-50 border-y text-gray-700">
+                      <tr className="whitespace-nowrap">
+                        <th className="px-3 py-2 text-center">
                           {isRunning && (
                             <input
                               type="checkbox"
-                              checked={!!r.selected}
-                              onChange={(ev) => setCell(r.id, "selected", ev.target.checked as any)}
+                              checked={allSelected}
+                              onChange={(e) =>
+                                toggleSelectAll(e.target.checked)
+                              }
                               className="rounded border-gray-300 text-emerald-600 focus:ring-emerald-500"
-                              title={`Select row ${idx + 1}`}
+                              title="Select all"
                             />
                           )}
-                        </td>
-
-                        <td className="px-4 py-2 align-top">
-                          <div>
-                            <div className="font-semibold text-emerald-700">{r.course || "—"}</div>
-                            <div className="text-gray-600 text-sm">{r.title || "—"}</div>
-                          </div>
-                        </td>
-
-                        <td className="px-2 py-2 text-center">
-                          <Cell
-                            editable={e.units}
-                            value={String(r.units ?? "")}
-                            onChange={(v) => setCell(r.id, "units", v as any)}
-                            className="w-[60px]"
-                            align="center"
-                          />
-                        </td>
-
-                        <td className="px-2 py-2 text-center">
-                          <Cell
-                            editable={e.section}
-                            value={r.section}
-                            onChange={(v) => setCell(r.id, "section", v)}
-                            className="w-[68px]"
-                            align="center"
-                          />
-                        </td>
-
-                        <td className="px-4 py-2">
-                          {e.faculty ? (
-                            <ComboBox
-                              value={r.faculty}
-                              onChange={(v) => setCell(r.id, "faculty", v)}
-                              options={facultyOptions}
-                              className="w-[200px] md:w-[240px] lg:w-[280px]"
-                            />
-                          ) : (
-                            <span className="block w-[200px] md:w-[240px] lg:w-[280px] truncate">
-                              {r.faculty || "—"}
-                            </span>
-                          )}
-                        </td>
-
-                        <td className="px-2 py-2 text-center">
-                          {e.day1 ? (
-                            <SelectBox
-                              value={r.day1}
-                              onChange={(v) => setCell(r.id, "day1", v)}
-                              options={DAY_OPTIONS}
-                              className="w-[70px] text-center"
-                            />
-                          ) : (
-                            <span>{r.day1 || "—"}</span>
-                          )}
-                        </td>
-
-                        <td className="px-2 py-2 text-center">
-                          {e.begin1 ? (
-                            <SelectBox
-                              value={r.begin1}
-                              onChange={(v) => setCell(r.id, "begin1", v)}
-                              options={TIME_BEGIN_OPTIONS}
-                              className="w-[70px] text-center"
-                            />
-                          ) : (
-                            <span>{r.begin1 || "—"}</span>
-                          )}
-                        </td>
-
-                        <td className="px-2 py-2 text-center">
-                          {e.end1 ? (
-                            <SelectBox
-                              value={r.end1}
-                              onChange={(v) => setCell(r.id, "end1", v)}
-                              options={TIME_END_OPTIONS}
-                              className="w-[70px] text-center"
-                            />
-                          ) : (
-                            <span>{r.end1 || "—"}</span>
-                          )}
-                        </td>
-
-                        <td className="px-2 py-2 text-center">
-                          <Cell
-                            editable={e.room1}
-                            value={r.room1}
-                            onChange={(v) => setCell(r.id, "room1", v)}
-                            className="w-[96px]"
-                            align="center"
-                          />
-                        </td>
-
-                        <td className="px-2 py-2 text-center">
-                          {e.day2 ? (
-                            <SelectBox
-                              value={r.day2}
-                              onChange={(v) => setCell(r.id, "day2", v)}
-                              options={DAY_OPTIONS}
-                              className="w-[70px] text-center"
-                            />
-                          ) : (
-                            <span>{r.day2 || "—"}</span>
-                          )}
-                        </td>
-
-                        <td className="px-2 py-2 text-center">
-                          {e.begin2 ? (
-                            <SelectBox
-                              value={r.begin2}
-                              onChange={(v) => setCell(r.id, "begin2", v)}
-                              options={TIME_BEGIN_OPTIONS}
-                              className="w-[70px] text-center"
-                            />
-                          ) : (
-                            <span>{r.begin2 || "—"}</span>
-                          )}
-                        </td>
-
-                        <td className="px-2 py-2 text-center">
-                          {e.end2 ? (
-                            <SelectBox
-                              value={r.end2}
-                              onChange={(v) => setCell(r.id, "end2", v)}
-                              options={TIME_END_OPTIONS}
-                              className="w-[70px] text-center"
-                            />
-                          ) : (
-                            <span>{r.end2 || "—"}</span>
-                          )}
-                        </td>
-
-                        <td className="px-2 py-2 text-center">
-                          <Cell
-                            editable={e.room2}
-                            value={r.room2}
-                            onChange={(v) => setCell(r.id, "room2", v)}
-                            className="w-[96px]"
-                            align="center"
-                          />
-                        </td>
-
-                        <td className="px-2 py-2 text-center">
-                          <Cell
-                            editable={e.capacity}
-                            value={String(r.capacity ?? "")}
-                            onChange={(v) => setCell(r.id, "capacity", v as any)}
-                            className="w-[64px]"
-                            align="center"
-                          />
-                        </td>
-
-                        <td className="px-2 py-2 text-center">
-                          <StatusChip r={r} />
-                        </td>
-
-                        <td className="px-2 py-2 text-center">
-                          {isRunning && (
-                            <div className="relative flex items-center justify-center gap-3 text-emerald-700">
-                              <button
-                                className="relative hover:brightness-110"
-                                title="Message"
-                                onClick={() => setReqChange({ open: true, from: r.faculty || "Faculty" })}
-                              >
-                                <MessageSquareText className="h-5 w-5" />
-                                {unread && (
-                                  <span className="absolute -top-1 -right-1 h-2.5 w-2.5 rounded-full bg-red-600" />
-                                )}
-                              </button>
-
-                              <button
-                                className="flex h-7 w-7 items-center justify-center rounded-full border-2 border-emerald-700 text-emerald-700 hover:bg-emerald-50"
-                                title="Approve row"
-                              >
-                                <Check className="h-4 w-4" strokeWidth={2.5} />
-                              </button>
-
-                              {String(r.id).startsWith("manual-") && (
-                                <button
-                                  className="flex h-7 w-7 items-center justify-center rounded-full border-2 border-red-600 text-red-600 hover:bg-red-50"
-                                  title="Remove this line"
-                                  onClick={() =>
-                                    setRows((prev) => prev.filter((row) => row.id !== r.id))
-                                  }
-                                >
-                                  <Trash2 className="h-4 w-4" />
-                                </button>
-                              )}
-                            </div>
-                          )}
-                        </td>
+                        </th>
+                        <th className="text-left px-4 py-2">Course & Title</th>
+                        <th className="text-center px-2 py-2">Units</th>
+                        <th className="text-center px-2 py-2">Section</th>
+                        <th className="text-left px-4 py-2">Faculty</th>
+                        <th className="text-center px-2 py-2">Day 1</th>
+                        <th className="text-center px-2 py-2">Begin 1</th>
+                        <th className="text-center px-2 py-2">End 1</th>
+                        <th className="text-center px-2 py-2">Room 1</th>
+                        <th className="text-center px-2 py-2">Day 2</th>
+                        <th className="text-center px-2 py-2">Begin 2</th>
+                        <th className="text-center px-2 py-2">End 2</th>
+                        <th className="text-center px-2 py-2">Room 2</th>
+                        <th className="text-center px-2 py-2">Capacity</th>
+                        <th className="text-center px-2 py-2">Status</th>
+                        <th className="text-center px-2 py-2">Actions</th>
                       </tr>
-                    );
-                  })}
+                    </thead>
 
-                  {filtered.length === 0 && (
-                    <tr>
-                      <td colSpan={17} className="px-4 py-10 text-center text-sm text-gray-500">
-                        No data yet. Click <span className="font-medium">Run</span> or{" "}
-                        <span className="font-medium">Add new line</span> to begin.
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
+                    <tbody className="divide-y">
+                      {filtered.map((r, idx) => {
+                        const e = getEditFlags(r);
+                        const unread = r.status === "Pending";
+                        return (
+                          <tr
+                            key={r.id}
+                            className="hover:bg-gray-50 whitespace-nowrap"
+                          >
+                            <td className="px-3 py-2 text-center">
+                              {isRunning && (
+                                <input
+                                  type="checkbox"
+                                  checked={!!r.selected}
+                                  onChange={(ev) =>
+                                    setCell(
+                                      r.id,
+                                      "selected",
+                                      ev.target.checked as any
+                                    )
+                                  }
+                                  className="rounded border-gray-300 text-emerald-600 focus:ring-emerald-500"
+                                  title={`Select row ${idx + 1}`}
+                                />
+                              )}
+                            </td>
 
-            <div className="border-t px-4 py-3">
-              <div className="flex justify-start">
-                <button
-                  onClick={addRow}
-                  className="inline-flex items-center gap-2 rounded-lg border border-gray-400 px-3 py-1.5 text-sm text-gray-800 hover:bg-gray-100"
-                  title="Add new line"
-                >
-                  <Plus className="h-4 w-4" />
-                  Add new line
-                </button>
+                            <td className="px-4 py-2 align-top">
+                              <div>
+                                <div className="font-semibold text-emerald-700">
+                                  {r.course || "—"}
+                                </div>
+                                <div className="text-gray-600 text-sm">
+                                  {r.title || "—"}
+                                </div>
+                              </div>
+                            </td>
+
+                            <td className="px-2 py-2 text-center">
+                              <Cell
+                                editable={e.units}
+                                value={String(r.units ?? "")}
+                                onChange={(v) =>
+                                  setCell(r.id, "units", v as any)
+                                }
+                                className="w-[60px]"
+                                align="center"
+                              />
+                            </td>
+
+                            <td className="px-2 py-2 text-center">
+                              <Cell
+                                editable={e.section}
+                                value={r.section}
+                                onChange={(v) => setCell(r.id, "section", v)}
+                                className="w-[68px]"
+                                align="center"
+                              />
+                            </td>
+
+                            <td className="px-4 py-2">
+                              {e.faculty ? (
+                                <ComboBox
+                                  value={r.faculty}
+                                  onChange={(v) => setCell(r.id, "faculty", v)}
+                                  options={facultyOptions}
+                                  className="w-[200px] md:w-[240px] lg:w-[280px]"
+                                />
+                              ) : (
+                                <span className="block w-[200px] md:w-[240px] lg:w-[280px] truncate">
+                                  {r.faculty || "—"}
+                                </span>
+                              )}
+                            </td>
+
+                            <td className="px-2 py-2 text-center">
+                              {e.day1 ? (
+                                <SelectBox
+                                  value={r.day1}
+                                  onChange={(v) => setCell(r.id, "day1", v)}
+                                  options={DAY_OPTIONS}
+                                  className="w-[70px] text-center"
+                                />
+                              ) : (
+                                <span>{r.day1 || "—"}</span>
+                              )}
+                            </td>
+
+                            <td className="px-2 py-2 text-center">
+                              {e.begin1 ? (
+                                <SelectBox
+                                  value={r.begin1}
+                                  onChange={(v) => setCell(r.id, "begin1", v)}
+                                  options={TIME_BEGIN_OPTIONS}
+                                  className="w-[70px] text-center"
+                                />
+                              ) : (
+                                <span>{r.begin1 || "—"}</span>
+                              )}
+                            </td>
+
+                            <td className="px-2 py-2 text-center">
+                              {e.end1 ? (
+                                <SelectBox
+                                  value={r.end1}
+                                  onChange={(v) => setCell(r.id, "end1", v)}
+                                  options={TIME_END_OPTIONS}
+                                  className="w-[70px] text-center"
+                                />
+                              ) : (
+                                <span>{r.end1 || "—"}</span>
+                              )}
+                            </td>
+
+                            <td className="px-2 py-2 text-center">
+                              <Cell
+                                editable={e.room1}
+                                value={r.room1}
+                                onChange={(v) => setCell(r.id, "room1", v)}
+                                className="w-[96px]"
+                                align="center"
+                              />
+                            </td>
+
+                            <td className="px-2 py-2 text-center">
+                              {e.day2 ? (
+                                <SelectBox
+                                  value={r.day2}
+                                  onChange={(v) => setCell(r.id, "day2", v)}
+                                  options={DAY_OPTIONS}
+                                  className="w-[70px] text-center"
+                                />
+                              ) : (
+                                <span>{r.day2 || "—"}</span>
+                              )}
+                            </td>
+
+                            <td className="px-2 py-2 text-center">
+                              {e.begin2 ? (
+                                <SelectBox
+                                  value={r.begin2}
+                                  onChange={(v) => setCell(r.id, "begin2", v)}
+                                  options={TIME_BEGIN_OPTIONS}
+                                  className="w-[70px] text-center"
+                                />
+                              ) : (
+                                <span>{r.begin2 || "—"}</span>
+                              )}
+                            </td>
+
+                            <td className="px-2 py-2 text-center">
+                              {e.end2 ? (
+                                <SelectBox
+                                  value={r.end2}
+                                  onChange={(v) => setCell(r.id, "end2", v)}
+                                  options={TIME_END_OPTIONS}
+                                  className="w-[70px] text-center"
+                                />
+                              ) : (
+                                <span>{r.end2 || "—"}</span>
+                              )}
+                            </td>
+
+                            <td className="px-2 py-2 text-center">
+                              <Cell
+                                editable={e.room2}
+                                value={r.room2}
+                                onChange={(v) => setCell(r.id, "room2", v)}
+                                className="w-[96px]"
+                                align="center"
+                              />
+                            </td>
+
+                            <td className="px-2 py-2 text-center">
+                              <Cell
+                                editable={e.capacity}
+                                value={String(r.capacity ?? "")}
+                                onChange={(v) =>
+                                  setCell(r.id, "capacity", v as any)
+                                }
+                                className="w-[64px]"
+                                align="center"
+                              />
+                            </td>
+
+                            <td className="px-2 py-2 text-center">
+                              <StatusChip r={r} />
+                            </td>
+
+                            <td className="px-2 py-2 text-center">
+                              {isRunning && (
+                                <div className="relative flex items-center justify-center gap-3 text-emerald-700">
+                                  <button
+                                    className="relative hover:brightness-110"
+                                    title="Message"
+                                    onClick={() =>
+                                      setReqChange({
+                                        open: true,
+                                        from: r.faculty || "Faculty",
+                                      })
+                                    }
+                                  >
+                                    <MessageSquareText className="h-5 w-5" />
+                                    {unread && (
+                                      <span className="absolute -top-1 -right-1 h-2.5 w-2.5 rounded-full bg-red-600" />
+                                    )}
+                                  </button>
+
+                                  <button
+                                    className="flex h-7 w-7 items-center justify-center rounded-full border-2 border-emerald-700 text-emerald-700 hover:bg-emerald-50"
+                                    title="Approve row"
+                                  >
+                                    <Check
+                                      className="h-4 w-4"
+                                      strokeWidth={2.5}
+                                    />
+                                  </button>
+
+                                  {String(r.id).startsWith("manual-") && (
+                                    <button
+                                      className="flex h-7 w-7 items-center justify-center rounded-full border-2 border-red-600 text-red-600 hover:bg-red-50"
+                                      title="Remove this line"
+                                      onClick={() =>
+                                        setRows((prev) =>
+                                          prev.filter((row) => row.id !== r.id)
+                                        )
+                                      }
+                                    >
+                                      <Trash2 className="h-4 w-4" />
+                                    </button>
+                                  )}
+                                </div>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+
+                      {filtered.length === 0 && (
+                        <tr>
+                          <td
+                            colSpan={17}
+                            className="px-4 py-10 text-center text-sm text-gray-500"
+                          >
+                            No data yet. Click{" "}
+                            <span className="font-medium">Run</span> or{" "}
+                            <span className="font-medium">Add new line</span> to
+                            begin.
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+
+                <div className="border-t px-4 py-3">
+                  <div className="flex justify-start">
+                    <button
+                      onClick={addRow}
+                      className="inline-flex items-center gap-2 rounded-lg border border-gray-400 px-3 py-1.5 text-sm text-gray-800 hover:bg-gray-100"
+                      title="Add new line"
+                    >
+                      <Plus className="h-4 w-4" />
+                      Add new line
+                    </button>
+                  </div>
+                  {/* Right: Auto-assign (Run algorithm) */}
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={runAutoAssign}
+                      disabled={isAssigning}
+                      className="inline-flex items-center gap-2 rounded-md border border-emerald-700 text-emerald-800 bg-white px-3.5 py-2 text-sm font-medium hover:bg-emerald-50 disabled:opacity-60"
+                      title="Run auto-assignment algorithm"
+                    >
+                      <Play className="h-4 w-4" />
+                      {isAssigning ? "Assigning…" : "Auto-assign"}
+                    </button>
+                  </div>
+                </div>
               </div>
-            </div>
-          </div>
-        </main>
+            </main>
           )}
         </>
       )}
-      
-      <ApproveModal
 
+      <ApproveModal
         open={showApprove}
         onClose={() => setShowApprove(false)}
-                onApprove={() => {
+        onApprove={() => {
           (async () => {
             try {
               if (userId) {
@@ -1186,7 +1343,11 @@ export default function OM_LoadAssignment() {
         }}
       />
 
-      <SendModal open={showSend} onClose={() => setShowSend(false)} rows={selectedRows} />
+      <SendModal
+        open={showSend}
+        onClose={() => setShowSend(false)}
+        rows={selectedRows}
+      />
 
       <RequestChangeModal
         open={reqChange.open}
