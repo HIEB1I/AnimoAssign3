@@ -35,88 +35,79 @@ jobs:
           pytest -q || true
 
   deploy-s1:
-    name: Deploy S1 (primary)
     needs: build-test
     runs-on: ubuntu-latest
+    env:
+      S1_HOST: ${{ secrets.S1_HOST }}
+      S1_PORT: ${{ secrets.S1_PORT }}
+      S1_USER: ${{ secrets.S1_USER }}
+      S1_KEY:  ${{ secrets.S1_KEY }}
     steps:
       - name: Validate S1 secrets
-        env:
-          S1_HOST: ${{ secrets.S1_HOST }}
-          S1_PORT: ${{ secrets.S1_PORT }}
-          S1_USER: ${{ secrets.S1_USER }}
-          S1_KEY:  ${{ secrets.S1_KEY }}
         run: |
-          set -e
           for v in S1_HOST S1_PORT S1_USER S1_KEY; do
-            [ -n "${!v}" ] || { echo "::error ::Missing secret $v"; exit 1; }
+            [ -n "${!v}" ] || { echo "::error ::$v is empty. Set it in Settings → Secrets → Actions."; exit 1; }
           done
+          echo "S1 → $S1_USER@$S1_HOST:$S1_PORT"
 
       - name: Trust S1 host key
         run: |
           mkdir -p ~/.ssh
-          ssh-keyscan -p "${{ secrets.S1_PORT }}" "${{ secrets.S1_HOST }}" >> ~/.ssh/known_hosts
+          ssh-keyscan -p "$S1_PORT" "$S1_HOST" >> ~/.ssh/known_hosts
 
-      - name: Deploy to S1
+      - name: Deploy to S1 (prod)
         uses: appleboy/ssh-action@v1.0.3
         with:
-          host:     ${{ secrets.S1_HOST }}
-          port:     ${{ secrets.S1_PORT }}
-          username: ${{ secrets.S1_USER }}
-          key:      ${{ secrets.S1_KEY }}
+          host:     ${{ env.S1_HOST }}
+          port:     ${{ env.S1_PORT }}
+          username: ${{ env.S1_USER }}
+          key:      ${{ env.S1_KEY }}
           script: |
             set -Eeuo pipefail
 
             REPO_DIR=/opt/AnimoAssign3
-            COMPOSE_FILE=docker/docker-compose.prod.s1.yml
-            ENVF=docker/.env
-            export COMPOSE_PROJECT_NAME=animo_prod_s1
+            DATA_DIR=/opt/AnimoAssign3-prod-data
+            FILE=docker/docker-compose.prod.s1.yml
+            ENVF=docker/prod.s1.env
 
-            if [ ! -d "$REPO_DIR/.git" ]; then
-              mkdir -p "$REPO_DIR"
-              git clone https://github.com/HIEB1I/AnimoAssign3.git "$REPO_DIR"
-            fi
-            cd "$REPO_DIR"
+            mkdir -p "$REPO_DIR" "$DATA_DIR/tmp"
+            cd "$REPO_DIR" || exit 1
 
-            # Pull via HTTPS
-            unset GIT_SSH_COMMAND || true
+            git config --global --add safe.directory "$REPO_DIR"
             git config --global url.https://github.com/.insteadof git@github.com:
             git config --global url.https://github.com/.insteadof ssh://git@github.com/
-            git config --global --add safe.directory "$REPO_DIR"
 
-            git remote set-url origin https://github.com/HIEB1I/AnimoAssign3.git
-            git fetch --all --prune
-            git checkout main
-            git pull --ff-only
-
-            docker network inspect docker_animoassign >/dev/null 2>&1 || docker network create docker_animoassign
-
-            [ -f "$COMPOSE_FILE" ] || { echo "Missing $COMPOSE_FILE"; exit 1; }
-            [ -f "$ENVF" ]         || { echo "Missing $ENVF"; exit 1; }
-
-            # Pre-clean only our app service names if they belong to a different compose project
-            for svc in backend-primary analytics-primary frontend-primary nginx-primary; do
-              if docker ps -a --format '{{.Names}}' | grep -Fxq "$svc"; then
-                owner=$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project"}}' "$svc" 2>/dev/null || true)
-                if [ "$owner" != "$COMPOSE_PROJECT_NAME" ]; then
-                  echo "Removing stray container $svc (owner=$owner)"
-                  docker rm -f "$svc" || true
-                fi
-              fi
-            done
-
-            # Deploy only non-mongo services (avoid touching your running Mongo)
-            services=$(docker compose -f "$COMPOSE_FILE" --env-file "$ENVF" config --services | grep -E -v '^mongo')
-            if [ -z "$services" ]; then
-              echo "::warning ::No non-mongo services found (nothing to deploy)"; exit 0
+            if [ ! -d .git ]; then
+              git clone https://github.com/HIEB1I/AnimoAssign3.git .
             fi
-            echo "Services (S1):"; printf '%s\n' "$services" | sed 's/^/  - /'
-            docker compose -f "$COMPOSE_FILE" --env-file "$ENVF" up -d --build --remove-orphans --no-deps $services
 
-            # --- Network-based health checks with retry (no host ports needed) ---
-            NET=docker_animoassign
+            git fetch --all --prune
 
-            wait_http () {
-              net="$1"; url="$2"; svc="$3"; tries="${4:-40}"; i=0
+            if ! git merge-base --is-ancestor HEAD origin/main; then
+              ts=$(date +%Y%m%d-%H%M%S)
+              echo "::warning ::Local 'main' diverged; bundling to $DATA_DIR/backup-$ts.bundle"
+              git bundle create "$DATA_DIR/backup-$ts.bundle" --all || true
+            fi
+
+            git checkout -B main origin/main
+            git reset --hard origin/main
+            git clean -fdx
+
+            [ -f "$FILE" ] || { echo "Compose file not found: $FILE"; exit 1; }
+            [ -f "$ENVF" ] || { echo "Env file not found: $ENVF"; exit 1; }
+
+            export COMPOSE_PROJECT_NAME=animo_prod_s1
+            DEF_NET="${COMPOSE_PROJECT_NAME}_default"
+            EXT_NET="docker_animoassign"
+
+            set -a
+            . "$ENVF"
+            set +a
+
+            docker compose -f "$FILE" --env-file "$ENVF" up -d --build --remove-orphans
+
+            curl_wait() {
+              local net="$1" url="$2" svc="$3" tries="${4:-40}" i=0
               while true; do
                 if docker run --rm --network "$net" curlimages/curl:8.10.1 -fsS "$url" >/dev/null 2>&1; then
                   echo "::notice ::$svc healthy at $url"
@@ -124,120 +115,98 @@ jobs:
                 fi
                 i=$((i+1))
                 if [ "$i" -ge "$tries" ]; then
-                  echo "::error ::$svc failed health check at $url"
-                  docker compose -f "$COMPOSE_FILE" --env-file "$ENVF" logs --tail=200 "$svc" || true
+                  echo "::error ::$svc did not become ready at $url"
+                  docker compose -f "$FILE" logs --tail=200 "$svc" || true
                   exit 1
                 fi
                 sleep 3
               done
             }
 
-            wait_head () {
-              net="$1"; url="$2"; svc="$3"; tries="${4:-40}"; i=0
-              while true; do
-                if docker run --rm --network "$net" curlimages/curl:8.10.1 -fsSI "$url" >/dev/null 2>&1; then
-                  echo "::notice ::$svc serving at $url"
-                  break
-                fi
-                i=$((i+1))
-                if [ "$i" -ge "$tries" ]; then
-                  echo "::error ::$svc failed HEAD check at $url"
-                  docker compose -f "$COMPOSE_FILE" --env-file "$ENVF" logs --tail=200 "$svc" || true
-                  exit 1
-                fi
-                sleep 3
-              done
-            }
+            curl_wait "$DEF_NET" http://backend-primary:8000/health   backend
+            curl_wait "$DEF_NET" http://analytics-primary:8000/health analytics
+            curl_wait "$EXT_NET" http://frontend-primary/              frontend-primary
 
-            wait_http "$NET" http://backend-primary:8000/health   backend-primary
-            wait_http "$NET" http://analytics-primary:8000/health analytics-primary
-            wait_head "$NET" http://frontend-primary               frontend-primary
-            # ---------------------------------------------------------------------
+            if docker ps --format '{{.Names}}' | grep -q '^nginx-primary$'; then
+              docker exec nginx-primary nginx -t
+              docker exec nginx-primary nginx -s reload || true
+            fi
 
-            docker image prune -f || true
+            docker system prune -f || true
 
   deploy-s2:
-    name: Deploy S2 (backup)
-    needs: build-test
+    needs: deploy-s1
     runs-on: ubuntu-latest
+    env:
+      S2_HOST: ${{ secrets.S2_HOST }}
+      S2_PORT: ${{ secrets.S2_PORT }}
+      S2_USER: ${{ secrets.S2_USER }}
+      S2_KEY:  ${{ secrets.S2_KEY }}
     steps:
       - name: Validate S2 secrets
-        env:
-          S2_HOST: ${{ secrets.S2_HOST }}
-          S2_PORT: ${{ secrets.S2_PORT }}
-          S2_USER: ${{ secrets.S2_USER }}
-          S2_KEY:  ${{ secrets.S2_KEY }}
         run: |
-          set -e
           for v in S2_HOST S2_PORT S2_USER S2_KEY; do
-            [ -n "${!v}" ] || { echo "::error ::Missing secret $v"; exit 1; }
+            [ -n "${!v}" ] || { echo "::error ::$v is empty. Set it in Settings → Secrets → Actions."; exit 1; }
           done
+          echo "S2 → $S2_USER@$S2_HOST:$S2_PORT"
 
       - name: Trust S2 host key
         run: |
           mkdir -p ~/.ssh
-          ssh-keyscan -p "${{ secrets.S2_PORT }}" "${{ secrets.S2_HOST }}" >> ~/.ssh/known_hosts
+          ssh-keyscan -p "$S2_PORT" "$S2_HOST" >> ~/.ssh/known_hosts
 
-      - name: Deploy to S2
+      - name: Deploy to S2 (prod)
         uses: appleboy/ssh-action@v1.0.3
         with:
-          host:     ${{ secrets.S2_HOST }}
-          port:     ${{ secrets.S2_PORT }}
-          username: ${{ secrets.S2_USER }}
-          key:      ${{ secrets.S2_KEY }}
+          host:     ${{ env.S2_HOST }}
+          port:     ${{ env.S2_PORT }}
+          username: ${{ env.S2_USER }}
+          key:      ${{ env.S2_KEY }}
           script: |
             set -Eeuo pipefail
 
             REPO_DIR=/opt/AnimoAssign3
-            COMPOSE_FILE=docker/docker-compose.prod.s2.yml
-            ENVF=docker/.env
-            export COMPOSE_PROJECT_NAME=animo_prod_s2
+            DATA_DIR=/opt/AnimoAssign3-prod-data
+            FILE=docker/docker-compose.prod.s2.yml
+            ENVF=docker/prod.s2.env
 
-            if [ ! -d "$REPO_DIR/.git" ]; then
-              mkdir -p "$REPO_DIR"
-              git clone https://github.com/HIEB1I/AnimoAssign3.git "$REPO_DIR"
-            fi
-            cd "$REPO_DIR"
+            mkdir -p "$REPO_DIR" "$DATA_DIR/tmp"
+            cd "$REPO_DIR" || exit 1
 
-            unset GIT_SSH_COMMAND || true
+            git config --global --add safe.directory "$REPO_DIR"
             git config --global url.https://github.com/.insteadof git@github.com:
             git config --global url.https://github.com/.insteadof ssh://git@github.com/
-            git config --global --add safe.directory "$REPO_DIR"
 
-            git remote set-url origin https://github.com/HIEB1I/AnimoAssign3.git
-            git fetch --all --prune
-            git checkout main
-            git pull --ff-only
-
-            docker network inspect docker_animoassign >/dev/null 2>&1 || docker network create docker_animoassign
-
-            [ -f "$COMPOSE_FILE" ] || { echo "Missing $COMPOSE_FILE"; exit 1; }
-            [ -f "$ENVF" ]         || { echo "Missing $ENVF"; exit 1; }
-
-            # Pre-clean only our app service names if they belong to a different compose project
-            for svc in backend-secondary analytics-secondary frontend-secondary nginx-secondary; do
-              if docker ps -a --format '{{.Names}}' | grep -Fxq "$svc"; then
-                owner=$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project"}}' "$svc" 2>/dev/null || true)
-                if [ "$owner" != "$COMPOSE_PROJECT_NAME" ]; then
-                  echo "Removing stray container $svc (owner=$owner)"
-                  docker rm -f "$svc" || true
-                fi
-              fi
-            done
-
-            # Deploy only non-mongo services
-            services=$(docker compose -f "$COMPOSE_FILE" --env-file "$ENVF" config --services | grep -E -v '^mongo')
-            if [ -z "$services" ]; then
-              echo "::warning ::No non-mongo services found (nothing to deploy)"; exit 0
+            if [ ! -d .git ]; then
+              git clone https://github.com/HIEB1I/AnimoAssign3.git .
             fi
-            echo "Services (S2):"; printf '%s\n' "$services" | sed 's/^/  - /'
-            docker compose -f "$COMPOSE_FILE" --env-file "$ENVF" up -d --build --remove-orphans --no-deps $services
 
-            # Health checks via docker network
-            NET=docker_animoassign
+            git fetch --all --prune
+            if ! git merge-base --is-ancestor HEAD origin/main; then
+              ts=$(date +%Y%m%d-%H%M%S)
+              echo "::warning ::Local 'main' diverged; bundling to $DATA_DIR/backup-$ts.bundle"
+              git bundle create "$DATA_DIR/backup-$ts.bundle" --all || true
+            fi
 
-            wait_http () {
-              net="$1"; url="$2"; svc="$3"; tries="${4:-40}"; i=0
+            git checkout -B main origin/main
+            git reset --hard origin/main
+            git clean -fdx
+
+            [ -f "$FILE" ] || { echo "Compose file not found: $FILE"; exit 1; }
+            [ -f "$ENVF" ] || { echo "Env file not found: $ENVF"; exit 1; }
+
+            export COMPOSE_PROJECT_NAME=animo_prod_s2
+            DEF_NET="${COMPOSE_PROJECT_NAME}_default"
+            EXT_NET="docker_animoassign"
+
+            set -a
+            . "$ENVF"
+            set +a
+
+            docker compose -f "$FILE" --env-file "$ENVF" up -d --build --remove-orphans
+
+            curl_wait() {
+              local net="$1" url="$2" svc="$3" tries="${4:-40}" i=0
               while true; do
                 if docker run --rm --network "$net" curlimages/curl:8.10.1 -fsS "$url" >/dev/null 2>&1; then
                   echo "::notice ::$svc healthy at $url"
@@ -245,33 +214,21 @@ jobs:
                 fi
                 i=$((i+1))
                 if [ "$i" -ge "$tries" ]; then
-                  echo "::error ::$svc failed health check at $url"
-                  docker compose -f "$COMPOSE_FILE" --env-file "$ENVF" logs --tail=200 "$svc" || true
+                  echo "::error ::$svc did not become ready at $url"
+                  docker compose -f "$FILE" logs --tail=200 "$svc" || true
                   exit 1
                 fi
                 sleep 3
               done
             }
 
-            wait_head () {
-              net="$1"; url="$2"; svc="$3"; tries="${4:-40}"; i=0
-              while true; do
-                if docker run --rm --network "$net" curlimages/curl:8.10.1 -fsSI "$url" >/dev/null 2>&1; then
-                  echo "::notice ::$svc serving at $url"
-                  break
-                fi
-                i=$((i+1))
-                if [ "$i" -ge "$tries" ]; then
-                  echo "::error ::$svc failed HEAD check at $url"
-                  docker compose -f "$COMPOSE_FILE" --env-file "$ENVF" logs --tail=200 "$svc" || true
-                  exit 1
-                fi
-                sleep 3
-              done
-            }
+            curl_wait "$DEF_NET" http://backend-secondary:8000/health   backend
+            curl_wait "$DEF_NET" http://analytics-secondary:8000/health analytics
+            curl_wait "$EXT_NET" http://frontend-secondary/              frontend-secondary
 
-            wait_http "$NET" http://backend-secondary:8000/health   backend-secondary
-            wait_http "$NET" http://analytics-secondary:8000/health analytics-secondary
-            wait_head "$NET" http://frontend-secondary               frontend-secondary
+            if docker ps --format '{{.Names}}' | grep -q '^nginx-secondary$'; then
+              docker exec nginx-secondary nginx -t
+              docker exec nginx-secondary nginx -s reload || true
+            fi
 
-            docker image prune -f || true
+            docker system prune -f || true

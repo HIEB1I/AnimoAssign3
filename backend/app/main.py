@@ -1,204 +1,189 @@
 # backend/app/main.py
 from datetime import datetime, timezone
-from typing import Any, Dict, List
+from typing import Any, Dict, Optional
 
-import httpx
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
-from pydantic import BaseModel, Field
 
 from .config import get_settings
 
+# --------------------------------------------------------------------
+# Settings & App
+# --------------------------------------------------------------------
 settings = get_settings()
-
 app = FastAPI(title="AnimoAssign Backend", version="1.0.0")
 
-# Async Mongo client; directConnection may be False in RS mode, True for single-node probes
+# --------------------------------------------------------------------
+# Database (single shared client/database for all routers)
+# --------------------------------------------------------------------
 client = AsyncIOMotorClient(
     settings.mongodb_uri,
+    # keep directConnection optional for single-node vs RS; do not force it
     directConnection=getattr(settings, "mongodb_direct_connection", False),
 )
 db = client.get_default_database()
 
-# ---------- Models ----------
 
-class ConnectivityTestPayload(BaseModel):
-    title: str = Field(..., description="Sample title for the diagnostic record")
-    status: str = Field("todo", pattern=r"^[a-zA-Z0-9_-]+$")
-    notes: str | None = Field(default=None, max_length=500)
+@app.on_event("startup")
+async def _ensure_faculty_overview_indexes() -> None:
+    # lookups / filters
+    await db.faculty_profiles.create_index("user_id")
+    await db.faculty_assignments.create_index([("faculty_id", 1), ("is_archived", 1)])
+    await db.sections.create_index([("section_id", 1), ("term_id", 1)])
+    await db.section_schedules.create_index("section_id")
+    await db.rooms.create_index([("room_id", 1), ("campus_id", 1)])
+    await db.campuses.create_index("campus_id")
+    await db.courses.create_index("course_id")
+    await db.terms.create_index([("acad_year_start", -1), ("term_number", -1)])
+    await db.departments.create_index("department_id")
+    # summary header lookup
+    await db.faculty_loads.create_index([("department_id", 1), ("term_id", 1)])
 
-class AssignmentIn(BaseModel):
-    title: str = Field(..., min_length=1, max_length=200)
-    content: str | None = Field(default=None, max_length=4000)
+    # ------------------------------------------------------
+    # FACULTY: PREFERENCES (pattern: fast fetch + unique scope)
+    # ------------------------------------------------------
+    await db.faculty_preferences.create_index([("faculty_id", 1), ("term_id", 1)], unique=True)
+    await db.faculty_preferences.create_index([("submitted_at", -1)])  # recency sort
 
-# ---------- Helpers ----------
+    # Lookups used by router
+    await db.kacs.create_index("kac_id")
+    await db.kacs.create_index("kac_code")
+    await db.campuses.create_index("campus_id")  # already present above; safe if duplicated
+    await db.terms.create_index([("acad_year_start", -1), ("term_number", -1)])  # already present
 
+    # OM: LOAD ASSIGNMENT – lookups & sorts
+    await db.faculty_assignments.create_index([("section_id", 1)])
+    await db.faculty_assignments.create_index([("faculty_id", 1)])
+    await db.faculty_assignments.create_index([("created_at", -1)])
+    await db.sections.create_index([("section_id", 1)])
+    await db.section_schedules.create_index([("section_id", 1), ("start_time", 1)])
+    await db.courses.create_index([("course_id", 1)])
+    await db.users.create_index([("user_id", 1)])
+
+    # ------------------------------------------------------
+    # ADMIN: MANAGEMENT – lookups & recency sort
+    # (added per request; idempotent if run multiple times)
+    # ------------------------------------------------------
+    await db.users.create_index("user_id")  # already created above; safe duplicate
+    await db.users.create_index("email")
+    await db.user_roles.create_index("role_id")
+    await db.user_roles.create_index("role_type")
+    await db.role_assignments.create_index("user_id")
+    await db.departments.create_index("department_id")  # already created above; safe duplicate
+    await db.departments.create_index("dept_code")
+    await db.audit_logs.create_index([("timestamp", -1)])
+
+
+__all__ = ["app", "db"]
+
+# --------------------------------------------------------------------
+# CORS (unchanged policy; adjust only if you already do elsewhere)
+# --------------------------------------------------------------------
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # keep as-is if this is what you already use
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# --------------------------------------------------------------------
+# Small helpers (safe to keep even if unused by new routes)
+# --------------------------------------------------------------------
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
-def _service_result(name: str, ok: bool, detail: str, latency_ms: float | None) -> Dict[str, Any]:
+
+def _service_result(name: str, ok: bool, detail: str, latency_ms: Optional[float]) -> Dict[str, Any]:
     out: Dict[str, Any] = {"service": name, "ok": ok, "detail": detail}
     if latency_ms is not None:
         out["latencyMs"] = round(latency_ms, 2)
     return out
 
-def _serialize(doc: Dict[str, Any]) -> Dict[str, Any]:
-    d = dict(doc)
-    d["id"] = str(d.pop("_id", ""))
-    # normalize created_at
-    ca = d.get("created_at")
-    if isinstance(ca, datetime):
-        if ca.tzinfo is None:
-            ca = ca.replace(tzinfo=timezone.utc)
-        d["createdAt"] = ca.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-    else:
-        d["createdAt"] = _utcnow().isoformat().replace("+00:00", "Z")
-    return d
 
-# ---------- CORS ----------
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"], allow_credentials=True,
-    allow_methods=["*"], allow_headers=["*"],
-)
-
-# ---------- System ----------
-
+# --------------------------------------------------------------------
+# System endpoints (keep your existing ones)
+# --------------------------------------------------------------------
 @app.get("/health", tags=["system"])
 async def health():
-    return {"status": "ok", "service": settings.service_name}
+    return {"status": "ok", "service": getattr(settings, "service_name", "backend")}
+
 
 @app.get("/health/db", tags=["system"])
 async def health_db():
-    # simple ping to admin
     await client.admin.command("ping")
     return {"db": "ok"}
 
-# ---------- Assignments ----------
 
-@app.get("/assignments", tags=["assignments"])
-async def list_assignments(limit: int = Query(50, ge=1, le=200)):
-    cursor = db.assignments.find({}).sort("_id", -1).limit(limit)
-    items: List[Dict[str, Any]] = []
-    async for doc in cursor:
-        items.append(_serialize(doc))
-    return {"items": items, "limit": limit}
+# --------------------------------------------------------------------
+# Feature routers (NEW) – no path/routing changes needed
+# These will live under the backend root; your nginx/Vite already forward /api/* here.
+# --------------------------------------------------------------------
+from .Login.Login import router as login_router
+# from .OM.OM_HomePage import router as om_home_router
+# from .OM.OM_Profile import router as om_profile_router
+from .OM.OM_FacultyManagement import router as om_facultymanagement
+from .OM.OM_CourseManagement import router as om_coursemanagement
+from .OM.OM_FacultyForm import router as om_facultyform
+from .OM.OM_StudentPetition import router as om_studentpetition
+# from .OM.OM_ClassRentention import router as om_classretention
 
-@app.post("/assignments", tags=["assignments"], status_code=201)
-async def create_assignment(payload: AssignmentIn):
-    document = {
-        "title": payload.title.strip(),
-        "content": (payload.content or "").strip(),
-        "created_at": _utcnow(),
-    }
-    result = await db.assignments.insert_one(document)
-    created = await db.assignments.find_one({"_id": result.inserted_id})
-    if not created:
-        raise HTTPException(status_code=500, detail="Failed to create assignment")
-    return _serialize(created)
+from .OM.OM_Inbox import router as om_inbox_router
+from .OM.OM_LoadAssignment import router as om_loadassignment_router
+from .OM.OM_ReportsAnalytics import router as om_reportsanalytics_router
 
-@app.get("/assignments/search", tags=["assignments"])
-async def search_assignments(
-    q: str = Query("", max_length=200, description="Search term for assignment titles/content"),
-    limit: int = Query(25, ge=1, le=100),
-):
-    q = q.strip()
-    filters: Dict[str, Any] = {}
-    if q:
-        regex = {"$regex": q, "$options": "i"}
-        filters = {"$or": [{"title": regex}, {"content": regex}]}
-    cursor = db.assignments.find(filters).sort("_id", -1).limit(limit)
-    items: List[Dict[str, Any]] = []
-    async for doc in cursor:
-        items.append(_serialize(doc))
-    return {"items": items, "query": q, "count": len(items)}
+from .APO.APO_PreEnlistment import router as preenlistment_router
+from .APO.APO_RoomAllocation import router as roomallocation_router
+from .APO.APO_CourseOfferings import router as courseofferings_router
+from .STUDENT.STUDENT_Petition import router as studentpetition_router
 
-@app.get("/records", tags=["records"])
-async def list_records_compat(limit: int = Query(50, ge=1, le=200)):
-    # reuse assignments implementation
-    return await list_assignments(limit=limit)
+from .FACULTY.FACULTY_Overview import router as facultyoverview_router
+from .FACULTY.FACULTY_Preferences import router as faculty_prefs_router
+from .FACULTY.FACULTY_History import router as faculty_history_router
+from .FACULTY.FACULTY_Inbox import router as faculty_inbox_router
+from .FACULTY.FACULTY_Deloadings import router as faculty_deloadings_router
 
-@app.post("/records", tags=["records"], status_code=201)
-async def create_record_compat(payload: AssignmentIn):
-    return await create_assignment(payload)
+from .CHAIR.CHAIR_Plantilla import router as chair_plantilla_router
+from .CHAIR.CHAIR_FacultyManagement import router as chair_facultymanagement_router
+from .CHAIR.CHAIR_CourseManagement import router as chair_coursemanagement_router
+from .CHAIR.CHAIR_FacultyService import router as chair_facultyservice_router
+from .CHAIR.CHAIR_ClassRetention import router as chair_classretention_router
+from .CHAIR.CHAIR_StudentPetition import router as chair_studentpetition_router
+from .CHAIR.CHAIR_Inbox import router as chair_inbox_router
 
-@app.get("/records/search", tags=["records"])
-async def search_records_compat(
-    q: str = Query("", max_length=200),
-    limit: int = Query(25, ge=1, le=100),
-):
-    return await search_assignments(q=q, limit=limit)
+from .ADMIN.ADMIN import router as admin_router
+from .ADMIN.ADMIN_Inbox import router as admin_inbox_router
 
-# ---------- Diagnostics (end-to-end) ----------
+app.include_router(login_router, prefix="/api")
 
-@app.post("/connectivity-test", tags=["diagnostics"])
-async def connectivity_test(payload: ConnectivityTestPayload):
-    results: List[Dict[str, Any]] = []
-    t0 = _utcnow()
+app.include_router(om_inbox_router, prefix="/api")
+app.include_router(om_loadassignment_router, prefix="/api")
+app.include_router(om_reportsanalytics_router, prefix="/api")
 
-    # Backend self
-    results.append(_service_result(settings.service_name, True, "Backend reached.", 0.0))
+app.include_router(preenlistment_router, prefix="/api")
+app.include_router(roomallocation_router, prefix="/api")
+app.include_router(courseofferings_router, prefix="/api")
+app.include_router(studentpetition_router, prefix="/api")
+app.include_router(om_facultymanagement, prefix="/api")
+app.include_router(om_coursemanagement, prefix="/api")
+app.include_router(om_facultyform, prefix="/api")
+app.include_router(om_studentpetition, prefix="/api")
+# app.include_router(om_classretention, prefix="/api")
 
-    # Mongo write/read/cleanup
-    m0 = _utcnow()
-    mongo_ok, mongo_detail = True, "Inserted and read diagnostic record."
-    inserted_id = None
-    try:
-        doc = {
-            "title": payload.title,
-            "status": payload.status,
-            "notes": payload.notes,
-            "source": "connectivity-test",
-            "created_at": _utcnow(),
-        }
-        ins = await db.connectivity_tests.insert_one(doc)
-        inserted_id = ins.inserted_id
-        back = await db.connectivity_tests.find_one({"_id": inserted_id})
-        if back is None:
-            mongo_ok = False
-            mongo_detail = "Insert OK, but read-back failed."
-    except Exception as e:
-        mongo_ok = False
-        mongo_detail = f"MongoDB error: {e}"[:300]
-    finally:
-        if inserted_id is not None:
-            try:
-                await db.connectivity_tests.delete_one({"_id": inserted_id})
-            except Exception as e:
-                mongo_ok = False
-                extra = f"Cleanup error: {e}"[:200]
-                mongo_detail = f"{mongo_detail} | {extra}"
-    m_latency = (datetime.now(timezone.utc) - m0).total_seconds() * 1000
-    results.append(_service_result("mongodb", mongo_ok, mongo_detail, m_latency))
+app.include_router(facultyoverview_router, prefix="/api")
+app.include_router(faculty_prefs_router, prefix="/api")
+app.include_router(faculty_history_router, prefix="/api")
+app.include_router(faculty_inbox_router, prefix="/api")
+app.include_router(faculty_deloadings_router, prefix="/api")
 
-    # Analytics POST (NOTE: analytics_url points to ROOT; endpoint is /ingest)
-    a0 = _utcnow()
-    a_ok, a_detail = True, "Analytics acknowledged event."
-    try:
-        async with httpx.AsyncClient(timeout=settings.analytics_timeout_seconds) as s:
-            r = await s.post(
-                f"{settings.analytics_url}/ingest",
-                json={
-                    "id": "connectivity-test",
-                    "title": payload.title,
-                    "created_at": _utcnow().isoformat().replace("+00:00", "Z"),
-                },
-            )
-            r.raise_for_status()
-            # optional: check returned JSON
-            _ = r.json()
-    except Exception as e:
-        a_ok = False
-        a_detail = f"Analytics error: {e}"[:300]
-    a_latency = (datetime.now(timezone.utc) - a0).total_seconds() * 1000
-    results.append(_service_result("analytics", a_ok, a_detail, a_latency))
+app.include_router(admin_router, prefix="/api")
+app.include_router(admin_inbox_router, prefix="/api")
 
-    total_ms = (datetime.now(timezone.utc) - t0).total_seconds() * 1000
-    return {
-        "echo": payload.model_dump(),
-        "services": results,
-        "latencyMs": round(total_ms, 2),
-        "timestamp": _utcnow().isoformat().replace("+00:00", "Z"),
-    }
+app.include_router(chair_plantilla_router, prefix="/api")
+app.include_router(chair_facultymanagement_router, prefix="/api")
+app.include_router(chair_coursemanagement_router, prefix="/api")
+app.include_router(chair_facultyservice_router, prefix="/api")
+app.include_router(chair_classretention_router, prefix="/api")
+app.include_router(chair_studentpetition_router, prefix="/api")
+app.include_router(chair_inbox_router, prefix="/api")

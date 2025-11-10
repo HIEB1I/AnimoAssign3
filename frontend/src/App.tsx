@@ -1,35 +1,172 @@
-import { BrowserRouter, Link, Route, Routes } from "react-router-dom";
-import AnalyticsPage from "./pages/AnalyticsPage";
-import LandingPage from "./pages/LandingPage";
-import SearchRecordsPage from "./pages/SearchRecordsPage";
-import SubmitRecordPage from "./pages/SubmitRecordPage";
+import { BrowserRouter, Route, Routes, Navigate, Outlet } from "react-router-dom";
 import "./App.css";
 
+// Pages
+import Login from "./pages/Login/Login";
+import AuthCallback from "./pages/Login/AuthCallback";
+
+// ---------------- OM ----------------
+import OM_LoadAssignment from "./pages/OM/OM_LoadAssignment";
+import OM_ReportsAnalytics from "./pages/OM/OM_ReportsAnalytics";
+import OM_FacultyManagement from "./pages/OM/OM_FacultyManagement";
+import OM_CourseManagement from "./pages/OM/OM_CourseManagement";
+import OM_FacultyForm from "./pages/OM/OM_FacultyForm";
+import OM_StudentPetition from "./pages/OM/OM_StudentPetition";
+import OM_ClassRetention from "./pages/OM/OM_ClassRetention";
+import OM_Inbox from "./pages/OM/OM_Inbox";
+import OM_desc from "./pages/OM/OM_desc";
+import OM_desc2 from "./pages/OM/OM_desc2";
+import OM_desc3 from "./pages/OM/OM_desc3";
+import OM_pred1 from "./pages/OM/OM_pred1";
+import OM_pred2 from "./pages/OM/OM_pred2";
+import OM_LoadReco from "./pages/OM/OM_LoadReco";
+
+// ----- Reports & Analytics sub-pages -----
+import OM_RP_FacultyTeachingHistory from "@/pages/OM/OM_REPORTS_ANALYTICS/OM_RP_FacultyTeachingHistory";
+import OM_RP_CourseHistory from "@/pages/OM/OM_REPORTS_ANALYTICS/OM_RP_CourseProfile";
+import OM_RP_DeloadingUtilization from "@/pages/OM/OM_REPORTS_ANALYTICS/OM_RP_DeloadingUtilization";
+import OM_RP_AvailabilityForecasting from "@/pages/OM/OM_REPORTS_ANALYTICS/OM_RP_AvailabilityForecasting";
+import OM_RP_LoadRisk from "@/pages/OM/OM_REPORTS_ANALYTICS/OM_RP_LoadRisk";
+
+// ---------------- Student ----------------
+import STUDENT_Petition from "./pages/STUDENT/STUDENT_Petition";
+
+// ---------------- Faculty ----------------
+import FACULTY_Overview from "./pages/FACULTY/FACULTY_Overview";
+import FACULTY_Inbox from "./pages/FACULTY/FACULTY_Inbox";
+import FACULTY_History from "./pages/FACULTY/FACULTY_History";
+import FACULTY_Preferences from "./pages/FACULTY/FACULTY_Preferences";
+import FACULTY_Deloadings from "./pages/FACULTY/FACULTY_Deloadings";
+
+// ---------------- Admin ----------------
+import ADMIN from "./pages/ADMIN/ADMIN";
+import ADMIN_Inbox from "./pages/ADMIN/ADMIN_Inbox";
+
+// ---------------- APO ----------------
+import APO_PreEnlistment from "./pages/APO/APO_PreEnlistment";
+import APO_CourseOfferings from "./pages/APO/APO_CourseOfferings";
+import APO_RoomAllocation from "./pages/APO/APO_RoomAllocation";
+
+// ---------------- CHAIR ----------------
+import CHAIR_Plantilla from "./pages/CHAIR/CHAIR_Plantilla";
+import CHAIR_FacultyManagement from "./pages/CHAIR/CHAIR_FacultyManagement";
+import CHAIR_CourseManagement from "./pages/CHAIR/CHAIR_CourseManagement";
+import CHAIR_FacultyService from "./pages/CHAIR/CHAIR_FacultyService";
+import CHAIR_StudentPetition from "./pages/CHAIR/CHAIR_StudentPetition";
+import CHAIR_ClassRetention from "./pages/CHAIR/CHAIR_ClassRetention";
+import CHAIR_Inbox from "./pages/CHAIR/CHAIR_Inbox"; 
+
 const base = (import.meta.env.BASE_URL || "/").replace(/\/$/, "");
+
+// Simple auth gate: requires localStorage "animo.user"
+function RequireAuth() {
+  let ok = false;
+  try {
+    ok = Boolean(JSON.parse(localStorage.getItem("animo.user") || "null"));
+  } catch {
+    ok = false;
+  }
+  return ok ? <Outlet /> : <Navigate to="/Login" replace />;
+}
 
 export default function App() {
   return (
     <BrowserRouter basename={base}>
-      <div className="app-shell">
-        <nav className="app-nav">
-          <Link to="/" className="app-nav__brand">Animo Demo</Link>
-          <div className="app-nav__links">
-            <Link to="/submit">Submit</Link>
-            <Link to="/search">Search</Link>
-            <Link to="/analytics">Analytics</Link>
-          </div>
-        </nav>
-        <main className="app-main">
-          <Routes>
-            <Route index element={<LandingPage />} />        {/* ⇦ NEW */}
-            <Route path="/" element={<LandingPage />} />
-            <Route path="/submit" element={<SubmitRecordPage />} />
-            <Route path="/search" element={<SearchRecordsPage />} />
-            <Route path="/analytics" element={<AnalyticsPage />} />
-            <Route path="*" element={<LandingPage />} />      {/* ⇦ NEW */}
-          </Routes>
-        </main>
-      </div>
+      <Routes>
+        {/* Default -> login */}
+        <Route path="/" element={<Navigate to="/Login" replace />} />
+
+        {/* Public */}
+        <Route path="/Login" element={<Login />} />
+        <Route path="/auth/callback" element={<AuthCallback />} />
+
+        {/* Protected */}
+        <Route element={<RequireAuth />}>
+          {/* OM loose pages */}
+          <Route path="/om/desc" element={<OM_desc />} />
+          <Route path="/om/desc2" element={<OM_desc2 />} />
+          <Route path="/om/desc3" element={<OM_desc3 />} />
+          <Route path="/om/pred1" element={<OM_pred1 />} />
+          <Route path="/om/pred2" element={<OM_pred2 />} />
+          <Route path="/om/loadreco" element={<OM_LoadReco />} />
+
+          <Route path="/om/inbox" element={<OM_Inbox />} />
+          <Route path="/om/class-retention" element={<OM_ClassRetention />} />
+
+          {/* OM shell with children (ONE declaration only) */}
+          <Route path="/om/home" element={<OM_LoadAssignment />}>
+            {/* Index & canonical load-assignment (shell decides what to show) */}
+            <Route index element={<></>} />
+            <Route path="load-assignment" element={<></>} />
+
+            <Route path="faculty-management" element={<OM_FacultyManagement />} />
+            <Route path="course-management" element={<OM_CourseManagement />} />
+            <Route path="faculty-form" element={<OM_FacultyForm />} />
+            <Route path="student-petition" element={<OM_StudentPetition />} />
+
+            {/* Reports & Analytics landing */}
+            <Route path="reports-analytics" element={<OM_ReportsAnalytics />} />
+
+            {/* Child detail pages (inherit shell via Outlet) */}
+            <Route path="reports-analytics/teaching-history" element={<OM_RP_FacultyTeachingHistory />} />
+            <Route path="reports-analytics/course-history" element={<OM_RP_CourseHistory />} />
+            <Route path="reports-analytics/deloading-utilization" element={<OM_RP_DeloadingUtilization />} />
+            <Route path="reports-analytics/availability-forecast" element={<OM_RP_AvailabilityForecasting />} />
+            <Route path="reports-analytics/load-risk" element={<OM_RP_LoadRisk />} />
+          </Route>
+
+          {/* Redirects for old/external OM links -> new nested routes */}
+          <Route path="/om/faculty-management" element={<Navigate to="/om/home/faculty-management" replace />} />
+          <Route path="/om/course-management" element={<Navigate to="/om/home/course-management" replace />} />
+          <Route path="/om/faculty-form" element={<Navigate to="/om/home/faculty-form" replace />} />
+          <Route path="/om/student-petition" element={<Navigate to="/om/home/student-petition" replace />} />
+          <Route path="/om/reports-analytics" element={<Navigate to="/om/home/reports-analytics" replace />} />
+          <Route path="/om/reports-analytics/teaching-history" element={<Navigate to="/om/home/reports-analytics/teaching-history" replace />} />
+          <Route path="/om/reports-analytics/course-history" element={<Navigate to="/om/home/reports-analytics/course-history" replace />} />
+          <Route path="/om/reports-analytics/deloading-utilization" element={<Navigate to="/om/home/reports-analytics/deloading-utilization" replace />} />
+          <Route path="/om/reports-analytics/availability-forecast" element={<Navigate to="/om/home/reports-analytics/availability-forecast" replace />} />
+          <Route path="/om/reports-analytics/load-risk" element={<Navigate to="/om/home/reports-analytics/load-risk" replace />} />
+
+          {/* Student */}
+          <Route path="/student/petition" element={<STUDENT_Petition />} />
+
+          {/* APO */}
+          <Route path="/apo/preenlistment" element={<APO_PreEnlistment />} />
+          <Route path="/apo/courseofferings" element={<APO_CourseOfferings />} />
+          <Route path="/apo/roomallocation" element={<APO_RoomAllocation />} />
+
+          {/* Faculty */}
+          <Route path="/faculty/overview" element={<FACULTY_Overview />} />
+          <Route path="/faculty/history" element={<FACULTY_History />} />
+          <Route path="/faculty/preferences" element={<FACULTY_Preferences />} />
+          <Route path="/faculty/deloadings" element={<FACULTY_Deloadings />} />
+          <Route path="/inbox" element={<FACULTY_Inbox />} />
+
+          {/* Admin */}
+          <Route path="/admin" element={<ADMIN />} />
+          <Route path="/admin/inbox" element={<ADMIN_Inbox />} />
+
+          <Route path="/chair" element={<CHAIR_Plantilla />}>
+            {/* Parent landing */}
+            <Route index element={<div />} />
+            <Route path="plantilla" element={<div />} />
+
+            {/* Children per mapping */}
+            <Route path="faculty-management" element={<CHAIR_FacultyManagement />} />
+            <Route path="course-management" element={<CHAIR_CourseManagement />} />
+            <Route path="faculty-service" element={<CHAIR_FacultyService />} />
+            <Route path="student-petitions" element={<CHAIR_StudentPetition />} />
+            <Route path="class-retention" element={<CHAIR_ClassRetention />} />
+          </Route>
+          <Route path="/chair/inbox" element={<CHAIR_Inbox />} />
+
+          {/* Authenticated wildcard: unknown paths for logged-in users go OM home */}
+          <Route path="*" element={<Navigate to="/om/home" replace />} />
+        </Route>
+
+        {/* Public fallback: unknown + unauthenticated -> Login */}
+        <Route path="*" element={<Navigate to="/Login" replace />} />
+      </Routes>
     </BrowserRouter>
   );
 }

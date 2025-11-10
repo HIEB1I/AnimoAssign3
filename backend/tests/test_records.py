@@ -6,7 +6,7 @@ import pytest
 import pytest_asyncio
 from httpx import AsyncClient
 
-from app.main import app, settings
+from backend.app.login.main import app, settings
 
 TEST_BASE_URL = "http://localhost"
 
@@ -92,7 +92,7 @@ class InMemoryDatabase:
 
 @pytest_asyncio.fixture(autouse=True)
 async def use_inmemory_database(monkeypatch):
-    from app import main
+    from backend.app.login import main
 
     main.db = InMemoryDatabase()
 
