@@ -1580,11 +1580,15 @@ export async function getOmLoadAssignmentProfile(userId: string) {
   return data;
 }
 
-export async function submitOmLoadAssignment(userId: string, payload: { rows: OmLoadRow[] }) {
+export async function submitOmLoadAssignment(
+  userId: string,
+  payload: { rows: OmLoadRow[] },
+  action: "submit" | "approve" = "submit"
+) {
   const { data } = await axios.post(`${API_BASE}/om/loadassignment`, payload, {
-    params: { userId, action: "submit" },
+    params: { userId, action },
   });
-  return data as { ok: boolean; rows: OmLoadRow[] };
+  return data as { ok: boolean; rows?: OmLoadRow[]; approved?: number; term?: string };
 }
 
 /** List all sections for the current term (no algorithm) */

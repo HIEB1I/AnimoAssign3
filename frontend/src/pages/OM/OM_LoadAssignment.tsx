@@ -1332,15 +1332,16 @@ export default function OM_LoadAssignment() {
           (async () => {
             try {
               if (userId) {
-                // minimal optimistic submit; backend returns display-ready rows
-                await submitOmLoadAssignment(userId, { rows });
+                await submitOmLoadAssignment(userId, { rows }, "approve"); // <-- key change
               }
+              // pull fresh data so you see persisted faculty + any created schedules
+              await loadFromServer();
               setApproved(true);
             } finally {
               setShowApprove(false);
             }
           })();
-        }}
+        }}        
       />
 
       <SendModal
