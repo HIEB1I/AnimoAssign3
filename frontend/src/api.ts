@@ -952,20 +952,62 @@ export async function searchCourseCatalog(
   userId: string,
   params: { q?: string; limit?: number; department_id?: string; program_level?: string } = {}
 ) {
-  const body = { action: "courseCatalog", ...params };
-  const { data } = await axios.post(join(BASE, "apo"), body, {
-    headers: { "x-user-id": userId }, // keep your existing header convention if any
-  });
-  return data as { ok: boolean; results: Array<{
-    course_id: string;
-    course_code: string;
-    course_title: string;
-    department_id?: string;
-    program_level?: string;
-    units?: number | null;
-    type_of_course?: string | null;
-  }> };
+  const url = `${API_BASE}/apo/courseofferings?${new URLSearchParams({
+    userId,
+    action: "courseCatalog",
+    ...(params.q ? { q: params.q } : {}),
+    ...(params.limit != null ? { limit: String(params.limit) } : {}),
+    ...(params.department_id ? { department_id: params.department_id } : {}),
+    ...(params.program_level ? { program_level: params.program_level } : {}),
+  }).toString()}`;
+
+  const { data } = await axios.post(url, {}); // backend reads action from query
+  return data as {
+    ok: boolean;
+    results: Array<{
+      course_id: string;
+      course_code: string | string[]; // backend may return array
+      course_title: string;
+      department_id?: string;
+      program_level?: string;
+      units?: number | null;
+      type_of_course?: string | null;
+    }>;
+  };
 }
+
+export async function createCatalogCourse(userId: string, payload: CreateCoursePayload) {
+  const url = join(API_BASE, "apo/courseofferings"); // same base/path family as catalog.search
+  const { data } = await axios.post(
+    `${url}?userId=${encodeURIComponent(userId)}&action=catalog.create`,
+    payload
+  );
+  return data; // { ok: true, course: {...} }
+}
+
+// --- Types ---
+export type CreateCoursePayload = {
+  department_id: string;
+  program_level: "UGS" | "GS";           // UGS = Undergraduate, GS = Graduate Studies
+  course_code: string;
+  course_title: string;
+  units?: number | null;
+  type_of_course?: string | null;        // e.g., "Elective Course", "GE", "Major"
+  description?: string;
+  room_type?: string | null;             // e.g., "Classroom", "Comlab"
+  capacity?: number | null;              // max_enrollee
+  min_enrollee?: number | null;
+};
+
+export type CourseCatalogItem = {
+  course_id: string;
+  course_code: string | string[];
+  course_title: string;
+  department_id?: string;
+  program_level?: string;                // "UGS" | "GS" | human label
+  units?: number | null;
+  type_of_course?: string | null;
+};
 /* =========================================================
    ===============  APO: ROOM ALLOCATION  ==================
    ========================================================= */
@@ -1501,6 +1543,94 @@ export async function bulkForwardOMSP(course_ids: string[], status?: string) {
   });
   return data as { ok: boolean; matched: number; modified: number; status: string };
 }
+/* =========================================================
+   ==============  OM: CLASS RETENTION  ====================
+   ========================================================= */
+
+export type OMCRRow = {
+  retention_id: string;
+  term_id: string;
+  course_id: string;
+  section_id: string;
+  // derived/display
+  faculty_id?: string | null;     // derived from faculty_assignments
+  student_units?: number | null;
+  faculty_units?: number | null;
+  status?: string;
+  term_label?: string;
+  course_code?: string;
+  course_title?: string;
+  section_code?: string;
+  enrolled?: number | null;
+  faculty_name?: string;          // LASTNAME, FIRSTNAME (ALL CAPS) or UNASSIGNED
+};
+
+export type OMCROptions = {
+  ok: boolean;
+  statuses: string[];
+  activeTerm?: { term_id: string; term_number: number; acad_year_start: number } | null;
+  activeTermLabel?: string;
+};
+
+export type OMCRCourseOpt = { course_id: string; course_code: string; course_title: string };
+export type OMCRSectionOpt = {
+  section_id: string;
+  section_code: string;
+  enrolled?: number | null;
+  faculty_id?: string | null;
+  faculty_name?: string;          // LASTNAME, FIRSTNAME or UNASSIGNED
+};
+
+// ---------- OM: Class Retention endpoints ----------
+export async function getOMCR_Options(): Promise<OMCROptions> {
+  const { data } = await api.get(`/om/classretention`, {
+    params: { action: "options" },
+  });
+  return data as OMCROptions;
+}
+
+export async function listOMCR(params: {
+  term_id?: string;
+  status?: string;
+  q?: string;
+}): Promise<{ ok: boolean; rows: OMCRRow[] }> {
+  const { data } = await api.get(`/om/classretention`, {
+    params: { action: "list", ...params },
+  });
+  return data as { ok: boolean; rows: OMCRRow[] };
+}
+
+export async function getOMCR_CourseOptions(term_id?: string): Promise<{ ok: boolean; options: OMCRCourseOpt[] }> {
+  const { data } = await api.get(`/om/classretention`, {
+    params: { action: "courseOptions", term_id },
+  });
+  return data as { ok: boolean; options: OMCRCourseOpt[] };
+}
+
+export async function getOMCR_SectionOptions(
+  course_id: string,
+  term_id?: string
+): Promise<{ ok: boolean; options: OMCRSectionOpt[] }> {
+  const { data } = await api.get(`/om/classretention`, {
+    params: { action: "sectionOptions", course_id, term_id },
+  });
+  return data as { ok: boolean; options: OMCRSectionOpt[] };
+}
+
+export async function saveOMCR(
+  payload: Partial<OMCRRow>
+): Promise<{ ok: boolean; retention_id: string }> {
+  const copy = { ...payload };
+  // faculty is auto-derived on backend — do not send
+  delete (copy as any).faculty_id;
+  const { data } = await api.post(`/om/classretention`, copy, { params: { action: "save" } });
+  return data as { ok: boolean; retention_id: string };
+}
+
+export async function deleteOMCR(retention_id: string): Promise<{ ok: boolean }> {
+  const { data } = await api.post(`/om/classretention`, { retention_id }, { params: { action: "delete" } });
+  return data as { ok: boolean };
+}
 
 /* =========================================================
    ==============  CHAIR: STUDENT PETITIONS  ===============
@@ -1665,22 +1795,32 @@ export async function getFacultyPreferencesProfile(userId: string) {
   });
   return data;
 }
+
 export async function submitFacultyPreferences(
   userId: string,
   payload: {
     preferred_units: number;
     availability_days: string[];
     preferred_times: string[];
-    preferred_kacs: string[]; // IDs (preferred) or names; backend normalizes
+    preferred_kacs: string[]; // IDs or names; backend normalizes
+
+    // Accept single object (preferred) or legacy array-of-objects.
     mode?:
-      | { mode?: string; campus_id?: string }
-      | { mode?: string; campus_id?: string }[]; // accepts single or array
-    deloading_data?: { deloading_type?: string; units?: string | number }[];
-    preferred_courses?: string[]; // <— add this
+      | { mode?: string; campus_id?: string | string[] }
+      | Array<{ mode?: string; campus_id?: string | string[] }>;
+
+    deloading_data?: { deloading_type?: string; units?: string | number; detail?: string }[];
+    preferred_courses?: string[];
     notes?: string;
     has_new_prep?: boolean;
     is_finished?: boolean;
     term_id?: string;
+
+    // Optional extras your page is sending (safe for backend to ignore)
+    on_break?: boolean;
+    break_reason?: string;
+    break_return_date?: string;
+    employment_type?: "FT" | "PT";
   }
 ) {
   const { data } = await axios.post(`${API_BASE}/faculty/preferences`, payload, {
@@ -1817,6 +1957,96 @@ export async function chairFacultyService(userId: string) {
   });
   return data as { ok: boolean; services: any[] };
 }
+
+// frontend/src/api.ts
+// -----------------------------------------------------------------------------
+// ADDITIONS for Faculty Service (kept near the other CHAIR helpers)
+// -----------------------------------------------------------------------------
+
+export type ToDept = "Information Technology" | "Computer Technology";
+export type DayShort = "M" | "T" | "W" | "H" | "F" | "S";
+export type FacultyLite = {
+  faculty_id?: string;
+  first_name?: string;
+  last_name?: string;
+  email?: string;
+};
+
+export type FacultyServiceRow = {
+  id?: string;
+  fs_id?: string;
+  course_code: string;
+  course_title: string;
+  units: number | null;
+  from_department: "Software Technology";
+  to_department: ToDept;
+  faculty: FacultyLite;
+  day1: DayShort | "";
+  begin1: string | "";
+  end1: string | "";
+  day2: DayShort | "";
+  begin2: string | "";
+  end2: string | "";
+  remarks: string;
+  status?: "draft" | "sent" | "responded";
+  created_at?: string;
+  updated_at?: string;
+};
+
+export async function getFSOptions(params?: { q?: string; toDepartment?: ToDept }) {
+  const sp = new URLSearchParams();
+  if (params?.q) sp.set("q", params.q);
+  if (params?.toDepartment) sp.set("toDepartment", params.toDepartment);
+  const { data } = await api.get(`/chair/faculty-service/options?${sp.toString()}`);
+  return data as {
+    ok: boolean;
+    courses: Array<{ code: string; title: string; units?: number }>;
+    departments: ToDept[];
+    timeSlots: string[];
+    days: DayShort[];
+    from: "Software Technology";
+    facultyOptions?: Array<{ faculty_id: string; first_name: string; last_name: string; email?: string; label: string }>;
+  };
+}
+
+export async function listFacultyService(params?: { status?: string; dept?: string; search?: string }) {
+  const sp = new URLSearchParams();
+  if (params?.status) sp.set("status", params.status);
+  if (params?.dept) sp.set("dept", params.dept);
+  if (params?.search) sp.set("search", params.search);
+  const { data } = await api.get(`/chair/faculty-service/list?${sp.toString()}`);
+  return data as { ok: boolean; rows: FacultyServiceRow[] };
+}
+
+export async function createFacultyService(payload: {
+  course_code: string;
+  course_title?: string;
+  units?: number | null;
+  to_department: ToDept;
+}) {
+  const { data } = await api.post(`/chair/faculty-service/create`, payload);
+  return data as { ok: boolean; row: FacultyServiceRow };
+}
+
+export async function sendFacultyService(fs_id: string) {
+  const { data } = await api.post(`/chair/faculty-service/send/${encodeURIComponent(fs_id)}`);
+  return data as { ok: boolean; row: FacultyServiceRow };
+}
+
+export async function respondFacultyService(fs_id: string, payload: {
+  faculty: FacultyLite;
+  day1?: DayShort | "";
+  begin1?: string | "";
+  end1?: string | "";
+  day2?: DayShort | "";
+  begin2?: string | "";
+  end2?: string | "";
+  remarks?: string;
+}) {
+  const { data } = await api.post(`/chair/faculty-service/respond/${encodeURIComponent(fs_id)}`, payload);
+  return data as { ok: boolean; row: FacultyServiceRow };
+}
+
 
 export async function chairClassRetention(userId: string) {
   const { data } = await api.post(`/chair/class-retention`, {}, {

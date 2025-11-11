@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   Edit,
   Trash2,
@@ -25,7 +25,10 @@ import {
   curriculumRemoveCourse,
   getElectiveOptions,
   searchCourseCatalog,      
+  createCatalogCourse,                  
   type ApiConflict,
+  type CreateCoursePayload,  
+  type CourseCatalogItem           
 } from "../../api";
 
 /* --------------------------------- helpers --------------------------------- */
@@ -76,6 +79,36 @@ const isFullTime = (s?: string) => ((s || "").replace(/\D/g, "")).length === 4;
 
 // allow partial typing (0..4 digits)
 const sanitizeTime = (s?: string) => (s || "").replace(/\D/g, "").slice(0, 4);
+// --- Static GE time slots (single pick sets start+end) ---
+const GE_TIME_SLOTS = [
+  { label: "07:30 - 09:00", start: "0730", end: "0900" },
+  { label: "09:15 - 10:45", start: "0915", end: "1045" },
+  { label: "11:00 - 12:30", start: "1100", end: "1230" },
+  { label: "12:45 - 14:15", start: "1245", end: "1415" },
+  { label: "14:30 - 16:00", start: "1430", end: "1600" },
+  { label: "16:15 - 17:45", start: "1615", end: "1745" },
+  { label: "18:00 - 19:30", start: "1800", end: "1930" },
+  { label: "19:45 - 21:00", start: "1945", end: "2100" },
+    // NEW long blocks you requested
+  { label: "08:00 - 10:00", start: "0800", end: "1000" },
+  { label: "10:00 - 12:00", start: "1000", end: "1200" },
+  { label: "13:00 - 15:00", start: "1300", end: "1500" },
+  { label: "15:30 - 17:30", start: "1530", end: "1730" },
+  { label: "18:00 - 20:00", start: "1800", end: "2000" },
+];
+
+const GE_PLACEHOLDER = "— Select —";
+
+const geFindByLabel = (label: string) => GE_TIME_SLOTS.find(t => t.label === label);
+const geFindByTimes = (start?: string | null, end?: string | null) => {
+  const s = (start || "").replace(/\D/g, "");
+  const e = (end || "").replace(/\D/g, "");
+  return GE_TIME_SLOTS.find(t => t.start === s && t.end === e);
+};
+const geCurrentLabel = (slot?: { start_time?: string | null; end_time?: string | null }) => {
+  const hit = geFindByTimes(slot?.start_time, slot?.end_time);
+  return hit ? hit.label : GE_PLACEHOLDER;
+};
 
 // A slot can only receive a room if it has day + full HHMM times
 const slotReady = (s?: { day?: Day | ""; start_time?: string; end_time?: string }) =>
@@ -435,7 +468,6 @@ function defaultSectionCode(row: OfferingRow, campusName: string): string | null
 
 export default function CourseOfferingsPage() {
   const [view, setView] = useState<ViewMode>("offerings");
-
   const [search, setSearch] = useState("");
   const [level, setLevel] = useState<string>("All Levels");
   const [departmentName, setDepartmentName] = useState<string>("All Departments");
@@ -466,7 +498,7 @@ const RoomSelectBox: React.FC<{
   );
 
   // shorter placeholder avoids forcing the cell wider than its col width
-  const placeholder = disabled ? "— Set day+time —" : "— Select room —";
+  const placeholder = disabled ? "— Set day & time —" : "— Select room —";
   const currentLabel = value ? (items.find(x => x.id === value)?.label ?? placeholder) : placeholder;
   const optionLabels = [placeholder, ...items.map(x => x.label)];
 
@@ -498,6 +530,8 @@ const RoomSelectBox: React.FC<{
     program_code?: string;
     batch_id?: string;
   } | null>(null);
+  const [showCreateCourseModal, setShowCreateCourseModal] = useState(false);
+
   // Offerings collapse state (keyed by "ID::PROGRAM")
   const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
 
@@ -620,6 +654,75 @@ const loadOfferings = async () => {
 
   const [showForward, setShowForward] = useState(false);
   const [showPlanModal, setShowPlanModal] = useState(false);
+  
+  // Build a lookup so the modal can show "CODE — Title" instead of course_id
+const planCourseIndex = useMemo(() => {
+  type Meta = { code: string; title: string };
+  const m: Record<string, Meta> = {};
+
+  const put = (id?: string, code?: string | string[], title?: string) => {
+    const c = Array.isArray(code) ? String(code[0] ?? "") : String(code ?? "");
+    const t = String(title ?? "");
+    const idKey = String(id ?? "").trim();
+    const codeKey = c.trim().toUpperCase();
+
+    // store by true course_id
+    if (idKey && !m[idKey]) m[idKey] = { code: c, title: t };
+
+    // also index by course_code so "CRS0245" lookups succeed
+    if (codeKey && !m[codeKey]) m[codeKey] = { code: c, title: t };
+  };
+
+  // learn from rows
+  (data?.rows || []).forEach((r: OfferingRow) =>
+    put(r.course.course_id, r.course.course_code, r.course.course_title)
+  );
+
+  // learn from options
+  const groups = (data?.course_options_by_group ?? {}) as Record<string, CourseOption[]>;
+  Object.values(groups).forEach((arr) => {
+    (arr || []).forEach((o) => put(o?.course_id, o?.course_code as any, o?.course_title));
+  });
+
+  return m;
+}, [data?.rows, data?.course_options_by_group]);
+// extra index entries we resolve on demand
+const [extraCourseIndex, setExtraCourseIndex] = useState<Record<string, { code: string; title: string }>>({});
+
+// when the Planning modal opens, make sure every change.course_id is resolvable
+useEffect(() => {
+  if (!showPlanModal || !user?.userId || !data?.planning?.pending_changes?.length) return;
+
+  const have = (k: string) => !!(planCourseIndex[k] || planCourseIndex[k.toUpperCase()] || extraCourseIndex[k] || extraCourseIndex[k.toUpperCase()]);
+  const missing = Array.from(
+    new Set(
+      (data.planning.pending_changes || [])
+        .map((ch: any) => String(ch.course_id || "").trim())
+        .filter((id) => id && !have(id))
+    )
+  );
+
+  if (!missing.length) return;
+
+  (async () => {
+    const adds: Record<string, { code: string; title: string }> = {};
+    for (const id of missing) {
+      try {
+        // try a direct catalog search by course_id (works in our catalog endpoint)
+        const r = await searchCourseCatalog(user.userId, { q: id, limit: 1 });
+        const hit = (r?.results || [])[0];
+        if (hit) {
+          const code = Array.isArray(hit.course_code) ? String(hit.course_code[0] ?? "") : String(hit.course_code ?? "");
+          const title = String(hit.course_title ?? "");
+          if (title || code) adds[id] = { code, title };
+        }
+      } catch {
+        /* ignore; we just leave it as the id */
+      }
+    }
+    if (Object.keys(adds).length) setExtraCourseIndex((prev) => ({ ...prev, ...adds }));
+  })();
+}, [showPlanModal, data?.planning?.pending_changes, planCourseIndex, extraCourseIndex, user?.userId]);
 
   /* --------------------------------- filters -------------------------------- */
   const normalizeLevel = (v?: string) => {
@@ -1179,6 +1282,8 @@ if (isGE) {
     await curriculumRemoveCourse(user.userId, { program_id, batch_id, course_id });
     await loadCurriculum();
   };
+  // treat either inline edit row or inline add row as "edit UI"
+  const inEditUI = !!editing || addAnchorKey !== null;
 
   /* ----------------------------------- UI ----------------------------------- */
 
@@ -1281,6 +1386,16 @@ if (isGE) {
                 }}
                 options={["All ID", ...currBatches.map((b) => b.code)]}
               />
+
+              {/* ADD: global catalog "Add Course" button */}
+              <button
+                className="ml-auto inline-flex items-center gap-2 rounded-md bg-emerald-700 px-4 py-2 text-sm font-medium text-white shadow-sm"
+                onClick={() => setShowCreateCourseModal(true)}
+                title="Create a new course in the global catalog"
+              >
+                <Plus className="h-4 w-4" />
+                Add Course
+              </button>
             </>
           )}
         </div>
@@ -1354,23 +1469,23 @@ if (isGE) {
                           {!isCollapsed && (
                             <div className="p-0">
                               <div className="overflow-x-auto">
-                                <table className="w-full text-sm table-fixed border-collapse">
+                                <table className={`w-full text-sm border-collapse ${inEditUI ? "table-auto" : "table-fixed"}`}>
                                   <colgroup>
                                     <col style={{ width: 96 }} />   {/* Program No. */}
-                                    <col style={{ width: 280 }} />  {/* Course Code & Title */}
-                                    <col style={{ width: 96 }} />   {/* Section */}
+                                    <col style={{ width: 230 }} />  {/* Course Code & Title */}
+                                    <col style={{ width: 90 }} />   {/* Section */}
                                     <col style={{ width: 180 }} />  {/* Faculty */}
-                                    <col style={{ width: 96 }} />   {/* Day 1 */}
-                                    <col style={{ width: 96 }} />   {/* Begin 1 */}
-                                    <col style={{ width: 96 }} />   {/* End 1 */}
-                                    <col style={{ width: 200 }} />  {/* Room 1 */}
-                                    <col style={{ width: 96 }} />   {/* Day 2 */}
-                                    <col style={{ width: 96 }} />   {/* Begin 2 */}
-                                    <col style={{ width: 96 }} />   {/* End 2 */}
-                                    <col style={{ width: 200 }} />  {/* Room 2 */}
-                                    <col style={{ width: 96 }} />   {/* Capacity */}
-                                    <col style={{ width: 200 }} />  {/* Remarks */}
-                                    <col style={{ width: 144 }} />  {/* Actions */}
+                                    <col style={{ width: 95 }} />   {/* Day 1 */}
+                                    <col style={{ width: 70 }} />   {/* Begin 1 */}
+                                    <col style={{ width: 70 }} />   {/* End 1 */}
+                                    <col style={{ width: 120 }} />  {/* Room 1 */}
+                                    <col style={{ width: 95 }} />   {/* Day 2 */}
+                                    <col style={{ width: 70 }} />   {/* Begin 2 */}
+                                    <col style={{ width: 70 }} />   {/* End 2 */}
+                                    <col style={{ width: 120 }} />  {/* Room 2 */}
+                                    <col style={{ width: 80 }} />   {/* Capacity */}
+                                    <col style={{ width: 150 }} />  {/* Remarks */}
+                                    <col style={{ width: 100 }} />  {/* Actions */}
                                   </colgroup>
                                   <thead className="bg-gray-50 text-emerald-800 sticky top-0 z-10">
                                     <tr className="text-[13px] font-semibold">
@@ -1632,6 +1747,7 @@ if (isGE) {
 
                                           {/* Section code */}
                                           <td className="px-3 py-2 border border-gray-200 bg-white">
+                                            <div className="w-full min-w-0">
                                           <input
                                             value={editing?.draft.section_code || ""}
                                             onChange={(e) => {
@@ -1644,7 +1760,7 @@ if (isGE) {
                                               setEditing((p) => p && { ...p, draft: { ...p.draft, section_code: raw.toUpperCase() } });
                                             }}
                                             placeholder={defaultSectionCode(r, data?.campus?.campus_name || "") || "Section code"}
-                                            className={SOFT_INPUT}
+                                            className={`${SOFT_INPUT} w-full min-w-0`}
                                           />
 
                                             {(() => {
@@ -1659,10 +1775,12 @@ if (isGE) {
                                                 </div>
                                               ) : null;
                                             })()}
+                                            </div>
                                           </td>
 
                                           {/* Faculty - editable if GE */}
                                           <td className="px-3 py-2 border border-gray-200 bg-white">
+                                            <div className="w-full min-w-0">
                                             {ge ? (
                                               <input
                                                 value={editing?.draft.faculty_name || ""}
@@ -1670,98 +1788,72 @@ if (isGE) {
                                                   setEditing((p) => p && { ...p, draft: { ...p.draft, faculty_name: e.target.value } })
                                                 }
                                                 placeholder="Faculty name"
-                                                className={SOFT_INPUT}
+                                                className={`${SOFT_INPUT} w-full min-w-0`}
                                               />
                                             ) : (
                                               <span className={r.faculty.faculty_name === "UNASSIGNED" ? "text-red-600 font-medium" : ""}>
                                                 {r.faculty.faculty_name || "UNASSIGNED"}
                                               </span>
                                             )}
+                                            </div>
                                           </td>
 
                                           {/* Slot 1 */}
                                           <td className="px-3 py-2 border border-gray-200 bg-white">
-                                            {ge ? (
-                                              <div className="relative">
-                                                <select
-                                                  value={editing?.draft.slot1?.day || ""}
-                                                  onChange={(e) =>
-                                                    setEditing(
-                                                      (p) =>
-                                                        p &&
-                                                        {
-                                                          ...p,
-                                                          draft: {
-                                                            ...p.draft,
-                                                            slot1: { ...(p.draft.slot1 || {}), day: e.target.value as Day | "" },
-                                                          },
-                                                        }
-                                                    )
+                                          {ge ? (
+                                            <SelectBox
+                                              value={(editing?.draft.slot1?.day && editing.draft.slot1.day.length ? editing.draft.slot1.day : "—") as string}
+                                              onChange={(label: string) =>
+                                                setEditing(p => p && ({
+                                                  ...p,
+                                                  draft: {
+                                                    ...p.draft,
+                                                    slot1: { ...(p.draft.slot1 || {}), day: (label === "—" ? "" : (label as Day)) }
                                                   }
-                                                  className={SOFT_SELECT}
-                                                >
-                                                  <option value="">—</option>
-                                                  {DAYS.map((d) => (
-                                                    <option key={d} value={d}>
-                                                      {d}
-                                                    </option>
-                                                  ))}
-                                                </select>
-                                                <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-500" />
-                                              </div>
-                                            ) : (
-                                              r.slot1?.day || "—"
-                                            )}
-                                          </td>
-                                          <td className="px-3 py-2 border border-gray-200 bg-white">
-                                            {ge ? (
-                                              <input
-                                                value={editing?.draft.slot1?.start_time || ""}
-                                                onChange={(e) =>
-                                                  setEditing(
-                                                    (p) =>
-                                                      p &&
-                                                      {
-                                                        ...p,
-                                                        draft: {
-                                                          ...p.draft,
-                                                          slot1: { ...(p.draft.slot1 || {}), start_time: sanitizeTime(e.target.value) },
-                                                        },
-                                                      }
-                                                  )
-                                                }
-                                                placeholder="HHMM"
-                                                className={SOFT_INPUT}
-                                              />
-
-                                            ) : (
-                                              fmtTime(r.slot1?.start_time)
-                                            )}
-                                          </td>
-                                          <td className="px-3 py-2 border border-gray-200 bg-white">
-                                            {ge ? (
-                                            <input
-                                              value={editing?.draft.slot1?.end_time || ""}
-                                              onChange={(e) =>
-                                                setEditing(
-                                                  (p) =>
-                                                    p &&
-                                                    {
-                                                      ...p,
-                                                      draft: {
-                                                        ...p.draft,
-                                                        slot1: { ...(p.draft.slot1 || {}), end_time: sanitizeTime(e.target.value) },
-                                                      },
-                                                    }
-                                                )
+                                                }))
                                               }
-                                              placeholder="HHMM"
-                                              className={SOFT_INPUT}
+                                              options={["—", ...DAYS]}
+                                              className="!min-w-0 w-full max-w-full"
                                             />
+                                          ) : (
+                                            r.slot1?.day || "—"
+                                          )}
 
-                                            ) : (
-                                              fmtTime(r.slot1?.end_time)
-                                            )}
+                                          </td>
+                                          <td className="px-3 py-2 border border-gray-200 bg-white">
+                                          {ge ? (
+                                            <div className="inline-block min-w-[140px] whitespace-nowrap">
+                                              <SelectBox
+                                              value={geCurrentLabel(editing?.draft.slot1)}
+                                              options={[GE_PLACEHOLDER, ...GE_TIME_SLOTS.map(t => t.label)]}
+                                              onChange={(label: string) => {
+                                                if (label === GE_PLACEHOLDER) {
+                                                  setEditing(p => p && ({
+                                                    ...p,
+                                                    draft: { ...p.draft, slot1: { ...(p.draft.slot1 || {}), start_time: "", end_time: "" } }
+                                                  }));
+                                                  return;
+                                                }
+                                                const hit = geFindByLabel(label);
+                                                setEditing(p => p && ({
+                                                  ...p,
+                                                  draft: { ...p.draft, slot1: { ...(p.draft.slot1 || {}), start_time: hit?.start || "", end_time: hit?.end || "" } }
+                                                }));
+                                              }}
+                                              className="w-auto whitespace-nowrap"
+                                            />
+                                            </div>
+                                          ) : (
+                                            fmtTime(r.slot1?.start_time)
+                                          )}
+
+                                          </td>
+                                          <td className="px-3 py-2 border border-gray-200 bg-white">
+                                          {ge ? (
+                                            <div className="text-sm">{fmtTime(editing?.draft.slot1?.end_time) || "—"}</div>
+                                          ) : (
+                                            fmtTime(r.slot1?.end_time)
+                                          )}
                                           </td>
                                           <td className="px-3 py-2 border border-gray-200 bg-white relative overflow-visible">
                                             <RoomSelectBox
@@ -1780,86 +1872,58 @@ if (isGE) {
                                           {/* Slot 2 */}
                                           <td className="px-3 py-2 border border-gray-200 bg-white">
                                             {ge ? (
-                                              <div className="relative">
-                                                <select
-                                                  value={editing?.draft.slot2?.day || ""}
-                                                  onChange={(e) =>
-                                                    setEditing(
-                                                      (p) =>
-                                                        p &&
-                                                        {
-                                                          ...p,
-                                                          draft: {
-                                                            ...p.draft,
-                                                            slot2: { ...(p.draft.slot2 || {}), day: e.target.value as Day | "" },
-                                                          },
-                                                        }
-                                                    )
-                                                  }
-                                                  className={SOFT_SELECT}
-                                                >
-                                                  <option value="">—</option>
-                                                  {DAYS.map((d) => (
-                                                    <option key={d} value={d}>
-                                                      {d}
-                                                    </option>
-                                                  ))}
-                                                </select>
-                                                <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-500" />
-                                              </div>
+                                              <SelectBox
+                                                value={(editing?.draft.slot2?.day && editing.draft.slot2.day.length ? editing.draft.slot2.day : "—") as string}
+                                                onChange={(label: string) =>
+                                                  setEditing(p => p && ({
+                                                    ...p,
+                                                    draft: {
+                                                      ...p.draft,
+                                                      slot2: { ...(p.draft.slot2 || {}), day: (label === "—" ? "" : (label as Day)) }
+                                                    }
+                                                  }))
+                                                }
+                                                options={["—", ...DAYS]}
+                                                className="!min-w-0 w-full max-w-full"
+                                              />
                                             ) : (
                                               r.slot2?.day || "—"
                                             )}
                                           </td>
                                           <td className="px-3 py-2 border border-gray-200 bg-white">
-                                            {ge ? (
-                                              <input
-                                                value={editing?.draft.slot2?.start_time || ""}
-                                                onChange={(e) =>
-                                                  setEditing(
-                                                    (p) =>
-                                                      p &&
-                                                      {
-                                                        ...p,
-                                                        draft: {
-                                                          ...p.draft,
-                                                          slot2: { ...(p.draft.slot2 || {}), start_time: sanitizeTime(e.target.value) },
-                                                        },
-                                                      }
-                                                  )
+                                          {ge ? (
+                                            <div className="inline-block min-w-[140px] whitespace-nowrap">
+                                            <SelectBox
+                                              value={geCurrentLabel(editing?.draft.slot2)}
+                                              options={[GE_PLACEHOLDER, ...GE_TIME_SLOTS.map(t => t.label)]}
+                                              onChange={(label: string) => {
+                                                if (label === GE_PLACEHOLDER) {
+                                                  setEditing(p => p && ({
+                                                    ...p,
+                                                    draft: { ...p.draft, slot2: { ...(p.draft.slot2 || {}), start_time: "", end_time: "" } }
+                                                  }));
+                                                  return;
                                                 }
-                                                placeholder="HHMM"
-                                                className={SOFT_INPUT}
-                                              />
+                                                const hit = geFindByLabel(label);
+                                                setEditing(p => p && ({
+                                                  ...p,
+                                                  draft: { ...p.draft, slot2: { ...(p.draft.slot2 || {}), start_time: hit?.start || "", end_time: hit?.end || "" } }
+                                                }));
+                                              }}
+                                              className="!min-w-0 w-full max-w-full"
+                                            />
+                                            </div>
+                                          ) : (
+                                            fmtTime(r.slot2?.start_time)
+                                          )}
 
-                                            ) : (
-                                              fmtTime(r.slot2?.start_time)
-                                            )}
                                           </td>
                                           <td className="px-3 py-2 border border-gray-200 bg-white">
-                                            {ge ? (
-                                              <input
-                                                value={editing?.draft.slot2?.end_time || ""}
-                                                onChange={(e) =>
-                                                  setEditing(
-                                                    (p) =>
-                                                      p &&
-                                                      {
-                                                        ...p,
-                                                        draft: {
-                                                          ...p.draft,
-                                                          slot2: { ...(p.draft.slot2 || {}), end_time: sanitizeTime(e.target.value) },
-                                                        },
-                                                      }
-                                                  )
-                                                }
-                                                placeholder="HHMM"
-                                                className={SOFT_INPUT}
-                                              />
-
-                                            ) : (
-                                              fmtTime(r.slot2?.end_time)
-                                            )}
+                                          {ge ? (
+                                            <div className="text-sm">{fmtTime(editing?.draft.slot2?.end_time) || "—"}</div>
+                                          ) : (
+                                            fmtTime(r.slot2?.end_time)
+                                          )}
                                           </td>
                                           <td className="px-3 py-2 border border-gray-200 bg-white relative overflow-visible">
                                             <RoomSelectBox
@@ -2654,6 +2718,7 @@ if (isGE) {
       {showPlanModal && data?.planning && (
         <PlanReviewModal
           changes={data.planning.pending_changes || []}
+          courseIndex={{ ...planCourseIndex, ...extraCourseIndex }}  // ⟵ merged
           onClose={() => setShowPlanModal(false)}
           onApprove={async () => {
             if (!user?.userId) return;
@@ -2678,6 +2743,18 @@ if (isGE) {
           onChanged={async () => { await loadCurriculum(); setEditorState(null); }}
         />
       )}
+      {showCreateCourseModal && (
+        <CreateCourseModal
+          departments={(curr?.departments || []).map(d => ({ id: d.department_id, name: d.department_name }))}
+          onClose={() => setShowCreateCourseModal(false)}
+          onCreated={async () => {
+            setShowCreateCourseModal(false);
+            // refresh curriculum options so newly created course appears in editor/suggestions
+            await loadCurriculum();
+          }}
+        />
+      )}
+
     </div>
   );
 }
@@ -2733,28 +2810,103 @@ const PlanReviewModal: React.FC<{
   changes: PlanningChange[];
   onClose: () => void;
   onApprove: () => void | Promise<void>;
-}> = ({ changes, onClose, onApprove }) => {
+  courseIndex?: Record<string, { code: string; title: string }>;
+}> = ({ changes, onClose, onApprove, courseIndex = {} }) => {
   const [busy, setBusy] = useState(false);
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-      <div className="w-full max-w-3xl rounded-xl bg-white shadow-xl border border-gray-200">
-        <div className="border-b px-4 py-3 font-semibold">Review Planning Updates</div>
-        <div className="p-4 max-h-[70vh] overflow-auto">
+  <div className="fixed inset-0 z-[9999] flex items-start justify-center bg-black/40 p-3 sm:p-4">
+    <div className="w-[92vw] max-w-[900px] max-h-[88vh] mt-6 rounded-2xl bg-white shadow-2xl border border-gray-200 flex flex-col">
+      <div className="sticky top-0 z-10 bg-white border-b border-gray-200 px-4 py-3 font-semibold">
+        Review Planning Updates
+      </div>
+        <div className="flex-1 min-h-0 p-4 overflow-auto">
           {changes.length === 0 ? (
             <div className="text-sm text-slate-700">No pending changes.</div>
           ) : (
             <ul className="space-y-3">
-              {changes.map((ch, i) => (
-                <li key={i} className="rounded border p-3">
-                  <div className="text-sm font-semibold">{ch.type}</div>
-                  <pre className="text-xs bg-slate-50 border rounded p-2 mt-2 overflow-auto">
-                    {JSON.stringify(ch, null, 2)}
-                  </pre>
-                </li>
-              ))}
+              {changes.map((ch: any, i: number) => {
+              const codeForCourse = (id?: string) => {
+                const key = String(id || "");
+                const meta =
+                  courseIndex[key] ||
+                  courseIndex[key.toUpperCase()];
+                const code = (meta?.code || "").trim();
+                return code || key || "Unknown course";
+              };
+
+                const TypeBadge = ({ text }: { text: string }) => (
+                  <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] font-semibold text-emerald-700">
+                    {text}
+                  </span>
+                );
+
+                // ---- Friendly summaries for known change types ----
+                let title = "Update";
+                let details: Array<{ k: string; v: React.ReactNode }> = [];
+                let badge = "Update";
+
+                switch (ch.type) {
+                  case "add_course_to_curriculum":
+                    title = "Add course to curriculum";
+                    badge = "Add";
+                    details = [
+                      { k: "Course code", v: codeForCourse(ch.course_id) },
+                      { k: "Enlisted", v: ch.count ?? "—" },
+                      ...(ch.target ? [{ k: "Target", v: String(ch.target) }] : []),
+                    ];
+                    break;
+
+                  case "sections_increase":
+                    title = "Increase sections";
+                    badge = "Increase";
+                    details = [
+                      { k: "Course code", v: codeForCourse(ch.course_id) },
+                      { k: "Sections +", v: typeof ch.by_sections === "number" ? ch.by_sections : "—" },
+                    ];
+                    break;
+
+                  case "sections_decrease":
+                    title = "Reduce sections";
+                    badge = "Reduce";
+                    details = [
+                      { k: "Course code", v: codeForCourse(ch.course_id) },
+                      { k: "Sections −", v: typeof ch.by_sections === "number" ? ch.by_sections : "—" },
+                    ];
+                    break;
+
+
+                  default:
+                    // Unknown type: still show readable blocks, with optional raw toggle
+                    title = (String(ch.type || "Update").replace(/_/g, " "));
+                    badge = "Update";
+                    details = Object.keys(ch)
+                      .filter(k => k !== "type")
+                      .map(k => ({ k, v: String(ch[k]) }));
+                    break;
+                }
+
+                return (
+                  <li key={i} className="rounded-xl border border-gray-200 bg-gray-50 p-3 shadow-sm">
+                    <div className="flex items-center justify-between">
+                      <div className="text-sm font-semibold text-slate-800">{title}</div>
+                      <TypeBadge text={badge} />
+                    </div>
+
+                    <div className="mt-2 grid grid-cols-1 sm:grid-cols-3 gap-3 text-sm">
+                      {details.map((d, idx) => (
+                        <div key={idx}>
+                          <div className="text-xs uppercase text-gray-500">{d.k}</div>
+                          <div className="font-medium text-slate-900 break-words">{d.v}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </li>
+                );
+              })}
             </ul>
           )}
         </div>
+
         <div className="flex items-center justify-end gap-2 border-t px-4 py-3">
           <button className="rounded-md border px-3 py-1.5 text-sm" onClick={onClose}>
             Close
@@ -2779,6 +2931,7 @@ const PlanReviewModal: React.FC<{
     </div>
   );
 };
+
 type ProgramCoursesEditorProps = {
   userId?: string;
   programId: string;
@@ -2827,10 +2980,29 @@ const ProgramCoursesEditor: React.FC<ProgramCoursesEditorProps> = ({
   const [current, setCurrent] = useState(base.courses);
   const currentIds = useMemo(() => new Set(current.map((c) => c.course_id)), [current]);
 
-  const [query, setQuery] = useState("");
-  const [results, setResults] = useState<any[]>([]);
-  const [suggestions, setSuggestions] = useState<any[]>([]);
-  const [busy, setBusy] = useState(false);
+const [query, setQuery] = useState("");
+const [results, setResults] = useState<CourseCatalogItem[]>([]);
+const [suggestions, setSuggestions] = useState<CourseCatalogItem[]>([]);
+const [busy, setBusy] = useState(false);
+
+// NEW: protect against stale responses + show stable UI while searching
+const requestIdRef = useRef(0);
+const [loadingSearch, setLoadingSearch] = useState(false);
+// --- robust filtering for code/title, ignoring case/space/dashes ---
+const norm = (s?: string) =>
+  String(s ?? "")
+    .toLowerCase()
+    .replace(/\s+/g, "")
+    .replace(/-/g, "");
+
+const filterCatalog = (arr: CourseCatalogItem[], q: string) => {
+  const nq = norm(q);
+  if (!nq) return arr;
+  return (arr || []).filter((r) =>
+    norm(String(r.course_code)).includes(nq) ||
+    norm(r.course_title).includes(nq)
+  );
+};
 
   // Initial suggestions (wildcard search → fallback to curriculum options)
   useEffect(() => {
@@ -2838,7 +3010,7 @@ const ProgramCoursesEditor: React.FC<ProgramCoursesEditorProps> = ({
       if (!userId) return;
       let out: any[] = [];
       try {
-        const r = await searchCourseCatalog(userId, { q: "*", limit: 40 });
+        const r = await searchCourseCatalog(userId, { q: "*", limit: 500 });
         out = Array.isArray(r?.results) ? r.results : [];
       } catch {}
       if (!out.length) {
@@ -2860,21 +3032,33 @@ const ProgramCoursesEditor: React.FC<ProgramCoursesEditorProps> = ({
 
   // Debounced live search (only if 2+ chars)
   useEffect(() => {
+    const q = query.trim();
+    const myId = ++requestIdRef.current;
     const t = setTimeout(async () => {
       if (!userId) return;
-      const q = query.trim();
-      if (q.length < 2) return setResults([]);
+      if (q.length < 2) {
+        if (myId === requestIdRef.current) setResults([]);
+        return;
+      }
+      setLoadingSearch(true);
       try {
-        const { results } = await searchCourseCatalog(userId, { q, limit: 40 });
-        setResults(results || []);
+        const resp = await searchCourseCatalog(userId, { q, limit: 500 });
+        const arr = Array.isArray((resp as any)?.results) ? (resp as any).results : [];
+        if (myId === requestIdRef.current) setResults(arr);
+        setResults(arr);
       } catch {
-        setResults([]);
+        if (myId === requestIdRef.current) setResults([]);
+      } finally {
+        if (myId === requestIdRef.current) setLoadingSearch(false);
       }
     }, 250);
     return () => clearTimeout(t);
   }, [query, userId]);
 
-  const list = results.length ? results : suggestions;
+const source = results.length ? results : suggestions;
+const list = filterCatalog(source, query);
+const noMatches = query.trim().length >= 2 && list.length === 0;
+
 
   const adds = useMemo(() => {
     const baseIds = new Set(base.courses.map((c) => c.course_id));
@@ -2952,17 +3136,29 @@ const ProgramCoursesEditor: React.FC<ProgramCoursesEditorProps> = ({
           <div className="rounded-lg border">
             <div className="px-3 py-2 bg-gray-50 font-semibold">Add from catalog</div>
             <div className="p-3">
-              <input
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                placeholder="Type code or title to search all courses…"
-                className="w-full rounded-lg border px-3 py-2 text-sm"
-              />
+              <div className="relative">
+                <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-500" />
+                <input
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  placeholder="Type code or title to search all courses…"
+                  className={cls(SOFT_INPUT, "pl-9")}
+                />
+              </div>
             </div>
+
             <div className="max-h-[52vh] overflow-auto divide-y">
-              {list.map((r) => {
-                const inCurr = currentIds.has(r.course_id);
-                return (
+              {loadingSearch && (
+                <div className="p-3 text-sm text-neutral-500">Searching…</div>
+              )}
+              {!loadingSearch && noMatches && (
+                <div className="p-3 text-sm text-neutral-500">
+                  No matches for “{query.trim()}”.
+                </div>
+              )}
+              {!loadingSearch && list.map((r) => {
+                    const inCurr = currentIds.has(r.course_id);
+                    return (
                   <div key={r.course_id} className="p-3 flex items-start justify-between gap-3">
                     <div className="min-w-0">
                       <div className="font-semibold text-emerald-700">{String(r.course_code)}</div>
@@ -3009,6 +3205,225 @@ const ProgramCoursesEditor: React.FC<ProgramCoursesEditorProps> = ({
           >
             <Check className="inline-block h-4 w-4 mr-1 align-[-2px]" />
             Save changes
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+/* ==== CREATE COURSE MODAL (fixed + SelectBox dropdowns) ==== */
+const CreateCourseModal: React.FC<{
+  departments: { id: string; name: string }[];
+  onClose: () => void;
+  onCreated: () => void | Promise<void>;
+}> = ({ departments, onClose, onCreated }) => {
+  // Show names in the SelectBox; map back to id on save
+  const [deptName, setDeptName] = useState<string>(departments[0]?.name || "");
+
+  // Exact UI labels you want
+  const LEVEL_LABELS = ["Undergraduate", "Graduate Studies"] as const;
+  type LevelLabel = (typeof LEVEL_LABELS)[number];
+  const [level, setLevel] = useState<LevelLabel>("Undergraduate");
+
+  const TYPE_OF_OPTIONS = ["GE", "Major", "Foundation", "Elective", "Elective Course", "SHS"] as const;
+  type TypeOf = (typeof TYPE_OF_OPTIONS)[number];
+  const [typeOf, setTypeOf] = useState<TypeOf>("Elective Course");
+
+  const ROOM_TYPES = ["Classroom", "Comlab"] as const;
+  type RoomType = (typeof ROOM_TYPES)[number];
+  const [roomType, setRoomType] = useState<RoomType>("Classroom");
+
+  const [code, setCode] = useState("");
+  const [title, setTitle] = useState("");
+  const [units, setUnits] = useState<string>("");
+  const [desc, setDesc] = useState("");
+  const [capacity, setCapacity] = useState<string>("");
+  const [minEnroll, setMinEnroll] = useState<string>("");
+
+  const [busy, setBusy] = useState(false);
+
+  const user = useMemo(() => {
+    const raw = localStorage.getItem("animo.user");
+    return raw ? JSON.parse(raw) : null;
+  }, []);
+
+  // Resolve selected department id
+  const deptId = useMemo(
+    () => departments.find((d) => d.name === deptName)?.id || departments[0]?.id || "",
+    [departments, deptName]
+  );
+
+  const canSave = !!deptId && !!level && !!code.trim() && !!title.trim();
+
+  const save = async () => {
+    if (!user?.userId || !canSave) return;
+    setBusy(true);
+    try {
+      // Map UI label -> API code
+      const levelCode = (level === "Graduate Studies" ? "GS" : "UGS") as "UGS" | "GS";
+
+      const payload: CreateCoursePayload = {
+        department_id: deptId,
+        program_level: levelCode,                 // <-- FIXED (type-safe)
+        course_code: code.trim().toUpperCase(),
+        course_title: title.trim(),
+        units: units === "" ? null : Number(units),
+        type_of_course: (typeOf || null) as string | null,
+        description: desc || "",
+        room_type: (roomType || null) as string | null,
+        capacity: capacity === "" ? null : Number(capacity),   // max_enrollee equivalent
+        min_enrollee: minEnroll === "" ? null : Number(minEnroll),
+      };
+
+      const res = await createCatalogCourse(user.userId, payload);
+      if (res?.ok) {
+        alert(`Course ${payload.course_code} created (course_id: ${res.course?.course_id || "new"})`);
+        await onCreated();
+      } else {
+        alert(res?.message || "Failed to create course.");
+      }
+    } catch (e: any) {
+      alert(e?.message || "Failed to create course.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+      <div className="w-full max-w-2xl rounded-xl bg-white shadow-xl border border-gray-200">
+        <div className="flex items-center justify-between border-b px-4 py-3">
+          <div className="font-semibold">Add Course (Global Catalog)</div>
+          <button className="rounded-md border px-3 py-1.5 text-sm" onClick={onClose}>
+            Close
+          </button>
+        </div>
+
+        <div className="p-4 grid grid-cols-1 md:grid-cols-2 gap-3">
+          {/* Department (SelectBox) */}
+          <div className="md:col-span-1">
+            <label className="text-xs font-medium text-slate-700 mb-1 block">Department</label>
+            <SelectBox
+              value={deptName || "— Select —"}
+              onChange={(v: string) => setDeptName(v)}
+              options={departments.length ? departments.map((d) => d.name) : ["— Select —"]}
+              className="w-full"
+            />
+          </div>
+
+          {/* Program Level (SelectBox) */}
+          <div className="md:col-span-1">
+            <label className="text-xs font-medium text-slate-700 mb-1 block">Program Level</label>
+            <SelectBox
+              value={level}
+              onChange={(v: string) => setLevel(v as LevelLabel)}
+              options={[...LEVEL_LABELS]}
+              className="w-full"
+            />
+          </div>
+
+          {/* Course Code */}
+          <div>
+            <label className="text-xs font-medium text-slate-700">Course Code</label>
+            <input
+              className={SOFT_INPUT}
+              value={code}
+              onChange={(e) => setCode(e.target.value)}
+              placeholder=" "
+            />
+          </div>
+
+          {/* Course Title */}
+          <div>
+            <label className="text-xs font-medium text-slate-700">Course Title</label>
+            <input
+              className={SOFT_INPUT}
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              placeholder="Course title"
+            />
+          </div>
+
+          {/* Units */}
+          <div>
+            <label className="text-xs font-medium text-slate-700">Units</label>
+            <input
+              type="number"
+              step="0.5"
+              className={SOFT_INPUT}
+              value={units}
+              onChange={(e) => setUnits(e.target.value)}
+              placeholder="3"
+            />
+          </div>
+
+          {/* Type of Course (SelectBox) */}
+          <div>
+            <label className="text-xs font-medium text-slate-700 mb-1 block">Type of Course</label>
+            <SelectBox
+              value={typeOf}
+              onChange={(v: string) => setTypeOf(v as TypeOf)}
+              options={[...TYPE_OF_OPTIONS]}
+              className="w-full"
+            />
+          </div>
+
+          {/* Room Type (SelectBox) */}
+          <div>
+            <label className="text-xs font-medium text-slate-700 mb-1 block">Room Type</label>
+            <SelectBox
+              value={roomType}
+              onChange={(v: string) => setRoomType(v as RoomType)}
+              options={[...ROOM_TYPES]}
+              className="w-full"
+            />
+          </div>
+
+          {/* Capacity */}
+          <div>
+            <label className="text-xs font-medium text-slate-700">Capacity (max enrollees)</label>
+            <input
+              type="number"
+              className={SOFT_INPUT}
+              value={capacity}
+              onChange={(e) => setCapacity(e.target.value)}
+              placeholder="45"
+            />
+          </div>
+
+          {/* Min Enrollees */}
+          <div>
+            <label className="text-xs font-medium text-slate-700">Min Enrollees (optional)</label>
+            <input
+              type="number"
+              className={SOFT_INPUT}
+              value={minEnroll}
+              onChange={(e) => setMinEnroll(e.target.value)}
+            />
+          </div>
+
+          {/* Description */}
+          <div className="md:col-span-2">
+            <label className="text-xs font-medium text-slate-700">Description</label>
+            <textarea
+              className={cls(SOFT_INPUT, "min-h-[96px]")}
+              value={desc}
+              onChange={(e) => setDesc(e.target.value)}
+              placeholder="Optional description…"
+            />
+          </div>
+        </div>
+
+        <div className="flex items-center justify-end gap-2 border-t px-4 py-3">
+          <button className="rounded-md border px-3 py-1.5 text-sm" onClick={onClose}>
+            Cancel
+          </button>
+          <button
+            disabled={!canSave || busy}
+            className="rounded-md bg-emerald-700 px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50"
+            onClick={save}
+          >
+            Create Course
           </button>
         </div>
       </div>
