@@ -456,39 +456,6 @@ function EditForm({
       const has = arr.includes(value);
       return { ...f, [key]: has ? arr.filter((v) => v !== value) : [...arr, value] };
     });
-  /*
-  // payload helpers
-  const deliveryToCode = (delivery?: string | null) => {
-    if (!delivery) return null;
-    const s = delivery.toLowerCase();
-    if (s.includes("online")) return "ONL";
-    if (s.includes("face-to-face") || s.includes("face to face") || s.includes("f2f")) return "F2F";
-    if (s.includes("hybrid")) return "HYB";
-    return null;
-  };*/
-
-  /*
-  const toModeObject = (v: SavedPrefs) => {
-    const code = (deliveryToCode(v.delivery) || "F2F").toUpperCase();
-    if (code === "ONL") return { mode: "ONL", campus_id: "" };
-    if (/laguna/i.test(v.campus)) return { mode: code, campus_id: "CMPS0002" };
-    if (/manila/i.test(v.campus)) return { mode: code, campus_id: "CMPS0001" };
-    return { mode: code, campus_id: "" };
-  };*/
-
-  const availableCourses = useMemo(
-    () => (form.kac.length ? form.kac.flatMap((k) => KAC_COURSES[k as KACKey] ?? []) : []),
-    [form.kac]
-  );
-  useEffect(() => {
-    setForm((f) => ({ ...f, courses: f.courses.filter((c) => availableCourses.includes(c)) }));
-  }, [availableCourses]);
-
-  function toggleInArray(arr: string[], value: string): string[] {
-    return arr.includes(value) ? arr.filter((v) => v !== value) : [...arr, value];
-  }
-  const toggleMulti = (key: "days" | "timeSlots" | "courses", value: string) =>
-    setForm((f) => ({ ...f, [key]: toggleInArray(f[key] as string[], value) }));
 
   const showAE = ["Laguna Campus", "Either Campus"].includes(form.campus);
   const prepNote =
