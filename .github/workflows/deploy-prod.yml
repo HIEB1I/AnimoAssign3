@@ -106,7 +106,7 @@ jobs:
 
             # --- One-time-safe pre-clean to absorb legacy containers ---
             # S1 names:
-            for c in mongo-primary backend-primary analytics-primary frontend-primary; do
+            for c in mongo-primary backend-primary analytics-primary frontend-primary nginx-primary; do
               docker rm -f "$c" 2>/dev/null || true
             done
 
@@ -241,7 +241,7 @@ jobs:
             . "$ENVF"
             set +a
 
-            for c in mongo-secondary backend-secondary analytics-secondary frontend-secondary mongo-tertiary; do
+            for c in mongo-secondary backend-secondary analytics-secondary frontend-secondary mongo-tertiary nginx-secondary; do
               docker rm -f "$c" 2>/dev/null || true
             done
 
