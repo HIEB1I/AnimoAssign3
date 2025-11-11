@@ -440,6 +440,18 @@ export async function archiveApoPreenlistment(
   const { data } = await axios.post(url);
   return data;
 }
+export async function reactivateApoPreenlistment(
+  userId: string,
+  termId: string,
+  campusName?: "MANILA" | "LAGUNA"
+) {
+  const qs = new URLSearchParams({ userId, action: "reactivate", termId });
+  if (campusName) qs.set("campus", campusName);
+  const url = join(API_BASE, `apo/preenlistment?${qs.toString()}`);
+  const { data } = await axios.post(url);
+  return data;
+}
+
 
 /* =========================================================
    ===============  APO: COURSE OFFERINGS  =================

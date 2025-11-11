@@ -16,6 +16,7 @@ import {
   type TermMeta,
   type ArchiveMetaItem,
   campusFromRoles,
+  reactivateApoPreenlistment,
 } from "../../api";
 
 export default function APO_PreEnlistment() {
@@ -38,6 +39,7 @@ export default function APO_PreEnlistment() {
   const [archiveCount, setArchiveCount] = useState<string[][]>([]);
   const [archiveStats, setArchiveStats] = useState<string[][]>([]);
   const [archiveLoading, setArchiveLoading] = useState(false);
+  const [reactivating, setReactivating] = useState(false);
 
   const archiveLabel = (t: ArchiveMetaItem) => `Term ${t.term_number ?? "—"} · ${t.ay_label}`;
 
@@ -599,12 +601,31 @@ export default function APO_PreEnlistment() {
 
               <div className="ml-auto">
                 <button
-                  className="inline-flex items-center gap-2 rounded-md border px-3 py-2 text-sm hover:bg-gray-50"
-                  onClick={() => setView("active")}
+                  className="inline-flex items-center gap-2 rounded-md border border-emerald-300 text-emerald-700 bg-white/80 px-3 py-2 text-sm hover:bg-emerald-50 disabled:opacity-50"
+                  disabled={!archiveTermId || reactivating}
+                  title="Make this archived term the current active term"
+                  onClick={async () => {
+                    if (!user?.userId || !archiveTermId) return;
+                    const sel = archiveTerms.find(t => t.term_id === archiveTermId);
+                    const label = sel ? `Term ${sel.term_number ?? "—"} ${sel.ay_label}` : archiveTermId;
+                    if (!confirm(`Make ${label} the active term${campusLabel ? ` for ${campusLabel}` : ""}?`)) return;
+
+                    setReactivating(true);
+                    try {
+                      await reactivateApoPreenlistment(user.userId, archiveTermId, campusName || undefined);
+                      setView("active");
+                      await refresh();
+                    } catch (e: any) {
+                      setErr(e?.message || "Failed to reactivate term.");
+                    } finally {
+                      setReactivating(false);
+                    }
+                  }}
                 >
-                  Back to Active
+                  {reactivating ? "Reactivating…" : "Make Active"}
                 </button>
               </div>
+
             </div>
 
             <div className="grid md:grid-cols-2 gap-6">
