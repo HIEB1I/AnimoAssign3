@@ -153,7 +153,7 @@ jobs:
             const u = db.getUser("animo_app");
             db.revokeRolesFromUser("animo_app", (u && u.roles) || []);
             db.grantRolesToUser("animo_app", [{ role: "dbOwner", db: dbname }]);
-            print("✅ animo_app password + roles updated");
+            print("animo_app password + roles updated");
             JS
 
             # Optional: verify the app user can create an index
@@ -163,11 +163,13 @@ jobs:
             const coll = "faculty_profiles";
             db = db.getSiblingDB(dbname);
             db[coll].createIndex({ user_id: 1 }, { name: "user_id_1" });
-            print("✅ app user can create indexes on " + dbname + "." + coll);
+            print("app user can create indexes on " + dbname + "." + coll);
             JS
 
             # --- 3) Now start backend/analytics/frontend ---
-            docker compose -f "$FILE" --env-file "$ENVF" up -d --build backend-stg analytics-stg frontend-stg
+            SERVICES=$(docker compose -f "$FILE" config --services | grep -v '^mongo-stg$' || true)
+            echo "::notice ::Compose services: $SERVICES"
+            docker compose -f "$FILE" --env-file "$ENVF" up -d --build $SERVICES
 
             # Health checks inside networks
             DEF_NET="${COMPOSE_PROJECT_NAME}_default"
