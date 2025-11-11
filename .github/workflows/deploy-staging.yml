@@ -151,6 +151,34 @@ jobs:
                 sleep 3
               done
             }
+
+            # Use the same root creds you already have in docker/staging.env
+            docker exec -i mongo-stg mongosh \
+              -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" \
+              --authenticationDatabase admin --quiet <<'JS'
+            const dbname = "animoassign_dev";          // change if your staging DB name differs
+            const user   = "animo_app";                 // change if your app user differs
+            const pwd    = "DLSU1234!";                 // ignored if user already exists
+
+            db = db.getSiblingDB("admin");
+            if (!db.getUser(user)) {
+              db.createUser({
+                user, pwd,
+                roles: [
+                  { role: "readWrite", db: dbname },
+                  { role: "dbAdmin",   db: dbname }   // needed for createIndexes & collection options
+                ]
+              });
+              print(`created user ${user} with readWrite+dbAdmin on ${dbname}`);
+            } else {
+              db.grantRolesToUser(user, [
+                { role: "readWrite", db: dbname },
+                { role: "dbAdmin",   db: dbname }
+              ]);
+              print(`ensured roles for ${user} on ${dbname}`);
+            }
+            JS
+
             curl_wait "$DEF_NET" http://backend-stg:8000/health   backend
             curl_wait "$DEF_NET" http://analytics-stg:8000/health analytics
             curl_wait "$EXT_NET" http://frontend-stg              frontend-stg
