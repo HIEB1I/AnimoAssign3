@@ -952,20 +952,62 @@ export async function searchCourseCatalog(
   userId: string,
   params: { q?: string; limit?: number; department_id?: string; program_level?: string } = {}
 ) {
-  const body = { action: "courseCatalog", ...params };
-  const { data } = await axios.post(join(BASE, "apo"), body, {
-    headers: { "x-user-id": userId }, // keep your existing header convention if any
-  });
-  return data as { ok: boolean; results: Array<{
-    course_id: string;
-    course_code: string;
-    course_title: string;
-    department_id?: string;
-    program_level?: string;
-    units?: number | null;
-    type_of_course?: string | null;
-  }> };
+  const url = `${API_BASE}/apo/courseofferings?${new URLSearchParams({
+    userId,
+    action: "courseCatalog",
+    ...(params.q ? { q: params.q } : {}),
+    ...(params.limit != null ? { limit: String(params.limit) } : {}),
+    ...(params.department_id ? { department_id: params.department_id } : {}),
+    ...(params.program_level ? { program_level: params.program_level } : {}),
+  }).toString()}`;
+
+  const { data } = await axios.post(url, {}); // backend reads action from query
+  return data as {
+    ok: boolean;
+    results: Array<{
+      course_id: string;
+      course_code: string | string[]; // backend may return array
+      course_title: string;
+      department_id?: string;
+      program_level?: string;
+      units?: number | null;
+      type_of_course?: string | null;
+    }>;
+  };
 }
+
+export async function createCatalogCourse(userId: string, payload: CreateCoursePayload) {
+  const url = join(API_BASE, "apo/courseofferings"); // same base/path family as catalog.search
+  const { data } = await axios.post(
+    `${url}?userId=${encodeURIComponent(userId)}&action=catalog.create`,
+    payload
+  );
+  return data; // { ok: true, course: {...} }
+}
+
+// --- Types ---
+export type CreateCoursePayload = {
+  department_id: string;
+  program_level: "UGS" | "GS";           // UGS = Undergraduate, GS = Graduate Studies
+  course_code: string;
+  course_title: string;
+  units?: number | null;
+  type_of_course?: string | null;        // e.g., "Elective Course", "GE", "Major"
+  description?: string;
+  room_type?: string | null;             // e.g., "Classroom", "Comlab"
+  capacity?: number | null;              // max_enrollee
+  min_enrollee?: number | null;
+};
+
+export type CourseCatalogItem = {
+  course_id: string;
+  course_code: string | string[];
+  course_title: string;
+  department_id?: string;
+  program_level?: string;                // "UGS" | "GS" | human label
+  units?: number | null;
+  type_of_course?: string | null;
+};
 /* =========================================================
    ===============  APO: ROOM ALLOCATION  ==================
    ========================================================= */
@@ -1501,6 +1543,94 @@ export async function bulkForwardOMSP(course_ids: string[], status?: string) {
   });
   return data as { ok: boolean; matched: number; modified: number; status: string };
 }
+/* =========================================================
+   ==============  OM: CLASS RETENTION  ====================
+   ========================================================= */
+
+export type OMCRRow = {
+  retention_id: string;
+  term_id: string;
+  course_id: string;
+  section_id: string;
+  faculty_id?: string;           // now optional; auto from schedule
+  student_units?: number | null;
+  faculty_units?: number | null;
+  status?: string;
+  // display
+  term_label?: string;
+  course_code?: string;
+  course_title?: string;
+  section_code?: string;
+  enrolled?: number | null;
+  faculty_name?: string;         // "LASTNAME, FIRSTNAME" (ALL CAPS)
+};
+
+export type OMCROptions = {
+  ok: boolean;
+  statuses: string[];
+  activeTerm?: { term_id: string; term_number: number; acad_year_start: number } | null;
+  activeTermLabel?: string;
+};
+
+export type OMCRCourseOpt = { course_id: string; course_code: string; course_title: string };
+export type OMCRSectionOpt = { section_id: string; section_code: string; enrolled?: number | null };
+
+// ---------- OM: Class Retention endpoints ----------
+export async function getOMCR_Options(): Promise<OMCROptions> {
+  const { data } = await axios.get(join(BASE, "api/om/classretention"), {
+    params: { action: "options" },
+  });
+  return data;
+}
+
+export async function listOMCR(params: {
+  status?: string;
+  q?: string;
+}): Promise<{ ok: boolean; rows: OMCRRow[] }> {
+  const { data } = await axios.get(join(BASE, "api/om/classretention"), {
+    params: { action: "list", ...params },
+  });
+  return data;
+}
+
+export async function saveOMCR(
+  payload: Partial<OMCRRow>
+): Promise<{ ok: boolean; retention_id: string }> {
+  const copy = { ...payload };
+  // faculty is auto-derived on backend — do not send
+  delete (copy as any).faculty_id;
+  const { data } = await axios.post(join(BASE, "api/om/classretention"), copy, {
+    params: { action: "save" },
+  });
+  return data;
+}
+
+export async function deleteOMCR(retention_id: string): Promise<{ ok: boolean }> {
+  const { data } = await axios.post(
+    join(BASE, "api/om/classretention"),
+    { retention_id },
+    { params: { action: "delete" } }
+  );
+  return data;
+}
+
+// dropdown data
+export async function getOMCR_CourseOptions(): Promise<{ ok: boolean; options: OMCRCourseOpt[] }> {
+  const { data } = await axios.get(join(BASE, "api/om/classretention"), {
+    params: { action: "courseOptions" },
+  });
+  return data;
+}
+
+export async function getOMCR_SectionOptions(
+  course_id: string
+): Promise<{ ok: boolean; options: OMCRSectionOpt[] }> {
+  const { data } = await axios.get(join(BASE, "api/om/classretention"), {
+    params: { action: "sectionOptions", course_id },
+  });
+  return data;
+}
+
 
 /* =========================================================
    ==============  CHAIR: STUDENT PETITIONS  ===============
