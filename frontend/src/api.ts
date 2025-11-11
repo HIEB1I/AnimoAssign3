@@ -1665,22 +1665,32 @@ export async function getFacultyPreferencesProfile(userId: string) {
   });
   return data;
 }
+
 export async function submitFacultyPreferences(
   userId: string,
   payload: {
     preferred_units: number;
     availability_days: string[];
     preferred_times: string[];
-    preferred_kacs: string[]; // IDs (preferred) or names; backend normalizes
+    preferred_kacs: string[]; // IDs or names; backend normalizes
+
+    // Accept single object (preferred) or legacy array-of-objects.
     mode?:
-      | { mode?: string; campus_id?: string }
-      | { mode?: string; campus_id?: string }[]; // accepts single or array
-    deloading_data?: { deloading_type?: string; units?: string | number }[];
-    preferred_courses?: string[]; // <— add this
+      | { mode?: string; campus_id?: string | string[] }
+      | Array<{ mode?: string; campus_id?: string | string[] }>;
+
+    deloading_data?: { deloading_type?: string; units?: string | number; detail?: string }[];
+    preferred_courses?: string[];
     notes?: string;
     has_new_prep?: boolean;
     is_finished?: boolean;
     term_id?: string;
+
+    // Optional extras your page is sending (safe for backend to ignore)
+    on_break?: boolean;
+    break_reason?: string;
+    break_return_date?: string;
+    employment_type?: "FT" | "PT";
   }
 ) {
   const { data } = await axios.post(`${API_BASE}/faculty/preferences`, payload, {

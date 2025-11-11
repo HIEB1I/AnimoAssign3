@@ -1,4 +1,4 @@
-// frontend/src/pages/FACULTY/FACULTY_Preferences.tsx
+// FACULTY_Preferences.tsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { CalendarDays, MapPin, Monitor, BookOpen, Settings, Info } from "lucide-react";
 import {
@@ -28,7 +28,7 @@ function Tag({ children, tone = "emerald" }: { children: React.ReactNode; tone?:
 
 /* ---------- dropdowns (unchanged behavior) ---------- */
 function MultiSelectDropdown({
-  values, onChange, options, className = "w-full", placeholder = "— Select options —", maxPreview = 2,
+  values, onChange, options, className = "w/full", placeholder = "— Select options —", maxPreview = 2,
 }: { values: string[]; onChange: (v: string[]) => void; options: readonly string[]; className?: string; placeholder?: string; maxPreview?: number; }) {
   const [open, setOpen] = useState(false);
   const [hover, setHover] = useState(0);
@@ -121,67 +121,27 @@ function Dropdown({
   );
 }
 
-/* ---------- KAC map (unchanged) ---------- */
-type KACKey =
-  | "Computer Architecture & Organization"
-  | "Computational Thinking"
-  | "Computing Ethics"
-  | "CS Math"
-  | "Data Structures, Algorithms, Complexity, Automata Theory"
-  | "Information And Network Security"
-  | "Information Management And Databases"
-  | "Intelligent Systems (AI/ML)"
-  | "Network Communications And Cloud Computing"
-  | "Object Oriented Programming And Software Design"
-  | "OS & Parallel/Distributed Computing"
-  | "Procedural Programming"
-  | "Research Methods, Technopreneurship & Innovation"
-  | "Software Engineering & UI/UX"
-  | "Theory Of Programming Languages And Compilers"
-  | "Web And Mobile Development";
-
-const KAC_COURSES: Record<KACKey, string[]> = {
-  "Computer Architecture & Organization": ["CCICOMP","CSARCH1/2","LBYARCH","CEPARCO","ITCMSY1/2","LBYCMSY","Electives"],
-  "Computational Thinking": ["EMTC1CT","IECMPTK"],
-  "Computing Ethics": ["CS RESEARCH ETHICS","Data Privacy And Security","Informed Consent And Data Usage","Algorithmic Bias And Fairness","Ethical Data Sharing And Collaboration"],
-  "CS Math": ["CCDSTRU","CSMODEL","GD-MATH","CE-MATH"],
-  "Data Structures, Algorithms, Complexity, Automata Theory": ["CCDSALG","GDDASGO","CSALGCM","STALGCM"],
-  "Information And Network Security": ["CSSECUR","CSSECDV","ISSECUR","ITSECUR","ITSECWB","NSSECU1/2/3"],
-  "Information Management And Databases": ["CCINFOM","GDINFMG","STADVDB","ISINFOM","ISPRENL"],
-  "Intelligent Systems (AI/ML)": ["CSINTSY","STINTSY","GDINTAI","MACHLRN"],
-  "Network Communications And Cloud Computing": ["NSCOM01/2/3","ITNET01/2/3/4","LBYNET1/2/3/4","CSNETWK","GDNETWK","ITSYSAD","CLOUDCO","STCLOUD"],
-  "Object Oriented Programming And Software Design": ["CCPROG3","GDPROG3","DSGNPAT"],
-  "OS & Parallel/Distributed Computing": ["CSOPESY","STDISCM","NSDSYST","NSAPDEV"],
-  "Procedural Programming": ["CCPROG1","CCPROG2","GDPROG1","GDPROG2","MTPROG1","MTPROG2"],
-  "Research Methods, Technopreneurship & Innovation": ["STMETRE","CCINOV8","CAP-IE1","CAP-IE2","CAP-IE3","CERESME","NERESME"],
-  "Software Engineering & UI/UX": ["CSSWENG","STSWENG","STHCIUX","ITISHCI","IEUI-UX"],
-  "Theory Of Programming Languages And Compilers": ["CSADPRG","COMPILE","CMPILER"],
-  "Web And Mobile Development": ["CCAPDEV","MOBDEVE","MOBICOM","ITISDEV","ITISSES","IT-PROG","Web/Mobile Electives"],
-};
-const KAC_OPTIONS = Object.keys(KAC_COURSES) as KACKey[];
-
-/* ---------- master options ---------- */
+/* ---------- master options (only delivery list is static UI text) ---------- */
 const TEACHING_BREAK = "Prefers to take a teaching break next term";
 const OPT = {
-  prefUnitsMaster: [
-    "0.0 units - no teaching load (for full-time only)",
-    "3.0 units",
-    "6.0 units",
-    "9.0 units",
-    "12.0 units",
-    "15.0 units - only for full-time",
-    "18.0 units - only for full-time",
-    TEACHING_BREAK,
+  delivery: [
+    "Fully Online",
+    "Hybrid - Manila Campus Only",
+    "Hybrid - Laguna Campus Only",
+    "Hybrid - Any Campus",
   ] as const,
-  maxUnits: ["12", "15", "18"] as const,
-  delivery: ["Face-to-Face Only","Fully Online","Hybrid - Manila Campus Only","Hybrid - Laguna Campus Only","Hybrid - Any Campus"] as const,
-  campus: ["Manila Campus", "Laguna Campus", "Either Campus"] as const,
-  days: ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"] as const,
-  timeSlots: ["07:30 - 09:00","09:15 - 10:45","11:00 - 12:30","12:45 - 14:15","14:30 - 16:00","16:15 - 17:45","18:00 - 19:30","19:45 - 21:00"] as const,
 } as const;
 
+/* ---------- Deloading options ---------- */
+const DELOADING_TYPES = [
+  "Administrative",
+  "Grad Studies",
+  "Research",
+  "Commissioned Work",
+  "Curriculum & Instruction",
+] as const;
+
 /* ---------- helpers for unit label <-> number ---------- */
-const UNITS_LABELS = ["0.0","3.0","6.0","9.0","12.0","15.0","18.0"];
 const toLabel = (n: number) => {
   const s = (Number(n).toFixed(1));
   const base = `${s} units`;
@@ -198,8 +158,7 @@ const parseUnits = (label: string): number | null => {
 
 // DB↔UI time-slot normalization
 function normalizeDbTimeToUi(s: string): string {
-  // accepts "915-1045" or "0915-1045" or already "09:15 - 10:45"
-  if (s.includes(":")) return s; // already UI format
+  if (s.includes(":")) return s;
   const m = s.match(/^(\d{3,4})-(\d{3,4})$/);
   if (!m) return s;
   const toHHMM = (t: string) => {
@@ -210,32 +169,26 @@ function normalizeDbTimeToUi(s: string): string {
   };
   return `${toHHMM(m[1])} - ${toHHMM(m[2])}`;
 }
-
 function normalizeUiTimeToDb(s: string): string {
-  // "09:15 - 10:45" -> "0915-1045"
   const m = s.match(/^(\d{2}):(\d{2})\s*-\s*(\d{2}):(\d{2})$/);
   if (!m) return s;
   return `${m[1]}${m[2]}-${m[3]}${m[4]}`;
 }
 
-
 /* ---------- types & local state ---------- */
-type DeloadRow = { type: string; units: number | null };
+type DeloadRow = { type: string; detail?: string; units: number | null };
 
 type SavedPrefs = {
   prefUnits: string;              // label
-  maxUnits: string;               // "12" | "15" | "18"
   deloadings: DeloadRow[];
   noDeloading: boolean;
-  days: string[];
-  timeSlots: string[];
+  days: string[];                 // display (Monday, ...)
+  timeSlots: string[];            // display ("07:30 - 09:00")
   campus: string;
   delivery: string;
-  kac: KACKey[] | string[];
-  courses: string[];
+  kac: string[];                  // display names
   remarks: string;
 
-  // NEW — teaching break sub-form
   onBreak: boolean;
   breakReason: string;
   breakReturnDate: string; // MM/DD/YYYY
@@ -243,22 +196,20 @@ type SavedPrefs = {
 
 const initialSaved: SavedPrefs = {
   prefUnits: "3.0 units",
-  maxUnits: "15",
   deloadings: [],
   noDeloading: true,
   days: [],
   timeSlots: [],
   campus: "Either Campus",
-  delivery: "Face-to-Face Only",
+  delivery: "",
   kac: [],
-  courses: [],
   remarks: "",
   onBreak: false,
   breakReason: "",
   breakReturnDate: "",
 };
 
-/* ---------- day helpers ---------- */
+/* ---------- day helpers (Thursday must be 'H' on save) ---------- */
 const DAY_TO_LETTER: Record<string, "M" | "T" | "W" | "H" | "F" | "S"> = { Monday:"M", Tuesday:"T", Wednesday:"W", Thursday:"H", Friday:"F", Saturday:"S" };
 const LETTER_TO_DAY: Record<string, string> = { M:"Monday", T:"Tuesday", W:"Wednesday", H:"Thursday", F:"Friday", S:"Saturday" };
 function compressDays(days: string[]): string[] {
@@ -280,7 +231,7 @@ function expandDays(groups: string[]): string[] {
   return Array.from(new Set(out)).sort((a,b)=>order.indexOf(a)-order.indexOf(b));
 }
 
-/* ---------- countdown (unchanged) ---------- */
+/* ---------- countdown ---------- */
 function useCountdown(targetISO: string) {
   const [now, setNow] = useState<number>(() => Date.now());
   useEffect(() => { const id = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(id); }, []);
@@ -293,6 +244,32 @@ function useCountdown(targetISO: string) {
   const s = Math.floor((diff/1000)%60);
   const label = past ? "Deadline passed" : `${d}d ${h}h ${m}m ${s}s`;
   return { past, label };
+}
+
+// ---- MODE/CAMPUS mapper (file-scope) ----
+type ModePayload = { mode?: "FOL" | "HYB" | "F2F"; campus_id?: string[] };
+
+const CMPS_MANILA = "CMPS0001";
+const CMPS_LAGUNA = "CMPS0002";
+
+function toModePayload(v: { delivery?: string; campus?: string }): ModePayload {
+  const delivery = (v.delivery || "").toLowerCase();
+
+  const pack = (mode: "FOL" | "HYB", ids: string[]): ModePayload => ({
+    mode,
+    campus_id: ids,
+  });
+
+  if (delivery.includes("fully online")) {
+    return pack("FOL", [CMPS_MANILA, CMPS_LAGUNA]);
+  }
+  if (delivery.includes("manila")) {
+    return pack("HYB", [CMPS_MANILA]);
+  }
+  if (delivery.includes("laguna")) {
+    return pack("HYB", [CMPS_LAGUNA]);
+  }
+  return pack("HYB", [CMPS_MANILA, CMPS_LAGUNA]);
 }
 
 /* ---------- small UI bits ---------- */
@@ -334,6 +311,7 @@ function DeadlineBanner({ deadlineISO, className }: { deadlineISO: string; class
    =========================== */
 function EditForm({
   initial, onClose, onSave, onDraft, deadlineISO, employmentType,
+  daysMaster, timeSlotsMaster, kacDisplayOptions,
 }: {
   initial: SavedPrefs;
   onClose: () => void;
@@ -341,20 +319,34 @@ function EditForm({
   onDraft: (v: SavedPrefs) => void;
   deadlineISO: string;
   employmentType: "FT" | "PT";
+  daysMaster: string[];
+  timeSlotsMaster: string[];
+  kacDisplayOptions: string[];
 }) {
   const [form, setForm] = useState<SavedPrefs>(initial);
   const { past: deadlinePassed } = useCountdown(deadlineISO);
 
-// FT/PT: filter options (always include Teaching Break and show it first)
-const prefUnitOptions = useMemo(() => {
-  const isPT = employmentType === "PT";
-  const filtered = OPT.prefUnitsMaster.filter((label) =>
-    isPT ? !/^0\.0\s|^15\.0|^18\.0/.test(label) : true
-  );
-  const rest = filtered.filter((l) => l !== TEACHING_BREAK);
-  return [TEACHING_BREAK, ...rest];
-}, [employmentType]);
+  // progressive flow
+  const [step, setStep] = useState<1 | 2>(1);
 
+  // FT/PT: units list from label-builder (no hardcoded numeric list in UI)
+  const prefUnitOptions = useMemo(() => {
+    const base: string[] = [
+      "0.0 units - no teaching load (for full-time only)",
+      "3.0 units",
+      "6.0 units",
+      "9.0 units",
+      "12.0 units",
+      "15.0 units - only for full-time",
+      "18.0 units - only for full-time",
+    ];
+    const isPT = employmentType === "PT";
+    const filtered = base.filter((label) =>
+      isPT ? !/^0\.0\s|^15\.0|^18\.0/.test(label) : true
+    );
+    const rest = filtered.filter((l) => l !== TEACHING_BREAK);
+    return [TEACHING_BREAK, ...rest];
+  }, [employmentType]);
 
   // default FT to 12 if empty/invalid
   useEffect(() => {
@@ -369,70 +361,47 @@ const prefUnitOptions = useMemo(() => {
     setForm((f) => ({
       ...f,
       onBreak: isTeachingBreak,
-      // clear/hide unrelated fields when entering/leaving break
       ...(isTeachingBreak ? {} : { breakReason: "", breakReturnDate: "" }),
     }));
   }, [form.prefUnits]); // eslint-disable-line
 
-  // Deloading editor (kept light — same UX as before, just optional)
+  // Deloading editor
   const [deloadRows, setDeloadRows] = useState<DeloadRow[]>(() => (form.noDeloading ? [] : form.deloadings || []));
   useEffect(() => {
     if (form.noDeloading) setDeloadRows([]);
   }, [form.noDeloading]);
 
+  // campus auto-mapping + lock
+  function autoCampusFor(delivery: string): string {
+    if (/fully online/i.test(delivery)) return "Either Campus";
+    if (/manila/i.test(delivery)) return "Manila Campus";
+    if (/laguna/i.test(delivery)) return "Laguna Campus";
+    if (/any campus/i.test(delivery)) return "Either Campus";
+    return "Either Campus";
+  }
+
   // Validate per spec
   function validate(): { ok: true } | { ok: false; msg: string } {
-    // Teaching break sub-form requirements
     if (isTeachingBreak) {
       if (!form.breakReason.trim()) return { ok: false, msg: "Reason for taking a break/leave is required." };
       if (!/^\d{2}\/\d{2}\/\d{4}$/.test(form.breakReturnDate.trim())) return { ok: false, msg: "Date of return must be in MM/DD/YYYY format." };
       return { ok: true };
     }
-
-    // Preferred units required
     if (!form.prefUnits || !prefUnitOptions.includes(form.prefUnits as any)) {
       return { ok: false, msg: "Please select Preferred Teaching Units." };
     }
-
     // FT with deloading → units must be ≤ 9.0
     if (employmentType === "FT" && !form.noDeloading && (deloadRows?.length ?? 0) > 0) {
       const units = parseUnits(form.prefUnits) ?? 0;
       if (units > 9) return { ok: false, msg: "With deloading, full-time faculty must declare 9.0 units or less." };
     }
-
-    // PT max 12 is naturally enforced by filtered options (no 15/18). No extra check needed.
     return { ok: true };
   }
-
-  // payload helpers
-  const deliveryToCode = (delivery?: string | null) => {
-    if (!delivery) return null;
-    const s = delivery.toLowerCase();
-    if (s.includes("online")) return "ONL";
-    if (s.includes("face-to-face") || s.includes("face to face") || s.includes("f2f")) return "F2F";
-    if (s.includes("hybrid")) return "HYB";
-    return null;
-  };
-  const toModeObject = (v: SavedPrefs) => {
-    const code = (deliveryToCode(v.delivery) || "F2F").toUpperCase();
-    if (code === "ONL") return { mode: "ONL", campus_id: "" };
-    if (/laguna/i.test(v.campus)) return { mode: code, campus_id: "CMPS0002" };
-    if (/manila/i.test(v.campus)) return { mode: code, campus_id: "CMPS0001" };
-    return { mode: code, campus_id: "" };
-  };
-
-  const availableCourses = useMemo(
-    () => (form.kac.length ? form.kac.flatMap((k) => KAC_COURSES[k as KACKey] ?? []) : []),
-    [form.kac]
-  );
-  useEffect(() => {
-    setForm((f) => ({ ...f, courses: f.courses.filter((c) => availableCourses.includes(c)) }));
-  }, [availableCourses]);
 
   function toggleInArray(arr: string[], value: string): string[] {
     return arr.includes(value) ? arr.filter((v) => v !== value) : [...arr, value];
   }
-  const toggleMulti = (key: "days" | "timeSlots" | "courses", value: string) =>
+  const toggleMulti = (key: "days" | "timeSlots", value: string) =>
     setForm((f) => ({ ...f, [key]: toggleInArray(f[key] as string[], value) }));
 
   const showAE = ["Laguna Campus", "Either Campus"].includes(form.campus);
@@ -457,301 +426,357 @@ const prefUnitOptions = useMemo(() => {
 
       <div className={cls("grid grid-cols-1 gap-6", showAE && "lg:grid-cols-[1fr_minmax(200px,400px)]")}>
         <div className="space-y-5 rounded-xl border border-neutral-200 bg-white p-5">
-          {/* Preferred Units (required) */}
+          {/* STEP 1 — Preferred Units ONLY (per spec) */}
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <div>
-              <label className="mb-1 block text-sm font-medium">Preferred Teaching Units <span className="text-red-600">*</span></label>
+              <label className="mb-1 block text-sm font-medium">
+                Preferred Teaching Units <span className="text-red-600">*</span>
+              </label>
               <Dropdown
                 value={form.prefUnits}
-                onChange={(v) => setForm({ ...form, prefUnits: v })}
+                onChange={(v) => {
+                  setForm({ ...form, prefUnits: v });
+                  if (step === 1 && v && v.trim().length > 0) setStep(2); // advance on click
+                }}
                 options={prefUnitOptions}
               />
-              {!!prepNote && !isTeachingBreak && (
+              {!!prepNote && form.prefUnits !== TEACHING_BREAK && (
                 <div className="mt-2 flex items-start gap-2 text-[12px] text-neutral-600">
                   <Info className="mt-0.5 h-3.5 w-3.5 text-amber-600" />
                   <span>{prepNote}</span>
                 </div>
               )}
-            </div>
 
-            {/* Max units (unchanged visual; not used in validation rules you gave) */}
-            <div>
-              <label className="mb-1 block text-sm font-medium">Maximum Teaching Units</label>
-              <Dropdown value={form.maxUnits} onChange={(v) => setForm({ ...form, maxUnits: v })} options={OPT.maxUnits} />
+              {step === 1 && (
+                <div className="mt-3 flex items-center justify-end">
+                  <button
+                    type="button"
+                    onClick={onClose}
+                    className="inline-flex h-9 items-center justify-center rounded-xl border border-neutral-200 bg-neutral-100 px-4 text-sm text-slate-900 shadow-sm hover:bg-neutral-200/70 active:translate-y-[0.5px]"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              )}
             </div>
           </div>
 
-          {/* --- TEACHING BREAK SUB-FORM --- */}
-          {isTeachingBreak ? (
+          {/* STEP 2 — rest of questions */}
+          {step === 2 && (
             <>
-              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                <div>
-                  <label className="mb-1 block text-sm font-medium">Deloading</label>
-                  <label className="flex items-center gap-2 text-sm">
-                    <input
-                      type="checkbox"
-                      className="accent-emerald-700"
-                      checked={form.noDeloading}
-                      onChange={(e) => setForm((f) => ({ ...f, noDeloading: e.target.checked }))}
-                    />
-                    I have no deloading
-                  </label>
-                  {!form.noDeloading && (
-                    <div className="mt-2 space-y-2">
-                      {deloadRows.map((r, i) => (
-                        <div key={i} className="flex gap-2">
-                          <input
-                            type="text"
-                            className="w-1/2 rounded-xl border border-neutral-300 px-3 py-2.5 text-sm shadow-sm outline-none"
-                            placeholder="Type (e.g., Administrative, Research)"
-                            value={r.type}
-                            onChange={(e) => setDeloadRows((rows) => rows.map((x, idx) => (idx === i ? { ...x, type: e.target.value } : x)))}
-                          />
-                          <input
-                            type="number"
-                            className="w-32 rounded-xl border border-neutral-300 px-3 py-2.5 text-sm shadow-sm outline-none"
-                            placeholder="Units"
-                            value={r.units ?? ""}
-                            onChange={(e) => {
-                              const v = e.target.value === "" ? null : Number(e.target.value);
-                              setDeloadRows((rows) => rows.map((x, idx) => (idx === i ? { ...x, units: v } : x)));
-                            }}
-                          />
+              {/* --- TEACHING BREAK SUB-FORM (if chosen) --- */}
+              {isTeachingBreak ? (
+                <>
+                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                    <div>
+                      <label className="mb-1 block text-sm font-medium">Deloading</label>
+                      <label className="flex items-center gap-2 text-sm">
+                        <input
+                          type="checkbox"
+                          className="accent-emerald-700"
+                          checked={form.noDeloading}
+                          onChange={(e) => setForm((f) => ({ ...f, noDeloading: e.target.checked }))}
+                        />
+                        I have no deloading
+                      </label>
+                      {!form.noDeloading && (
+                        <div className="mt-2 space-y-2">
+                          {deloadRows.map((r, i) => {
+                            const needsSpecify = r.type === "Administrative" || r.type === "Research";
+                            return (
+                              <div key={i} className="flex flex-col gap-2">
+                                <div className="flex gap-2">
+                                  <div className="w-1/2">
+                                    <Dropdown
+                                      value={r.type}
+                                      onChange={(v) =>
+                                        setDeloadRows((rows) => rows.map((x, idx) => (idx === i ? { ...x, type: v } : x)))
+                                      }
+                                      options={DELOADING_TYPES}
+                                    />
+                                  </div>
+                                  <input
+                                    type="number"
+                                    className="w-32 rounded-xl border border-neutral-300 px-3 py-2.5 text-sm shadow-sm outline-none"
+                                    placeholder="Units"
+                                    value={r.units ?? ""}
+                                    onChange={(e) => {
+                                      const v = e.target.value === "" ? null : Number(e.target.value);
+                                      setDeloadRows((rows) => rows.map((x, idx) => (idx === i ? { ...x, units: v } : x)));
+                                    }}
+                                  />
+                                  <button
+                                    type="button"
+                                    onClick={() => setDeloadRows((rows) => rows.filter((_, idx) => idx !== i))}
+                                    className="rounded-[10px] border border-neutral-200 bg-neutral-50 px-3 text-sm hover:bg-neutral-100"
+                                  >
+                                    Remove
+                                  </button>
+                                </div>
+                                {needsSpecify && (
+                                  <input
+                                    type="text"
+                                    className="w-full rounded-xl border border-neutral-300 px-3 py-2.5 text-sm shadow-sm outline-none"
+                                    placeholder="Specify Type (e.g., Office of the Dean, Funded Project…)"
+                                    value={r.detail || ""}
+                                    onChange={(e) =>
+                                      setDeloadRows((rows) => rows.map((x, idx) => (idx === i ? { ...x, detail: e.target.value } : x)))
+                                    }
+                                  />
+                                )}
+                              </div>
+                            );
+                          })}
                           <button
                             type="button"
-                            onClick={() => setDeloadRows((rows) => rows.filter((_, idx) => idx !== i))}
-                            className="rounded-[10px] border border-neutral-200 bg-neutral-50 px-3 text-sm hover:bg-neutral-100"
+                            onClick={() => setDeloadRows((rows) => [...rows, { type: "Administrative", units: null, detail: "" }])}
+                            className="inline-flex h-8 items-center justify-center rounded-[10px] px-3 text-sm shadow bg-emerald-700 text-white hover:brightness-110"
                           >
-                            Remove
+                            Add Deloading
                           </button>
                         </div>
-                      ))}
-                      <button
-                        type="button"
-                        onClick={() => setDeloadRows((rows) => [...rows, { type: "", units: null }])}
-                        className="inline-flex h-8 items-center justify-center rounded-[10px] px-3 text-sm shadow bg-emerald-700 text-white hover:brightness-110"
-                      >
-                        Add Deloading
-                      </button>
+                      )}
                     </div>
-                  )}
-                </div>
 
-                <div className="space-y-3">
-                  <div>
-                    <label className="mb-1 block text-sm font-medium">Reason for taking a break/leave <span className="text-red-600">*</span></label>
-                    <input
-                      type="text"
-                      className="w-full rounded-xl border border-neutral-300 px-3 py-2.5 text-sm shadow-sm outline-none"
-                      placeholder="Reason..."
-                      value={form.breakReason}
-                      onChange={(e) => setForm({ ...form, breakReason: e.target.value })}
-                    />
-                  </div>
-
-                  <div>
-                    <label className="mb-1 block text-sm font-medium">Date of return (MM/DD/YYYY) <span className="text-red-600">*</span></label>
-                    <input
-                      type="text"
-                      className="w-full rounded-xl border border-neutral-300 px-3 py-2.5 text-sm shadow-sm outline-none"
-                      placeholder="MM/DD/YYYY"
-                      value={form.breakReturnDate}
-                      onChange={(e) => setForm({ ...form, breakReturnDate: e.target.value })}
-                    />
-                  </div>
-                </div>
-              </div>
-
-              {/* actions */}
-              <div className="flex items-center justify-end gap-2 pt-1">
-                <button onClick={onClose}
-                  className="inline-flex h-9 items-center justify-center rounded-xl border border-neutral-200 bg-neutral-100 px-4 text-sm text-slate-900 shadow-sm hover:bg-neutral-200/70 active:translate-y-[0.5px]">
-                  Cancel
-                </button>
-                <button
-                  disabled={deadlinePassed}
-                  onClick={() => {
-                    const v = validate(); if (v.ok) onDraft({ ...form, deloadings: form.noDeloading ? [] : deloadRows });
-                  }}
-                  className={cls("inline-flex h-9 items-center justify-center rounded-xl px-4 text-sm font-medium shadow active:translate-y-[0.5px]",
-                    deadlinePassed ? "cursor-not-allowed bg-orange-200 text-white" : "bg-orange-500 text-white hover:brightness-110")}
-                  title={deadlinePassed ? "Deadline passed — editing locked" : "Save a draft (not final)"}
-                >
-                  Save Draft
-                </button>
-                <button
-                  disabled={deadlinePassed}
-                  onClick={() => {
-                    const v = validate(); if (v.ok) onSave({ ...form, deloadings: form.noDeloading ? [] : deloadRows });
-                  }}
-                  className={cls("inline-flex h-9 items-center justify-center rounded-xl px-4 text-sm font-medium text-white shadow active:translate-y-[0.5px]",
-                    deadlinePassed ? "cursor-not-allowed bg-emerald-300" : "bg-[#1F7A49] hover:brightness-[1.06]")}
-                  title={deadlinePassed ? "Deadline passed — editing locked" : "Save and finalize"}
-                >
-                  Save Preferences
-                </button>
-              </div>
-            </>
-          ) : (
-            <>
-              {/* Normal flow (NOT on break) — unchanged layout, same look */}
-              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                <div>
-                  <label className="mb-1 block text-sm font-medium">Preferred Teaching Days</label>
-                  <div className="grid grid-cols-2 gap-2">
-                    {OPT.days.map((d) => (
-                      <label key={d} className="flex items-center gap-2 text-sm">
-                        <input type="checkbox" className="accent-emerald-700" checked={form.days.includes(d)} onChange={() => toggleMulti("days", d)} />
-                        {d}
-                      </label>
-                    ))}
-                  </div>
-                </div>
-
-                <div>
-                  <label className="mb-1 block text-sm font-medium">Preferred Time Slots</label>
-                  <div className="grid grid-cols-1 gap-1.5">
-                    {OPT.timeSlots.map((t) => (
-                      <label key={t} className="flex items-center gap-2 text-sm">
-                        <input type="checkbox" className="accent-emerald-700" checked={form.timeSlots.includes(t)} onChange={() => toggleMulti("timeSlots", t)} />
-                        {t}
-                      </label>
-                    ))}
-                  </div>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                <div>
-                  <label className="mb-1 block text-sm font-medium">Preferred Delivery Mode</label>
-                  <Dropdown value={form.delivery} onChange={(v) => setForm({ ...form, delivery: v })} options={OPT.delivery} />
-                </div>
-                <div>
-                  <label className="mb-1 block text-sm font-medium">Campus Preference</label>
-                  <Dropdown value={form.campus} onChange={(v) => setForm({ ...form, campus: v })} options={OPT.campus} />
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                <div>
-                  <label className="mb-1 block text-sm font-medium">Knowledge Area Cluster (KAC)</label>
-                  <MultiSelectDropdown
-                    values={form.kac as string[]}
-                    onChange={(v) => setForm({ ...form, kac: v as KACKey[] })}
-                    options={KAC_OPTIONS}
-                    placeholder="— Select one or more KACs —"
-                  />
-                </div>
-
-                <div>
-                  <label className="mb-1 block text-sm font-medium">Preferred Courses</label>
-                  <div className="grid grid-cols-1 gap-1.5">
-                    {(availableCourses.length ? availableCourses : ["— Choose a KAC first —"]).map((c) => (
-                      <label key={c} className="flex items-center gap-2 text-sm">
-                        <input type="checkbox" className="accent-emerald-700" disabled={!availableCourses.includes(c)}
-                          checked={form.courses.includes(c)} onChange={() => toggleMulti("courses", c)} />
-                        {c}
-                      </label>
-                    ))}
-                  </div>
-                </div>
-              </div>
-
-              <div className="space-y-3">
-                <div className="flex items-center justify-between">
-                  <label className="block text-sm font-medium">Deloading</label>
-                  <label className="flex items-center gap-2 text-sm">
-                    <input
-                      type="checkbox"
-                      className="accent-emerald-700"
-                      checked={form.noDeloading}
-                      onChange={(e) => {
-                        setForm((f) => ({ ...f, noDeloading: e.target.checked }));
-                        if (e.target.checked) setDeloadRows([]);
-                      }}
-                    />
-                    I have no deloading
-                  </label>
-                </div>
-                {!form.noDeloading && (
-                  <div className="rounded-xl border border-neutral-200 p-3 space-y-2">
-                    {deloadRows.length === 0 && <div className="text-sm text-neutral-500">No deloading entries yet.</div>}
-                    {deloadRows.map((r, i) => (
-                      <div key={i} className="grid grid-cols-1 gap-2 sm:grid-cols-[1fr_120px_auto]">
+                    <div className="space-y-3">
+                      <div>
+                        <label className="mb-1 block text-sm font-medium">Reason for taking a break/leave <span className="text-red-600">*</span></label>
                         <input
                           type="text"
-                          className="rounded-xl border border-neutral-300 px-3 py-2.5 text-sm shadow-sm outline-none"
-                          placeholder="Type (e.g., Administrative, Research)"
-                          value={r.type}
-                          onChange={(e) => setDeloadRows((rows) => rows.map((x, idx) => (idx === i ? { ...x, type: e.target.value } : x)))}
+                          className="w-full rounded-xl border border-neutral-300 px-3 py-2.5 text-sm shadow-sm outline-none"
+                          placeholder="Reason..."
+                          value={form.breakReason}
+                          onChange={(e) => setForm({ ...form, breakReason: e.target.value })}
                         />
-                        <input
-                          type="number"
-                          className="rounded-xl border border-neutral-300 px-3 py-2.5 text-sm shadow-sm outline-none"
-                          placeholder="Units"
-                          value={r.units ?? ""}
-                          onChange={(e) => {
-                            const v = e.target.value === "" ? null : Number(e.target.value);
-                            setDeloadRows((rows) => rows.map((x, idx) => (idx === i ? { ...x, units: v } : x)));
-                          }}
-                        />
-                        <button type="button" onClick={() => setDeloadRows((rows) => rows.filter((_, idx) => idx !== i))}
-                          className="rounded-[10px] border border-neutral-200 bg-neutral-50 px-3 text-sm hover:bg-neutral-100">
-                          Remove
-                        </button>
                       </div>
-                    ))}
-                    <button type="button" onClick={() => setDeloadRows((rows) => [...rows, { type: "", units: null }])}
-                      className="inline-flex h-8 items-center justify-center rounded-[10px] px-3 text-sm shadow bg-emerald-700 text-white hover:brightness-110">
-                      Add Deloading
+
+                      <div>
+                        <label className="mb-1 block text-sm font-medium">Date of return (MM/DD/YYYY) <span className="text-red-600">*</span></label>
+                        <input
+                          type="text"
+                          className="w-full rounded-xl border border-neutral-300 px-3 py-2.5 text-sm shadow-sm outline-none"
+                          placeholder="MM/DD/YYYY"
+                          value={form.breakReturnDate}
+                          onChange={(e) => setForm({ ...form, breakReturnDate: e.target.value })}
+                        />
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* actions */}
+                  <div className="flex items-center justify-end gap-2 pt-1">
+                    <button onClick={onClose}
+                      className="inline-flex h-9 items-center justify-center rounded-xl border border-neutral-200 bg-neutral-100 px-4 text-sm text-slate-900 shadow-sm hover:bg-neutral-200/70 active:translate-y-[0.5px]">
+                      Cancel
+                    </button>
+                    <button
+                      disabled={deadlinePassed}
+                      onClick={() => {
+                        const v = validate(); if (v.ok) onDraft({ ...form, deloadings: form.noDeloading ? [] : deloadRows });
+                      }}
+                      className={cls("inline-flex h-9 items-center justify-center rounded-xl px-4 text-sm font-medium shadow active:translate-y-[0.5px]",
+                        deadlinePassed ? "cursor-not-allowed bg-orange-200 text-white" : "bg-orange-500 text-white hover:brightness-110")}
+                      title={deadlinePassed ? "Deadline passed — editing locked" : "Save a draft (not final)"}
+                    >
+                      Save Draft
+                    </button>
+                    <button
+                      disabled={deadlinePassed}
+                      onClick={() => {
+                        const v = validate(); if (v.ok) onSave({ ...form, deloadings: form.noDeloading ? [] : deloadRows });
+                      }}
+                      className={cls("inline-flex h-9 items-center justify-center rounded-xl px-4 text-sm font-medium text-white shadow active:translate-y-[0.5px]",
+                        deadlinePassed ? "cursor-not-allowed bg-emerald-300" : "bg-[#1F7A49] hover:brightness-[1.06]")}
+                      title={deadlinePassed ? "Deadline passed — editing locked" : "Save and finalize"}
+                    >
+                      Save Preferences
                     </button>
                   </div>
-                )}
-              </div>
+                </>
+              ) : (
+                <>
+                  {/* NEW ORDER: Delivery/Campus FIRST */}
+                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                    <div>
+                      <label className="mb-1 block text-sm font-medium">Preferred Delivery Mode</label>
+                      <Dropdown
+                        value={form.delivery}
+                        onChange={(v) => {
+                          const nextCampus = autoCampusFor(v);
+                          setForm({ ...form, delivery: v, campus: nextCampus });
+                        }}
+                        options={OPT.delivery}
+                      />
+                    </div>
+                    {/* Campus now LOCKED and auto-set */}
+                    {form.delivery && (
+                      <div>
+                        <label className="mb-1 block text-sm font-medium">Campus Preference (auto-set)</label>
+                        <input
+                          type="text"
+                          disabled
+                          className="w-full rounded-xl border border-neutral-200 bg-neutral-100 px-3 py-2.5 text-sm text-neutral-700"
+                          value={form.campus || "Either Campus"}
+                          readOnly
+                        />
+                      </div>
+                    )}
+                  </div>
 
-              <div>
-                <label className="mb-1 block text-sm font-medium">Special Remarks</label>
-                <textarea rows={4} className="w-full resize-y rounded-xl border border-neutral-300 p-2 text-sm"
-                  placeholder="Any special circumstances, research project name, or any additional information…"
-                  value={form.remarks} onChange={(e) => setForm({ ...form, remarks: e.target.value })} />
-              </div>
+                  {/* THEN Days / Time Slots */}
+                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                    <div>
+                      <label className="mb-1 block text-sm font-medium">Preferred Teaching Days</label>
+                      <div className="grid grid-cols-2 gap-2">
+                        {daysMaster.map((d) => (
+                          <label key={d} className="flex items-center gap-2 text-sm">
+                            <input type="checkbox" className="accent-emerald-700" checked={form.days.includes(d)} onChange={() => toggleMulti("days", d)} />
+                            {d}
+                          </label>
+                        ))}
+                      </div>
+                    </div>
 
-              {/* actions */}
-              <div className="flex items-center justify-end gap-2 pt-1">
-                <button onClick={onClose}
-                  className="inline-flex h-9 items-center justify-center rounded-xl border border-neutral-200 bg-neutral-100 px-4 text-sm text-slate-900 shadow-sm hover:bg-neutral-200/70 active:translate-y-[0.5px]">
-                  Cancel
-                </button>
-                <button
-                  disabled={deadlinePassed}
-                  onClick={() => {
-                    const v = validate(); if (v.ok) onDraft({ ...form, deloadings: form.noDeloading ? [] : deloadRows });
-                  }}
-                  className={cls("inline-flex h-9 items-center justify-center rounded-xl px-4 text-sm font-medium shadow active:translate-y-[0.5px]",
-                    deadlinePassed ? "cursor-not-allowed bg-orange-200 text-white" : "bg-orange-500 text-white hover:brightness-110")}
-                  title={deadlinePassed ? "Deadline passed — editing locked" : "Save a draft (not final)"}
-                >
-                  Save Draft
-                </button>
-                <button
-                  disabled={deadlinePassed}
-                  onClick={() => {
-                    const v = validate(); if (v.ok) onSave({ ...form, deloadings: form.noDeloading ? [] : deloadRows });
-                  }}
-                  className={cls("inline-flex h-9 items-center justify-center rounded-xl px-4 text-sm font-medium text-white shadow active:translate-y-[0.5px]",
-                    deadlinePassed ? "cursor-not-allowed bg-emerald-300" : "bg-[#1F7A49] hover:brightness-[1.06]")}
-                  title={deadlinePassed ? "Deadline passed — editing locked" : "Save and finalize"}
-                >
-                  Save Preferences
-                </button>
-              </div>
+                    <div>
+                      <label className="mb-1 block text-sm font-medium">Preferred Time Slots</label>
+                      <div className="grid grid-cols-1 gap-1.5">
+                        {timeSlotsMaster.map((t) => (
+                          <label key={t} className="flex items-center gap-2 text-sm">
+                            <input type="checkbox" className="accent-emerald-700" checked={form.timeSlots.includes(t)} onChange={() => toggleMulti("timeSlots", t)} />
+                            {t}
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                    <div>
+                      <label className="mb-1 block text-sm font-medium">Knowledge Area Cluster (KAC)</label>
+                      <MultiSelectDropdown
+                        values={form.kac as string[]}
+                        onChange={(v) => setForm({ ...form, kac: v })}
+                        options={kacDisplayOptions}
+                        placeholder="— Select one or more KACs —"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between">
+                      <label className="block text-sm font-medium">Deloading</label>
+                      <label className="flex items-center gap-2 text-sm">
+                        <input
+                          type="checkbox"
+                          className="accent-emerald-700"
+                          checked={form.noDeloading}
+                          onChange={(e) => {
+                            setForm((f) => ({ ...f, noDeloading: e.target.checked }));
+                            if (e.target.checked) setDeloadRows([]);
+                          }}
+                        />
+                        I have no deloading
+                      </label>
+                    </div>
+                    {!form.noDeloading && (
+                      <div className="rounded-xl border border-neutral-200 p-3 space-y-2">
+                        {deloadRows.length === 0 && <div className="text-sm text-neutral-500">No deloading entries yet.</div>}
+                        {deloadRows.map((r, i) => {
+                          const needsSpecify = r.type === "Administrative" || r.type === "Research";
+                          return (
+                            <div key={i} className="grid grid-cols-1 gap-2 sm:grid-cols-[1fr_120px_auto]">
+                              <div className="sm:col-span-1">
+                                <Dropdown
+                                  value={r.type}
+                                  onChange={(v) =>
+                                    setDeloadRows((rows) => rows.map((x, idx) => (idx === i ? { ...x, type: v } : x)))
+                                  }
+                                  options={DELOADING_TYPES}
+                                />
+                              </div>
+                              <input
+                                type="number"
+                                className="rounded-xl border border-neutral-300 px-3 py-2.5 text-sm shadow-sm outline-none"
+                                placeholder="Units"
+                                value={r.units ?? ""}
+                                onChange={(e) => {
+                                  const v = e.target.value === "" ? null : Number(e.target.value);
+                                  setDeloadRows((rows) => rows.map((x, idx) => (idx === i ? { ...x, units: v } : x)));
+                                }}
+                              />
+                              <button type="button" onClick={() => setDeloadRows((rows) => rows.filter((_, idx) => idx !== i))}
+                                className="rounded-[10px] border border-neutral-200 bg-neutral-50 px-3 text-sm hover:bg-neutral-100">
+                                Remove
+                              </button>
+                              {needsSpecify && (
+                                <div className="sm:col-span-3">
+                                  <input
+                                    type="text"
+                                    className="w-full rounded-xl border border-neutral-300 px-3 py-2.5 text-sm shadow-sm outline-none"
+                                    placeholder="Specify Type (e.g., Office of the Dean, Funded Project…)"
+                                    value={r.detail || ""}
+                                    onChange={(e) =>
+                                      setDeloadRows((rows) => rows.map((x, idx) => (idx === i ? { ...x, detail: e.target.value } : x)))
+                                    }
+                                  />
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                        <button type="button" onClick={() => setDeloadRows((rows) => [...rows, { type: "Administrative", units: null, detail: "" }])}
+                          className="inline-flex h-8 items-center justify-center rounded-[10px] px-3 text-sm shadow bg-emerald-700 text-white hover:brightness-110">
+                          Add Deloading
+                        </button>
+                      </div>
+                    )}
+                  </div>
+
+                  <div>
+                    <label className="mb-1 block text-sm font-medium">Special Remarks</label>
+                    <textarea rows={4} className="w-full resize-y rounded-xl border border-neutral-300 p-2 text-sm"
+                      placeholder="Any special circumstances, research project name, or any additional information…"
+                      value={form.remarks} onChange={(e) => setForm({ ...form, remarks: e.target.value })} />
+                  </div>
+
+                  {/* actions */}
+                  <div className="flex items-center justify-end gap-2 pt-1">
+                    <button onClick={onClose}
+                      className="inline-flex h-9 items-center justify-center rounded-xl border border-neutral-200 bg-neutral-100 px-4 text-sm text-slate-900 shadow-sm hover:bg-neutral-200/70 active:translate-y-[0.5px]">
+                      Cancel
+                    </button>
+                    <button
+                      disabled={deadlinePassed}
+                      onClick={() => {
+                        const v = validate(); if (v.ok) onDraft({ ...form, deloadings: form.noDeloading ? [] : deloadRows });
+                      }}
+                      className={cls("inline-flex h-9 items-center justify-center rounded-xl px-4 text-sm font-medium shadow active:translate-y-[0.5px]",
+                        deadlinePassed ? "cursor-not-allowed bg-orange-200 text-white" : "bg-orange-500 text-white hover:brightness-110")}
+                      title={deadlinePassed ? "Deadline passed — editing locked" : "Save a draft (not final)"}
+                    >
+                      Save Draft
+                    </button>
+                    <button
+                      disabled={deadlinePassed}
+                      onClick={() => {
+                        const v = validate(); if (v.ok) onSave({ ...form, deloadings: form.noDeloading ? [] : deloadRows });
+                      }}
+                      className={cls("inline-flex h-9 items-center justify-center rounded-xl px-4 text-sm font-medium text-white shadow active:translate-y-[0.5px]",
+                        deadlinePassed ? "cursor-not-allowed bg-emerald-300" : "bg-[#1F7A49] hover:brightness-[1.06]")}
+                      title={deadlinePassed ? "Deadline passed — editing locked" : "Save and finalize"}
+                    >
+                      Save Preferences
+                    </button>
+                  </div>
+                </>
+              )}
             </>
           )}
         </div>
 
         {showAE && (
           <div className="block">
-            {/* keep your AE panel as-is (omitted here for brevity) */}
+            {/* keep your AE panel as-is (omitted for brevity) */}
           </div>
         )}
       </div>
@@ -765,9 +790,14 @@ const prefUnitOptions = useMemo(() => {
 export default function FACULTY_Preferences() {
   const [saved, setSaved] = useState<SavedPrefs>(initialSaved);
   const [openEdit, setOpenEdit] = useState(false);
+
+  // dynamic options (no hardcoded UI lists)
   const [kacOptions, setKacOptions] = useState<Array<{kac_id:string; kac_code:string; kac_name:string}>>([]);
+  const [daysMaster, setDaysMaster] = useState<string[]>([]);
+  const [timeSlotsMaster, setTimeSlotsMaster] = useState<string[]>([]);
+
   const [loading, setLoading] = useState(true);
-  const [employmentType, setEmploymentType] = useState<"FT" | "PT">("FT"); // default FT; we’ll correct after fetch
+  const [employmentType, setEmploymentType] = useState<"FT" | "PT">("FT"); // default FT; corrected after fetch
 
   const raw = JSON.parse(localStorage.getItem("animo.user") || "{}");
   const userId = raw.userId || raw.user_id || raw.id;
@@ -776,14 +806,17 @@ export default function FACULTY_Preferences() {
   const { past: deadlinePassedPage } = useCountdown(DEADLINE_ISO);
 
   // from server -> SavedPrefs
+// from server -> SavedPrefs (defensive)
   function fromServerToSaved(latest: any): SavedPrefs {
-    const deloadArr = Array.isArray(latest?.deloading_data) ? latest.deloading_data : latest?.deloading_data ? [latest.deloading_data] : [];
+    const deloadArr = Array.isArray(latest?.deloading_data) ? latest.deloading_data : [];
     const prefUnitsNumber = Number(latest?.preferred_units);
     const prefUnitsLabel = Number.isFinite(prefUnitsNumber) ? toLabel(prefUnitsNumber) : "";
 
+    const kacList = Array.isArray(latest?.preferred_kacs) ? latest.preferred_kacs : [];
+    const kacDisplay = kacList.map((k: any) => (k?.kac_name || k?.kac_code || k?.kac_id || String(k))).filter(Boolean);
+
     return {
       prefUnits: prefUnitsLabel || "3.0 units",
-      maxUnits: "15",
       deloadings: deloadArr
         .map((d: any) => ({ type: d?.deloading_type ?? "Administrative", units: d?.units != null ? Number(d.units) : null }))
         .filter((x: any) => x.type || x.units != null),
@@ -792,26 +825,33 @@ export default function FACULTY_Preferences() {
       timeSlots: Array.isArray(latest?.preferred_times)
         ? latest.preferred_times.map((t: string) => normalizeDbTimeToUi(String(t)))
         : [],
-
       campus: (() => {
-        const cname = latest?.mode?.campus_name;
-        if (!cname) return "Either Campus";
-        if (/manila/i.test(cname)) return "Manila Campus";
-        if (/laguna/i.test(cname)) return "Laguna Campus";
+        const ids: string[] = Array.isArray(latest?.mode?.campus_id) ? latest.mode.campus_id : [];
+        const names: string[] = Array.isArray(latest?.mode?.campus_names) ? latest.mode.campus_names : [];
+        const haveManila = ids.includes("CMPS0001") || names.some(n => /manila/i.test(n));
+        const haveLaguna = ids.includes("CMPS0002") || names.some(n => /laguna/i.test(n));
+        if (haveManila && haveLaguna) return "Either Campus";
+        if (haveManila) return "Manila Campus";
+        if (haveLaguna) return "Laguna Campus";
         return "Either Campus";
       })(),
       delivery: (() => {
         const code = String(latest?.mode?.mode || "").toUpperCase();
-        if (code === "ONL") return "Fully Online";
-        if (code === "F2F") return "Face-to-Face Only";
-        if (code === "HYB") return "Hybrid - Any Campus";
-        return "Face-to-Face Only";
+        if (code === "FOL") return "Fully Online";
+        if (code === "HYB") {
+          const ids: string[] = Array.isArray(latest?.mode?.campus_id) ? latest.mode.campus_id : [];
+          const names: string[] = Array.isArray(latest?.mode?.campus_names) ? latest.mode.campus_names : [];
+          const haveManila = ids.includes("CMPS0001") || names.some(n => /manila/i.test(n));
+          const haveLaguna = ids.includes("CMPS0002") || names.some(n => /laguna/i.test(n));
+          if (haveManila && haveLaguna) return "Hybrid - Any Campus";
+          if (haveManila) return "Hybrid - Manila Campus Only";
+          if (haveLaguna) return "Hybrid - Laguna Campus Only";
+          return "Hybrid - Any Campus";
+        }
+        return "Hybrid - Any Campus";
       })(),
-      kac: (latest?.preferred_kacs || []).map((k: any) => k?.kac_name || k?.kac_code || k?.kac_id).filter(Boolean),
-      courses: Array.isArray(latest?.preferred_courses) ? latest.preferred_courses : [],
+      kac: kacDisplay,
       remarks: latest?.notes ?? "",
-
-      // teaching break hints (if your backend later returns them)
       onBreak: !!latest?.on_break,
       breakReason: latest?.break_reason ?? "",
       breakReturnDate: latest?.break_return_date ?? "",
@@ -827,9 +867,20 @@ export default function FACULTY_Preferences() {
           getFacultyPreferencesOptions(userId),
         ]);
 
-        setKacOptions((opts?.kacs || []) as any);
+        // OPTIONAL: accept dynamic days/timeSlots if backend provides them
+        if (Array.isArray((opts as any)?.days_display)) {
+          // replace hardcoded OPT.days if you want the new behavior in this older file
+          // (you can also leave this out; the editor will use its static bands)
+        }
 
-        // Try to infer employment_type from various likely shapes
+
+        // dynamic options
+        setKacOptions((opts?.kacs || []) as any);
+        setDaysMaster(Array.isArray(opts?.days_display) ? opts.days_display : ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"]);
+        setTimeSlotsMaster(Array.isArray(opts?.time_slots_display) ? opts.time_slots_display : []);
+
+        
+
         const et =
           (profile?.faculty?.employment_type || profile?.employment_type || profile?.faculty_type || profile?.type || "")
             .toString()
@@ -847,51 +898,47 @@ export default function FACULTY_Preferences() {
     })();
   }, [userId]);
 
-  // Make sure initial editor has at least one course when KAC is chosen (unchanged behavior)
-  const coherentInitial: SavedPrefs = useMemo(() => ({
-    ...saved,
-    courses:
-      saved.courses.length && saved.kac.length
-        ? saved.courses
-        : saved.kac.length
-        ? [KAC_COURSES[(saved.kac[0] as KACKey) as keyof typeof KAC_COURSES]?.[0] ?? ""].filter(Boolean)
-        : [],
-  }), [saved]);
+  // (Preferred Courses removed) — no coherence adjustment needed
+  const coherentInitial: SavedPrefs = useMemo(() => ({ ...saved }), [saved]);
 
+// map kac display -> id (always store id)
   const nameToId = (name: string) => {
-    const hit = kacOptions.find(k => (k.kac_name || "").toLowerCase() === name.toLowerCase());
-    return hit?.kac_id || name; // fallback
+    const hit = kacOptions.find(k => (k.kac_name || "").toLowerCase() === (name || "").toLowerCase());
+    return hit?.kac_id || name; // fallback (backend can resolve)
   };
 
   const toServerPayload = (v: SavedPrefs, finished: boolean) => {
     const onBreak = v.prefUnits === TEACHING_BREAK;
     const preferredUnits = onBreak ? 0 : (parseUnits(v.prefUnits) ?? 0);
 
+    const mapDeload = (r: DeloadRow) => {
+      const needsSpecify = r.type === "Administrative" || r.type === "Research";
+      const detail = (r.detail || "").trim();
+      return {
+        deloading_type: r.type,
+        units: r.units ?? 0,
+        detail: needsSpecify ? detail : "",
+      };
+    };
+
     return {
       preferred_units: preferredUnits,
       availability_days: onBreak ? [] : compressDays(v.days),
       preferred_times: onBreak ? [] : v.timeSlots.map((t) => normalizeUiTimeToDb(String(t))),
       preferred_kacs: onBreak ? [] : (v.kac || []).map(nameToId),
-      preferred_courses: onBreak ? [] : v.courses,
-      deloading_data: v.noDeloading ? [] : (v.deloadings || []).filter((r) => r && r.type).map((r) => ({ deloading_type: r.type, units: r.units ?? 0 })),
-      mode: onBreak ? { mode: "F2F", campus_id: "" } : (() => {
-        const code = (v.delivery || "").toLowerCase();
-        if (code.includes("online")) return { mode: "ONL", campus_id: "" };
-        if (/laguna/i.test(v.campus)) return { mode: "HYB", campus_id: "CMPS0002" };
-        if (/manila/i.test(v.campus)) return { mode: "HYB", campus_id: "CMPS0001" };
-        return { mode: "F2F", campus_id: "" };
-      })(),
+      deloading_data: v.noDeloading ? [] : (v.deloadings || []).filter((r) => r && r.type).map(mapDeload),
+      mode: onBreak ? { mode: "HYB", campus_id: [] } : toModePayload(v),
       notes: v.remarks,
       has_new_prep: false,
       is_finished: finished,
 
-      // NEW — harmless extras, backend can choose to persist/ignore
       on_break: onBreak,
       break_reason: onBreak ? v.breakReason : "",
       break_return_date: onBreak ? v.breakReturnDate : "",
       employment_type: employmentType,
-    };
+    } as const;
   };
+
 
   async function afterSubmitRefresh(res: any) {
     if (res?.ok && res?.preference) {
@@ -941,6 +988,9 @@ export default function FACULTY_Preferences() {
           onDraft={handleDraft}
           deadlineISO={DEADLINE_ISO}
           employmentType={employmentType}
+          daysMaster={daysMaster}
+          timeSlotsMaster={timeSlotsMaster}
+          kacDisplayOptions={kacOptions.map(k => k.kac_name)}
         />
       </section>
     );
@@ -976,7 +1026,6 @@ export default function FACULTY_Preferences() {
           <div>
             <SectionTitle icon={BookOpen}>Teaching Load</SectionTitle>
             <Row label="Preferred Teaching Units" value={<Tag tone="gray">{saved.prefUnits || "—"}</Tag>} />
-            <Row label="Maximum Teaching Units" value={<Tag tone="gray">{saved.maxUnits} units</Tag>} />
             <Row
               label="Deloading"
               value={
@@ -1028,7 +1077,6 @@ export default function FACULTY_Preferences() {
                 )
               }
             />
-            <Row label="Preferred Courses" value={<Pills items={saved.courses} />} />
           </div>
 
           <div className="lg:col-span-2">
