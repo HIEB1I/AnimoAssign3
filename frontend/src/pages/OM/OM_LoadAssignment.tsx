@@ -233,6 +233,7 @@ type Row = {
   end2: string;
   room2: string;
   capacity: number | "";
+  mode?: string;
   status?: "" | "Confirmed" | "Pending" | "Unassigned" | "Conflict";
   conflictNote?: string;
   editable?: boolean;
@@ -1035,6 +1036,7 @@ export default function OM_LoadAssignment() {
                         <th className="text-center px-2 py-2">End 2</th>
                         <th className="text-center px-2 py-2">Room 2</th>
                         <th className="text-center px-2 py-2">Capacity</th>
+                        <th className="text-center px-2 py-2">Mode</th>
                         <th className="text-center px-2 py-2">Status</th>
                         <th className="text-center px-2 py-2">Actions</th>
                       </tr>
@@ -1224,7 +1226,7 @@ export default function OM_LoadAssignment() {
                                 align="center"
                               />
                             </td>
-
+                            <td className="px-2 py-2 text-center">{r.mode || "—"}</td>
                             <td className="px-2 py-2 text-center">
                               <StatusChip r={r} />
                             </td>
@@ -1341,7 +1343,8 @@ export default function OM_LoadAssignment() {
               setShowApprove(false);
             }
           })();
-        }}        
+        }}
+        
       />
 
       <SendModal

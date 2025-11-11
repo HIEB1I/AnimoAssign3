@@ -11,6 +11,7 @@ from dataclasses import dataclass, asdict
 from datetime import datetime, time
 from functools import lru_cache
 from motor.motor_asyncio import AsyncIOMotorClient
+from collections import defaultdict
 
 from ..main import db
 
@@ -31,6 +32,7 @@ COL_TERMS = "terms"
 COL_DEPTS = "departments"
 COL_CAMPUSES = "campuses"
 COL_LEAVES = "leaves"
+COL_PREFERENCES = "faculty_preferences"
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -87,6 +89,141 @@ def _fmt_time(hhmm: Optional[Any]) -> str:
     # Anything else invalid
     return ""
 
+# DEBUG function
+async def _faculty_on_leave_map(db, active_term_id: str):
+    leaves = await db["leaves"].find(
+        {
+            "approval_status": "APPROVED",
+            "is_active": True,
+        },
+        {"_id": 0, "faculty_id": 1, "start_term_id": 1, "end_term_id": 1},
+    ).to_list(None)
+
+    term_list = await db["terms"].find({}, {"_id": 0, "term_id": 1}).sort([
+        ("acad_year_start", 1),
+        ("term_number", 1)
+    ]).to_list(None)
+    term_ids = [t["term_id"] for t in term_list]
+    active_idx = term_ids.index(active_term_id) if active_term_id in term_ids else -1
+
+    blocked = set()
+    for lv in leaves:
+        if lv["start_term_id"] in term_ids and lv["end_term_id"] in term_ids:
+            s = term_ids.index(lv["start_term_id"])
+            e = term_ids.index(lv["end_term_id"])
+            if s <= active_idx <= e:
+                blocked.add(lv["faculty_id"])
+
+    print(f"[DEBUG] Active term: {active_term_id}, blocked faculty: {blocked}")
+    return blocked
+
+# --- Day-pair normalization helpers -----------------------------------------
+DAY_PAIR = {
+    "M": "H",  # Monday ↔ Thursday
+    "H": "M",
+    "T": "F",  # Tuesday ↔ Friday
+    "F": "T",
+    "W": "S",  # Wednesday ↔ Saturday
+    "S": "W",
+}
+DAY_ORDER_INDEX = {"M": 0, "H": 1, "T": 0, "F": 1, "W": 0, "S": 1}
+
+def _normalize_pair_order(
+    d1: str | None, b1: str | None, e1: str | None,
+    d2: str | None, b2: str | None, e2: str | None,
+):
+    """
+    Rules:
+      1) If only slot2 is filled, promote it to slot1.
+      2) If both days exist and are a valid pair (M/H, T/F, W/S) but in reverse order,
+         swap so day1 is the pair's canonical 'first' (M,T,W).
+      3) If both days exist but not a valid pair, keep as-is (we only normalize valid pairs).
+      4) If both days are same, keep slot1 and blank slot2.
+    """
+    # 1) promote slot2 -> slot1 when slot1 is empty
+    if not d1 and d2:
+        d1, b1, e1, d2, b2, e2 = d2, b2, e2, None, None, None
+        return d1, b1, e1, d2, b2, e2
+
+    # If both empty or only slot1 present, nothing to do
+    if not d1 or not d2:
+        return d1, b1, e1, d2, b2, e2
+
+    D1, D2 = (d1 or "").upper(), (d2 or "").upper()
+
+    # 4) identical days -> drop slot2
+    if D1 == D2:
+        return d1, b1, e1, None, None, None
+
+    # Check if they are a recognized pair
+    is_pair = DAY_PAIR.get(D1) == D2 or DAY_PAIR.get(D2) == D1
+    if not is_pair:
+        return d1, b1, e1, d2, b2, e2  # unrelated days; leave as-is
+
+    # Make sure day1 is the canonical 'first' (M/T/W indices are 0)
+    i1 = DAY_ORDER_INDEX.get(D1)
+    i2 = DAY_ORDER_INDEX.get(D2)
+    if i1 is None or i2 is None:
+        return d1, b1, e1, d2, b2, e2
+
+    # If slot1 is the 'second' of the pair, swap
+    if i1 == 1 and i2 == 0:
+        d1, b1, e1, d2, b2, e2 = d2, b2, e2, d1, b1, e1
+
+    return d1, b1, e1, d2, b2, e2
+
+def _derive_mode(section: Dict[str, Any],
+                 scheds: List[Dict[str, Any]],
+                 course: Dict[str, Any],
+                 pref_mode: Optional[str] = None) -> str:
+    """
+    Decide effective mode (optimized rule):
+      1) If section.mode is explicitly set → use it.
+      2) Else if there’s an assigned faculty preference → use it.
+      3) Else → return "" (unset). We do NOT infer from schedules or course.
+    """
+    def _norm(x: Any) -> str:
+        return str(x or "").strip().upper()
+
+    m = _norm(section.get("mode"))
+    if m in {"HYB", "FOL", "ONLINE", "ONSITE"}:
+        return m
+
+    pm = _norm(pref_mode)
+    if pm in {"HYB", "FOL", "ONLINE", "ONSITE"}:
+        return pm
+
+    return ""  # leave unset when no section mode and no faculty preference
+
+def _looks_like_room_id(v: str | None) -> bool:
+    s = (v or "").strip().upper()
+    return s.startswith("ROOM")
+
+def _preferred_cap_for(ctx, fid: str) -> int:
+    pref = (getattr(ctx, "prefs_by_faculty", {}) or {}).get(fid, {}) or {}
+    return int(pref.get("preferred_units") or pref.get("load_units") or 12)
+
+def _enforce_global_caps(ctx, assignments: list[dict]) -> tuple[list[dict], dict]:
+    """
+    Stable pass over 'assignments' that drops overflow after preferred caps are reached.
+    Keeps earlier entries (6A order is already priority-aware).
+    Returns (kept_assignments, by_faculty_used_units).
+    """
+    used = defaultdict(int)
+    kept = []
+    for a in assignments:
+        fid = a.get("faculty_id")
+        cid = a.get("course_id")
+        if not fid or not cid:
+            continue
+        units = int((ctx.courses.get(cid, {}) or {}).get("units") or 0)
+        cap = _preferred_cap_for(ctx, fid)
+        if used[fid] + units <= cap:
+            kept.append(a)
+            used[fid] += units
+        # else: overflow → drop this assignment
+    return kept, used
+
 async def _fetch_rows(user_id: str, term_id: str, db) -> Dict[str, Any]:
     pipe: List[Dict[str, Any]] = [
         {"$match": {"term_id": term_id}} if term_id else {"$match": {}},
@@ -103,6 +240,10 @@ async def _fetch_rows(user_id: str, term_id: str, db) -> Dict[str, Any]:
         # join faculty + user to display name
         {"$lookup": {"from": COL_FACULTY, "localField": "asg.faculty_id", "foreignField": "faculty_id", "as": "fac"}},
         {"$unwind": {"path": "$fac", "preserveNullAndEmptyArrays": True}},
+
+        # NEW: pull all prefs for that faculty (we'll pick the active term in Python)
+        {"$lookup": {"from": COL_PREFERENCES, "localField": "asg.faculty_id", "foreignField": "faculty_id", "as": "fprefs"}},
+
         {"$lookup": {"from": COL_USERS, "localField": "fac.user_id", "foreignField": "user_id", "as": "u"}},
         {"$unwind": {"path": "$u", "preserveNullAndEmptyArrays": True}},
 
@@ -128,28 +269,67 @@ async def _fetch_rows(user_id: str, term_id: str, db) -> Dict[str, Any]:
 
     docs = [x async for x in db[COL_SECTIONS].aggregate(pipe)]
 
-    def schedule_pair(scheds: List[Dict[str, Any]]) -> Dict[str, str]:
+    def schedule_pair(
+        scheds: List[Dict[str, Any]],
+        section: Dict[str, Any],
+        course: Dict[str, Any],
+        mode_override: Optional[str] = None,   # NEW
+    ) -> Dict[str, str]:
         s1 = (scheds[0] if len(scheds) > 0 else {}) or {}
         s2 = (scheds[1] if len(scheds) > 1 else {}) or {}
-        def room_label(s: Dict[str, Any]) -> str:
-            t = (s.get("room_type") or "").strip()
-            if t in ("Online", "TBA"): return t
-            return s.get("room_id") or ""
+
+        # Decide effective mode FIRST, then rooms use that
+        mode = _derive_mode(section, scheds, course, pref_mode=mode_override)
+        campus_id = (section.get("campus_id") or "").strip().upper()
+        course_rt = (course.get("room_type") or "").strip()
+
+        def _fallback_from_policy(slot_ord: int, s: Dict[str, Any]) -> str:
+            """Return placeholder room for this slot (1 or 2) using your rules."""
+            # If DB already has explicit values, use them.
+            rid = (s.get("room_id") or "").strip()
+            rty = (s.get("room_type") or "").strip()
+            if rty in ("Online", "TBA", "Classroom"):
+                return rty
+            if rid:
+                return rid
+
+            # Policy when empty:
+            if mode == "HYB":
+                if campus_id == "CMPS0001":
+                    # Manila: room1 Online, room2 course room (or TBA)
+                    if slot_ord == 1:
+                        return "Online"
+                    return course_rt or "TBA"
+                if campus_id == "CMPS0002":
+                    # Laguna: swap
+                    if slot_ord == 1:
+                        return course_rt or "TBA"
+                    return "Online"
+            elif mode == "FOL":
+                # Fully online: both Online
+                return "Online"
+
+            if not mode:
+                return ""  # leave blank; UI shows "—"
+            # (keep any other explicit modes if you add later)
+            return ""
+
         def _get_day(s: Dict[str, Any]) -> str:
             return (s.get("day") or s.get("day_of_week") or s.get("day1") or s.get("day2") or "") or ""
         def _get_start(s: Dict[str, Any]) -> str:
             return _fmt_time(s.get("start_time") or s.get("begin") or s.get("begin1") or s.get("start"))
         def _get_end(s: Dict[str, Any]) -> str:
             return _fmt_time(s.get("end_time") or s.get("end") or s.get("end1") or s.get("finish"))
+
         return {
             "day1": _get_day(s1),
             "begin1": _get_start(s1) or "",
             "end1": _get_end(s1) or "",
-            "room1": room_label(s1),
+            "room1": _fallback_from_policy(1, s1),
             "day2": _get_day(s2),
             "begin2": _get_start(s2) or "",
             "end2": _get_end(s2) or "",
-            "room2": room_label(s2),
+            "room2": _fallback_from_policy(2, s2),
         }
 
     rows_by_sid: Dict[str, Dict[str, Any]] = {}
@@ -157,18 +337,43 @@ async def _fetch_rows(user_id: str, term_id: str, db) -> Dict[str, Any]:
         sid = d.get("section_id") or ""
         if not sid:
             continue
-        pair = schedule_pair(d.get("scheds") or [])
+
+        course_doc = (d.get("course") or {})
+        scheds = (d.get("scheds") or [])
+
+        # --- Faculty preference mode for current term ---
+        pref_mode = ""
+        fid = (d.get("asg") or {}).get("faculty_id")
+        if fid:
+            for p in (d.get("fprefs") or []):
+                if p.get("term_id") == term_id and p.get("is_finished"):
+                    pref_mode = ((p.get("mode") or {}).get("mode")
+                                or p.get("preferred_mode") or "").strip().upper()
+                    if pref_mode:
+                        break
+        
+        # Compute effective mode once (section → pref → scheds → course)
+        effective_mode = _derive_mode(d, scheds, course_doc, pref_mode=pref_mode or None)
+
+        # Rooms are derived using that same mode
+        pair = schedule_pair(scheds, d, course_doc, mode_override=effective_mode)
+
+        # Display uses the effective mode
+        mode_display = effective_mode
+
         rows_by_sid[sid] = {
             "id": sid,
             "course": d.get("course_code_display") or "",
-            "title": (d.get("course") or {}).get("course_title","") or "",
-            "units": (d.get("course") or {}).get("units","") or "",
+            "title": course_doc.get("course_title","") or "",
+            "units": course_doc.get("units","") or "",
             "section": d.get("section_code","") or "",
             "faculty": d.get("faculty_name_display","") or "",
             **pair,
             "capacity": d.get("enrollment_cap","") or "",
+            "mode": mode_display,  # 👈 NEW column beside capacity
             "status": "Pending" if (d.get("asg") or {}).get("faculty_id") else "Unassigned",
         }
+
     rows = list(rows_by_sid.values())
     return {"rows": rows}
 
@@ -280,12 +485,12 @@ async def run_auto_assignment(
     department_id: str | None = Query(None),
     db = Depends(get_db),
 ):
-    active = await _active_term()  # <-- upcoming term
+    active = await _active_term()
     if not active:
         raise HTTPException(409, "No upcoming term found (is_current anchor missing?)")
 
-    # ensure prefs exist for the upcoming term
-    pref_cnt = await db["faculty_preferences"].count_documents(
+    # Require finished prefs for the upcoming term
+    pref_cnt = await db[COL_PREFERENCES].count_documents(
         {"term_id": active["term_id"], "is_finished": True}
     )
     if pref_cnt == 0:
@@ -298,13 +503,94 @@ async def run_auto_assignment(
     base = await _fetch_rows(user_id, term_id=active["term_id"], db=db)
     rows = [dict(r) for r in base["rows"]]
 
-    # lock sections that are already populated in the *row* (faculty and/or concrete times)
-    locked: set[str] = set()
+    # Prefs (used for alt-window search on duplicates)
+    ctx_for_prefs = await phase0_load(active["term_id"], db, department_id=department_id)
+    fac_prefs = ctx_for_prefs.prefs_by_faculty or {}
+
+    # Build a quick map → faculty_id -> preferred_mode (from faculty_preferences.mode.mode)
+    fac_pref_mode: dict[str, str] = {}
+    for fid, pref in (ctx_for_prefs.prefs_by_faculty or {}).items():
+        mode_obj = pref.get("mode") or {}
+        mode_str = str(mode_obj.get("mode") or "").strip().upper()
+        if fid and mode_str:
+            fac_pref_mode[fid] = mode_str
+
+    # NEW: section_id → campus_id and course_room_type
+    sid_to_campus: dict[str, str] = {
+        s["section_id"]: str(s.get("campus_id") or "")
+        for s in (ctx_for_prefs.sections or [])
+        if s.get("section_id")
+    }
+    sid_to_course: dict[str, str] = {
+        s["section_id"]: s.get("course_id")
+        for s in (ctx_for_prefs.sections or [])
+        if s.get("section_id") and s.get("course_id")
+    }
+    sid_to_crt: dict[str, str] = {}
+    for sid, cid in sid_to_course.items():
+        c = (ctx_for_prefs.courses or {}).get(cid, {})
+        rt = str(c.get("room_type") or "").strip()
+        sid_to_crt[sid] = rt  # e.g., "Classroom", "Comlab", "Online", or ""
+
+    # Track used slots per faculty to avoid duplicates
+    used: dict[str, set[tuple[str, str, str]]] = {}
+
+    def _add_used(fid: str | None, day: str | None, b: str | None, e: str | None):
+        if fid and day and b and e:
+            used.setdefault(str(fid), set()).add((day.upper(), str(b), str(e)))
+
+    def _would_reuse(fid, day, b, e):
+        if not (fid and day and b and e):
+            return False
+        return (day.upper(), str(b), str(e)) in used.get(str(fid), set())
+
+    def _parse_win_to_hhmm_pair(win) -> tuple[str, str] | None:
+        st = _to_min(win.get("start") or win.get("begin")) if isinstance(win, dict) else None
+        en = _to_min(win.get("end") or win.get("finish")) if isinstance(win, dict) else None
+        if isinstance(win, (list, tuple)) and len(win) == 2:
+            st, en = _to_min(win[0]), _to_min(win[1])
+        if isinstance(win, str) and "-" in win:
+            a, b = win.replace("–", "-").replace("—", "-").split("-", 1)
+            st, en = _to_min(a), _to_min(b)
+        return (_mm_to_hhmm(st), _mm_to_hhmm(en)) if (st is not None and en is not None and st >= 0 and en > st) else None
+
+    # Standard grid you listed
+    GRID = [
+        ("07:30", "09:00"),
+        ("09:15", "10:45"),
+        ("11:00", "12:30"),
+        ("12:45", "14:15"),
+        ("14:30", "16:00"),
+        ("16:15", "17:45"),
+        ("18:00", "19:30"),
+        ("19:45", "21:15"),
+    ]
+
+    def _pick_alt_slot(fid: str, day: str, pref: dict) -> tuple[str, str] | None:
+        # 1) try other explicit preferred windows first
+        wins = pref.get("preferred_times")
+        if wins:
+            seq = wins if isinstance(wins, list) else [wins]
+            for w in seq:
+                hhmm = _parse_win_to_hhmm_pair(w)
+                if not hhmm:
+                    continue
+                b_alt, e_alt = hhmm
+                if not _would_reuse(fid, day, b_alt, e_alt):
+                    return (b_alt, e_alt)
+
+        # 2) fallback: iterate the standard grid for that day
+        for b_alt, e_alt in GRID:
+            if not _would_reuse(fid, day, b_alt, e_alt):
+                return (b_alt, e_alt)
+
+        return None
+    
+    # Seed current used slots from table rows
     for r in rows:
-        has_faculty = bool((r.get("faculty") or "").strip())
-        has_time = any((r.get("begin1") or r.get("end1") or r.get("begin2") or r.get("end2")))
-        if has_faculty or has_time:
-            locked.add(r["id"])
+        fid = r.get("faculty_id") or None
+        _add_used(fid, r.get("day1"), r.get("begin1"), r.get("end1"))
+        _add_used(fid, r.get("day2"), r.get("begin2"), r.get("end2"))
 
     sugg = await compute_load_recommendations(term_id=active["term_id"], db=db)
     debug = sugg.get("debug", {}) or {}
@@ -325,23 +611,117 @@ async def run_auto_assignment(
         }
 
     suggestions = {s["section_id"]: s for s in sugg.get("assignments", [])}
-    for r in rows:
-        # skip rows already populated (keeps existing DB-backed faculty/times intact)
-        if r["id"] in locked:
-            continue
 
+    overlay_reasons: dict[str, dict] = {}
+    for r in rows:
         a = suggestions.get(r["id"])
         if not a:
             continue
+
+        fid = a.get("faculty_id")
+        d1, b1, e1 = a.get("day1"), a.get("begin1"), a.get("end1")
+        d2, b2, e2 = a.get("day2"), a.get("begin2"), a.get("end2")
+        why: dict[str, str] = {}
+
+        if _would_reuse(fid, d1, b1, e1):
+            alt = _pick_alt_slot(fid, (d1 or "").upper(), fac_prefs.get(fid, {}))
+            if alt:
+                b1, e1 = alt
+                why["slot1"] = "picked_alt_pref_window"
+            else:
+                d1 = b1 = e1 = None
+                why["slot1"] = "duplicate_slot_removed"
+
+        if _would_reuse(fid, d2, b2, e2):
+            alt = _pick_alt_slot(fid, (d2 or "").upper(), fac_prefs.get(fid, {}))
+            if alt:
+                b2, e2 = alt
+                why["slot2"] = "picked_alt_pref_window"
+            else:
+                d2 = b2 = e2 = None
+                why["slot2"] = "duplicate_slot_removed"
+
+        old_pair = (d1, d2)
+        d1, b1, e1, d2, b2, e2 = _normalize_pair_order(d1, b1, e1, d2, b2, e2)
+        if old_pair != (d1, d2):
+            why["pairing"] = f"normalized_from_{old_pair}_to_{(d1, d2)}"
+
         r["faculty"] = a.get("faculty", r["faculty"])
-        r["day1"]    = a.get("day1", r["day1"]);   r["begin1"] = a.get("begin1", r["begin1"]); r["end1"] = a.get("end1", r["end1"]); r["room1"] = a.get("room1", r["room1"])
-        r["day2"]    = a.get("day2", r["day2"]);   r["begin2"] = a.get("begin2", r["begin2"]); r["end2"] = a.get("end2", r["end2"]); r["room2"] = a.get("room2", r["room2"])
-        r["status"]  = a.get("status", "Pending")
+
+        # NEW: set Mode on the row from assigned faculty’s preferred_mode
+        if fid:
+            pm = fac_pref_mode.get(fid, "")
+            if pm:
+                r["mode"] = pm  # rows show the decided mode immediately
+
+        if d1 and b1 and e1:
+            r["day1"], r["begin1"], r["end1"] = d1, b1, e1
+            _add_used(fid, d1, b1, e1)
+        else:
+            why.setdefault("slot1", "left_blank")
+
+        if d2 and b2 and e2:
+            r["day2"], r["begin2"], r["end2"] = d2, b2, e2
+            _add_used(fid, d2, b2, e2)
+        else:
+            why.setdefault("slot2", "left_blank")
+
+        # --- NEW: derive rooms from row-level mode + campus (only if blank) ---
+        def _derive_rooms_from_mode_row(row: dict) -> tuple[str, str]:
+            mode = (row.get("mode") or "").strip().upper()
+            if not mode:
+                return (row.get("room1") or "", row.get("room2") or "")
+            sid = row.get("id") or row.get("section_id")
+            campus = (sid_to_campus.get(sid) or "").upper()
+            crt = sid_to_crt.get(sid) or ""          # course room type (e.g., "Classroom","Comlab","Online")
+
+            # FOL: both Online
+            if mode == "FOL":
+                return ("Online", "Online")
+
+            # HYB: Manila (CMPS0001) → Online then campus/classroom; Laguna (CMPS0002) reversed
+            if mode == "HYB":
+                if campus == "CMPS0001":
+                    return ("Online", crt or "TBA")
+                if campus == "CMPS0002":
+                    return (crt or "TBA", "Online")
+                # unknown campus → don't guess
+                return (row.get("room1") or "", row.get("room2") or "")
+
+            # Other modes: leave as-is
+            return (row.get("room1") or "", row.get("room2") or "")
+
+        # Only fill when currently blank (don’t stomp explicit suggestions)
+        if not (r.get("room1") or "").strip() or not (r.get("room2") or "").strip():
+            dr1, dr2 = _derive_rooms_from_mode_row(r)
+            if not (r.get("room1") or "").strip():
+                r["room1"] = dr1
+            if not (r.get("room2") or "").strip():
+                r["room2"] = dr2
+
+        # Keep status/conflict overlay (unchanged)
+        r["status"] = a.get("status", "Pending")
         if a.get("conflictNote"):
             r["conflictNote"] = a["conflictNote"]
 
-    # <-- include debug from compute_load_recommendations (Phase 6A adds phase6a_faculty_debug)
-    return {"term": _term_label(active), "rows": rows, "debug": (sugg.get("debug") or {})}
+        overlay_reasons[r["id"]] = {
+            "faculty_id": fid,
+            "input_from_phase7": {
+                "day1": a.get("day1"), "begin1": a.get("begin1"), "end1": a.get("end1"),
+                "day2": a.get("day2"), "begin2": a.get("begin2"), "end2": a.get("end2"),
+            },
+            "result_after_overlay": {
+                "day1": r.get("day1"), "begin1": r.get("begin1"), "end1": r.get("end1"),
+                "day2": r.get("day2"), "begin2": r.get("begin2"), "end2": r.get("end2"),
+            },
+            "reason": why,
+        }
+
+    return {
+        "term": _term_label(active),
+        "rows": rows,
+        "debug": {**debug, "overlay_no_time_details": overlay_reasons},
+    }
 
 #    ===========================================================
 #    =====================  LOAD RECO ==========================
@@ -516,7 +896,7 @@ async def phase0_load(term_id: str, db, department_id: str | None = None) -> Con
     # ------------------------------
     # 5) Preferences (for THIS upcoming term_id)
     # ------------------------------
-    pref_rows = await db["faculty_preferences"].find(
+    pref_rows = await db[COL_PREFERENCES].find(
         {"term_id": term_id, "is_finished": True},
         {
             "_id": 0,
@@ -527,11 +907,34 @@ async def phase0_load(term_id: str, db, department_id: str | None = None) -> Con
             "preferred_kacs": 1,
             "campus_id": 1,
             "leave_data": 1,
+            "mode": 1,
         },
     ).to_list(None)
     prefs_by_faculty = {
         r["faculty_id"]: r for r in pref_rows if r.get("faculty_id")
     }
+
+    # after prefs_by_faculty (DEBUG)
+    debug_pref_windows = {}
+    for fid, p in prefs_by_faculty.items():
+        times = p.get("preferred_times")
+        ok = 0; bad = 0
+        seq = times if isinstance(times, list) else ([times] if times else [])
+        for t in seq:
+            pair = None
+            if isinstance(t, dict):
+                pair = (_to_min(t.get("start") or t.get("begin")), _to_min(t.get("end") or t.get("finish")))
+            elif isinstance(t, (list, tuple)) and len(t) == 2:
+                pair = (_to_min(t[0]), _to_min(t[1]))
+            elif isinstance(t, str) and "-" in t:
+                a, b = t.replace("–","-").replace("—","-").split("-", 1)
+                pair = (_to_min(a), _to_min(b))
+            if pair and pair[0] >= 0 and pair[1] > pair[0]:
+                ok += 1
+            else:
+                bad += 1
+        if ok + bad:
+            debug_pref_windows[fid] = {"ok_windows": ok, "bad_windows": bad}
 
     # Keep historical field name but set to current term (since 'target = next' is already satisfied)
     prefs_prev_term_id = term_id
@@ -569,11 +972,12 @@ async def phase0_load(term_id: str, db, department_id: str | None = None) -> Con
     # ------------------------------
     # 7) Leaves
     # ------------------------------
+    # 7) Leaves
     term_rank = {t["term_id"]: i for i, t in enumerate(all_terms or [])}
 
-    # Fetch approved leaves; filter here using term ranks
+    # Case-insensitive "approved" + only the fields we need
     leave_rows = await db[COL_LEAVES].find(
-        {"approval_status": "APPROVED"},
+        {"approval_status": {"$regex": r"^approved$", "$options": "i"}},
         {"_id": 0, "faculty_id": 1, "start_term_id": 1, "end_term_id": 1}
     ).to_list(None)
 
@@ -584,15 +988,35 @@ async def phase0_load(term_id: str, db, department_id: str | None = None) -> Con
             fid = lv.get("faculty_id")
             st  = lv.get("start_term_id")
             et  = lv.get("end_term_id")
-            if not fid or not st or not et:
+            if not fid:
                 continue
-            st_r = term_rank.get(st)
-            et_r = term_rank.get(et)
-            if st_r is None or et_r is None:
-                continue
-            # on-leave if current term index falls between start and end (inclusive)
-            if st_r <= cur_rank <= et_r:
+            st_r = term_rank.get(st) if st else None
+            et_r = term_rank.get(et) if et else None
+
+            # start..∞
+            if st_r is not None and et_r is None and cur_rank >= st_r:
+                blocked.add(fid); continue
+            # -∞..end
+            if st_r is None and et_r is not None and cur_rank <= et_r:
+                blocked.add(fid); continue
+            # bounded [st..et]
+            if st_r is not None and et_r is not None and st_r <= cur_rank <= et_r:
                 blocked.add(fid)
+
+    # Fallback: also respect prefs.leave_data (union into blocked)
+    for fid, pref in (prefs_by_faculty or {}).items():
+        ld = pref.get("leave_data") or {}
+        st = ld.get("start_term_id"); et = ld.get("end_term_id")
+        st_r = term_rank.get(st) if st else None
+        et_r = term_rank.get(et) if et else None
+        if cur_rank is None:
+            continue
+        if st_r is not None and et_r is None and cur_rank >= st_r:
+            blocked.add(fid); continue
+        if st_r is None and et_r is not None and cur_rank <= et_r:
+            blocked.add(fid); continue
+        if st_r is not None and et_r is not None and st_r <= cur_rank <= et_r:
+            blocked.add(fid)
 
     # ------------------------------
     # 8) Assemble Context
@@ -615,6 +1039,30 @@ async def phase0_load(term_id: str, db, department_id: str | None = None) -> Con
     ctx.kacs = ctx_kacs                          # type: ignore[attr-defined]
     ctx.course_to_kacs = course_to_kacs          # type: ignore[attr-defined]
     ctx.leave_blocked = blocked
+    ctx.pref_windows_quality = debug_pref_windows  # type: ignore[attr-defined]
+    print("phase0_load → leave_rows:", len(leave_rows), "blocked:", len(blocked), "has FAC0002:", "FAC0002" in blocked)  # debug
+    
+    # Build exclusion sets
+    all_fids = {f["faculty_id"] for f in ctx.faculty}
+    no_pref_fids = all_fids - set((ctx.prefs_by_faculty or {}).keys())
+    blocked_fids = set(ctx.leave_blocked or set())
+
+    # Final eligible faculty = has prefs AND not on leave
+    eligible = [f for f in ctx.faculty
+                if f["faculty_id"] not in no_pref_fids
+                and f["faculty_id"] not in blocked_fids]
+
+    # Attach for debugging/visibility
+    ctx.excluded_no_prefs = no_pref_fids
+    ctx.excluded_leave = blocked_fids
+
+    # Replace the pool used by downstream phases (B/6A/6B)
+    ctx.faculty = eligible
+
+    print("[phase0] faculty:", len(all_fids),
+        "eligible:", len(eligible),
+        "no_prefs:", len(no_pref_fids),
+        "on_leave:", len(blocked_fids))
     return ctx
 
 def phase1_kac_helpers(ctx: ContextA, weights: dict[str, int] | None = None) -> None:
@@ -758,6 +1206,36 @@ def _faculty_capacities(ctx: ContextA) -> dict[str, int]:
         caps[fid] = pref_units or prof_units or DEFAULT_UNITS
     return caps
 
+def _enforce_global_caps(ctx: ContextA, assignments: list[dict]) -> tuple[list[dict], dict[str, int]]:
+    """
+    Walk assignments in order and keep only those that still fit within each faculty's
+    remaining capacity. Anything beyond the faculty's cap is dropped.
+    Returns (kept_assignments, used_units_by_faculty).
+    """
+    caps = _faculty_capacities(ctx)          # per-faculty hard cap (preferred or default)
+    used: dict[str, int] = {fid: 0 for fid in caps}  # how many units we have allocated so far
+    kept: list[dict] = []
+
+    for a in assignments:
+        fid = a.get("faculty_id")
+        cid = a.get("course_id")
+        if not fid or not cid:
+            continue
+        units = int((ctx.courses.get(cid) or {}).get("units") or 0)
+
+        # skip if no capacity info for this faculty (or zero cap)
+        cap = int(caps.get(fid, 0))
+        if cap <= 0:
+            continue
+
+        # keep only if this assignment still fits
+        if used.get(fid, 0) + units <= cap:
+            kept.append(a)
+            used[fid] = used.get(fid, 0) + units
+        # else: overflow → drop it
+
+    return kept, used
+
 def _campus_compat(f: dict, campus_id_or_name: str) -> bool:
     # map your campus codes → names as needed
     id_to_name = {"CMPS0001": "Manila", "CMPS0002": "Laguna"}
@@ -837,6 +1315,15 @@ def _slots_from_scheds(scheds: list[dict]) -> list[tuple[int, tuple[int,int]]]:
         if di in _DAY_MAP.values():
             out.append((di, (st, en)))
     return out
+
+def _to_compact_hhmm(hhmm: str) -> str:
+    """'07:30' → '730', '09:15' → '915'."""
+    m = _to_min(hhmm)         
+    if m < 0: 
+        return ""
+    h, mm = divmod(m, 60)
+    return f"{h}{mm:02d}"
+
 # ------------------------------------------------------------------------------
 
 # ---------------------- FACULTY OCCUPIED GRID + PREFS -------------------------
@@ -1063,6 +1550,55 @@ def _apply_solo_kac_tags(ctx: ContextA, by_course: dict, cid: str, candidates: l
     by_course[cid]["protection_tags"] = {fid: sorted(list(v)) for fid, v in tags.items()}
 # --------------------------- END PHASE 5 -----------------------------
 
+async def _room_type_from_row(r: dict, ordn: int, db=None) -> str | None:
+    """
+    Determine room_type for section_schedules based on section + course mode rules.
+    Rules:
+      - If section['mode'] == 'HYB':
+          * CMPS0001 campus: Room 1 = Online (room_id null)
+            Room 2 = if no room_id yet, use course.room_type as temp display value
+          * CMPS0002 campus: reverse logic (Online for Room 2)
+      - If section['mode'] == 'FOL':
+          * Both Room 1 and Room 2 = Online (room_id null)
+    """
+    sid = r.get("section_id") or r.get("id")
+    if not sid or not db:
+        return None
+
+    # Fetch section to get mode and campus
+    section = await db["sections"].find_one({"section_id": sid}, {"_id": 0, "mode": 1, "campus_id": 1, "course_id": 1})
+    if not section:
+        return None
+
+    mode = (str(r.get("mode") or "").upper() or str(section.get("mode") or "").upper())
+    campus_id = section.get("campus_id")
+    course_id = section.get("course_id")
+
+    # Fetch course to get its room_type
+    course = await db["courses"].find_one({"course_id": course_id}, {"_id": 0, "room_type": 1})
+    course_room_type = (course or {}).get("room_type") or "Online"
+
+    # --- Logic ---
+    if mode == "HYB":
+        # CMPS0001 campus
+        if campus_id == "CMPS0001":
+            if ordn == 1:
+                return "Online"
+            else:
+                return course_room_type  # fallback room type for display
+        # CMPS0002 campus
+        elif campus_id == "CMPS0002":
+            if ordn == 1:
+                return course_room_type
+            else:
+                return "Online"
+
+    elif mode == "FOL":
+        return "Online"
+
+    # No mode decided → do not set a room_type
+    return None
+
 # =============  MILESTONE C — Phase 6A (Capacity-first matching; no time/day)  =============
 # Goal: iterate in KAC→course order, and for each course exhaust the top faculty's
 # remaining units on its sections before moving to the next faculty (time/day ignored for now).
@@ -1101,8 +1637,11 @@ async def run_milestone_c_phase6a(term_id: str, db, department_id: str | None = 
     Phase 6A: capacity-first, campus/mode-ready (already gated in Phase 5),
     NO time/day checking yet. Produces a list of tentative assignments.
     """
+
     # Rebuild context + ordering (reuse A/3 logic) and reuse B to get candidates
     ctx = await phase0_load(term_id, db, department_id)
+    print("6A ctx.leave_blocked:", len(getattr(ctx, "leave_blocked", set()) or set()),
+          "has FAC0002:", "FAC0002" in (getattr(ctx, "leave_blocked", set()) or set()))  # <-- ADD
     phase1_kac_helpers(ctx)
     phase3_kac_prioritization(ctx)
 
@@ -1110,7 +1649,26 @@ async def run_milestone_c_phase6a(term_id: str, db, department_id: str | None = 
     phase5 = await run_milestone_b(term_id, db, department_id)
     by_course = phase5.get("by_course", {})
     course_order = phase5.get("courses_order", []) or (ctx.course_order or [])
-    
+
+    # --- NEW: Enforce primary pass order: Foundation → SHS → others ---
+    def _ctype_of(cid: str) -> str:
+        c = (ctx.courses.get(cid) or {})
+        t = (c.get("type") or c.get("type_of_course") or "Major")
+        return str(t).strip().upper()
+
+    buckets = {"FOUNDATION": [], "SHS": [], "OTHER": []}
+    for cid in course_order:
+        ct = _ctype_of(cid)
+        if ct == "FOUNDATION":
+            buckets["FOUNDATION"].append(cid)
+        elif ct == "SHS":
+            buckets["SHS"].append(cid)
+        else:
+            buckets["OTHER"].append(cid)
+
+    # Final processing order
+    course_order = buckets["FOUNDATION"] + buckets["SHS"] + buckets["OTHER"]
+
     # ----- Phase 6A KAC coverage bookkeeping (prioritize higher KACs) -----
     # total sections per KAC (from phase3 kac_stats), and per-KAC assigned so far
     kac_total_sections: dict[str, int] = {}
@@ -1130,6 +1688,7 @@ async def run_milestone_c_phase6a(term_id: str, db, department_id: str | None = 
 
     # capacities (preferred_units → remaining_units → default)
     caps = _faculty_capacities(ctx)
+    caps_baseline = dict(caps)
 
     # quick lookups
     section_to_course = {s["section_id"]: s["course_id"] for s in ctx.sections}
@@ -1160,6 +1719,15 @@ async def run_milestone_c_phase6a(term_id: str, db, department_id: str | None = 
             fid = c.get("faculty_id")
             if not fid:
                 continue
+
+            # NEW: hard guard — never assign someone on leave
+            if fid in (getattr(ctx, "leave_blocked", set()) or set()):
+                continue
+
+            # NEW: hard guard — never assign someone on leave
+            if fid in (getattr(ctx, "leave_blocked", set()) or set()):
+                continue
+
             cap = int(caps.get(fid, 0))
             if cap < units_per_sec:
                 continue
@@ -1237,12 +1805,43 @@ async def run_milestone_c_phase6a(term_id: str, db, department_id: str | None = 
         })
     # ---------------------------------------------------------------------------
 
+    # compute used units per faculty
+    faculty_units = {}
+    for a in assignments:
+        fid = a.get("faculty_id")
+        if not fid:
+            continue
+        units = (ctx.courses.get(a.get("course_id"), {}).get("units") or 0)
+        faculty_units[fid] = faculty_units.get(fid, 0) + int(units)
+
+    # compute each faculty's preferred cap
+    preferred_cap = {}
+    for fid in caps.keys():
+        pref_doc = (ctx.prefs_by_faculty or {}).get(fid, {})
+        preferred_cap[fid] = (
+            pref_doc.get("preferred_units")
+            or pref_doc.get("load_units")
+            or 12
+        )
+
+    phase6a_used_units = {}
+    for a in assignments:
+        fid = a.get("faculty_id")
+        units = int((ctx.courses.get(a.get("course_id"), {}) or {}).get("units") or 0)
+        phase6a_used_units[fid] = phase6a_used_units.get(fid, 0) + units
+
+    base_cap_map = _faculty_capacities(ctx).copy()
+
     debug6a = {
         "phase6a_assigned_total": len(assignments),
         "phase6a_per_course": per_course_assigned,
         "phase6a_per_kac": {k: {"assigned": int(kac_assigned.get(k, 0)), "total": int(kac_total_sections.get(k, 0))}
                             for k in sorted(set(kac_total_sections) | set(kac_assigned))},
-        "phase6a_caps_left": {k: int(v) for k, v in caps.items()},
+        "phase6a_used_units": {fid: int(u) for fid, u in phase6a_used_units.items()},
+        "phase6a_caps_left": {
+            fid: f"{int(phase6a_used_units.get(fid, 0))}/{int(preferred_cap.get(fid, 12))}"
+            for fid in caps.keys()
+        },
         "phase6a_faculty_debug": phase6a_faculty_debug,
     }
 
@@ -1272,6 +1871,8 @@ async def run_milestone_d_phase6b(term_id: str, db, department_id: str | None = 
 
     # 2) Rebuild context to read schedules/prefs quickly
     ctx = await phase0_load(term_id, db, department_id)
+    print("6B ctx.leave_blocked:", len(getattr(ctx, "leave_blocked", set()) or set()),
+          "has FAC0002:", "FAC0002" in (getattr(ctx, "leave_blocked", set()) or set()))
 
     # 3) Prepare grids & quick lookups
     fac_pref = ctx.prefs_by_faculty or {}
@@ -1323,16 +1924,19 @@ async def run_milestone_d_phase6b(term_id: str, db, department_id: str | None = 
             fid2 = c.get("faculty_id")
             if not fid2: 
                 continue
-            # skip same faculty (already conflicting)
             if fid2 == a["faculty_id"]:
                 continue
-            # enough remaining units after 6A?
+
+            # NEW: also respect leave here
+            if fid2 in (getattr(ctx, "leave_blocked", set()) or set()):
+                continue
+
             if int(caps_after_6a.get(fid2, 0)) < units:
                 continue
             if not _is_ok(fid2, sid):
                 continue
-
             # OK → assign to fid2
+            
             found = {
                 **a,
                 "faculty_id": fid2,
@@ -1380,6 +1984,166 @@ async def run_milestone_d_phase6b(term_id: str, db, department_id: str | None = 
     }
 # =============  END MILESTONE D — Phase 6B  ==========================
 
+# =============  MILESTONE D2 — Rebalance: borrow from SHS to cover non-SHS  =============
+async def run_milestone_d2_rebalance_shs_to_cover_nshs(term_id: str, db, department_id: str | None = None) -> dict:
+    """
+    Start from Phase 6B results, then:
+      1) Find any non-SHS sections with no assignment (missing) or marked Conflict/Unassigned.
+      2) Search SHS-assigned faculty for a compatible match (KAC/campus/mode + time/prefs).
+      3) If compatible, move the faculty from SHS → the empty non-SHS, and release the SHS section.
+      4) Optionally try to backfill the released SHS from its candidate pool.
+    """
+    base = await run_milestone_d_phase6b(term_id, db, department_id)
+    assignments: list[dict] = list(base.get("assignments", []))
+
+    # Rebuild context + quick lookups
+    ctx = await phase0_load(term_id, db, department_id)
+    by_course = dict(base.get("by_course", {})) or {}
+    schedules_by_section = ctx.schedules_by_section or {}
+
+    def _ctype(cid: str) -> str:
+        c = (ctx.courses.get(cid) or {})
+        t = (c.get("type") or c.get("type_of_course") or "Major")
+        return str(t).strip().upper()
+
+    # Build convenience maps
+    section_to_course = {s["section_id"]: s["course_id"] for s in ctx.sections}
+    assigned_by_sid = {a["section_id"]: a for a in assignments}
+    all_sids = [s["section_id"] for s in ctx.sections]
+
+    # Identify targets: non-SHS sections that are missing or unresolved
+    empty_nshs: list[str] = []
+    for sid in all_sids:
+        cid = section_to_course.get(sid)
+        if not cid or _ctype(cid) == "SHS":
+            continue
+        a = assigned_by_sid.get(sid)
+        if not a or (a.get("status", "").lower() in ("conflict", "unassigned")):
+            empty_nshs.append(sid)
+
+    # Build pool of SHS assignees we can potentially borrow from
+    shs_pool: list[dict] = []
+    for a in assignments:
+        cid = a.get("course_id")
+        if _ctype(cid) == "SHS" and a.get("faculty_id"):
+            shs_pool.append(a)
+
+    # Helpers we already have in file
+    def _is_sched_ok(fid: str, sid: str) -> bool:
+        # reuse Phase 6B helpers
+        slots = _slots_from_scheds(schedules_by_section.get(sid, []))
+        if not slots:
+            return True
+        fpref = (ctx.prefs_by_faculty or {}).get(fid, {})
+        # Build a faculty grid from current assignments (excluding the SHS one we might remove)
+        tentative = [x for x in assignments if x.get("faculty_id") == fid and x.get("section_id") != sid]
+        grid = _build_faculty_grid(ctx, tentative)
+        for di, itv in slots:
+            if not _pref_accepts_slot(fpref, di, itv):
+                return False
+            for cur in grid.get(fid, {}).get(di, []):
+                if _conflict(cur, itv):
+                    return False
+        return True
+
+    def _campus_mode_ok(fid: str, sid: str) -> bool:
+        sec = next((x for x in ctx.sections if x["section_id"] == sid), {})
+        fdoc = next((x for x in ctx.faculty if x.get("faculty_id") == fid), {})
+        return _campus_compat(fdoc, sec.get("campus_id") or "") and _mode_compat(fdoc, sec.get("mode"))
+
+    # Rebalance loop: for each empty non-SHS, try to borrow one SHS faculty
+    borrowed = []
+    backfill_shs = []  # (released_shs_sid)
+    for sid in empty_nshs:
+        cid = section_to_course.get(sid)
+        if not cid:
+            continue
+        # test SHS assignees in stable order
+        taken = None
+        for shs_a in list(shs_pool):
+            fid = shs_a.get("faculty_id")
+            if not fid or fid in (getattr(ctx, "leave_blocked", set()) or set()):
+                continue
+            if not _campus_mode_ok(fid, sid):
+                continue
+            # KAC compatibility: require intersection if course has KACs
+            course_kacs = set((getattr(ctx, "course_to_kacs", {}) or {}).get(cid, set()))
+            if course_kacs:
+                f = next((x for x in ctx.faculty if x.get("faculty_id") == fid), {})
+                pref_kacs = set(((ctx.prefs_by_faculty.get(fid) or {}).get("preferred_kacs") or []))
+                qual_kacs = set(f.get("qualified_kacs") or f.get("kac_ids") or [])
+                union = pref_kacs | qual_kacs
+                if not (union and course_kacs.intersection(union)):
+                    continue
+            # time feasibility
+            if not _is_sched_ok(fid, sid):
+                continue
+
+            # Borrow: move faculty from SHS section → this non-SHS
+            taken = shs_a
+            break
+
+        if taken:
+            # 1) Move faculty to target non-SHS sid
+            fid = taken["faculty_id"]
+            name = taken.get("faculty", "")
+            new_a = {
+                "section_id": sid,
+                "course_id": cid,
+                "faculty_id": fid,
+                "faculty": name,
+                "status": "Pending",
+            }
+            assignments = [a for a in assignments if a.get("section_id") != sid] + [new_a]
+
+            # 2) Release SHS section (remove its assignment)
+            shs_sid = taken["section_id"]
+            assignments = [a for a in assignments if a.get("section_id") != shs_sid]
+            backfill_shs.append(shs_sid)
+
+            # 3) Remove from pool (already borrowed)
+            shs_pool = [a for a in shs_pool if a.get("section_id") != shs_sid]
+            borrowed.append({"from_shs": shs_sid, "to_nshs": sid, "faculty_id": fid})
+
+    # Optional: Backfill released SHS from its own candidate pool
+    for shs_sid in backfill_shs:
+        shs_cid = section_to_course.get(shs_sid)
+        if not shs_cid:
+            continue
+        cinfo = by_course.get(shs_cid, {})
+        cand_list = list(cinfo.get("candidates", []))
+        cand_list = _promote_protected_first(by_course, shs_cid, cand_list)
+        chosen = None
+        for c in cand_list:
+            fid2 = c.get("faculty_id")
+            if not fid2 or fid2 in (getattr(ctx, "leave_blocked", set()) or set()):
+                continue
+            if not _campus_mode_ok(fid2, shs_sid):
+                continue
+            # SHS time feasibility uses its actual schedule (soft-locked)
+            if not _is_sched_ok(fid2, shs_sid):
+                continue
+            chosen = {"section_id": shs_sid, "course_id": shs_cid, "faculty_id": fid2, "faculty": c.get("name", ""), "status":"Pending"}
+            break
+        if chosen:
+            assignments.append(chosen)
+        else:
+            # leave SHS unassigned; Phase 7 will still soft-lock schedule display
+            pass
+
+    debug_d2 = {
+        "d2_borrowed_count": len(borrowed),
+        "d2_borrowed_pairs": borrowed,
+        "d2_shs_backfilled": len(backfill_shs),
+    }
+
+    return {
+        **base,
+        "assignments": assignments,
+        "debug": {**(base.get("debug") or {}), **debug_d2},
+    }
+# =============  END MILESTONE D2  =============
+
 # =============  MILESTONE E — Phase 7 (SHS soft-locks + Proposed Times)  =============
 async def run_milestone_e_phase7(term_id: str, db, department_id: str | None = None) -> dict:
     """
@@ -1389,8 +2153,9 @@ async def run_milestone_e_phase7(term_id: str, db, department_id: str | None = N
       (We do not persist; we only surface proposed times in the assignment payload.)
     """
     # Base (contains feasible + any conflicts) -------------------------------
-    base = await run_milestone_d_phase6b(term_id, db, department_id)
+    base = await run_milestone_d2_rebalance_shs_to_cover_nshs(term_id, db, department_id)
     assignments = list(base.get("assignments", []))
+    dbg_prev = dict(base.get("debug", {}))
 
     # Context for course types and schedules --------------------------------
     ctx = await phase0_load(term_id, db, department_id)
@@ -1398,6 +2163,14 @@ async def run_milestone_e_phase7(term_id: str, db, department_id: str | None = N
     schedules_by_section = ctx.schedules_by_section or {}
     fac_prefs = ctx.prefs_by_faculty or {}
     sections_by_id = {s["section_id"]: s for s in ctx.sections}
+
+    # --- Hard stop: if demand > capacity, prune overflow cleanly ---
+    assignments, _used_units = _enforce_global_caps(ctx, assignments)
+
+    # Tiny debug so you can see pruning effects in the response
+    cap_dbg = dbg_prev.setdefault("cap_sanity", {})
+    cap_dbg["assignments_after_prune"] = len(assignments)
+    cap_dbg["used_units_by_faculty"] = {fid: int(u) for fid, u in _used_units.items()}
 
     def _course_is_shs(cid: str) -> bool:
         t = (courses.get(cid) or {}).get("type") or (courses.get(cid) or {}).get("type_of_course")
@@ -1438,30 +2211,41 @@ async def run_milestone_e_phase7(term_id: str, db, department_id: str | None = N
         return None
 
     def _pick_days(fp: dict) -> tuple[str, str]:
-        """Return up to two day codes from availability; default to ('M','H')."""
+        """Return paired days with directional order: day1 in {M,T,W} only; day2 = {H,F,S}."""
+        pair = {"M":"H","T":"F","W":"S"}  # directional
         days = (fp or {}).get("availability_days") or []
         norm = []
         for d in days:
             s = str(d).strip().upper()
             if s == "TH": s = "H"
-            if s in ("M","T","W","H","F","S","U"):
+            if s in ("M","T","W","H","F","S"):
                 norm.append(s)
-        if not norm:
-            return ("M", "H")
-        if len(norm) == 1:
-            return (norm[0], "")
-        return (norm[0], norm[1])
+        # pick first available anchor from M,T,W; else default M/H
+        for anchor in ("M","T","W"):
+            if anchor in norm:
+                return (anchor, pair[anchor])
+        return ("M", "H")
 
     # Build proposed times for sections that lack schedules ------------------
     proposed: list[dict] = []
     kept: list[dict] = []
 
+     # NEW: collect reasons when a section ends with no proposed times (DEBUG)
+    debug_no_time_phase7: dict[str, dict] = {}  # section_id -> reasons
+
     for a in assignments:
         sid = a["section_id"]; cid = a["course_id"]; fid = a["faculty_id"]
         has_sched = any(_slots_from_scheds(schedules_by_section.get(sid, [])))
-        # If section already has a schedule OR is SHS with schedule → keep as is
-        if has_sched or _course_is_shs(cid):
+        if has_sched:
             kept.append(a)
+            # NEW: explain that we skipped because a schedule already exists (DEBUG)
+            debug_no_time_phase7[sid] = {"reason": "has_existing_schedule"}
+            continue
+
+        if _course_is_shs(cid):
+            kept.append(a)
+            # NEW: SHS sections are soft-locked (DEBUG)
+            debug_no_time_phase7[sid] = {"reason": "SHS_soft_lock"}
             continue
 
         fp = fac_prefs.get(fid, {})  # faculty preferences
@@ -1469,8 +2253,15 @@ async def run_milestone_e_phase7(term_id: str, db, department_id: str | None = N
         d1, d2 = _pick_days(fp)
 
         if not win and not d1:
-            # nothing to propose; leave untouched
             kept.append(a)
+            # NEW: no usable window/days parsed from prefs
+            debug_no_time_phase7[sid] = {
+                "reason": "no_pref_window_or_days",
+                "pref_snapshot": {
+                    "availability_days": (fp or {}).get("availability_days"),
+                    "preferred_times": (fp or {}).get("preferred_times"),
+                },
+            }
             continue
 
         st, en = win if win else (None, None)
@@ -1485,6 +2276,8 @@ async def run_milestone_e_phase7(term_id: str, db, department_id: str | None = N
             if st is not None: assn["begin2"] = _mm_to_hhmm(st)
             if en is not None: assn["end2"]   = _mm_to_hhmm(en)
         # leave room blank; status remains Pending
+        # NEW: note that we did propose times
+        debug_no_time_phase7.pop(sid, None)
         proposed.append(assn)
 
     final_assignments = kept + proposed
@@ -1493,6 +2286,8 @@ async def run_milestone_e_phase7(term_id: str, db, department_id: str | None = N
         "phase7_proposed_count": len(proposed),
         "phase7_kept_count": len(kept),
         "phase7_note": "Proposed times based on availability_days/preferred_times for unscheduled, non-SHS sections.",
+        # NEW: surface the reasons
+        "phase7_no_time_details": debug_no_time_phase7,
     }
 
     return {
@@ -1522,32 +2317,75 @@ async def _approve_and_persist(term_id: str, rows: list[dict], db):
     sugg = await compute_load_recommendations(term_id=term_id, db=db)
     by_sid = {a["section_id"]: a for a in (sugg.get("assignments") or [])}
 
+    # --- NEW: preflight used slots to prevent duplicates across the batch ---
+    used: dict[str, set[tuple[str,str,str]]] = {}
+
+    def _add_used(fid: str | None, d: str | None, b: str | None, e: str | None):
+        if not fid or not d or not b or not e:
+            return
+        used.setdefault(fid, set()).add((str(d).upper(), str(b), str(e)))
+
+    def _dup(fid: str | None, d: str | None, b: str | None, e: str | None) -> bool:
+        if not fid or not d or not b or not e:
+            return False
+        return (str(d).upper(), str(b), str(e)) in used.get(fid, set())
+
     # Process each approved row
     for r in rows:
         sid = r.get("id") or r.get("section_id")
         if not sid:
             continue
         a = by_sid.get(sid) or {}
-        fid = a.get("faculty_id")
+        fid = a.get("faculty_id") or r.get("faculty_id")
         cid = a.get("course_id") or section_to_course.get(sid)
+
+        # --- Allow SHS fallback: use the row faculty_id even if missing in compute output ---
+        if not fid and _course_is_shs(cid):
+            fid = r.get("faculty_id")
 
         # skip rows without an assigned faculty or those marked Conflict/Unassigned
         status = (r.get("status") or "Pending").capitalize()
-        if not fid or status in ("Conflict", "Unassigned"):
+
+        # --- NEW: keep sections.mode in sync with the row's mode (if present) ---
+        row_mode = str(r.get("mode") or "").strip().upper()
+        if row_mode:
+            await db[COL_SECTIONS].update_one(
+                {"section_id": sid},
+                {"$set": {"mode": row_mode}},
+                upsert=False,
+            )
+
+        # Skip only if truly missing faculty (except SHS, which may show 'Unassigned')
+        if not fid:
             continue
 
-        # ---------- 1) faculty_assignments upsert ----------
-        # key on (term_id, section_id)
+        # For non-SHS courses, skip if marked Conflict/Unassigned
+        if status in ("Conflict", "Unassigned") and not _course_is_shs(cid):
+            continue
+
+        # ---------- 1) faculty_assignments upsert (preserve legacy; not archived) ----------
+        # If there is already an assignment doc for this section (legacy or new schema),
+        # update it in-place and KEEP its legacy fields (assignment_id, load_id).
+        existing = await db[COL_ASSIGN].find_one(
+            {"section_id": sid},
+            {"_id": 0, "assignment_id": 1, "load_id": 1}
+        )
+
+        set_fields = {
+            "section_id": sid,
+            "faculty_id": fid,
+            "created_at": _utcnow(),
+            "is_archived": False,   
+        }
+        # preserve legacy identifiers if present
+        if existing:
+            if existing.get("assignment_id"): set_fields["assignment_id"] = existing["assignment_id"]
+            if existing.get("load_id"):       set_fields["load_id"] = existing["load_id"]
+
+        # Use section_id-only filter so we update a legacy row if it exists
         await db[COL_ASSIGN].update_one(
-            {"term_id": term_id, "section_id": sid},
-            {"$set": {
-                "term_id": term_id,
-                "section_id": sid,
-                "course_id": cid,
-                "faculty_id": fid,
-                "status": "Confirmed",
-                "approved_at": _utcnow(),
-            }},
+            {"section_id": sid},
+            {"$set": set_fields},
             upsert=True,
         )
 
@@ -1559,33 +2397,67 @@ async def _approve_and_persist(term_id: str, rows: list[dict], db):
             continue
 
         # pull proposed times from the row (already normalized in UI/run)
-        pairs = [
-            ("day1", "begin1", "end1", 1),
-            ("day2", "begin2", "end2", 2),
-        ]
+        pairs = [("day1","begin1","end1",1),("day2","begin2","end2",2)]
         for dkey, bkey, ekey, ordn in pairs:
             day = (r.get(dkey) or "").strip().upper()
-            begin = _norm_hhmm(r.get(bkey))
-            end   = _norm_hhmm(r.get(ekey))
+            begin_hhmm = _norm_hhmm(r.get(bkey))
+            end_hhmm   = _norm_hhmm(r.get(ekey))
+            if not day or not begin_hhmm or not end_hhmm:
+                continue
 
-            # only upsert if we have both day and a valid start/end
-            if not day or not begin or not end:
+            # duplicate-slot check only if we actually know the faculty
+            if fid and _dup(fid, day, begin_hhmm, end_hhmm):
                 continue
 
             schedule_id = _sched_id(sid, ordn)
+
+            # --- NEW: preserve existing room_id if already saved for this schedule ---
+            existing_sched = await db[COL_SCHED].find_one(
+                {"schedule_id": schedule_id},
+                {"_id": 0, "room_id": 1}
+            )
+            existing_room_id = (existing_sched or {}).get("room_id") or ""
+
+            # Only accept a REAL room id from the row; ignore placeholders like "Online"/"Classroom"/"TBA"
+            row_room_val = (r.get(f"room{ordn}") or "").strip()
+            final_room_id = existing_room_id
+            if not final_room_id and _looks_like_room_id(row_room_val):
+                final_room_id = row_room_val
+
+            # --- NEW: derive room_type from final_room_id (do not guess otherwise) ---
+            if final_room_id:
+                # map room_id → rooms.room_type
+                room_doc = await db[COL_ROOMS].find_one(
+                    {"room_id": final_room_id},
+                    {"_id": 0, "room_type": 1}
+                )
+                final_room_type = (room_doc or {}).get("room_type") or ""
+            else:
+                # no room selected → treat as fully online for this slot
+                final_room_type = "Online"
+
             await db[COL_SCHED].update_one(
                 {"schedule_id": schedule_id},
-                {"$set": {
-                    "schedule_id": schedule_id,
-                    "term_id": term_id,
-                    "section_id": sid,
-                    "day": day,
-                    "start_time": begin,
-                    "end_time": end,
-                    # leave room fields as-is if you’re not assigning rooms here
-                }},
+                {
+                    "$set": {
+                        "schedule_id": schedule_id,
+                        "term_id": term_id,
+                        "section_id": sid,
+                        "day": day,
+                        "start_time": _to_compact_hhmm(begin_hhmm),
+                        "end_time": _to_compact_hhmm(end_hhmm),
+                        # keep existing room_id if it exists; otherwise set what the row proposes
+                        "room_id": final_room_id,
+                        # always align room_type to the final room choice (or Online when no room)
+                        "room_type": final_room_type,
+                        "created_at": r.get("created_at") or "",
+                        "updated_at": r.get("updated_at") or "",
+                    }
+                },
                 upsert=True,
             )
+
+            _add_used(fid, day, begin_hhmm, end_hhmm)
 
 async def run_milestone_b(term_id: str, db, department_id: str | None = None) -> dict:
     """
@@ -1618,6 +2490,7 @@ async def run_milestone_b(term_id: str, db, department_id: str | None = None) ->
 
         # small counters for debug
         dbg_total = 0
+        dbg_after_leave = 0
         dbg_kac_ok = 0
         dbg_campus_mode_ok = 0
         dbg_time_ok = 0
@@ -1630,12 +2503,14 @@ async def run_milestone_b(term_id: str, db, department_id: str | None = None) ->
                 continue
             
             # (0) Require a submitted preference for the upcoming term
-            if fid not in ctx.prefs_by_faculty:
-                continue
+            # if fid not in ctx.prefs_by_faculty:
+            #     continue
+            has_prefs = fid in ctx.prefs_by_faculty
 
             # (0b) Exclude if on approved leave overlapping this term
             if fid in (getattr(ctx, "leave_blocked", set()) or set()):
                 continue
+            dbg_after_leave += 1   # NEW: survived leave gate
 
             # (A) LEAVE blackout (optional, from previous-term prefs payload)
             fpref = (ctx.prefs_by_faculty.get(fid) or {})
@@ -1690,7 +2565,10 @@ async def run_milestone_b(term_id: str, db, department_id: str | None = None) ->
 
             # weights: preference > history > FT > being in qualified/union > capacity
             # (adds separation so scores aren’t all “cap-only” ties)
+            # score = (40*prefers_this_kac) + (25*hx) + (10*ft_bonus) + (5*qual_matches_union) + min(cap, 12)
             score = (40*prefers_this_kac) + (25*hx) + (10*ft_bonus) + (5*qual_matches_union) + min(cap, 12)
+            if not has_prefs:
+                score -= 20  # soft penalty, still eligible
 
             name = _display_name_from_users(ctx.users_by_faculty.get(fid))
             cands.append({
@@ -1728,6 +2606,7 @@ async def run_milestone_b(term_id: str, db, department_id: str | None = None) ->
 
         by_course[cid]["_debug_filters"] = {
             "pool": dbg_total,
+            "after_leave": dbg_after_leave,
             "after_kac": dbg_kac_ok,
             "after_campus_mode": dbg_campus_mode_ok,
             "after_time": dbg_time_ok,
@@ -1801,6 +2680,7 @@ async def run_milestone_b(term_id: str, db, department_id: str | None = None) ->
             for cid in (ctx.course_order or [])
         },
         # --------------------------- END PHASE 5 -----------------------------
+        "pref_windows_quality": getattr(ctx, "pref_windows_quality", {}),
     }
 
     return {
