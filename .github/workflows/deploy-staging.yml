@@ -38,7 +38,6 @@ jobs:
   deploy:
     needs: build-test
     runs-on: ubuntu-latest
-
     env:
       S1_HOST: ${{ secrets.S1_HOST }}
       S1_PORT: ${{ secrets.S1_PORT }}
@@ -49,10 +48,7 @@ jobs:
       - name: Validate inputs
         run: |
           for v in S1_HOST S1_PORT S1_USER S1_KEY; do
-            if [ -z "${!v}" ]; then
-              echo "::error ::$v is empty. Add it in Settings → Secrets → Actions."
-              exit 1
-            fi
+            [ -n "${!v}" ] || { echo "::error ::$v is empty. Add it in Settings → Secrets → Actions."; exit 1; }
           done
           echo "Using $S1_USER@$S1_HOST:$S1_PORT"
 
@@ -71,126 +67,163 @@ jobs:
           script: |
             set -Eeuo pipefail
 
-            # Ensure checkout exists
-            if [ ! -d /opt/AnimoAssign3-staging/.git ]; then
-              mkdir -p /opt/AnimoAssign3-staging
-              cd /opt/AnimoAssign3-staging
-              git clone https://github.com/HIEB1I/AnimoAssign3.git .
-            else
-              cd /opt/AnimoAssign3-staging
-            fi
+            REPO=/opt/AnimoAssign3-staging
+            ARTROOT=/opt/AnimoAssign3-staging-data
+            FILE=docker/docker-compose.staging.yml
+            ENVF=docker/staging.env
 
-            # Pull via HTTPS (no SSH needed on server)
+            # Checkout / sync
+            if [ ! -d "$REPO/.git" ]; then
+              mkdir -p "$REPO"
+              git clone https://github.com/HIEB1I/AnimoAssign3.git "$REPO"
+            fi
+            cd "$REPO"
+
             unset GIT_SSH_COMMAND || true
             git config --global url.https://github.com/.insteadof git@github.com:
             git config --global url.https://github.com/.insteadof ssh://git@github.com/
-            git config --global --add safe.directory /opt/AnimoAssign3-staging
+            git config --global --add safe.directory "$REPO"
             git remote set-url origin https://github.com/HIEB1I/AnimoAssign3.git
-
             git fetch --all --prune
 
-            # --- Force-sync staging to remote, with a backup if there are local commits
             if ! git merge-base --is-ancestor HEAD origin/staging; then
               ts=$(date +%Y%m%d-%H%M%S)
-              echo "::warning ::Local staging diverged; backing up to /opt/AnimoAssign3-staging-backup-$ts.bundle and hard-resetting."
-              git bundle create "/opt/AnimoAssign3-staging-backup-$ts.bundle" --all || true
+              echo "::warning ::Local staging diverged; bundling to $ARTROOT/backup-$ts.bundle"
+              mkdir -p "$ARTROOT"
+              git bundle create "$ARTROOT/backup-$ts.bundle" --all || true
             fi
             git checkout -B staging origin/staging
             git reset --hard origin/staging
-
-            # ---------- Artifacts directory (outside repo), with fallback ----------
-            ART="/opt/AnimoAssign3-staging-data/tmp"
-            if ! mkdir -p "$ART" 2>/dev/null; then
-              # no permission under /opt — fall back to $HOME
-              ART="$HOME/animoassign-staging-data/tmp"
-              mkdir -p "$ART"
-              echo "::notice ::Using user-writable artifacts dir: $ART"
-            fi
-            chmod 755 "$ART"
-            # ----------------------------------------------------------------------
-
-            # Don't let git clean touch repo/tmp (might contain uploaded dumps)
             git clean -fdx -e tmp/** || true
 
-            # Compose files
-            FILE=docker/docker-compose.staging.yml
-            ENVF=docker/staging.env
-            [ -f "$FILE" ] || { echo "Compose file not found: $FILE"; exit 1; }
-            [ -f "$ENVF" ] || { echo "Env file not found: $ENVF"; exit 1; }
+            # Ensure files
+            [ -f "$FILE" ] || { echo "::error ::Compose file not found: $FILE"; exit 1; }
+            [ -f "$ENVF" ] || { echo "::error ::Env file not found: $ENVF"; exit 1; }
 
             export COMPOSE_PROJECT_NAME=animo_staging
             set -a; . "$ENVF"; set +a
 
-            # Clean once to absorb legacy containers
-            docker compose -f "$FILE" --env-file "$ENVF" down --remove-orphans || true
-            for c in backend-stg analytics-stg frontend-stg mongo-stg; do
-              docker rm -f "$c" 2>/dev/null || true
-            done
-
-            # --- 1) Start ONLY mongo first ---
-            docker compose -f "$FILE" --env-file "$ENVF" up -d mongo-stg
-
-            # Wait for mongo to be reachable
-            i=0; until docker exec -i mongo-stg mongosh \
-                  -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" \
-                  --authenticationDatabase admin --quiet --eval 'db.runCommand({ping:1}).ok' | grep -q '^1$'; do
-              i=$((i+1)); [ "$i" -gt 60 ] && { echo "::error ::mongo-stg did not become ready"; docker logs mongo-stg | tail -n 200; exit 1; }
-              sleep 2
-            done
-            echo "::notice ::mongo-stg is ready"
-
-            # --- 2) Ensure app user + permissions BEFORE backend starts ---
-            docker exec -i mongo-stg mongosh -u root -p 'StagingDLSU' --authenticationDatabase admin --quiet <<'JS'
-            db = db.getSiblingDB("admin");
-            try {
-              db.updateUser("animo_app", { pwd: "StagingDLSU" });
-            } catch(e) {
-              // Fallback for versions that prefer this helper
-              db.changeUserPassword("animo_app", "StagingDLSU");
-            }
-            // Ensure role is correct
-            const dbname = "animoassign_dev";
-            const u = db.getUser("animo_app");
-            db.revokeRolesFromUser("animo_app", (u && u.roles) || []);
-            db.grantRolesToUser("animo_app", [{ role: "dbOwner", db: dbname }]);
-            print("animo_app password + roles updated");
-            JS
-
-            # Optional: verify the app user can create an index
-            docker exec -i mongo-stg mongosh \
-              -u animo_app -p 'StagingDLSU' --authenticationDatabase admin --quiet <<'JS'
-            const dbname = "animoassign_dev";
-            const coll = "faculty_profiles";
-            db = db.getSiblingDB(dbname);
-            db[coll].createIndex({ user_id: 1 }, { name: "user_id_1" });
-            print("app user can create indexes on " + dbname + "." + coll);
-            JS
-
-            # --- 3) Now start backend/analytics/frontend ---
-            SERVICES=$(docker compose -f "$FILE" config --services | grep -v '^mongo-stg$' || true)
-            echo "::notice ::Compose services: $SERVICES"
-            docker compose -f "$FILE" --env-file "$ENVF" up -d --build $SERVICES
-
-            # Health checks inside networks
-            DEF_NET="${COMPOSE_PROJECT_NAME}_default"
-            EXT_NET="docker_animoassign"
-            curl_wait() {
-              local net="$1" url="$2" svc="$3" tries="${4:-40}" i=0
+            # -------- Helpers (imitate prod) --------
+            curl_in() { # usage: curl_in <containerIdOrName> <url> <label> [tries]
+              local c="$1" url="$2" label="$3" tries="${4:-90}" i=0
               while true; do
-                if docker run --rm --network "$net" curlimages/curl:8.10.1 -fsS "$url" >/dev/null 2>&1; then
-                  echo "::notice ::$svc is healthy at $url"
+                if docker run --rm --network "container:$c" curlimages/curl:8.10.1 -fsS "$url" >/dev/null 2>&1; then
+                  echo "::notice ::$label healthy (via container:$c) $url"
                   break
                 fi
                 i=$((i+1)); if [ "$i" -ge "$tries" ]; then
-                  echo "::error ::$svc did not become ready at $url"
-                  docker compose -f "$FILE" logs --tail=200 "$svc" || true
+                  echo "::error ::$label did not become ready at $url"
+                  docker logs "$c" --tail=200 || true
+                  docker inspect -f '{{json .NetworkSettings.Networks}}' "$c" || true
                   exit 1
                 fi
-                sleep 3
+                sleep 2
               done
             }
-            curl_wait "$DEF_NET" http://backend-stg:8000/health   backend-stg
-            curl_wait "$DEF_NET" http://analytics-stg:8000/health analytics-stg
-            curl_wait "$EXT_NET" http://frontend-stg              frontend-stg
+
+            svc_first() { # pick first service matching regex
+              docker compose -f "$FILE" config --services | grep -E "$1" | head -n1
+            }
+
+            cid_for() { # container id for compose service
+              docker compose -f "$FILE" ps -q "$1"
+            }
+            # ----------------------------------------
+
+            # Clean legacy containers
+            docker compose -f "$FILE" --env-file "$ENVF" down --remove-orphans || true
+
+            # ---- 1) Start ONLY Mongo (service autodetect) ----
+            MONGO_SVC="$(svc_first '(^|-)mongo($|-)|(^|-)mongodb($-)')"
+            [ -n "$MONGO_SVC" ] || { echo "::error ::Could not find mongo service in compose"; exit 1; }
+
+            docker compose -f "$FILE" --env-file "$ENVF" up -d "$MONGO_SVC"
+
+            CID_MONGO="$(cid_for "$MONGO_SVC")"
+            i=0; until docker exec -i "$CID_MONGO" mongosh \
+                     -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" \
+                     --authenticationDatabase admin --quiet \
+                     --eval 'db.runCommand({ping:1}).ok' | grep -q '^1$'; do
+              i=$((i+1)); [ "$i" -gt 90 ] && { echo "::error ::Mongo did not become ready"; docker logs "$CID_MONGO" | tail -n 200; exit 1; }
+              sleep 2
+            done
+            echo "::notice ::$MONGO_SVC is ready"
+
+            # ---- 2) Ensure app user matches your ENV authSource ----
+            # Your staging.env uses: authSource=animoassign_stg and DB animoassign_dev
+            APP_DB="animoassign_dev"
+            AUTH_DB="animoassign_stg"
+            APP_USER="animo_app"
+            APP_PWD="StagingDLSU"
+
+            docker exec -i "$CID_MONGO" mongosh -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" --authenticationDatabase admin --quiet <<JS
+            // Create or update user in AUTH_DB so it works with authSource=$AUTH_DB
+            const APP_DB  = "$APP_DB";
+            const AUTH_DB = "$AUTH_DB";
+            const USER    = "$APP_USER";
+            const PWD     = "$APP_PWD";
+
+            let adb = db.getSiblingDB(AUTH_DB);
+            try {
+              if (!adb.getUser(USER)) {
+                adb.createUser({
+                  user: USER, pwd: PWD,
+                  roles: [
+                    { role: "readWrite", db: APP_DB },
+                    { role: "dbAdmin",   db: APP_DB }
+                  ]
+                });
+                print(`created user \${USER} in \${AUTH_DB} with readWrite+dbAdmin on \${APP_DB}`);
+              } else {
+                // refresh password + ensure roles exist
+                try { adb.updateUser(USER, { pwd: PWD }); } catch(e) { adb.changeUserPassword(USER, PWD); }
+                const u = adb.getUser(USER);
+                const want = [
+                  { role: "readWrite", db: APP_DB },
+                  { role: "dbAdmin",   db: APP_DB }
+                ];
+                // grant missing roles
+                for (const r of want) {
+                  if (!u.roles.some(v => v.role===r.role && v.db===r.db)) {
+                    adb.grantRolesToUser(USER, [r]);
+                  }
+                }
+                print(`ensured \${USER} in \${AUTH_DB} has readWrite+dbAdmin on \${APP_DB}`);
+              }
+            } catch(e) { print(e.message); quit(1); }
+            JS
+
+            # quick capability test using authSource from ENV
+            docker exec -i "$CID_MONGO" mongosh \
+              "mongodb://$APP_USER:$APP_PWD@localhost:27017/$APP_DB?authSource=$AUTH_DB" --quiet <<'JS'
+            const dbname = db.getName();
+            const coll = "faculty_profiles";
+            db[coll].createIndex({ user_id: 1 }, { name: "user_id_1" });
+            print(`index check ok on ${dbname}.${coll}`);
+            JS
+
+            # ---- 3) Start the rest of the services (auto-discovered) ----
+            SERVICES="$(docker compose -f "$FILE" config --services | grep -v "^$MONGO_SVC$" || true)"
+            echo "::notice ::Compose services: $SERVICES"
+            docker compose -f "$FILE" --env-file "$ENVF" up -d --build $SERVICES
+
+            # ---- 4) Health checks via container netns (imitate prod) ----
+            DEF_NET="${COMPOSE_PROJECT_NAME}_default"
+
+            SVC_BACKEND="$(svc_first '(^|-)backend($|-)|(^|-)api($|-)')"
+            SVC_ANALYTICS="$(svc_first '(^|-)analytics($|-)')"
+            SVC_FRONTEND="$(svc_first '(^|-)front(end)?($|-)')"
+
+            [ -n "$SVC_BACKEND" ]   || { echo "::error ::Cannot find backend service in compose"; exit 1; }
+            [ -n "$SVC_ANALYTICS" ] || { echo "::error ::Cannot find analytics service in compose"; exit 1; }
+            [ -n "$SVC_FRONTEND" ]  || { echo "::error ::Cannot find frontend service in compose"; exit 1; }
+
+            CID_BACKEND="$(cid_for "$SVC_BACKEND")"
+            CID_ANALYTICS="$(cid_for "$SVC_ANALYTICS")"
+            CID_FRONTEND="$(cid_for "$SVC_FRONTEND")"
+
+            curl_in "$CID_BACKEND"   http://127.0.0.1:8000/health   "$SVC_BACKEND"
+            curl_in "$CID_ANALYTICS" http://127.0.0.1:8000/health   "$SVC_ANALYTICS"
+            curl_in "$CID_FRONTEND"  http://127.0.0.1/              "$SVC_FRONTEND"
 
             docker system prune -f || true
