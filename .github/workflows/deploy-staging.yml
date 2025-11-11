@@ -140,37 +140,25 @@ jobs:
             echo "::notice ::mongo-stg is ready"
 
             # --- 2) Ensure app user + permissions BEFORE backend starts ---
-            docker exec -i mongo-stg mongosh \
-              -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" \
-              --authenticationDatabase admin --quiet <<'JS'
-            const dbname = "animoassign_dev";   // change if your staging DB name differs
-            const user   = "animo_app";
-            const pwd    = "StagingDLSU";         // only used on first create
-
+            ddocker exec -i mongo-stg mongosh -u root -p 'StagingDLSU' --authenticationDatabase admin --quiet <<'JS'
             db = db.getSiblingDB("admin");
-            const existing = db.getUser(user);
-            if (!existing) {
-              db.createUser({
-                user, pwd,
-                roles: [
-                  { role: "dbOwner", db: dbname }     // strongest & simplest for staging
-                ]
-              });
-              print(` created ${user} as dbOwner on ${dbname}`);
-            } else {
-              // Normalize to dbOwner (covers createIndexes, collMod, etc.)
-              db.revokeRolesFromUser(user, existing.roles || []);
-              db.grantRolesToUser(user, [{ role: "dbOwner", db: dbname }]);
-              print(` ensured ${user} has dbOwner on ${dbname}`);
+            try {
+              db.updateUser("animo_app", { pwd: "StagingDLSU" });
+            } catch(e) {
+              // Fallback for versions that prefer this helper
+              db.changeUserPassword("animo_app", "StagingDLSU");
             }
-
-            // Show effective privileges (sanity)
-            printjson(db.runCommand({ usersInfo: user, showPrivileges: true }));
+            // Ensure role is correct
+            const dbname = "animoassign_dev";
+            const u = db.getUser("animo_app");
+            db.revokeRolesFromUser("animo_app", (u && u.roles) || []);
+            db.grantRolesToUser("animo_app", [{ role: "dbOwner", db: dbname }]);
+            print("✅ animo_app password + roles updated");
             JS
 
             # Optional: verify the app user can create an index
             docker exec -i mongo-stg mongosh \
-              -u animo_app -p 'DLSU1234!' --authenticationDatabase admin --quiet <<'JS'
+              -u animo_app -p 'StagingDLSU' --authenticationDatabase admin --quiet <<'JS'
             const dbname = "animoassign_dev";
             const coll = "faculty_profiles";
             db = db.getSiblingDB(dbname);
