@@ -35,6 +35,54 @@ import {
 const DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"] as const;
 type Day = (typeof DAYS)[number];
 
+// === ADDED: Abbreviation mapping & coercers ===
+const DAY_ABBR = ["M","T","W","TH","F","S"] as const;
+type DayAbbr = (typeof DAY_ABBR)[number];
+
+const DAY_FULL_TO_ABBR: Record<Day, DayAbbr> = {
+  Monday: "M",
+  Tuesday: "T",
+  Wednesday: "W",
+  Thursday: "TH",
+  Friday: "F",
+  Saturday: "S",
+};
+
+const DAY_ABBR_TO_FULL: Record<DayAbbr, Day> = {
+  M: "Monday",
+  T: "Tuesday",
+  W: "Wednesday",
+  TH: "Thursday",
+  F: "Friday",
+  S: "Saturday",
+};
+
+// Accepts "Monday" or "M" → returns "M/T/W/TH/F/S"
+function toAbbrevDay(d?: string | null): DayAbbr | "" {
+  const raw = String(d || "").trim();
+  if (!raw) return "";
+  const up = raw.toUpperCase();
+
+  // Already an abbreviation? (M/T/W/TH/F/S)
+  if ((DAY_ABBR as readonly string[]).includes(up)) return up as DayAbbr;
+
+  // Normalize to full day (e.g., "Monday") and look up
+  const full = (raw[0]?.toUpperCase() + raw.slice(1).toLowerCase()) as Day;
+  const hit = (DAY_FULL_TO_ABBR as Record<string, DayAbbr>)[full];
+  return hit || "";
+}
+
+
+// Accepts "M/T/W/TH/F/S" or full → returns full ("Monday…")
+function toFullDay(d?: string | null): Day | "" {
+  const s = String(d || "").trim();
+  if (!s) return "";
+  const up = s.toUpperCase();
+  if ((DAY_ABBR as readonly string[]).includes(up)) return DAY_ABBR_TO_FULL[up as DayAbbr];
+  const norm = s[0]?.toUpperCase() + s.slice(1).toLowerCase();
+  return (DAYS.includes(norm as Day) ? (norm as Day) : "") as Day | "";
+}
+
 type RoomOption = {
   room_id: string;
   room_number: string;
@@ -850,21 +898,20 @@ useEffect(() => {
       faculty_name: row.faculty?.faculty_name || "UNASSIGNED",
       slot1: row.slot1
         ? {
-            day: (row.slot1.day as Day | ""),
+            day: toFullDay(row.slot1.day) as Day | "",
             start_time: row.slot1.start_time,
             end_time: row.slot1.end_time,
-            ...(row.slot1.room_id ? { room_id: row.slot1.room_id } : {}), // <- no empty string
+            ...(row.slot1.room_id ? { room_id: row.slot1.room_id } : {}),
           }
         : undefined,
       slot2: row.slot2
         ? {
-            day: (row.slot2.day as Day | ""),
+            day: toFullDay(row.slot2.day) as Day | "",
             start_time: row.slot2.start_time,
             end_time: row.slot2.end_time,
-            ...(row.slot2.room_id ? { room_id: row.slot2.room_id } : {}), // <- no empty string
+            ...(row.slot2.room_id ? { room_id: row.slot2.room_id } : {}),
           }
         : undefined,
-
       for_placeholder_course_id: electiveParentId,
       specific_course_id: currentSpecificId,
     },
@@ -988,6 +1035,10 @@ const s1 = isGE ? compactSlotGE(editing.draft.slot1) : compactSlotStrict(editing
 const s2 = isGE ? compactSlotGE(editing.draft.slot2) : compactSlotStrict(editing.draft.slot2);
 if (s1 && Object.keys(s1).length) payload.slot1 = s1;
 if (s2 && Object.keys(s2).length) payload.slot2 = s2;
+
+// === ADDED: convert any day values to abbreviations before posting ===
+if (payload.slot1?.day) (payload.slot1 as any).day = toAbbrevDay(payload.slot1.day) as any;
+if (payload.slot2?.day) (payload.slot2 as any).day = toAbbrevDay(payload.slot2.day) as any;
 
 if (isGE) {
   payload.faculty_name = (editing.draft.faculty_name || "UNASSIGNED").trim() || "UNASSIGNED";
@@ -1586,11 +1637,11 @@ if (isGE) {
                                               {r.faculty.faculty_name}
                                             </span>
                                           </td>
-                                          <td className="px-3 py-2 border border-gray-300">{r.slot1?.day || "—"}</td>
+                                          <td className="px-3 py-2 border border-gray-300">{toAbbrevDay(r.slot1?.day) || "—"}</td>
                                           <td className="px-3 py-2 border border-gray-300">{fmtTime(r.slot1?.start_time)}</td>
                                           <td className="px-3 py-2 border border-gray-300">{fmtTime(r.slot1?.end_time)}</td>
                                           <td className="px-3 py-2 border border-gray-300">{r.slot1?.room_number || r.slot1?.room_id || "—"}</td>
-                                          <td className="px-3 py-2 border border-gray-300">{r.slot2?.day || "—"}</td>
+                                          <td className="px-3 py-2 border border-gray-300">{toAbbrevDay(r.slot2?.day) || "—"}</td>
                                           <td className="px-3 py-2 border border-gray-300">{fmtTime(r.slot2?.start_time)}</td>
                                           <td className="px-3 py-2 border border-gray-300">{fmtTime(r.slot2?.end_time)}</td>
                                           <td className="px-3 py-2 border border-gray-300">{r.slot2?.room_number || r.slot2?.room_id || "—"}</td>

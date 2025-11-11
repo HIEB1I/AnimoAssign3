@@ -58,6 +58,31 @@ async def _next_course_id() -> str:
         if not exists:
             return cid
     raise HTTPException(status_code=500, detail="Unable to allocate new course_id")
+def _parse_seq_with_prefix(prefix: str, value: Optional[str]) -> int:
+    m = re.match(rf"^{re.escape(prefix)}(\d+)$", (value or ""))
+    return int(m.group(1)) if m else 0
+
+async def _next_seq_id(
+    collection: str,
+    field: str,
+    prefix: str,
+    width: int = 4,
+    attempts: int = 50,
+) -> str:
+    """Return next ID like 'SEC0001' / 'FAC0001' for any collection/field."""
+    last = await db[collection].find_one(
+        {field: {"$regex": rf"^{re.escape(prefix)}\d+$"}},
+        sort=[(field, -1)]
+    )
+    n = _parse_seq_with_prefix(prefix, (last or {}).get(field))
+    for _ in range(attempts):
+        n += 1
+        vid = f"{prefix}{n:0{width}d}"
+        exists = await db[collection].find_one({field: vid})
+        if not exists:
+            return vid
+    raise HTTPException(status_code=500, detail=f"Unable to allocate new {field} in {collection}")
+
 def _clean_mongo_doc(doc: dict) -> dict:
     """Return a JSON-safe copy of a MongoDB doc (ObjectId -> str)."""
     if not doc:
@@ -624,7 +649,7 @@ async def _resolve_or_create_faculty_by_name(name: str) -> Tuple[Optional[str], 
         if fp.get("faculty_id"):
             return (None, fp["faculty_id"])
 
-    fid = _id("FAC")
+    fid = await _next_seq_id(COL_FAC_PROFILES, "faculty_id", "FAC", 4)
     doc = {
         "faculty_id": fid,
         "first_name": nm["first_name"],
@@ -1208,6 +1233,7 @@ async def ensure_sections_from_demand(
         to_make = base_per_program - existing
         for _ in range(to_make):
             code = await next_section_code(campus_prefix, term_id, course_id)
+            sid = await _next_seq_id(COL_SECTIONS, "section_id", "SEC", 4)
             doc = {
                 "section_id": _id("SEC"),
                 "section_code": code,
@@ -1226,8 +1252,9 @@ async def ensure_sections_from_demand(
     if existing < needed:
         for _ in range(needed - existing):
             code = await next_section_code(campus_prefix, term_id, course_id)
+            sid = await _next_seq_id(COL_SECTIONS, "section_id", "SEC", 4)
             doc = {
-                "section_id": _id("SEC"),
+                "section_id": sid,
                 "section_code": code,
                 "course_id": course_id,
                 "term_id": term_id,
@@ -1244,8 +1271,9 @@ async def _create_sections(
     made = 0
     for _ in range(max(0, int(count))):
         code = await next_section_code(campus_prefix, term_id, course_id)
+        sid = await _next_seq_id(COL_SECTIONS, "section_id", "SEC", 4)
         doc = {
-            "section_id": _id("SEC"),
+            "section_id": sid,
             "section_code": code,
             "course_id": course_id,
             "term_id": term_id,
@@ -1848,8 +1876,15 @@ async def get_course_offerings(
             {"term_id": term_id, "section_id": section_id, "is_archived": {"$ne": True}},
             {"_id": 0, "user_id": 1, "faculty_id": 1}
         )
+        # Fallback for legacy rows that don’t have term_id
+        if not fa:
+            fa = await db[COL_FAC_ASSIGN].find_one(
+                {"section_id": section_id, "is_archived": {"$ne": True}},
+                {"_id": 0, "user_id": 1, "faculty_id": 1}
+            )
         if not fa:
             return ("UNASSIGNED", None, None)
+
         uid = (fa.get("user_id") or "").strip() or None
         fid = (fa.get("faculty_id") or "").strip() or None
         if uid:
@@ -2645,7 +2680,7 @@ async def post_course_offerings(
 
         section_code = (payload.get("section_code") or "").strip() or await next_section_code(chosen_prefix, term_id, target_course_id)
 
-        sid = _id("SEC")
+        sid = await _next_seq_id(COL_SECTIONS, "section_id", "SEC", 4)
         cap = payload.get("enrollment_cap")
         if cap in (None, ""):
             cap = await default_capacity_for_course(target_course_id)
@@ -2732,15 +2767,22 @@ async def post_course_offerings(
                     resolved_uid, resolved_fid = await _resolve_or_create_faculty_by_name(fname)
                     uid, fid = resolved_uid or "", resolved_fid or ""
                 if uid or fid:
+                    fas_id = await _next_seq_id(COL_FAC_ASSIGN, "faculty_assignment_id", "FAS", 4)
+                    asg_id = await _next_seq_id(COL_FAC_ASSIGN, "assignment_id", "ASG", 4)
                     await db[COL_FAC_ASSIGN].update_one(
-                        {"term_id": term_id, "section_id": sid},
+                        {"section_id": sid},  # do NOT include term_id so legacy rows match
                         {"$set": {
                             "user_id": uid or None,
                             "faculty_id": fid or None,
                             "is_archived": False,
                             "updated_at": now()
                         },
-                         "$setOnInsert": {"faculty_assignment_id": _id("FAS"), "created_at": now()}},
+                        "$setOnInsert": {
+                            "assignment_id": asg_id,                  # <- legacy field name
+                            "load_id": (payload.get("load_id") or None),  # <- optional if you send it
+                            "section_id": sid,
+                            "created_at": now()
+                        }},
                         upsert=True
                     )
 
@@ -2887,18 +2929,25 @@ async def post_course_offerings(
 
             if uid or fid:
                 await db[COL_FAC_ASSIGN].update_many(
-                    {"term_id": term_id, "section_id": section_id, "is_archived": {"$ne": True}},
+                    {"section_id": section_id, "is_archived": {"$ne": True}},
                     {"$set": {"is_archived": True, "updated_at": now()}}
                 )
+                fas_id = await _next_seq_id(COL_FAC_ASSIGN, "faculty_assignment_id", "FAS", 4)
+                asg_id = await _next_seq_id(COL_FAC_ASSIGN, "assignment_id", "ASG", 4)
                 await db[COL_FAC_ASSIGN].update_one(
-                    {"term_id": term_id, "section_id": section_id},
+                    {"section_id": section_id},  # legacy-compatible
                     {"$set": {
                         "user_id": uid or None,
                         "faculty_id": fid or None,
                         "is_archived": False,
                         "updated_at": now()
                     },
-                     "$setOnInsert": {"faculty_assignment_id": _id("FAS"), "created_at": now()}},
+                    "$setOnInsert": {
+                        "assignment_id": asg_id,
+                        "load_id": (payload.get("load_id") or None),
+                        "section_id": section_id,
+                        "created_at": now()
+                    }},
                     upsert=True
                 )
 
