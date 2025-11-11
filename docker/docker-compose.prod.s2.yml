@@ -12,13 +12,19 @@ services:
     network_mode: host
     restart: unless-stopped
 
-  mongo-arbiter:
-    container_name: mongo-arbiter
+  mongo-tertiary:
+    container_name: mongo-tertiary
     image: mongo:7
-    command: ["mongod", "--replSet", "animoassignRS", "--bind_ip_all", "--port", "27018", "--auth", "--keyFile", "/run/secrets/mongo-keyfile"]
+    command: ["mongod","--replSet","animoassignRS","--bind_ip_all","--auth","--keyFile","/run/secrets/mongo-keyfile"]
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_INITDB_ROOT_USERNAME:-animo_root}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD:-DLSU1234!}
     volumes:
+      - mongo_tertiary_data:/data/db
       - /opt/secrets/animoassign/mongo-keyfile:/run/secrets/mongo-keyfile:ro
-    network_mode: host
+    ports:
+      - "27019:27017"
+    networks: [animoassign]
     restart: unless-stopped
 
   backend-secondary:
@@ -31,6 +37,7 @@ services:
       SERVICE_ROLE: secondary
     depends_on:
       - mongo-secondary
+      - mongo-tertiary
     ports:
       - "28000:8000"
     networks: [animoassign]
@@ -45,6 +52,7 @@ services:
       SERVICE_ROLE: secondary
     depends_on:
       - mongo-secondary
+      - mongo-tertiary
     ports:
       - "28100:8000"
     networks: [animoassign]
@@ -83,3 +91,4 @@ networks:
 
 volumes:
   mongo_secondary_data:
+  mongo_tertiary_data:
