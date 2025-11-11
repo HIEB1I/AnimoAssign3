@@ -147,7 +147,7 @@ from .FACULTY.FACULTY_Deloadings import router as faculty_deloadings_router
 from .CHAIR.CHAIR_Plantilla import router as chair_plantilla_router
 from .CHAIR.CHAIR_FacultyManagement import router as chair_facultymanagement_router
 from .CHAIR.CHAIR_CourseManagement import router as chair_coursemanagement_router
-from .CHAIR.CHAIR_FacultyService import router as chair_facultyservice_router
+from .CHAIR.CHAIR_FacultyService import router as chair_faculty_service_router
 from .CHAIR.CHAIR_ClassRetention import router as chair_classretention_router
 from .CHAIR.CHAIR_StudentPetition import router as chair_studentpetition_router
 from .CHAIR.CHAIR_Inbox import router as chair_inbox_router
@@ -183,7 +183,7 @@ app.include_router(admin_inbox_router, prefix="/api")
 app.include_router(chair_plantilla_router, prefix="/api")
 app.include_router(chair_facultymanagement_router, prefix="/api")
 app.include_router(chair_coursemanagement_router, prefix="/api")
-app.include_router(chair_facultyservice_router, prefix="/api")
+app.include_router(chair_faculty_service_router, prefix="/api")
 app.include_router(chair_classretention_router, prefix="/api")
 app.include_router(chair_studentpetition_router, prefix="/api")
 app.include_router(chair_inbox_router, prefix="/api")
