@@ -145,7 +145,7 @@ jobs:
               --authenticationDatabase admin --quiet <<'JS'
             const dbname = "animoassign_dev";   // change if your staging DB name differs
             const user   = "animo_app";
-            const pwd    = "DLSU1234!";         // only used on first create
+            const pwd    = "StagingDLSU";         // only used on first create
 
             db = db.getSiblingDB("admin");
             const existing = db.getUser(user);
@@ -156,7 +156,7 @@ jobs:
                   { role: "dbOwner", db: dbname }     // strongest & simplest for staging
                 ]
               });
-              print(`created ${user} as dbOwner on ${dbname}`);
+              print(` created ${user} as dbOwner on ${dbname}`);
             } else {
               // Normalize to dbOwner (covers createIndexes, collMod, etc.)
               db.revokeRolesFromUser(user, existing.roles || []);
