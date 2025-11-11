@@ -140,7 +140,7 @@ jobs:
             echo "::notice ::mongo-stg is ready"
 
             # --- 2) Ensure app user + permissions BEFORE backend starts ---
-            ddocker exec -i mongo-stg mongosh -u root -p 'StagingDLSU' --authenticationDatabase admin --quiet <<'JS'
+            docker exec -i mongo-stg mongosh -u root -p 'StagingDLSU' --authenticationDatabase admin --quiet <<'JS'
             db = db.getSiblingDB("admin");
             try {
               db.updateUser("animo_app", { pwd: "StagingDLSU" });
