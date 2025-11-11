@@ -119,8 +119,6 @@ jobs:
             [ -f "$ENVF" ] || { echo "Env file not found: $ENVF"; exit 1; }
 
             export COMPOSE_PROJECT_NAME=animo_staging
-
-            # Export env vars for compose substitution
             set -a; . "$ENVF"; set +a
 
             # Clean once to absorb legacy containers
@@ -129,8 +127,59 @@ jobs:
               docker rm -f "$c" 2>/dev/null || true
             done
 
-            # Recreate services
-            docker compose -f "$FILE" --env-file "$ENVF" up -d --build
+            # --- 1) Start ONLY mongo first ---
+            docker compose -f "$FILE" --env-file "$ENVF" up -d mongo-stg
+
+            # Wait for mongo to be reachable
+            i=0; until docker exec -i mongo-stg mongosh \
+                  -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" \
+                  --authenticationDatabase admin --quiet --eval 'db.runCommand({ping:1}).ok' | grep -q '^1$'; do
+              i=$((i+1)); [ "$i" -gt 60 ] && { echo "::error ::mongo-stg did not become ready"; docker logs mongo-stg | tail -n 200; exit 1; }
+              sleep 2
+            done
+            echo "::notice ::mongo-stg is ready"
+
+            # --- 2) Ensure app user + permissions BEFORE backend starts ---
+            docker exec -i mongo-stg mongosh \
+              -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" \
+              --authenticationDatabase admin --quiet <<'JS'
+            const dbname = "animoassign_dev";   // change if your staging DB name differs
+            const user   = "animo_app";
+            const pwd    = "DLSU1234!";         // only used on first create
+
+            db = db.getSiblingDB("admin");
+            const existing = db.getUser(user);
+            if (!existing) {
+              db.createUser({
+                user, pwd,
+                roles: [
+                  { role: "dbOwner", db: dbname }     // strongest & simplest for staging
+                ]
+              });
+              print(`created ${user} as dbOwner on ${dbname}`);
+            } else {
+              // Normalize to dbOwner (covers createIndexes, collMod, etc.)
+              db.revokeRolesFromUser(user, existing.roles || []);
+              db.grantRolesToUser(user, [{ role: "dbOwner", db: dbname }]);
+              print(` ensured ${user} has dbOwner on ${dbname}`);
+            }
+
+            // Show effective privileges (sanity)
+            printjson(db.runCommand({ usersInfo: user, showPrivileges: true }));
+            JS
+
+            # Optional: verify the app user can create an index
+            docker exec -i mongo-stg mongosh \
+              -u animo_app -p 'DLSU1234!' --authenticationDatabase admin --quiet <<'JS'
+            const dbname = "animoassign_dev";
+            const coll = "faculty_profiles";
+            db = db.getSiblingDB(dbname);
+            db[coll].createIndex({ user_id: 1 }, { name: "user_id_1" });
+            print("✅ app user can create indexes on " + dbname + "." + coll);
+            JS
+
+            # --- 3) Now start backend/analytics/frontend ---
+            docker compose -f "$FILE" --env-file "$ENVF" up -d --build backend-stg analytics-stg frontend-stg
 
             # Health checks inside networks
             DEF_NET="${COMPOSE_PROJECT_NAME}_default"
@@ -142,8 +191,7 @@ jobs:
                   echo "::notice ::$svc is healthy at $url"
                   break
                 fi
-                i=$((i+1))
-                if [ "$i" -ge "$tries" ]; then
+                i=$((i+1)); if [ "$i" -ge "$tries" ]; then
                   echo "::error ::$svc did not become ready at $url"
                   docker compose -f "$FILE" logs --tail=200 "$svc" || true
                   exit 1
@@ -151,36 +199,8 @@ jobs:
                 sleep 3
               done
             }
-
-            # Use the same root creds you already have in docker/staging.env
-            docker exec -i mongo-stg mongosh \
-              -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" \
-              --authenticationDatabase admin --quiet <<'JS'
-            const dbname = "animoassign_dev";          // change if your staging DB name differs
-            const user   = "animo_app";                 // change if your app user differs
-            const pwd    = "DLSU1234!";                 // ignored if user already exists
-
-            db = db.getSiblingDB("admin");
-            if (!db.getUser(user)) {
-              db.createUser({
-                user, pwd,
-                roles: [
-                  { role: "readWrite", db: dbname },
-                  { role: "dbAdmin",   db: dbname }   // needed for createIndexes & collection options
-                ]
-              });
-              print(`created user ${user} with readWrite+dbAdmin on ${dbname}`);
-            } else {
-              db.grantRolesToUser(user, [
-                { role: "readWrite", db: dbname },
-                { role: "dbAdmin",   db: dbname }
-              ]);
-              print(`ensured roles for ${user} on ${dbname}`);
-            }
-            JS
-
-            curl_wait "$DEF_NET" http://backend-stg:8000/health   backend
-            curl_wait "$DEF_NET" http://analytics-stg:8000/health analytics
+            curl_wait "$DEF_NET" http://backend-stg:8000/health   backend-stg
+            curl_wait "$DEF_NET" http://analytics-stg:8000/health analytics-stg
             curl_wait "$EXT_NET" http://frontend-stg              frontend-stg
 
-            docker system prune -f
+            docker system prune -f || true
