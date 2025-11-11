@@ -1,6 +1,6 @@
 // FACULTY_Preferences.tsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { CalendarDays, MapPin, Monitor, BookOpen, Settings, Info } from "lucide-react";
+import { CalendarDays, MapPin, Monitor, BookOpen, Settings, Info, AlertTriangle } from "lucide-react";
 import {
   getFacultyPreferencesProfile,
   getFacultyPreferencesOptions,
@@ -26,7 +26,20 @@ function Tag({ children, tone = "emerald" }: { children: React.ReactNode; tone?:
   );
 }
 
-/* ---------- dropdowns (unchanged behavior) ---------- */
+/* ---------- shared label/dropdown styles to match screenshot ---------- */
+function FieldLabel({ children, required = false }: { children: React.ReactNode; required?: boolean }) {
+  return (
+    <label className="mb-2 block text-[15px] font-semibold text-emerald-700">
+      {children} {required && <span className="text-red-600">*</span>}
+    </label>
+  );
+}
+const DD_BASE =
+  "w-full rounded-2xl border border-gray-300 bg-white py-3 pl-4 pr-10 text-left text-[15px] shadow-sm outline-none hover:bg-gray-50 focus:ring-2 focus:ring-emerald-500/30";
+const DD_MENU =
+  "absolute z-20 mt-2 max-h-80 w-full overflow-auto rounded-2xl border border-gray-300 bg-white shadow-lg";
+
+/* ---------- multi-select dropdown ---------- */
 function MultiSelectDropdown({
   values, onChange, options, className = "w/full", placeholder = "— Select options —", maxPreview = 2,
 }: { values: string[]; onChange: (v: string[]) => void; options: readonly string[]; className?: string; placeholder?: string; maxPreview?: number; }) {
@@ -51,17 +64,17 @@ function MultiSelectDropdown({
   };
   return (
     <div className={cls("relative", className)} onKeyDown={onKey}>
-      <button ref={btnRef} onClick={() => setOpen((v) => !v)} aria-haspopup="listbox" aria-expanded={open}
-        className={cls("w-full rounded-xl border border-gray-200 bg-white py-2.5 pl-3 pr-10 text-left text-sm shadow-sm outline-none","hover:bg-gray-50 focus:ring-2 focus:ring-emerald-500/30")}>
-        {label}<span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2">▾</span>
+      <button ref={btnRef} onClick={() => setOpen((v) => !v)} aria-haspopup="listbox" aria-expanded={open} className={DD_BASE}>
+        {label}
+        <span className="pointer-events-none absolute right-4 top-1/2 -translate-y-1/2">▾</span>
       </button>
       {open && (
-        <div ref={listRef} role="listbox" className="absolute z-20 mt-2 max-h-80 w-full overflow-auto rounded-2xl border border-gray-300 bg-white shadow-lg">
+        <div ref={listRef} role="listbox" className={DD_MENU}>
           {options.map((opt, i) => {
             const checked = values.includes(opt);
             return (
               <button key={opt} role="option" aria-selected={checked} onMouseEnter={() => setHover(i)} onClick={() => toggle(opt)}
-                className={cls("flex w-full items-center gap-3 px-4 py-3 text-left text-sm", i === hover && "bg-emerald-50")}>
+                className={cls("flex w-full items-center gap-3 px-4 py-3 text-left text-[15px]", i === hover && "bg-emerald-50")}>
                 <input type="checkbox" readOnly checked={checked} className="accent-emerald-700" />
                 <span>{opt}</span>
               </button>
@@ -79,8 +92,9 @@ function MultiSelectDropdown({
   );
 }
 
+/* ---------- single-select dropdown ---------- */
 function Dropdown({
-  value, onChange, options, className = "w-full", placeholder = "— Select an option —",
+  value, onChange, options, className = "w-full", placeholder = "— Select —",
 }: { value: string; onChange: (v: string) => void; options: readonly string[]; className?: string; placeholder?: string; }) {
   const [open, setOpen] = useState(false);
   const [hover, setHover] = useState(() => Math.max(0, options.findIndex((o) => o === value)));
@@ -101,17 +115,16 @@ function Dropdown({
   };
   return (
     <div className={cls("relative", className)} onKeyDown={onKey}>
-      <button ref={btnRef} onClick={() => setOpen((v) => !v)} aria-haspopup="listbox" aria-expanded={open}
-        className={cls("w-full rounded-xl border border-gray-200 bg-white py-2.5 pl-3 pr-10 text-left text-sm shadow-sm outline-none","hover:bg-gray-50 focus:ring-2 focus:ring-emerald-500/30")}>
+      <button ref={btnRef} onClick={() => setOpen((v) => !v)} aria-haspopup="listbox" aria-expanded={open} className={DD_BASE}>
         {value || <span className="text-gray-400">{placeholder}</span>}
-        <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2">▾</span>
+        <span className="pointer-events-none absolute right-4 top-1/2 -translate-y-1/2">▾</span>
       </button>
       {open && (
-        <div ref={listRef} role="listbox" className="absolute z-20 mt-2 max-h-80 w-full overflow-auto rounded-2xl border border-gray-300 bg-white shadow-lg">
+        <div ref={listRef} role="listbox" className={DD_MENU}>
           {options.map((opt, i) => (
             <button key={opt} role="option" aria-selected={value === opt} onMouseEnter={() => setHover(i)}
               onClick={() => { onChange(opt); setOpen(false); btnRef.current?.focus(); }}
-              className={cls("block w-full px-4 py-3 text-left text-sm", i === hover && "bg-emerald-50")}>
+              className={cls("block w-full px-4 py-3 text-left text-[15px]", i === hover && "bg-emerald-50")}>
               {opt}
             </button>
           ))}
@@ -121,7 +134,7 @@ function Dropdown({
   );
 }
 
-/* ---------- master options (only delivery list is static UI text) ---------- */
+/* ---------- constants ---------- */
 const TEACHING_BREAK = "Prefers to take a teaching break next term";
 const OPT = {
   delivery: [
@@ -132,7 +145,6 @@ const OPT = {
   ] as const,
 } as const;
 
-/* ---------- Deloading options ---------- */
 const DELOADING_TYPES = [
   "Administrative",
   "Grad Studies",
@@ -141,7 +153,7 @@ const DELOADING_TYPES = [
   "Curriculum & Instruction",
 ] as const;
 
-/* ---------- helpers for unit label <-> number ---------- */
+/* ---------- unit helpers ---------- */
 const toLabel = (n: number) => {
   const s = (Number(n).toFixed(1));
   const base = `${s} units`;
@@ -156,7 +168,7 @@ const parseUnits = (label: string): number | null => {
   return m ? Number(m[1]) : null;
 };
 
-// DB↔UI time-slot normalization
+/* ---------- DB↔UI time-slot normalization ---------- */
 function normalizeDbTimeToUi(s: string): string {
   if (s.includes(":")) return s;
   const m = s.match(/^(\d{3,4})-(\d{3,4})$/);
@@ -174,40 +186,6 @@ function normalizeUiTimeToDb(s: string): string {
   if (!m) return s;
   return `${m[1]}${m[2]}-${m[3]}${m[4]}`;
 }
-
-/* ---------- types & local state ---------- */
-type DeloadRow = { type: string; detail?: string; units: number | null };
-
-type SavedPrefs = {
-  prefUnits: string;              // label
-  deloadings: DeloadRow[];
-  noDeloading: boolean;
-  days: string[];                 // display (Monday, ...)
-  timeSlots: string[];            // display ("07:30 - 09:00")
-  campus: string;
-  delivery: string;
-  kac: string[];                  // display names
-  remarks: string;
-
-  onBreak: boolean;
-  breakReason: string;
-  breakReturnDate: string; // MM/DD/YYYY
-};
-
-const initialSaved: SavedPrefs = {
-  prefUnits: "3.0 units",
-  deloadings: [],
-  noDeloading: true,
-  days: [],
-  timeSlots: [],
-  campus: "Either Campus",
-  delivery: "",
-  kac: [],
-  remarks: "",
-  onBreak: false,
-  breakReason: "",
-  breakReturnDate: "",
-};
 
 /* ---------- day helpers (Thursday must be 'H' on save) ---------- */
 const DAY_TO_LETTER: Record<string, "M" | "T" | "W" | "H" | "F" | "S"> = { Monday:"M", Tuesday:"T", Wednesday:"W", Thursday:"H", Friday:"F", Saturday:"S" };
@@ -241,34 +219,21 @@ function useCountdown(targetISO: string) {
   const d = Math.floor(diff / (1000*60*60*24));
   const h = Math.floor((diff/(1000*60*60))%24);
   const m = Math.floor((diff/(1000*60))%60);
-  const s = Math.floor((diff/1000)%60);
+  const s = Math.floor((diff/1000))%60;
   const label = past ? "Deadline passed" : `${d}d ${h}h ${m}m ${s}s`;
   return { past, label };
 }
 
-// ---- MODE/CAMPUS mapper (file-scope) ----
+/* ---------- MODE/CAMPUS mapper ---------- */
 type ModePayload = { mode?: "FOL" | "HYB" | "F2F"; campus_id?: string[] };
-
 const CMPS_MANILA = "CMPS0001";
 const CMPS_LAGUNA = "CMPS0002";
-
 function toModePayload(v: { delivery?: string; campus?: string }): ModePayload {
   const delivery = (v.delivery || "").toLowerCase();
-
-  const pack = (mode: "FOL" | "HYB", ids: string[]): ModePayload => ({
-    mode,
-    campus_id: ids,
-  });
-
-  if (delivery.includes("fully online")) {
-    return pack("FOL", [CMPS_MANILA, CMPS_LAGUNA]);
-  }
-  if (delivery.includes("manila")) {
-    return pack("HYB", [CMPS_MANILA]);
-  }
-  if (delivery.includes("laguna")) {
-    return pack("HYB", [CMPS_LAGUNA]);
-  }
+  const pack = (mode: "FOL" | "HYB", ids: string[]): ModePayload => ({ mode, campus_id: ids });
+  if (delivery.includes("fully online")) return pack("FOL", [CMPS_MANILA, CMPS_LAGUNA]);
+  if (delivery.includes("manila")) return pack("HYB", [CMPS_MANILA]);
+  if (delivery.includes("laguna")) return pack("HYB", [CMPS_LAGUNA]);
   return pack("HYB", [CMPS_MANILA, CMPS_LAGUNA]);
 }
 
@@ -306,6 +271,97 @@ function DeadlineBanner({ deadlineISO, className }: { deadlineISO: string; class
   );
 }
 
+/* ---------- AE Line 1 Schedule (same as reference) ---------- */
+function AELine1Schedule() {
+  const ML = [
+    { trip: "AE 101", etd: "6:00 AM" }, { trip: "AE 102", etd: "7:30 AM" }, { trip: "AE 103", etd: "9:30 AM" },
+    { trip: "AE 104", etd: "11:00 AM" }, { trip: "AE 105", etd: "1:00 PM" }, { trip: "AE 106", etd: "2:30 PM" },
+    { trip: "AE 107", etd: "3:30 PM" }, { trip: "AE 108", etd: "5:10 PM" }, { trip: "AE 109", etd: "6:15 PM" }, { trip: "AE 110", etd: "7:45 PM" },
+  ];
+  const LM = [
+    { trip: "AE 151", etd: "5:45 AM" }, { trip: "AE 152", etd: "6:15 AM" }, { trip: "AE 153", etd: "7:00 AM" },
+    { trip: "AE 154", etd: "8:00 AM" }, { trip: "AE 155", etd: "9:00 AM" }, { trip: "AE 156", etd: "11:00 AM" },
+    { trip: "AE 157", etd: "1:00 PM" }, { trip: "AE 158", etd: "2:30 PM" }, { trip: "AE 159", etd: "3:30 PM" },
+    { trip: "AE 160", etd: "5:10 PM" }, { trip: "AE 161", etd: "6:15 PM" }, { trip: "AE 162", etd: "7:45 PM" },
+  ];
+  const rows = Math.max(ML.length, LM.length);
+  const get = (arr: { trip: string; etd: string }[], i: number) => arr[i] ?? { trip: "", etd: "" };
+  return (
+    <div className="overflow-hidden rounded-xl border border-neutral-200 bg-white text-[11px]">
+      <div className="bg-emerald-700 px-3 py-2 text-center font-semibold text-white">
+        <div className="text-xs font-bold leading-tight">DLSU – Laguna Campus</div>
+        <div className="mt-1 inline-block rounded px-2 py-0.5 text-[10px] font-extrabold tracking-wide bg-amber-300 text-emerald-900">ARROWS EXPRESS</div>
+        <div className="mt-1 text-[11px]">LINE 1 SCHEDULE</div>
+        <div className="text-[11px]">Monday – Saturday</div>
+      </div>
+      <div className="grid grid-cols-2 border-b border-neutral-300 bg-neutral-50 text-center text-[11px] font-semibold text-neutral-800">
+        <div className="border-r border-neutral-300 px-2 py-2">MANILA &gt; LAGUNA</div>
+        <div className="px-2 py-2">LAGUNA &gt; MANILA</div>
+      </div>
+      <table className="w-full text-[11px]">
+        <thead>
+          <tr className="bg-neutral-100 text-center text-[11px] text-neutral-800">
+            <th className="border-r border-neutral-300 px-2 py-1.5 font-semibold">Trip Number</th>
+            <th className="border-r border-neutral-300 px-2 py-1.5 font-semibold">ETD</th>
+            <th className="border-r border-neutral-300 px-2 py-1.5 font-semibold">Trip Number</th>
+            <th className="px-2 py-1.5 font-semibold">ETD</th>
+          </tr>
+        </thead>
+        <tbody>
+          {Array.from({ length: rows }).map((_, i) => {
+            const L = get(ML, i), R = get(LM, i);
+            return (
+              <tr key={i} className="odd:bg-white even:bg-neutral-50">
+                <td className="border-t border-r border-neutral-300 px-2 py-1.5 align-top text-center">{L.trip || "\u00A0"}</td>
+                <td className="border-t border-r border-neutral-300 px-2 py-1.5 align-top text-center">{L.etd || "\u00A0"}</td>
+                <td className="border-t border-r border-neutral-300 px-2 py-1.5 align-top text-center">{R.trip || "\u00A0"}</td>
+                <td className="border-t border-neutral-300 px-2 py-1.5 align-top text-center">{R.etd || "\u00A0"}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+      <div className="grid grid-cols-2 border-t border-neutral-300 bg-neutral-50 text-[10px]">
+        <div className="border-r border-neutral-300 px-2 py-2"><span className="font-semibold">Pick-Up Point :</span> Southgate (LS Bldg.)</div>
+        <div className="px-2 py-2"><span className="font-semibold">Pick-Up Point :</span> East Canopy (MRR Bldg.)</div>
+      </div>
+    </div>
+  );
+}
+
+/* ===========================
+   TYPES & STATE
+   =========================== */
+type DeloadRow = { type: string; detail?: string; units: number | null };
+type SavedPrefs = {
+  prefUnits: string;
+  deloadings: DeloadRow[];
+  noDeloading: boolean;
+  days: string[];
+  timeSlots: string[];
+  campus: string;
+  delivery: string;
+  kac: string[];
+  remarks: string;
+  onBreak: boolean;
+  breakReason: string;
+  breakReturnDate: string; // stored as YYYY-MM-DD for the date input
+};
+const initialSaved: SavedPrefs = {
+  prefUnits: "3.0 units",
+  deloadings: [],
+  noDeloading: true,
+  days: [],
+  timeSlots: [],
+  campus: "Either Campus",
+  delivery: "",
+  kac: [],
+  remarks: "",
+  onBreak: false,
+  breakReason: "",
+  breakReturnDate: "",
+};
+
 /* ===========================
    EDIT FORM
    =========================== */
@@ -325,30 +381,22 @@ function EditForm({
 }) {
   const [form, setForm] = useState<SavedPrefs>(initial);
   const { past: deadlinePassed } = useCountdown(deadlineISO);
-
-  // progressive flow
   const [step, setStep] = useState<1 | 2>(1);
 
-  // FT/PT: units list from label-builder (no hardcoded numeric list in UI)
+  // FT/PT: unit options
   const prefUnitOptions = useMemo(() => {
     const base: string[] = [
       "0.0 units - no teaching load (for full-time only)",
-      "3.0 units",
-      "6.0 units",
-      "9.0 units",
-      "12.0 units",
-      "15.0 units - only for full-time",
-      "18.0 units - only for full-time",
+      "3.0 units", "6.0 units", "9.0 units", "12.0 units",
+      "15.0 units - only for full-time", "18.0 units - only for full-time",
     ];
     const isPT = employmentType === "PT";
-    const filtered = base.filter((label) =>
-      isPT ? !/^0\.0\s|^15\.0|^18\.0/.test(label) : true
-    );
+    const filtered = base.filter((label) => (isPT ? !/^0\.0\s|^15\.0|^18\.0/.test(label) : true));
     const rest = filtered.filter((l) => l !== TEACHING_BREAK);
     return [TEACHING_BREAK, ...rest];
   }, [employmentType]);
 
-  // default FT to 12 if empty/invalid
+  // default FT to 12
   useEffect(() => {
     const isValid = form.prefUnits && prefUnitOptions.includes(form.prefUnits as any);
     if (employmentType === "FT" && (!isValid || form.prefUnits === "")) {
@@ -365,11 +413,9 @@ function EditForm({
     }));
   }, [form.prefUnits]); // eslint-disable-line
 
-  // Deloading editor
+  // deloading rows
   const [deloadRows, setDeloadRows] = useState<DeloadRow[]>(() => (form.noDeloading ? [] : form.deloadings || []));
-  useEffect(() => {
-    if (form.noDeloading) setDeloadRows([]);
-  }, [form.noDeloading]);
+  useEffect(() => { if (form.noDeloading) setDeloadRows([]); }, [form.noDeloading]);
 
   // campus auto-mapping + lock
   function autoCampusFor(delivery: string): string {
@@ -380,29 +426,36 @@ function EditForm({
     return "Either Campus";
   }
 
-  // Validate per spec
+  // validation (includes research unit bounds + required details)
   function validate(): { ok: true } | { ok: false; msg: string } {
     if (isTeachingBreak) {
       if (!form.breakReason.trim()) return { ok: false, msg: "Reason for taking a break/leave is required." };
-      if (!/^\d{2}\/\d{2}\/\d{4}$/.test(form.breakReturnDate.trim())) return { ok: false, msg: "Date of return must be in MM/DD/YYYY format." };
+      if (!form.breakReturnDate.trim()) return { ok: false, msg: "Date of return is required." };
       return { ok: true };
     }
     if (!form.prefUnits || !prefUnitOptions.includes(form.prefUnits as any)) {
       return { ok: false, msg: "Please select Preferred Teaching Units." };
     }
-    // FT with deloading → units must be ≤ 9.0
-    if (employmentType === "FT" && !form.noDeloading && (deloadRows?.length ?? 0) > 0) {
-      const units = parseUnits(form.prefUnits) ?? 0;
-      if (units > 9) return { ok: false, msg: "With deloading, full-time faculty must declare 9.0 units or less." };
+    // Required details for Administrative/Research + research units range
+    for (const r of deloadRows) {
+      const needsSpecify = r.type === "Administrative" || r.type === "Research";
+      if (!form.noDeloading && needsSpecify && !(r.detail || "").trim()) {
+        return { ok: false, msg: `Please provide details for "${r.type}".` };
+      }
+      if (r.type === "Research" && r.units != null && (r.units < 1 || r.units > 9)) {
+        return { ok: false, msg: "Research deloading units must be between 1 and 9." };
+      }
     }
     return { ok: true };
   }
 
-  function toggleInArray(arr: string[], value: string): string[] {
-    return arr.includes(value) ? arr.filter((v) => v !== value) : [...arr, value];
-  }
+  // toggles
   const toggleMulti = (key: "days" | "timeSlots", value: string) =>
-    setForm((f) => ({ ...f, [key]: toggleInArray(f[key] as string[], value) }));
+    setForm((f) => {
+      const arr = f[key] as string[];
+      const has = arr.includes(value);
+      return { ...f, [key]: has ? arr.filter((v) => v !== value) : [...arr, value] };
+    });
 
   const showAE = ["Laguna Campus", "Either Campus"].includes(form.campus);
   const prepNote =
@@ -415,6 +468,9 @@ function EditForm({
         })()
       : "";
 
+  // deadline date (used as max for return date)
+  const termEndDate = new Date(deadlineISO).toISOString().slice(0, 10); // YYYY-MM-DD
+
   return (
     <div className="w-full">
       <div className="mb-4">
@@ -424,14 +480,12 @@ function EditForm({
 
       <DeadlineBanner deadlineISO={deadlineISO} />
 
-      <div className={cls("grid grid-cols-1 gap-6", showAE && "lg:grid-cols-[1fr_minmax(200px,400px)]")}>
-        <div className="space-y-5 rounded-xl border border-neutral-200 bg-white p-5">
-          {/* STEP 1 — Preferred Units ONLY (per spec) */}
+      <div className={cls("grid grid-cols-1 gap-6", step === 2 && showAE && "lg:grid-cols-[1fr_minmax(200px,400px)]")}>
+        <div className="space-y-6 rounded-xl border border-neutral-200 bg-white p-5">
+          {/* STEP 1 — match screenshot style */}
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <div>
-              <label className="mb-1 block text-sm font-medium">
-                Preferred Teaching Units <span className="text-red-600">*</span>
-              </label>
+              <FieldLabel required>Preferred Teaching Units</FieldLabel>
               <Dropdown
                 value={form.prefUnits}
                 onChange={(v) => {
@@ -452,7 +506,7 @@ function EditForm({
                   <button
                     type="button"
                     onClick={onClose}
-                    className="inline-flex h-9 items-center justify-center rounded-xl border border-neutral-200 bg-neutral-100 px-4 text-sm text-slate-900 shadow-sm hover:bg-neutral-200/70 active:translate-y-[0.5px]"
+                    className="inline-flex h-9 items-center justify-center rounded-2xl border border-neutral-200 bg-neutral-100 px-4 text-sm text-slate-900 shadow-sm hover:bg-neutral-200/70 active:translate-y-[0.5px]"
                   >
                     Cancel
                   </button>
@@ -461,16 +515,16 @@ function EditForm({
             </div>
           </div>
 
-          {/* STEP 2 — rest of questions */}
+          {/* STEP 2 */}
           {step === 2 && (
             <>
-              {/* --- TEACHING BREAK SUB-FORM (if chosen) --- */}
+              {/* Teaching Break subform */}
               {isTeachingBreak ? (
                 <>
-                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                  <div className="grid grid-cols-1 gap-6 sm:grid-cols-2">
                     <div>
-                      <label className="mb-1 block text-sm font-medium">Deloading</label>
-                      <label className="flex items-center gap-2 text-sm">
+                      <FieldLabel>Deloading</FieldLabel>
+                      <label className="flex items-center gap-2 text-[15px]">
                         <input
                           type="checkbox"
                           className="accent-emerald-700"
@@ -480,24 +534,29 @@ function EditForm({
                         I have no deloading
                       </label>
                       {!form.noDeloading && (
-                        <div className="mt-2 space-y-2">
+                        <div className="mt-3 space-y-3">
                           {deloadRows.map((r, i) => {
                             const needsSpecify = r.type === "Administrative" || r.type === "Research";
+                            const researchOutOfRange = r.type === "Research" && r.units != null && (r.units < 1 || r.units > 9);
                             return (
-                              <div key={i} className="flex flex-col gap-2">
-                                <div className="flex gap-2">
-                                  <div className="w-1/2">
+                              <div key={i} className="flex flex-col gap-2 rounded-xl border border-neutral-200 p-3">
+                                <div className="flex flex-col gap-2 sm:flex-row">
+                                  <div className="sm:w-1/2">
                                     <Dropdown
                                       value={r.type}
                                       onChange={(v) =>
                                         setDeloadRows((rows) => rows.map((x, idx) => (idx === i ? { ...x, type: v } : x)))
                                       }
                                       options={DELOADING_TYPES}
+                                      placeholder="— Select Deloading Type —"
                                     />
                                   </div>
                                   <input
                                     type="number"
-                                    className="w-32 rounded-xl border border-neutral-300 px-3 py-2.5 text-sm shadow-sm outline-none"
+                                    className={cls(
+                                      "w-full sm:w-40 rounded-2xl border px-4 py-3 text-[15px] shadow-sm outline-none",
+                                      researchOutOfRange ? "border-red-300" : "border-neutral-300"
+                                    )}
                                     placeholder="Units"
                                     value={r.units ?? ""}
                                     onChange={(e) => {
@@ -508,21 +567,34 @@ function EditForm({
                                   <button
                                     type="button"
                                     onClick={() => setDeloadRows((rows) => rows.filter((_, idx) => idx !== i))}
-                                    className="rounded-[10px] border border-neutral-200 bg-neutral-50 px-3 text-sm hover:bg-neutral-100"
+                                    className="rounded-2xl border border-neutral-200 bg-neutral-50 px-4 py-2 text-[14px] hover:bg-neutral-100"
                                   >
                                     Remove
                                   </button>
                                 </div>
+
                                 {needsSpecify && (
-                                  <input
-                                    type="text"
-                                    className="w-full rounded-xl border border-neutral-300 px-3 py-2.5 text-sm shadow-sm outline-none"
-                                    placeholder="Specify Type (e.g., Office of the Dean, Funded Project…)"
-                                    value={r.detail || ""}
-                                    onChange={(e) =>
-                                      setDeloadRows((rows) => rows.map((x, idx) => (idx === i ? { ...x, detail: e.target.value } : x)))
-                                    }
-                                  />
+                                  <>
+                                    <div className="mt-1 text-[13px] font-semibold text-emerald-700">
+                                      {r.type} Deloading Details <span className="text-red-600">*</span>
+                                    </div>
+                                    <input
+                                      type="text"
+                                      className="w-full rounded-2xl border border-neutral-300 px-4 py-3 text-[15px] shadow-sm outline-none"
+                                      placeholder={r.type === "Administrative" ? "Specify Office/Unit (e.g., Office of the Dean…)" : "Specify Project/Study (e.g., Funded Research…)"}
+                                      value={r.detail || ""}
+                                      onChange={(e) =>
+                                        setDeloadRows((rows) => rows.map((x, idx) => (idx === i ? { ...x, detail: e.target.value } : x)))
+                                      }
+                                    />
+                                  </>
+                                )}
+
+                                {researchOutOfRange && (
+                                  <div className="mt-1 flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 p-2 text-[13px] text-amber-800">
+                                    <AlertTriangle className="mt-0.5 h-4 w-4" />
+                                    Research deloading units should be between 1 and 9.
+                                  </div>
                                 )}
                               </div>
                             );
@@ -530,7 +602,7 @@ function EditForm({
                           <button
                             type="button"
                             onClick={() => setDeloadRows((rows) => [...rows, { type: "Administrative", units: null, detail: "" }])}
-                            className="inline-flex h-8 items-center justify-center rounded-[10px] px-3 text-sm shadow bg-emerald-700 text-white hover:brightness-110"
+                            className="inline-flex h-9 items-center justify-center rounded-2xl bg-emerald-700 px-4 text-sm text-white shadow hover:brightness-110"
                           >
                             Add Deloading
                           </button>
@@ -538,12 +610,12 @@ function EditForm({
                       )}
                     </div>
 
-                    <div className="space-y-3">
+                    <div className="space-y-4">
                       <div>
-                        <label className="mb-1 block text-sm font-medium">Reason for taking a break/leave <span className="text-red-600">*</span></label>
+                        <FieldLabel required>Reason for taking a break/leave</FieldLabel>
                         <input
                           type="text"
-                          className="w-full rounded-xl border border-neutral-300 px-3 py-2.5 text-sm shadow-sm outline-none"
+                          className="w-full rounded-2xl border border-neutral-300 px-4 py-3 text-[15px] shadow-sm outline-none"
                           placeholder="Reason..."
                           value={form.breakReason}
                           onChange={(e) => setForm({ ...form, breakReason: e.target.value })}
@@ -551,14 +623,15 @@ function EditForm({
                       </div>
 
                       <div>
-                        <label className="mb-1 block text-sm font-medium">Date of return (MM/DD/YYYY) <span className="text-red-600">*</span></label>
+                        <FieldLabel required>Date of return (MM/DD/YYYY)</FieldLabel>
                         <input
-                          type="text"
-                          className="w-full rounded-xl border border-neutral-300 px-3 py-2.5 text-sm shadow-sm outline-none"
-                          placeholder="MM/DD/YYYY"
-                          value={form.breakReturnDate}
+                          type="date"
+                          className="w-full rounded-2xl border border-neutral-300 px-4 py-3 text-[15px] shadow-sm outline-none"
+                          value={form.breakReturnDate || ""}
                           onChange={(e) => setForm({ ...form, breakReturnDate: e.target.value })}
+                          max={termEndDate} // cannot go beyond current term end
                         />
+                        <div className="mt-1 text-[12px] text-neutral-500">Must not be later than the current term.</div>
                       </div>
                     </div>
                   </div>
@@ -566,15 +639,13 @@ function EditForm({
                   {/* actions */}
                   <div className="flex items-center justify-end gap-2 pt-1">
                     <button onClick={onClose}
-                      className="inline-flex h-9 items-center justify-center rounded-xl border border-neutral-200 bg-neutral-100 px-4 text-sm text-slate-900 shadow-sm hover:bg-neutral-200/70 active:translate-y-[0.5px]">
+                      className="inline-flex h-9 items-center justify-center rounded-2xl border border-neutral-200 bg-neutral-100 px-4 text-sm text-slate-900 shadow-sm hover:bg-neutral-200/70 active:translate-y-[0.5px]">
                       Cancel
                     </button>
                     <button
                       disabled={deadlinePassed}
-                      onClick={() => {
-                        const v = validate(); if (v.ok) onDraft({ ...form, deloadings: form.noDeloading ? [] : deloadRows });
-                      }}
-                      className={cls("inline-flex h-9 items-center justify-center rounded-xl px-4 text-sm font-medium shadow active:translate-y-[0.5px]",
+                      onClick={() => { const v = validate(); if (v.ok) onDraft({ ...form, deloadings: form.noDeloading ? [] : deloadRows }); }}
+                      className={cls("inline-flex h-9 items-center justify-center rounded-2xl px-4 text-sm font-medium shadow active:translate-y-[0.5px]",
                         deadlinePassed ? "cursor-not-allowed bg-orange-200 text-white" : "bg-orange-500 text-white hover:brightness-110")}
                       title={deadlinePassed ? "Deadline passed — editing locked" : "Save a draft (not final)"}
                     >
@@ -582,10 +653,8 @@ function EditForm({
                     </button>
                     <button
                       disabled={deadlinePassed}
-                      onClick={() => {
-                        const v = validate(); if (v.ok) onSave({ ...form, deloadings: form.noDeloading ? [] : deloadRows });
-                      }}
-                      className={cls("inline-flex h-9 items-center justify-center rounded-xl px-4 text-sm font-medium text-white shadow active:translate-y-[0.5px]",
+                      onClick={() => { const v = validate(); if (v.ok) onSave({ ...form, deloadings: form.noDeloading ? [] : deloadRows }); }}
+                      className={cls("inline-flex h-9 items-center justify-center rounded-2xl px-4 text-sm font-medium text-white shadow active:translate-y-[0.5px]",
                         deadlinePassed ? "cursor-not-allowed bg-emerald-300" : "bg-[#1F7A49] hover:brightness-[1.06]")}
                       title={deadlinePassed ? "Deadline passed — editing locked" : "Save and finalize"}
                     >
@@ -595,10 +664,10 @@ function EditForm({
                 </>
               ) : (
                 <>
-                  {/* NEW ORDER: Delivery/Campus FIRST */}
-                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                  {/* Delivery/Campus */}
+                  <div className="grid grid-cols-1 gap-6 sm:grid-cols-2">
                     <div>
-                      <label className="mb-1 block text-sm font-medium">Preferred Delivery Mode</label>
+                      <FieldLabel>Preferred Delivery Mode</FieldLabel>
                       <Dropdown
                         value={form.delivery}
                         onChange={(v) => {
@@ -606,16 +675,16 @@ function EditForm({
                           setForm({ ...form, delivery: v, campus: nextCampus });
                         }}
                         options={OPT.delivery}
+                        placeholder="— Select Delivery Mode —"
                       />
                     </div>
-                    {/* Campus now LOCKED and auto-set */}
                     {form.delivery && (
                       <div>
-                        <label className="mb-1 block text-sm font-medium">Campus Preference (auto-set)</label>
+                        <FieldLabel>Campus Preference (auto-set)</FieldLabel>
                         <input
                           type="text"
                           disabled
-                          className="w-full rounded-xl border border-neutral-200 bg-neutral-100 px-3 py-2.5 text-sm text-neutral-700"
+                          className="w-full rounded-2xl border border-neutral-200 bg-neutral-100 px-4 py-3 text-[15px] text-neutral-700"
                           value={form.campus || "Either Campus"}
                           readOnly
                         />
@@ -623,13 +692,13 @@ function EditForm({
                     )}
                   </div>
 
-                  {/* THEN Days / Time Slots */}
-                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                  {/* Days / Time Slots */}
+                  <div className="grid grid-cols-1 gap-6 sm:grid-cols-2">
                     <div>
-                      <label className="mb-1 block text-sm font-medium">Preferred Teaching Days</label>
+                      <FieldLabel>Preferred Teaching Days</FieldLabel>
                       <div className="grid grid-cols-2 gap-2">
                         {daysMaster.map((d) => (
-                          <label key={d} className="flex items-center gap-2 text-sm">
+                          <label key={d} className="flex items-center gap-2 text-[15px]">
                             <input type="checkbox" className="accent-emerald-700" checked={form.days.includes(d)} onChange={() => toggleMulti("days", d)} />
                             {d}
                           </label>
@@ -638,10 +707,10 @@ function EditForm({
                     </div>
 
                     <div>
-                      <label className="mb-1 block text-sm font-medium">Preferred Time Slots</label>
+                      <FieldLabel>Preferred Time Slots</FieldLabel>
                       <div className="grid grid-cols-1 gap-1.5">
                         {timeSlotsMaster.map((t) => (
-                          <label key={t} className="flex items-center gap-2 text-sm">
+                          <label key={t} className="flex items-center gap-2 text-[15px]">
                             <input type="checkbox" className="accent-emerald-700" checked={form.timeSlots.includes(t)} onChange={() => toggleMulti("timeSlots", t)} />
                             {t}
                           </label>
@@ -650,22 +719,22 @@ function EditForm({
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                    <div>
-                      <label className="mb-1 block text-sm font-medium">Knowledge Area Cluster (KAC)</label>
-                      <MultiSelectDropdown
-                        values={form.kac as string[]}
-                        onChange={(v) => setForm({ ...form, kac: v })}
-                        options={kacDisplayOptions}
-                        placeholder="— Select one or more KACs —"
-                      />
-                    </div>
+                  {/* KAC */}
+                  <div>
+                    <FieldLabel>Knowledge Area Cluster (KAC)</FieldLabel>
+                    <MultiSelectDropdown
+                      values={form.kac as string[]}
+                      onChange={(v) => setForm({ ...form, kac: v })}
+                      options={kacDisplayOptions}
+                      placeholder="— Select KAC —"
+                    />
                   </div>
 
+                  {/* Deloading */}
                   <div className="space-y-3">
                     <div className="flex items-center justify-between">
-                      <label className="block text-sm font-medium">Deloading</label>
-                      <label className="flex items-center gap-2 text-sm">
+                      <FieldLabel>Deloading</FieldLabel>
+                      <label className="flex items-center gap-2 text-[15px]">
                         <input
                           type="checkbox"
                           className="accent-emerald-700"
@@ -678,25 +747,31 @@ function EditForm({
                         I have no deloading
                       </label>
                     </div>
+
                     {!form.noDeloading && (
-                      <div className="rounded-xl border border-neutral-200 p-3 space-y-2">
-                        {deloadRows.length === 0 && <div className="text-sm text-neutral-500">No deloading entries yet.</div>}
+                      <div className="space-y-3">
+                        {deloadRows.length === 0 && <div className="text-[15px] text-neutral-500">No deloading entries yet.</div>}
                         {deloadRows.map((r, i) => {
                           const needsSpecify = r.type === "Administrative" || r.type === "Research";
+                          const researchOutOfRange = r.type === "Research" && r.units != null && (r.units < 1 || r.units > 9);
                           return (
-                            <div key={i} className="grid grid-cols-1 gap-2 sm:grid-cols-[1fr_120px_auto]">
-                              <div className="sm:col-span-1">
+                            <div key={i} className="grid grid-cols-1 gap-2 sm:grid-cols-[1fr_160px_auto] rounded-xl border border-neutral-200 p-3">
+                              <div>
                                 <Dropdown
                                   value={r.type}
                                   onChange={(v) =>
                                     setDeloadRows((rows) => rows.map((x, idx) => (idx === i ? { ...x, type: v } : x)))
                                   }
                                   options={DELOADING_TYPES}
+                                  placeholder="— Select Deloading Type —"
                                 />
                               </div>
                               <input
                                 type="number"
-                                className="rounded-xl border border-neutral-300 px-3 py-2.5 text-sm shadow-sm outline-none"
+                                className={cls(
+                                  "rounded-2xl border px-4 py-3 text-[15px] shadow-sm outline-none",
+                                  researchOutOfRange ? "border-red-300" : "border-neutral-300"
+                                )}
                                 placeholder="Units"
                                 value={r.units ?? ""}
                                 onChange={(e) => {
@@ -705,15 +780,19 @@ function EditForm({
                                 }}
                               />
                               <button type="button" onClick={() => setDeloadRows((rows) => rows.filter((_, idx) => idx !== i))}
-                                className="rounded-[10px] border border-neutral-200 bg-neutral-50 px-3 text-sm hover:bg-neutral-100">
+                                className="rounded-2xl border border-neutral-200 bg-neutral-50 px-4 text-[14px] hover:bg-neutral-100">
                                 Remove
                               </button>
+
                               {needsSpecify && (
                                 <div className="sm:col-span-3">
+                                  <div className="mb-1 text-[13px] font-semibold text-emerald-700">
+                                    {r.type} Deloading Details <span className="text-red-600">*</span>
+                                  </div>
                                   <input
                                     type="text"
-                                    className="w-full rounded-xl border border-neutral-300 px-3 py-2.5 text-sm shadow-sm outline-none"
-                                    placeholder="Specify Type (e.g., Office of the Dean, Funded Project…)"
+                                    className="w-full rounded-2xl border border-neutral-300 px-4 py-3 text-[15px] shadow-sm outline-none"
+                                    placeholder={r.type === "Administrative" ? "Specify Office/Unit (e.g., Office of the Dean…)" : "Specify Project/Study (e.g., Funded Research…)"}
                                     value={r.detail || ""}
                                     onChange={(e) =>
                                       setDeloadRows((rows) => rows.map((x, idx) => (idx === i ? { ...x, detail: e.target.value } : x)))
@@ -721,20 +800,28 @@ function EditForm({
                                   />
                                 </div>
                               )}
+
+                              {researchOutOfRange && (
+                                <div className="sm:col-span-3 mt-1 flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 p-2 text-[13px] text-amber-800">
+                                  <AlertTriangle className="mt-0.5 h-4 w-4" />
+                                  Research deloading units should be between 1 and 9.
+                                </div>
+                              )}
                             </div>
                           );
                         })}
                         <button type="button" onClick={() => setDeloadRows((rows) => [...rows, { type: "Administrative", units: null, detail: "" }])}
-                          className="inline-flex h-8 items-center justify-center rounded-[10px] px-3 text-sm shadow bg-emerald-700 text-white hover:brightness-110">
+                          className="inline-flex h-9 items-center justify-center rounded-2xl bg-emerald-700 px-4 text-sm text-white shadow hover:brightness-110">
                           Add Deloading
                         </button>
                       </div>
                     )}
                   </div>
 
+                  {/* Remarks */}
                   <div>
-                    <label className="mb-1 block text-sm font-medium">Special Remarks</label>
-                    <textarea rows={4} className="w-full resize-y rounded-xl border border-neutral-300 p-2 text-sm"
+                    <FieldLabel>Special Remarks</FieldLabel>
+                    <textarea rows={4} className="w-full resize-y rounded-2xl border border-neutral-300 p-3 text-[15px]"
                       placeholder="Any special circumstances, research project name, or any additional information…"
                       value={form.remarks} onChange={(e) => setForm({ ...form, remarks: e.target.value })} />
                   </div>
@@ -742,15 +829,13 @@ function EditForm({
                   {/* actions */}
                   <div className="flex items-center justify-end gap-2 pt-1">
                     <button onClick={onClose}
-                      className="inline-flex h-9 items-center justify-center rounded-xl border border-neutral-200 bg-neutral-100 px-4 text-sm text-slate-900 shadow-sm hover:bg-neutral-200/70 active:translate-y-[0.5px]">
+                      className="inline-flex h-9 items-center justify-center rounded-2xl border border-neutral-200 bg-neutral-100 px-4 text-sm text-slate-900 shadow-sm hover:bg-neutral-200/70 active:translate-y-[0.5px]">
                       Cancel
                     </button>
                     <button
                       disabled={deadlinePassed}
-                      onClick={() => {
-                        const v = validate(); if (v.ok) onDraft({ ...form, deloadings: form.noDeloading ? [] : deloadRows });
-                      }}
-                      className={cls("inline-flex h-9 items-center justify-center rounded-xl px-4 text-sm font-medium shadow active:translate-y-[0.5px]",
+                      onClick={() => { const v = validate(); if (v.ok) onDraft({ ...form, deloadings: form.noDeloading ? [] : deloadRows }); }}
+                      className={cls("inline-flex h-9 items-center justify-center rounded-2xl px-4 text-sm font-medium shadow active:translate-y-[0.5px]",
                         deadlinePassed ? "cursor-not-allowed bg-orange-200 text-white" : "bg-orange-500 text-white hover:brightness-110")}
                       title={deadlinePassed ? "Deadline passed — editing locked" : "Save a draft (not final)"}
                     >
@@ -758,10 +843,8 @@ function EditForm({
                     </button>
                     <button
                       disabled={deadlinePassed}
-                      onClick={() => {
-                        const v = validate(); if (v.ok) onSave({ ...form, deloadings: form.noDeloading ? [] : deloadRows });
-                      }}
-                      className={cls("inline-flex h-9 items-center justify-center rounded-xl px-4 text-sm font-medium text-white shadow active:translate-y-[0.5px]",
+                      onClick={() => { const v = validate(); if (v.ok) onSave({ ...form, deloadings: form.noDeloading ? [] : deloadRows }); }}
+                      className={cls("inline-flex h-9 items-center justify-center rounded-2xl px-4 text-sm font-medium text-white shadow active:translate-y-[0.5px]",
                         deadlinePassed ? "cursor-not-allowed bg-emerald-300" : "bg-[#1F7A49] hover:brightness-[1.06]")}
                       title={deadlinePassed ? "Deadline passed — editing locked" : "Save and finalize"}
                     >
@@ -774,11 +857,13 @@ function EditForm({
           )}
         </div>
 
-        {showAE && (
+        {/* Right column: AE schedule (only when Laguna/Either) */}
+        {step === 2 && showAE && (
           <div className="block">
-            {/* keep your AE panel as-is (omitted for brevity) */}
+            <AELine1Schedule />
           </div>
         )}
+
       </div>
     </div>
   );
@@ -791,11 +876,9 @@ export default function FACULTY_Preferences() {
   const [saved, setSaved] = useState<SavedPrefs>(initialSaved);
   const [openEdit, setOpenEdit] = useState(false);
 
-  // dynamic options (no hardcoded UI lists)
   const [kacOptions, setKacOptions] = useState<Array<{kac_id:string; kac_code:string; kac_name:string}>>([]);
   const [daysMaster, setDaysMaster] = useState<string[]>([]);
   const [timeSlotsMaster, setTimeSlotsMaster] = useState<string[]>([]);
-
   const [loading, setLoading] = useState(true);
   const [employmentType, setEmploymentType] = useState<"FT" | "PT">("FT"); // default FT; corrected after fetch
 
@@ -805,8 +888,7 @@ export default function FACULTY_Preferences() {
   const DEADLINE_ISO = "2025-11-15T17:00:00+08:00";
   const { past: deadlinePassedPage } = useCountdown(DEADLINE_ISO);
 
-  // from server -> SavedPrefs
-// from server -> SavedPrefs (defensive)
+  // server -> SavedPrefs
   function fromServerToSaved(latest: any): SavedPrefs {
     const deloadArr = Array.isArray(latest?.deloading_data) ? latest.deloading_data : [];
     const prefUnitsNumber = Number(latest?.preferred_units);
@@ -815,6 +897,12 @@ export default function FACULTY_Preferences() {
     const kacList = Array.isArray(latest?.preferred_kacs) ? latest.preferred_kacs : [];
     const kacDisplay = kacList.map((k: any) => (k?.kac_name || k?.kac_code || k?.kac_id || String(k))).filter(Boolean);
 
+    // normalize return date into YYYY-MM-DD if backend used MM/DD/YYYY
+    const retRaw: string = latest?.break_return_date || "";
+    const retISO = /^\d{2}\/\d{2}\/\d{4}$/.test(retRaw)
+      ? (() => { const [mm, dd, yy] = retRaw.split("/"); return `${yy}-${mm.padStart(2,"0")}-${dd.padStart(2,"0")}`; })()
+      : (retRaw || "");
+
     return {
       prefUnits: prefUnitsLabel || "3.0 units",
       deloadings: deloadArr
@@ -822,9 +910,7 @@ export default function FACULTY_Preferences() {
         .filter((x: any) => x.type || x.units != null),
       noDeloading: deloadArr.length === 0,
       days: expandDays(latest?.availability_days ?? []),
-      timeSlots: Array.isArray(latest?.preferred_times)
-        ? latest.preferred_times.map((t: string) => normalizeDbTimeToUi(String(t)))
-        : [],
+      timeSlots: Array.isArray(latest?.preferred_times) ? latest.preferred_times.map((t: string) => normalizeDbTimeToUi(String(t))) : [],
       campus: (() => {
         const ids: string[] = Array.isArray(latest?.mode?.campus_id) ? latest.mode.campus_id : [];
         const names: string[] = Array.isArray(latest?.mode?.campus_names) ? latest.mode.campus_names : [];
@@ -854,7 +940,7 @@ export default function FACULTY_Preferences() {
       remarks: latest?.notes ?? "",
       onBreak: !!latest?.on_break,
       breakReason: latest?.break_reason ?? "",
-      breakReturnDate: latest?.break_return_date ?? "",
+      breakReturnDate: retISO,
     };
   }
 
@@ -867,19 +953,9 @@ export default function FACULTY_Preferences() {
           getFacultyPreferencesOptions(userId),
         ]);
 
-        // OPTIONAL: accept dynamic days/timeSlots if backend provides them
-        if (Array.isArray((opts as any)?.days_display)) {
-          // replace hardcoded OPT.days if you want the new behavior in this older file
-          // (you can also leave this out; the editor will use its static bands)
-        }
-
-
-        // dynamic options
         setKacOptions((opts?.kacs || []) as any);
         setDaysMaster(Array.isArray(opts?.days_display) ? opts.days_display : ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"]);
         setTimeSlotsMaster(Array.isArray(opts?.time_slots_display) ? opts.time_slots_display : []);
-
-        
 
         const et =
           (profile?.faculty?.employment_type || profile?.employment_type || profile?.faculty_type || profile?.type || "")
@@ -898,13 +974,19 @@ export default function FACULTY_Preferences() {
     })();
   }, [userId]);
 
-  // (Preferred Courses removed) — no coherence adjustment needed
   const coherentInitial: SavedPrefs = useMemo(() => ({ ...saved }), [saved]);
 
-// map kac display -> id (always store id)
+  // map kac display -> id (always store id)
   const nameToId = (name: string) => {
     const hit = kacOptions.find(k => (k.kac_name || "").toLowerCase() === (name || "").toLowerCase());
-    return hit?.kac_id || name; // fallback (backend can resolve)
+    return hit?.kac_id || name;
+  };
+
+  // convert YYYY-MM-DD -> MM/DD/YYYY for backend storage
+  const dateISOToMDY = (iso: string) => {
+    if (!iso) return "";
+    const [yy, mm, dd] = iso.split("-");
+    return `${mm}/${dd}/${yy}`;
   };
 
   const toServerPayload = (v: SavedPrefs, finished: boolean) => {
@@ -934,11 +1016,10 @@ export default function FACULTY_Preferences() {
 
       on_break: onBreak,
       break_reason: onBreak ? v.breakReason : "",
-      break_return_date: onBreak ? v.breakReturnDate : "",
+      break_return_date: onBreak ? dateISOToMDY(v.breakReturnDate) : "",
       employment_type: employmentType,
     } as const;
   };
-
 
   async function afterSubmitRefresh(res: any) {
     if (res?.ok && res?.preference) {
@@ -990,7 +1071,7 @@ export default function FACULTY_Preferences() {
           employmentType={employmentType}
           daysMaster={daysMaster}
           timeSlotsMaster={timeSlotsMaster}
-          kacDisplayOptions={kacOptions.map(k => k.kac_name)}
+          kacDisplayOptions={[...kacOptions].map(k => k.kac_name).sort((a, b) => a.localeCompare(b))}
         />
       </section>
     );
@@ -1012,7 +1093,7 @@ export default function FACULTY_Preferences() {
             disabled={deadlinePassedPage}
             onClick={() => setOpenEdit(true)}
             className={cls(
-              "inline-flex h-8 items-center gap-2 rounded-xl px-3 text-[13px] font-medium text-white shadow",
+              "inline-flex h-8 items-center gap-2 rounded-2xl px-3 text-[13px] font-medium text-white shadow",
               deadlinePassedPage ? "cursor-not-allowed bg-emerald-300" : "bg-emerald-700 hover:brightness-110"
             )}
             title={deadlinePassedPage ? "Deadline passed — editing locked" : "Edit preferences"}
