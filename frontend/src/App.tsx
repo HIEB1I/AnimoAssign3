@@ -91,7 +91,6 @@ export default function App() {
           <Route path="/om/loadreco" element={<OM_LoadReco />} />
 
           <Route path="/om/inbox" element={<OM_Inbox />} />
-          <Route path="/om/class-retention" element={<OM_ClassRetention />} />
 
           {/* OM shell with children (ONE declaration only) */}
           <Route path="/om/home" element={<OM_LoadAssignment />}>
@@ -103,6 +102,7 @@ export default function App() {
             <Route path="course-management" element={<OM_CourseManagement />} />
             <Route path="faculty-form" element={<OM_FacultyForm />} />
             <Route path="student-petition" element={<OM_StudentPetition />} />
+            <Route path="class-retention" element={<OM_ClassRetention />} />
 
             {/* Reports & Analytics landing */}
             <Route path="reports-analytics" element={<OM_ReportsAnalytics />} />
@@ -120,6 +120,7 @@ export default function App() {
           <Route path="/om/course-management" element={<Navigate to="/om/home/course-management" replace />} />
           <Route path="/om/faculty-form" element={<Navigate to="/om/home/faculty-form" replace />} />
           <Route path="/om/student-petition" element={<Navigate to="/om/home/student-petition" replace />} />
+          <Route path="/om/class-retention" element={<Navigate to="/om/home/class-retention" replace />} />
           <Route path="/om/reports-analytics" element={<Navigate to="/om/home/reports-analytics" replace />} />
           <Route path="/om/reports-analytics/teaching-history" element={<Navigate to="/om/home/reports-analytics/teaching-history" replace />} />
           <Route path="/om/reports-analytics/course-history" element={<Navigate to="/om/home/reports-analytics/course-history" replace />} />

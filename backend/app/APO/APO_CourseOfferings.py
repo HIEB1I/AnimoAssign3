@@ -6,6 +6,7 @@ import re
 import json
 import hashlib
 import secrets
+from bson import ObjectId
 from typing import Any, Dict, List, Optional, Tuple, Literal
 
 from fastapi import APIRouter, HTTPException, Query, Body
@@ -40,12 +41,50 @@ COL_PLANSTATE = "planning_state"
 
 DEFAULT_CAP = 20
 
-# ---------------- helpers: electives ----------------
+def _parse_course_seq(course_id: str) -> int:
+    m = re.match(r"^CRS(\d+)$", course_id or "")
+    return int(m.group(1)) if m else 0
+
+async def _next_course_id() -> str:
+    last = await db[COL_COURSES].find_one(
+        {"course_id": {"$regex": r"^CRS\d+$"}},
+        sort=[("course_id", -1)]
+    )
+    n = _parse_course_seq(last["course_id"]) if last else 0
+    for _ in range(50):
+        n += 1
+        cid = f"CRS{n:04d}"
+        exists = await db[COL_COURSES].find_one({"course_id": cid})
+        if not exists:
+            return cid
+    raise HTTPException(status_code=500, detail="Unable to allocate new course_id")
+def _clean_mongo_doc(doc: dict) -> dict:
+    """Return a JSON-safe copy of a MongoDB doc (ObjectId -> str)."""
+    if not doc:
+        return {}
+    out = {}
+    for k, v in doc.items():
+        if isinstance(v, ObjectId):
+            out[k] = str(v)
+        elif isinstance(v, dict):
+            out[k] = _clean_mongo_doc(v)
+        elif isinstance(v, list):
+            out[k] = [str(x) if isinstance(x, ObjectId)
+                      else (_clean_mongo_doc(x) if isinstance(x, dict) else x)
+                      for x in v]
+        else:
+            out[k] = v
+    # expose course_id and drop _id for frontend
+    if "_id" in out and "course_id" not in out:
+        out["course_id"] = out["_id"]
+    out.pop("_id", None)
+    return out
+
 # ---------------- helpers: electives ----------------
 async def _fetch_all_specific_electives_async() -> list[dict]:
     """
     Return ALL specific electives from COL_COURSES, even if not in curriculum/preenlistment.
-    We match 'Elective Course' robustly and normalize course_code to a string.
+    Match 'Elective Course' robustly; normalize course_code to a string.
     """
     q = {
         "$or": [
@@ -68,7 +107,7 @@ async def _fetch_all_specific_electives_async() -> list[dict]:
             "course_id": doc.get("course_id") or "",
             "course_code": code or "",
             "course_title": doc.get("course_title") or "",
-            "type_of_course": "Elective Course",  # normalize label
+            "type_of_course": "Elective Course",
         })
     out.sort(key=lambda d: (d.get("course_code") or "").upper())
     return out
@@ -77,29 +116,102 @@ async def _fetch_all_specific_electives_async() -> list[dict]:
 def _ctype(v: Optional[str]) -> str:
     return (v or "").strip().upper()
 
-# Placeholder in curriculum (e.g., ITELEC1)
 ELECTIVE_PLACEHOLDER = "ELECTIVE"
-# Actual, specific courses that can fulfill the elective slot
 ELECTIVE_SPECIFIC = "ELECTIVE COURSE"
 
-# --- COURSE TYPE NORMALIZATION (fixes GE not being treated as full-editable) ---
+# --- COURSE TYPE NORMALIZATION ---
 def canonical_course_type(x: Optional[str]) -> str:
     u = _ctype(x)
-    # GE synonyms
     if u == "GE" or u == "GE COURSE" or "GENERAL EDUCATION" in u:
         return "GE"
-    # SHS synonyms
     if u in {"SHS", "SENIOR HIGH", "SENIOR HIGH SCHOOL"}:
         return "SHS"
-    # Elective forms
     if u == "ELECTIVE COURSE":
         return "ELECTIVE COURSE"
     if u == "ELECTIVE":
         return "ELECTIVE"
-    # Keep common limited types as-is
     if u in {"MAJOR", "FOUNDATION", "COS"}:
         return u
     return u
+def _as_list(val):
+    if val is None:
+        return []
+    if isinstance(val, list):
+        # normalize and keep non-empty strings
+        out = []
+        for v in val:
+            s = _norm_code(v) if isinstance(v, str) else str(v)
+            if s:
+                out.append(s)
+        return out
+    s = _norm_code(val) if isinstance(val, str) else str(val)
+    return [s] if s else []
+
+def _int_or_none(v):
+    try:
+        if v in (None, ""):
+            return None
+        return int(v)
+    except Exception:
+        return None
+
+def _build_full_course_document(data: Dict[str, Any], *, course_id: str) -> Dict[str, Any]:
+    """
+    Return a FULL course doc with all fields present.
+    Missing inputs are defaulted to null/""/[] so the record is complete.
+    """
+    # normalize inputs
+    toc_raw = data.get("type_of_course")
+    toc_norm = canonical_course_type(toc_raw)
+    if toc_norm == "ELECTIVE COURSE":
+        type_of_course = "Elective Course"
+    elif toc_norm == "ELECTIVE":
+        type_of_course = "Elective"
+    elif toc_norm in {"GE", "SHS", "MAJOR", "FOUNDATION", "COS"}:
+        type_of_course = toc_norm
+    else:
+        type_of_course = toc_raw or None
+
+    program_level = level_code(data.get("program_level"))  # -> "UGS" / "GSM"
+    units_val = data.get("units")
+    try:
+        units = int(units_val) if units_val not in (None, "") else 0
+    except Exception:
+        units = 0
+
+    max_enrollee = data.get("max_enrollee", data.get("capacity"))
+    me = _int_or_none(max_enrollee)
+    if me is None:
+        me = DEFAULT_CAP  # keep your existing default unless you want 30 as a global default
+
+    doc = {
+        "course_id": course_id,
+        "course_code": _as_list(data.get("course_code")),        # ALWAYS an array
+        "course_title": (data.get("course_title") or "").strip(),
+        "department_id": (data.get("department_id") or "").strip(),
+        "program_level": program_level or None,                   # "UGS"/"GSM" or null
+        "type_of_course": type_of_course,                         # normalized or null
+
+        # numbers
+        "units": units,
+        "min_enrollee": _int_or_none(data.get("min_enrollee")),
+        "max_enrollee": me,
+
+        # strings
+        "room_type": (data.get("room_type") or None),
+        "description": (data.get("description") or "").strip(),
+        "syllabus": (data.get("syllabus") or "").strip(),
+
+        # arrays
+        "course_coordinator": _as_list(data.get("course_coordinator")),
+        "prerequisites": _as_list(data.get("prerequisites")),
+        "teaching_team": _as_list(data.get("teaching_team")),
+
+        # provenance
+        "created_at": now(),
+        "updated_at": now(),
+    }
+    return doc
 
 # ------------ utils ------------
 def now() -> datetime:
@@ -118,7 +230,6 @@ def _norm_code(code: Optional[str]) -> str:
     return s
 
 def _code_str(value):
-    """Return a safe string for course_code that may be a string, list, or empty."""
     if isinstance(value, list):
         return value[0] if value else ""
     return value or ""
@@ -133,19 +244,16 @@ def ensure_list(x: Any) -> List[Any]:
 async def current_term() -> Optional[Dict[str, Any]]:
     return await db[COL_TERMS].find_one({"is_current": True}, {"_id": 0})
 
-# If no current term is marked, try to infer and mark one so routes still work.
 async def _ensure_current_term() -> Optional[Dict[str, Any]]:
     t = await current_term()
     if t:
         return t
-
     sample = await db[COL_PREEN].find_one({}, {"_id": 0, "term_id": 1})
     if sample and sample.get("term_id"):
         await db[COL_TERMS].update_one({"term_id": sample["term_id"]}, {"$set": {"is_current": True}})
         t2 = await current_term()
         if t2:
             return t2
-
     latest = await db[COL_TERMS].find(
         {}, {"_id": 1, "term_id": 1, "acad_year_start": 1, "term_number": 1}
     ).sort([("acad_year_start", -1), ("term_number", -1)]).limit(1).to_list(1)
@@ -182,7 +290,6 @@ def _coerce_cap(value) -> int | None:
         return None
 
 async def _sync_section_status_flags(current_term_id: str) -> None:
-    # ensure index for elective planning lookups
     try:
         await db[COL_SECTIONS].create_index(
             [("term_id", 1), ("fulfilled_placeholder_course_id", 1)],
@@ -190,13 +297,10 @@ async def _sync_section_status_flags(current_term_id: str) -> None:
         )
     except Exception:
         pass
-
-    # mark sections of the current term as active
     await db[COL_SECTIONS].update_many(
         {"term_id": current_term_id, "status": {"$ne": "active"}},
         {"$set": {"status": "active", "updated_at": now()}}
     )
-    # everything not in the current term becomes inactive
     await db[COL_SECTIONS].update_many(
         {"term_id": {"$ne": current_term_id}, "status": {"$ne": "inactive"}},
         {"$set": {"status": "inactive", "updated_at": now()}}
@@ -219,7 +323,7 @@ def _strip_room_when_no_time(slot: dict | None) -> dict:
         slot.pop("room_id", None)
     return slot
 
-# --- NEW: course default capacity from courses.max_enrollee ---
+# --- default capacity ---
 async def default_capacity_for_course(course_id: str) -> int:
     doc = await db[COL_COURSES].find_one({"course_id": course_id}, {"_id": 0, "max_enrollee": 1})
     try:
@@ -227,7 +331,7 @@ async def default_capacity_for_course(course_id: str) -> int:
         return int(v) if v not in (None, "") else DEFAULT_CAP
     except Exception:
         return DEFAULT_CAP
-# --- Effective capacity: prefer actual section caps on this campus/course ---
+
 async def effective_section_capacity(term_id: str, campus_name: str, course_id: str) -> int:
     lvl = await _course_program_level(course_id)
     pref_pat = prefix_pattern_for_level(campus_name, lvl) or ""
@@ -246,7 +350,7 @@ async def effective_section_capacity(term_id: str, campus_name: str, course_id: 
 
     if caps:
         caps.sort()
-        return caps[len(caps)//2]  # median of existing caps
+        return caps[len(caps)//2]
     return await default_capacity_for_course(course_id)
 
 # ------------ APO scope / campus ------------
@@ -291,10 +395,8 @@ def campus_section_prefix(campus_name: str) -> Optional[str]:
         return "S"
     return None
 
-# --- NEW: CBL helpers / prefix selection -------------------
-
+# --- CBL helpers / prefix selection ---
 def _is_cbl_program(program_name: Optional[str]) -> bool:
-    """True if program name ends with '(CBL)' (case-insensitive, tolerant to spaces)."""
     if not program_name:
         return False
     return str(program_name).strip().upper().endswith("(CBL)")
@@ -313,10 +415,6 @@ def level_code(label_or_code: Optional[str]) -> str:
     return u
 
 def campus_section_prefix_for_course(campus_name: str, level_or_code: Optional[str], program_name: Optional[str]) -> Optional[str]:
-    """
-    Manila: UG -> 'S', GS -> 'G'
-    Laguna: UG (CBL) -> 'XC'; UG (non-CBL) -> 'XX'
-    """
     n = (campus_name or "").lower()
     is_laguna = ("laguna" in n) or ("biñan" in n) or ("binan" in n) or ("canlubang" in n)
     is_manila = ("manila" in n) or ("taft" in n)
@@ -328,17 +426,11 @@ def campus_section_prefix_for_course(campus_name: str, level_or_code: Optional[s
         return "G" if is_grad else "S"
     if is_laguna:
         if is_grad:
-            # If GS ever exists in Laguna (rare), default to 'XX' (can adjust later)
             return "XX"
         return "XC" if _is_cbl_program(program_name) else "XX"
     return None
 
 def prefix_pattern_for_level(campus_name: str, level_or_code: Optional[str]) -> str:
-    """
-    Pattern for listing/aggregates:
-      Manila UG -> '^S', Manila GS -> '^G'
-      Laguna UG -> '^(XX|XC)' (include both)
-    """
     n = (campus_name or "").lower()
     is_laguna = ("laguna" in n) or ("biñan" in n) or ("binan" in n) or ("canlubang" in n)
     is_manila = ("manila" in n) or ("taft" in n)
@@ -350,9 +442,7 @@ def prefix_pattern_for_level(campus_name: str, level_or_code: Optional[str]) -> 
         return "(XX|XC)" if not is_grad else "XX"
     return ""
 
-# --- NEW: numbering bases and formatting ---
 def section_start_base(prefix: str) -> int:
-    """Return base 'already-exists' number so next is the first code."""
     p = (prefix or "").upper()
     if p == "XX":
         return 21   # next -> XX22
@@ -397,7 +487,7 @@ def _sha1_of(obj: Any) -> str:
     b = json.dumps(obj, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha1(b).hexdigest()
 
-# ------------ Level mapping (labels) ------------
+# ------------ Level mapping ------------
 LEVEL_LABELS = {
     "UGS": "Undergraduate",
     "UGB": "Undergraduate",
@@ -417,15 +507,13 @@ def level_label(code: Optional[str]) -> str:
         return "Undergraduate"
     if lc.startswith("graduate"):
         return "Graduate Studies"
-    return c  # fallback
+    return c
 
 # ------------ editing rules (type_of_course) ------------
 EDIT_FULL = {"GE", "SHS"}  # full-row edit (faculty, day/time, etc.)
 EDIT_LIMITED = {"MAJOR", "FOUNDATION", "ELECTIVE", "COS", "ELECTIVE COURSE"}
 
-# Replace old _course_type with canonicalized version
 async def _course_type(course_id: str) -> str:
-    """Return canonicalized type_of_course."""
     if not course_id:
         return ""
     d = await db[COL_COURSES].find_one({"course_id": course_id}, {"_id": 0, "type_of_course": 1})
@@ -492,7 +580,7 @@ def normalize_level(x: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
         return ("Undergraduate", "UG")
     if "graduate" in t:
         return ("Graduate", "GS")
-    return (x, None)  # unknown, return as-is for display
+    return (x, None)
 
 def expected_section_prefix(campus_name: str, level_label: Optional[str]) -> str:
     c = (campus_name or "").strip().upper()
@@ -504,11 +592,6 @@ def expected_section_prefix(campus_name: str, level_label: Optional[str]) -> str
     return "S"
 
 async def _resolve_or_create_faculty_by_name(name: str) -> Tuple[Optional[str], Optional[str]]:
-    """
-    Try to resolve a free-text name to either a users.user_id (preferred) or faculty_profiles.faculty_id.
-    If not found, create a minimal faculty_profile and return (None, new_faculty_id).
-    Returns (user_id, faculty_id).
-    """
     nm = _parse_person_name(name)
     if not nm:
         return (None, None)
@@ -516,7 +599,6 @@ async def _resolve_or_create_faculty_by_name(name: str) -> Tuple[Optional[str], 
     def _eq_ci(field: str, val: str) -> Dict[str, Any]:
         return {field: {"$regex": f"^{re.escape(val)}$", "$options": "i"}}
 
-    # 1) Try real user
     users_q: Dict[str, Any] = {}
     if nm["first_name"]: users_q.update(_eq_ci("first_name", nm["first_name"]))
     if nm["last_name"]: users_q.update(_eq_ci("last_name", nm["last_name"]))
@@ -528,7 +610,6 @@ async def _resolve_or_create_faculty_by_name(name: str) -> Tuple[Optional[str], 
     if u and u.get("user_id"):
         return (u["user_id"], None)
 
-    # 2) Else faculty profile
     fac_q: Dict[str, Any] = {}
     if nm["first_name"]: fac_q.update(_eq_ci("first_name", nm["first_name"]))
     if nm["last_name"]: fac_q.update(_eq_ci("last_name", nm["last_name"]))
@@ -543,14 +624,12 @@ async def _resolve_or_create_faculty_by_name(name: str) -> Tuple[Optional[str], 
         if fp.get("faculty_id"):
             return (None, fp["faculty_id"])
 
-    # 3) Create minimal faculty profile
     fid = _id("FAC")
     doc = {
         "faculty_id": fid,
         "first_name": nm["first_name"],
         "middle_name": nm["middle_name"],
         "last_name": nm["last_name"],
-        "source": "custom",
         "created_at": now(),
         "updated_at": now(),
     }
@@ -571,9 +650,8 @@ async def map_courses(course_ids: List[str]) -> Dict[str, Dict[str, Any]]:
             "course_title": 1,
             "department_id": 1,
             "program_level": 1,
-            "source": 1,
             "units": 1,
-            "type_of_course": 1,  # include type
+            "type_of_course": 1,
         },
     )
     async for c in cur:
@@ -586,9 +664,8 @@ async def map_courses(course_ids: List[str]) -> Dict[str, Dict[str, Any]]:
             "department_id": c.get("department_id", ""),
             "program_level": c.get("program_level", ""),
             "program_level_label": level_label(c.get("program_level")),
-            "source": c.get("source", "DB"),
             "units": c.get("units"),
-            "type_of_course": c.get("type_of_course", ""),  # keep raw for UI; backend uses canonical fn
+            "type_of_course": c.get("type_of_course", ""),
         }
     return out
 
@@ -680,25 +757,16 @@ def _year_level_name(batch_num: Optional[int], latest_num: Optional[int]) -> Opt
     return "senior"
 
 async def _program_stats_doc(term_id: str, program_id: str, _campus_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
-    """
-    Return stats for a program in a term (campus-agnostic).
-    Supports fallback via program_code when only that is present in the stats collection.
-    """
     proj = {"_id": 0, "freshman": 1, "sophomore": 1, "junior": 1, "senior": 1, "enrollment": 1}
-
-    # Primary: program_id
     doc = await db[COL_PREEN_STATS].find_one({"term_id": term_id, "program_id": program_id}, proj)
     if doc:
         return doc
-
-    # Fallback: program_code
     prog = await db[COL_PROGRAMS].find_one({"program_id": program_id}, {"_id": 0, "program_code": 1})
     pcode = (prog or {}).get("program_code")
     if pcode:
         doc = await db[COL_PREEN_STATS].find_one({"term_id": term_id, "program_code": pcode}, proj)
         if doc:
             return doc
-
     return None
 
 async def _estimate_cohort_demand_for_course(term_id: str, campus_id: Optional[str], course_id: str) -> int:
@@ -780,7 +848,6 @@ async def safe_insert_section(doc: Dict[str, Any]) -> Optional[str]:
             await db[COL_SECTIONS].insert_one(doc)
             return doc["section_id"]
         except DuplicateKeyError:
-            # If caller explicitly set the code (e.g., GE override), don't auto-renumber — signal failure.
             if user_code:
                 return None
             prefix = re.match(r"^[A-Za-z]+", doc.get("section_code","")).group(0) if doc.get("section_code") else ""
@@ -828,7 +895,7 @@ async def validate_hard_errors(action: str, payload: Dict[str, Any], term_id: st
     def err(code: str, msg: str):
         errs.append({"code": code, "message": msg})
 
-    # --- ELECTIVE SUPPORT: accept either (course_id) OR (for_placeholder_course_id + specific_course_id)
+    # ELECTIVE handling
     if action in {"addRow", "editRow"}:
         course_id = (payload.get("course_id") or payload.get("links", {}).get("course_id") or "").strip()
         placeholder_id = (payload.get("for_placeholder_course_id") or "").strip()
@@ -846,14 +913,12 @@ async def validate_hard_errors(action: str, payload: Dict[str, Any], term_id: st
                         err("ELECTIVE_PLACEHOLDER_INVALID", "for_placeholder_course_id must be 'Elective'.")
                 if specific_id:
                     sc = await db[COL_COURSES].find_one({"course_id": specific_id}, {"_id": 0, "type_of_course": 1})
-                    # CHANGED: must be explicitly an "Elective Course"
                     if not sc or _ctype(sc.get("type_of_course")) != ELECTIVE_SPECIFIC:
                         err("ELECTIVE_SPECIFIC_INVALID", "specific_course_id must have type_of_course = 'Elective Course'.")
 
         if action == "editRow":
             if specific_id:
                 sc = await db[COL_COURSES].find_one({"course_id": specific_id}, {"_id": 0, "type_of_course": 1})
-                # CHANGED: must be explicitly an "Elective Course"
                 if not sc or _ctype(sc.get("type_of_course")) != ELECTIVE_SPECIFIC:
                     err("ELECTIVE_SPECIFIC_INVALID", "specific_course_id must have type_of_course = 'Elective Course'.")
             if placeholder_id:
@@ -861,7 +926,7 @@ async def validate_hard_errors(action: str, payload: Dict[str, Any], term_id: st
                 if not ph or _ctype(ph.get("type_of_course")) != ELECTIVE_PLACEHOLDER:
                     err("ELECTIVE_PLACEHOLDER_INVALID", "for_placeholder_course_id must be 'Elective'.")
 
-        # NEW: a room cannot be set if the slot has no day/time
+        # Room/time validations
         for idx, key in enumerate(["slot1", "slot2"], start=1):
             s = (payload.get(key) or {}) if isinstance(payload.get(key), dict) else {}
             rid = (s.get("room_id") or "").strip()
@@ -871,11 +936,9 @@ async def validate_hard_errors(action: str, payload: Dict[str, Any], term_id: st
                 continue
 
             if action == "addRow":
-                # On create, you MUST send time/day with the room.
                 if not has_time:
                     err("ROOM_REQUIRES_TIME", f"{key}: room requires day/start_time/end_time.")
             else:
-                # On edit, allow room if payload has times, or existing slot already has times.
                 section_id = (payload.get("section_id") or "").strip()
                 if not has_time and section_id:
                     existing = await db[COL_SCHEDS].find_one(
@@ -886,13 +949,11 @@ async def validate_hard_errors(action: str, payload: Dict[str, Any], term_id: st
                     if not existing_has_time:
                         err("ROOM_REQUIRES_TIME", f"{key}: room requires day/start_time/end_time.")
 
-            # --- Capacity & room_type validation ---
-            # Determine effective capacity for the section at this point
+            # Capacity/room_type checks
             cap_eff = None
             if action == "addRow":
                 add_cap = payload.get("enrollment_cap")
                 if add_cap in (None, ""):
-                    # Use the target course default capacity
                     _raw_course = (payload.get("course_id") or payload.get("links", {}).get("course_id") or "").strip()
                     _ph = (payload.get("for_placeholder_course_id") or "").strip()
                     _spec = (payload.get("specific_course_id") or "").strip()
@@ -953,16 +1014,14 @@ async def validate_hard_errors(action: str, payload: Dict[str, Any], term_id: st
                 if cap < 0:
                     errs.append({"code": "CAPACITY_NEGATIVE", "message": "enrollment_cap cannot be negative."})
 
-    # Duplicate section code — use the *target* course_id (specific if elective)
     if action in {"addRow", "editRow"} and payload.get("section_code"):
         _raw_course = (payload.get("course_id") or payload.get("links", {}).get("course_id") or "").strip()
         _ph = (payload.get("for_placeholder_course_id") or "").strip()
         _spec = (payload.get("specific_course_id") or "").strip()
         target_cid = _spec or _raw_course
 
-        # GE/SHS: allow manual override of section code (no hard error here).
         ctype = await _course_type(target_cid) if target_cid else ""
-        if ctype not in EDIT_FULL:  # keep hard check for non-GE/SHS
+        if ctype not in EDIT_FULL:
             q = {"term_id": term_id, "course_id": target_cid, "section_code": payload["section_code"].strip()}
             if action == "editRow":
                 q["section_id"] = {"$ne": payload.get("section_id")}
@@ -981,11 +1040,9 @@ async def validate_soft_conflicts(
             item["data"] = data
         conf.append(item)
 
-    # Compute expected prefix for this edit (based on course level + CBL program)
     placeholder_id = (payload.get("for_placeholder_course_id") or "").strip()
     course_id_fallback = (payload.get("course_id") or payload.get("links", {}).get("course_id") or "").strip()
 
-    # CHANGED: on edit/delete when placeholder not provided, pull it from existing section
     if not placeholder_id and action in {"editRow", "deleteRow"} and payload.get("section_id"):
         sec_doc = await db[COL_SECTIONS].find_one(
             {"section_id": (payload.get("section_id") or "").strip()},
@@ -996,12 +1053,10 @@ async def validate_soft_conflicts(
     plan_cid = placeholder_id or course_id_fallback
     plan_lvl = await _course_program_level(plan_cid) if plan_cid else None
 
-    # NEW: if GE/SHS, skip ALL soft checks (no override prompts at all)
     ctype = (await _course_type(plan_cid)) if plan_cid else ""
-    if ctype in EDIT_FULL:  # {"GE","SHS"}
+    if ctype in EDIT_FULL:
         return []
 
-    # resolve program_name from payload/links (for CBL detection)
     prog_id = (payload.get("program_id") or payload.get("links", {}).get("program_id") or "").strip()
     prog_name = await _program_name(prog_id) if prog_id else None
 
@@ -1019,12 +1074,10 @@ async def validate_soft_conflicts(
     if (s1.get("room_id") in (None, "")) and (s2.get("room_id") in (None, "")):
         warn("NO_ROOM_SET", "No room selected yet (TBA).")
 
-    # Seat-deficit & planned-capacity checks only for non-GE/SHS
     if plan_cid:
         sec_q: Dict[str, Any] = {"term_id": term_id}
         sec_q["$or"] = [{"course_id": plan_cid}, {"fulfilled_placeholder_course_id": plan_cid}]
 
-        # For aggregates, include both XX/XC for Laguna UG
         pref_pat = prefix_pattern_for_level(campus_name, plan_lvl)
         if pref_pat:
             sec_q["section_code"] = {"$regex": f"^{pref_pat}", "$options": "i"}
@@ -1035,10 +1088,8 @@ async def validate_soft_conflicts(
 
         cap_delta = 0
         if action == "addRow":
-            # capacity contributed by the new section
             add_cap = payload.get("enrollment_cap")
             if add_cap in (None, ""):
-                # use the *target* course’s default capacity
                 add_cap = await default_capacity_for_course(plan_cid) if plan_cid else DEFAULT_CAP
             cap_delta += int(add_cap)
         if action == "editRow" and "enrollment_cap" in payload and payload.get("enrollment_cap") not in (None, ""):
@@ -1084,7 +1135,7 @@ def _sort_sections_by_number(sections: List[Dict[str, Any]]) -> List[Dict[str, A
     return sorted(sections, key=num)
 
 def _assign_blocks_to_sections(
-    block_keys: List[Tuple[str, str, str, int]],  # (batch_id, program_id, label, batch_number)
+    block_keys: List[Tuple[str, str, str, int]],
     sections: List[Dict[str, Any]]
 ) -> Dict[Tuple[str, str], Optional[Dict[str, Any]]]:
     by_bn: Dict[int, List[Dict[str, Any]]] = {}
@@ -1115,7 +1166,6 @@ def _assign_blocks_to_sections(
             used.add(match["section_id"])
     return seating
 
-# New: round-robin distribution to support multiple blocks per owner
 def _unique_owners_in_order(keys: List[Tuple[str, str, str, int]]) -> List[Tuple[str, str, int]]:
     seen = set()
     out: List[Tuple[str, str, int]] = []
@@ -1144,20 +1194,16 @@ def _distribute_sections_round_robin(
 async def ensure_sections_from_demand(
     *, term_id: str, campus_id: str, campus_prefix: str, course_id: str, base_per_program: int, capacity: int = DEFAULT_CAP
 ) -> None:
-    # count existing sections for this course with the campus-specific prefix
     q: Dict[str, Any] = {"term_id": term_id, "$or": [{"course_id": course_id}, {"fulfilled_placeholder_course_id": course_id}]}
     if campus_prefix:
         q["section_code"] = {"$regex": f"^{campus_prefix}", "$options": "i"}
     existing = await db[COL_SECTIONS].count_documents(q)
 
-    # compute needed by demand
     est = await estimated_demand(term_id, campus_id, course_id)
     total = int(est["plan"] or 0)
-    # (call sites should pass capacity=await default_capacity_for_course(course_id))
     needed_by_demand = max(1, ceil((total or 0) / (capacity or DEFAULT_CAP)))
     needed = max(base_per_program, needed_by_demand)
 
-    # create to meet base minimum
     if existing < base_per_program:
         to_make = base_per_program - existing
         for _ in range(to_make):
@@ -1177,7 +1223,6 @@ async def ensure_sections_from_demand(
             await safe_insert_section(doc)
         existing += to_make
 
-    # create to satisfy demand
     if existing < needed:
         for _ in range(needed - existing):
             code = await next_section_code(campus_prefix, term_id, course_id)
@@ -1276,9 +1321,6 @@ async def _cohort_snapshot(term_id: str, campus_id: str) -> Dict[str, Dict[str, 
     return out
 
 async def _planned_capacity_by_course_multi(term_id: str, prefix_map: Dict[str, str], course_ids: List[str]) -> Dict[str, int]:
-    """
-    prefix_map value may be 'S', 'G', 'XX', 'XC', or '(XX|XC)'.
-    """
     out: Dict[str, int] = {}
     for cid in course_ids:
         sec_q: Dict[str, Any] = {"term_id": term_id, "$or": [{"course_id": cid}, {"fulfilled_placeholder_course_id": cid}]}
@@ -1341,7 +1383,6 @@ async def _pending_changes(
     view_course_ids = sorted(list(course_ids_in_curr))
     c_map_for_level = await map_courses(view_course_ids)
 
-    # prefix pattern per course (UG on Laguna => (XX|XC))
     prefix_map: Dict[str, str] = {}
     for cid in view_course_ids:
         lvl = c_map_for_level.get(cid, {}).get("program_level")
@@ -1353,7 +1394,6 @@ async def _pending_changes(
         demand_by_course[cid] = est["plan"]
     cap_by_course = await _planned_capacity_by_course_multi(term_id, prefix_map, view_course_ids)
 
-    # base sections per course = at least number of programs that include it
     course_to_programs: Dict[str, set] = {}
     for c in currs:
         pid = c.get("program_id")
@@ -1362,7 +1402,6 @@ async def _pending_changes(
                 course_to_programs.setdefault(cid, set()).add(pid)
     base_by_course: Dict[str, int] = {cid: max(1, len(ps)) for cid, ps in course_to_programs.items()}
 
-    # Decide by section count (prefix pattern-aware), using per-course default capacity
     for cid in view_course_ids:
         plan = int(demand_by_course.get(cid) or 0)
         existing = await _section_count(term_id, prefix_map.get(cid, ""), cid)
@@ -1379,11 +1418,7 @@ async def _pending_changes(
 
     return (False, changes, preen_hash, cohort_hash)
 
-
 async def _planning_flags(term_id: str, campus_id: str, campus_prefix: str):
-    """
-    Returns (needs_import, approval_required, pending_changes, preen_hash, cohort_hash, plan_state_doc)
-    """
     meta = await campus_meta(campus_id)
     needs_import, pending, preen_hash, cohort_hash = await _pending_changes(
         term_id=term_id, campus_id=campus_id, campus_name=meta.get("campus_name","")
@@ -1414,11 +1449,9 @@ async def get_course_offerings(
     action: Optional[str] = Query(None),
 ):
 
-    # Ensure a current term exists
     t = await current_term() or await _ensure_current_term()
     term_id = (t or {}).get("term_id")
     if not term_id:
-        # graceful empty reply
         return {
             "campus": {"campus_id": "", "campus_name": ""},
             "term_id": "", "term_label": "",
@@ -1428,13 +1461,12 @@ async def get_course_offerings(
         }
     await _sync_section_status_flags(term_id)
 
-    # Resolve campus
     campus_id, _ = await apo_scope(userId)
     if not campus_id:
         raise HTTPException(status_code=400, detail="Unable to resolve APO campus from role_assignments.")
     campus = await campus_meta(campus_id)
     prefix_default = campus_section_prefix(campus.get("campus_name", "")) or ""
-    # Action branch: return the global Specific Elective list for UI dropdowns
+
     if action == "electiveOptions":
         options = await _fetch_all_specific_electives_async()
         return {"ok": True, "options": options}
@@ -1474,7 +1506,6 @@ async def get_course_offerings(
                     "department_name": dep_map.get(ci.get("department_id",""),{}).get("department_name",""),
                     "program_level": ci.get("program_level_label",""),
                     "program_level_code": ci.get("program_level",""),
-                    "source": ci.get("source","DB")
                 })
             items.append({
                 "program_id": pid, "program_code": p.get("program_code",""),
@@ -1483,7 +1514,6 @@ async def get_course_offerings(
                 "courses": courses,
             })
 
-        # Course picker: only courses from the Program’s department
         by_dep: Dict[str, List[Dict[str, Any]]] = {}
         async for cc in db[COL_COURSES].find(
             {"department_id": {"$in": dep_ids}},
@@ -1534,7 +1564,6 @@ async def get_course_offerings(
             "room_type": r.get("room_type"),
         })
 
-    # Filtered view query (applies UI filters)
     q_view: Dict[str, Any] = {"term_id": term_id, "campus_id": campus_id}
     if batch_id:
         q_view["batch_id"] = batch_id
@@ -1546,7 +1575,6 @@ async def get_course_offerings(
         {"_id": 0, "curriculum_id": 1, "program_id": 1, "batch_id": 1, "term_id": 1, "course_list": 1}
     )]
 
-    # ---- Stable Program No. computation: use ALL campus curricula (no filters)
     curricula_all_for_no = [x async for x in db[COL_CURRICULUM].find(
         {"term_id": term_id, "campus_id": campus_id},
         {"_id": 0, "program_id": 1, "batch_id": 1}
@@ -1554,7 +1582,6 @@ async def get_course_offerings(
 
     batch_by_number, batch_by_id = await map_batches()
 
-    # Map programs for both the filtered set (data) and all-for-numbering (labels)
     prog_ids_view = list({c["program_id"] for c in curricula if c.get("program_id")})
     prog_ids_for_no = list({c["program_id"] for c in curricula_all_for_no if c.get("program_id")})
     prog_map_view = await map_programs(prog_ids_view)
@@ -1592,7 +1619,6 @@ async def get_course_offerings(
     def dept_ok(cid: str) -> bool:
         return (not department_id) or (c_map_all.get(cid, {}).get("department_id") == department_id)
 
-    # Build selectable levels using normalized labels
     level_set = set()
     for cid, info in c_map_all.items():
         lbl = _norm_level_filter(info.get("program_level_label") or info.get("program_level"))
@@ -1630,11 +1656,9 @@ async def get_course_offerings(
 
     allowed_course_ids = {cid for cid in all_course_ids if level_ok(cid) and dept_ok(cid)}
 
-    # Global pool: ALL specific electives in the database, regardless of curriculum/preen/term/campus
     elective_specific_pool: List[Dict[str, Any]] = []
     async for e in db[COL_COURSES].find(
         {
-            # Accept 'Elective Course' even if there are prefixes/suffixes; exclude plain 'Elective' placeholders.
             "$or": [
                 {"type_of_course": {"$regex": r"\belective\s*course\b", "$options": "i"}},
                 {
@@ -1663,7 +1687,6 @@ async def get_course_offerings(
             "program_level": e.get("program_level", ""),
         })
 
-    # Flat GLOBAL list for the UI (sorted by code)
     all_specific_electives = sorted(
         elective_specific_pool,
         key=lambda x: (x.get("course_code") or "").upper()
@@ -1685,7 +1708,6 @@ async def get_course_offerings(
     for k in electives_by_dep:
         electives_by_dep[k].sort(key=lambda x: x["course_code"])
 
-    # KEEP this fallback pool too (for departments that have zero 'Elective Course' rows):
     non_placeholder_by_dep: Dict[str, List[Dict[str, Any]]] = {}
     async for e in db[COL_COURSES].find(
         {"type_of_course": {"$not": {"$regex": r"^\s*elective\s*$", "$options": "i"}}},
@@ -1716,13 +1738,9 @@ async def get_course_offerings(
             }
             if _ctype(cm.get("type_of_course")) == ELECTIVE_PLACEHOLDER:
                 opt_item["is_elective_placeholder"] = True
-                # Show ALL specific electives, not just same department/curriculum.
                 opt_item["elective_options"] = all_specific_electives
-
-
             opts.append(opt_item)
 
-        # de-dup
         seen, uniq = set(), []
         for o in opts:
             if o["course_id"] in seen:
@@ -1737,7 +1755,6 @@ async def get_course_offerings(
     campus_sec_by_course: Dict[str, List[Dict[str, Any]]]= {}
     planned_capacity_by_course: Dict[str, int] = {}
 
-    # For Laguna UG, include BOTH 'XX' and 'XC' in queries
     for cid in allowed_course_ids:
         lvl = (c_map_all.get(cid) or {}).get("program_level")
         pref_pat = prefix_pattern_for_level(campus.get("campus_name",""), lvl)
@@ -1752,7 +1769,6 @@ async def get_course_offerings(
         campus_sec_by_course[cid] = secs
         planned_capacity_by_course[cid] = sum(int(s.get("enrollment_cap") or DEFAULT_CAP) for s in secs)
 
-    # Map any offered (specific) course_ids not in c_map_all
     offered_ids: set = set()
     for cid, secs in campus_sec_by_course.items():
         for s in secs:
@@ -1772,7 +1788,6 @@ async def get_course_offerings(
     def _pc_view(pid: Optional[str]) -> str:
         return (prog_map_view.get(pid or "", {}) or {}).get("program_code", "") or ""
 
-    # ---- Build a STABLE Program No. map from ALL campus curricula ----
     curricula_all_sorted = sorted(
         curricula_all_for_no,
         key=lambda x: (-_bn(x.get("batch_id")), (prog_map_all.get(x.get("program_id",""), {}) or {}).get("program_code","") or "")
@@ -1786,10 +1801,8 @@ async def get_course_offerings(
         per_batch_seq[bid] = per_batch_seq.get(bid, 0) + 1
         prog_no_label_map[(bid, pid)] = f"{pc}-{per_batch_seq[bid]}"
 
-    # --- Continue with the filtered set for rows
     curricula_sorted = sorted(curricula, key=lambda x: (-_bn(x.get("batch_id")), _pc_view(x.get("program_id"))))
 
-    # Build owner keys per course → then round-robin distribute sections among owners
     block_keys_by_course: Dict[str, List[Tuple[str, str, str, int]]] = {}
     for cur in curricula_sorted:
         bid = cur.get("batch_id", "")
@@ -1896,7 +1909,7 @@ async def get_course_offerings(
         pid = cur.get("program_id", "")
         binfo = batch_by_id.get(bid or "", {})
         batch_num = int(binfo.get("batch_number") or 0)
-        prog_no_base = prog_no_label_map.get((bid, pid), "PROG-?")  # e.g., "BSCS-1"
+        prog_no_base = prog_no_label_map.get((bid, pid), "PROG-?")
 
         for course_id in ensure_list(cur.get("course_list")):
             if course_id not in allowed_course_ids:
@@ -1916,14 +1929,14 @@ async def get_course_offerings(
             suggest_total_sections = existing_sections + suggest_additional
 
             course_payload = {
-                "course_id": course_id,  # NOTE: placeholder (e.g., ITELEC1)
+                "course_id": course_id,
                 "course_code": cinfo.get("course_code",""),
                 "course_title": cinfo.get("course_title",""),
                 "program_level": cinfo.get("program_level",""),
                 "program_level_label": cinfo.get("program_level_label",""),
                 "department_id": cinfo.get("department_id",""),
                 "department_name": dep_name,
-                "type_of_course": cinfo.get("type_of_course",""),  # expose to UI
+                "type_of_course": cinfo.get("type_of_course",""),
             }
 
             my_sections = distribution_by_course.get(course_id, {}).get((bid, pid), [])
@@ -1949,7 +1962,6 @@ async def get_course_offerings(
                     "faculty": {"faculty_id": None, "user_id": None, "faculty_name": "UNASSIGNED"},
                     "slot1": None, "slot2": None,
                     "links": {"curriculum_id": cur.get("curriculum_id"), "term_id": term_id, "course_id": course_id, "batch_id": binfo.get("batch_id", ""), "program_id": pid,
-                              # expose placeholder so UI can carry it forward when picking specifics later
                               "fulfilled_placeholder_course_id": course_id},
                     "sizing": sizing_payload(),
                 })
@@ -1970,7 +1982,6 @@ async def get_course_offerings(
                             "type_of_course": offered_info.get("type_of_course", ""),
                         }
 
-                    # Decide what the UI should display (always compute these)
                     _display_course = offered_payload or course_payload
                     _placeholder_course = (
                         course_payload
@@ -1987,14 +1998,9 @@ async def get_course_offerings(
                             "batch_number": batch_num or None,
                         },
                         "program": {"program_id": pid, "program_code": (prog_map_view.get(pid, {}) or {}).get("program_code", "")},
-
-                        # SHOW the specific elective (ADFILM/ISDESTH/…) as the main course
                         "course": _display_course,
-
-                        # keep both for reference / UI badges
-                        "offered_course": offered_payload,          # the specific elective (if any)
-                        "placeholder_course": _placeholder_course,  # the Elective slot (e.g., CBELEC2/ITELEC1)
-
+                        "offered_course": offered_payload,
+                        "placeholder_course": _placeholder_course,
                         "section": {
                             "section_id": sid,
                             "section_code": s.get("section_code", ""),
@@ -2008,6 +2014,7 @@ async def get_course_offerings(
                             "curriculum_id": cur.get("curriculum_id"),
                             "term_id": term_id,
                             "course_id": course_id,  # still the placeholder owner for grouping/demand
+                            "course_id": course_id,
                             "batch_id": binfo.get("batch_id", ""),
                             "program_id": pid,
                             "section_id": sid,
@@ -2016,7 +2023,6 @@ async def get_course_offerings(
                         "sizing": sizing_payload(),
                     })
 
-    # ----- deterministic sorting for stable UI
     def _sec_num(code: str) -> int:
         return int("".join(ch for ch in (code or "") if ch.isdigit()) or "0")
 
@@ -2035,7 +2041,7 @@ async def get_course_offerings(
         "filters": {"levels": levels, "departments": dep_opts, "ids": id_opts, "programs": prog_opts},
         "rows": rows,
         "course_options_by_group": options_by_group,
-        "all_specific_electives": all_specific_electives,   # << NEW, global pool
+        "all_specific_electives": all_specific_electives,
         "room_options": room_opts,
         "planning": {
             "needs_import": needs_import,
@@ -2043,11 +2049,6 @@ async def get_course_offerings(
             "pending_changes": pending if approval_required else []
         }
     }
-async def _normalize_code(v):
-    # course_code may be a string or array in your DB
-    if isinstance(v, list):
-        return v[0] if v else ""
-    return v or ""
 
 # ---------- POST ----------
 @router.post("/courseofferings")
@@ -2056,11 +2057,13 @@ async def post_course_offerings(
     action: Literal[
         "addRow", "editRow", "deleteRow", "forward",
         "curriculumAddCourse", "curriculumEditCourse", "curriculumRemoveCourse",
-        "approvePlan"
+        "approvePlan",
+        "courseCatalog",
+        "catalog.create"
     ] = Query(...),
     payload: Optional[Dict[str, Any]] = Body(None),
 ):
-    # Ensure a current term
+
     t = await current_term() or await _ensure_current_term()
     term_id = (t or {}).get("term_id")
     if not term_id:
@@ -2074,23 +2077,29 @@ async def post_course_offerings(
     prefix_default = campus_section_prefix(campus.get("campus_name", "")) or ""
     
     if action == "courseCatalog":
-        q = (payload or {}).get("q", "") or ""
-        limit = int((payload or {}).get("limit", 50))
-        department_id = (payload or {}).get("department_id") or None
-        program_level = (payload or {}).get("program_level") or None
+        # inputs
+        q_raw = (payload or {}).get("q") or ""
+        req_limit = int((payload or {}).get("limit", 500))
+        limit = max(1, min(req_limit, 1000))  # clamp
 
+        department_id = (payload or {}).get("department_id") or None
+        program_level = (payload or {}).get("program_level") or None  # accepts 'UGS'/'GSM' or 'Undergraduate'/'Graduate Studies'
+
+        # base filter
         flt: Dict[str, Any] = {}
         if department_id:
             flt["department_id"] = department_id
         if program_level:
-            flt["program_level"] = program_level
+            flt["program_level"] = level_code(program_level)  # normalize UGS/GSM
 
-        # search by code (string or array) OR title
-        if q:
-            rx = {"$regex": re.escape(q), "$options": "i"}
+        # tokenized query: "CCINF 1" -> regex "CCINF.*1" (case-insensitive)
+        tokens = [t for t in re.split(r"\s+", q_raw.strip()) if t]
+        if tokens:
+            pattern = ".*".join(re.escape(t) for t in tokens)
+            rx = {"$regex": pattern, "$options": "i"}
             flt["$or"] = [
-                {"course_code": rx},        # string form
-                {"course_code.0": rx},      # array form (first element)
+                {"course_code": rx},     # string form
+                {"course_code.0": rx},   # array[0] form
                 {"course_title": rx},
             ]
 
@@ -2105,12 +2114,150 @@ async def post_course_offerings(
             "type_of_course": 1,
         }
 
-        rows = list(db[COL_COURSES].find(flt, proj).limit(limit))
-        # normalize course_code to string for UI consistency
-        for r in rows:
-            r["course_code"] = _normalize_code(r.get("course_code"))
-        return {"ok": True, "results": rows}
-    
+        # fetch a wider pool, then sort by relevance locally
+        pool_cap = min(limit * 5, 2000)
+        raw: List[Dict[str, Any]] = []
+        cursor = db[COL_COURSES].find(flt, proj).limit(pool_cap)
+        async for r in cursor:
+            r["course_code"] = _code_str(r.get("course_code"))
+            raw.append(r)
+
+        # relevance scoring
+        q_join = "".join(tokens).upper() if tokens else ""
+        toksU = [t.upper() for t in tokens]
+
+        def contains_in_order(text: str, toks: List[str]) -> bool:
+            if not toks:
+                return False
+            T = (text or "").upper()
+            i = 0
+            for t in toks:
+                j = T.find(t, i)
+                if j < 0:
+                    return False
+                i = j + len(t)
+            return True
+
+        def score(row: Dict[str, Any]):
+            code = (row.get("course_code") or "").upper()
+            title = (row.get("course_title") or "").upper()
+
+            # 0 = best: code starts with query (joined tokens)
+            s0 = 0 if (q_join and code.startswith(q_join)) else 1
+
+            # then: tokens appear in order in code, else in title, else none
+            if contains_in_order(code, toksU):
+                s1 = 0
+            elif contains_in_order(title, toksU):
+                s1 = 1
+            else:
+                s1 = 2
+
+            # final tiebreakers: shorter code first, then lexicographic
+            return (s0, s1, len(code), code)
+
+        raw.sort(key=score)
+        return {"ok": True, "results": raw[:limit]}
+    if action == "catalog.create":
+        if not payload:
+            raise HTTPException(status_code=400, detail="Missing payload.")
+
+        # Required fields
+        course_code = _norm_code((payload.get("course_code") or ""))
+        course_title = (payload.get("course_title") or "").strip()
+        department_id = (payload.get("department_id") or "").strip()
+        program_level_in = payload.get("program_level")  # accepts UG/GS/UGS/GSM or labels
+        if not (course_code and course_title and department_id and program_level_in):
+            raise HTTPException(
+                status_code=422,
+                detail="course_code, course_title, department_id, and program_level are required."
+            )
+
+        # Validate department exists (optional but safer)
+        dep_exists = await db[COL_DEPARTMENTS].find_one({"department_id": department_id}, {"_id": 1})
+        if not dep_exists:
+            raise HTTPException(status_code=422, detail="department_id not found.")
+
+        # Normalize level and type
+        program_level = level_code(program_level_in)  # -> "UGS" or "GSM"
+        toc_raw = payload.get("type_of_course")
+        toc_norm = canonical_course_type(toc_raw)
+        # Store human-facing casing for 'Elective Course'
+        if toc_norm == "ELECTIVE COURSE":
+            type_of_course = "Elective Course"
+        elif toc_norm == "ELECTIVE":
+            type_of_course = "Elective"
+        elif toc_norm == "GE":
+            type_of_course = "GE"
+        elif toc_norm == "SHS":
+            type_of_course = "SHS"
+        elif toc_norm in {"MAJOR", "FOUNDATION", "COS"}:
+            type_of_course = toc_norm
+        else:
+            type_of_course = (toc_raw or "")  # leave as-is if unknown; you can also force "".
+
+        # Units (optional)
+        units = None
+        if "units" in payload and payload.get("units") not in (None, ""):
+            try:
+                units = float(payload.get("units"))
+            except Exception:
+                raise HTTPException(status_code=422, detail="units must be a number.")
+
+        # Capacity for planning defaults — we use 'max_enrollee' in this codebase
+        max_enrollee = payload.get("max_enrollee", payload.get("capacity"))
+        if max_enrollee in (None, ""):
+            max_enrollee = DEFAULT_CAP
+        try:
+            max_enrollee = int(max_enrollee)
+            if max_enrollee < 0:
+                raise ValueError()
+        except Exception:
+            raise HTTPException(status_code=422, detail="max_enrollee/capacity must be a non-negative integer.")
+
+        # Optional description
+        description = (payload.get("description") or "").strip()
+
+        # Deduplicate by course_code (string or array[0])
+        dup = await db[COL_COURSES].find_one(
+            {"$or": [{"course_code": course_code}, {"course_code.0": course_code}]},
+            {"_id": 1}
+        )
+        if dup:
+            raise HTTPException(status_code=409, detail="Course with the same course_code already exists.")
+
+        # Generate a new course_id (sequential CRS0001... if available)
+        try:
+            course_id = await _next_course_id()
+        except Exception:
+            # Fall back to timestamp style if sequence fails
+            course_id = _id("CRS")
+
+        # Build a full doc with defaults for missing fields
+        doc = _build_full_course_document(
+            {
+                "course_code": course_code,            # string -> will be stored as ["CODE"]
+                "course_title": course_title,
+                "department_id": department_id,
+                "program_level": program_level_in,     # accept label or code; builder normalizes
+                "type_of_course": payload.get("type_of_course"),
+                "units": units,
+                "max_enrollee": max_enrollee,
+                "description": description,
+                # optional inputs if your UI ever sends them:
+                "min_enrollee": payload.get("min_enrollee"),
+                "room_type": payload.get("room_type"),
+                "syllabus": payload.get("syllabus"),
+                "course_coordinator": payload.get("course_coordinator"),
+                "prerequisites": payload.get("prerequisites"),
+                "teaching_team": payload.get("teaching_team"),
+            },
+            course_id=course_id,
+        )
+
+        await db[COL_COURSES].insert_one(doc)
+        return {"ok": True, "course": _clean_mongo_doc(doc)}
+
     if action == "forward":
         if not payload:
             raise HTTPException(status_code=400, detail="Missing payload.")
@@ -2137,27 +2284,37 @@ async def post_course_offerings(
         if not pid or not bid:
             raise HTTPException(status_code=422, detail="program_id and batch_id are required.")
 
-        # allow custom course creation with units
         if not course_id and payload.get("new_course"):
             nc = payload["new_course"]
             code = _norm_code(nc.get("course_code"))
             title = (nc.get("course_title") or "").strip()
             dep = (nc.get("department_id") or "").strip()
-            lvl = level_code(nc.get("program_level"))
-            units = nc.get("units")
-            if not (code and title and dep and lvl):
+            lvl_in = nc.get("program_level")
+            if not (code and title and dep and lvl_in):
                 raise HTTPException(status_code=422, detail="new_course requires course_code, course_title, department_id, program_level.")
-            cid = _id("CRS")
-            doc = {
-                "course_id": cid, "course_code": code, "course_title": title,
-                "department_id": dep, "program_level": lvl, "source": "custom",
-                "created_at": now(), "updated_at": now()
-            }
-            if units is not None:
-                try:
-                    doc["units"] = float(units)
-                except Exception:
-                    pass
+
+            cid = await _next_course_id() if "_parse_course_seq" in globals() else _id("CRS")
+
+            doc = _build_full_course_document(
+                {
+                    "course_code": code,                       # will be saved as [code]
+                    "course_title": title,
+                    "department_id": dep,
+                    "program_level": lvl_in,                   # builder normalizes to UGS/GSM
+                    "type_of_course": nc.get("type_of_course"),
+                    "units": nc.get("units"),
+                    "min_enrollee": nc.get("min_enrollee"),
+                    "max_enrollee": nc.get("max_enrollee", nc.get("capacity")),
+                    "room_type": nc.get("room_type"),
+                    "description": nc.get("description"),
+                    "syllabus": nc.get("syllabus"),
+                    "course_coordinator": nc.get("course_coordinator"),
+                    "prerequisites": nc.get("prerequisites"),
+                    "teaching_team": nc.get("teaching_team"),
+                },
+                course_id=cid,
+            )
+
             await db[COL_COURSES].insert_one(doc)
             course_id = cid
 
@@ -2199,7 +2356,6 @@ async def post_course_offerings(
         if not cur_doc:
             raise HTTPException(status_code=404, detail="Curriculum not found.")
 
-        # inline edit of course fields (title/level/units)
         if upd:
             f: Dict[str, Any] = {}
             if "course_title" in upd:
@@ -2219,7 +2375,6 @@ async def post_course_offerings(
                 await db[COL_COURSES].update_one({"course_id": old_cid}, {"$set": {**f, "updated_at": now()}})
             return {"ok": True, "course_id": old_cid}
 
-        # replace course id in curriculum list
         if not new_cid:
             raise HTTPException(status_code=422, detail="new_course_id or update_course must be provided.")
         clist = [c for c in ensure_list(cur_doc.get("course_list")) if c != old_cid]
@@ -2248,7 +2403,6 @@ async def post_course_offerings(
         if needs_import:
             raise HTTPException(status_code=400, detail="Import Pre-Enlistment first.")
 
-        # base sections per course = at least number of programs that include it
         curr = [x async for x in db[COL_CURRICULUM].find(
             {"term_id": term_id, "campus_id": campus_id},
             {"_id":0,"program_id":1,"course_list":1}
@@ -2261,7 +2415,6 @@ async def post_course_offerings(
                     course_to_programs.setdefault(cid, set()).add(pid)
         base_by_course: Dict[str, int] = {cid: max(1, len(ps)) for cid, ps in course_to_programs.items()}
 
-        # helper to choose prefix for creation (Laguna UG → XC if any owner is CBL, else XX)
         async def _choose_creation_prefix(cid: str) -> str:
             lvl = (await db[COL_COURSES].find_one({"course_id": cid}, {"_id":0,"program_level":1}) or {}).get("program_level")
             owners = list(course_to_programs.get(cid, set()))
@@ -2273,12 +2426,10 @@ async def post_course_offerings(
             any_cbl = any(_is_cbl_program(nm) for nm in pname_list)
             if "laguna" in (campus.get("campus_name","").lower()):
                 if level_code(lvl) == "GSM":
-                    return "XX"  # GS default if ever needed on Laguna
+                    return "XX"
                 return "XC" if any_cbl else "XX"
-            # Manila
             return "G" if level_code(lvl) == "GSM" else "S"
 
-        # 1) add courses to curriculum where pending recommends it
         for ch in pending:
             if ch.get("type") == "add_course_to_curriculum":
                 cid = ch.get("course_id")
@@ -2298,7 +2449,6 @@ async def post_course_offerings(
                     else:
                         await db[COL_CURRICULUM].update_one({"_id": cur_doc["_id"]}, {"$addToSet": {"course_list": cid}, "$set": {"updated_at": now()}})
 
-        # 2) adjust sections to match capacity intent
         for ch in pending:
             if ch.get("type") not in {"sections_increase", "sections_decrease"}:
                 continue
@@ -2307,7 +2457,6 @@ async def post_course_offerings(
             if not cid:
                 continue
 
-            # Use pattern for queries, but a concrete prefix when creating new
             lvl = (await db[COL_COURSES].find_one({"course_id": cid}, {"_id":0,"program_level":1}) or {}).get("program_level")
             pref_pat = prefix_pattern_for_level(campus.get("campus_name",""), lvl) or prefix_default
             sec_q = {"term_id": term_id, "$or": [{"course_id": cid}, {"fulfilled_placeholder_course_id": cid}]}
@@ -2335,7 +2484,6 @@ async def post_course_offerings(
                         count=need_base,
                         capacity=await effective_section_capacity(term_id, campus.get("campus_name",""), cid)
                     )
-
                     existing += need_base
 
                 by_sections = max(0, by_sections - need_base)
@@ -2351,7 +2499,7 @@ async def post_course_offerings(
                         capacity=await effective_section_capacity(term_id, campus.get("campus_name",""), cid)
                     )
 
-            else:  # sections_decrease
+            else:
                 by_sections = int(ch.get("by_sections") or 0)
                 if by_sections > 0:
                     target = max(base, existing - by_sections)
@@ -2360,13 +2508,11 @@ async def post_course_offerings(
                     eff_cap = await effective_section_capacity(term_id, campus.get("campus_name",""), cid) or DEFAULT_CAP
                     target = max(base, ceil((est["plan"] or 0) / eff_cap) or 1)
 
-                # Prefer reduction across both XX and XC (pattern works)
                 await reduce_sections_if_excess(
                     term_id=term_id, campus_prefix=pref_pat,
                     course_id=cid, target_count=target
                 )
 
-        # mark approved with the exact hashes we just applied
         await db[COL_PLANSTATE].update_one(
             {"term_id": term_id, "campus_id": campus_id},
             {"$set": {"last_preen_hash": preen_hash, "last_cohort_hash": cohort_hash, "approved": True, "updated_at": now()}},
@@ -2374,10 +2520,9 @@ async def post_course_offerings(
         )
         return {"ok": True, "applied": len(pending)}
 
-    # ----- GE/SHS EXEMPTION: planning gate is skipped for GE/SHS -----
+    # ----- GE/SHS EXEMPTION -----
     plan_warning = False
     if action in {"addRow", "editRow", "deleteRow"}:
-        # Determine target course to decide if we should exempt from planning gate
         ge_shs_exempt = False
         target_cid = ""
 
@@ -2393,9 +2538,8 @@ async def post_course_offerings(
 
         if target_cid:
             ctype = await _course_type(target_cid)
-            ge_shs_exempt = (ctype in EDIT_FULL)  # {"GE","SHS"}
+            ge_shs_exempt = (ctype in EDIT_FULL)
 
-        # Only non-GE/SHS are blocked by planning gate
         if not ge_shs_exempt:
             needs_import, approval_required, _pending, _ph, _ch, _st = await _planning_flags(
                 term_id=term_id, campus_prefix=prefix_default, campus_id=campus_id
@@ -2436,11 +2580,9 @@ async def post_course_offerings(
             violations=gating,
             payload=payload,
         )
-        # proceed with the action; do not block
         gating = []
 
     if gating and not payload.get("override"):
-        # Build a minimal preview (same as your old preview code, but use gating only)
         _raw_course = (payload.get("course_id") or payload.get("links", {}).get("course_id") or "").strip()
         _spec = (payload.get("specific_course_id") or "").strip()
         preview_cid = _spec or _raw_course
@@ -2482,7 +2624,6 @@ async def post_course_offerings(
     if action == "addRow":
         batch_id = (payload.get("batch_id") or "").strip()
 
-        # ELECTIVE target course resolution
         placeholder_id = (payload.get("for_placeholder_course_id") or "").strip()
         specific_id = (payload.get("specific_course_id") or "").strip()
         raw_course_id = (payload.get("course_id") or "").strip()
@@ -2492,18 +2633,16 @@ async def post_course_offerings(
             target_course_id = raw_course_id
 
         ctype_target = await _course_type(target_course_id)
-        is_full = ctype_target in EDIT_FULL  # GE/SHS free edits
+        is_full = ctype_target in EDIT_FULL
 
         b = await db[COL_BATCHES].find_one({"batch_id": batch_id}, {"_id": 0, "batch_number": 1, "batch_code": 1})
         batch_number = _extract_batch_number(b or {})
 
-        # choose prefix per course level + CBL (program_name)
         lvl = await _course_program_level(target_course_id)
         prog_id = (payload.get("program_id") or "").strip()
         prog_name = await _program_name(prog_id) if prog_id else None
         chosen_prefix = campus_section_prefix_for_course(campus.get("campus_name",""), lvl, prog_name) or prefix_default
 
-        # NOTE: GE can supply ANY section_code; we don't enforce pattern (soft checks already skipped)
         section_code = (payload.get("section_code") or "").strip() or await next_section_code(chosen_prefix, term_id, target_course_id)
 
         sid = _id("SEC")
@@ -2526,7 +2665,6 @@ async def post_course_offerings(
             "status": "active",
             "created_at": now(), "updated_at": now(),
         }
-        # If the user explicitly set the code (e.g., GE), preserve it — don't auto-renumber on duplicate.
         if (payload.get("section_code") or "").strip():
             doc["_code_from_user"] = True
 
@@ -2537,7 +2675,6 @@ async def post_course_offerings(
         if not inserted:
             raise HTTPException(status_code=409, detail="Could not allocate a unique section code. Try again.")
 
-        # ---- Schedules
         for idx, key in enumerate(["slot1", "slot2"], start=1):
             s = (payload.get(key) or {})
             day = normalize_day(s.get("day"))
@@ -2548,7 +2685,6 @@ async def post_course_offerings(
 
             has_time = bool(day and beg and end)
 
-            is_full = ctype_target in EDIT_FULL
             if is_full:
                 if rid and not has_time:
                     raise HTTPException(status_code=422, detail={"ok": False, "errors": [
@@ -2578,7 +2714,6 @@ async def post_course_offerings(
                         "created_at": now(), "updated_at": now(),
                     })
 
-        # ---- Faculty on CREATE for GE/SHS (optional)
         if is_full:
             want_faculty = (
                 ("faculty_user_id" in payload) or
@@ -2615,15 +2750,13 @@ async def post_course_offerings(
     if action == "editRow":
         section_id = (payload.get("section_id") or "").strip()
 
-        # Resolve course type for rule gating
         cid_for_edit = (payload.get("course_id") or "").strip()
         if not cid_for_edit:
             sec_doc = await db[COL_SECTIONS].find_one({"section_id": section_id}, {"_id": 0, "course_id": 1})
             cid_for_edit = (sec_doc or {}).get("course_id", "")
         ctype = (await _course_type(cid_for_edit))
-        is_full = ctype in EDIT_FULL  # GE/SHS free edits
+        is_full = ctype in EDIT_FULL
 
-        # Optional: change course code/title from offerings
         upd_course = payload.get("update_course") or {}
         course_set: Dict[str, Any] = {}
         if "course_code" in upd_course:
@@ -2638,7 +2771,6 @@ async def post_course_offerings(
             course_set["updated_at"] = now()
             await db[COL_COURSES].update_one({"course_id": cid_for_edit}, {"$set": course_set})
 
-        # Section basics
         sec_updates: Dict[str, Any] = {}
         if "section_code" in payload:
             sec_updates["section_code"] = (payload.get("section_code") or "").strip()
@@ -2648,7 +2780,6 @@ async def post_course_offerings(
         if "remarks" in payload:
             sec_updates["remarks"] = (payload.get("remarks") or "").strip()
 
-        # ELECTIVE: switch specific elective and/or set placeholder link
         _new_specific    = (payload.get("specific_course_id") or "").strip()
         _new_placeholder = (payload.get("for_placeholder_course_id") or "").strip()
         if _new_specific:
@@ -2664,8 +2795,6 @@ async def post_course_offerings(
                     {"code": "SECTION_CODE_DUP", "message": "Section code already in use for this course and term."}
                 ]})
 
-
-        # Schedules
         for idx, key in enumerate(["slot1", "slot2"], start=1):
             s = payload.get(key)
             if s is None:
@@ -2735,7 +2864,6 @@ async def post_course_offerings(
                         "created_at": now(), "updated_at": now(),
                     })
 
-        # Faculty updates for GE/SHS
         want_faculty_change = (
             ("faculty_user_id" in payload) or
             ("faculty_id" in payload) or
