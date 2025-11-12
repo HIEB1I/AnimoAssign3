@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from fastapi import APIRouter, Body, HTTPException, Query, Request
 from pydantic import BaseModel, Field
@@ -55,6 +55,47 @@ class PrefDoc(SubmitPayload):
 
 
 # helper: fetch type_id by exact type label
+
+# top of file (imports)
+from datetime import datetime, timezone, timedelta
+
+# ...
+
+async def _active_term_doc() -> dict | None:
+    # Fetch the active/current term with best-effort date fields
+    term = await db.terms.find_one(
+        {"$or": [{"status": "active"}, {"is_current": True}]},
+        {"_id": 0, "term_id": 1, "start_date": 1, "classes_start_date": 1}
+    )
+    return term or {}
+
+def _parse_date_any(dt: str | datetime | None) -> datetime | None:
+    if isinstance(dt, datetime):
+        return dt
+    if not dt:
+        return None
+    # Try common ISO formats
+    try:
+        return datetime.fromisoformat(str(dt).replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+def _prefs_window_from_term(term: dict) -> tuple[datetime, datetime]:
+    """
+    Opens at the start of WEEK 7 of the current term,
+    then closes exactly 30 days after open.
+    """
+    # prefer classes_start_date, else start_date, else now (fallback)
+    start = _parse_date_any(term.get("classes_start_date")) or _parse_date_any(term.get("start_date")) or datetime.now(timezone.utc)
+    # move to UTC if naive
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=timezone.utc)
+
+    open_dt = start + timedelta(weeks=6)  # week 7
+    close_dt = open_dt + timedelta(days=30)
+
+    return open_dt, close_dt
+
 async def _get_type_id(db, type_label: str) -> str | None:
     if not type_label:
         return None
@@ -289,7 +330,18 @@ async def preferences_root(
             "07:30 - 09:00","09:15 - 10:45","11:00 - 12:30","12:45 - 14:15",
             "14:30 - 16:00","16:15 - 17:45","18:00 - 19:30","19:45 - 21:00",
         ]
-        return {"ok": True, "kacs": kacs, "days_display": days_display, "time_slots_display": time_slots_display}
+        term = await _active_term_doc()
+        open_dt, close_dt = _prefs_window_from_term(term)
+        return {
+            "ok": True,
+            "kacs": kacs,
+            "days_display": days_display,
+            "time_slots_display": time_slots_display,
+            "prefs_window": {
+                "openISO": open_dt.isoformat(),
+                "deadlineISO": close_dt.isoformat(),
+                "term_id": term.get("term_id")
+            }}
 
     if action == "fetch":
         # Map userId -> faculty_id
@@ -311,8 +363,25 @@ async def preferences_root(
         return {"ok": True, "preferences": prefs}
 
     if action == "submit":
+
         if not payload:
             raise HTTPException(status_code=400, detail="Missing payload")
+
+        term_doc = await _active_term_doc()
+        if not term_doc:
+            raise HTTPException(status_code=400, detail="Active term not found; cannot submit preferences.")
+        term_id = termId or term_doc.get("term_id")
+        if not term_id:
+            raise HTTPException(status_code=400, detail="Active term not found; cannot submit preferences.")
+
+        open_dt, close_dt = _prefs_window_from_term(term_doc)
+        now = datetime.now(timezone.utc)
+        if now < open_dt:
+            raise HTTPException(status_code=403, detail="Preferences window has not opened yet.")
+        if now > close_dt:
+            raise HTTPException(status_code=403, detail="Preferences window is already closed.")
+
+        faculty_id = fac["faculty_id"]
 
         # Map userId -> faculty_id
         fac = await db.faculty_profiles.find_one({"user_id": userId}, {"_id": 0, "faculty_id": 1})

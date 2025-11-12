@@ -555,11 +555,6 @@ export default function OM_LoadAssignment() {
 
   const userId = session?.userId || "";
 
-  const normRoles = (session?.roles || []).map((r) =>
-  String(r).toLowerCase().replace(/\s+/g, "_")
-  );
-  
-
   // TopBar profile from DB (fallback to session)
   const [profileName, setProfileName] = useState<string>(session?.fullName || "");
   const [profileSubtitle, setProfileSubtitle] = useState<string>("");
@@ -572,24 +567,22 @@ export default function OM_LoadAssignment() {
       if (!userId) return;
       try {
         const p = await getOmLoadAssignmentProfile(userId);
-        // p: { ok: boolean; staff_id?: string; position_title?: string }
+        // role text
+        let roleTitle = p?.position_title || "";
+        // append " | Department of …" like CHAIR
+        if (roleTitle && p?.dept_name) roleTitle = `${roleTitle} | ${p.dept_name}`;
+        setProfileSubtitle(roleTitle);
+        setProfileName(p?.full_name || "");
 
-        // ✅ 2) Updated role/subtitle logic (replaces the old session?.roles check)
-        if (normRoles.includes("office_manager") || normRoles.includes("role0006")) {
-          setProfileSubtitle("Office Manager");
-        } else if (p?.position_title) {
-          setProfileSubtitle(p.position_title);
-        }
-
-        // ✅ 3) Updated name fallback logic (after subtitle)
+        // Keep the existing full name fallback
         if (!profileName) setProfileName(p?.full_name || session?.fullName || "");
-        
       } catch {
         /* ignore; non-blocking for UI */
       }
     })();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userId]);
+
 
 
   const [search, setSearch] = useState("");

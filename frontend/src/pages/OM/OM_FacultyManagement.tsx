@@ -2,14 +2,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import SelectBox from "../../component/SelectBox";
 import { cls } from "../../utilities/cls";
-import {
-  Search as SearchIcon,
-  MoreVertical,
-  Calendar,
-  BookOpen,
-} from "lucide-react";
-
-
+import { Search as SearchIcon, MoreVertical, Calendar, BookOpen } from "lucide-react";
 import {
   getFacultyOptions,
   listFaculty,
@@ -50,7 +43,8 @@ function ActionMenu({
 
       {open && (
         <div className="absolute right-0 mt-2 w-48 rounded-xl border border-gray-200 bg-white shadow-xl py-1 text-left z-50">
-          <button           
+          <button
+           
             onClick={() => {
               setOpen(false);             
               onViewSchedule();           
@@ -302,33 +296,33 @@ export default function OM_FacultyManagement() {
     setActiveModal(null);
    
     setSelected(null);
-      
+   
     setSchedule(null);
    
     setHistory(null);
  
   };
 
-// Load modal content
-useEffect(() => {
-  (async () => {
-    if (!activeModal || !selected) return;
-    try {
-      if (activeModal === "schedule") {
-        const data = await getFacultySchedule(selected.faculty_id);
-        setSchedule(data);
-      } else if (activeModal === "history") {
-        // Pass AY start (number) — api helper also accepts termId (string)
-        const ay = academicYears[historyYearIndex];
-        const data = await getFacultyHistory(selected.faculty_id, ay);
-        setHistory({ teaching_history: data?.teaching_history || [] });
+  // Load modal content
+  useEffect(() => {
+    (async () => {
+      if (!activeModal || !selected) return;
+      try {
+        if (activeModal === "schedule") {
+          const data = await getFacultySchedule(selected.faculty_id);
+          setSchedule(data);
+        } else if (activeModal === "history") {
+          // Pass AY start (number) — api helper also accepts termId (string)
+          const ay = academicYears[historyYearIndex];
+          const data = await getFacultyHistory(selected.faculty_id, ay);
+          setHistory({ teaching_history: data?.teaching_history || [] });
+        }
+      } catch {
+        /* ignore per-modal fetch errors */
       }
-    } catch {
-      /* ignore per-modal fetch errors */
-    }
-  })();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-}, [activeModal, selected, historyYearIndex, academicYears]);
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeModal, selected, historyYearIndex, academicYears]);
 
   const historyYearLabel = useMemo(() => {
     const ay = academicYears[historyYearIndex];
@@ -412,7 +406,6 @@ useEffect(() => {
     <main className="w-full px-8 py-8">
       <header className="mb-6">
         <h1 className="text-2xl font-bold">Faculty Directory</h1>
-        <p className="text-sm text-gray-600">Browse and manage faculty profile, schedule and history.</p>
       </header>
 
       {err && (

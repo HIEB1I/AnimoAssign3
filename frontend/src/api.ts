@@ -1501,7 +1501,14 @@ export type OMFOptions = {
     label?: string;
     submission_deadline?: string; // ISO
   };
+  // NEW: drives the countdown banner (same shape as backend payload)
+  prefs_window?: {
+    openISO?: string;
+    deadlineISO?: string;
+    term_id?: string;
+  };
 };
+
 
 export type OMFRow = {
   faculty_id: string;
