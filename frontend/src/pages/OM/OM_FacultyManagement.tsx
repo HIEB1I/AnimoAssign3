@@ -2,19 +2,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import SelectBox from "../../component/SelectBox";
 import { cls } from "../../utilities/cls";
-import {
-  Search as SearchIcon,
-  MoreVertical,
-  User,
-  Calendar,
-  BookOpen,
-  GraduationCap,
-} from "lucide-react";
-
+import { Search as SearchIcon, MoreVertical, Calendar, BookOpen } from "lucide-react";
 import {
   getFacultyOptions,
   listFaculty,
-  getFacultyProfile,
   getFacultySchedule,
   getFacultyHistory,
   type FacultyRow,
@@ -23,11 +14,9 @@ import {
 
 /* ---- Row actions menu ---- */
 function ActionMenu({
-  onViewProfile,
   onViewSchedule,
   onViewHistory,
 }: {
-  onViewProfile: () => void;
   onViewSchedule: () => void;
   onViewHistory: () => void;
 }) {
@@ -54,21 +43,6 @@ function ActionMenu({
 
       {open && (
         <div className="absolute right-0 mt-2 w-48 rounded-xl border border-gray-200 bg-white shadow-xl py-1 text-left z-50">
-          <button
-           
-            onClick={() => {
-             
-              setOpen(false);
-             
-              onViewProfile();
-           
-            }}
-           
-            className="flex w-full items-center gap-2 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
-          
-          >
-            <User className="h-4 w-4" /> <span>Faculty Profile</span>
-          </button>
           <button
            
             onClick={() => {
@@ -242,7 +216,7 @@ function renderTeachingHistoryLikeFacultyFromArray(flatRows: HistRow[]) {
 
 /* ---------------- Page ---------------- */
 export default function OM_FacultyManagement() {
-  type ModalType = null | "profile" | "schedule" | "history";
+  type ModalType = null | "schedule" | "history";
 
   // filters
   const [department, setDepartment] = useState("All Departments");
@@ -267,7 +241,6 @@ export default function OM_FacultyManagement() {
   const [selected, setSelected] = useState<FacultyRow | null>(null);
 
   // modal data
-  const [profile, setProfile] = useState<any>(null);
   const [schedule, setSchedule] = useState<any>(null);
 
   // history now expects { teaching_history: HistRow[] }
@@ -327,8 +300,6 @@ export default function OM_FacultyManagement() {
    
     setSelected(null);
    
-    setProfile(null);
-   
     setSchedule(null);
    
     setHistory(null);
@@ -340,10 +311,7 @@ export default function OM_FacultyManagement() {
     (async () => {
       if (!activeModal || !selected) return;
       try {
-        if (activeModal === "profile") {
-          const { profile } = await getFacultyProfile(selected.faculty_id);
-          setProfile(profile);
-        } else if (activeModal === "schedule") {
+        if (activeModal === "schedule") {
           const data = await getFacultySchedule(selected.faculty_id);
           setSchedule(data);
         } else if (activeModal === "history") {
@@ -441,7 +409,6 @@ export default function OM_FacultyManagement() {
     <main className="w-full px-8 py-8">
       <header className="mb-6">
         <h1 className="text-2xl font-bold">Faculty Directory</h1>
-        <p className="text-sm text-gray-600">Browse and manage faculty profile, schedule and history.</p>
       </header>
 
       {err && (
@@ -511,7 +478,6 @@ export default function OM_FacultyManagement() {
                   <td className="text-center text-gray-800">{r.status}</td>
                   <td className="text-center">
                     <ActionMenu
-                      onViewProfile={() => openModal("profile", r)}
                       onViewSchedule={() => openModal("schedule", r)}
                       onViewHistory={() => openModal("history", r)}
                     />
@@ -527,72 +493,6 @@ export default function OM_FacultyManagement() {
         {activeModal && selected && (
           <div className="fixed inset-0 z-[100] grid place-items-center bg-black/40 p-4">
             <div className="w-full max-w-screen-xl rounded-2xl bg-white p-6 shadow-2xl overflow-y-auto max-h-[90vh]">
-              {activeModal === "profile" && profile && (
-                <>
-                  <h2 className="text-lg font-semibold text-emerald-700 mb-6">Faculty Profile</h2>
-                  <div className="grid grid-cols-3 gap-y-5 text-sm mb-8">
-                    <div>
-                      <p className="font-semibold text-gray-900">Name</p>
-                      <p className="text-gray-600">{profile.name}</p>
-                    </div>
-                    <div>
-                      <p className="font-semibold text-gray-900">Email</p>
-                      <p className="text-gray-600">{profile.email}</p>
-                    </div>
-                    <div>
-                      <p className="font-semibold text-gray-900">Department</p>
-                      <p className="text-gray-600">{profile.department}</p>
-                    </div>
-                    <div>
-                      <p className="font-semibold text-gray-900">Faculty Type</p>
-                      <p className="text-gray-600">{profile.faculty_type}</p>
-                    </div>
-                    <div>
-                      <p className="font-semibold text-gray-900">Status</p>
-                      <p className="text-gray-600">{profile.status}</p>
-                    </div>
-                    <div>
-                      <p className="font-semibold text-gray-900">Position</p>
-                      <p className="text-gray-600">{profile.position || "—"}</p>
-                    </div>
-                    <div>
-                      <p className="font-semibold text-gray-900">Admin Position</p>
-                      <p className="text-gray-600">{profile.admin_position || "—"}</p>
-                    </div>
-                    <div>
-                      <p className="font-semibold text-gray-900">Course Coordinator</p>
-                      <p className="text-gray-600">
-                        {Array.isArray(profile.course_coordinator_of) && profile.course_coordinator_of.length
-                          ? profile.course_coordinator_of.join(", ")
-                          : "—"}
-                      </p>
-                    </div>
-                  </div>
-                  <h3 className="text-md font-semibold flex items-center gap-2 mb-2 text-gray-900">
-                    <GraduationCap className="h-5 w-5 text-emerald-700" />
-                    Nature of Load
-                  </h3>
-                  <div className="grid grid-cols-4 text-left text-sm mb-4">
-                    <div>
-                      <p className="font-semibold">Teaching</p>
-                      <p>{profile.load?.teaching ?? 0}</p>
-                    </div>
-                    <div>
-                      <p className="font-semibold">Admin</p>
-                      <p>{profile.load?.admin ?? 0}</p>
-                    </div>
-                    <div>
-                      <p className="font-semibold">Research</p>
-                      <p>{profile.load?.research ?? 0}</p>
-                    </div>
-                    <div>
-                      <p className="font-semibold">Faculty Units</p>
-                      <p>{profile.load?.faculty_units ?? 0}</p>
-                    </div>
-                  </div>
-                </>
-              )}
-
               {activeModal === "schedule" && (
                 <>
                   <div className="text-center mb-4">

@@ -2,6 +2,7 @@
 from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Query
 from ..main import db
+from datetime import datetime, timezone, timedelta  # <-- add
 
 router = APIRouter(prefix="/om", tags=["om"])
 
@@ -13,20 +14,39 @@ COL_TERMS = "terms"
 COL_PREFS = "faculty_preferences"  # existing preferences table
 
 # ---- Helpers (same style as Faculty Management) ----
-def _dept_name_expr():
+def _dept_name_expr() -> Dict[str, Any]:
     return {"$ifNull": ["$dept.department_name", "$dept.dept_name"]}
 
-def _full_name_expr():
+def _full_name_expr() -> Dict[str, Any]:
+    """Prefer joined users.{first,last}_name, fallback to faculty_profiles fields."""
+    last = {"$ifNull": ["$u.last_name", "$last_name"]}
+    first = {"$ifNull": ["$u.first_name", "$first_name"]}
+    # Add comma only if both parts exist
     return {
         "$trim": {
-            "input": {"$concat": [
-                {"$ifNull": ["$u.first_name", ""]}, " ",
-                {"$ifNull": ["$u.last_name",  ""]},
-            ]}
+            "input": {
+                "$concat": [
+                    {"$ifNull": [last, ""]},
+                    {
+                        "$cond": [
+                            {"$and": [
+                                {"$ne": [last, None]},
+                                {"$ne": [first, None]},
+                                {"$ne": [last, ""]},
+                                {"$ne": [first, ""]},
+                            ]},
+                            ", ",
+                            ""
+                        ]
+                    },
+                    {"$ifNull": [first, ""]},
+                ]
+            }
         }
     }
 
-def _faculty_type_display():
+def _faculty_type_display() -> Dict[str, Any]:
+    """Map employment_type codes to human labels."""
     return {
         "$switch": {
             "branches": [
@@ -37,15 +57,54 @@ def _faculty_type_display():
         }
     }
 
-async def _active_term() -> Dict[str, Any]:
+
+# (new) parse date like in FACULTY_Preferences backend
+def _parse_date_any(dt):
+    if isinstance(dt, datetime):
+        return dt
+    if not dt:
+        return None
+    try:
+        return datetime.fromisoformat(str(dt).replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+# (new) compute open/deadline like FACULTY_Preferences
+def _prefs_window_from_term(term: Dict[str, Any]) -> tuple[datetime, datetime]:
+    start = _parse_date_any(term.get("classes_start_date")) or _parse_date_any(term.get("start_date")) or datetime.now(timezone.utc)
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=timezone.utc)
+    open_dt = start + timedelta(weeks=6)   # Week 7
+    close_dt = open_dt + timedelta(days=30)
+    return open_dt, close_dt
+
+async def _active_term():
+    # (unchanged) but now also grab start/classes_start for window calc
     t = await db[COL_TERMS].find_one(
         {"$or": [{"status": "active"}, {"is_current": True}]},
-        {"_id": 0, "term_id": 1, "acad_year_start": 1, "term_number": 1, "submission_deadline": 1},
+        {
+            "_id": 0,
+            "term_id": 1,
+            "acad_year_start": 1,
+            "term_number": 1,
+            "submission_deadline": 1,
+            "start_date": 1,             # <-- added
+            "classes_start_date": 1,     # <-- added
+        },
     )
     if t:
         return t
     last = await db[COL_TERMS].find(
-        {}, {"_id": 0, "term_id": 1, "acad_year_start": 1, "term_number": 1, "submission_deadline": 1}
+        {},
+        {
+            "_id": 0,
+            "term_id": 1,
+            "acad_year_start": 1,
+            "term_number": 1,
+            "submission_deadline": 1,
+            "start_date": 1,
+            "classes_start_date": 1,
+        },
     ).sort([("acad_year_start", -1), ("term_number", -1)]).limit(1).to_list(1)
     return last[0] if last else {}
 
@@ -76,6 +135,14 @@ async def facultyforms_handler(
         tn = active.get("term_number")
         label = f"Term {tn} AY {ay}–{(ay + 1) if ay else ''}" if (ay and tn) else None
 
+        # NEW: compute open/deadline like FACULTY_Preferences backend
+        open_dt, close_dt = _prefs_window_from_term(active or {})
+        prefs_window = {
+            "openISO": open_dt.isoformat(),
+            "deadlineISO": close_dt.isoformat(),
+            "term_id": active.get("term_id"),
+        }
+
         return {
             "ok": True,
             "departments": department_options,
@@ -87,6 +154,7 @@ async def facultyforms_handler(
                 "label": label,
                 "submission_deadline": active.get("submission_deadline"),
             },
+            "prefs_window": prefs_window,  # <-- added
         }
 
     # ----- Resolve term (no parsing of termId strings) -----
