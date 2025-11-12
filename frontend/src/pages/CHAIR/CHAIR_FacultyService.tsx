@@ -16,9 +16,18 @@ import {
 const cls = (...s: (string | false | undefined)[]) => s.filter(Boolean).join(" ");
 const toast = (msg: string) => alert(msg);
 
-/** unify control heights — roomier */
+/** unify control heights */
 const CONTROL =
   "h-10 w-full rounded-md border border-gray-300 px-3 text-[13px] shadow-sm focus:ring-2 focus:ring-emerald-500/30";
+
+/** shared table look */
+const SHARED_TABLE = "w-full table-fixed border-collapse text-[13px]";
+const CELL = "px-4 py-2 align-middle";
+const TH = "px-4 py-2 font-medium text-xs text-gray-600 tracking-wide text-center";
+
+/** tighter cells just for REQUESTER tables */
+const CELL_TIGHT = "px-3 py-1.5 align-middle";
+const TH_TIGHT = "px-3 py-1.5 font-medium text-xs text-gray-600 tracking-wide text-center";
 
 /* ---------------- Dropdown (portal-less, fixed-positioned) ---------------- */
 function Dropdown({
@@ -29,6 +38,7 @@ function Dropdown({
   className = "",
   searchable = false,
   align = "left",
+  onOpen,                 // NEW
 }: {
   value: string;
   onChange: (v: string) => void;
@@ -37,53 +47,51 @@ function Dropdown({
   className?: string;
   searchable?: boolean;
   align?: "left" | "right";
+  onOpen?: () => void;    // NEW
 }) {
   const [open, setOpen] = useState(false);
   const [term, setTerm] = useState("");
-  const btnRef = useRef<HTMLButtonElement>(null);
+  const boxRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
 
-  // fixed menu placement data
   const [menuRect, setMenuRect] = useState<{ left: number; top: number; width: number; place: "down" | "up" }>();
 
-  const shown = useMemo(
-    () => (!searchable || !term ? options : options.filter((o) => o.toLowerCase().includes(term.toLowerCase()))),
-    [term, options, searchable]
-  );
+  const shown = useMemo(() => {
+    const list = options || [];
+    if (!searchable) return list;
+    const q = term.trim().toLowerCase();
+    return q ? list.filter((o) => o.toLowerCase().includes(q)) : list;
+  }, [options, term, searchable]);
 
-  // compute fixed coordinates so the menu is never clipped by overflow
   const compute = () => {
-    const el = btnRef.current;
+    const el = boxRef.current;
     if (!el) return;
     const r = el.getBoundingClientRect();
     const vw = window.innerWidth;
     const vh = window.innerHeight;
-    const estMenuH = Math.min(48 + shown.length * 36, Math.floor(vh * 0.6)); // approx header + items
+    const estMenuH = Math.min(48 + shown.length * 36, Math.floor(vh * 0.6));
     const roomBelow = vh - r.bottom;
     const place: "down" | "up" = roomBelow >= estMenuH || r.top < estMenuH ? "down" : "up";
-    let left = r.left;
     const width = Math.max(r.width, 220);
-    if (align === "right") left = Math.max(8, Math.min(vw - width - 8, r.right - width));
-    else left = Math.max(8, Math.min(vw - width - 8, r.left));
+    const left = Math.max(8, Math.min(vw - width - 8, align === "right" ? r.right - width : r.left));
     const top = place === "down" ? Math.min(vh - 8, r.bottom + 8) : Math.max(8, r.top - 8);
     setMenuRect({ left, top, width, place });
   };
 
-  // open/close + listeners
+  // Close when clicking outside
   useEffect(() => {
     const onDoc = (e: MouseEvent) => {
       if (!open) return;
       const t = e.target as Node;
-      if (btnRef.current && !btnRef.current.contains(t)) {
-        // clicks outside menu (which is fixed) close as well
-        const menu = document.getElementById(menuId);
-        if (!menu || !menu.contains(t)) setOpen(false);
-      }
+      if (boxRef.current?.contains(t)) return;
+      const menu = document.getElementById(menuId);
+      if (!menu || !menu.contains(t)) setOpen(false);
     };
     document.addEventListener("mousedown", onDoc);
     return () => document.removeEventListener("mousedown", onDoc);
   }, [open]);
 
-  // recalc on open / resize / scroll
+  // Recompute on open/resize/scroll
   useLayoutEffect(() => {
     if (!open) return;
     compute();
@@ -91,8 +99,7 @@ function Dropdown({
     const onScroll = () => compute();
     window.addEventListener("resize", onResize);
     window.addEventListener("scroll", onScroll, true);
-    // ensure button is visible in a scrollable container
-    btnRef.current?.scrollIntoView({ block: "nearest" });
+    inputRef.current?.focus();
     return () => {
       window.removeEventListener("resize", onResize);
       window.removeEventListener("scroll", onScroll, true);
@@ -102,18 +109,94 @@ function Dropdown({
 
   const menuId = useMemo(() => `dd-${Math.random().toString(36).slice(2)}`, []);
 
+  // value shown in the input
+  const inputValue = searchable ? (open ? term : value) : value;
+  const effectivePlaceholder = open && value && !term ? value : placeholder;
+
+  const openFresh = () => {
+      setTerm("");
+      onOpen?.();           // 🔑 tell parent we’re opening
+      setOpen(true);
+      requestAnimationFrame(() => {
+        compute();
+        inputRef.current?.focus();
+      });
+    };
+
+  const onPick = (opt: string) => {
+    onChange(opt);
+    setTerm("");
+    setOpen(false);
+  };
+
   return (
-    <div className={cls("relative", className)}>
-      <button
-        ref={btnRef}
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        className={cls(CONTROL, "truncate pr-8 text-left")}
-        title={value || undefined}
-      >
-        {value || <span className="text-neutral-400">{placeholder}</span>}
-        <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-500" />
-      </button>
+    <div className={cls("relative", className)} ref={boxRef}>
+      <div className="relative">
+        <input
+          ref={inputRef}
+          value={inputValue}
+          // Use onMouseDown so it fires before document's mousedown closer
+          onMouseDown={(e) => {
+            // If already open, let it be; if closed, open freshly
+            if (!open) {
+              e.preventDefault(); // keep focus on input
+              openFresh();
+            }
+          }}
+          onFocus={() => {
+            if (!open) openFresh();
+          }}
+          onChange={(e) => {
+            if (searchable) {
+              setTerm(e.target.value);
+              if (!open) setOpen(true);
+            }
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "ArrowDown" && !open) {
+              openFresh();
+              e.preventDefault();
+            }
+            if (e.key === "Enter" && shown.length > 0) onPick(shown[0]);
+            if (e.key === "Escape") setOpen(false);
+          }}
+          placeholder={effectivePlaceholder}
+          className={cls(CONTROL, "pr-16 truncate")}
+          title={value || undefined}
+        />
+
+        {/* Clear search */}
+        {searchable && open && term && (
+          <button
+            type="button"
+            onClick={() => {
+              setTerm("");
+              // recompute so full list sizes correctly
+              requestAnimationFrame(() => {
+                compute();
+                inputRef.current?.focus();
+              });
+            }}
+            className="absolute right-8 top-1/2 -translate-y-1/2 p-0.5 rounded hover:bg-neutral-100"
+            aria-label="Clear"
+            title="Clear"
+          >
+            <X className="h-4 w-4 text-neutral-500" />
+          </button>
+        )}
+
+        {/* Chevron toggle */}
+        <button
+          type="button"
+          onMouseDown={(e) => e.preventDefault()} // keep focus
+          onClick={() => (open ? setOpen(false) : openFresh())}
+          className="absolute right-1.5 top-1/2 -translate-y-1/2 p-1 rounded hover:bg-neutral-100"
+          aria-label="Toggle menu"
+          title="Toggle"
+        >
+          <ChevronDown className="h-4 w-4 text-neutral-500" />
+        </button>
+      </div>
 
       {open && menuRect && (
         <div
@@ -128,44 +211,31 @@ function Dropdown({
           }}
           className={cls(
             "z-[9999] overflow-auto rounded-xl border border-neutral-300 bg-white",
-            "shadow-[0_8px_24px_rgba(0,0,0,0.15)] overscroll-contain"
+            "shadow-[0_8px_24px_rgba(0,0,0,0.15)] overscroll-contain py-1"
           )}
         >
-          {searchable && (
-            <div className="p-2 border-b border-neutral-200 bg-neutral-50/70 sticky top-0">
-              <input
-                value={term}
-                onChange={(e) => setTerm(e.target.value)}
-                placeholder="Search…"
-                className={cls(CONTROL, "h-9")}
-                autoFocus
-              />
-            </div>
+          {shown.map((opt) => (
+            <button
+              key={opt}
+              onClick={() => onPick(opt)}
+              className={cls(
+                "block w-full truncate px-3 py-2 text-left text-[13px] hover:bg-emerald-50/60 transition-colors",
+                value === opt && "bg-emerald-100 text-emerald-800 font-medium"
+              )}
+              title={opt}
+            >
+              {opt}
+            </button>
+          ))}
+          {shown.length === 0 && (
+            <div className="px-3 py-2 text-[13px] text-neutral-500">No results</div>
           )}
-          <div className="py-1">
-            {shown.map((opt) => (
-              <button
-                key={opt}
-                onClick={() => {
-                  onChange(opt);
-                  setOpen(false);
-                }}
-                className={cls(
-                  "block w-full truncate px-3 py-2 text-left text-[13px] hover:bg-emerald-50/60 transition-colors",
-                  value === opt && "bg-emerald-100 text-emerald-800 font-medium"
-                )}
-                title={opt}
-              >
-                {opt}
-              </button>
-            ))}
-            {shown.length === 0 && <div className="px-3 py-2 text-[13px] text-neutral-500">No results</div>}
-          </div>
         </div>
       )}
     </div>
   );
 }
+
 
 /* ---------------- Spec constants ---------------- */
 const DAY_OPTIONS: DayShort[] = ["M", "T", "W", "H", "F", "S"];
@@ -182,28 +252,46 @@ const END_BY_BEGIN: Record<(typeof BEGIN_OPTIONS)[number], string> = {
   "19:45": "21:00",
 };
 
-/** spacious column widths */
-const COLS = [
-  "14%", // Course Code
-  "28%", // Course Title
-  "6%",  // Units
-  "16%", // From
-  "18%", // To
-  "14%", // Faculty
-  "5%",  // Day 1
-  "6%",  // Begin 1
-  "6%",  // End 1
-  "5%",  // Day 2
-  "6%",  // Begin 2
-  "6%",  // End 2
-  "12%", // Remarks
-  "8%",  // Action/Status
+/** full receiver layout (14 columns) */
+const COLS_14 = [
+  "25ch", // Course Code
+  "40ch", // Course Title
+  "10ch", // Units
+  "40ch", // From
+  "40ch", // To
+  "40ch", // Faculty
+  "15ch", // Day1
+  "15ch", // Begin1
+  "15ch", // End1
+  "15ch", // Day2
+  "15ch", // Begin2
+  "15ch", // End2
+  "30ch", // Remarks
+  "12ch", // Action/Status
 ];
-
-function ColGroup() {
+function ColGroup14() {
   return (
     <colgroup>
-      {COLS.map((w, i) => (
+      {COLS_14.map((w, i) => (
+        <col key={i} style={{ width: w }} />
+      ))}
+    </colgroup>
+  );
+}
+
+/** compact requester layout (6 columns) */
+const COLS_REQ = [
+  "22ch", // Course Code
+  "36ch", // Course Title
+  "8ch",  // Units
+  "36ch", // From
+  "36ch", // To
+  "14ch", // Action / Status
+];
+function ColGroupReq() {
+  return (
+    <colgroup>
+      {COLS_REQ.map((w, i) => (
         <col key={i} style={{ width: w }} />
       ))}
     </colgroup>
@@ -234,10 +322,7 @@ export default function CHAIR_FacultyService() {
   }, []);
 
   const userDeptName: string =
-    user?.department ||
-    user?.department_name ||
-    user?.dept_name ||
-    "Department of Software Technology";
+    user?.department || user?.department_name || user?.dept_name || "Department of Software Technology";
 
   const isRequester = /software technology/i.test(userDeptName);
 
@@ -418,110 +503,93 @@ export default function CHAIR_FacultyService() {
         </p>
       </header>
 
-      {/* REQUESTER view: creation + sent table */}
+      {/* REQUESTER view: creation + sent table (COMPACT 6-COLUMN LAYOUT) */}
       {isRequester && (
         <>
           {/* Creation (Requester) */}
           <div className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-x-auto overflow-y-visible mb-8">
-            <table className="w-full table-fixed text-[13px] min-w-[1200px]">
-              <ColGroup />
-              <thead className="bg-gray-50 border-y text-gray-700 text-left text-xs">
-                <tr className="[&>th]:py-3 [&>th]:px-4 uppercase tracking-wide">
-                  <th>Course Code</th>
-                  <th>Course Title</th>
-                  <th className="text-center">Units</th>
-                  <th>From</th>
-                  <th>To</th>
-                  <th>Faculty</th>
-                  <th className="text-center">Day 1</th>
-                  <th className="text-center">Begin 1</th>
-                  <th className="text-center">End 1</th>
-                  <th className="text-center">Day 2</th>
-                  <th className="text-center">Begin 2</th>
-                  <th className="text-center">End 2</th>
-                  <th>Remarks</th>
-                  <th className="text-center">Action</th>
+            <table className={cls(SHARED_TABLE, "border-t border-gray-200")}>
+              <ColGroupReq />
+              <thead className="bg-neutral-50">
+                <tr>
+                  <th className={TH_TIGHT}>Course Code</th>
+                  <th className={TH_TIGHT}>Course Title</th>
+                  <th className={TH_TIGHT}>Units</th>
+                  <th className={TH_TIGHT}>From</th>
+                  <th className={TH_TIGHT}>To</th>
+                  <th className={TH_TIGHT}>Action</th>
                 </tr>
               </thead>
 
-              <tbody className="whitespace-nowrap text-neutral-800">
-                <tr className="align-middle hover:bg-emerald-50/30">
-                  {/* Course Code (dropdown) */}
-                  <td className="px-4 py-3">
-                    <Dropdown
-                      value={draft.course_code}
-                      onChange={(code) => {
-                        const hit = courseSuggestions.find((c) => c.code === code);
-                        setDraft((d) => ({
-                          ...d,
-                          course_code: code,
-                          course_title: hit?.title ?? d.course_title,
-                          units: hit?.units ?? d.units,
-                        }));
-                        setCourseTerm(code);
-                      }}
-                      options={codeOptions}
-                      placeholder="Select code…"
-                      searchable
-                    />
+              <tbody className="text-gray-800">
+                <tr className="even:bg-gray-50">
+                  {/* Course Code */}
+                  <td className={CELL_TIGHT}>
+                    <div className="relative">
+                      <Dropdown
+                        value={draft.course_code}
+                        onChange={(code) => {
+                          const hit = courseSuggestions.find((c) => c.code === code);
+                          setDraft((d) => ({
+                            ...d,
+                            course_code: code,
+                            course_title: hit?.title ?? d.course_title,
+                            units: hit?.units ?? d.units,
+                          }));
+                          // was: setCourseTerm(code)
+                          setCourseTerm("");  // 🔑 reset to fetch/show the full list again
+                        }}
+
+                        options={codeOptions}
+                        placeholder="Select code…"
+                        searchable
+                        className="[&>button]:h-9 [&>button]:px-2"
+                        onOpen={() => setCourseTerm("")}
+                      />
+                    </div>
                   </td>
 
-                  {/* Course Title (readonly, auto-filled) */}
-                  <td className="px-4 py-3">
-                    <input value={draft.course_title} readOnly placeholder="—" className={cls(CONTROL, "bg-neutral-50")} />
+                  {/* Course Title (readonly) */}
+                  <td className={cls(CELL_TIGHT, "text-center")}>
+                    <span className="inline-block max-w-full truncate leading-6 px-1">
+                      {draft.course_title || "\u00A0"}
+                    </span>
                   </td>
 
-                  {/* Units */}
-                  <td className="px-4 py-3 text-center tabular-nums">
-                    <input
-                      type="number"
-                      min={0}
-                      step={1}
-                      value={draft.units ?? ""}
-                      onChange={(e) => {
-                        const v = e.target.value === "" ? null : Math.max(0, Number(e.target.value) || 0);
-                        setDraft((d) => ({ ...d, units: v }));
-                      }}
-                      className={cls(CONTROL, "text-center")}
-                    />
+                  {/* Units (readonly) */}
+                  <td className={cls(CELL_TIGHT, "text-center tabular-nums")}>
+                    <span className="inline-block leading-6">
+                      {draft.units ?? "\u00A0"}
+                    </span>
                   </td>
 
-                  {/* From (readonly chip) */}
-                  <td className="px-4 py-3">
+                  {/* From */}
+                  <td className={cls(CELL_TIGHT, "text-center")}>
                     <span
-                      className="inline-block rounded-md border border-gray-300 bg-white px-3 py-1.5 text-[13px] leading-tight shadow-sm max-w-full truncate"
+                      className="inline-block leading-6"
                       title={userDeptName}
                     >
-                      {userDeptName}
+                      {userDeptName || "\u00A0"}
                     </span>
                   </td>
 
                   {/* To */}
-                  <td className="px-4 py-3">
+                  <td className={cls(CELL_TIGHT, "text-center")}>
                     <Dropdown
                       value={draft.to_department}
                       onChange={(v) => setDraft((d) => ({ ...d, to_department: v as ToDept }))}
                       options={toDepts}
                       placeholder="Select department…"
+                      className="[&>button]:h-9 [&>button]:px-2"
                     />
                   </td>
 
-                  {/* Placeholders (Requester cannot edit) */}
-                  <td className="px-4 py-3 text-neutral-400">—</td>
-                  <td className="px-4 py-3 text-center text-neutral-400">—</td>
-                  <td className="px-4 py-3 text-center text-neutral-400">—</td>
-                  <td className="px-4 py-3 text-center text-neutral-400">—</td>
-                  <td className="px-4 py-3 text-center text-neutral-400">—</td>
-                  <td className="px-4 py-3 text-center text-neutral-400">—</td>
-                  <td className="px-4 py-3 text-left text-neutral-400">—</td>
-
-                  <td className="px-4 py-3 text-center">
+                  {/* Action (Send button sized to column) */}
+                  <td className={cls(CELL_TIGHT, "text-center")}>
                     <button
                       className={cls(
-                        "inline-flex items-center justify-center gap-1.5 rounded-md px-3 font-medium shadow-sm h-10",
-                        canSend
-                          ? "bg-[#008e4e] text-white hover:brightness-110"
-                          : "bg-neutral-200 text-neutral-500 cursor-not-allowed"
+                        "inline-flex h-9 w-full items-center justify-center gap-1.5 rounded-md px-2 text-[13px] font-medium shadow-sm",
+                        canSend ? "bg-[#008e4e] text-white hover:brightness-110" : "bg-neutral-200 text-neutral-500 cursor-not-allowed"
                       )}
                       disabled={!canSend}
                       onClick={handleCreateAndSend}
@@ -536,53 +604,47 @@ export default function CHAIR_FacultyService() {
             </table>
           </div>
 
-          {/* Sent Requests (Requester) */}
+          {/* Sent Requests (Requester) – COMPACT 6-COLUMN LAYOUT */}
           <div className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-x-auto overflow-y-visible">
             <div className="px-5 pt-4 text-[13px] text-neutral-600">Sent Requests</div>
-            <table className="w-full table-fixed text-[13px] min-w-[1200px]">
-              <ColGroup />
-              <thead className="bg-gray-50 border-y text-gray-700 text-left text-xs">
-                <tr className="[&>th]:py-3 [&>th]:px-4 uppercase tracking-wide">
-                  <th>Course Code &amp; Title</th>
-                  <th className="text-center">Units</th>
-                  <th>From</th>
-                  <th>To</th>
-                  <th>Faculty</th>
-                  <th className="text-center">Day1</th>
-                  <th className="text-center">Begin1</th>
-                  <th className="text-center">End1</th>
-                  <th className="text-center">Day2</th>
-                  <th className="text-center">Begin2</th>
-                  <th className="text-center">End2</th>
-                  <th>Remarks</th>
-                  <th className="text-center">Status</th>
+            <table className={cls(SHARED_TABLE, "border-t border-gray-200")}>
+              <ColGroupReq />
+              <thead className="bg-neutral-50">
+                <tr>
+                  <th className={TH_TIGHT}>Course Code</th>
+                  <th className={TH_TIGHT}>Course Title</th>
+                  <th className={TH_TIGHT}>Units</th>
+                  <th className={TH_TIGHT}>From</th>
+                  <th className={TH_TIGHT}>To</th>
+                  <th className={TH_TIGHT}>Status</th>
                 </tr>
               </thead>
-              <tbody className="whitespace-nowrap text-neutral-800">
-                {sentRows.map((r) => (
-                  <tr key={r.fs_id} className="align-middle border-b last:border-0 odd:bg-white even:bg-neutral-50/60">
-                    <td className="px-4 py-3">
-                      <span className="block truncate" title={`${r.course_code} — ${r.course_title}`}>
-                        <span className="font-semibold text-emerald-700">{r.course_code}</span> — {r.course_title}
+              <tbody className="text-gray-800">
+                {sentRows.map((r, i) => (
+                  <tr key={r.fs_id} className={cls("align-middle", i % 2 === 0 ? "bg-white" : "bg-gray-50", "border-b border-gray-200")}>
+                    <td className={cls(CELL_TIGHT, "text-center")}>
+                      <span className="font-semibold text-emerald-700">{r.course_code}</span>
+                    </td>
+                    <td className={CELL_TIGHT}>
+                      <span className="block whitespace-normal break-words" title={r.course_title}>
+                        {r.course_title}
                       </span>
                     </td>
-                    <td className="px-4 py-3 text-center tabular-nums">{r.units ?? ""}</td>
-                    <td className="px-4 py-3 truncate" title={r.from_department}>{r.from_department}</td>
-                    <td className="px-4 py-3 truncate" title={r.to_department}>{r.to_department}</td>
-                    <td className="px-4 py-3 truncate" title={facultyLabel(r.faculty as any)}>{facultyLabel(r.faculty as any) || "—"}</td>
-                    <td className="px-4 py-3 text-center">{r.day1 || "—"}</td>
-                    <td className="px-4 py-3 text-center">{r.begin1 || "—"}</td>
-                    <td className="px-4 py-3 text-center">{r.end1 || "—"}</td>
-                    <td className="px-4 py-3 text-center">{r.day2 || "—"}</td>
-                    <td className="px-4 py-3 text-center">{r.begin2 || "—"}</td>
-                    <td className="px-4 py-3 text-center">{r.end2 || "—"}</td>
-                    <td className="px-4 py-3 truncate" title={r.remarks || ""}>{r.remarks || "—"}</td>
-                    <td className="px-4 py-3 text-center">
+                    <td className={cls(CELL_TIGHT, "text-center tabular-nums")}>{r.units ?? ""}</td>
+                    <td className={cls(CELL_TIGHT, "text-center truncate")} title={r.from_department}>
+                      {r.from_department}
+                    </td>
+                    <td className={cls(CELL_TIGHT, "text-center truncate")} title={r.to_department}>
+                      {r.to_department}
+                    </td>
+                    <td className={cls(CELL_TIGHT, "text-center")}>
                       <span
                         className={cls(
                           "inline-block rounded-full px-2 py-[2px] text-[12px]",
-                          r.status === "responded" ? "bg-emerald-100 text-emerald-700"
-                            : r.status === "rejected" ? "bg-red-100 text-red-700"
+                          r.status === "responded"
+                            ? "bg-emerald-100 text-emerald-700"
+                            : r.status === "rejected"
+                            ? "bg-red-100 text-red-700"
                             : "bg-amber-100 text-amber-700"
                         )}
                       >
@@ -592,10 +654,18 @@ export default function CHAIR_FacultyService() {
                   </tr>
                 ))}
                 {sentRows.length === 0 && !loadingList && (
-                  <tr><td className="px-4 py-10 text-neutral-500 text-center" colSpan={13}>No sent requests yet.</td></tr>
+                  <tr>
+                    <td className="px-4 py-6 text-center text-sm text-gray-500" colSpan={6}>
+                      No sent requests yet.
+                    </td>
+                  </tr>
                 )}
                 {loadingList && (
-                  <tr><td className="px-4 py-10 text-neutral-500 text-center" colSpan={13}>Loading…</td></tr>
+                  <tr>
+                    <td className="px-4 py-6 text-center text-sm text-gray-500" colSpan={6}>
+                      Loading…
+                    </td>
+                  </tr>
                 )}
               </tbody>
             </table>
@@ -603,33 +673,33 @@ export default function CHAIR_FacultyService() {
         </>
       )}
 
-      {/* RECEIVER view */}
+      {/* RECEIVER view – SAME 14-COLUMN LAYOUT (unchanged) */}
       {!isRequester && (
-        <div className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-x-auto overflow-y-visible">
+        <div className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-x-auto overflow-y-visible mt-8">
           <div className="px-5 pt-4 text-[13px] text-neutral-600">Received Requests</div>
-          <table className="w-full table-fixed text-[13px] min-w-[1200px]">
-            <ColGroup />
-            <thead className="bg-gray-50 border-y text-gray-700 text-left text-xs">
-              <tr className="[&>th]:py-3 [&>th]:px-4 uppercase tracking-wide">
-                <th>Course Code</th>
-                <th>Course Title</th>
-                <th className="text-center">Units</th>
-                <th>From</th>
-                <th>To</th>
-                <th>Faculty</th>
-                <th className="text-center">Day1</th>
-                <th className="text-center">Begin1</th>
-                <th className="text-center">End1</th>
-                <th className="text-center">Day2</th>
-                <th className="text-center">Begin2</th>
-                <th className="text-center">End2</th>
-                <th>Remarks</th>
-                <th className="text-center">Action</th>
+          <table className={cls(SHARED_TABLE, "border-t border-gray-200")}>
+            <ColGroup14 />
+            <thead className="bg-neutral-50">
+              <tr>
+                <th className={TH}>Course Code</th>
+                <th className={TH}>Course Title</th>
+                <th className={TH}>Units</th>
+                <th className={TH}>From</th>
+                <th className={TH}>To</th>
+                <th className={TH}>Faculty</th>
+                <th className={TH}>Day1</th>
+                <th className={TH}>Begin1</th>
+                <th className={TH}>End1</th>
+                <th className={TH}>Day2</th>
+                <th className={TH}>Begin2</th>
+                <th className={TH}>End2</th>
+                <th className={TH}>Remarks</th>
+                <th className={TH}>Action</th>
               </tr>
             </thead>
 
-            <tbody className="whitespace-nowrap text-neutral-800">
-              {receivedRows.map((r) => {
+            <tbody className="text-gray-800">
+              {receivedRows.map((r, idx) => {
                 const fsid = r.fs_id!;
                 const dept = r.to_department || "";
                 const e = getEdit(fsid);
@@ -639,22 +709,28 @@ export default function CHAIR_FacultyService() {
                 return (
                   <tr
                     key={fsid}
-                    className="align-middle border-b last:border-0 odd:bg-white even:bg-neutral-50/60 hover:bg-emerald-50/30 transition-colors"
+                    className={cls("align-middle", idx % 2 === 0 ? "bg-white" : "bg-gray-50", "border-b border-gray-200")}
                     onMouseEnter={() => ensureFacultyForDept(dept)}
                   >
-                    <td className="px-4 py-3">
+                    <td className={cls(CELL, "text-center")}>
                       <span className="font-semibold text-emerald-700">{r.course_code}</span>
                     </td>
-                    <td className="px-4 py-3">
-                      <span className="block truncate" title={r.course_title}>{r.course_title}</span>
+                    <td className={CELL}>
+                      <span className="block whitespace-normal break-words" title={r.course_title}>
+                        {r.course_title}
+                      </span>
                     </td>
 
-                    <td className="px-4 py-3 text-center tabular-nums">{r.units ?? ""}</td>
-                    <td className="px-4 py-3 truncate" title={r.from_department}>{r.from_department}</td>
-                    <td className="px-4 py-3 truncate" title={r.to_department}>{r.to_department}</td>
+                    <td className={cls(CELL, "text-center tabular-nums")}>{r.units ?? ""}</td>
+                    <td className={cls(CELL, "text-center truncate")} title={r.from_department}>
+                      {r.from_department}
+                    </td>
+                    <td className={cls(CELL, "text-center truncate")} title={r.to_department}>
+                      {r.to_department}
+                    </td>
 
                     {/* Faculty */}
-                    <td className="px-4 py-3">
+                    <td className={CELL}>
                       {!isClosed ? (
                         <Dropdown
                           value={facultyLabel(e.faculty)}
@@ -676,19 +752,21 @@ export default function CHAIR_FacultyService() {
                           searchable
                         />
                       ) : (
-                        <span className="block truncate" title={facultyLabel(r.faculty as any)}>
+                        <span className="block truncate text-center" title={facultyLabel(r.faculty as any)}>
                           {facultyLabel(r.faculty as any) || "—"}
                         </span>
                       )}
                     </td>
 
                     {/* Day/Begin/End */}
-                    <td className="px-4 py-3 text-center">
+                    <td className={cls(CELL, "text-center")}>
                       {!isClosed ? (
                         <Dropdown value={e.day1} onChange={(v) => patchEdit(fsid, { day1: v as DayShort })} options={DAY_OPTIONS} placeholder="—" />
-                      ) : (r.day1 || "—")}
+                      ) : (
+                        r.day1 || "—"
+                      )}
                     </td>
-                    <td className="px-4 py-3 text-center">
+                    <td className={cls(CELL, "text-center")}>
                       {!isClosed ? (
                         <Dropdown
                           value={e.begin1}
@@ -697,19 +775,25 @@ export default function CHAIR_FacultyService() {
                           placeholder="—"
                           align="right"
                         />
-                      ) : (r.begin1 || "—")}
+                      ) : (
+                        r.begin1 || "—"
+                      )}
                     </td>
-                    <td className="px-4 py-3 text-center">
+                    <td className={cls(CELL, "text-center")}>
                       {!isClosed ? (
                         <input value={e.end1 ? String(e.end1) : ""} readOnly className={cls(CONTROL, "text-center bg-neutral-50")} placeholder="—" />
-                      ) : (r.end1 || "—")}
+                      ) : (
+                        r.end1 || "—"
+                      )}
                     </td>
-                    <td className="px-4 py-3 text-center">
+                    <td className={cls(CELL, "text-center")}>
                       {!isClosed ? (
                         <Dropdown value={e.day2} onChange={(v) => patchEdit(fsid, { day2: v as DayShort })} options={DAY_OPTIONS} placeholder="—" />
-                      ) : (r.day2 || "—")}
+                      ) : (
+                        r.day2 || "—"
+                      )}
                     </td>
-                    <td className="px-4 py-3 text-center">
+                    <td className={cls(CELL, "text-center")}>
                       {!isClosed ? (
                         <Dropdown
                           value={e.begin2}
@@ -718,16 +802,20 @@ export default function CHAIR_FacultyService() {
                           placeholder="—"
                           align="right"
                         />
-                      ) : (r.begin2 || "—")}
+                      ) : (
+                        r.begin2 || "—"
+                      )}
                     </td>
-                    <td className="px-4 py-3 text-center">
+                    <td className={cls(CELL, "text-center")}>
                       {!isClosed ? (
                         <input value={e.end2 ? String(e.end2) : ""} readOnly className={cls(CONTROL, "text-center bg-neutral-50")} placeholder="—" />
-                      ) : (r.end2 || "—")}
+                      ) : (
+                        r.end2 || "—"
+                      )}
                     </td>
 
                     {/* Remarks */}
-                    <td className="px-4 py-3">
+                    <td className={CELL}>
                       {!isClosed ? (
                         <input
                           value={e.remarks}
@@ -736,12 +824,14 @@ export default function CHAIR_FacultyService() {
                           className={CONTROL}
                         />
                       ) : (
-                        <span className="block truncate" title={r.remarks || ""}>{r.remarks || "—"}</span>
+                        <span className="block whitespace-normal break-words" title={r.remarks || ""}>
+                          {r.remarks || "—"}
+                        </span>
                       )}
                     </td>
 
                     {/* Action */}
-                    <td className="px-4 py-3 text-center">
+                    <td className={cls(CELL, "text-center")}>
                       {!isClosed ? (
                         <div className="flex items-center justify-center gap-3">
                           <button
@@ -777,10 +867,18 @@ export default function CHAIR_FacultyService() {
               })}
 
               {receivedRows.length === 0 && !loadingList && (
-                <tr><td className="px-4 py-10 text-neutral-500 text-center" colSpan={13}>No received requests for your department.</td></tr>
+                <tr>
+                  <td className="px-4 py-6 text-center text-sm text-gray-500" colSpan={14}>
+                    No received requests for your department.
+                  </td>
+                </tr>
               )}
               {loadingList && (
-                <tr><td className="px-4 py-10 text-neutral-500 text-center" colSpan={13}>Loading…</td></tr>
+                <tr>
+                  <td className="px-4 py-6 text-center text-sm text-gray-500" colSpan={14}>
+                    Loading…
+                  </td>
+                </tr>
               )}
             </tbody>
           </table>
