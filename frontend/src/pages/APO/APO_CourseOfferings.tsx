@@ -35,6 +35,56 @@ import {
 const DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"] as const;
 type Day = (typeof DAYS)[number];
 
+// === ADDED: Abbreviation mapping & coercers ===
+const DAY_ABBR = ["M","T","W","TH","F","S"] as const;
+type DayAbbr = (typeof DAY_ABBR)[number];
+
+const DAY_FULL_TO_ABBR: Record<Day, DayAbbr> = {
+  Monday: "M",
+  Tuesday: "T",
+  Wednesday: "W",
+  Thursday: "TH",
+  Friday: "F",
+  Saturday: "S",
+};
+
+
+// Accepts wide variety: "M", "Mon", "MONDAY", "Th", "Thu", "THU", ...
+const DAY_ALIASES: Record<string, Day> = {
+  M: "Monday", MON: "Monday", MONDAY: "Monday",
+  T: "Tuesday", TU: "Tuesday", TUE: "Tuesday", TUES: "Tuesday", TUESDAY: "Tuesday",
+  W: "Wednesday", WED: "Wednesday", WEDNESDAY: "Wednesday",
+  TH: "Thursday", THU: "Thursday", THUR: "Thursday", THURS: "Thursday", THURSDAY: "Thursday",
+  F: "Friday", FRI: "Friday", FRIDAY: "Friday",
+  S: "Saturday", SA: "Saturday", SAT: "Saturday", SATURDAY: "Saturday",
+};
+
+function toFullDay(d?: string | null): Day | "" {
+  const s = String(d || "").trim();
+  if (!s) return "";
+  const key = s.replace(/\./g, "").replace(/\s+/g, "").toUpperCase(); // strip dots/spaces
+  if (DAY_ALIASES[key]) return DAY_ALIASES[key];
+  // fallback: title-case check
+  const norm = s[0]?.toUpperCase() + s.slice(1).toLowerCase();
+  return (DAYS.includes(norm as Day) ? (norm as Day) : "") as Day | "";
+}
+
+// Abbreviation we POST back: "M/T/W/TH/F/S"
+function toAbbrevDay(d?: string | null): DayAbbr | "" {
+  const s = String(d || "").trim();
+  if (!s) return "";
+  const key = s.replace(/\./g, "").replace(/\s+/g, "").toUpperCase();
+  if (["M", "MON", "MONDAY"].includes(key)) return "M";
+  if (["T", "TU", "TUE", "TUES", "TUESDAY"].includes(key)) return "T";
+  if (["W", "WED", "WEDNESDAY"].includes(key)) return "W";
+  if (["TH", "THU", "THUR", "THURS", "THURSDAY"].includes(key)) return "TH";
+  if (["F", "FRI", "FRIDAY"].includes(key)) return "F";
+  if (["S", "SA", "SAT", "SATURDAY"].includes(key)) return "S";
+  // already full name?
+  if ((DAYS as readonly string[]).includes(s)) return DAY_FULL_TO_ABBR[s as Day];
+  return "";
+}
+
 type RoomOption = {
   room_id: string;
   room_number: string;
@@ -74,12 +124,6 @@ const toHHMM = (s?: string) => {
   return "";
 };
 
-// exactly HHMM check
-const isFullTime = (s?: string) => ((s || "").replace(/\D/g, "")).length === 4;
-
-// allow partial typing (0..4 digits)
-const sanitizeTime = (s?: string) => (s || "").replace(/\D/g, "").slice(0, 4);
-// --- Static GE time slots (single pick sets start+end) ---
 const GE_TIME_SLOTS = [
   { label: "07:30 - 09:00", start: "0730", end: "0900" },
   { label: "09:15 - 10:45", start: "0915", end: "1045" },
@@ -111,25 +155,28 @@ const geCurrentLabel = (slot?: { start_time?: string | null; end_time?: string |
 };
 
 // A slot can only receive a room if it has day + full HHMM times
-const slotReady = (s?: { day?: Day | ""; start_time?: string; end_time?: string }) =>
-  !!(s && s.day && isFullTime(s.start_time) && isFullTime(s.end_time));
+const slotReady = (s?: { day?: Day | ""; start_time?: string; end_time?: string }) => {
+  if (!s) return false;
+  const dayOk = !!toFullDay(s.day || "");
+  const st = toHHMM(s.start_time);
+  const en = toHHMM(s.end_time);
+  return dayOk && st.length === 4 && en.length === 4;
+};
 
 // strict (non-GE) slot: require day + full start + full end, optional room
 const compactSlotStrict = (
   s?: { day?: Day | ""; start_time?: string; end_time?: string; room_id?: string }
 ) => {
   if (!s) return undefined;
-  const day = (s.day || "") as Day | "";
-  const start = sanitizeTime(s.start_time);
-  const end = sanitizeTime(s.end_time);
-  if (!(day && isFullTime(start) && isFullTime(end))) return undefined;
-  const out: any = { day, start_time: start, end_time: end };
-  if (s.room_id) out.room_id = s.room_id;
+  const dayFull = toFullDay(s.day || "");
+  const start = toHHMM(s.start_time);
+  const end = toHHMM(s.end_time);
+  if (!(dayFull && start.length === 4 && end.length === 4)) return undefined;
+  const out: any = { day: dayFull, start_time: start, end_time: end };
+  if (s.room_id !== undefined) out.room_id = s.room_id ? s.room_id : null; // allow clear
   return out;
 };
 
-// GE slot: allow partial updates, only send the keys that are actually provided
-// GE slot: allow partial updates, but never send empty strings
 const compactSlotGE = (
   s?: { day?: Day | ""; start_time?: string; end_time?: string; room_id?: string }
 ) => {
@@ -150,7 +197,6 @@ const compactSlotGE = (
 
   return Object.keys(out).length ? out : undefined;
 };
-
 
 const normCode = (s?: string) =>
   (s || "")
@@ -489,32 +535,27 @@ const RoomSelectBox: React.FC<{
   className?: string;
   onChange: (roomId: string | null) => void;
 }> = ({ rooms, value, disabled, className, onChange }) => {
-  const items = useMemo(
-    () => rooms.map(r => ({
-      id: r.room_id,
-      label: r.building ? `${r.building} ${r.room_number}` : r.room_number
-    })),
-    [rooms]
-  );
-
-  // shorter placeholder avoids forcing the cell wider than its col width
   const placeholder = disabled ? "— Set day & time —" : "— Select room —";
-  const currentLabel = value ? (items.find(x => x.id === value)?.label ?? placeholder) : placeholder;
-  const optionLabels = [placeholder, ...items.map(x => x.label)];
-
   return (
-    <SelectBox
-      value={currentLabel}
-      onChange={(label) => {
-        if (label === placeholder) return onChange(null);
-        const hit = items.find(x => x.label === label);
-        onChange(hit?.id ?? null);
-      }}
-      options={optionLabels}
-      disabled={!!disabled}
-      // !min-w-0 + max-w-full stops SelectBox from pushing into next columns
-      className={cls("!min-w-0 w-full max-w-full overflow-hidden text-ellipsis", className)}
-    />
+    <div className={cls("relative z-[200]", className)}>
+      <select
+        disabled={!!disabled}
+        value={value ?? ""}
+        onChange={(e) => onChange(e.target.value ? e.target.value : null)}
+        className={SOFT_SELECT + " w-full pr-8"}
+      >
+        <option value="">{placeholder}</option>
+        {rooms.map((r) => {
+          const label = r.building ? `${r.building} ${r.room_number}` : r.room_number;
+          return (
+            <option key={r.room_id} value={r.room_id}>
+              {label}
+            </option>
+          );
+        })}
+      </select>
+      <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-500" />
+    </div>
   );
 };
 
@@ -850,21 +891,21 @@ useEffect(() => {
       faculty_name: row.faculty?.faculty_name || "UNASSIGNED",
       slot1: row.slot1
         ? {
-            day: (row.slot1.day as Day | ""),
-            start_time: row.slot1.start_time,
-            end_time: row.slot1.end_time,
-            ...(row.slot1.room_id ? { room_id: row.slot1.room_id } : {}), // <- no empty string
-          }
-        : undefined,
-      slot2: row.slot2
-        ? {
-            day: (row.slot2.day as Day | ""),
-            start_time: row.slot2.start_time,
-            end_time: row.slot2.end_time,
-            ...(row.slot2.room_id ? { room_id: row.slot2.room_id } : {}), // <- no empty string
+            day: toFullDay(row.slot1.day) as Day | "",
+            start_time: toHHMM(row.slot1.start_time),
+            end_time: toHHMM(row.slot1.end_time),
+            ...(row.slot1.room_id ? { room_id: row.slot1.room_id } : {}),
           }
         : undefined,
 
+    slot2: row.slot2
+      ? {
+          day: toFullDay(row.slot2.day) as Day | "",
+          start_time: toHHMM(row.slot2.start_time),
+          end_time: toHHMM(row.slot2.end_time),
+          ...(row.slot2.room_id ? { room_id: row.slot2.room_id } : {}),
+        }
+      : undefined,
       for_placeholder_course_id: electiveParentId,
       specific_course_id: currentSpecificId,
     },
@@ -988,6 +1029,10 @@ const s1 = isGE ? compactSlotGE(editing.draft.slot1) : compactSlotStrict(editing
 const s2 = isGE ? compactSlotGE(editing.draft.slot2) : compactSlotStrict(editing.draft.slot2);
 if (s1 && Object.keys(s1).length) payload.slot1 = s1;
 if (s2 && Object.keys(s2).length) payload.slot2 = s2;
+
+// === ADDED: convert any day values to abbreviations before posting ===
+if (payload.slot1?.day) (payload.slot1 as any).day = toAbbrevDay(payload.slot1.day) as any;
+if (payload.slot2?.day) (payload.slot2 as any).day = toAbbrevDay(payload.slot2.day) as any;
 
 if (isGE) {
   payload.faculty_name = (editing.draft.faculty_name || "UNASSIGNED").trim() || "UNASSIGNED";
@@ -1586,11 +1631,11 @@ if (isGE) {
                                               {r.faculty.faculty_name}
                                             </span>
                                           </td>
-                                          <td className="px-3 py-2 border border-gray-300">{r.slot1?.day || "—"}</td>
+                                          <td className="px-3 py-2 border border-gray-300">{toAbbrevDay(r.slot1?.day) || "—"}</td>
                                           <td className="px-3 py-2 border border-gray-300">{fmtTime(r.slot1?.start_time)}</td>
                                           <td className="px-3 py-2 border border-gray-300">{fmtTime(r.slot1?.end_time)}</td>
                                           <td className="px-3 py-2 border border-gray-300">{r.slot1?.room_number || r.slot1?.room_id || "—"}</td>
-                                          <td className="px-3 py-2 border border-gray-300">{r.slot2?.day || "—"}</td>
+                                          <td className="px-3 py-2 border border-gray-300">{toAbbrevDay(r.slot2?.day) || "—"}</td>
                                           <td className="px-3 py-2 border border-gray-300">{fmtTime(r.slot2?.start_time)}</td>
                                           <td className="px-3 py-2 border border-gray-300">{fmtTime(r.slot2?.end_time)}</td>
                                           <td className="px-3 py-2 border border-gray-300">{r.slot2?.room_number || r.slot2?.room_id || "—"}</td>
@@ -1859,7 +1904,7 @@ if (isGE) {
                                             <RoomSelectBox
                                               rooms={filterRoomsByCap(data?.room_options || [])}
                                               value={editing?.draft.slot1?.room_id || null}
-                                              disabled={!slotReady(editing?.draft.slot1)}    // still locked until Day+Begin+End
+                                              disabled={!slotReady(editing?.draft.slot1) && !slotReady(r.slot1 as any)} // ← fallback to row slot
                                               onChange={(roomId) =>
                                                 setEditing(p => p && ({
                                                   ...p,
@@ -1929,7 +1974,7 @@ if (isGE) {
                                             <RoomSelectBox
                                               rooms={filterRoomsByCap(data?.room_options || [])}
                                               value={editing?.draft.slot2?.room_id || null}
-                                              disabled={!slotReady(editing?.draft.slot2)}
+                                              disabled={!slotReady(editing?.draft.slot2) && !slotReady(r.slot2 as any)}
                                               onChange={(roomId) =>
                                                 setEditing(p => p && ({
                                                   ...p,

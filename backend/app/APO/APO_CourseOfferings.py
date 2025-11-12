@@ -58,6 +58,47 @@ async def _next_course_id() -> str:
         if not exists:
             return cid
     raise HTTPException(status_code=500, detail="Unable to allocate new course_id")
+def _parse_seq_with_prefix(prefix: str, value: Optional[str]) -> int:
+    m = re.match(rf"^{re.escape(prefix)}(\d+)$", (value or ""))
+    return int(m.group(1)) if m else 0
+
+async def _next_seq_id(
+    collection: str,
+    field: str,
+    prefix: str,
+    width: int = 4,
+    attempts: int = 50,
+) -> str:
+    """Return next ID like 'SEC0001' / 'FAC0001' for any collection/field."""
+    last = await db[collection].find_one(
+        {field: {"$regex": rf"^{re.escape(prefix)}\d+$"}},
+        sort=[(field, -1)]
+    )
+    n = _parse_seq_with_prefix(prefix, (last or {}).get(field))
+    for _ in range(attempts):
+        n += 1
+        vid = f"{prefix}{n:0{width}d}"
+        exists = await db[collection].find_one({field: vid})
+        if not exists:
+            return vid
+    raise HTTPException(status_code=500, detail=f"Unable to allocate new {field} in {collection}")
+# --- ID helpers derived from section_id (SEC####) ---
+SEC_NUM_RX = re.compile(r"^SEC(\d+)$")
+
+def _sec_num(section_id: Optional[str]) -> Optional[int]:
+    if not section_id:
+        return None
+    m = SEC_NUM_RX.match(section_id)
+    return int(m.group(1)) if m else None
+
+def _sch_id_from_sec(section_id: str, slot: int = 1) -> str:
+    n = _sec_num(section_id)
+    return f"SCH{n:04d}-{slot:02d}" if n is not None else f"SCH-{section_id}-{slot}"
+
+def _asg_id_from_sec(section_id: str) -> str:
+    n = _sec_num(section_id)
+    return f"ASG{n:04d}" if n is not None else _id("ASG")
+
 def _clean_mongo_doc(doc: dict) -> dict:
     """Return a JSON-safe copy of a MongoDB doc (ObjectId -> str)."""
     if not doc:
@@ -222,6 +263,64 @@ def _ts() -> int:
 
 def _id(prefix: str) -> str:
     return f"{prefix}{_ts()}"
+# --- schedule id helpers & ensure functions ---
+def _sched_id_for_section(section_id: str, idx: int) -> str:
+    """
+    Convert 'SEC0613' -> 'SCH0613-01' / 'SCH0613-02'
+    Falls back to SCH{section_id}-{idx:02d} if digits can't be parsed.
+    """
+    m = re.search(r"(\d+)$", section_id or "")
+    core = m.group(1) if m else section_id
+    return f"SCH{core}-{idx:02d}"
+
+async def _ensure_two_blank_schedules(section_id: str, course_id: Optional[str]) -> None:
+    """
+    Make sure two schedule docs exist for visualization, with room_type
+    taken from courses.room_type. Times/room_id can stay null.
+    """
+    room_type = None
+    if course_id:
+        c = await db[COL_COURSES].find_one({"course_id": course_id}, {"_id": 0, "room_type": 1})
+        room_type = (c or {}).get("room_type")
+
+    for i in (1, 2):
+        sched_id = _sched_id_for_section(section_id, i)
+        await db[COL_SCHEDS].update_one(
+            {"schedule_id": sched_id},
+            {"$setOnInsert": {
+                "schedule_id": sched_id,
+                "section_id": section_id,
+                "day": None, "start_time": None, "end_time": None,
+                "room_id": None,
+                "room_type": room_type if room_type else None,
+                "created_at": now(), "updated_at": now(),
+            }},
+            upsert=True
+        )
+
+async def _ensure_faculty_assignment_stub(section_id: str, term_id: str) -> None:
+    """
+    Ensure there is at least one non-archived faculty_assignments row
+    for the section (even if faculty/user is unknown yet).
+    """
+    exists = await db[COL_FAC_ASSIGN].find_one(
+        {"section_id": section_id, "is_archived": {"$ne": True}},
+        {"_id": 1}
+    )
+    if exists:
+        return
+    asg_id = await _next_seq_id(COL_FAC_ASSIGN, "assignment_id", "ASG", 4)
+    # Note: no user_id needed; faculty_id can remain None for now.
+    await db[COL_FAC_ASSIGN].insert_one({
+        "assignment_id": asg_id,
+        "load_id": None,
+        "section_id": section_id,
+        "faculty_id": None,
+        "term_id": term_id,
+        "created_at": now(),
+        "updated_at": now(),
+        "is_archived": False
+    })
 
 def _norm_code(code: Optional[str]) -> str:
     s = (code or "").strip().upper()
@@ -352,6 +451,79 @@ async def effective_section_capacity(term_id: str, campus_name: str, course_id: 
         caps.sort()
         return caps[len(caps)//2]
     return await default_capacity_for_course(course_id)
+async def _provision_sched_and_assignment_for_new_section(section_doc: Dict[str, Any]) -> None:
+    """
+    Ensure every new section has:
+      • two placeholder schedules: SCH####-01 and SCH####-02 (room_type from courses.room_type)
+      • one placeholder faculty_assignments row (ASG####), NO user_id
+    Idempotent; safe if rows already exist.
+    """
+    try:
+        sid = (section_doc or {}).get("section_id")
+        cid = (section_doc or {}).get("course_id")
+        term_id = (section_doc or {}).get("term_id")
+        if not sid:
+            return
+
+        # room_type from courses
+        course = await db[COL_COURSES].find_one({"course_id": cid}, {"_id": 0, "room_type": 1})
+        room_type = (course or {}).get("room_type")
+
+        # Create/ensure two schedules (01 and 02)
+        for idx in (1, 2):
+            sch_id = _sch_id_from_sec(sid, idx)
+            try:
+                await db[COL_SCHEDS].update_one(
+                    {"section_id": sid, "schedule_id": sch_id},
+                    {"$setOnInsert": {
+                        "schedule_id": sch_id,
+                        "section_id": sid,
+                        "day": None,
+                        "start_time": None,
+                        "end_time": None,
+                        "room_id": None,
+                        "room_type": room_type,   # <- mirror from courses.room_type
+                        "created_at": now(),
+                        "updated_at": now(),
+                    }},
+                    upsert=True
+                )
+            except Exception:
+                pass
+
+        # Ensure exactly one active faculty assignment exists (placeholder if none assigned yet)
+        existing_assigned = await db[COL_FAC_ASSIGN].find_one(
+            {
+                "section_id": sid,
+                "is_archived": {"$ne": True},
+                "$or": [{"user_id": {"$nin": ["", None]}}, {"faculty_id": {"$nin": ["", None]}}]
+            },
+            {"_id": 1}
+        )
+        if not existing_assigned:
+            # If there is already an active placeholder, leave it. Otherwise create one.
+            existing_active_any = await db[COL_FAC_ASSIGN].find_one(
+                {"section_id": sid, "is_archived": {"$ne": True}},
+                {"_id": 1}
+            )
+            if not existing_active_any:
+                try:
+                    asg_id = _asg_id_from_sec(sid)
+                    await db[COL_FAC_ASSIGN].insert_one({
+                        "assignment_id": asg_id,
+                        "load_id": None,
+                        "section_id": sid,
+                        "faculty_id": None,
+                        "term_id": term_id,
+                        "created_at": now(),
+                        "is_archived": False,
+                    })
+                except Exception:
+                    pass
+
+    except Exception:
+        # Never block section creation because of visualization extras
+        pass
 
 # ------------ APO scope / campus ------------
 async def apo_scope(user_id: str) -> Tuple[Optional[str], Optional[str]]:
@@ -477,6 +649,25 @@ def normalize_day(v: Any) -> str:
     if s in DOW:
         return s
     return DAY_NAME.get(s.upper(), s.title() if s.title() in DOW else s)
+
+def _is_tba(v: Any) -> bool:
+    return isinstance(v, str) and ("TBA" in v.upper())
+
+def _clean_slot_inputs(s: Optional[dict], *, allow_time: bool) -> tuple[str, str, str, str, str]:
+    """Return (day, start, end, room_id, room_type) with TBA/blank normalized to ''. """
+    s = s or {}
+    rid = (s.get("room_id") or "").strip()
+    rtp = (s.get("room_type") or "").strip()
+    day = (s.get("day") or "").strip() if allow_time else ""
+    beg = (s.get("start_time") or "").strip() if allow_time else ""
+    end = (s.get("end_time") or "").strip() if allow_time else ""
+
+    if _is_tba(rid) or rid == "— TBA —":
+        rid = ""
+    if _is_tba(day) or _is_tba(beg) or _is_tba(end):
+        day = beg = end = ""
+
+    return day, beg, end, rid, rtp
 
 def caps_name(u: Dict[str, Any]) -> str:
     first, last = (u.get("first_name") or "").strip(), (u.get("last_name") or "").strip()
@@ -624,7 +815,7 @@ async def _resolve_or_create_faculty_by_name(name: str) -> Tuple[Optional[str], 
         if fp.get("faculty_id"):
             return (None, fp["faculty_id"])
 
-    fid = _id("FAC")
+    fid = await _next_seq_id(COL_FAC_PROFILES, "faculty_id", "FAC", 4)
     doc = {
         "faculty_id": fid,
         "first_name": nm["first_name"],
@@ -941,8 +1132,9 @@ async def validate_hard_errors(action: str, payload: Dict[str, Any], term_id: st
             else:
                 section_id = (payload.get("section_id") or "").strip()
                 if not has_time and section_id:
+                    sid_tag = _sched_id_for_section(section_id, idx)
                     existing = await db[COL_SCHEDS].find_one(
-                        {"section_id": section_id, "schedule_id": {"$regex": f"^SCH-{re.escape(section_id)}-{idx}$"}},
+                        {"section_id": section_id, "schedule_id": sid_tag},
                         {"_id": 0, "day": 1, "start_time": 1, "end_time": 1}
                     )
                     existing_has_time = bool(existing and (existing.get("day") and existing.get("start_time") and existing.get("end_time")))
@@ -983,12 +1175,9 @@ async def validate_hard_errors(action: str, payload: Dict[str, Any], term_id: st
                     err("ROOM_TOO_SMALL", f"{key}: room capacity {rcap} < section capacity {cap_eff}.")
 
                 req_type = (s.get("room_type") or "").strip()
-                if not req_type:
-                    err("ROOM_TYPE_REQUIRED", f"{key}: room_type is required when selecting a room.")
-                else:
-                    rtype = (room.get("room_type") or "").strip()
-                    if rtype and req_type.lower() != rtype.lower():
-                        err("ROOM_TYPE_MISMATCH", f"{key}: room_type '{req_type}' does not match room’s type '{rtype}'.")
+                rtype = (room.get("room_type") or "").strip()
+                if req_type and rtype and req_type.lower() != rtype.lower():
+                    err("ROOM_TYPE_MISMATCH", f"{key}: room_type '{req_type}' does not match room’s type '{rtype}'.")
 
     if action in {"addRow"}:
         batch_id = (payload.get("batch_id") or "").strip()
@@ -1208,8 +1397,9 @@ async def ensure_sections_from_demand(
         to_make = base_per_program - existing
         for _ in range(to_make):
             code = await next_section_code(campus_prefix, term_id, course_id)
+            sid = await _next_seq_id(COL_SECTIONS, "section_id", "SEC", 4)
             doc = {
-                "section_id": _id("SEC"),
+                "section_id": sid,
                 "section_code": code,
                 "course_id": course_id,
                 "term_id": term_id,
@@ -1220,14 +1410,17 @@ async def ensure_sections_from_demand(
                 "status": "active",
                 "created_at": now(), "updated_at": now(),
             }
-            await safe_insert_section(doc)
+            inserted = await safe_insert_section(doc)
+            if inserted:
+                await _provision_sched_and_assignment_for_new_section(doc)
         existing += to_make
 
     if existing < needed:
         for _ in range(needed - existing):
             code = await next_section_code(campus_prefix, term_id, course_id)
+            sid = await _next_seq_id(COL_SECTIONS, "section_id", "SEC", 4)
             doc = {
-                "section_id": _id("SEC"),
+                "section_id": sid,
                 "section_code": code,
                 "course_id": course_id,
                 "term_id": term_id,
@@ -1236,7 +1429,8 @@ async def ensure_sections_from_demand(
                 "remarks": "",
                 "created_at": now(), "updated_at": now(),
             }
-            await safe_insert_section(doc)
+            if await safe_insert_section(doc):
+                await _provision_sched_and_assignment_for_new_section(doc)
 
 async def _create_sections(
     *, term_id: str, campus_id: str, campus_prefix: str, course_id: str, count: int, capacity: int = DEFAULT_CAP
@@ -1244,8 +1438,9 @@ async def _create_sections(
     made = 0
     for _ in range(max(0, int(count))):
         code = await next_section_code(campus_prefix, term_id, course_id)
+        sid = await _next_seq_id(COL_SECTIONS, "section_id", "SEC", 4)
         doc = {
-            "section_id": _id("SEC"),
+            "section_id": sid,
             "section_code": code,
             "course_id": course_id,
             "term_id": term_id,
@@ -1258,6 +1453,7 @@ async def _create_sections(
             "updated_at": now(),
         }
         if await safe_insert_section(doc):
+            await _provision_sched_and_assignment_for_new_section(doc)
             made += 1
     return made
 
@@ -1436,6 +1632,111 @@ async def _planning_flags(term_id: str, campus_id: str, campus_prefix: str):
         or (cohort_hash != last_cohort)
     )
     return needs_import, approval_required, pending, preen_hash, cohort_hash, plan_state
+# --- room availability helpers (capacity/type/time overlap) ---
+def _time_overlap(a_start: str, a_end: str, b_start: str, b_end: str) -> bool:
+    """Times are HHMM. Overlap if ranges intersect and both non-empty."""
+    if not (a_start and a_end and b_start and b_end):
+        return False
+    return not (a_end <= b_start or a_start >= b_end)
+
+# --- room availability helper (capacity/type/time overlap, de-duped) ---
+async def _rooms_available_for_slot(
+    *, campus_id: str, day: str, start: str, end: str,
+    required_type: Optional[str] = None,
+    min_capacity: Optional[int] = None,
+    exclude_schedule_ids: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Return rooms in campus that:
+      (1) match room_type (if given),
+      (2) have capacity >= min_capacity (if given), and
+      (3) are NOT busy (overlap) on the same day/time window.
+    """
+    day_n = normalize_day(day)
+    start_n = "".join(ch for ch in (start or "") if ch.isdigit())
+    end_n   = "".join(ch for ch in (end or "") if ch.isdigit())
+    exclude_schedule_ids = exclude_schedule_ids or []
+
+    # Get all rooms under this campus that match type/capacity.
+    room_q: Dict[str, Any] = {"campus_id": campus_id}
+    if required_type:
+        room_q["room_type"] = required_type
+    if min_capacity is not None:
+        try:
+            room_q["capacity"] = {"$gte": int(min_capacity)}
+        except Exception:
+            pass
+
+    proj = {"_id": 0, "room_id": 1, "room_number": 1, "capacity": 1, "room_type": 1}
+    rooms = [r async for r in db[COL_ROOMS].find(room_q, proj)]
+    room_ids = {r["room_id"] for r in rooms if r.get("room_id")}
+
+    if not room_ids or not (day_n and start_n and end_n):
+        # No time window or no rooms satisfying filters: return what we have.
+        # (Frontend already ensures time is present before calling, but keep safe.)
+        return sorted(rooms, key=lambda x: (x.get("room_type") or "", x.get("room_number") or x.get("room_id", "")))
+
+    # Find rooms busy in the same window on the same day.
+    # IMPORTANT: exclude by schedule_id (not _id).
+    busy_cur = db[COL_SCHEDS].find(
+        {
+            "day": day_n,
+            "start_time": {"$lt": end_n},
+            "end_time": {"$gt": start_n},
+            "schedule_id": {"$nin": exclude_schedule_ids},
+            "room_id": {"$in": list(room_ids)},
+        },
+        {"_id": 0, "room_id": 1},
+    )
+    busy = {s["room_id"] async for s in busy_cur if s.get("room_id")}
+
+    free = [r for r in rooms if r.get("room_id") not in busy]
+    free.sort(key=lambda x: (x.get("room_type") or "", x.get("room_number") or x.get("room_id", "")))
+    return free
+
+# ---------- helper: eligible rooms by time/type/capacity ----------
+async def _rooms_available_for_slot(
+    campus_id: str,
+    day: str,
+    start: str,   # "HHMM"
+    end: str,     # "HHMM"
+    required_type: Optional[str] = None,
+    min_capacity: Optional[int] = None,
+    exclude_schedule_ids: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
+    exclude_schedule_ids = exclude_schedule_ids or []
+
+    # Find room_ids that are busy (time overlap on same day)
+    overlap_q: Dict[str, Any] = {
+        "day": day,
+        "start_time": {"$lt": end},
+        "end_time": {"$gt": start},
+        "is_archived": {"$ne": True},
+    }
+    if exclude_schedule_ids:
+        overlap_q["_id"] = {"$nin": exclude_schedule_ids}
+
+    busy = await db[COL_SCHEDS].distinct("room_id", overlap_q)
+    busy = [r for r in busy if r]  # strip nulls/empty
+
+    # Build room query
+    room_q: Dict[str, Any] = {
+        "campus_id": campus_id,
+        "is_archived": {"$ne": True},
+    }
+    if required_type:
+        room_q["room_type"] = required_type
+    if min_capacity is not None:
+        room_q["capacity"] = {"$gte": min_capacity}
+    if busy:
+        room_q["room_id"] = {"$nin": busy}
+
+    cursor = db[COL_ROOMS].find(
+        room_q,
+        {"_id": 0, "room_id": 1, "room_number": 1, "capacity": 1, "room_type": 1},
+    ).sort([("room_number", 1)])
+
+    return [r async for r in cursor]
 
 # ---------- GET ----------
 @router.get("/courseofferings")
@@ -1447,6 +1748,16 @@ async def get_course_offerings(
     program_id: Optional[str] = Query(None),
     view: Optional[Literal["curriculum", "offerings"]] = Query("offerings"),
     action: Optional[str] = Query(None),
+
+    # room filtering params
+    day: Optional[str] = Query(None),
+    start: Optional[str] = Query(None),
+    end: Optional[str] = Query(None),
+    room_type: Optional[str] = Query(None),
+    capacity: Optional[int] = Query(None),
+    exclude: Optional[str] = Query(None),
+    section_id: Optional[str] = Query(None),   # <-- ADDED
+    course_id: Optional[str] = Query(None),    # <-- ADDED
 ):
 
     t = await current_term() or await _ensure_current_term()
@@ -1466,6 +1777,82 @@ async def get_course_offerings(
         raise HTTPException(status_code=400, detail="Unable to resolve APO campus from role_assignments.")
     campus = await campus_meta(campus_id)
     prefix_default = campus_section_prefix(campus.get("campus_name", "")) or ""
+    # ---- filtered room options for a given slot (frontend can call this) ----
+    if action == "roomOptions":
+        # Delegate to eligibleRooms to keep a single source of truth
+        # (section_id/course_id are already in the function signature)
+        return await get_course_offerings(
+            userId=userId, level=level, department_id=department_id, batch_id=batch_id,
+            program_id=program_id, view=view, action="eligibleRooms",
+            day=day, start=start, end=end, room_type=room_type, capacity=capacity,
+            exclude=exclude, section_id=section_id, course_id=course_id
+        )
+
+    if action == "eligibleRooms":
+        # Normalize time inputs
+        day_n   = normalize_day((day or "").strip())
+        start_n = "".join(ch for ch in (start or "") if ch.isdigit())
+        end_n   = "".join(ch for ch in (end or "") if ch.isdigit())
+
+        if not (day_n and start_n and end_n):
+            return {"ok": True, "rooms": []}
+
+        # Build exclude list (avoid treating this section's own schedules as conflicts)
+        exclude_ids = [x for x in (exclude or "").split(",") if x]
+        if section_id:
+            exclude_ids.extend([
+                _sch_id_from_sec(section_id, 1),
+                _sch_id_from_sec(section_id, 2),
+            ])
+
+        # Resolve effective capacity:
+        #   (a) explicit ?capacity=..., else
+        #   (b) section.enrollment_cap if section_id, else
+        #   (c) course default capacity if course_id, else None
+        cap_n: Optional[int] = None
+        if capacity not in (None, "", "null"):
+            try:
+                cap_n = int(capacity)
+            except Exception:
+                cap_n = None
+        if cap_n is None and section_id:
+            sec_doc = await db[COL_SECTIONS].find_one(
+                {"section_id": section_id}, {"_id": 0, "enrollment_cap": 1}
+            )
+            try:
+                cap_n = int((sec_doc or {}).get("enrollment_cap"))
+            except Exception:
+                cap_n = None
+        if cap_n is None and course_id:
+            # fall back to the course's planning default
+            try:
+                cap_n = int(await default_capacity_for_course(course_id))
+            except Exception:
+                cap_n = None
+
+        # Resolve required room_type:
+        #   (a) explicit ?room_type=..., else course.room_type from course_id or section->course_id
+        rt_required = (room_type or "").strip() or None
+        if not rt_required:
+            cid_for_type = course_id
+            if not cid_for_type and section_id:
+                sdoc = await db[COL_SECTIONS].find_one({"section_id": section_id}, {"_id": 0, "course_id": 1})
+                cid_for_type = (sdoc or {}).get("course_id")
+            if cid_for_type:
+                cdoc = await db[COL_COURSES].find_one({"course_id": cid_for_type}, {"_id": 0, "room_type": 1})
+                rt_required = ((cdoc or {}).get("room_type") or "").strip() or None
+
+        avail = await _rooms_available_for_slot(
+            campus_id=campus_id,
+            day=day_n,
+            start=start_n,
+            end=end_n,
+            required_type=rt_required,
+            min_capacity=cap_n,
+            exclude_schedule_ids=exclude_ids,
+        )
+        return {"ok": True, "rooms": avail}
+
 
     if action == "electiveOptions":
         options = await _fetch_all_specific_electives_async()
@@ -1844,51 +2231,103 @@ async def get_course_offerings(
         return out
 
     async def first_faculty_name_for_section(term_id: str, section_id: str) -> Tuple[str, Optional[str], Optional[str]]:
+        # Prefer a non-archived assignment for this term; fall back to any non-archived
         fa = await db[COL_FAC_ASSIGN].find_one(
             {"term_id": term_id, "section_id": section_id, "is_archived": {"$ne": True}},
             {"_id": 0, "user_id": 1, "faculty_id": 1}
         )
         if not fa:
+            fa = await db[COL_FAC_ASSIGN].find_one(
+                {"section_id": section_id, "is_archived": {"$ne": True}},
+                {"_id": 0, "user_id": 1, "faculty_id": 1}
+            )
+        if not fa:
             return ("UNASSIGNED", None, None)
-        uid = (fa.get("user_id") or "").strip() or None
-        fid = (fa.get("faculty_id") or "").strip() or None
+
+        uid = (fa.get("user_id") or "") or None
+        fid = (fa.get("faculty_id") or "") or None
+
+        # If the assignment carries a user_id, use USERS directly for the display name
         if uid:
             u = await db[COL_USERS].find_one(
                 {"user_id": uid}, {"_id": 0, "first_name": 1, "last_name": 1, "middle_name": 1}
             )
-            name = caps_name(u) if u else f"USER:{uid}"
-            return (name, uid, fid)
+            if u:
+                return (caps_name(u), uid, fid)
+            # fallthrough: user missing -> try faculty profile
+
+        # If we only have faculty_id, find profile. If that has user_id, hop to USERS.
         if fid:
             fp = await db[COL_FAC_PROFILES].find_one(
-                {"faculty_id": fid}, {"_id": 0, "first_name": 1, "last_name": 1, "middle_name": 1, "user_id": 1}
+                {"faculty_id": fid},
+                {"_id": 0, "first_name": 1, "last_name": 1, "middle_name": 1, "user_id": 1}
             )
-            name = caps_name(fp) if fp else f"FACULTY:{fid}"
-            linked_uid = (fp or {}).get("user_id") or None
-            return (name, linked_uid, fid)
-        return ("UNASSIGNED", None, None)
+            if fp:
+                linked_uid = fp.get("user_id") or None
+                if linked_uid:
+                    u = await db[COL_USERS].find_one(
+                        {"user_id": linked_uid}, {"_id": 0, "first_name": 1, "last_name": 1, "middle_name": 1}
+                    )
+                    if u:
+                        return (caps_name(u), linked_uid, fid)
+                # fallback: use name stored in faculty_profiles
+                if fp.get("first_name") or fp.get("last_name"):
+                    return (caps_name(fp), linked_uid, fid)
+
+        return ("UNASSIGNED", uid, fid)
 
     async def slot_payload_from_schedules(sid: str):
         scheds = [x async for x in db[COL_SCHEDS].find(
             {"section_id": sid},
-            {"_id": 0, "schedule_id": 1, "section_id": 1, "day": 1, "start_time": 1, "end_time": 1, "room_id": 1, "room_type": 1}
+            {"_id": 0, "schedule_id": 1, "section_id": 1, "day": 1,
+            "start_time": 1, "end_time": 1, "room_id": 1, "room_type": 1}
         )]
-        picked = sorted(
-            scheds,
-            key=lambda s: (normalize_day(s.get("day")), int(str(s.get("start_time") or "0")))
-        )[:2]
-        rids = list({sc.get("room_id") for sc in scheds if sc.get("room_id")})
-        rmap: Dict[str, Dict[str, Any]] = {}
+
+        def _has_info(s: dict) -> bool:
+            has_time = bool(s.get("day") and s.get("start_time") and s.get("end_time"))
+            has_room = bool((s.get("room_id") or "").strip())
+            return has_time or has_room
+
+        # Monday..Saturday order (not alphabetical)
+        _DOW_RANK = {"Monday":1, "Tuesday":2, "Wednesday":3, "Thursday":4, "Friday":5, "Saturday":6}
+
+        def _start_num(v: str) -> int:
+            t = "".join(ch for ch in str(v or "") if ch.isdigit())
+            try:
+                return int(t)  # "0730" -> 730
+            except Exception:
+                return 0
+
+        def _key(s: dict):
+            # 1) prefer entries that have time/room info
+            info_rank = 0 if _has_info(s) else 1
+            # 2) sort by weekday rank
+            day_name = normalize_day(s.get("day"))
+            day_rank = _DOW_RANK.get(day_name, 99)
+            # 3) then by start time
+            return (info_rank, day_rank, _start_num(s.get("start_time")))
+
+        picked = sorted(scheds, key=_key)[:2]
+
+        # Map room_id -> room_number for any referenced rooms
+        rids = list({sc.get("room_id") for sc in picked if sc.get("room_id")})
+        rmap: Dict[str, str] = {}
         if rids:
-            async for r in db[COL_ROOMS].find({"room_id": {"$in": rids}}, {"_id": 0, "room_id": 1, "room_number": 1}):
-                rmap[r["room_id"]] = r
+            async for r in db[COL_ROOMS].find(
+                {"room_id": {"$in": rids}}, {"_id": 0, "room_id": 1, "room_number": 1}
+            ):
+                rmap[r["room_id"]] = r.get("room_number") or r["room_id"]
 
         def slot_payload(x: Optional[Dict[str, Any]]):
             if not x:
                 return None
             rid = (x.get("room_id") or "").strip()
-            room_number = (rmap.get(rid) or {}).get("room_number", "")
-            if not room_number and rid in {"ONLINE", ""}:
-                room_number = "ONLINE" if rid == "ONLINE" else "— TBA —"
+            room_number = rmap.get(rid, "")
+            if not room_number:
+                if rid == "ONLINE":
+                    room_number = "ONLINE"
+                elif not rid:
+                    room_number = "— TBA —"
             return {
                 "schedule_id": x.get("schedule_id", ""),
                 "day": normalize_day(x.get("day")),
@@ -1899,10 +2338,10 @@ async def get_course_offerings(
                 "room_type": (x.get("room_type") or ""),
             }
 
-        return (
-            slot_payload(picked[0]) if len(picked) >= 1 else None,
-            slot_payload(picked[1]) if len(picked) >= 2 else None,
-        )
+        slot1 = slot_payload(picked[0]) if len(picked) >= 1 else None
+        slot2 = slot_payload(picked[1]) if len(picked) >= 2 else None
+        return (slot1, slot2)
+
 
     for cur in curricula_sorted:
         bid = cur.get("batch_id", "")
@@ -2645,7 +3084,7 @@ async def post_course_offerings(
 
         section_code = (payload.get("section_code") or "").strip() or await next_section_code(chosen_prefix, term_id, target_course_id)
 
-        sid = _id("SEC")
+        sid = await _next_seq_id(COL_SECTIONS, "section_id", "SEC", 4)
         cap = payload.get("enrollment_cap")
         if cap in (None, ""):
             cap = await default_capacity_for_course(target_course_id)
@@ -2670,18 +3109,28 @@ async def post_course_offerings(
 
         if placeholder_id:
             doc["fulfilled_placeholder_course_id"] = placeholder_id
-        inserted = await safe_insert_section(doc)
 
+        inserted = await safe_insert_section(doc)
         if not inserted:
             raise HTTPException(status_code=409, detail="Could not allocate a unique section code. Try again.")
 
+        # Create the blank schedules + placeholder faculty assignment safely after insert
+        await _provision_sched_and_assignment_for_new_section(doc)
+
         for idx, key in enumerate(["slot1", "slot2"], start=1):
             s = (payload.get(key) or {})
-            day = normalize_day(s.get("day"))
-            beg = (s.get("start_time") or "").strip()
-            end = (s.get("end_time") or "").strip()
+            # sanitize (treat any TBA text as empty)
+            day_raw = s.get("day")
+            day = normalize_day(day_raw) if day_raw else ""
+            beg, end = (s.get("start_time") or "").strip(), (s.get("end_time") or "").strip()
             rid = (s.get("room_id") or "").strip()
             rtype = (s.get("room_type") or "").strip()
+
+            # normalize away any TBA-like values
+            if _is_tba(rid) or rid == "— TBA —":
+                rid = ""
+            if _is_tba(day) or _is_tba(beg) or _is_tba(end):
+                day = beg = end = ""
 
             has_time = bool(day and beg and end)
 
@@ -2691,16 +3140,22 @@ async def post_course_offerings(
                         {"code": "ROOM_REQUIRES_TIME", "message": f"{key}: room requires day/start_time/end_time."}
                     ]})
                 if has_time or rid:
-                    await db[COL_SCHEDS].insert_one({
-                        "schedule_id": f"SCH-{sid}-{idx}",
+                    doc = {
+                        "schedule_id": _sch_id_from_sec(sid, idx),
                         "section_id": sid,
-                        "day": day if has_time else "",
-                        "start_time": beg if has_time else "",
-                        "end_time": end if has_time else "",
-                        "room_id": rid if rid else "",
-                        "room_type": rtype,
                         "created_at": now(), "updated_at": now(),
-                    })
+                    }
+                    if has_time:
+                        doc.update({"day": day, "start_time": beg, "end_time": end})
+                    if rid:
+                        doc["room_id"] = rid
+                        if not rtype:
+                            rdoc = await db[COL_ROOMS].find_one({"room_id": rid}, {"_id": 0, "room_type": 1})
+                            rtype = (rdoc or {}).get("room_type")
+                        if rtype:
+                            doc["room_type"] = rtype
+
+                    await db[COL_SCHEDS].insert_one(doc)
             else:
                 if rid:
                     if not has_time:
@@ -2708,8 +3163,9 @@ async def post_course_offerings(
                             {"code": "ROOM_REQUIRES_TIME", "message": f"{key}: room requires day/start_time/end_time."}
                         ]})
                     await db[COL_SCHEDS].insert_one({
-                        "schedule_id": f"SCH-{sid}-{idx}",
-                        "section_id": sid, "day": day, "start_time": beg, "end_time": end,
+                        "schedule_id": _sch_id_from_sec(sid, idx),
+                        "section_id": sid,
+                        "day": day, "start_time": beg, "end_time": end,
                         "room_id": rid, "room_type": rtype,
                         "created_at": now(), "updated_at": now(),
                     })
@@ -2732,15 +3188,22 @@ async def post_course_offerings(
                     resolved_uid, resolved_fid = await _resolve_or_create_faculty_by_name(fname)
                     uid, fid = resolved_uid or "", resolved_fid or ""
                 if uid or fid:
+                    fas_id = await _next_seq_id(COL_FAC_ASSIGN, "faculty_assignment_id", "FAS", 4)
+                    asg_id = await _next_seq_id(COL_FAC_ASSIGN, "assignment_id", "ASG", 4)
                     await db[COL_FAC_ASSIGN].update_one(
-                        {"term_id": term_id, "section_id": sid},
+                        {"section_id": sid},  # do NOT include term_id so legacy rows match
                         {"$set": {
                             "user_id": uid or None,
                             "faculty_id": fid or None,
                             "is_archived": False,
                             "updated_at": now()
                         },
-                         "$setOnInsert": {"faculty_assignment_id": _id("FAS"), "created_at": now()}},
+                        "$setOnInsert": {
+                            "assignment_id": asg_id,                  # <- legacy field name
+                            "load_id": (payload.get("load_id") or None),  # <- optional if you send it
+                            "section_id": sid,
+                            "created_at": now()
+                        }},
                         upsert=True
                     )
 
@@ -2799,16 +3262,20 @@ async def post_course_offerings(
             s = payload.get(key)
             if s is None:
                 continue
-
+            existing = await db[COL_SCHEDS].find_one(
+                {"section_id": section_id, "schedule_id": _sch_id_from_sec(section_id, idx)}
+            )
+            # sanitize incoming values (treat any TBA text as empty)
             rid = (s.get("room_id") or "").strip()
             rtype = (s.get("room_type") or "").strip()
             day = (s.get("day") or "").strip() if is_full else ""
             beg = (s.get("start_time") or "").strip() if is_full else ""
             end = (s.get("end_time") or "").strip() if is_full else ""
 
-            existing = await db[COL_SCHEDS].find_one(
-                {"section_id": section_id, "schedule_id": {"$regex": f"^SCH-{re.escape(section_id)}-{idx}$"}}
-            )
+            if _is_tba(rid) or rid == "— TBA —":
+                rid = ""
+            if _is_tba(day) or _is_tba(beg) or _is_tba(end):
+                day = beg = end = ""
 
             has_time_now = bool(day and beg and end)
             existing_has_time = bool(existing and existing.get("day") and existing.get("start_time") and existing.get("end_time"))
@@ -2821,48 +3288,68 @@ async def post_course_offerings(
                     ]})
 
             if existing:
+                # If user cleared time and room, keep a blank placeholder doc — don't delete.
                 if is_full and payload_has_any_time_key and (not has_time_now) and (rid == ""):
-                    await db[COL_SCHEDS].delete_one({"_id": existing["_id"]})
+                    await db[COL_SCHEDS].update_one(
+                        {"_id": existing["_id"]},
+                        {"$unset": {"day": "", "start_time": "", "end_time": "", "room_id": ""},
+                        "$set": {"updated_at": now()}}
+                    )
                     continue
 
-                upd = {"updated_at": now()}
-                if rid != "":
-                    upd["room_id"] = rid
+                # Build updates
+                set_fields = {"updated_at": now()}
+                unset_fields = {}
+
+                if "room_id" in s:
+                    if rid:
+                        set_fields["room_id"] = rid
+                        # Auto-fill room_type if UI didn't send one (or sent empty)
+                        if not s.get("room_type"):
+                            rdoc = await db[COL_ROOMS].find_one({"room_id": rid}, {"_id": 0, "room_type": 1})
+                            if rdoc and (rdoc.get("room_type") or "").strip():
+                                set_fields["room_type"] = (rdoc.get("room_type") or "").strip()
+                    else:
+                        unset_fields["room_id"] = ""
+                        unset_fields["room_type"] = ""
+
+
                 if "room_type" in s:
-                    upd["room_type"] = rtype
-                if is_full and ("room_id" in s) and rid == "":
-                    upd["room_id"] = ""
+                    if rtype:
+                        set_fields["room_type"] = rtype
+                    else:
+                        unset_fields["room_type"] = ""
 
                 if is_full and payload_has_any_time_key:
-                    upd.update({"day": day, "start_time": beg, "end_time": end})
+                    if has_time_now:
+                        set_fields.update({"day": day, "start_time": beg, "end_time": end})
+                    else:
+                        unset_fields.update({"day": "", "start_time": "", "end_time": ""})
 
-                await db[COL_SCHEDS].update_one({"_id": existing["_id"]}, {"$set": upd})
+                update_doc = {"$set": set_fields}
+                if unset_fields:
+                    update_doc["$unset"] = unset_fields
+                await db[COL_SCHEDS].update_one({"_id": existing["_id"]}, update_doc)
 
             else:
-                if rid:
+                # no existing schedule doc for this slot
+                if rid or has_time_now:
                     doc = {
-                        "schedule_id": f"SCH-{section_id}-{idx}",
+                        "schedule_id": _sch_id_from_sec(section_id, idx),
                         "section_id": section_id,
-                        "room_id": rid,
-                        "room_type": rtype,
                         "created_at": now(), "updated_at": now(),
                     }
-                    if is_full:
+                    if has_time_now:
                         doc.update({"day": day, "start_time": beg, "end_time": end})
-                    if not is_full and not existing_has_time:
-                        raise HTTPException(status_code=422, detail={"ok": False, "errors": [
-                            {"code": "ROOM_REQUIRES_TIME", "message": f"{key}: room requires day/start_time/end_time."}
-                        ]})
-                    await db[COL_SCHEDS].insert_one(doc)
+                    if rid:
+                        doc["room_id"] = rid
+                        if not rtype:
+                            rdoc = await db[COL_ROOMS].find_one({"room_id": rid}, {"_id": 0, "room_type": 1})
+                            rtype = (rdoc or {}).get("room_type")
+                        if rtype:
+                            doc["room_type"] = rtype
 
-                elif is_full and has_time_now:
-                    await db[COL_SCHEDS].insert_one({
-                        "schedule_id": f"SCH-{section_id}-{idx}",
-                        "section_id": section_id,
-                        "day": day, "start_time": beg, "end_time": end,
-                        "room_id": "", "room_type": rtype,
-                        "created_at": now(), "updated_at": now(),
-                    })
+                    await db[COL_SCHEDS].insert_one(doc)
 
         want_faculty_change = (
             ("faculty_user_id" in payload) or
@@ -2887,18 +3374,25 @@ async def post_course_offerings(
 
             if uid or fid:
                 await db[COL_FAC_ASSIGN].update_many(
-                    {"term_id": term_id, "section_id": section_id, "is_archived": {"$ne": True}},
+                    {"section_id": section_id, "is_archived": {"$ne": True}},
                     {"$set": {"is_archived": True, "updated_at": now()}}
                 )
+                fas_id = await _next_seq_id(COL_FAC_ASSIGN, "faculty_assignment_id", "FAS", 4)
+                asg_id = await _next_seq_id(COL_FAC_ASSIGN, "assignment_id", "ASG", 4)
                 await db[COL_FAC_ASSIGN].update_one(
-                    {"term_id": term_id, "section_id": section_id},
+                    {"section_id": section_id},  # legacy-compatible
                     {"$set": {
                         "user_id": uid or None,
                         "faculty_id": fid or None,
                         "is_archived": False,
                         "updated_at": now()
                     },
-                     "$setOnInsert": {"faculty_assignment_id": _id("FAS"), "created_at": now()}},
+                    "$setOnInsert": {
+                        "assignment_id": asg_id,
+                        "load_id": (payload.get("load_id") or None),
+                        "section_id": section_id,
+                        "created_at": now()
+                    }},
                     upsert=True
                 )
 

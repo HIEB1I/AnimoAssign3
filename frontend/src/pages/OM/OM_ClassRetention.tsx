@@ -33,6 +33,8 @@ function Pill({ text }: { text?: string }) {
   );
 }
 
+const toNumOrNull = (v: string) => (v.trim() === "" ? null : Number(v));
+
 export default function OM_ClassRetention() {
   // active term (for saving and options)
   const [activeTermId, setActiveTermId] = useState<string>("");
@@ -42,6 +44,7 @@ export default function OM_ClassRetention() {
   const [statuses, setStatuses] = useState<string[]>(["All Status"]);
   const [status, setStatus] = useState("All Status");
   const [search, setSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
 
   // table
   const [rows, setRows] = useState<OMCRRow[]>([]);
@@ -61,6 +64,12 @@ export default function OM_ClassRetention() {
   const [sectionLabels, setSectionLabels] = useState<string[]>([]);
   const [sectionLabelToId, setSectionLabelToId] = useState<Record<string,string>>({});
 
+  // debounce search
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedSearch(search.trim()), 300);
+    return () => clearTimeout(t);
+  }, [search]);
+
   // initial page options
   useEffect(() => {
     (async () => {
@@ -72,7 +81,7 @@ export default function OM_ClassRetention() {
         setActiveTermId(opt.activeTerm?.term_id || "");
 
         // preload course options for active term
-        const c = await getOMCR_CourseOptions();
+        const c = await getOMCR_CourseOptions(opt.activeTerm?.term_id);
         const labels = (c.options || []).map(o => `${o.course_code}`);
         const map: Record<string,string> = {};
         (c.options || []).forEach(o => (map[`${o.course_code}`] = o.course_id));
@@ -90,7 +99,7 @@ export default function OM_ClassRetention() {
     try {
       setLoading(true);
       setErr("");
-      const { ok, rows } = await listOMCR({ status, q: search.trim() });
+      const { ok, rows } = await listOMCR({ status, q: debouncedSearch });
       if (!ok) throw new Error("Failed to load");
       setRows(rows);
     } catch (e: any) {
@@ -100,20 +109,20 @@ export default function OM_ClassRetention() {
       setLoading(false);
     }
   };
-  useEffect(() => { load(); }, [status, search]);
+  useEffect(() => { load(); }, [status, debouncedSearch]);
 
   const headerLabel = useMemo(
     () => (activeTermLabel ? `Manage low-enrollment sections for ${activeTermLabel}` : "Manage low-enrollment sections"),
     [activeTermLabel]
   );
 
-  // helpers to (re)load section options given the chosen course
+  // helpers to (re)load section options given the chosen course (includes faculty info)
   const refreshSections = async (course_id: string) => {
     if (!course_id) {
       setSectionOpts([]); setSectionLabels([]); setSectionLabelToId({});
       return;
     }
-    const s = await getOMCR_SectionOptions(course_id);
+    const s = await getOMCR_SectionOptions(course_id, activeTermId);
     const labels = (s.options || []).map(o => o.section_code);
     const map: Record<string,string> = {};
     (s.options || []).forEach(o => (map[o.section_code] = o.section_id));
@@ -136,8 +145,6 @@ export default function OM_ClassRetention() {
     setEditingId(row.retention_id);
     setAdding(false);
     setDraft({ ...row, term_id: row.term_id || activeTermId });
-
-    // make sure section dropdown shows valid sections for its course
     await refreshSections(row.course_id);
   };
   const cancelEdit = () => { setEditingId(null); setDraft({}); };
@@ -146,8 +153,17 @@ export default function OM_ClassRetention() {
     try {
       setLoading(true);
       setErr("");
-      // ensure term id is set
-      const payload = { ...draft, term_id: draft.term_id || activeTermId };
+      const payload: Partial<OMCRRow> = {
+        retention_id: draft.retention_id,
+        term_id: draft.term_id || activeTermId,
+        course_id: draft.course_id!,
+        section_id: draft.section_id!,
+        student_units: draft.student_units ?? null,
+        faculty_units: draft.faculty_units ?? null,
+        status: draft.status,
+        enrolled: draft.enrolled ?? null,
+        // faculty_id is auto-derived on backend
+      };
       await saveOMCR(payload);
       setAdding(false);
       setEditingId(null);
@@ -172,6 +188,13 @@ export default function OM_ClassRetention() {
     } finally {
       setLoading(false);
     }
+  };
+
+  const facultyNameForDraftSection = () => {
+    if (!draft.section_id) return "UNASSIGNED";
+    const sec = sectionOpts.find(s => s.section_id === draft.section_id);
+    return sec?.faculty_name || "UNASSIGNED";
+    // value is calculated from faculty_assignments on the server
   };
 
   return (
@@ -229,9 +252,7 @@ export default function OM_ClassRetention() {
                   <SelectBox
                     value={
                       draft.course_id
-                        ? (courseOpts.find(o => o.course_id === draft.course_id)
-                            ? `${courseOpts.find(o => o.course_id === draft.course_id)!.course_code} — ${courseOpts.find(o => o.course_id === draft.course_id)!.course_title}`
-                            : "")
+                        ? (courseOpts.find(o => o.course_id === draft.course_id)?.course_code || "")
                         : ""
                     }
                     onChange={async (label) => {
@@ -241,7 +262,11 @@ export default function OM_ClassRetention() {
                     }}
                     options={courseLabels}
                   />
+                  <div className="mt-1 text-xs text-gray-500">
+                    {draft.course_id ? (courseOpts.find(o => o.course_id === draft.course_id)?.course_title || " ") : " "}
+                  </div>
                 </td>
+
                 <td className="px-4 py-3 text-center">
                   <SelectBox
                     value={
@@ -256,41 +281,42 @@ export default function OM_ClassRetention() {
                     options={sectionLabels}
                   />
                 </td>
+
                 <td className="px-4 py-3 text-center">
                   <input
                     type="number"
                     value={draft.student_units ?? 0}
-                    onChange={(e) => setDraft((d) => ({ ...d, student_units: Number(e.target.value) }))}
+                    onChange={(e) => setDraft((d) => ({ ...d, student_units: toNumOrNull(e.target.value) }))}
                     className={cls(SOFT_INPUT, "w-24 text-center")}
                   />
                 </td>
+
                 <td className="px-4 py-3 text-center">
                   <input
                     type="number"
                     value={draft.faculty_units ?? 0}
-                    onChange={(e) => setDraft((d) => ({ ...d, faculty_units: Number(e.target.value) }))}
+                    onChange={(e) => setDraft((d) => ({ ...d, faculty_units: toNumOrNull(e.target.value) }))}
                     className={cls(SOFT_INPUT, "w-24 text-center")}
                   />
                 </td>
+
                 <td className="px-4 py-3 text-center">
                   <input
                     type="number"
-                    value={draft.enrolled ?? ""}                   // allow blank or number
-                    onChange={(e) => {
-                      const val = e.target.value;
-                      setDraft((d) => ({ ...d, enrolled: val === "" ? null : Number(val) }));
-                    }}
+                    value={draft.enrolled ?? ""}
+                    onChange={(e) => setDraft((d) => ({ ...d, enrolled: toNumOrNull(e.target.value) }))}
                     className={cls(SOFT_INPUT, "w-24 text-center")}
                   />
                 </td>
-                <td className="px-4 py-3">
-                  <input
-                    value={draft.faculty_id || ""}
-                    onChange={(e) => setDraft((d) => ({ ...d, faculty_id: e.target.value }))}
-                    placeholder="Faculty ID"
-                    className={cls(SOFT_INPUT, "w-48")}
-                  />
+
+                {/* Faculty is auto-derived; show read-only */}
+                <td className="px-4 py-3 text-left">
+                  <div className="font-medium">{facultyNameForDraftSection()}</div>
+                  <div className="text-xs text-gray-500">
+                    {draft.section_id ? "Derived from faculty assignments" : "Select a section to resolve faculty"}
+                  </div>
                 </td>
+
                 <td className="px-4 py-3 text-center">
                   <SelectBox
                     value={draft.status || "Under Review"}
@@ -298,6 +324,7 @@ export default function OM_ClassRetention() {
                     options={statuses.filter((s) => s !== "All Status")}
                   />
                 </td>
+
                 <td className="px-4 py-3 text-center">
                   <div className="flex items-center justify-center gap-2">
                     <button
@@ -329,6 +356,15 @@ export default function OM_ClassRetention() {
                 const editing = editingId === r.retention_id;
                 const currentCourse = courseOpts.find(o => o.course_id === (draft.course_id || r.course_id));
                 const currentCourseLabel = currentCourse ? `${currentCourse.course_code}` : "";
+
+                const currentDraftFacultyName = (() => {
+                  if (!editing) return r.faculty_name || "UNASSIGNED";
+                  if (draft.section_id) {
+                    const sec = sectionOpts.find(s => s.section_id === draft.section_id);
+                    return sec?.faculty_name || "UNASSIGNED";
+                  }
+                  return r.faculty_name || "UNASSIGNED";
+                })();
 
                 return (
                   <tr key={r.retention_id} className="hover:bg-gray-50">
@@ -375,7 +411,7 @@ export default function OM_ClassRetention() {
                         <input
                           type="number"
                           value={draft.student_units ?? r.student_units ?? 0}
-                          onChange={(e) => setDraft((d) => ({ ...d, student_units: Number(e.target.value) }))}
+                          onChange={(e) => setDraft((d) => ({ ...d, student_units: toNumOrNull(e.target.value) }))}
                           className={cls(SOFT_INPUT, "w-24 text-center")}
                         />
                       ) : (
@@ -388,7 +424,7 @@ export default function OM_ClassRetention() {
                         <input
                           type="number"
                           value={draft.faculty_units ?? r.faculty_units ?? 0}
-                          onChange={(e) => setDraft((d) => ({ ...d, faculty_units: Number(e.target.value) }))}
+                          onChange={(e) => setDraft((d) => ({ ...d, faculty_units: toNumOrNull(e.target.value) }))}
                           className={cls(SOFT_INPUT, "w-24 text-center")}
                         />
                       ) : (
@@ -401,9 +437,7 @@ export default function OM_ClassRetention() {
                         <input
                           type="number"
                           value={draft.enrolled ?? r.enrolled ?? 0}
-                          onChange={(e) =>
-                            setDraft((d) => ({ ...d, enrolled: Number(e.target.value) }))
-                          }
+                          onChange={(e) => setDraft((d) => ({ ...d, enrolled: toNumOrNull(e.target.value) }))}
                           className={cls(SOFT_INPUT, "w-24 text-center")}
                         />
                       ) : (
@@ -411,17 +445,10 @@ export default function OM_ClassRetention() {
                       )}
                     </td>
 
+                    {/* Faculty: read-only, derived */}
                     <td className="px-4 py-3 text-left">
-                      {editing ? (
-                        <input
-                          value={draft.faculty_id ?? r.faculty_id ?? ""}
-                          onChange={(e) => setDraft((d) => ({ ...d, faculty_id: e.target.value }))}
-                          placeholder="Faculty ID"
-                          className={cls(SOFT_INPUT, "w-48")}
-                        />
-                      ) : (
-                        r.faculty_name || "—"
-                      )}
+                      <span className="font-medium">{currentDraftFacultyName}</span>
+                      <div className="text-xs text-gray-500"> </div>
                     </td>
 
                     <td className="px-4 py-3 text-center">

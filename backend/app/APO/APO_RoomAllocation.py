@@ -80,24 +80,34 @@ def default_open_days_for_campus(campus_name: str) -> List[str]:
 def now() -> datetime:
     return datetime.utcnow()
 
-def fmt_pair(s: str) -> str:
-    s = str(s or "")
-    if len(s) == 3:
-        h, m = s[0], s[1:]
-    else:
-        h, m = s[:-2], s[-2:]
-    return f"{int(h):02d}:{m}"
+def fmt_pair(t) -> str:
+    """
+    Format 'HHMM' -> 'HH:MM'. If t is blank/None/malformed, return ''.
+    """
+    s = "".join(ch for ch in str(t) if ch.isdigit())
+    if len(s) != 4:
+        return ""
+    h, m = s[:2], s[2:]
+    try:
+        return f"{int(h):02d}:{m}"
+    except Exception:
+        return ""
 
-def band_of(start: str, end: str) -> str:
-    return f"{fmt_pair(start)} – {fmt_pair(end)}"
+def band_of(start, end) -> str:
+    """
+    Return 'HH:MM – HH:MM' or '' if either side is missing.
+    """
+    a, b = fmt_pair(start), fmt_pair(end)
+    return f"{a} – {b}" if (a and b) else ""
 
 def parse_band(band: str) -> Tuple[str, str]:
     try:
         a, b = [x.strip() for x in band.split("–")]
         sh, sm = [int(x) for x in a.split(":")]
         eh, em = [int(x) for x in b.split(":")]
-        st = f"{sh}{sm:02d}".lstrip("0") or "0"
-        et = f"{eh}{em:02d}".lstrip("0") or "0"
+        # Always return zero-padded HHMM to match DB ("0730", "0900")
+        st = f"{sh:02d}{sm:02d}"
+        et = f"{eh:02d}{em:02d}"
         return (st, et)
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid time band (use HH:MM – HH:MM).")
@@ -194,7 +204,7 @@ async def sections_map(term_id: str) -> Dict[str, Dict[str, Any]]:
     out: Dict[str, Dict[str, Any]] = {}
     cursor = db[COL_SECTIONS].find(
         {"term_id": term_id},
-        {"_id": 0, "section_id": 1, "section_code": 1, "course_id": 1},
+        {"_id": 0, "section_id": 1, "section_code": 1, "course_id": 1, "enrollment_cap": 1},
     )
     secs = [s async for s in cursor]
     cids = [s["course_id"] for s in secs if s.get("course_id")]
@@ -218,6 +228,7 @@ async def sections_map(term_id: str) -> Dict[str, Dict[str, Any]]:
             "course_id": cid,
             "course_code": code_map.get(cid, ""),
             "college_id": college_map.get(cid, ""),
+            "enrollment_cap": s.get("enrollment_cap"),
         }
     return out
 
@@ -302,12 +313,14 @@ async def get_room_allocation(userId: str = Query(..., min_length=3)):
     # courses (for FE labels)
     course_ids = sorted({v.get("course_id", "") for v in s_map.values() if v.get("course_id")})
     courses = []
+    course_room_type: Dict[str, str] = {}   # ← ensure it exists even if no courses
     if course_ids:
         cc = db[COL_COURSES].find(
             {"course_id": {"$in": course_ids}},
-            {"_id": 0, "course_id": 1, "course_code": 1, "college_id": 1},
+            {"_id": 0, "course_id": 1, "course_code": 1, "college_id": 1, "room_type": 1},
         )
         courses = [x async for x in cc]
+        course_room_type = {c["course_id"]: (c.get("room_type") or "") for c in courses}
 
     # ---- schedules ----
     # 1) Schedules for in-scope sections (these drive the Allocate modal)
@@ -402,25 +415,75 @@ async def get_room_allocation(userId: str = Query(..., min_length=3)):
         # 2) Saved availability placeholders (normalized days)
         avail_for_room = [a for a in availability if a["room_id"] == rid]
         saved_avail_keys = {(a["day"], a["time_band"]) for a in avail_for_room}
-        saved_days = {a["day"] for a in avail_for_room}  # e.g., {"Monday"} if you only edited Monday
+        saved_days = {a["day"] for a in avail_for_room}
 
         allowed_keys = set(assigned_keys) | saved_avail_keys
 
         # 3) Day-scoped default overlay:
-        #    For campus default-open days that have *no* saved availability yet,
-        #    still show the defaults so they don't disappear after editing another day.
         for d in default_open_days:
             if d not in saved_days:
                 for tb in TIME_BANDS:
                     allowed_keys.add((d, tb))
 
+        # Helper: convert "HH:MM – HH:MM" to ("HHMM","HHMM")
+        def _band_to_times(band: str) -> Tuple[str, str]:
+            st, et = parse_band(band)
+            return (st, et)
+
+        # Build a fast view over in-scope section schedules (not yet room-assigned)
+        scheds_open = [
+            s for s in section_scheds_scoped
+            if not (s.get("room_id") or "").strip()
+        ]
+        # Quick lookups
+        sec_meta = s_map            # from sections_map(); includes enrollment_cap
+        def _cap(sid: str) -> int:
+            try:
+                v = sec_meta.get(sid, {}).get("enrollment_cap")
+                return int(v) if v not in (None, "") else 0
+            except Exception:
+                return 0
+        def _rtype_for_section(sid: str) -> str:
+            # prefer schedule.room_type if you later store it; else derive from course
+            cid = sec_meta.get(sid, {}).get("course_id", "")
+            return (course_room_type.get(cid, "") or "").strip()
+
         out = []
         for k, cell in schedule_by_room[rid].items():
-            if k in allowed_keys:
-                c = dict(cell)
-                c["allowed"] = True
-                out.append(c)
+            if k not in allowed_keys:
+                continue
+            day, band = k
+            st, et = _band_to_times(band)
+
+            # Compute eligible sections for this room cell
+            eligible: List[str] = []
+            # Room properties
+            this_room = next((rr for rr in rooms if rr["room_id"] == rid), None)
+            r_cap = int(this_room.get("capacity") or 0) if this_room else 0
+            r_type = (this_room.get("room_type") or "").strip().lower() if this_room else ""
+
+            for s in scheds_open:
+                if normalize_day(s.get("day")) != day:
+                    continue
+                if band_of(s.get("start_time",""), s.get("end_time","")) != band:
+                    continue
+                sid = s.get("section_id", "")
+                if not sid:
+                    continue
+                # capacity & type fit
+                if r_cap and _cap(sid) and r_cap < _cap(sid):
+                    continue
+                need_type = _rtype_for_section(sid).lower()
+                if need_type and r_type and (need_type != r_type):
+                    continue
+                eligible.append(sid)
+
+            c = dict(cell)
+            c["allowed"] = True
+            c["eligible_section_ids"] = eligible
+            out.append(c)
         return out
+
 
     buildings = sorted(list({r.get("building", "") for r in rooms if r.get("building")}))
 
