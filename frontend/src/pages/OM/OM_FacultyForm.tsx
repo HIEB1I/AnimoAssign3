@@ -19,6 +19,71 @@ import {
   type OMFRow,
 } from "../../api";
 
+/* ---------- countdown + banner (copied from FACULTY_Preferences) ---------- */
+function useCountdown(targetISO: string) {
+  const [now, setNow] = useState<number>(() => Date.now());
+  useEffect(() => { const id = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(id); }, []);
+  const target = new Date(targetISO || 0).getTime();
+  const diff = Math.max(0, target - now);
+  const past = targetISO ? now > target : false;
+  const d = Math.floor(diff / (1000*60*60*24));
+  const h = Math.floor((diff/(1000*60*60))%24);
+  const m = Math.floor((diff/(1000*60))%60);
+  const s = Math.floor((diff/1000))%60;
+  const label = past ? "Deadline passed" : `${d}d ${h}h ${m}m ${s}s`;
+  return { past, label };
+}
+
+function DeadlineBanner({ openISO, deadlineISO, className }: { openISO: string; deadlineISO: string; className?: string }) {
+  const { past: openPassed, label: openLabel } = useCountdown(openISO);
+  const { past: deadlinePassed, label: deadlineLabel } = useCountdown(deadlineISO);
+
+  if (!openPassed) {
+    return (
+      <div className={cls("mb-4 flex items-start gap-3 rounded-xl border p-4 border-amber-300 bg-amber-50 text-amber-900", className)}>
+        <div className="mt-0.5 h-2.5 w-2.5 shrink-0 rounded-full bg-amber-500" />
+        <div className="text-sm">
+          <div className="font-semibold">Submissions Open In</div>
+          <div className="mt-0.5">
+            Opens: <span className="font-medium">{openISO ? new Date(openISO).toLocaleString() : "—"}</span>{" • "}
+            <span className="font-bold text-amber-700">{openISO ? openLabel : "TBA"}</span>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (deadlinePassed) {
+    return (
+      <div className={cls("mb-4 flex items-start gap-3 rounded-xl border p-4 border-red-300 bg-red-50 text-red-800", className)}>
+        <div className="mt-0.5 h-2.5 w-2.5 shrink-0 rounded-full bg-red-500" />
+        <div className="text-sm">
+          <div className="font-semibold">Editing Locked</div>
+          <div className="mt-0.5">
+            Deadline: <span className="font-medium">{deadlineISO ? new Date(deadlineISO).toLocaleString() : "—"}</span>{" • "}
+            <span className="font-bold text-red-700">Deadline passed</span>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className={cls("mb-4 flex items-start gap-3 rounded-xl border p-4 border-amber-300 bg-amber-50 text-amber-900", className)}>
+      <div className="mt-0.5 h-2.5 w-2.5 shrink-0 rounded-full bg-amber-500" />
+      <div className="text-sm">
+        <div className="font-semibold">Submission Deadline Approaching</div>
+        <div className="mt-0.5">
+          Deadline: <span className="font-medium">{deadlineISO ? new Date(deadlineISO).toLocaleString() : "—"}</span>{" • "}
+          <span className="font-bold text-amber-700">{deadlineISO ? deadlineLabel : "TBA"}</span>
+        </div>
+        <div className="mt-1 text-[12px] opacity-80">Please finalize before the deadline. Drafts are allowed until lock.</div>
+      </div>
+    </div>
+  );
+}
+/* ------------------------------------------------------------------------- */
+
 /* ---- Row actions menu ---- */
 function ActionMenu({ onView }: { onView: () => void }) {
   const [open, setOpen] = useState(false);
@@ -77,6 +142,9 @@ export default function OM_FacultyForm() {
   // header/term
   const [activeTerm, setActiveTerm] = useState<OMFOptions["activeTerm"] | null>(null);
 
+  // NEW: prefs window (open/deadline) for banner
+  const [prefsWindow, setPrefsWindow] = useState<{ openISO: string; deadlineISO: string }>({ openISO: "", deadlineISO: "" });
+
   // table rows
   const [rows, setRows] = useState<OMFRow[]>([]);
   const [loading, setLoading] = useState(false);
@@ -96,6 +164,11 @@ export default function OM_FacultyForm() {
         setDeptOptions(["All Departments", ...opt.departments]);
         setTypeOptions(["All Faculty Type", ...opt.facultyTypes]);
         setActiveTerm(opt.activeTerm || null);
+        // NEW: pick up window from backend
+        setPrefsWindow({
+          openISO: opt?.prefs_window?.openISO || "",
+          deadlineISO: opt?.prefs_window?.deadlineISO || "",
+        });
       } catch (e: any) {
         setErr(e?.response?.data?.detail || e?.message || "Failed to load options.");
       }
@@ -144,7 +217,7 @@ export default function OM_FacultyForm() {
   const closeView = () => { setSelected(null); setPref(null); };
 
   const fmtDate = (iso?: string) => {
-    if (!iso) return "N/A";               // <- per requirement
+    if (!iso) return "N/A";
     const d = new Date(iso);
     return isNaN(d.getTime()) ? "N/A" : d.toLocaleDateString();
   };
@@ -154,7 +227,7 @@ export default function OM_FacultyForm() {
   return (
     <main className="w-full px-8 py-8">
       {/* Header */}
-      <header className="mb-6 flex items-center justify-between">
+      <header className="mb-4 flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold">Faculty Preferences</h1>
           <p className="text-sm text-gray-600">
@@ -167,6 +240,9 @@ export default function OM_FacultyForm() {
           </p>
         )}
       </header>
+
+      {/* NEW: same banner as in Faculty Preferences */}
+      <DeadlineBanner openISO={prefsWindow.openISO} deadlineISO={prefsWindow.deadlineISO} className="mb-6" />
 
       {err && (
         <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
