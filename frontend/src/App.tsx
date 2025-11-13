@@ -55,6 +55,8 @@ import CHAIR_FacultyService from "./pages/CHAIR/CHAIR_FacultyService";
 import CHAIR_StudentPetition from "./pages/CHAIR/CHAIR_StudentPetition";
 import CHAIR_ClassRetention from "./pages/CHAIR/CHAIR_ClassRetention";
 import CHAIR_Inbox from "./pages/CHAIR/CHAIR_Inbox"; 
+import CHAIR_ServiceReciever from "./pages/CHAIR/CHAIR_ServiceReciever";
+
 
 const base = (import.meta.env.BASE_URL || "/").replace(/\/$/, "");
 
@@ -156,10 +158,12 @@ export default function App() {
             <Route path="faculty-management" element={<CHAIR_FacultyManagement />} />
             <Route path="course-management" element={<CHAIR_CourseManagement />} />
             <Route path="faculty-service" element={<CHAIR_FacultyService />} />
+            <Route path="service-receiver" element={<CHAIR_ServiceReciever />} />
             <Route path="student-petitions" element={<CHAIR_StudentPetition />} />
             <Route path="class-retention" element={<CHAIR_ClassRetention />} />
           </Route>
           <Route path="/chair/inbox" element={<CHAIR_Inbox />} />
+          
 
           {/* Authenticated wildcard: unknown paths for logged-in users go OM home */}
           <Route path="*" element={<Navigate to="/om/home" replace />} />

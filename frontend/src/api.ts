@@ -2000,7 +2000,7 @@ export type FacultyServiceRow = {
   course_code: string;
   course_title: string;
   units: number | null;
-  from_department: "Software Technology";
+  from_department: string; 
   to_department: ToDept;
   faculty: FacultyLite;
   day1: DayShort | "";

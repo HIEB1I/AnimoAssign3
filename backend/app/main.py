@@ -151,6 +151,7 @@ from .CHAIR.CHAIR_FacultyService import router as chair_faculty_service_router
 from .CHAIR.CHAIR_ClassRetention import router as chair_classretention_router
 from .CHAIR.CHAIR_StudentPetition import router as chair_studentpetition_router
 from .CHAIR.CHAIR_Inbox import router as chair_inbox_router
+from .CHAIR.CHAIR_ServiceReciever import router as service_receiver_router
 
 from .ADMIN.ADMIN import router as admin_router
 from .ADMIN.ADMIN_Inbox import router as admin_inbox_router
@@ -187,3 +188,4 @@ app.include_router(chair_faculty_service_router, prefix="/api")
 app.include_router(chair_classretention_router, prefix="/api")
 app.include_router(chair_studentpetition_router, prefix="/api")
 app.include_router(chair_inbox_router, prefix="/api")
+app.include_router(service_receiver_router, prefix="/api")
