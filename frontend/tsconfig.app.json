@@ -23,13 +23,12 @@
     "erasableSyntaxOnly": true,
     "noFallthroughCasesInSwitch": true,
     "noUncheckedSideEffectImports": true,
-    "noImplicitAny": false,
     "allowJs": true,
     "baseUrl": ".",                  
     "paths": {                       
     "@/*": ["src/*"]
     }
   },
-  "include": ["src",  "src/types"]
+  "include": ["src"]
 }
 

@@ -32,8 +32,7 @@
     "typescript": "^5.5.3",
     "vite": "^7.1.10"
   },
-    "jspdf": {
-      "dompurify": "^3.2.6"
-    }
-  
+  "jspdf": {
+    "dompurify": "^3.2.6"
+  }
 }

@@ -54,7 +54,7 @@ import CHAIR_CourseManagement from "./pages/CHAIR/CHAIR_CourseManagement";
 import CHAIR_FacultyService from "./pages/CHAIR/CHAIR_FacultyService";
 import CHAIR_StudentPetition from "./pages/CHAIR/CHAIR_StudentPetition";
 import CHAIR_ClassRetention from "./pages/CHAIR/CHAIR_ClassRetention";
-import CHAIR_Inbox from "./pages/CHAIR/CHAIR_Inbox"; 
+import CHAIR_Inbox from "./pages/CHAIR/CHAIR_Inbox";
 
 const base = (import.meta.env.BASE_URL || "/").replace(/\/$/, "");
 
@@ -67,6 +67,38 @@ function RequireAuth() {
     ok = false;
   }
   return ok ? <Outlet /> : <Navigate to="/Login" replace />;
+}
+
+/**
+ * Small wrapper for the CHAIR Faculty Service route.
+ *
+ * It reads the logged-in user from localStorage ("animo.user") and tries to
+ * derive the department name/label, then passes it into CHAIR_FacultyService
+ * via the `chairDepartmentName` prop.
+ *
+ * This is where we effectively do:
+ *   <CHAIR_FacultyService chairDepartmentName={currentUser.dept_name} />
+ */
+function ChairFacultyServiceRoute() {
+  let deptName: string | undefined;
+
+  try {
+    const raw = localStorage.getItem("animo.user");
+    if (raw) {
+      const session = JSON.parse(raw);
+      // Adjust these keys to match whatever you store in animo.user.
+      // We try a few common shapes just in case:
+      deptName =
+        session?.dept_label || // e.g. from backend header
+        session?.deptName ||
+        session?.dept_name ||
+        session?.department?.dept_name;
+    }
+  } catch {
+    // ignore, deptName stays undefined
+  }
+
+  return <CHAIR_FacultyService chairDepartmentName={deptName} />;
 }
 
 export default function App() {
@@ -147,6 +179,7 @@ export default function App() {
           <Route path="/admin" element={<ADMIN />} />
           <Route path="/admin/inbox" element={<ADMIN_Inbox />} />
 
+          {/* CHAIR */}
           <Route path="/chair" element={<CHAIR_Plantilla />}>
             {/* Parent landing */}
             <Route index element={<div />} />
@@ -155,7 +188,8 @@ export default function App() {
             {/* Children per mapping */}
             <Route path="faculty-management" element={<CHAIR_FacultyManagement />} />
             <Route path="course-management" element={<CHAIR_CourseManagement />} />
-            <Route path="faculty-service" element={<CHAIR_FacultyService />} />
+            {/* 🔽 CHANGED: use wrapper that passes chairDepartmentName */}
+            <Route path="faculty-service" element={<ChairFacultyServiceRoute />} />
             <Route path="student-petitions" element={<CHAIR_StudentPetition />} />
             <Route path="class-retention" element={<CHAIR_ClassRetention />} />
           </Route>

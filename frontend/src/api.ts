@@ -440,6 +440,17 @@ export async function archiveApoPreenlistment(
   const { data } = await axios.post(url);
   return data;
 }
+export async function reactivateApoPreenlistment(
+  userId: string,
+  termId: string,
+  campusName?: "MANILA" | "LAGUNA"
+) {
+  const qs = new URLSearchParams({ userId, action: "reactivate", termId });
+  if (campusName) qs.set("campus", campusName);
+  const url = join(API_BASE, `apo/preenlistment?${qs.toString()}`);
+  const { data } = await axios.post(url);
+  return data;
+}
 
 /* =========================================================
    ===============  APO: COURSE OFFERINGS  =================
@@ -920,34 +931,77 @@ export async function getElectiveOptions(
 }
 
 /* ---- Eligible rooms for a section (capacity + room_type guard) ---- */
+/* ---- Eligible rooms for a section (capacity + room_type guard) ---- */
 export type EligibleRoomsParams = {
   section_id?: string;
+
+  /** Preferred: server reads this as a minimum seat requirement */
+  min_capacity?: number;
+  /** Back-compat from the caller: we’ll map this to min_capacity */
   enrollment_cap?: number;
+
+  /** Preferred: server expects this key */
+  required_type?: string;
+  /** Back-compat from the caller: we’ll map this to required_type */
   room_type?: string;
+
   campus_id?: string;
-  // optional time filter (if backend supports clash checks)
+
+  // time filter for clash checks
   day?: string;
+  /** Back-compat from the caller; we’ll emit as `start` */
   start_time?: string;
+  /** Back-compat from the caller; we’ll emit as `end` */
   end_time?: string;
+
+  /** IDs to ignore when checking conflicts (CSV or array) */
+  exclude_schedule_ids?: string | string[];
 };
+
 export async function getEligibleRoomsForOffering(
   userId: string,
   params: EligibleRoomsParams
-): Promise<
-  { ok: boolean; rooms: Array<{ room_id: string; room_number: string; room_type: string; capacity: number; building?: string }> }
-> {
-  const qp = { ...params };
-  // normalize times if present
-  if (qp.start_time) qp.start_time = _normTime(qp.start_time) || qp.start_time;
-  if (qp.end_time) qp.end_time = _normTime(qp.end_time) || qp.end_time;
+): Promise<{ ok: boolean; rooms: Array<{ room_id: string; room_number: string; room_type: string; capacity: number; building?: string }> }> {
+  const qp: Record<string, any> = { ...params };
+
+  // --- Times: send server's expected keys `start` / `end`
+  const s = _normTime(qp.start ?? qp.start_time);
+  const e = _normTime(qp.end ?? qp.end_time);
+  if (s) qp.start = s;
+  if (e) qp.end = e;
+  delete qp.start_time;
+  delete qp.end_time;
+
+  // --- Capacity/type: accept either naming, send server's expected keys
+  qp.required_type = qp.required_type ?? qp.room_type ?? undefined;
+  qp.min_capacity = qp.min_capacity ?? qp.enrollment_cap ?? undefined;
+  delete qp.room_type;
+  delete qp.enrollment_cap;
+
+  // --- Day normalization: accept "TH" or "H" for Thursday; backend is tolerant but we help it.
+  const rawDay = String(qp.day || "").toUpperCase().trim();
+  qp.day = rawDay === "TH" ? "H" : rawDay; // keep M T W H F S
+
+  // --- Exclusions: ensure comma-separated string
+  if (Array.isArray(qp.exclude_schedule_ids)) {
+    qp.exclude_schedule_ids = qp.exclude_schedule_ids.join(",");
+  }
 
   const url = `${API_BASE}/apo/courseofferings${q({
     userId,
     action: "eligibleRooms",
-    ...qp,
+    campus_id: qp.campus_id,
+    day: qp.day,
+    start: qp.start,
+    end: qp.end,
+    required_type: qp.required_type,
+    min_capacity: qp.min_capacity,
+    exclude_schedule_ids: qp.exclude_schedule_ids,
   })}`;
+
   return get(url);
 }
+
 export async function searchCourseCatalog(
   userId: string,
   params: { q?: string; limit?: number; department_id?: string; program_level?: string } = {}
@@ -1447,7 +1501,14 @@ export type OMFOptions = {
     label?: string;
     submission_deadline?: string; // ISO
   };
+  // NEW: drives the countdown banner (same shape as backend payload)
+  prefs_window?: {
+    openISO?: string;
+    deadlineISO?: string;
+    term_id?: string;
+  };
 };
+
 
 export type OMFRow = {
   faculty_id: string;
@@ -1963,7 +2024,11 @@ export async function chairFacultyService(userId: string) {
 // ADDITIONS for Faculty Service (kept near the other CHAIR helpers)
 // -----------------------------------------------------------------------------
 
-export type ToDept = "Information Technology" | "Computer Technology";
+export type ToDept =
+  | "Department of Computer Technology"
+  | "Department of Information Technology"
+  | "Department of Literature"
+  | "Department of Software Technology";
 export type DayShort = "M" | "T" | "W" | "H" | "F" | "S";
 export type FacultyLite = {
   faculty_id?: string;
@@ -1978,7 +2043,7 @@ export type FacultyServiceRow = {
   course_code: string;
   course_title: string;
   units: number | null;
-  from_department: "Software Technology";
+  from_department: string; 
   to_department: ToDept;
   faculty: FacultyLite;
   day1: DayShort | "";
@@ -1988,45 +2053,56 @@ export type FacultyServiceRow = {
   begin2: string | "";
   end2: string | "";
   remarks: string;
-  status?: "draft" | "sent" | "responded";
+  status?: "draft" | "sent" | "responded" | "rejected";
   created_at?: string;
   updated_at?: string;
 };
 
-export async function getFSOptions(params?: { q?: string; toDepartment?: ToDept }) {
+export async function getFSOptions(params?: { q?: string; toDepartment?: ToDept; requesterDepartment?: string }) {
   const sp = new URLSearchParams();
   if (params?.q) sp.set("q", params.q);
   if (params?.toDepartment) sp.set("toDepartment", params.toDepartment);
+  if (params?.requesterDepartment) sp.set("requesterDepartment", params.requesterDepartment);
   const { data } = await api.get(`/chair/faculty-service/options?${sp.toString()}`);
   return data as {
     ok: boolean;
     courses: Array<{ code: string; title: string; units?: number }>;
     departments: ToDept[];
-    timeSlots: string[];
+    timeBegins: string[]; // renamed: begin options only
     days: DayShort[];
-    from: "Software Technology";
     facultyOptions?: Array<{ faculty_id: string; first_name: string; last_name: string; email?: string; label: string }>;
   };
 }
 
-export async function listFacultyService(params?: { status?: string; dept?: string; search?: string }) {
+
+export async function listFacultyService(params?: {
+  status?: string;
+  dept?: string;
+  search?: string;
+  box?: "sent" | "received"; 
+}) {
   const sp = new URLSearchParams();
   if (params?.status) sp.set("status", params.status);
   if (params?.dept) sp.set("dept", params.dept);
   if (params?.search) sp.set("search", params.search);
+  if (params?.box) sp.set("box", params.box); 
+
   const { data } = await api.get(`/chair/faculty-service/list?${sp.toString()}`);
   return data as { ok: boolean; rows: FacultyServiceRow[] };
 }
+
 
 export async function createFacultyService(payload: {
   course_code: string;
   course_title?: string;
   units?: number | null;
   to_department: ToDept;
+  from_department?: string; // NEW
 }) {
   const { data } = await api.post(`/chair/faculty-service/create`, payload);
   return data as { ok: boolean; row: FacultyServiceRow };
 }
+
 
 export async function sendFacultyService(fs_id: string) {
   const { data } = await api.post(`/chair/faculty-service/send/${encodeURIComponent(fs_id)}`);
@@ -2046,6 +2122,12 @@ export async function respondFacultyService(fs_id: string, payload: {
   const { data } = await api.post(`/chair/faculty-service/respond/${encodeURIComponent(fs_id)}`, payload);
   return data as { ok: boolean; row: FacultyServiceRow };
 }
+
+export async function rejectFacultyService(fs_id: string, payload?: { remarks?: string }) {
+  const { data } = await api.post(`/chair/faculty-service/reject/${encodeURIComponent(fs_id)}`, payload || {});
+  return data as { ok: boolean; row: FacultyServiceRow };
+}
+
 
 
 export async function chairClassRetention(userId: string) {

@@ -1,4 +1,5 @@
 // FACULTY_Preferences.tsx
+
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { CalendarDays, MapPin, Monitor, BookOpen, Settings, Info, AlertTriangle } from "lucide-react";
 import {
@@ -26,7 +27,7 @@ function Tag({ children, tone = "emerald" }: { children: React.ReactNode; tone?:
   );
 }
 
-/* ---------- shared label/dropdown styles to match screenshot ---------- */
+/* ---------- shared label/dropdown styles ---------- */
 function FieldLabel({ children, required = false }: { children: React.ReactNode; required?: boolean }) {
   return (
     <label className="mb-2 block text-[15px] font-semibold text-emerald-700">
@@ -155,7 +156,7 @@ const DELOADING_TYPES = [
 
 /* ---------- unit helpers ---------- */
 const toLabel = (n: number) => {
-  const s = (Number(n).toFixed(1));
+  const s = Number(n).toFixed(1);
   const base = `${s} units`;
   if (s === "0.0") return "0.0 units - no teaching load (for full-time only)";
   if (s === "15.0") return "15.0 units - only for full-time";
@@ -187,7 +188,7 @@ function normalizeUiTimeToDb(s: string): string {
   return `${m[1]}${m[2]}-${m[3]}${m[4]}`;
 }
 
-/* ---------- day helpers (Thursday must be 'H' on save) ---------- */
+/* ---------- day helpers (Thursday is 'H') ---------- */
 const DAY_TO_LETTER: Record<string, "M" | "T" | "W" | "H" | "F" | "S"> = { Monday:"M", Tuesday:"T", Wednesday:"W", Thursday:"H", Friday:"F", Saturday:"S" };
 const LETTER_TO_DAY: Record<string, string> = { M:"Monday", T:"Tuesday", W:"Wednesday", H:"Thursday", F:"Friday", S:"Saturday" };
 function compressDays(days: string[]): string[] {
@@ -213,9 +214,9 @@ function expandDays(groups: string[]): string[] {
 function useCountdown(targetISO: string) {
   const [now, setNow] = useState<number>(() => Date.now());
   useEffect(() => { const id = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(id); }, []);
-  const target = new Date(targetISO).getTime();
+  const target = new Date(targetISO || 0).getTime();
   const diff = Math.max(0, target - now);
-  const past = now > target;
+  const past = targetISO ? now > target : false;
   const d = Math.floor(diff / (1000*60*60*24));
   const h = Math.floor((diff/(1000*60*60))%24);
   const m = Math.floor((diff/(1000*60))%60);
@@ -254,24 +255,57 @@ function Pills({ items }: { items: string[] }) {
     <div className="flex flex-wrap gap-1.5">{items.map((v) => <Tag key={v} tone="gray">{v}</Tag>)}</div>
   );
 }
-function DeadlineBanner({ deadlineISO, className }: { deadlineISO: string; className?: string }) {
-  const { past, label } = useCountdown(deadlineISO);
-  return (
-    <div className={cls("mb-4 flex items-start gap-3 rounded-xl border p-4", past ? "border-red-300 bg-red-50 text-red-800" : "border-amber-300 bg-amber-50 text-amber-900", className)}>
-      <div className={cls("mt-0.5 h-2.5 w-2.5 shrink-0 rounded-full", past ? "bg-red-500" : "bg-amber-500")} />
-      <div className="text-sm">
-        <div className="font-semibold">{past ? "Editing Locked" : "Submission Deadline Approaching"}</div>
-        <div className="mt-0.5">
-          Deadline: <span className="font-medium">{new Date(deadlineISO).toLocaleString()}</span>{" • "}
-          <span className={cls("font-bold", past ? "text-red-700" : "text-amber-700")}>{label}</span>
+function DeadlineBanner({ openISO, deadlineISO, className }: { openISO: string; deadlineISO: string; className?: string }) {
+  const { past: openPassed, label: openLabel } = useCountdown(openISO);
+  const { past: deadlinePassed, label: deadlineLabel } = useCountdown(deadlineISO);
+
+  if (!openPassed) {
+    return (
+      <div className={cls("mb-4 flex items-start gap-3 rounded-xl border p-4 border-amber-300 bg-amber-50 text-amber-900", className)}>
+        <div className="mt-0.5 h-2.5 w-2.5 shrink-0 rounded-full bg-amber-500" />
+        <div className="text-sm">
+          <div className="font-semibold">Submissions Open In</div>
+          <div className="mt-0.5">
+            Opens: <span className="font-medium">{openISO ? new Date(openISO).toLocaleString() : "—"}</span>{" • "}
+            <span className="font-bold text-amber-700">{openISO ? openLabel : "TBA"}</span>
+          </div>
+          <div className="mt-1 text-[12px] opacity-80">Editing is locked until the window opens.</div>
         </div>
-        {!past && <div className="mt-1 text-[12px] opacity-80">Please finalize before the deadline. Drafts are allowed until lock.</div>}
+      </div>
+    );
+  }
+
+  if (deadlinePassed) {
+    return (
+      <div className={cls("mb-4 flex items-start gap-3 rounded-xl border p-4 border-red-300 bg-red-50 text-red-800", className)}>
+        <div className="mt-0.5 h-2.5 w-2.5 shrink-0 rounded-full bg-red-500" />
+        <div className="text-sm">
+          <div className="font-semibold">Editing Locked</div>
+          <div className="mt-0.5">
+            Deadline: <span className="font-medium">{deadlineISO ? new Date(deadlineISO).toLocaleString() : "—"}</span>{" • "}
+            <span className="font-bold text-red-700">Deadline passed</span>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className={cls("mb-4 flex items-start gap-3 rounded-xl border p-4 border-amber-300 bg-amber-50 text-amber-900", className)}>
+      <div className="mt-0.5 h-2.5 w-2.5 shrink-0 rounded-full bg-amber-500" />
+      <div className="text-sm">
+        <div className="font-semibold">Submission Deadline Approaching</div>
+        <div className="mt-0.5">
+          Deadline: <span className="font-medium">{deadlineISO ? new Date(deadlineISO).toLocaleString() : "—"}</span>{" • "}
+          <span className="font-bold text-amber-700">{deadlineISO ? deadlineLabel : "TBA"}</span>
+        </div>
+        <div className="mt-1 text-[12px] opacity-80">Please finalize before the deadline. Drafts are allowed until lock.</div>
       </div>
     </div>
   );
 }
 
-/* ---------- AE Line 1 Schedule (same as reference) ---------- */
+/* ---------- AE Line 1 Schedule (unchanged) ---------- */
 function AELine1Schedule() {
   const ML = [
     { trip: "AE 101", etd: "6:00 AM" }, { trip: "AE 102", etd: "7:30 AM" }, { trip: "AE 103", etd: "9:30 AM" },
@@ -345,15 +379,15 @@ type SavedPrefs = {
   remarks: string;
   onBreak: boolean;
   breakReason: string;
-  breakReturnDate: string; // stored as YYYY-MM-DD for the date input
+  breakReturnDate: string; // YYYY-MM-DD
 };
 const initialSaved: SavedPrefs = {
-  prefUnits: "3.0 units",
+  prefUnits: "",
   deloadings: [],
   noDeloading: true,
   days: [],
   timeSlots: [],
-  campus: "Either Campus",
+  campus: "",
   delivery: "",
   kac: [],
   remarks: "",
@@ -366,22 +400,24 @@ const initialSaved: SavedPrefs = {
    EDIT FORM
    =========================== */
 function EditForm({
-  initial, onClose, onSave, onDraft, deadlineISO, employmentType,
-  daysMaster, timeSlotsMaster, kacDisplayOptions,
+  initial, onClose, onSave, onDraft, openISO, deadlineISO, employmentType, daysMaster, timeSlotsMaster, kacDisplayOptions,
 }: {
   initial: SavedPrefs;
   onClose: () => void;
   onSave: (v: SavedPrefs) => void;
   onDraft: (v: SavedPrefs) => void;
+  openISO: string;
   deadlineISO: string;
   employmentType: "FT" | "PT";
   daysMaster: string[];
   timeSlotsMaster: string[];
   kacDisplayOptions: string[];
 }) {
+  // local form & wizard step
   const [form, setForm] = useState<SavedPrefs>(initial);
+  const [step, setStep] = useState<number>(form.prefUnits && form.prefUnits.trim() ? 2 : 1);
+
   const { past: deadlinePassed } = useCountdown(deadlineISO);
-  const [step, setStep] = useState<1 | 2>(1);
 
   // FT/PT: unit options
   const prefUnitOptions = useMemo(() => {
@@ -402,7 +438,8 @@ function EditForm({
     if (employmentType === "FT" && (!isValid || form.prefUnits === "")) {
       setForm((f) => ({ ...f, prefUnits: "12.0 units" }));
     }
-  }, [employmentType, prefUnitOptions]); // eslint-disable-line
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [employmentType, prefUnitOptions]);
 
   const isTeachingBreak = form.prefUnits === TEACHING_BREAK;
   useEffect(() => {
@@ -411,7 +448,8 @@ function EditForm({
       onBreak: isTeachingBreak,
       ...(isTeachingBreak ? {} : { breakReason: "", breakReturnDate: "" }),
     }));
-  }, [form.prefUnits]); // eslint-disable-line
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form.prefUnits]);
 
   // deloading rows
   const [deloadRows, setDeloadRows] = useState<DeloadRow[]>(() => (form.noDeloading ? [] : form.deloadings || []));
@@ -426,7 +464,7 @@ function EditForm({
     return "Either Campus";
   }
 
-  // validation (includes research unit bounds + required details)
+  // validation
   function validate(): { ok: true } | { ok: false; msg: string } {
     if (isTeachingBreak) {
       if (!form.breakReason.trim()) return { ok: false, msg: "Reason for taking a break/leave is required." };
@@ -436,7 +474,6 @@ function EditForm({
     if (!form.prefUnits || !prefUnitOptions.includes(form.prefUnits as any)) {
       return { ok: false, msg: "Please select Preferred Teaching Units." };
     }
-    // Required details for Administrative/Research + research units range
     for (const r of deloadRows) {
       const needsSpecify = r.type === "Administrative" || r.type === "Research";
       if (!form.noDeloading && needsSpecify && !(r.detail || "").trim()) {
@@ -469,7 +506,7 @@ function EditForm({
       : "";
 
   // deadline date (used as max for return date)
-  const termEndDate = new Date(deadlineISO).toISOString().slice(0, 10); // YYYY-MM-DD
+  const termEndDate = deadlineISO ? new Date(deadlineISO).toISOString().slice(0, 10) : "";
 
   return (
     <div className="w-full">
@@ -478,11 +515,11 @@ function EditForm({
         <p className="text-sm text-neutral-500">Update your teaching preferences for the upcoming term</p>
       </div>
 
-      <DeadlineBanner deadlineISO={deadlineISO} />
+      <DeadlineBanner openISO={openISO} deadlineISO={deadlineISO} />
 
       <div className={cls("grid grid-cols-1 gap-6", step === 2 && showAE && "lg:grid-cols-[1fr_minmax(200px,400px)]")}>
         <div className="space-y-6 rounded-xl border border-neutral-200 bg-white p-5">
-          {/* STEP 1 — match screenshot style */}
+          {/* STEP 1 */}
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <div>
               <FieldLabel required>Preferred Teaching Units</FieldLabel>
@@ -490,7 +527,7 @@ function EditForm({
                 value={form.prefUnits}
                 onChange={(v) => {
                   setForm({ ...form, prefUnits: v });
-                  if (step === 1 && v && v.trim().length > 0) setStep(2); // advance on click
+                  if (step === 1 && v && v.trim().length > 0) setStep(2);
                 }}
                 options={prefUnitOptions}
               />
@@ -629,7 +666,7 @@ function EditForm({
                           className="w-full rounded-2xl border border-neutral-300 px-4 py-3 text-[15px] shadow-sm outline-none"
                           value={form.breakReturnDate || ""}
                           onChange={(e) => setForm({ ...form, breakReturnDate: e.target.value })}
-                          max={termEndDate} // cannot go beyond current term end
+                          max={termEndDate || undefined}
                         />
                         <div className="mt-1 text-[12px] text-neutral-500">Must not be later than the current term.</div>
                       </div>
@@ -863,7 +900,6 @@ function EditForm({
             <AELine1Schedule />
           </div>
         )}
-
       </div>
     </div>
   );
@@ -874,7 +910,17 @@ function EditForm({
    =========================== */
 export default function FACULTY_Preferences() {
   const [saved, setSaved] = useState<SavedPrefs>(initialSaved);
-  const [openEdit, setOpenEdit] = useState(false);
+  const [openEdit, setOpenEdit] = useState(false); /* set to true to open */
+
+  // prefs window state (from backend options)
+  const [prefsWindow, setPrefsWindow] = useState<{ openISO: string; deadlineISO: string }>({
+    openISO: "",
+    deadlineISO: "",
+  });
+
+  const { past: openPassedPage } = useCountdown(prefsWindow.openISO || "");
+  const { past: deadlinePassedPage } = useCountdown(prefsWindow.deadlineISO || "");
+  const editingLocked = !openPassedPage || deadlinePassedPage;
 
   const [kacOptions, setKacOptions] = useState<Array<{kac_id:string; kac_code:string; kac_name:string}>>([]);
   const [daysMaster, setDaysMaster] = useState<string[]>([]);
@@ -884,9 +930,6 @@ export default function FACULTY_Preferences() {
 
   const raw = JSON.parse(localStorage.getItem("animo.user") || "{}");
   const userId = raw.userId || raw.user_id || raw.id;
-
-  const DEADLINE_ISO = "2025-11-15T17:00:00+08:00";
-  const { past: deadlinePassedPage } = useCountdown(DEADLINE_ISO);
 
   // server -> SavedPrefs
   function fromServerToSaved(latest: any): SavedPrefs {
@@ -904,7 +947,7 @@ export default function FACULTY_Preferences() {
       : (retRaw || "");
 
     return {
-      prefUnits: prefUnitsLabel || "3.0 units",
+      prefUnits: prefUnitsLabel || "",
       deloadings: deloadArr
         .map((d: any) => ({ type: d?.deloading_type ?? "Administrative", units: d?.units != null ? Number(d.units) : null }))
         .filter((x: any) => x.type || x.units != null),
@@ -919,7 +962,7 @@ export default function FACULTY_Preferences() {
         if (haveManila && haveLaguna) return "Either Campus";
         if (haveManila) return "Manila Campus";
         if (haveLaguna) return "Laguna Campus";
-        return "Either Campus";
+        return "";
       })(),
       delivery: (() => {
         const code = String(latest?.mode?.mode || "").toUpperCase();
@@ -932,9 +975,9 @@ export default function FACULTY_Preferences() {
           if (haveManila && haveLaguna) return "Hybrid - Any Campus";
           if (haveManila) return "Hybrid - Manila Campus Only";
           if (haveLaguna) return "Hybrid - Laguna Campus Only";
-          return "Hybrid - Any Campus";
+          return "";
         }
-        return "Hybrid - Any Campus";
+        return "";
       })(),
       kac: kacDisplay,
       remarks: latest?.notes ?? "",
@@ -952,6 +995,11 @@ export default function FACULTY_Preferences() {
           getFacultyPreferencesProfile(userId),
           getFacultyPreferencesOptions(userId),
         ]);
+
+        setPrefsWindow({
+          openISO: opts?.prefs_window?.openISO || "",
+          deadlineISO: opts?.prefs_window?.deadlineISO || "",
+        });
 
         setKacOptions((opts?.kacs || []) as any);
         setDaysMaster(Array.isArray(opts?.days_display) ? opts.days_display : ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"]);
@@ -1067,7 +1115,8 @@ export default function FACULTY_Preferences() {
           onClose={() => setOpenEdit(false)}
           onSave={handleSave}
           onDraft={handleDraft}
-          deadlineISO={DEADLINE_ISO}
+          openISO={prefsWindow.openISO}
+          deadlineISO={prefsWindow.deadlineISO}
           employmentType={employmentType}
           daysMaster={daysMaster}
           timeSlotsMaster={timeSlotsMaster}
@@ -1080,7 +1129,7 @@ export default function FACULTY_Preferences() {
   /* -------------------- SAVED VIEW -------------------- */
   return (
     <section className="mx-auto w-full max-w-screen-2xl px-4">
-      <DeadlineBanner deadlineISO={DEADLINE_ISO} />
+      <DeadlineBanner openISO={prefsWindow.openISO} deadlineISO={prefsWindow.deadlineISO} />
 
       <div className="rounded-xl border border-neutral-200 bg-white p-5">
         <div className="mb-4 flex items-start justify-between">
@@ -1090,13 +1139,17 @@ export default function FACULTY_Preferences() {
           </div>
 
           <button
-            disabled={deadlinePassedPage}
+            disabled={editingLocked}
             onClick={() => setOpenEdit(true)}
             className={cls(
               "inline-flex h-8 items-center gap-2 rounded-2xl px-3 text-[13px] font-medium text-white shadow",
-              deadlinePassedPage ? "cursor-not-allowed bg-emerald-300" : "bg-emerald-700 hover:brightness-110"
+              editingLocked ? "cursor-not-allowed bg-gray-300 text-gray-600" : "bg-emerald-700 hover:brightness-110"
             )}
-            title={deadlinePassedPage ? "Deadline passed — editing locked" : "Edit preferences"}
+            title={
+              !openPassedPage ? "Submissions not open yet" :
+              deadlinePassedPage ? "Deadline passed — editing locked" :
+              "Edit preferences"
+            }
           >
             <Settings className="h-4 w-4" />
             Edit Preferences
