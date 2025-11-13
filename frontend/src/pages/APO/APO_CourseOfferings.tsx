@@ -25,7 +25,8 @@ import {
   curriculumRemoveCourse,
   getElectiveOptions,
   searchCourseCatalog,      
-  createCatalogCourse,                  
+  createCatalogCourse, 
+  getEligibleRoomsForOffering,                    
   type ApiConflict,
   type CreateCoursePayload,  
   type CourseCatalogItem           
@@ -34,6 +35,56 @@ import {
 /* --------------------------------- helpers --------------------------------- */
 const DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"] as const;
 type Day = (typeof DAYS)[number];
+
+// === ADDED: Abbreviation mapping & coercers ===
+const DAY_ABBR = ["M","T","W","H","F","S"] as const;
+type DayAbbr = (typeof DAY_ABBR)[number];
+
+const DAY_FULL_TO_ABBR: Record<Day, DayAbbr> = {
+  Monday: "M",
+  Tuesday: "T",
+  Wednesday: "W",
+  Thursday: "H",
+  Friday: "F",
+  Saturday: "S",
+};
+
+
+// Accepts wide variety: "M", "Mon", "MONDAY", "Th", "Thu", "THU", ...
+const DAY_ALIASES: Record<string, Day> = {
+  M: "Monday", MON: "Monday", MONDAY: "Monday",
+  T: "Tuesday", TU: "Tuesday", TUE: "Tuesday", TUES: "Tuesday", TUESDAY: "Tuesday",
+  W: "Wednesday", WED: "Wednesday", WEDNESDAY: "Wednesday",
+  H: "Thursday", THU: "Thursday", THUR: "Thursday", THURS: "Thursday", THURSDAY: "Thursday",
+  F: "Friday", FRI: "Friday", FRIDAY: "Friday",
+  S: "Saturday", SA: "Saturday", SAT: "Saturday", SATURDAY: "Saturday",
+};
+
+function toFullDay(d?: string | null): Day | "" {
+  const s = String(d || "").trim();
+  if (!s) return "";
+  const key = s.replace(/\./g, "").replace(/\s+/g, "").toUpperCase(); // strip dots/spaces
+  if (DAY_ALIASES[key]) return DAY_ALIASES[key];
+  // fallback: title-case check
+  const norm = s[0]?.toUpperCase() + s.slice(1).toLowerCase();
+  return (DAYS.includes(norm as Day) ? (norm as Day) : "") as Day | "";
+}
+
+// Abbreviation we POST back: "M/T/W/TH/F/S"
+function toAbbrevDay(d?: string | null): DayAbbr | "" {
+  const s = String(d || "").trim();
+  if (!s) return "";
+  const key = s.replace(/\./g, "").replace(/\s+/g, "").toUpperCase();
+  if (["M", "MON", "MONDAY"].includes(key)) return "M";
+  if (["T", "TU", "TUE", "TUES", "TUESDAY"].includes(key)) return "T";
+  if (["W", "WED", "WEDNESDAY"].includes(key)) return "W";
+  if (["T", "THU", "THUR", "THURS", "THURSDAY"].includes(key)) return "H";
+  if (["F", "FRI", "FRIDAY"].includes(key)) return "F";
+  if (["S", "SA", "SAT", "SATURDAY"].includes(key)) return "S";
+  // already full name?
+  if ((DAYS as readonly string[]).includes(s)) return DAY_FULL_TO_ABBR[s as Day];
+  return "";
+}
 
 type RoomOption = {
   room_id: string;
@@ -74,12 +125,6 @@ const toHHMM = (s?: string) => {
   return "";
 };
 
-// exactly HHMM check
-const isFullTime = (s?: string) => ((s || "").replace(/\D/g, "")).length === 4;
-
-// allow partial typing (0..4 digits)
-const sanitizeTime = (s?: string) => (s || "").replace(/\D/g, "").slice(0, 4);
-// --- Static GE time slots (single pick sets start+end) ---
 const GE_TIME_SLOTS = [
   { label: "07:30 - 09:00", start: "0730", end: "0900" },
   { label: "09:15 - 10:45", start: "0915", end: "1045" },
@@ -111,25 +156,28 @@ const geCurrentLabel = (slot?: { start_time?: string | null; end_time?: string |
 };
 
 // A slot can only receive a room if it has day + full HHMM times
-const slotReady = (s?: { day?: Day | ""; start_time?: string; end_time?: string }) =>
-  !!(s && s.day && isFullTime(s.start_time) && isFullTime(s.end_time));
+const slotReady = (s?: { day?: Day | ""; start_time?: string; end_time?: string }) => {
+  if (!s) return false;
+  const dayOk = !!toFullDay(s.day || "");
+  const st = toHHMM(s.start_time);
+  const en = toHHMM(s.end_time);
+  return dayOk && st.length === 4 && en.length === 4;
+};
 
 // strict (non-GE) slot: require day + full start + full end, optional room
 const compactSlotStrict = (
   s?: { day?: Day | ""; start_time?: string; end_time?: string; room_id?: string }
 ) => {
   if (!s) return undefined;
-  const day = (s.day || "") as Day | "";
-  const start = sanitizeTime(s.start_time);
-  const end = sanitizeTime(s.end_time);
-  if (!(day && isFullTime(start) && isFullTime(end))) return undefined;
-  const out: any = { day, start_time: start, end_time: end };
-  if (s.room_id) out.room_id = s.room_id;
+  const dayFull = toFullDay(s.day || "");
+  const start = toHHMM(s.start_time);
+  const end = toHHMM(s.end_time);
+  if (!(dayFull && start.length === 4 && end.length === 4)) return undefined;
+  const out: any = { day: dayFull, start_time: start, end_time: end };
+  if (s.room_id !== undefined) out.room_id = s.room_id ? s.room_id : null; // allow clear
   return out;
 };
 
-// GE slot: allow partial updates, only send the keys that are actually provided
-// GE slot: allow partial updates, but never send empty strings
 const compactSlotGE = (
   s?: { day?: Day | ""; start_time?: string; end_time?: string; room_id?: string }
 ) => {
@@ -150,7 +198,6 @@ const compactSlotGE = (
 
   return Object.keys(out).length ? out : undefined;
 };
-
 
 const normCode = (s?: string) =>
   (s || "")
@@ -484,36 +531,123 @@ export default function CourseOfferingsPage() {
 // ---------- RoomSelectBox (SelectBox-powered) ----------
 const RoomSelectBox: React.FC<{
   rooms: RoomOption[];
-  value: string | null | undefined;
+  value: string | null | undefined;   // room_id
   disabled?: boolean;
   className?: string;
   onChange: (roomId: string | null) => void;
 }> = ({ rooms, value, disabled, className, onChange }) => {
-  const items = useMemo(
-    () => rooms.map(r => ({
-      id: r.room_id,
-      label: r.building ? `${r.building} ${r.room_number}` : r.room_number
-    })),
+  // prefer TBA if present and nothing is selected
+  const tbaId =
+    rooms.find(r => String(r.room_number || "").replace(/[-–—]/g, "").trim().toUpperCase() === "TBA")
+      ?.room_id ?? null;
+
+  const opts = React.useMemo(
+    () => rooms.map(r => ({ id: r.room_id, label: r.room_number || r.room_id })),
     [rooms]
   );
 
-  // shorter placeholder avoids forcing the cell wider than its col width
-  const placeholder = disabled ? "— Set day & time —" : "— Select room —";
-  const currentLabel = value ? (items.find(x => x.id === value)?.label ?? placeholder) : placeholder;
-  const optionLabels = [placeholder, ...items.map(x => x.label)];
+  const currentLabel = React.useMemo(() => {
+    const currentId = (value ?? tbaId ?? "") as string;
+    const hit = opts.find(o => o.id === currentId);
+    return hit ? hit.label : "—";
+  }, [opts, value, tbaId]);
 
   return (
-    <SelectBox
-      value={currentLabel}
-      onChange={(label) => {
-        if (label === placeholder) return onChange(null);
-        const hit = items.find(x => x.label === label);
-        onChange(hit?.id ?? null);
-      }}
-      options={optionLabels}
-      disabled={!!disabled}
-      // !min-w-0 + max-w-full stops SelectBox from pushing into next columns
-      className={cls("!min-w-0 w-full max-w-full overflow-hidden text-ellipsis", className)}
+    <div className={cls("relative z-[1000] w-full", className)}>
+      <SelectBox
+        value={currentLabel}
+        onChange={(label: string) => {
+          const match = opts.find(o => o.label === label);
+          onChange(match?.id ?? tbaId ?? null);
+        }}
+        options={opts.map(o => o.label)}
+        disabled={!!disabled}
+        className="!min-w-[140px] w-full max-w-none"
+      />
+    </div>
+  );
+};
+
+// ------ EligibleRoomSelect: fetch rooms that are truly available for the slot ------
+const EligibleRoomSelect: React.FC<{
+  userId: string;
+  campusId: string;
+  spec: {
+    day?: string | null;
+    start?: string | null;
+    end?: string | null;
+    roomType?: string | null;
+    capacity?: number | null;
+    excludeScheduleIds?: string[];
+  };
+  fallbackRooms: RoomOption[];  // e.g., data.room_options (used when slot not ready)
+  value: string | null | undefined;
+  disabled?: boolean;
+  className?: string;
+  onChange: (roomId: string | null) => void;
+}> = ({ userId, campusId, spec, fallbackRooms, value, disabled, className, onChange }) => {
+  const [opts, setOpts] = useState<RoomOption[]>([]);
+
+  const ready =
+    !!toAbbrevDay(spec.day || "") &&
+    toHHMM(spec.start || "").length === 4 &&
+    toHHMM(spec.end || "").length === 4;
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (!ready || disabled) {
+        setOpts(filterRoomsByCap(fallbackRooms, spec.capacity));
+        return;
+      }
+      try {
+        const payload = {
+          campus_id: campusId,
+          day: toAbbrevDay(spec.day || ""),
+          start: toHHMM(spec.start || ""),
+          end: toHHMM(spec.end || ""),
+          required_type: spec.roomType || undefined,
+          min_capacity: spec.capacity ?? undefined,
+          exclude_schedule_ids: spec.excludeScheduleIds || [],
+        } as any;
+
+        const res: any = await getEligibleRoomsForOffering(userId, payload);
+        const list: RoomOption[] = Array.isArray(res?.rooms) ? res.rooms : (res ?? []);
+
+        const filtered = filterRoomsByCap(list, spec.capacity).filter((r) => {
+          if (!spec.roomType) return true;
+          const a = String(r.room_type || "").toLowerCase();
+          const b = String(spec.roomType || "").toLowerCase();
+          return a === b;
+        });
+
+        if (!cancelled) setOpts(filtered);
+
+      } catch {
+        if (!cancelled) setOpts([]);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [
+    userId,
+    campusId,
+    spec.day,
+    spec.start,
+    spec.end,
+    spec.roomType,
+    spec.capacity,
+    spec.excludeScheduleIds,
+    disabled,
+    fallbackRooms,
+  ]);
+
+  return (
+    <RoomSelectBox
+      rooms={opts}
+      value={value}
+      disabled={disabled || !ready}
+      className={className}
+      onChange={onChange}
     />
   );
 };
@@ -850,21 +984,21 @@ useEffect(() => {
       faculty_name: row.faculty?.faculty_name || "UNASSIGNED",
       slot1: row.slot1
         ? {
-            day: (row.slot1.day as Day | ""),
-            start_time: row.slot1.start_time,
-            end_time: row.slot1.end_time,
-            ...(row.slot1.room_id ? { room_id: row.slot1.room_id } : {}), // <- no empty string
-          }
-        : undefined,
-      slot2: row.slot2
-        ? {
-            day: (row.slot2.day as Day | ""),
-            start_time: row.slot2.start_time,
-            end_time: row.slot2.end_time,
-            ...(row.slot2.room_id ? { room_id: row.slot2.room_id } : {}), // <- no empty string
+            day: toFullDay(row.slot1.day) as Day | "",
+            start_time: toHHMM(row.slot1.start_time),
+            end_time: toHHMM(row.slot1.end_time),
+            ...(row.slot1.room_id ? { room_id: row.slot1.room_id } : {}),
           }
         : undefined,
 
+    slot2: row.slot2
+      ? {
+          day: toFullDay(row.slot2.day) as Day | "",
+          start_time: toHHMM(row.slot2.start_time),
+          end_time: toHHMM(row.slot2.end_time),
+          ...(row.slot2.room_id ? { room_id: row.slot2.room_id } : {}),
+        }
+      : undefined,
       for_placeholder_course_id: electiveParentId,
       specific_course_id: currentSpecificId,
     },
@@ -988,6 +1122,10 @@ const s1 = isGE ? compactSlotGE(editing.draft.slot1) : compactSlotStrict(editing
 const s2 = isGE ? compactSlotGE(editing.draft.slot2) : compactSlotStrict(editing.draft.slot2);
 if (s1 && Object.keys(s1).length) payload.slot1 = s1;
 if (s2 && Object.keys(s2).length) payload.slot2 = s2;
+
+// === ADDED: convert any day values to abbreviations before posting ===
+if (payload.slot1?.day) (payload.slot1 as any).day = toAbbrevDay(payload.slot1.day) as any;
+if (payload.slot2?.day) (payload.slot2 as any).day = toAbbrevDay(payload.slot2.day) as any;
 
 if (isGE) {
   payload.faculty_name = (editing.draft.faculty_name || "UNASSIGNED").trim() || "UNASSIGNED";
@@ -1446,7 +1584,8 @@ if (isGE) {
                 </div>
               ) : (
                 Object.entries(groups).map(([idLabel, byProgram]) => (
-                  <div key={idLabel} className="rounded-xl border border-gray-300 bg-white shadow-sm overflow-hidden mb-6">
+                  <div   key={idLabel}
+  className="rounded-xl border border-gray-300 bg-white shadow-sm overflow-visible mb-6">
                     <div className="bg-[#21804A] text-white px-4 py-3 text-center font-semibold">{idLabel}</div>
                     {Object.entries(byProgram).map(([progLabel, list]) => {
                       const key = `${idLabel}::${progLabel}`;
@@ -1468,7 +1607,7 @@ if (isGE) {
 
                           {!isCollapsed && (
                             <div className="p-0">
-                              <div className="overflow-x-auto">
+                              <div className="overflow-x-auto" style={{ overflowY: "visible" }}>
                                 <table className={`w-full text-sm border-collapse ${inEditUI ? "table-auto" : "table-fixed"}`}>
                                   <colgroup>
                                     <col style={{ width: 96 }} />   {/* Program No. */}
@@ -1586,11 +1725,11 @@ if (isGE) {
                                               {r.faculty.faculty_name}
                                             </span>
                                           </td>
-                                          <td className="px-3 py-2 border border-gray-300">{r.slot1?.day || "—"}</td>
+                                          <td className="px-3 py-2 border border-gray-300">{toAbbrevDay(r.slot1?.day) || "—"}</td>
                                           <td className="px-3 py-2 border border-gray-300">{fmtTime(r.slot1?.start_time)}</td>
                                           <td className="px-3 py-2 border border-gray-300">{fmtTime(r.slot1?.end_time)}</td>
                                           <td className="px-3 py-2 border border-gray-300">{r.slot1?.room_number || r.slot1?.room_id || "—"}</td>
-                                          <td className="px-3 py-2 border border-gray-300">{r.slot2?.day || "—"}</td>
+                                          <td className="px-3 py-2 border border-gray-300">{toAbbrevDay(r.slot2?.day) || "—"}</td>
                                           <td className="px-3 py-2 border border-gray-300">{fmtTime(r.slot2?.start_time)}</td>
                                           <td className="px-3 py-2 border border-gray-300">{fmtTime(r.slot2?.end_time)}</td>
                                           <td className="px-3 py-2 border border-gray-300">{r.slot2?.room_number || r.slot2?.room_id || "—"}</td>
@@ -1856,10 +1995,20 @@ if (isGE) {
                                           )}
                                           </td>
                                           <td className="px-3 py-2 border border-gray-200 bg-white relative overflow-visible">
-                                            <RoomSelectBox
-                                              rooms={filterRoomsByCap(data?.room_options || [])}
+                                            <EligibleRoomSelect
+                                              userId={user?.userId}
+                                              campusId={data?.campus?.campus_id || ""}
+                                              spec={{
+                                                day: (editing?.draft.slot1?.day || r.slot1?.day || "") as string,
+                                                start: editing?.draft.slot1?.start_time || r.slot1?.start_time || "",
+                                                end: editing?.draft.slot1?.end_time || r.slot1?.end_time || "",
+                                                roomType: (r as any)?.course?.room_type || null,
+                                                capacity: r.section.enrollment_cap ?? null,
+                                                excludeScheduleIds: [r.slot1?.schedule_id, r.slot2?.schedule_id].filter(Boolean) as string[],
+                                              }}
+                                              fallbackRooms={filterRoomsByCap(data?.room_options || [], r.section.enrollment_cap)}
                                               value={editing?.draft.slot1?.room_id || null}
-                                              disabled={!slotReady(editing?.draft.slot1)}    // still locked until Day+Begin+End
+                                              disabled={!slotReady(editing?.draft.slot1) && !slotReady(r.slot1 as any)}
                                               onChange={(roomId) =>
                                                 setEditing(p => p && ({
                                                   ...p,
@@ -1926,10 +2075,20 @@ if (isGE) {
                                           )}
                                           </td>
                                           <td className="px-3 py-2 border border-gray-200 bg-white relative overflow-visible">
-                                            <RoomSelectBox
-                                              rooms={filterRoomsByCap(data?.room_options || [])}
+                                            <EligibleRoomSelect
+                                              userId={user?.userId}
+                                              campusId={data?.campus?.campus_id || ""}
+                                              spec={{
+                                                day: (editing?.draft.slot2?.day || r.slot2?.day || "") as string,
+                                                start: editing?.draft.slot2?.start_time || r.slot2?.start_time || "",
+                                                end: editing?.draft.slot2?.end_time || r.slot2?.end_time || "",
+                                                roomType: (r as any)?.slot2?.room_type || (r as any)?.slot1?.room_type || null,
+                                                capacity: r.section.enrollment_cap ?? null,
+                                                excludeScheduleIds: [r.slot1?.schedule_id, r.slot2?.schedule_id].filter(Boolean) as string[],
+                                              }}
+                                              fallbackRooms={filterRoomsByCap(data?.room_options || [], r.section.enrollment_cap)}
                                               value={editing?.draft.slot2?.room_id || null}
-                                              disabled={!slotReady(editing?.draft.slot2)}
+                                              disabled={!slotReady(editing?.draft.slot2) && !slotReady(r.slot2 as any)}
                                               onChange={(roomId) =>
                                                 setEditing(p => p && ({
                                                   ...p,

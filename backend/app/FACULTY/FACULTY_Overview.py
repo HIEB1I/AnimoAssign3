@@ -9,19 +9,17 @@ router = APIRouter(prefix="/faculty", tags=["faculty"])
 def _now_utc():
     return datetime.now(timezone.utc)
 
+
 # --- Helpers tied to your actual terms schema (augmented JSON) ---
 async def _get_current_term() -> Optional[Dict[str, Any]]:
     # 1) prefer is_current == True
     term = await db.terms.find_one({"is_current": True}, {"_id": 0})
     if term:
+        term["term_label"] = _term_label(term)
         return term
-
-    # 2) no start_date/end_date in your schema; fallback to newest AY + term_number
-    term = await db.terms.find_one({}, {"_id": 0}, sort=[("acad_year_start", -1), ("term_number", -1)])
-    if term:
-        return term
-
+    # No current term -> just say None here (we will fetch "previous" elsewhere)
     return None
+
 
 def _term_label(t: Dict[str, Any]) -> str:
     ay = str(t.get("acad_year_start", "")).strip()
@@ -153,7 +151,11 @@ async def overview_handler(
     if action == "fetch":
         term = await _get_current_term()
         if not term:
-            term = {"term_id": None, "term_label": "No Active Term"}
+            term = await _get_previous_term()
+
+        if not term:
+            term = {"term_id": None, "term_label": "No Term Found"}
+
         else:
             term.setdefault("term_label", _term_label(term))
 
@@ -176,13 +178,19 @@ async def overview_handler(
             {"$unwind": {"path": "$camp", "preserveNullAndEmptyArrays": True}},
 
             {"$addFields": {
-                "course_code_display": {
+                "syllabus_display": {
                     "$cond": [
-                        {"$isArray": "$course.course_code"},
-                        {"$ifNull": [{"$arrayElemAt": ["$course.course_code", 0]}, ""]},
-                        {"$ifNull": ["$course.course_code", ""]},
+                        {"$or": [
+                            {"$eq": [{"$type": "$course.syllabus"}, "missing"]},
+                            {"$eq": ["$course.syllabus", None]},
+                            {"$eq": [{"$toLower": {"$ifNull": ["$course.syllabus", ""]}}, "n/a"]},
+                            {"$eq": ["$course.syllabus", ""]}
+                        ]},
+                        "",
+                        "$course.syllabus"
                     ]
                 },
+
                 "day_display": {
                     "$switch": {
                         "branches": [
@@ -201,7 +209,7 @@ async def overview_handler(
             {"$project": {
                 "_id": 0,
                 "day": "$day_display",
-                "course_code": "$course_code_display",
+                "course_code": {"$ifNull": ["$course.course_code", ""]},  # <-- FIXED
                 "course_title": "$course.course_title",
                 "section": "$sec.section_code",
                 "units": {"$ifNull": ["$course.units", 0]},
@@ -210,7 +218,9 @@ async def overview_handler(
                 "room": {"$ifNull": ["$room.room_number", "Online"]},
                 "start_raw": "$sched.start_time",
                 "end_raw": "$sched.end_time",
+                "syllabus": "$syllabus_display"
             }},
+
             {"$sort": {"day": 1, "start_raw": 1, "section": 1}},
         ]
 
@@ -229,6 +239,7 @@ async def overview_handler(
                 "mode": r.get("mode", "Online"),
                 "room": r.get("room", "Online"),
                 "time": _fmt_time_band(r.get("start_raw"), r.get("end_raw")),
+                "syllabus": r.get("syllabus", ""),    # <-- NEW
             })
 
         total_units = sum((row.get("units") or 0) for row in teaching_load)
@@ -409,3 +420,18 @@ async def get_faculty_overview(userId: str = Query(...)):
         "teaching_load": teaching_load,
         "notifications": notifications,
     }
+
+async def _get_previous_term() -> Optional[Dict[str, Any]]:
+    # newest first
+    docs = await db.terms.find({}, {"_id": 0}) \
+        .sort([("acad_year_start", -1), ("term_number", -1)]) \
+        .to_list(length=2)
+
+    if not docs:
+        return None
+
+    # If we have at least 2, the second is "previous".
+    # If there is only 1 term in the DB, use that one.
+    t = docs[1] if len(docs) >= 2 else docs[0]
+    t["term_label"] = _term_label(t)
+    return t

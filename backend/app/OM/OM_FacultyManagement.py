@@ -89,7 +89,7 @@ async def _active_term() -> Dict[str, Any]:
 # ---------- Route ----------
 @router.post("/facultymanagement")
 async def facultymanagement_handler(
-    action: str = Query("list", description="header | options | list | profile | schedule | history"),
+    action: str = Query("list", description="header | options | list | schedule | history"),
 
     # header (who’s logged in)
     userEmail: Optional[str] = Query(None),
@@ -300,127 +300,6 @@ async def facultymanagement_handler(
 
         rows = [r async for r in db[COL_FACULTY].aggregate(pipeline)]
         return {"ok": True, "rows": rows}
-
-    # ----- PROFILE (now includes real Course Coordinator list) -----
-    if action == "profile":
-        if not facultyId:
-            raise HTTPException(status_code=400, detail="facultyId is required.")
-
-        pipeline: List[Dict[str, Any]] = [
-            {"$match": {"faculty_id": facultyId}},
-            {"$lookup": {
-                "from": COL_DEPARTMENTS,
-                "localField": "department_id",
-                "foreignField": "department_id",
-                "as": "dept",
-            }},
-            {"$unwind": {"path": "$dept", "preserveNullAndEmptyArrays": True}},
-            {"$lookup": {
-                "from": COL_USERS,
-                "let": {"uid": "$user_id", "femail": "$email"},
-                "pipeline": [
-                    {"$match": {"$expr": {"$or": [
-                        {"$and": [{"$ne": ["$$uid", None]}, {"$eq": ["$user_id", "$$uid"]}]},
-                        {"$and": [{"$ne": ["$$femail", None]}, {"$eq": ["$email", "$$femail"]}]},
-                    ]}}},  # noqa: E231
-                    {"$project": {"_id": 0, "first_name": 1, "last_name": 1, "status": 1, "email": 1}}
-                ],
-                "as": "u"
-            }},
-            {"$unwind": {"path": "$u", "preserveNullAndEmptyArrays": True}},
-
-            # ---- REAL course coordinator list from courses ----
-            {"$lookup": {
-                "from": COL_COURSES,
-                "let": {"uid": {"$ifNull": ["$user_id", "$u.user_id"]}},
-                "pipeline": [
-                    # normalize course_coordinator to array and match
-                    {"$addFields": {
-                        "cc_list": {
-                            "$cond": [
-                                {"$isArray": "$course_coordinator"},
-                                {"$ifNull": ["$course_coordinator", []]},
-                                {"$cond": [
-                                    {"$gt": [{"$type": "$course_coordinator"}, "missing"]},
-                                    [{"$ifNull": ["$course_coordinator", ""]}],
-                                    []
-                                ]}
-                            ]
-                        }
-                    }},
-                    {"$match": {"$expr": {"$in": ["$$uid", "$cc_list"]}}},
-                    # reduce course_code (array/string) to neat display
-                    {"$addFields": {
-                        "code_list": {
-                            "$cond": [
-                                {"$isArray": "$course_code"}, "$course_code",
-                                {"$cond": [{"$ne": ["$course_code", None]}, ["$course_code"], []]}
-                            ]
-                        }
-                    }},
-                    {"$addFields": {
-                        "code": {
-                            "$cond": [
-                                {"$gt": [{"$size": "$code_list"}, 0]},
-                                {"$reduce": {
-                                    "input": "$code_list",
-                                    "initialValue": "",
-                                    "in": {"$concat": ["$$value", {"$cond": [{"$eq": ["$$value", ""]}, "", " / "]}, "$$this"]}
-                                }},
-                                ""
-                            ]
-                        }
-                    }},
-                    {"$project": {"_id": 0, "code": 1, "course_title": 1}}
-                ],
-                "as": "cc_courses"
-            }},
-
-            {"$addFields": {
-                "department_display": _dept_name_expr(),
-                "name": _full_name_expr(),
-                "email_display": {"$ifNull": ["$u.email", "$email"]},
-                "status_display": {"$cond": [{"$eq": ["$u.status", True]}, "Active", "On Leave"]},
-                "faculty_type_display": {
-                    "$switch": {
-                        "branches": [
-                            {"case": {"$eq": ["$employment_type", "FT"]}, "then": "Full-Time"},
-                            {"case": {"$eq": ["$employment_type", "PT"]}, "then": "Part-Time"},
-                        ],
-                        "default": {"$ifNull": ["$employment_type", ""]}
-                    }
-                },
-                "cc_display": {
-                    "$map": {
-                        "input": {"$ifNull": ["$cc_courses", []]},
-                        "as": "c",
-                        "in": {"code": "$$c.code", "title": "$$c.course_title"}
-                    }
-                }
-            }},
-            {"$project": {
-                "_id": 0,
-                "faculty_id": 1,
-                "name": 1,
-                "email": "$email_display",
-                "department": "$department_display",
-                "faculty_type": "$faculty_type_display",
-                "status": "$status_display",
-                "position": {"$ifNull": ["$position", {"$ifNull": ["$fac_position", ""]}]},
-                "admin_position": 1,
-                "course_coordinator_of": "$cc_display",  # <-- final array [{code,title}]
-                "load": {
-                    "teaching": {"$ifNull": ["$load.teaching", 0]},
-                    "admin": {"$ifNull": ["$load.admin", 0]},
-                    "research": {"$ifNull": ["$load.research", 0]},
-                    "faculty_units": {"$ifNull": ["$load.faculty_units", 0]},
-                }
-            }},
-            {"$limit": 1}
-        ]
-
-        prof = [p async for p in db[COL_FACULTY].aggregate(pipeline)]
-        return {"ok": bool(prof), "profile": (prof[0] if prof else {})}
 
         # ----- SCHEDULE: current/selected term sections (reuse FACULTY_Overview logic) -----
     if action == "schedule":

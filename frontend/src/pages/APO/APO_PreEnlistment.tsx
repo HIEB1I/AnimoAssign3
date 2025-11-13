@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
-import Papa from "papaparse";
-import { Pencil, Check, Upload, Archive, Download } from "lucide-react";
+import Papa, { type ParseResult } from "papaparse";
+import { Pencil, Check, Upload, Archive, Download, X } from "lucide-react";
 import TopBar from "../../component/TopBar";
 import Tabs from "../../component/Tabs";
 import SelectBox from "../../component/SelectBox";
@@ -16,7 +16,114 @@ import {
   type TermMeta,
   type ArchiveMetaItem,
   campusFromRoles,
+  reactivateApoPreenlistment,
 } from "../../api";
+// Compact, consistent pill wrappers
+// Compact, consistent pill wrappers (keep miniBase + MiniFieldInput as-is)
+const miniBase =
+  "inline-flex items-center h-9 rounded-full border-2 border-emerald-200 bg-white px-2 shadow-sm focus-within:border-emerald-400";
+// Compact pill-style input (matches the dropdown box, no chevron)
+function MiniFieldInput({
+  value,
+  onChange,
+  placeholder = "",
+  type = "text",
+  className = "",
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  placeholder?: string;
+  type?: "text" | "number";
+  className?: string;
+}) {
+  return (
+    <div className={`${miniBase} ${className}`}>
+      <input
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        type={type}
+        className="w-full bg-transparent outline-none text-sm px-1"
+      />
+    </div>
+  );
+}
+
+// NEW: custom compact dropdown (no native <select>, fully stylable)
+function MiniSelectMenu({
+  value,
+  onChange,
+  options,
+  className = "",
+  placeholder = "",
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  options: string[];
+  className?: string;
+  placeholder?: string;
+}) {
+  const [open, setOpen] = React.useState(false);
+  const ref = React.useRef<HTMLDivElement | null>(null);
+
+  React.useEffect(() => {
+    function onDocClick(e: MouseEvent) {
+      if (!ref.current) return;
+      if (!ref.current.contains(e.target as Node)) setOpen(false);
+    }
+    function onEsc(e: KeyboardEvent) {
+      if (e.key === "Escape") setOpen(false);
+    }
+    document.addEventListener("mousedown", onDocClick);
+    document.addEventListener("keydown", onEsc);
+    return () => {
+      document.removeEventListener("mousedown", onDocClick);
+      document.removeEventListener("keydown", onEsc);
+    };
+  }, []);
+
+  return (
+    <div ref={ref} className={`relative ${miniBase} ${className}`}>
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="flex items-center gap-2 h-7 leading-none text-sm outline-none"
+      >
+        <span className={`${value ? "" : "text-neutral-400"}`}>
+          {value || placeholder}
+        </span>
+        <svg width="16" height="16" viewBox="0 0 20 20" aria-hidden="true" className="opacity-60">
+          <path d="M5 7l5 5 5-5H5z" />
+        </svg>
+      </button>
+
+      {open && (
+        <ul
+          className="absolute left-0 top-[calc(100%+6px)] z-40 min-w-[120px]
+                     rounded-xl border-2 border-emerald-200 bg-white shadow-lg overflow-hidden"
+        >
+          {options.map((opt) => {
+            const active = opt === value;
+            return (
+              <li
+                key={opt}
+                onClick={() => {
+                  onChange(opt);
+                  setOpen(false);
+                }}
+                className={`px-3 py-2 text-sm cursor-pointer select-none hover:bg-emerald-50 ${
+                  active ? "bg-emerald-50 font-medium" : ""
+                }`}
+              >
+                {opt}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </div>
+  );
+}
 
 export default function APO_PreEnlistment() {
   const [view, setView] = useState<"active" | "archives">("active");
@@ -38,6 +145,13 @@ export default function APO_PreEnlistment() {
   const [archiveCount, setArchiveCount] = useState<string[][]>([]);
   const [archiveStats, setArchiveStats] = useState<string[][]>([]);
   const [archiveLoading, setArchiveLoading] = useState(false);
+  const [reactivating, setReactivating] = useState(false);
+  // --- Add Row state (left panel - enlisted courses) ---
+  const [addingRow, setAddingRow] = useState(false);
+  const [newCareer, setNewCareer] = useState<"UGB" | "GSM">("UGB"); // uses SelectBox now
+  const [newCourseCode, setNewCourseCode] = useState("");
+  const [newCount, setNewCount] = useState<string>("0");
+
 
   const archiveLabel = (t: ArchiveMetaItem) => `Term ${t.term_number ?? "—"} · ${t.ay_label}`;
 
@@ -157,6 +271,63 @@ export default function APO_PreEnlistment() {
       }
     }
   };
+const saveNewCourseRow = async () => {
+  if (!user?.userId) {
+    setErr("Not logged in.");
+    return;
+  }
+
+  // Campus comes from role (MANILA/LAGUNA). Fallback: activeMeta campus_label (Title Case → UPPER)
+  const campusCSV = (
+    campusName || (activeMeta?.campus_label?.toUpperCase() as "MANILA" | "LAGUNA")
+  ) as "MANILA" | "LAGUNA";
+  if (!campusCSV) {
+    setErr("Campus is required (cannot infer).");
+    return;
+  }
+
+  if (!newCourseCode.trim()) {
+    setErr("Course Code is required.");
+    return;
+  }
+
+  try {
+    setErr(null);
+
+    const rows: CountCsvRow[] = [{
+      Career: newCareer,                    // "UGB" | "GSM"
+      "Acad Group": "CCS",                  // fixed as requested
+      Campus: campusCSV,                    // fixed from role
+      "Course Code": newCourseCode.trim().toUpperCase(),
+      Count: Number(newCount || 0),
+    }];
+
+    const res = await importApoPreenlistment(
+      user.userId,
+      rows,
+      [],
+      undefined,
+      { replaceCount: false },
+      campusName || undefined
+    );
+
+    if (!res || (res.insertedCount ?? 0) < 1) {
+      setErr("Add failed: course not found or invalid fields. Check the Course Code.");
+      return;
+    }
+
+    // reset UI
+    setAddingRow(false);
+    setNewCourseCode("");
+    setNewCount("0");
+    setNewCareer("UGB");
+
+    await refresh();
+  } catch (e: any) {
+    console.error(e);
+    setErr(e?.message || "Failed to add row.");
+  }
+};
 
   const startEditStats = (i: number) => {
     setEditIndexStats(i);
@@ -198,19 +369,19 @@ export default function APO_PreEnlistment() {
   const handleImportCourses = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file || !user?.userId) return;
-    Papa.parse(file, {
+    Papa.parse<CountCsvRow>(file, {
       header: true,
       skipEmptyLines: true,
-     complete: async (results: any) => {
-      const typed = ((results?.data ?? []) as CountCsvRow[])
-        .map((r) => {
+      complete: async (results: ParseResult<CountCsvRow>) => {
+        const rows = results.data
+          .map((r) => {
             if (!r.Campus && campusName) (r as any).Campus = campusName;
             return r;
           })
           .filter((r) => r["Course Code"] && r.Career && r.Campus && r.Count !== undefined);
         await importApoPreenlistment(
           user.userId,
-          typed,
+          rows,
           [],
           undefined,
           { replaceCount: true },
@@ -224,15 +395,15 @@ export default function APO_PreEnlistment() {
   const handleImportStats = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file || !user?.userId) return;
-    Papa.parse(file, {
+    Papa.parse<StatCsvRow>(file, {
       header: true,
       skipEmptyLines: true,
-    complete: async (results: any) => {
-      const typed = (results?.data ?? []) as StatCsvRow[];
-      await importApoPreenlistment(
-        user.userId,
-        [],
-        typed,
+      complete: async (results: ParseResult<StatCsvRow>) => {
+        const rows = results.data.filter((r) => !!r.Program);
+        await importApoPreenlistment(
+          user.userId,
+          [],
+          rows,
           undefined,
           { replaceStats: true },
           campusName || undefined
@@ -424,12 +595,25 @@ export default function APO_PreEnlistment() {
               <section className="flex-1 max-h-[420px] overflow-y-auto pr-4">
                 <div className="flex items-center justify-between mb-3">
                   <h3 className="text-base font-semibold">List of Enlisted Courses</h3>
-                  <label className="inline-flex items-center gap-2 rounded-md bg-[#008e4e] px-4 py-2 text-sm font-medium text-white shadow-sm hover:brightness-110">
-                    <Upload className="h-4 w-4" />
-                    Import CSV
-                    <input type="file" accept=".csv" onChange={handleImportCourses} className="hidden" />
-                  </label>
+                  <div className="flex items-center gap-2">
+                    <label className="inline-flex items-center gap-2 rounded-md bg-[#008e4e] px-4 py-2 text-sm font-medium text-white shadow-sm hover:brightness-110">
+                      <Upload className="h-4 w-4" />
+                      Import CSV
+                      <input type="file" accept=".csv" onChange={handleImportCourses} className="hidden" />
+                    </label>
+                    <button
+                      onClick={() => {
+                        setErr(null);
+                        setAddingRow((v) => !v);
+                      }}
+                      className="inline-flex items-center gap-2 rounded-md border border-emerald-300 text-emerald-700 bg-white px-3 py-2 text-sm hover:bg-emerald-50"
+                      title="Add a single course row"
+                    >
+                      + Add
+                    </button>
+                  </div>
                 </div>
+
                 <table className="w-full text-sm">
                   <thead className="bg-gray-50 text-left text-xs text-gray-500 border-b">
                     <tr>
@@ -485,7 +669,84 @@ export default function APO_PreEnlistment() {
                         </td>
                       </tr>
                     ))}
-                    {enlistedCourses.length === 0 && (
+
+                    {addingRow && (
+                      <tr className="bg-emerald-50/60 border-t">
+                        {/* No. */}
+                        <td className="py-2 px-2">—</td>
+
+                        {/* Career — compact select with matching style */}
+                        <td className="py-2 px-2">
+                          <MiniSelectMenu
+                            value={newCareer}
+                            onChange={(v) => setNewCareer((v as "UGB" | "GSM") || "UGB")}
+                            options={["UGB", "GSM"]}
+                            className="w-[110px]"
+                          />
+                        </td>
+
+                        {/* Acad Group — fixed pill */}
+                        <td className="py-2 px-2">
+                          <span className="inline-flex items-center rounded-full border border-neutral-300 bg-white px-2 py-0.5 text-xs text-neutral-700">
+                            CCS
+                          </span>
+                        </td>
+
+                        {/* Campus — fixed pill */}
+                        <td className="py-2 px-2">
+                          <span className="inline-flex items-center rounded-full border border-neutral-300 bg-white px-2 py-0.5 text-xs text-neutral-700">
+                            {activeMeta?.campus_label || (campusName === "MANILA" ? "Manila" : "Laguna")}
+                          </span>
+                        </td>
+
+                        {/* Course Code — compact input, no chevron */}
+                        <td className="py-2 px-2">
+                          <MiniFieldInput
+                            value={newCourseCode}
+                            onChange={(v) => setNewCourseCode(v.toUpperCase())}
+                            placeholder="Course Code"
+                            className="w-[150px]"
+                          />
+                        </td>
+
+                        {/* Count — compact input, no chevron */}
+                        <td className="py-2 px-2">
+                          <MiniFieldInput
+                            value={newCount}
+                            onChange={(v) => setNewCount(v.replace(/[^\d]/g, ""))}
+                            placeholder="0"
+                            type="number"
+                            className="w-[80px]"
+                          />
+                        </td>
+
+                        {/* Actions — exact styles you provided */}
+                        <td className="py-2 px-2 text-center">
+                          <div className="flex items-center justify-center gap-2">
+                            <button
+                              onClick={saveNewCourseRow}
+                              className="flex h-8 w-8 items-center justify-center rounded-full border-2 border-green-600 text-green-600 hover:bg-green-50"
+                              title="Save"
+                            >
+                              <Check className="h-4 w-4" strokeWidth={2.5} />
+                            </button>
+                            <button
+                              onClick={() => {
+                                setAddingRow(false);
+                                setNewCourseCode("");
+                                setNewCount("0");
+                                setNewCareer("UGB");
+                              }}
+                              className="flex h-8 w-8 items-center justify-center rounded-full border-2 border-red-600 text-red-600 hover:bg-red-50"
+                              title="Cancel"
+                            >
+                              <X className="h-4 w-4" strokeWidth={2.5} />
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                    {enlistedCourses.length === 0 && !addingRow && (
                       <tr>
                         <td colSpan={7} className="py-8 text-center text-gray-500">
                           No rows yet — import a CSV.
@@ -599,12 +860,31 @@ export default function APO_PreEnlistment() {
 
               <div className="ml-auto">
                 <button
-                  className="inline-flex items-center gap-2 rounded-md border px-3 py-2 text-sm hover:bg-gray-50"
-                  onClick={() => setView("active")}
+                  className="inline-flex items-center gap-2 rounded-md border border-emerald-300 text-emerald-700 bg-white/80 px-3 py-2 text-sm hover:bg-emerald-50 disabled:opacity-50"
+                  disabled={!archiveTermId || reactivating}
+                  title="Make this archived term the current active term"
+                  onClick={async () => {
+                    if (!user?.userId || !archiveTermId) return;
+                    const sel = archiveTerms.find(t => t.term_id === archiveTermId);
+                    const label = sel ? `Term ${sel.term_number ?? "—"} ${sel.ay_label}` : archiveTermId;
+                    if (!confirm(`Make ${label} the active term${campusLabel ? ` for ${campusLabel}` : ""}?`)) return;
+
+                    setReactivating(true);
+                    try {
+                      await reactivateApoPreenlistment(user.userId, archiveTermId, campusName || undefined);
+                      setView("active");
+                      await refresh();
+                    } catch (e: any) {
+                      setErr(e?.message || "Failed to reactivate term.");
+                    } finally {
+                      setReactivating(false);
+                    }
+                  }}
                 >
-                  Back to Active
+                  {reactivating ? "Reactivating…" : "Make Active"}
                 </button>
               </div>
+
             </div>
 
             <div className="grid md:grid-cols-2 gap-6">

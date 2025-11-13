@@ -89,6 +89,44 @@ async def chair_plantilla_get(
             sp = await db.staff_profiles.find_one({"user_id": userId}) or {}
             if sp.get("position_title"):
                 profile_subtitle = sp["position_title"]
+           
+            # --- Append department name beside the role in the subtitle (no hardcoded IDs) ---
+            dept_name: Optional[str] = None
+
+            # 1) Prefer an explicit department on the staff profile
+            dept_id = sp.get("department_id") or sp.get("dept_id")
+
+            # 2) Otherwise: most recent *active* role assignment that has a department scope
+            if not dept_id:
+                ra = await db.role_assignments.find(
+                    {
+                        "user_id": userId,
+                        "is_active": {"$in": [True, None]},
+                        "$or": [
+                            {"department_id": {"$exists": True, "$ne": None}},
+                            {"dept_id": {"$exists": True, "$ne": None}},
+                        ],
+                    }
+                ).sort([("updated_at", -1), ("created_at", -1)]).to_list(1)
+                if ra:
+                    dept_id = ra[0].get("department_id") or ra[0].get("dept_id")
+
+            # 2b) Fallback: if this user also has a faculty profile, use its department_id
+            if not dept_id:
+                fprof = await db.faculty_profiles.find_one({"user_id": userId}) or {}
+                dept_id = fprof.get("department_id") or fprof.get("dept_id")
+
+            # 3) Resolve department name from departments collection
+            if dept_id:
+                d = await db.departments.find_one({"department_id": dept_id}) \
+                    or await db.departments.find_one({"dept_id": dept_id}) \
+                    or {}
+                dept_name = d.get("dept_name") or d.get("name")
+
+            # 4) If found, show "<role> | <dept_name>" and reuse for table/export labels
+            if dept_name:
+                profile_subtitle = f"{profile_subtitle} | {dept_name}"
+                dept_label = dept_name
 
             # You can enrich dept_label later using role_assignments scope if needed.
 
