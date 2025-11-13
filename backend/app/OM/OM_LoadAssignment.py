@@ -203,27 +203,6 @@ def _preferred_cap_for(ctx, fid: str) -> int:
     pref = (getattr(ctx, "prefs_by_faculty", {}) or {}).get(fid, {}) or {}
     return int(pref.get("preferred_units") or pref.get("load_units") or 12)
 
-def _enforce_global_caps(ctx, assignments: list[dict]) -> tuple[list[dict], dict]:
-    """
-    Stable pass over 'assignments' that drops overflow after preferred caps are reached.
-    Keeps earlier entries (6A order is already priority-aware).
-    Returns (kept_assignments, by_faculty_used_units).
-    """
-    used = defaultdict(int)
-    kept = []
-    for a in assignments:
-        fid = a.get("faculty_id")
-        cid = a.get("course_id")
-        if not fid or not cid:
-            continue
-        units = int((ctx.courses.get(cid, {}) or {}).get("units") or 0)
-        cap = _preferred_cap_for(ctx, fid)
-        if used[fid] + units <= cap:
-            kept.append(a)
-            used[fid] += units
-        # else: overflow → drop this assignment
-    return kept, used
-
 async def _fetch_rows(user_id: str, term_id: str, db) -> Dict[str, Any]:
     pipe: List[Dict[str, Any]] = [
         {"$match": {"term_id": term_id}} if term_id else {"$match": {}},
@@ -377,6 +356,43 @@ async def _fetch_rows(user_id: str, term_id: str, db) -> Dict[str, Any]:
     rows = list(rows_by_sid.values())
     return {"rows": rows}
 
+# ------------------ Algorithm lives HERE ------------------
+# Make sure the name matches what the route calls,
+# and it’s defined ABOVE the route.
+async def build_load_recommendations(
+    db,
+    *,
+    term_id: str,
+    department_id: str,
+    only_section_ids: List[str] | None = None,
+    respect_locks: bool = True,
+) -> Dict[str, Any]:
+    """
+    Read sections/faculty/etc. from DB and fill faculty/day/time/room.
+    Return {"rows": [...]} matching your frontend Row type.
+    """
+    # 1) fetch sections for term/department (optionally filter by only_section_ids)
+    # 2) fetch faculty_profiles, faculty_preferences, rooms, constraints
+    # 3) compute assignments + detect conflicts
+    # 4) shape rows as the UI expects
+    rows: List[Dict[str, Any]] = [
+        # example shape; replace with real computed rows
+        # {
+        #   "id": "ASG0001", "course": "CCPROG1", "title": "...", "units": 3,
+        #   "section": "S11", "faculty": "Last, First",
+        #   "day1":"M","begin1":"07:30","end1":"09:00","room1":"CL-101",
+        #   "day2":"H","begin2":"07:30","end2":"09:00","room2":"CL-101",
+        #   "capacity": 40, "status":"Pending", "conflictNote":"", "editable": True
+        # }
+    ]
+    return {"rows": rows}
+
+# ----------------------------------------------------------
+def _term_label(t: dict) -> str:
+    if not t: return ""
+    ay = t["acad_year_start"]
+    return f"AY {ay}-{ay+1} T{t['term_number']}"
+
 router = APIRouter(prefix="/om", tags=["om"])
 
 @router.post("/loadassignment")
@@ -432,43 +448,6 @@ async def loadassignment_handler(
         return {"ok": True, "approved": len(rows), "term": _term_label(active)}
 
     raise HTTPException(status_code=400, detail="Invalid action parameter.")
-
-# ------------------ Algorithm lives HERE ------------------
-# Make sure the name matches what the route calls,
-# and it’s defined ABOVE the route.
-async def build_load_recommendations(
-    db,
-    *,
-    term_id: str,
-    department_id: str,
-    only_section_ids: List[str] | None = None,
-    respect_locks: bool = True,
-) -> Dict[str, Any]:
-    """
-    Read sections/faculty/etc. from DB and fill faculty/day/time/room.
-    Return {"rows": [...]} matching your frontend Row type.
-    """
-    # 1) fetch sections for term/department (optionally filter by only_section_ids)
-    # 2) fetch faculty_profiles, faculty_preferences, rooms, constraints
-    # 3) compute assignments + detect conflicts
-    # 4) shape rows as the UI expects
-    rows: List[Dict[str, Any]] = [
-        # example shape; replace with real computed rows
-        # {
-        #   "id": "ASG0001", "course": "CCPROG1", "title": "...", "units": 3,
-        #   "section": "S11", "faculty": "Last, First",
-        #   "day1":"M","begin1":"07:30","end1":"09:00","room1":"CL-101",
-        #   "day2":"H","begin2":"07:30","end2":"09:00","room2":"CL-101",
-        #   "capacity": 40, "status":"Pending", "conflictNote":"", "editable": True
-        # }
-    ]
-    return {"rows": rows}
-
-# ----------------------------------------------------------
-def _term_label(t: dict) -> str:
-    if not t: return ""
-    ay = t["acad_year_start"]
-    return f"AY {ay}-{ay+1} T{t['term_number']}"
 
 @router.get("/load-assignment/list")
 async def get_om_load_assignment_list(user_id: str, db=Depends(get_db)):
@@ -699,10 +678,16 @@ async def run_auto_assignment(
             if not (r.get("room2") or "").strip():
                 r["room2"] = dr2
 
-        # Keep status/conflict overlay (unchanged)
+        # Keep status/conflict overlay, but if there are times and no faculty, mark Pending
         r["status"] = a.get("status", "Pending")
         if a.get("conflictNote"):
             r["conflictNote"] = a["conflictNote"]
+
+        if not r.get("faculty") and (r.get("day1") or r.get("day2")):
+            # cosmetic: rows with proposed times shouldn’t appear as “Unassigned”
+            if r.get("status", "").lower() == "unassigned":
+                r["status"] = "Pending"
+
 
         overlay_reasons[r["id"]] = {
             "faculty_id": fid,
@@ -868,8 +853,6 @@ async def phase0_load(term_id: str, db, department_id: str | None = None) -> Con
             "user_id": 1,
             "employment_type": 1,
             "remaining_units": 1,
-            "preferred_campus_ids": 1,
-            "preferred_mode": 1,
             "qualified_kacs": 1,
             "kac_ids": 1,
         },
@@ -939,35 +922,10 @@ async def phase0_load(term_id: str, db, department_id: str | None = None) -> Con
     # Keep historical field name but set to current term (since 'target = next' is already satisfied)
     prefs_prev_term_id = term_id
 
-    # ------------------------------
-    # 6) Teaching history (last N terms before `term_id`)
-    # ------------------------------
-    HISTORY_TERMS = 3
+
     all_terms = await db[COL_TERMS].find(
         {}, {"_id": 0, "term_id": 1, "acad_year_start": 1, "term_number": 1}
     ).sort([("acad_year_start", 1), ("term_number", 1)]).to_list(None)    
-
-    wanted_term_ids: list[str] = []
-    if all_terms:
-        idx = next((i for i, t in enumerate(all_terms) if t.get("term_id") == term_id), None)
-        if idx is not None:
-            start = max(0, idx - HISTORY_TERMS)
-            wanted_term_ids = [t["term_id"] for t in all_terms[start:idx]]
-
-    history_map: dict[tuple[str, str], int] = {}
-    if wanted_term_ids:
-        fa_rows = await db[COL_ASSIGN].find(
-            {"term_id": {"$in": wanted_term_ids}},
-            {"_id": 0, "faculty_id": 1, "course_id": 1}
-        ).to_list(None)
-        for r in fa_rows:
-            fid, cid = r.get("faculty_id"), r.get("course_id")
-            if fid and cid:
-                history_map[(fid, cid)] = history_map.get((fid, cid), 0) + 1
-
-    hist_by_course: dict[str, int] = {}
-    for (fid, cid), n in history_map.items():
-        hist_by_course[cid] = hist_by_course.get(cid, 0) + n
 
     # ------------------------------
     # 7) Leaves
@@ -1034,8 +992,6 @@ async def phase0_load(term_id: str, db, department_id: str | None = None) -> Con
         course_order=None,
     )
     # Attach extras (attrs referenced by later phases)
-    ctx.hist_by_course = hist_by_course          # type: ignore[attr-defined]
-    ctx.history_map = history_map                # type: ignore[attr-defined]
     ctx.kacs = ctx_kacs                          # type: ignore[attr-defined]
     ctx.course_to_kacs = course_to_kacs          # type: ignore[attr-defined]
     ctx.leave_blocked = blocked
@@ -1052,6 +1008,54 @@ async def phase0_load(term_id: str, db, department_id: str | None = None) -> Con
                 if f["faculty_id"] not in no_pref_fids
                 and f["faculty_id"] not in blocked_fids]
 
+    # ------------------------------
+    # 6) Teaching history — optimized (no term cap; include archived)
+    #     • Faculty: only those in this run’s eligible pool
+    #     • Courses: only those that actually appear this term
+    #     • lineage: faculty_assignments(faculty_id, section_id) → sections(section_id→course_id)
+    # ------------------------------
+    eligible_fids = [f["faculty_id"] for f in (ctx.faculty or []) if f.get("faculty_id")]
+    candidate_cids = sorted({s["course_id"] for s in (ctx.sections or []) if s.get("course_id")})
+
+    history_map: dict[tuple[str, str], int] = {}
+    hist_by_course: dict[str, int] = {}
+
+    if eligible_fids and candidate_cids:
+        # 1) fetch assignments for eligible faculty (include archived, no term filter)
+        asg_rows = await db[COL_ASSIGN].find(
+            {"faculty_id": {"$in": eligible_fids}},
+            {"_id": 0, "faculty_id": 1, "section_id": 1}
+        ).to_list(None)
+
+        # 2) join to sections to recover course_id
+        section_ids = sorted({r["section_id"] for r in (asg_rows or []) if r.get("section_id")})
+        if section_ids:
+            sec_rows = await db[COL_SECTIONS].find(
+                {"section_id": {"$in": section_ids}},
+                {"_id": 0, "section_id": 1, "course_id": 1}
+            ).to_list(None)
+            sec_to_course = {
+                s["section_id"]: s.get("course_id")
+                for s in (sec_rows or [])
+                if s.get("section_id") and s.get("course_id")
+            }
+
+            # 3) tally counts only for candidate courses (keeps it relevant)
+            for r in (asg_rows or []):
+                fid = r.get("faculty_id")
+                sid = r.get("section_id")
+                cid = sec_to_course.get(sid)
+                if not fid or not cid:
+                    continue
+                if cid not in candidate_cids:
+                    continue
+                history_map[(fid, cid)] = history_map.get((fid, cid), 0) + 1
+                hist_by_course[cid] = hist_by_course.get(cid, 0) + 1
+
+    # 4) attach to context (consumed by Phases 3–5 and 6A)
+    ctx.history_map = history_map          # type: ignore[attr-defined]
+    ctx.hist_by_course = hist_by_course    # type: ignore[attr-defined]
+       
     # Attach for debugging/visibility
     ctx.excluded_no_prefs = no_pref_fids
     ctx.excluded_leave = blocked_fids
@@ -1216,9 +1220,18 @@ def _enforce_global_caps(ctx: ContextA, assignments: list[dict]) -> tuple[list[d
     used: dict[str, int] = {fid: 0 for fid in caps}  # how many units we have allocated so far
     kept: list[dict] = []
 
+    # DEBUG: snapshot of incoming assignments
+    print(
+        "[CAP_ENFORCE_IMPL] incoming:",
+        [(a.get("section_id"), a.get("faculty_id"), a.get("course_id"))
+         for a in assignments if a.get("faculty_id")]
+    )
+    print("[CAP_ENFORCE_IMPL] caps:", caps)
+
     for a in assignments:
         fid = a.get("faculty_id")
         cid = a.get("course_id")
+        sid = a.get("section_id")
         if not fid or not cid:
             continue
         units = int((ctx.courses.get(cid) or {}).get("units") or 0)
@@ -1226,35 +1239,57 @@ def _enforce_global_caps(ctx: ContextA, assignments: list[dict]) -> tuple[list[d
         # skip if no capacity info for this faculty (or zero cap)
         cap = int(caps.get(fid, 0))
         if cap <= 0:
+            print(
+                f"[CAP_ENFORCE_IMPL] skip sid={sid} fid={fid} cid={cid} "
+                f"because cap={cap}"
+            )
             continue
 
-        # keep only if this assignment still fits
-        if used.get(fid, 0) + units <= cap:
-            kept.append(a)
-            used[fid] = used.get(fid, 0) + units
-        # else: overflow → drop it
+        before = used.get(fid, 0)
 
+        # keep only if this assignment still fits
+        if before + units <= cap:
+            kept.append(a)
+            used[fid] = before + units
+        else:
+            # DEBUG: this is the important part – what exactly gets dropped?
+            print(
+                f"[CAP_ENFORCE_DROP] fid={fid} dropping sid={sid} cid={cid} "
+                f"units={units} used_before={before} cap={cap}"
+            )
+
+    print("[CAP_ENFORCE_IMPL] final_used:", used)
     return kept, used
 
-def _campus_compat(f: dict, campus_id_or_name: str) -> bool:
-    # map your campus codes → names as needed
-    id_to_name = {"CMPS0001": "Manila", "CMPS0002": "Laguna"}
-    want = id_to_name.get(campus_id_or_name, campus_id_or_name)
-    prefs = f.get("preferred_campus_ids") or []
-    if not prefs:
-        return True  # no preference == compatible
-    allowed = {id_to_name.get(x, x) for x in prefs}
-    return want in allowed
+def _campus_compat_pref(fpref: dict, section_campus_id: str) -> bool:
+    """
+    Campus compatibility comes from faculty_preferences.mode.campus_id (array).
+    Empty list = no restriction (compatible with any campus).
+    """
+    campus_list = ((fpref.get("mode") or {}).get("campus_id") 
+                   or fpref.get("campus_id") or [])
+    if not campus_list:
+        return True
+    sid = (section_campus_id or "").strip().upper()
+    return sid in {str(x).strip().upper() for x in campus_list}
 
-def _mode_compat(f: dict, section_mode: str | None) -> bool:
-    pref = (f.get("preferred_mode") or "").upper()
+def _mode_compat_pref(fpref: dict, section_mode: str | None) -> bool:
+    """
+    Mode compatibility comes from faculty_preferences.mode.mode.
+    HYB = wildcard; FOL/ONLINE accept ONLINE/HYB; ONSITE accepts ONSITE/HYB.
+    Empty = no restriction.
+    """
+    pref = str(((fpref.get("mode") or {}).get("mode") 
+               or fpref.get("preferred_mode") or "")).strip().upper()
     if not pref:
         return True
-    m = (section_mode or "HYB").upper()
-    if pref == "HYB":            # hybrid accepts any
+    m = (section_mode or "HYB").strip().upper()
+    if pref == "HYB":
         return True
-    if pref in ("FOL", "ONLINE"): # prefers / accepts online-ish
+    if pref in ("FOL", "ONLINE"):
         return m in ("ONLINE", "HYB")
+    if pref == "ONSITE":
+        return m in ("ONSITE", "HYB")
     return True
 
 # ---------------------- TIME / OVERLAP HELPERS (Phase 6B) ----------------------
@@ -1325,6 +1360,8 @@ def _to_compact_hhmm(hhmm: str) -> str:
     return f"{h}{mm:02d}"
 
 # ------------------------------------------------------------------------------
+
+
 
 # ---------------------- FACULTY OCCUPIED GRID + PREFS -------------------------
 def _build_faculty_grid(
@@ -1674,6 +1711,9 @@ async def run_milestone_c_phase6a(term_id: str, db, department_id: str | None = 
     kac_total_sections: dict[str, int] = {}
     kac_assigned: dict[str, int] = {}
 
+    campus2_total = sum(1 for s in ctx.sections if (s.get("campus_id") or "").strip().upper() == "CMPS0002")
+    campus2_assigned = 0
+
     # build course -> primary KAC map (choose the first KAC if multiple)
     course_to_primary_kac: dict[str, str] = {}
     for cid2 in course_order:
@@ -1713,6 +1753,24 @@ async def run_milestone_c_phase6a(term_id: str, db, department_id: str | None = 
             for fid_tag, taglist in tags.items():
                 if "soloKAC" in (taglist or []) and fid_tag not in solo_kac_of_faculty:
                     solo_kac_of_faculty[fid_tag] = course_to_primary_kac.get(course_id)
+
+        # --- NEW: local helper to enforce solo-CMPS0002 reservation until coverage ---
+        def _campus2_reservation_allows(fid: str, section_campus_id: str) -> bool:
+            # allow if the section is CMPS0002
+            if (section_campus_id or "").strip().upper() == "CMPS0002":
+                return True
+            # if faculty is not solo-CMPS0002, no reservation applies
+            fpref = (ctx.prefs_by_faculty.get(fid) or {})
+            campus_list = ((fpref.get("mode") or {}).get("campus_id") or [])
+            solo = {str(x).strip().upper() for x in campus_list if x} == {"CMPS0002"}
+            if not solo:
+                return True
+            # solo-CMPS0002 must be preserved for CMPS0002 until ~80% coverage
+            if campus2_total <= 0:
+                return True
+            if (section_campus_id or "").strip().upper() != "CMPS0002" and solo:
+                return False
+            return True
 
         # exhaust top candidate's units across the course before moving to next
         for c in cand_list:
@@ -1754,6 +1812,20 @@ async def run_milestone_c_phase6a(term_id: str, db, department_id: str | None = 
                     i += 1
                     continue
 
+                # --- NEW: reservation guard before committing ---
+                sec = next((x for x in ctx.sections if x.get("section_id") == sid), {}) or {}
+                sec_campus = (sec.get("campus_id") or "").strip().upper()
+                fpref_local = (ctx.prefs_by_faculty.get(fid) or {})
+                # campus check (strict, using THIS section’s campus)
+                if not _campus_compat_pref(fpref_local, sec_campus):
+                    i += 1
+                    continue
+                # mode check (use the section’s declared mode; default HYB if unset)
+                sec_mode = (sec.get("mode") or "HYB")
+                if not _mode_compat_pref(fpref_local, sec_mode):
+                    i += 1
+                    continue
+
                 # (Phase 6A skips time/day; campus/mode already gated in Phase 5)
                 assigned[sid] = {
                     "section_id": sid,
@@ -1770,7 +1842,11 @@ async def run_milestone_c_phase6a(term_id: str, db, department_id: str | None = 
                 pk = course_to_primary_kac.get(cid)
                 if pk:
                     kac_assigned[pk] = kac_assigned.get(pk, 0) + 1
-                # ------------------------------------------------------
+
+                # --- NEW: campus2 coverage++ when applicable ---
+                if sec_campus == "CMPS0002":
+                    campus2_assigned += 1
+                # -------------------------------------------------
 
                 i += 1
 
@@ -1984,6 +2060,21 @@ async def run_milestone_d_phase6b(term_id: str, db, department_id: str | None = 
     }
 # =============  END MILESTONE D — Phase 6B  ==========================
 
+POLICY_ALLOW_SHS_SACRIFICE_IF_NO_CAPACITY = True
+
+def _total_remaining_capacity(ctx, assignments) -> int:
+    units = {cid: int((ctx.courses.get(cid) or {}).get("units") or 3) for cid in ctx.courses}
+    caps  = _faculty_capacities(ctx)
+    used  = {}
+    for a in assignments:
+        fid, cid = a.get("faculty_id"), a.get("course_id")
+        if fid and cid:
+            used[fid] = used.get(fid, 0) + units.get(cid, 3)
+    rem = 0
+    for fid, cap in caps.items():
+        rem += max(0, cap - used.get(fid, 0))
+    return rem
+
 # =============  MILESTONE D2 — Rebalance: borrow from SHS to cover non-SHS  =============
 async def run_milestone_d2_rebalance_shs_to_cover_nshs(term_id: str, db, department_id: str | None = None) -> dict:
     """
@@ -2048,93 +2139,109 @@ async def run_milestone_d2_rebalance_shs_to_cover_nshs(term_id: str, db, departm
 
     def _campus_mode_ok(fid: str, sid: str) -> bool:
         sec = next((x for x in ctx.sections if x["section_id"] == sid), {})
-        fdoc = next((x for x in ctx.faculty if x.get("faculty_id") == fid), {})
-        return _campus_compat(fdoc, sec.get("campus_id") or "") and _mode_compat(fdoc, sec.get("mode"))
+        fpref = (ctx.prefs_by_faculty or {}).get(fid, {}) or {}
+        return (
+            _campus_compat_pref(fpref, sec.get("campus_id") or "") and
+            _mode_compat_pref(fpref, sec.get("mode"))
+        )
 
     # Rebalance loop: for each empty non-SHS, try to borrow one SHS faculty
     borrowed = []
-    backfill_shs = []  # (released_shs_sid)
     for sid in empty_nshs:
         cid = section_to_course.get(sid)
         if not cid:
             continue
-        # test SHS assignees in stable order
-        taken = None
+
+        # Try each SHS assignee as a donor, but only if we can backfill their SHS first
+        moved = False
         for shs_a in list(shs_pool):
-            fid = shs_a.get("faculty_id")
-            if not fid or fid in (getattr(ctx, "leave_blocked", set()) or set()):
+            donor_fid = shs_a.get("faculty_id")
+            shs_sid   = shs_a.get("section_id")
+            if not donor_fid or not shs_sid:
                 continue
-            if not _campus_mode_ok(fid, sid):
+            if donor_fid in (getattr(ctx, "leave_blocked", set()) or set()):
                 continue
-            # KAC compatibility: require intersection if course has KACs
+            # donor must fit the non-SHS target
+            if not _campus_mode_ok(donor_fid, sid):
+                continue
+            # KAC guard for target
             course_kacs = set((getattr(ctx, "course_to_kacs", {}) or {}).get(cid, set()))
             if course_kacs:
-                f = next((x for x in ctx.faculty if x.get("faculty_id") == fid), {})
-                pref_kacs = set(((ctx.prefs_by_faculty.get(fid) or {}).get("preferred_kacs") or []))
+                f = next((x for x in ctx.faculty if x.get("faculty_id") == donor_fid), {})
+                pref_kacs = set(((ctx.prefs_by_faculty.get(donor_fid) or {}).get("preferred_kacs") or []))
                 qual_kacs = set(f.get("qualified_kacs") or f.get("kac_ids") or [])
-                union = pref_kacs | qual_kacs
-                if not (union and course_kacs.intersection(union)):
+                if not (course_kacs & (pref_kacs | qual_kacs)):
                     continue
-            # time feasibility
-            if not _is_sched_ok(fid, sid):
+            # time feasibility for donor on target
+            if not _is_sched_ok(donor_fid, sid):
                 continue
 
-            # Borrow: move faculty from SHS section → this non-SHS
-            taken = shs_a
-            break
+            # --- Look ahead: can we backfill the SHS section (shs_sid) right now? ---
+            shs_cid = section_to_course.get(shs_sid)
+            cinfo = by_course.get(shs_cid, {})
+            cand_list = list(cinfo.get("candidates", []))
+            cand_list = _promote_protected_first(by_course, shs_cid, cand_list)
+            backfill = None
+            for c in cand_list:
+                fid2 = c.get("faculty_id")
+                if not fid2 or fid2 == donor_fid:
+                    continue
+                if fid2 in (getattr(ctx, "leave_blocked", set()) or set()):
+                    continue
+                if not _campus_mode_ok(fid2, shs_sid):
+                    continue
+                if not _is_sched_ok(fid2, shs_sid):
+                    continue
+                # KAC for SHS backfill
+                shs_kacs = set((getattr(ctx, "course_to_kacs", {}) or {}).get(shs_cid, set()))
+                if shs_kacs:
+                    f2 = next((x for x in ctx.faculty if x.get("faculty_id") == fid2), {})
+                    pk2 = set(((ctx.prefs_by_faculty.get(fid2) or {}).get("preferred_kacs") or []))
+                    qk2 = set(f2.get("qualified_kacs") or f2.get("kac_ids") or [])
+                    if not (shs_kacs & (pk2 | qk2)):
+                        continue
+                backfill = fid2
+                break
 
-        if taken:
-            # 1) Move faculty to target non-SHS sid
-            fid = taken["faculty_id"]
-            name = taken.get("faculty", "")
+            # If no backfill found, skip this donor (keep SHS intact)
+            if not backfill:
+                continue
+
+            # --- Perform atomic swap: move donor to non-SHS AND assign backfill to SHS ---
+            donor_name = shs_a.get("faculty", "")
+            # 1) assign donor to target non-SHS
             new_a = {
                 "section_id": sid,
                 "course_id": cid,
-                "faculty_id": fid,
-                "faculty": name,
+                "faculty_id": donor_fid,
+                "faculty": donor_name,
                 "status": "Pending",
             }
             assignments = [a for a in assignments if a.get("section_id") != sid] + [new_a]
 
-            # 2) Release SHS section (remove its assignment)
-            shs_sid = taken["section_id"]
-            assignments = [a for a in assignments if a.get("section_id") != shs_sid]
-            backfill_shs.append(shs_sid)
+            # 2) assign backfill to the released SHS
+            backfill_name = _display_name_from_users(ctx.users_by_faculty.get(backfill))
+            shs_new = {
+                "section_id": shs_sid,
+                "course_id": shs_cid,
+                "faculty_id": backfill,
+                "faculty": backfill_name,
+                "status": "Pending",
+            }
+            assignments = [a for a in assignments if a.get("section_id") != shs_sid] + [shs_new]
 
-            # 3) Remove from pool (already borrowed)
-            shs_pool = [a for a in shs_pool if a.get("section_id") != shs_sid]
-            borrowed.append({"from_shs": shs_sid, "to_nshs": sid, "faculty_id": fid})
+            # 3) update pools and logs
+            shs_pool = [a for a in shs_pool if a.get("section_id") != shs_sid]  # donor removed
+            borrowed.append({"from_shs": shs_sid, "to_nshs": sid, "faculty_id": donor_fid, "backfill": backfill})
+            moved = True
+            break  # stop scanning donors for this sid
 
-    # Optional: Backfill released SHS from its own candidate pool
-    for shs_sid in backfill_shs:
-        shs_cid = section_to_course.get(shs_sid)
-        if not shs_cid:
-            continue
-        cinfo = by_course.get(shs_cid, {})
-        cand_list = list(cinfo.get("candidates", []))
-        cand_list = _promote_protected_first(by_course, shs_cid, cand_list)
-        chosen = None
-        for c in cand_list:
-            fid2 = c.get("faculty_id")
-            if not fid2 or fid2 in (getattr(ctx, "leave_blocked", set()) or set()):
-                continue
-            if not _campus_mode_ok(fid2, shs_sid):
-                continue
-            # SHS time feasibility uses its actual schedule (soft-locked)
-            if not _is_sched_ok(fid2, shs_sid):
-                continue
-            chosen = {"section_id": shs_sid, "course_id": shs_cid, "faculty_id": fid2, "faculty": c.get("name", ""), "status":"Pending"}
-            break
-        if chosen:
-            assignments.append(chosen)
-        else:
-            # leave SHS unassigned; Phase 7 will still soft-lock schedule display
-            pass
+        # go to next empty non-SHS; if not moved, it stays empty for now
 
     debug_d2 = {
         "d2_borrowed_count": len(borrowed),
         "d2_borrowed_pairs": borrowed,
-        "d2_shs_backfilled": len(backfill_shs),
+        "d2_shs_backfilled": len([b for b in borrowed if b.get("backfill")]),
     }
 
     return {
@@ -2142,7 +2249,481 @@ async def run_milestone_d2_rebalance_shs_to_cover_nshs(term_id: str, db, departm
         "assignments": assignments,
         "debug": {**(base.get("debug") or {}), **debug_d2},
     }
+
 # =============  END MILESTONE D2  =============
+
+def _is_pt(ctx, fid: str) -> bool:
+    f = next((x for x in ctx.faculty if x.get("faculty_id") == fid), {})
+    return (f.get("employment_type") or "").strip().upper() == "PT"
+
+def _is_ft(ctx, fid: str) -> bool:
+    f = next((x for x in ctx.faculty if x.get("faculty_id") == fid), {})
+    return (f.get("employment_type") or "").strip().upper() == "FT"
+
+def _is_solo_campus2_pref(ctx, fid: str) -> bool:
+    p = (ctx.prefs_by_faculty.get(fid) or {})
+    camp = ((p.get("mode") or {}).get("campus_id") or [])
+    return {str(x).strip().upper() for x in camp if x} == {"CMPS0002"}
+
+def _mode_of_pref(ctx, fid: str) -> str:
+    p = (ctx.prefs_by_faculty.get(fid) or {})
+    return str(((p.get("mode") or {}).get("mode") or "")).strip().upper()
+
+def _section_campus(ctx, sid: str) -> str:
+    s = next((x for x in ctx.sections if x.get("section_id") == sid), {})
+    return (s.get("campus_id") or "").strip().upper()
+
+def _section_course(ctx, sid: str) -> str:
+    s = next((x for x in ctx.sections if x.get("section_id") == sid), {})
+    return s.get("course_id") or ""
+
+def _kac_ok(ctx, fid: str, cid: str) -> bool:
+    course_kacs = set((getattr(ctx, "course_to_kacs", {}) or {}).get(cid, set()))
+    if not course_kacs:
+        return True
+    fdoc = next((x for x in ctx.faculty if x.get("faculty_id") == fid), {})
+    pref_kacs = set(((ctx.prefs_by_faculty.get(fid) or {}).get("preferred_kacs") or []))
+    qual_kacs = set(fdoc.get("qualified_kacs") or fdoc.get("kac_ids") or [])
+    return bool((pref_kacs | qual_kacs) & course_kacs)
+
+def _campus_mode_ok_ctx(ctx, fid: str, sid: str) -> bool:
+    sec = next((x for x in ctx.sections if x["section_id"] == sid), {})
+    fpref = (ctx.prefs_by_faculty or {}).get(fid, {}) or {}
+    return (
+        _campus_compat_pref(fpref, sec.get("campus_id") or "") and
+        _mode_compat_pref(fpref, sec.get("mode"))
+    )
+
+def _sched_ok_ctx(ctx, fid: str, sid: str, assignments: list[dict]) -> bool:
+    slots = _slots_from_scheds((ctx.schedules_by_section or {}).get(sid, []))
+    if not slots:
+        return True
+    fpref = (ctx.prefs_by_faculty or {}).get(fid, {})
+    # build grid from all other assns of this fid
+    tentative = [x for x in assignments if x.get("faculty_id") == fid and x.get("section_id") != sid]
+    grid = _build_faculty_grid(ctx, tentative)
+    for di, itv in slots:
+        if not _pref_accepts_slot(fpref, di, itv):
+            return False
+        for cur in grid.get(fid, {}).get(di, []):
+            if _conflict(cur, itv):
+                return False
+    return True
+
+def _swap_assign(assignments: list[dict], sid: str, new_fid: str, new_name: str) -> list[dict]:
+    # replace or insert assignment for sid
+    out = []
+    replaced = False
+    for a in assignments:
+        if a.get("section_id") == sid:
+            out.append({**a, "faculty_id": new_fid, "faculty": new_name, "status": "Pending"})
+            replaced = True
+        else:
+            out.append(a)
+    if not replaced:
+        out.append({"section_id": sid, "course_id": "", "faculty_id": new_fid, "faculty": new_name, "status":"Pending"})
+    return out
+
+def run_pass_ft_reclaim_from_pt(ctx, assignments: list[dict]) -> list[dict]:
+    """
+    Lift under-cap FTs by reclaiming PT-held sections when feasible.
+    Never evict a solo-CMPS0002 PT from a CMPS0002 section.
+    Limit: at most 1 reclaim per FT.
+    """
+    # compute units per course once
+    units = {cid: int((ctx.courses.get(cid) or {}).get("units") or 3) for cid in ctx.courses}
+    # tally FT usage
+    used = {}
+    for a in assignments:
+        fid = a.get("faculty_id"); cid = a.get("course_id")
+        if fid and cid:
+            used[fid] = used.get(fid, 0) + units.get(cid, 3)
+    caps = _faculty_capacities(ctx)
+
+    # PT-held sections list
+    pt_sections = [a for a in assignments if a.get("faculty_id") and _is_pt(ctx, a["faculty_id"])]
+
+    for fdoc in ctx.faculty:
+        fid = fdoc.get("faculty_id") or ""
+        if not fid or not _is_ft(ctx, fid):
+            continue
+        # skip if FT already at or above cap
+        if used.get(fid, 0) >= caps.get(fid, 0):
+            continue
+
+        # try reclaim one PT-held section that fits this FT
+        for a in pt_sections:
+            sid = a.get("section_id"); pfid = a.get("faculty_id")
+            cid = a.get("course_id")
+
+            # protect solo-CMPS0002 PT on CMPS0002
+            if _is_solo_campus2_pref(ctx, pfid) and _section_campus(ctx, sid) == "CMPS0002":
+                continue
+
+            if not _kac_ok(ctx, fid, cid):
+                continue
+            if not _campus_mode_ok_ctx(ctx, fid, sid):
+                continue
+            if not _sched_ok_ctx(ctx, fid, sid, assignments):
+                continue
+
+            # perform swap (FT takes over)
+            name = _display_name_from_users(ctx.users_by_faculty.get(fid))
+            assignments = _swap_assign(assignments, sid, fid, name)
+
+            # update tallies
+            used[fid] = used.get(fid, 0) + units.get(cid, 3)
+            # one reclaim per FT
+            break
+
+    return assignments
+
+def run_pass_campus_concentrate_cmps2(ctx, assignments: list[dict]) -> list[dict]:
+    """
+    Move CMPS0002 sections from dual-campus FTs to PT(HYB & solo-CMPS0002) or PT(FOL),
+    when feasible. Limit 1 move per FT, keep protections/time/KAC/mode.
+    """
+    # map faculty → campuses currently held
+    by_fac = {}
+    for a in assignments:
+        fid = a.get("faculty_id"); sid = a.get("section_id")
+        if fid and sid:
+            by_fac.setdefault(fid, set()).add(_section_campus(ctx, sid))
+
+    for ft in ctx.faculty:
+        fid = ft.get("faculty_id") or ""
+        if not fid or not _is_ft(ctx, fid):
+            continue
+        campuses = by_fac.get(fid, set())
+        # only consider FTs with mixed campuses
+        if not ({"CMPS0001", "CMPS0002"} <= (campuses | {""}) or ("CMPS0001" in campuses and "CMPS0002" in campuses)):
+            continue
+
+        # try to move one CMPS0002 section
+        for a in [x for x in assignments if x.get("faculty_id") == fid]:
+            sid = a.get("section_id")
+            if _section_campus(ctx, sid) != "CMPS0002":
+                continue
+            cid = a.get("course_id")
+
+            # candidate PT pool: solo-CMPS0002 & HYB, or FOL (campus-agnostic)
+            pt_pool = [p for p in ctx.faculty if _is_pt(ctx, p.get("faculty_id") or "")]
+            pt_pool = [p for p in pt_pool
+                       if (_is_solo_campus2_pref(ctx, p["faculty_id"]) and _mode_of_pref(ctx, p["faculty_id"]) == "HYB")
+                       or (_mode_of_pref(ctx, p["faculty_id"]) == "FOL")]
+
+            found = None
+            for p in pt_pool:
+                pfid = p["faculty_id"]
+                if not _kac_ok(ctx, pfid, cid):
+                    continue
+                if not _campus_mode_ok_ctx(ctx, pfid, sid):
+                    continue
+                if not _sched_ok_ctx(ctx, pfid, sid, assignments):
+                    continue
+                found = pfid
+                break
+
+            if found:
+                name = _display_name_from_users(ctx.users_by_faculty.get(found))
+                assignments = _swap_assign(assignments, sid, found, name)
+                # one move per FT
+                break
+
+    return assignments
+
+def run_pass_rescue_non_shs(ctx, assignments: list[dict]) -> list[dict]:
+    """
+    After 6A/6B(+D2), if any non-SHS sections are blank:
+      • try a single atomic swap: move a compatible SHS-holding faculty to the blank,
+      • PREFER a safe backfill for the released SHS,
+      • but if POLICY_ALLOW_SHS_SACRIFICE_IF_NO_CAPACITY and no global capacity is left,
+        allow sacrificing the SHS (leave it blank) as long as donor stays within cap.
+
+    Gates enforced: campus+mode, KAC, time/prefs, capacity.
+    """
+    # quick lookups
+    section_to_course = {s["section_id"]: s["course_id"] for s in ctx.sections}
+    assigned_by_sid = {a["section_id"]: a for a in assignments if a.get("faculty_id")}
+    all_sids = [s["section_id"] for s in ctx.sections]
+
+    def _dbg(msg: str) -> None:
+        print(f"[RESCUE_NON_SHS] {msg}")
+
+    def _ctype(cid: str) -> str:
+        c = (ctx.courses.get(cid) or {})
+        t = (c.get("type") or c.get("type_of_course") or "Major")
+        return str(t).strip().upper()
+
+    # units and caps
+    units = {cid: int((ctx.courses.get(cid) or {}).get("units") or 3) for cid in ctx.courses}
+    used: dict[str, int] = {}
+    for a in assignments:
+        fid, cid = a.get("faculty_id"), a.get("course_id")
+        if fid and cid:
+            used[fid] = used.get(fid, 0) + units.get(cid, 3)
+    caps = _faculty_capacities(ctx)
+
+    # helpers (reuse existing policy guards)
+    def _can_take(fid: str, sid: str) -> bool:
+        cid = section_to_course.get(sid, "")
+        used_now = used.get(fid, 0)
+        cap = caps.get(fid, 0)
+        extra = units.get(cid, 3)
+
+        # NOTE: these logs fire for both donors and backfillers
+        if not _kac_ok(ctx, fid, cid):
+            print(f"[RESCUE_CAN_TAKE] fid={fid} sid={sid} ({cid}) -> False (KAC)")
+            return False
+        if not _campus_mode_ok_ctx(ctx, fid, sid):
+            print(f"[RESCUE_CAN_TAKE] fid={fid} sid={sid} ({cid}) -> False (campus/mode)")
+            return False
+        if not _sched_ok_ctx(ctx, fid, sid, assignments):
+            print(f"[RESCUE_CAN_TAKE] fid={fid} sid={sid} ({cid}) -> False (schedule)")
+            return False
+        if used_now + extra > cap:
+            print(
+                f"[RESCUE_CAN_TAKE] fid={fid} sid={sid} ({cid}) -> False (capacity) "
+                f"used={used_now} extra={extra} cap={cap}"
+            )
+            return False
+
+        print(
+            f"[RESCUE_CAN_TAKE] fid={fid} sid={sid} ({cid}) -> True "
+            f"used={used_now} extra={extra} cap={cap}"
+        )
+        return True
+
+    _dbg(f"assignments={len(assignments)}")
+    _dbg(f"used_units={used}")
+    _dbg(f"caps={caps}")
+    _dbg(f"total_remaining_capacity={_total_remaining_capacity(ctx, assignments)}")
+
+    def _swap(assignments, sid_take, fid_take, name_take, sid_release, fid_release, name_backfill):
+        # assign donor to blank
+        assignments = [a for a in assignments if a.get("section_id") != sid_take] + [{
+            "section_id": sid_take,
+            "course_id": section_to_course.get(sid_take, ""),
+            "faculty_id": fid_take,
+            "faculty": name_take,
+            "status": "Pending",
+        }]
+        # backfill the released SHS
+        assignments = [a for a in assignments if a.get("section_id") != sid_release] + [{
+            "section_id": sid_release,
+            "course_id": section_to_course.get(sid_release, ""),
+            "faculty_id": fid_release,
+            "faculty": name_backfill,
+            "status": "Pending",
+        }]
+        return assignments
+
+    # 0) Inspect all sections from the rescue pass perspective
+    _dbg("scanning all sections for blanks:")
+    for sid in all_sids:
+        cid = section_to_course.get(sid)
+        ctype = _ctype(cid) if cid else "?"
+        a = assigned_by_sid.get(sid)
+        fid = a.get("faculty_id") if a else None
+        status = (a.get("status") if a else None) or "None"
+        _dbg(f"  sid={sid} cid={cid} type={ctype} faculty_id={fid} status={status}")
+
+
+    # 1) list non-SHS blanks
+    blanks = []
+    for sid in all_sids:
+        cid = section_to_course.get(sid)
+        if not cid or _ctype(cid) == "SHS":
+            continue
+        a = assigned_by_sid.get(sid)
+        if not a or (a.get("status", "").lower() in ("unassigned", "conflict")):
+            blanks.append(sid)
+
+    _dbg(f"non-SHS blanks={[(sid, section_to_course.get(sid, '')) for sid in blanks]}")
+
+    if not blanks:
+        _dbg("no non-SHS blanks, nothing to rescue")
+        return assignments
+
+    # 2) SHS donor pool
+    shs_pool = [
+        a for a in assignments
+        if a.get("faculty_id") and _ctype(section_to_course.get(a["section_id"])) == "SHS"
+    ]
+    _dbg(f"SHS donor pool={[(a.get('section_id'), a.get('faculty_id')) for a in shs_pool]}")
+
+
+    # 3) fix each blank with one atomic swap
+    for sid_blank in blanks:
+        cid_blank = section_to_course.get(sid_blank, "")
+        _dbg(f"--- Trying to rescue blank {sid_blank} ({cid_blank}) ---")
+
+        # best: dict | None = None  # pick the “safest” option among feasible swaps
+        best = None  # pick the “safest” option among feasible swaps
+        for shs_a in shs_pool:
+            donor_fid = shs_a.get("faculty_id")
+            shs_sid   = shs_a.get("section_id")
+            if not donor_fid or not shs_sid:
+                continue
+            if donor_fid in (getattr(ctx, "leave_blocked", set()) or set()):
+                _dbg(f"skip donor {donor_fid} (leave_blocked) on SHS {shs_sid}")
+                continue
+
+            # donor must be able to take the non-SHS blank (KAC/campus/mode/time),
+            # but we ignore capacity here and check net load after swap instead.
+            _dbg(f"check donor {donor_fid} from SHS {shs_sid} for blank {sid_blank}")
+            # donor must be able to take the non-SHS blank
+            if not _can_take(donor_fid, sid_blank):
+                _dbg(f"  donor {donor_fid} CANNOT take blank {sid_blank} (see RESCUE_CAN_TAKE above)")
+                continue
+
+            shs_cid = section_to_course.get(shs_sid, "")
+
+            # --- Try to find an immediate backfill for this SHS ---
+            cinfo = (getattr(ctx, "by_course_for_rescue", {}) or {}).get(shs_cid) \
+                    or {}  # optional: attach by_course to ctx if you like
+            cand_list = list(cinfo.get("candidates", [])) or []
+
+            # If you don't have by_course on ctx, fall back to all faculty:
+            if not cand_list:
+                cand_list = [{"faculty_id": f.get("faculty_id")} for f in ctx.faculty]
+
+            backfill_fids = [
+                c.get("faculty_id") for c in cand_list
+                if c.get("faculty_id") and c.get("faculty_id") != donor_fid
+            ]
+            # PTs first
+            backfill_fids = sorted(      
+                backfill_fids,
+                key=lambda fid: 0 if _is_pt(ctx, fid) else 1
+            )
+
+            # 🔍 DEBUG: see who we will even try as backfill
+            _dbg(
+                f"  potential backfills for SHS {shs_sid} ({shs_cid}) "
+                f"donor={donor_fid}: {backfill_fids}"
+            )
+
+            bf: str | None = None
+            for fid2 in backfill_fids:
+                if fid2 in (getattr(ctx, "leave_blocked", set()) or set()):
+                    _dbg(f"    skip backfill {fid2} (leave_blocked)")
+                    continue
+
+                _dbg(f"    try backfill {fid2} for SHS {shs_sid}")
+                # Backfill must pass full feasibility (including capacity)
+                if not _can_take(fid2, shs_sid):
+                    _dbg(f"      backfill {fid2} CANNOT take SHS {shs_sid} (see RESCUE_CAN_TAKE above)")
+                    continue
+
+                _dbg(f"      backfill {fid2} OK for SHS {shs_sid}")
+                bf = fid2
+                break
+
+            # compute current global remaining capacity once per donor
+            no_capacity_left = (_total_remaining_capacity(ctx, assignments) == 0)
+            _dbg(
+                f"  after donor/backfill scan for donor {donor_fid} on SHS {shs_sid}: "
+                f"bf={bf}, no_capacity_left={no_capacity_left}"
+            )
+
+
+            blank_ud = units.get(cid_blank, 3)
+            shs_ud   = units.get(shs_cid, 3)
+            donor_current = used.get(donor_fid, 0)
+            donor_post = donor_current - shs_ud + blank_ud
+
+            # If donor would exceed their cap after swapping, skip this donor entirely
+            if donor_post > caps.get(donor_fid, 0):
+                continue
+
+            if bf is None:
+                # --- SACRIFICE MODE: only allowed if everyone is maxed ---
+                if not (POLICY_ALLOW_SHS_SACRIFICE_IF_NO_CAPACITY and no_capacity_left):
+                    continue
+
+                # Treat sacrifice as a worse rank than any safe backfill
+                rank = (2, 0)
+                if (best is None) or (rank < best["rank"]):
+                    best = {
+                        "rank": rank,
+                        "donor_fid": donor_fid,
+                        "donor_name": _display_name_from_users(ctx.users_by_faculty.get(donor_fid)),
+                        "sid_shs": shs_sid,
+                        "backfill_fid": None,
+                        "backfill_name": "",
+                        "donor_post": donor_post,
+                    }
+                continue  # check other donors
+
+            # --- Normal case: we DO have a backfill ---
+            pt_pref = 0 if _is_pt(ctx, bf) else 1
+            conc_nudge = 0
+            if _section_campus(ctx, shs_sid) == "CMPS0002" and _is_pt(ctx, bf) and _is_solo_campus2_pref(ctx, bf):
+                conc_nudge = -1
+            rank = (pt_pref, conc_nudge)
+
+            if (best is None) or (rank < best["rank"]):
+                best = {
+                    "rank": rank,
+                    "donor_fid": donor_fid,
+                    "donor_name": _display_name_from_users(ctx.users_by_faculty.get(donor_fid)),
+                    "sid_shs": shs_sid,
+                    "backfill_fid": bf,
+                    "backfill_name": _display_name_from_users(ctx.users_by_faculty.get(bf)),
+                    "donor_post": donor_post,
+                }
+
+        if best:
+            _dbg(
+                f"==> RESCUED {sid_blank} using donor={best['donor_fid']} "
+                f"from SHS={best['sid_shs']} backfill={best.get('backfill_fid')}"
+            )
+        else:
+            _dbg(f"==> FAILED to rescue blank {sid_blank}: no feasible donor+backfill combo")
+
+        
+        # Apply chosen move (if any) for this blank
+        if best:
+            donor_fid   = best["donor_fid"]
+            donor_name  = best["donor_name"]
+            shs_sid     = best["sid_shs"]
+            shs_cid     = section_to_course.get(shs_sid, "")
+            shs_units   = units.get(shs_cid, 3)
+            blank_units = units.get(cid_blank, 3)
+
+            if best["backfill_fid"]:
+                # normal atomic swap (donor -> blank, backfill -> SHS)
+                bf = best["backfill_fid"]
+                bf_name = best["backfill_name"]
+                assignments = _swap(
+                    assignments,
+                    sid_blank, donor_fid, donor_name,
+                    shs_sid, bf, bf_name,
+                )
+                # update usage tallies
+                used[donor_fid] = used.get(donor_fid, 0) - shs_units + blank_units
+                used[bf]        = used.get(bf, 0) + shs_units
+            else:
+                # --- SACRIFICE MODE: move donor to blank and leave SHS unassigned ---
+                # 1) remove donor's SHS assignment
+                assignments = [a for a in assignments if a.get("section_id") != shs_sid]
+                # 2) assign donor to blank
+                assignments = [a for a in assignments if a.get("section_id") != sid_blank] + [{
+                    "section_id": sid_blank,
+                    "course_id": cid_blank,
+                    "faculty_id": donor_fid,
+                    "faculty": donor_name,
+                    "status": "Pending",
+                }]
+                # 3) adjust donor usage (−SHS + blank)
+                used[donor_fid] = used.get(donor_fid, 0) - shs_units + blank_units
+
+            # donor’s former SHS is no longer in donor pool
+            shs_pool = [a for a in shs_pool if a.get("section_id") != shs_sid]
+
+    _dbg("end of run_pass_rescue_non_shs")
+    return assignments
 
 # =============  MILESTONE E — Phase 7 (SHS soft-locks + Proposed Times)  =============
 async def run_milestone_e_phase7(term_id: str, db, department_id: str | None = None) -> dict:
@@ -2152,25 +2733,45 @@ async def run_milestone_e_phase7(term_id: str, db, department_id: str | None = N
     - For sections with no schedule, propose day/time based on faculty prefs.
       (We do not persist; we only surface proposed times in the assignment payload.)
     """
-    # Base (contains feasible + any conflicts) -------------------------------
     base = await run_milestone_d2_rebalance_shs_to_cover_nshs(term_id, db, department_id)
     assignments = list(base.get("assignments", []))
-    dbg_prev = dict(base.get("debug", {}))
 
-    # Context for course types and schedules --------------------------------
+    # ---------------- PRE-CAP CONTEXT + DEBUG SHELL ----------------
     ctx = await phase0_load(term_id, db, department_id)
-    courses = ctx.courses
-    schedules_by_section = ctx.schedules_by_section or {}
-    fac_prefs = ctx.prefs_by_faculty or {}
-    sections_by_id = {s["section_id"]: s for s in ctx.sections}
+    dbg_prev = dict(base.get("debug", {}) or {})
 
-    # --- Hard stop: if demand > capacity, prune overflow cleanly ---
-    assignments, _used_units = _enforce_global_caps(ctx, assignments)
+    # --- HARD STOP: CAP PRUNE IMMEDIATELY AFTER D2 ---
+    # This ensures:
+    #   • D2 rebalances can overshoot caps a bit,
+    #   • but we prune *once* here,
+    #   • and all later passes (rescue / reclaim / concentrate) see the
+    #     real blanks and respect caps.
+    print("[CAP_ENFORCE] incoming_assignments:", len(assignments))
+    assignments, used_units = _enforce_global_caps(ctx, assignments)
+    print("[CAP_ENFORCE] assignments_after_prune:", len(assignments))
+    print("[CAP_ENFORCE] used_units_after:", used_units)
 
-    # Tiny debug so you can see pruning effects in the response
     cap_dbg = dbg_prev.setdefault("cap_sanity", {})
     cap_dbg["assignments_after_prune"] = len(assignments)
-    cap_dbg["used_units_by_faculty"] = {fid: int(u) for fid, u in _used_units.items()}
+    cap_dbg["used_units_by_faculty"] = {fid: int(u) for fid, u in used_units.items()}
+
+    # ---------------- MICRO-PASSES ON TOP OF PRUNED SET -------------
+    # 0) rescue pass: ensure no Major/Foundation/Other stays blank while SHS is filled
+    assignments = run_pass_rescue_non_shs(ctx, assignments)
+
+    # 1) optional: FT-first reclaim (keeps SHS+rules & caps)
+    assignments = run_pass_ft_reclaim_from_pt(ctx, assignments)
+
+    # 2) optional: improve CMPS0002 concentration (keeps rules; we keep loads balanced)
+    assignments = run_pass_campus_concentrate_cmps2(ctx, assignments)
+
+    # From here down, we only propose times and don’t change who teaches what.
+    # Rebuild context for schedules / types (separate from capacity ctx above).
+    courses_ctx = await phase0_load(term_id, db, department_id)
+    courses = courses_ctx.courses
+    schedules_by_section = courses_ctx.schedules_by_section or {}
+    fac_prefs = courses_ctx.prefs_by_faculty or {}
+    sections_by_id = {s["section_id"]: s for s in courses_ctx.sections}
 
     def _course_is_shs(cid: str) -> bool:
         t = (courses.get(cid) or {}).get("type") or (courses.get(cid) or {}).get("type_of_course")
@@ -2286,15 +2887,15 @@ async def run_milestone_e_phase7(term_id: str, db, department_id: str | None = N
         "phase7_proposed_count": len(proposed),
         "phase7_kept_count": len(kept),
         "phase7_note": "Proposed times based on availability_days/preferred_times for unscheduled, non-SHS sections.",
-        # NEW: surface the reasons
         "phase7_no_time_details": debug_no_time_phase7,
     }
 
     return {
         **base,
         "assignments": final_assignments,
-        "debug": {**(base.get("debug") or {}), **debug7},
+        "debug": {**dbg_prev, **debug7},
     }
+
 # =============  END MILESTONE E — Phase 7  ==========================
 
 async def _approve_and_persist(term_id: str, rows: list[dict], db):
@@ -2538,51 +3139,68 @@ async def run_milestone_b(term_id: str, db, department_id: str | None = None) ->
                 continue
             dbg_kac_ok += 1
 
-            # (C) Campus / mode gates
-            # Merge campus prefs from profile + previous-term prefs
-            pref_campus_ids = set((fpref.get("campus_id") or []))
-            fac_campus_ids  = set(f.get("preferred_campus_ids") or [])
-            if pref_campus_ids and not fac_campus_ids:
-                # reflect preference campuses in the same field the helper uses
-                f = {**f, "preferred_campus_ids": list(pref_campus_ids)}
+            # # (C) Campus / mode gates — drive strictly from THIS TERM’S preferences
+            # fpref = (ctx.prefs_by_faculty.get(fid) or {})
+            # if not _campus_compat_pref(fpref, campus):
+            #     continue
+            # if not _mode_compat_pref(fpref, mode):
+            #     continue
 
-            # (C) Campus / mode gates
-            if not _campus_compat(f, campus):
-                continue
-            if not _mode_compat(f, mode):
-                continue
             dbg_campus_mode_ok += 1
-
             dbg_time_ok += 1
 
             # (E) Course-aware scoring
             hx = int(getattr(ctx, "history_map", {}).get((fid, cid), 0))
-            # reuse pref_kacs from above; we also have fac_kacs_union
             prefers_this_kac = 1 if (course_kacs and pref_kacs and course_kacs.intersection(pref_kacs)) else 0
             qual_matches_union = 1 if (course_kacs and course_kacs.intersection(fac_kacs_union)) else 0
-            emp = (f.get("employment_type") or "").upper()
-            ft_bonus = 1 if "FULL" in emp else 0
 
-            # weights: preference > history > FT > being in qualified/union > capacity
-            # (adds separation so scores aren’t all “cap-only” ties)
-            # score = (40*prefers_this_kac) + (25*hx) + (10*ft_bonus) + (5*qual_matches_union) + min(cap, 12)
+            emp = (f.get("employment_type") or "").strip().upper()  # "FT" / "PT"
+            ft_bonus = 1 if emp == "FT" else 0
+
             score = (40*prefers_this_kac) + (25*hx) + (10*ft_bonus) + (5*qual_matches_union) + min(cap, 12)
             if not has_prefs:
                 score -= 20  # soft penalty, still eligible
 
+            # --- NEW TAGS: solo-campus based on preferences of THIS TERM ---
+            fpref = (ctx.prefs_by_faculty.get(fid) or {})
+            campus_list = ((fpref.get("mode") or {}).get("campus_id") or [])
+            campus_set = {str(x).strip().upper() for x in campus_list if x}
+            is_solo_campus2 = (campus_set == {"CMPS0002"})
+            is_ft_solo_campus2 = (emp == "FT" and is_solo_campus2)
+
             name = _display_name_from_users(ctx.users_by_faculty.get(fid))
+
             cands.append({
                 "faculty_id": fid,
                 "name": name,
                 "remaining_units": cap,
                 "employment_type": f.get("employment_type", ""),
                 "score": score,
+                # NEW: carry tags for downstream promotion
+                "tags": {
+                    "soloCampus2": bool(is_solo_campus2),
+                    "FT_soloCampus2": bool(is_ft_solo_campus2),
+                    # keep existing tags you already compute elsewhere (e.g., coordinator, soloKAC)
+                },
             })
 
         # sort: higher score first, then more capacity, then FT, then name
-        cands.sort(key=lambda x: (-x["score"], -x["remaining_units"],
-                                  0 if (x["employment_type"] or "").upper().startswith("FULL") else 1,
-                                  x["name"]))
+        def _promote_flags(c):
+            tags = c.get("tags", {}) or {}
+            # True → 0, False → 1 so that promoted items come first
+            is_coord = 0 if tags.get("coordinator") else 1
+            is_ft_solo2 = 0 if tags.get("FT_soloCampus2") else 1
+            is_solo2 = 0 if tags.get("soloCampus2") else 1
+            is_solo_kac = 0 if tags.get("soloKAC") else 1
+            return (is_coord, is_ft_solo2, is_solo2, is_solo_kac)
+
+        cands.sort(key=lambda x: (
+            *_promote_flags(x),
+            -x["score"],
+            -x["remaining_units"],
+            0 if (x.get("employment_type","").strip().upper() == "FT") else 1,
+            x["name"],
+        ))
 
         by_course[cid]["candidates"] = cands
 
