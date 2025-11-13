@@ -2,11 +2,12 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Outlet, useLocation } from "react-router-dom";
 import AppShell from "../../base/AppShell";
 import { runOmAutoAssign } from "../../api.ts"; // adjust path to your api.ts
+import { submitOmLoadAssignment } from "../../api.ts";
 
 import {
   getOmLoadAssignmentList,
   getOmLoadAssignmentProfile, // ← add this
-  submitOmLoadAssignment,
+  getAllFaculty,
 } from "../../api";
 
 import { cls } from "../../utilities/cls";
@@ -148,12 +149,14 @@ function ComboBox({
   placeholder = "— Select or type —",
   className = "",
 }: {
-  value: string;
+  value?: string | null;
   onChange: (v: string) => void;
-  options: string[];
+  options?: (string | null | undefined)[];
   placeholder?: string;
   className?: string;
 }) {
+  console.log("ComboBox options:", options);
+
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState(value ?? "");
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -170,30 +173,44 @@ function ComboBox({
   }, []);
 
   const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    if (!q) return options;
-    return options.filter((o) => o.toLowerCase().includes(q));
-  }, [options, query]);
+    const safeOptions = (options ?? []).map((o) => (o ?? "").toString());
+    const q = (query ?? "").trim().toLowerCase();
+  
+    // If no search text, show everything
+    if (!q) return safeOptions;
+  
+    const matches = safeOptions.filter((o) =>
+      o.toLowerCase().includes(q)
+    );
+  
+    // If nothing matches the current text (like "Sahur, Thung"),
+    // fall back to showing all options instead of "No matches"
+    return matches.length > 0 ? matches : safeOptions;
+  }, [options, query]);  
 
   return (
     <div ref={wrapRef} className={cls("relative", className)}>
       <input
         className="w-full rounded-lg border border-gray-300 px-3 py-2 pr-8 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30"
-        value={query}
+        value={query ?? ""}
         onChange={(e) => {
-          setQuery(e.target.value);
+          const v = e.target.value;
+          setQuery(v);
           setOpen(true);
-          onChange(e.target.value);
+          onChange(v);
         }}
         onFocus={() => setOpen(true)}
         placeholder={placeholder}
       />
       <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-500" />
-
+          
       {open && (
         <div className="absolute z-30 mt-2 max-h-72 w-full overflow-auto rounded-xl border border-gray-300 bg-white shadow-xl">
           {filtered.length === 0 ? (
-            <div className="px-4 py-2 text-sm text-gray-500">No matches</div>
+            <div className="px-4 py-2 text-sm text-gray-500">
+              No matches{" "}
+              {(options?.length ?? 0) === 0 && " (no faculty loaded)"}
+            </div>
           ) : (
             filtered.map((opt) => (
               <button
@@ -205,7 +222,7 @@ function ComboBox({
                 }}
                 className="block w-full px-4 py-2 text-left text-sm hover:bg-emerald-50"
               >
-                {opt}
+                {opt || "—"}
               </button>
             ))
           )}
@@ -224,6 +241,7 @@ type Row = {
   units: number | "";
   section: string;
   faculty: string;
+  faculty_id?: string;
   day1: string;
   begin1: string;
   end1: string;
@@ -254,6 +272,9 @@ const timeRange = (begin?: string, end?: string) => {
 };
 
 const DAY_OPTIONS = ["M", "T", "W", "H", "F", "S"];
+const MODE_OPTIONS = ["FOL", "HYB", "F2F"];
+const ROOM_OPTIONS = ["Online", "Classroom", "Comlab"];
+
 function buildTimeStartOptions() {
   const out: string[] = [];
   let h = 7;
@@ -285,9 +306,15 @@ function buildTimeEndOptions() {
     return `${String(endH).padStart(2, "0")}${String(endM).padStart(2, "0")}`;
   });
 }
-const TIME_BEGIN_OPTIONS = buildTimeStartOptions();
-const TIME_END_OPTIONS = buildTimeEndOptions();
 
+const SECOND_TIME_OPTIONS = ["0900", "1230", "1415", "1600", "1745", "1930"];
+
+const TIME_BEGIN_OPTIONS = Array.from(
+  new Set([...buildTimeStartOptions(), ...SECOND_TIME_OPTIONS])
+).sort((a, b) => Number(a) - Number(b));
+const TIME_END_OPTIONS = Array.from(
+  new Set([...buildTimeEndOptions(), ...SECOND_TIME_OPTIONS])
+).sort((a, b) => Number(a) - Number(b));
 /* ---------------- Reusable small components ---------------- */
 const StatusChip = ({ r }: { r: Row }) => {
   const [show, setShow] = useState(false);
@@ -725,6 +752,28 @@ export default function OM_LoadAssignment() {
   /** Track if there are unsaved/manual edits in the grid */
   const [hasLocalEdits, setHasLocalEdits] = useState(false);
 
+  const [facultyList, setFacultyList] = useState<Faculty[]>([]);
+
+
+  // Load all faculty once on mount
+  useEffect(() => {
+    (async () => {
+      try {
+        const list = await getAllFaculty(); // should be an array
+        console.log("DEBUG faculty list from API:", list);
+        if (Array.isArray(list)) {
+          setFacultyList(list);
+        } else {
+          console.warn("getAllFaculty returned non-array:", list);
+          setFacultyList([]);
+        }
+      } catch (e) {
+        console.error("Failed to load faculty list", e);
+        setFacultyList([]);
+      }
+    })();
+  }, []);
+
   // Show the main Load Assignment content only on /om or /om/load-assignment
   const loc = useLocation();
   const isIndex = /^\/om(\/(load-assignment|home))?$/.test(loc.pathname);
@@ -826,6 +875,7 @@ export default function OM_LoadAssignment() {
       end2: editSchedule,
       room2: editAll,
       capacity: editAll,
+      mode: editSchedule,
     } as const;
   };
 
@@ -860,12 +910,52 @@ export default function OM_LoadAssignment() {
       <>—</>
     );
 
+  /** Fields that must be filled before a row can be approved */
+  const isRowIncompleteForApproval = (r: Row) => {
+    // treat “touched” rows as those with any scheduling/faculty info
+    const hasAnyData =
+      !!r.day1 || !!r.begin1 || !!r.end1 || !!r.day2 || !!r.begin2 || !!r.end2;
+
+    if (!hasAnyData) return false; // completely empty row → ignore
+
+    // REQUIRED core fields
+    const missingCore =
+      !r.section || !r.faculty || !r.mode || !r.day1 || !r.begin1 || !r.end1;
+
+    // For meeting 2: if any of the 4 is filled, require all 4
+    const hasAnyMeet2 = !!r.day2 || !!r.begin2 || !!r.end2;
+    const missingMeet2 = hasAnyMeet2 && (!r.day2 || !r.begin2 || !r.end2);
+
+    return missingCore || missingMeet2;
+  };
+
+  /** true if there is at least one row that looks edited but incomplete */
+  const hasIncompleteRows = useMemo(
+    () => rows.some((r) => isRowIncompleteForApproval(r)),
+    [rows]
+  );
+
+  type Faculty = {
+    faculty_id: string;
+    faculty_name_display: string;
+  };
+
   const facultyOptions = useMemo(() => {
-    // strictly DB-derived: only from fetched rows
-    const set = new Set<string>();
-    rows.forEach((r) => r.faculty && set.add(r.faculty));
-    return Array.from(set).sort();
-  }, [rows]);
+    return (facultyList ?? [])
+    .map(f => f.faculty_name_display || f.faculty_id)
+      .filter((name) => name.trim().length > 0)
+      .sort((a, b) => a.localeCompare(b));
+  }, [facultyList]);  
+
+  const facultyNameToId = useMemo(() => {
+    const map: Record<string, string> = {};
+    (facultyList ?? []).forEach((f) => {
+      const name = f.faculty_name_display || f.faculty_id;
+      if (name) map[name] = f.faculty_id;
+    });
+    console.log("DEBUG facultyNameToId map:", map);
+    return map;
+  }, [facultyList]);
 
   return (
     <AppShell
@@ -930,11 +1020,21 @@ export default function OM_LoadAssignment() {
                     Save Draft
                   </button>
                   <button
-                    disabled={!hasReco || approved}
-                    onClick={() => setShowApprove(true)}
+                    disabled={!hasReco || approved || hasIncompleteRows}
+                    onClick={() => {
+                      if (hasIncompleteRows) {
+                        alert(
+                          "Some rows are incomplete.\n\n" +
+                            "Please make sure each edited row has Course, Title, Units, Section, Faculty, Mode, " +
+                            "and at least a full Day1/Begin1/End1/Room1 (and a complete Day2 block if used) before approving."
+                        );
+                        return;
+                      }
+                      setShowApprove(true);
+                    }}
                     className={cls(
                       "inline-flex items-center gap-2 rounded-md px-3.5 py-2 text-sm font-medium shadow-sm",
-                      hasReco && !approved
+                      hasReco && !approved && !hasIncompleteRows
                         ? "bg-emerald-700 text-white hover:brightness-110"
                         : "bg-gray-200 text-gray-500 cursor-not-allowed"
                     )}
@@ -943,6 +1043,8 @@ export default function OM_LoadAssignment() {
                         ? "No recommendations to approve yet"
                         : approved
                         ? "Already approved"
+                        : hasIncompleteRows
+                        ? "You have incomplete edited rows"
                         : "Approve"
                     }
                   >
@@ -1122,8 +1224,12 @@ export default function OM_LoadAssignment() {
                             <td className="px-4 py-2">
                               {e.faculty ? (
                                 <ComboBox
-                                  value={r.faculty}
-                                  onChange={(v) => setCell(r.id, "faculty", v)}
+                                  value={r.faculty ?? ""}
+                                  onChange={(v) => {
+                                    setCell(r.id, "faculty", v);
+                                    const fid = facultyNameToId[v] || "";
+                                    setCell(r.id, "faculty_id", fid as any);
+                                  }}
                                   options={facultyOptions}
                                   className="w-[200px] md:w-[240px] lg:w-[280px]"
                                 />
@@ -1174,13 +1280,18 @@ export default function OM_LoadAssignment() {
                             </td>
 
                             <td className="px-2 py-2 text-center">
-                              <Cell
-                                editable={e.room1}
-                                value={r.room1}
-                                onChange={(v) => setCell(r.id, "room1", v)}
-                                className="w-[96px]"
-                                align="center"
-                              />
+                              {e.room1 ? (
+                                <SelectBox
+                                  value={r.room1 || ""}
+                                  onChange={(v) =>
+                                    setCell(r.id, "room1", v as Row["room1"])
+                                  }
+                                  options={ROOM_OPTIONS}
+                                  className="w-[100px] text-center"
+                                />
+                              ) : (
+                                <span>{r.room1 || "—"}</span>
+                              )}
                             </td>
 
                             <td className="px-2 py-2 text-center">
@@ -1223,13 +1334,18 @@ export default function OM_LoadAssignment() {
                             </td>
 
                             <td className="px-2 py-2 text-center">
-                              <Cell
-                                editable={e.room2}
-                                value={r.room2}
-                                onChange={(v) => setCell(r.id, "room2", v)}
-                                className="w-[96px]"
-                                align="center"
-                              />
+                              {e.room2 ? (
+                                <SelectBox
+                                  value={r.room2 || ""}
+                                  onChange={(v) =>
+                                    setCell(r.id, "room2", v as Row["room2"])
+                                  }
+                                  options={ROOM_OPTIONS}
+                                  className="w-[100px] text-center"
+                                />
+                              ) : (
+                                <span>{r.room2 || "—"}</span>
+                              )}
                             </td>
 
                             <td className="px-2 py-2 text-center">
@@ -1244,7 +1360,18 @@ export default function OM_LoadAssignment() {
                               />
                             </td>
                             <td className="px-2 py-2 text-center">
-                              {r.mode || "—"}
+                              {e.mode ? (
+                                <SelectBox
+                                  value={r.mode || ""}
+                                  onChange={(v) =>
+                                    setCell(r.id, "mode", v as Row["mode"])
+                                  }
+                                  options={MODE_OPTIONS}
+                                  className="w-[80px] text-center"
+                                />
+                              ) : (
+                                <span>{r.mode || "—"}</span>
+                              )}
                             </td>
                             <td className="px-2 py-2 text-center">
                               <StatusChip r={r} />

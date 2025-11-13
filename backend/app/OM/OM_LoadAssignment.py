@@ -346,10 +346,12 @@ async def _fetch_rows(user_id: str, term_id: str, db) -> Dict[str, Any]:
             "title": course_doc.get("course_title","") or "",
             "units": course_doc.get("units","") or "",
             "section": d.get("section_code","") or "",
+            # NEW: keep both faculty_id and display name so manual edits can persist correctly
+            "faculty_id": (d.get("asg") or {}).get("faculty_id") or "",
             "faculty": d.get("faculty_name_display","") or "",
             **pair,
             "capacity": d.get("enrollment_cap","") or "",
-            "mode": mode_display,  # 👈 NEW column beside capacity
+            "mode": mode_display,
             "status": "Pending" if (d.get("asg") or {}).get("faculty_id") else "Unassigned",
         }
 
@@ -448,6 +450,47 @@ async def loadassignment_handler(
         return {"ok": True, "approved": len(rows), "term": _term_label(active)}
 
     raise HTTPException(status_code=400, detail="Invalid action parameter.")
+
+@router.get("/load-assignment/faculty-all")
+async def om_get_all_faculty(db = Depends(get_db)):
+    pipeline = [
+        {
+            "$match": {"is_archived": {"$ne": True}}
+        },
+        {
+            "$lookup": {
+                "from": "users",
+                "localField": "user_id",
+                "foreignField": "user_id",
+                "as": "user"
+            }
+        },
+        {
+            "$unwind": "$user"
+        },
+        {
+            "$set": {
+                "faculty_name_display": {
+                    "$concat": ["$user.last_name", ", ", "$user.first_name"]
+                }
+            }
+        },
+        {
+            "$project": {
+                "_id": 0,
+                "faculty_id": 1,
+                "faculty_name_display": 1
+            }
+        },
+        {
+            "$sort": {
+                "faculty_name_display": 1
+            }
+        }
+    ]
+    docs = await db[COL_FACULTY].aggregate(pipeline).to_list(None)
+    return {"ok": True, "faculty": docs}
+
 
 @router.get("/load-assignment/list")
 async def get_om_load_assignment_list(user_id: str, db=Depends(get_db)):
@@ -1360,8 +1403,6 @@ def _to_compact_hhmm(hhmm: str) -> str:
     return f"{h}{mm:02d}"
 
 # ------------------------------------------------------------------------------
-
-
 
 # ---------------------- FACULTY OCCUPIED GRID + PREFS -------------------------
 def _build_faculty_grid(
@@ -2937,7 +2978,9 @@ async def _approve_and_persist(term_id: str, rows: list[dict], db):
         if not sid:
             continue
         a = by_sid.get(sid) or {}
-        fid = a.get("faculty_id") or r.get("faculty_id")
+
+        # Prefer the faculty manually chosen in the row; fall back to the latest compute suggestion.
+        fid = r.get("faculty_id") or a.get("faculty_id")
         cid = a.get("course_id") or section_to_course.get(sid)
 
         # --- Allow SHS fallback: use the row faculty_id even if missing in compute output ---
