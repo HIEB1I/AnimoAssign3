@@ -32,7 +32,7 @@ DAY_CODE_TO_NAME = {
     # Wednesday
     "W": "Wednesday", "WED": "Wednesday", "WEDNESDAY": "Wednesday",
     # Thursday (include H/R)
-    "TH": "Thursday", "THU": "Thursday", "THUR": "Thursday", "THURS": "Thursday", "THURSDAY": "Thursday",
+    "H": "Thursday", "THU": "Thursday", "THUR": "Thursday", "THURS": "Thursday", "THURSDAY": "Thursday",
     "H": "Thursday", "R": "Thursday",
     # Friday
     "F": "Friday", "FRI": "Friday", "FRIDAY": "Friday",
@@ -41,7 +41,7 @@ DAY_CODE_TO_NAME = {
 }
 
 DAY_NAME_TO_CODE = {
-    "Monday": "M", "Tuesday": "T", "Wednesday": "W", "Thursday": "TH", "Friday": "F", "Saturday": "S"
+    "Monday": "M", "Tuesday": "T", "Wednesday": "W", "Thursday": "H", "Friday": "F", "Saturday": "S"
 }
 
 DAY_ALIASES: Dict[str, List[str]] = {
@@ -138,10 +138,11 @@ def normalize_room_type(rt: str) -> str:
         return "ComLab"
     return (rt or "").strip()
 
-def campus_section_prefix(campus_name: str) -> Optional[str]:
+def campus_section_prefix(campus_name: str) -> Optional[tuple[str, ...] | str]:
     n = (campus_name or "").lower()
     if "laguna" in n or "canlubang" in n or "binan" in n or "biñan" in n:
-        return "XX"   # ← Laguna must be XX
+        # Accept both XX… and XC… section codes for Laguna
+        return ("XX", "XC")
     if "manila" in n or "taft" in n:
         return "S"
     return None
@@ -233,38 +234,90 @@ async def sections_map(term_id: str) -> Dict[str, Dict[str, Any]]:
     return out
 
 async def faculty_by_section_first(sec_ids: List[str], term_id: str) -> Dict[str, Dict[str, str]]:
+    """
+    Resolve one faculty per section (first hit).
+    Priority:
+      1) faculty_assignments joined to faculty_loads(term_id), not archived
+      2) Fallback to section_schedules.faculty_id (any row for the section)
+    Names are fetched via faculty_profiles -> users and formatted as 'LAST, FIRST'.
+    """
     if not sec_ids:
         return {}
-    loads_cur = db[COL_FAC_LOADS].find({"term_id": term_id}, {"_id": 0, "load_id": 1})
-    load_ids = [x["load_id"] async for x in loads_cur]
-    if not load_ids:
-        return {}
-    fa_cur = db[COL_FAC_ASSIGN].find(
-        {"section_id": {"$in": sec_ids}, "load_id": {"$in": load_ids}, "is_archived": {"$ne": True}},
-        {"_id": 0, "section_id": 1, "faculty_id": 1},
-    )
-    rows = [x async for x in fa_cur]
-    fac_ids = list({r["faculty_id"] for r in rows if r.get("faculty_id")})
+
+    # -------- Primary: assignments tied to loads in the active term --------
+    load_ids = [x["load_id"] async for x in db[COL_FAC_LOADS].find(
+        {"term_id": term_id}, {"_id": 0, "load_id": 1}
+    )]
+
+    fa_cond: Dict[str, Any] = {
+        "section_id": {"$in": sec_ids},
+        "is_archived": {"$ne": True},
+    }
+    # Only enforce load_id filter if we actually found loads for the term.
+    if load_ids:
+        fa_cond["load_id"] = {"$in": load_ids}
+
+    fa_rows = [x async for x in db[COL_FAC_ASSIGN].find(
+        fa_cond, {"_id": 0, "section_id": 1, "faculty_id": 1}
+    )]
+
+    # -------- Fallback: pull faculty_id directly from section_schedules --------
+    have_sid = {r.get("section_id") for r in fa_rows if r.get("section_id")}
+    missing_secs = [sid for sid in sec_ids if sid not in have_sid]
+
+    if missing_secs:
+        ss_rows = [x async for x in db[COL_SCHEDS].find(
+            {
+                "section_id": {"$in": missing_secs},
+                "faculty_id": {"$exists": True, "$ne": ""},
+            },
+            {"_id": 0, "section_id": 1, "faculty_id": 1}
+        )]
+        # prefer first found faculty per section
+        seen = set()
+        for r in ss_rows:
+            sid = r.get("section_id")
+            if sid and sid not in have_sid and sid not in seen:
+                fa_rows.append({"section_id": sid, "faculty_id": r.get("faculty_id", "")})
+                seen.add(sid)
+
+    # If still nothing, return early
+    fac_ids = list({r.get("faculty_id") for r in fa_rows if r.get("faculty_id")})
     if not fac_ids:
         return {}
-    prof_cur = db[COL_FAC_PROFILES].find(
-        {"faculty_id": {"$in": fac_ids}}, {"_id": 0, "faculty_id": 1, "user_id": 1}
-    )
-    profs = [x async for x in prof_cur]
+
+    # -------- Map faculty_id -> user_id --------
+    profs = [x async for x in db[COL_FAC_PROFILES].find(
+        {"faculty_id": {"$in": fac_ids}},
+        {"_id": 0, "faculty_id": 1, "user_id": 1}
+    )]
     uid_by_fid = {p["faculty_id"]: p.get("user_id", "") for p in profs}
+
+    # -------- Map user_id -> "LAST, FIRST" --------
     uids = [u for u in uid_by_fid.values() if u]
-    user_cur = db[COL_USERS].find(
-        {"user_id": {"$in": uids}}, {"_id": 0, "user_id": 1, "first_name": 1, "last_name": 1}
-    )
-    users = [x async for x in user_cur]
-    name_by_uid = {u["user_id"]: f'{u.get("first_name","")} {u.get("last_name","")}'.strip() for u in users}
+    users = [x async for x in db[COL_USERS].find(
+        {"user_id": {"$in": uids}},
+        {"_id": 0, "user_id": 1, "first_name": 1, "last_name": 1}
+    )]
+    def fmt(u: Dict[str, Any]) -> str:
+        ln = (u.get("last_name") or "").upper()
+        fn = (u.get("first_name") or "").upper()
+        return f"{ln}, {fn}".strip(", ").strip()
+
+    name_by_uid = {u["user_id"]: fmt(u) for u in users}
+
+    # -------- Build per-section map (keep first) --------
     out: Dict[str, Dict[str, str]] = {}
-    for r in rows:
-        sid, fid = r["section_id"], r.get("faculty_id", "")
-        if sid in out:
+    for r in fa_rows:
+        sid, fid = r.get("section_id"), r.get("faculty_id")
+        if not sid or sid in out:
             continue
         uid = uid_by_fid.get(fid, "")
-        out[sid] = {"faculty_id": fid, "user_id": uid, "faculty_name": name_by_uid.get(uid, "")}
+        out[sid] = {
+            "faculty_id": fid or "",
+            "user_id": uid or "",
+            "faculty_name": name_by_uid.get(uid, ""),  # may be "" if user missing
+        }
     return out
 
 @router.get("/roomallocation")

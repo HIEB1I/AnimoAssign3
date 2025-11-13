@@ -25,7 +25,8 @@ import {
   curriculumRemoveCourse,
   getElectiveOptions,
   searchCourseCatalog,      
-  createCatalogCourse,                  
+  createCatalogCourse, 
+  getEligibleRoomsForOffering,                    
   type ApiConflict,
   type CreateCoursePayload,  
   type CourseCatalogItem           
@@ -36,14 +37,14 @@ const DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"
 type Day = (typeof DAYS)[number];
 
 // === ADDED: Abbreviation mapping & coercers ===
-const DAY_ABBR = ["M","T","W","TH","F","S"] as const;
+const DAY_ABBR = ["M","T","W","H","F","S"] as const;
 type DayAbbr = (typeof DAY_ABBR)[number];
 
 const DAY_FULL_TO_ABBR: Record<Day, DayAbbr> = {
   Monday: "M",
   Tuesday: "T",
   Wednesday: "W",
-  Thursday: "TH",
+  Thursday: "H",
   Friday: "F",
   Saturday: "S",
 };
@@ -54,7 +55,7 @@ const DAY_ALIASES: Record<string, Day> = {
   M: "Monday", MON: "Monday", MONDAY: "Monday",
   T: "Tuesday", TU: "Tuesday", TUE: "Tuesday", TUES: "Tuesday", TUESDAY: "Tuesday",
   W: "Wednesday", WED: "Wednesday", WEDNESDAY: "Wednesday",
-  TH: "Thursday", THU: "Thursday", THUR: "Thursday", THURS: "Thursday", THURSDAY: "Thursday",
+  H: "Thursday", THU: "Thursday", THUR: "Thursday", THURS: "Thursday", THURSDAY: "Thursday",
   F: "Friday", FRI: "Friday", FRIDAY: "Friday",
   S: "Saturday", SA: "Saturday", SAT: "Saturday", SATURDAY: "Saturday",
 };
@@ -77,7 +78,7 @@ function toAbbrevDay(d?: string | null): DayAbbr | "" {
   if (["M", "MON", "MONDAY"].includes(key)) return "M";
   if (["T", "TU", "TUE", "TUES", "TUESDAY"].includes(key)) return "T";
   if (["W", "WED", "WEDNESDAY"].includes(key)) return "W";
-  if (["TH", "THU", "THUR", "THURS", "THURSDAY"].includes(key)) return "TH";
+  if (["T", "THU", "THUR", "THURS", "THURSDAY"].includes(key)) return "H";
   if (["F", "FRI", "FRIDAY"].includes(key)) return "F";
   if (["S", "SA", "SAT", "SATURDAY"].includes(key)) return "S";
   // already full name?
@@ -530,32 +531,124 @@ export default function CourseOfferingsPage() {
 // ---------- RoomSelectBox (SelectBox-powered) ----------
 const RoomSelectBox: React.FC<{
   rooms: RoomOption[];
-  value: string | null | undefined;
+  value: string | null | undefined;   // room_id
   disabled?: boolean;
   className?: string;
   onChange: (roomId: string | null) => void;
 }> = ({ rooms, value, disabled, className, onChange }) => {
-  const placeholder = disabled ? "— Set day & time —" : "— Select room —";
+  // prefer TBA if present and nothing is selected
+  const tbaId =
+    rooms.find(r => String(r.room_number || "").replace(/[-–—]/g, "").trim().toUpperCase() === "TBA")
+      ?.room_id ?? null;
+
+  const opts = React.useMemo(
+    () => rooms.map(r => ({ id: r.room_id, label: r.room_number || r.room_id })),
+    [rooms]
+  );
+
+  const currentLabel = React.useMemo(() => {
+    const currentId = (value ?? tbaId ?? "") as string;
+    const hit = opts.find(o => o.id === currentId);
+    return hit ? hit.label : "—";
+  }, [opts, value, tbaId]);
+
   return (
-    <div className={cls("relative z-[200]", className)}>
-      <select
+    <div className={cls("relative z-[1000] w-full", className)}>
+      <SelectBox
+        value={currentLabel}
+        onChange={(label: string) => {
+          const match = opts.find(o => o.label === label);
+          onChange(match?.id ?? tbaId ?? null);
+        }}
+        options={opts.map(o => o.label)}
         disabled={!!disabled}
-        value={value ?? ""}
-        onChange={(e) => onChange(e.target.value ? e.target.value : null)}
-        className={SOFT_SELECT + " w-full pr-8"}
-      >
-        <option value="">{placeholder}</option>
-        {rooms.map((r) => {
-          const label = r.building ? `${r.building} ${r.room_number}` : r.room_number;
-          return (
-            <option key={r.room_id} value={r.room_id}>
-              {label}
-            </option>
-          );
-        })}
-      </select>
-      <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-500" />
+        className="!min-w-[140px] w-full max-w-none"
+      />
     </div>
+  );
+};
+
+// ------ EligibleRoomSelect: fetch rooms that are truly available for the slot ------
+const EligibleRoomSelect: React.FC<{
+  userId: string;
+  campusId: string;
+  spec: {
+    day?: string | null;
+    start?: string | null;
+    end?: string | null;
+    roomType?: string | null;
+    capacity?: number | null;
+    excludeScheduleIds?: string[];
+  };
+  fallbackRooms: RoomOption[];  // e.g., data.room_options (used when slot not ready)
+  value: string | null | undefined;
+  disabled?: boolean;
+  className?: string;
+  onChange: (roomId: string | null) => void;
+}> = ({ userId, campusId, spec, fallbackRooms, value, disabled, className, onChange }) => {
+  const [opts, setOpts] = useState<RoomOption[]>([]);
+
+  const ready =
+    !!toAbbrevDay(spec.day || "") &&
+    toHHMM(spec.start || "").length === 4 &&
+    toHHMM(spec.end || "").length === 4;
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (!ready || disabled) {
+        setOpts(filterRoomsByCap(fallbackRooms, spec.capacity));
+        return;
+      }
+      try {
+        const payload = {
+          campus_id: campusId,
+          day: toAbbrevDay(spec.day || ""),
+          start: toHHMM(spec.start || ""),
+          end: toHHMM(spec.end || ""),
+          required_type: spec.roomType || undefined,
+          min_capacity: spec.capacity ?? undefined,
+          exclude_schedule_ids: spec.excludeScheduleIds || [],
+        } as any;
+
+        const res: any = await getEligibleRoomsForOffering(userId, payload);
+        const list: RoomOption[] = Array.isArray(res?.rooms) ? res.rooms : (res ?? []);
+
+        const filtered = filterRoomsByCap(list, spec.capacity).filter((r) => {
+          if (!spec.roomType) return true;
+          const a = String(r.room_type || "").toLowerCase();
+          const b = String(spec.roomType || "").toLowerCase();
+          return a === b;
+        });
+
+        if (!cancelled) setOpts(filtered);
+
+      } catch {
+        if (!cancelled) setOpts([]);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [
+    userId,
+    campusId,
+    spec.day,
+    spec.start,
+    spec.end,
+    spec.roomType,
+    spec.capacity,
+    spec.excludeScheduleIds,
+    disabled,
+    fallbackRooms,
+  ]);
+
+  return (
+    <RoomSelectBox
+      rooms={opts}
+      value={value}
+      disabled={disabled || !ready}
+      className={className}
+      onChange={onChange}
+    />
   );
 };
 
@@ -1491,7 +1584,8 @@ if (isGE) {
                 </div>
               ) : (
                 Object.entries(groups).map(([idLabel, byProgram]) => (
-                  <div key={idLabel} className="rounded-xl border border-gray-300 bg-white shadow-sm overflow-hidden mb-6">
+                  <div   key={idLabel}
+  className="rounded-xl border border-gray-300 bg-white shadow-sm overflow-visible mb-6">
                     <div className="bg-[#21804A] text-white px-4 py-3 text-center font-semibold">{idLabel}</div>
                     {Object.entries(byProgram).map(([progLabel, list]) => {
                       const key = `${idLabel}::${progLabel}`;
@@ -1513,7 +1607,7 @@ if (isGE) {
 
                           {!isCollapsed && (
                             <div className="p-0">
-                              <div className="overflow-x-auto">
+                              <div className="overflow-x-auto" style={{ overflowY: "visible" }}>
                                 <table className={`w-full text-sm border-collapse ${inEditUI ? "table-auto" : "table-fixed"}`}>
                                   <colgroup>
                                     <col style={{ width: 96 }} />   {/* Program No. */}
@@ -1901,10 +1995,20 @@ if (isGE) {
                                           )}
                                           </td>
                                           <td className="px-3 py-2 border border-gray-200 bg-white relative overflow-visible">
-                                            <RoomSelectBox
-                                              rooms={filterRoomsByCap(data?.room_options || [])}
+                                            <EligibleRoomSelect
+                                              userId={user?.userId}
+                                              campusId={data?.campus?.campus_id || ""}
+                                              spec={{
+                                                day: (editing?.draft.slot1?.day || r.slot1?.day || "") as string,
+                                                start: editing?.draft.slot1?.start_time || r.slot1?.start_time || "",
+                                                end: editing?.draft.slot1?.end_time || r.slot1?.end_time || "",
+                                                roomType: (r as any)?.course?.room_type || null,
+                                                capacity: r.section.enrollment_cap ?? null,
+                                                excludeScheduleIds: [r.slot1?.schedule_id, r.slot2?.schedule_id].filter(Boolean) as string[],
+                                              }}
+                                              fallbackRooms={filterRoomsByCap(data?.room_options || [], r.section.enrollment_cap)}
                                               value={editing?.draft.slot1?.room_id || null}
-                                              disabled={!slotReady(editing?.draft.slot1) && !slotReady(r.slot1 as any)} // ← fallback to row slot
+                                              disabled={!slotReady(editing?.draft.slot1) && !slotReady(r.slot1 as any)}
                                               onChange={(roomId) =>
                                                 setEditing(p => p && ({
                                                   ...p,
@@ -1971,8 +2075,18 @@ if (isGE) {
                                           )}
                                           </td>
                                           <td className="px-3 py-2 border border-gray-200 bg-white relative overflow-visible">
-                                            <RoomSelectBox
-                                              rooms={filterRoomsByCap(data?.room_options || [])}
+                                            <EligibleRoomSelect
+                                              userId={user?.userId}
+                                              campusId={data?.campus?.campus_id || ""}
+                                              spec={{
+                                                day: (editing?.draft.slot2?.day || r.slot2?.day || "") as string,
+                                                start: editing?.draft.slot2?.start_time || r.slot2?.start_time || "",
+                                                end: editing?.draft.slot2?.end_time || r.slot2?.end_time || "",
+                                                roomType: (r as any)?.slot2?.room_type || (r as any)?.slot1?.room_type || null,
+                                                capacity: r.section.enrollment_cap ?? null,
+                                                excludeScheduleIds: [r.slot1?.schedule_id, r.slot2?.schedule_id].filter(Boolean) as string[],
+                                              }}
+                                              fallbackRooms={filterRoomsByCap(data?.room_options || [], r.section.enrollment_cap)}
                                               value={editing?.draft.slot2?.room_id || null}
                                               disabled={!slotReady(editing?.draft.slot2) && !slotReady(r.slot2 as any)}
                                               onChange={(roomId) =>

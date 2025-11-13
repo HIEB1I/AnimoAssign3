@@ -931,34 +931,77 @@ export async function getElectiveOptions(
 }
 
 /* ---- Eligible rooms for a section (capacity + room_type guard) ---- */
+/* ---- Eligible rooms for a section (capacity + room_type guard) ---- */
 export type EligibleRoomsParams = {
   section_id?: string;
+
+  /** Preferred: server reads this as a minimum seat requirement */
+  min_capacity?: number;
+  /** Back-compat from the caller: we’ll map this to min_capacity */
   enrollment_cap?: number;
+
+  /** Preferred: server expects this key */
+  required_type?: string;
+  /** Back-compat from the caller: we’ll map this to required_type */
   room_type?: string;
+
   campus_id?: string;
-  // optional time filter (if backend supports clash checks)
+
+  // time filter for clash checks
   day?: string;
+  /** Back-compat from the caller; we’ll emit as `start` */
   start_time?: string;
+  /** Back-compat from the caller; we’ll emit as `end` */
   end_time?: string;
+
+  /** IDs to ignore when checking conflicts (CSV or array) */
+  exclude_schedule_ids?: string | string[];
 };
+
 export async function getEligibleRoomsForOffering(
   userId: string,
   params: EligibleRoomsParams
-): Promise<
-  { ok: boolean; rooms: Array<{ room_id: string; room_number: string; room_type: string; capacity: number; building?: string }> }
-> {
-  const qp = { ...params };
-  // normalize times if present
-  if (qp.start_time) qp.start_time = _normTime(qp.start_time) || qp.start_time;
-  if (qp.end_time) qp.end_time = _normTime(qp.end_time) || qp.end_time;
+): Promise<{ ok: boolean; rooms: Array<{ room_id: string; room_number: string; room_type: string; capacity: number; building?: string }> }> {
+  const qp: Record<string, any> = { ...params };
+
+  // --- Times: send server's expected keys `start` / `end`
+  const s = _normTime(qp.start ?? qp.start_time);
+  const e = _normTime(qp.end ?? qp.end_time);
+  if (s) qp.start = s;
+  if (e) qp.end = e;
+  delete qp.start_time;
+  delete qp.end_time;
+
+  // --- Capacity/type: accept either naming, send server's expected keys
+  qp.required_type = qp.required_type ?? qp.room_type ?? undefined;
+  qp.min_capacity = qp.min_capacity ?? qp.enrollment_cap ?? undefined;
+  delete qp.room_type;
+  delete qp.enrollment_cap;
+
+  // --- Day normalization: accept "TH" or "H" for Thursday; backend is tolerant but we help it.
+  const rawDay = String(qp.day || "").toUpperCase().trim();
+  qp.day = rawDay === "TH" ? "H" : rawDay; // keep M T W H F S
+
+  // --- Exclusions: ensure comma-separated string
+  if (Array.isArray(qp.exclude_schedule_ids)) {
+    qp.exclude_schedule_ids = qp.exclude_schedule_ids.join(",");
+  }
 
   const url = `${API_BASE}/apo/courseofferings${q({
     userId,
     action: "eligibleRooms",
-    ...qp,
+    campus_id: qp.campus_id,
+    day: qp.day,
+    start: qp.start,
+    end: qp.end,
+    required_type: qp.required_type,
+    min_capacity: qp.min_capacity,
+    exclude_schedule_ids: qp.exclude_schedule_ids,
   })}`;
+
   return get(url);
 }
+
 export async function searchCourseCatalog(
   userId: string,
   params: { q?: string; limit?: number; department_id?: string; program_level?: string } = {}

@@ -46,11 +46,8 @@ function ActionMenu({
           <button
            
             onClick={() => {
-             
-              setOpen(false);
-             
-              onViewSchedule();
-           
+              setOpen(false);             
+              onViewSchedule();           
             }}
            
             className="flex w-full items-center gap-2 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
