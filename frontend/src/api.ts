@@ -2075,14 +2075,22 @@ export async function getFSOptions(params?: { q?: string; toDepartment?: ToDept;
 }
 
 
-export async function listFacultyService(params?: { status?: string; dept?: string; search?: string }) {
+export async function listFacultyService(params?: {
+  status?: string;
+  dept?: string;
+  search?: string;
+  box?: "sent" | "received"; 
+}) {
   const sp = new URLSearchParams();
   if (params?.status) sp.set("status", params.status);
   if (params?.dept) sp.set("dept", params.dept);
   if (params?.search) sp.set("search", params.search);
+  if (params?.box) sp.set("box", params.box); 
+
   const { data } = await api.get(`/chair/faculty-service/list?${sp.toString()}`);
   return data as { ok: boolean; rows: FacultyServiceRow[] };
 }
+
 
 export async function createFacultyService(payload: {
   course_code: string;
