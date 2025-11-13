@@ -241,10 +241,6 @@ const SOFT_INPUT =
   "w-full min-w-0 rounded-lg border border-gray-300 bg-white px-2.5 py-2 text-sm shadow-sm " +
   "focus:outline-none focus:ring-2 focus:ring-emerald-200 focus:border-emerald-300";
 
-const SOFT_SELECT =
-  "block w-full min-w-0 max-w-full appearance-none rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm " +
-  "shadow-sm outline-none focus:ring-2 focus:ring-emerald-200 focus:border-emerald-300";
-
 /* ---------------------------------- types ---------------------------------- */
 
 type OfferingRow = {
@@ -1841,46 +1837,46 @@ if (isGE) {
                                             const specificList = (sourceList || []).filter((o) =>
                                               isSpecificElectiveType(o.type_of_course || "")
                                             );
+                                            const placeholderLabel = "— Select specific elective —";
+                                            const specificOptions = specificList.map((opt) => ({
+                                              id: opt.course_id,
+                                              label: `${codeOf(opt.course_code)} • ${opt.course_title}`,
+                                            }));
 
-                                            const currentSpecific = editing?.draft.specific_course_id || (isSpecific ? r.course.course_id : "");
+                                            const currentSpecificId =
+                                              editing?.draft.specific_course_id || (isSpecific ? r.course.course_id : "");
+                                            const currentLabel =
+                                              currentSpecificId
+                                                ? specificOptions.find((o) => o.id === currentSpecificId)?.label || placeholderLabel
+                                                : placeholderLabel;
 
+                                            return (
+                                              <div className="mt-2">
+                                                <label className="text-xs font-medium text-slate-700 mb-1 block">
+                                                  Specific Elective
+                                                </label>
+                                                <SelectBox
+                                                  value={currentLabel}
+                                                  onChange={(label: string) => {
+                                                    const hit = specificOptions.find((o) => o.label === label);
+                                                    const sid = hit?.id || "";
+                                                    setEditing((p) =>
+                                                      p && {
+                                                        ...p,
+                                                        draft: {
+                                                          ...p.draft,
+                                                          for_placeholder_course_id: parentId || undefined,
+                                                          specific_course_id: sid || undefined,
+                                                        },
+                                                      }
+                                                    );
+                                                  }}
+                                                  options={[placeholderLabel, ...specificOptions.map((o) => o.label)]}
+                                                  className="!min-w-0 w-full max-w-full"
+                                                />
+                                              </div>
+                                            );
 
-                                              return (
-                                                <div className="mt-2">
-                                                  <label className="text-xs font-medium text-slate-700 mb-1 block">Specific Elective</label>
-                                                  <div className="relative">
-                                                    <select
-                                                      className={SOFT_SELECT}
-                                                      value={currentSpecific || ""}
-                                                      onChange={(e) => {
-                                                        const sid = e.target.value || "";
-                                                        setEditing((p) =>
-                                                          p && {
-                                                            ...p,
-                                                            draft: {
-                                                              ...p.draft,
-                                                              // keep parent linkage if we know it
-                                                              for_placeholder_course_id: parentId || undefined,
-                                                              specific_course_id: sid || undefined,
-                                                            },
-                                                          }
-                                                        );
-                                                      }}
-                                                    >
-                                                      <option value="">— Select specific elective —</option>
-                                                      {specificList.map((opt) => {
-                                                        const code = codeOf(opt.course_code);
-                                                        return (
-                                                          <option key={opt.course_id} value={opt.course_id}>
-                                                            {code} • {opt.course_title}
-                                                          </option>
-                                                        );
-                                                      })}
-                                                    </select>
-                                                    <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-500" />
-                                                  </div>
-                                                </div>
-                                              );
                                             })()}
                                           </td>
 
@@ -2256,17 +2252,28 @@ if (isGE) {
                                                       </div>
 
                                                       {/* Secondary select only for Elective placeholders */}
-                                                      {rowIsElective && (
-                                                        <div className="mb-2">
-                                                          <label className="text-xs font-medium text-slate-700 mb-1 block">
-                                                            Specific Elective
-                                                          </label>
-                                                          <div className="relative">
-                                                            <select
-                                                              className={SOFT_SELECT}
-                                                              value={addElectiveSpecificId}
-                                                              onChange={(e) => {
-                                                                const sid = e.target.value;
+                                                      {rowIsElective && (() => {
+                                                        const placeholderLabel = "— Select specific elective —";
+                                                        const specificOptions = specificElectives.map((opt) => ({
+                                                          id: opt.course_id,
+                                                          label: `${codeOf(opt.course_code)} • ${opt.course_title}`,
+                                                        }));
+
+                                                        const currentLabel =
+                                                          addElectiveSpecificId
+                                                            ? specificOptions.find((o) => o.id === addElectiveSpecificId)?.label || placeholderLabel
+                                                            : placeholderLabel;
+
+                                                        return (
+                                                          <div className="mb-2">
+                                                            <label className="text-xs font-medium text-slate-700 mb-1 block">
+                                                              Specific Elective
+                                                            </label>
+                                                            <SelectBox
+                                                              value={currentLabel}
+                                                              onChange={(label: string) => {
+                                                                const hit = specificOptions.find((o) => o.label === label);
+                                                                const sid = hit?.id || "";
                                                                 setAddElectiveSpecificId(sid);
                                                                 setAddDraft((p) => ({
                                                                   ...p,
@@ -2275,21 +2282,12 @@ if (isGE) {
                                                                   course_id: sid || "",
                                                                 }));
                                                               }}
-                                                            >
-                                                              <option value="">— Select specific elective —</option>
-                                                              {specificElectives.map((opt) => {
-                                                                const code = codeOf(opt.course_code);
-                                                                return (
-                                                                  <option value={opt.course_id} key={opt.course_id}>
-                                                                    {code} • {opt.course_title}
-                                                                  </option>
-                                                                );
-                                                              })}
-                                                            </select>
-                                                            <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-500" />
+                                                              options={[placeholderLabel, ...specificOptions.map((o) => o.label)]}
+                                                              className="!min-w-0 w-full max-w-full"
+                                                            />
                                                           </div>
-                                                        </div>
-                                                      )}
+                                                        );
+                                                      })()}
                                                     </>
                                                   );
                                                 })()}
