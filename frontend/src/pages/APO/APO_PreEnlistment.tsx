@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
-import Papa, { type ParseResult } from "papaparse";
+//import Papa, { type ParseResult } from "papaparse";
+import Papa from "papaparse";
 import { Pencil, Check, Upload, Archive, Download, X } from "lucide-react";
 import TopBar from "../../component/TopBar";
 import Tabs from "../../component/Tabs";
@@ -366,7 +367,7 @@ const saveNewCourseRow = async () => {
     }
   };
 
-  const handleImportCourses = (event: React.ChangeEvent<HTMLInputElement>) => {
+/*  const handleImportCourses = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file || !user?.userId) return;
     Papa.parse<CountCsvRow>(file, {
@@ -391,8 +392,8 @@ const saveNewCourseRow = async () => {
       },
     });
   };
-
-  const handleImportStats = (event: React.ChangeEvent<HTMLInputElement>) => {
+  
+   const handleImportStats = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file || !user?.userId) return;
     Papa.parse<StatCsvRow>(file, {
@@ -412,6 +413,82 @@ const saveNewCourseRow = async () => {
       },
     });
   };
+
+  
+  
+  */
+
+ // Minimal shape we actually use
+type CsvResult<T> = {
+  data: T[];
+  errors?: unknown[];
+  meta?: unknown;
+};
+
+const handleImportCourses = (event: React.ChangeEvent<HTMLInputElement>) => {
+  const file = event.target.files?.[0];
+  if (!file || !user?.userId) return;
+
+  Papa.parse(file, {
+    header: true,
+    skipEmptyLines: true,
+    complete: async (results: CsvResult<CountCsvRow>) => {
+      const rows = results.data
+        .map((r: CountCsvRow) => {
+          if (!r.Campus && campusName) (r as any).Campus = campusName;
+          return r;
+        })
+        .filter(
+          (r: CountCsvRow) =>
+            r["Course Code"] && r.Career && r.Campus && r.Count !== undefined
+        );
+
+      await importApoPreenlistment(
+        user.userId,
+        rows,
+        [],
+        undefined,
+        { replaceCount: true },
+        campusName || undefined
+      );
+      await refresh();
+      event.currentTarget.value = "";
+    },
+    error: (err: unknown) => {
+      console.error("CSV parse error (courses):", err);
+      event.currentTarget.value = "";
+    },
+  });
+};
+
+const handleImportStats = (event: React.ChangeEvent<HTMLInputElement>) => {
+  const file = event.target.files?.[0];
+  if (!file || !user?.userId) return;
+
+  Papa.parse(file, {
+    header: true,
+    skipEmptyLines: true,
+    complete: async (results: CsvResult<StatCsvRow>) => {
+      const rows = results.data.filter((r: StatCsvRow) => !!r.Program);
+
+      await importApoPreenlistment(
+        user.userId,
+        [],
+        rows,
+        undefined,
+        { replaceStats: true },
+        campusName || undefined
+      );
+      await refresh();
+      event.currentTarget.value = "";
+    },
+    error: (err: unknown) => {
+      console.error("CSV parse error (stats):", err);
+      event.currentTarget.value = "";
+    },
+  });
+};
+
 
   const [archiveCountTotal, setArchiveCountTotal] = useState(0);
   const [archiveStatsTotals, setArchiveStatsTotals] = useState([0, 0, 0, 0]);
