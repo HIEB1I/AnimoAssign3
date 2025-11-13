@@ -643,6 +643,15 @@ export default function OM_LoadAssignment() {
 
   async function runAutoAssign() {
     if (!userId) return;
+
+    // FRONTEND GUARD: block auto-assign while there are unsaved edits
+    if (hasLocalEdits) {
+      alert(
+        "Auto-assign is disabled while you have manual edits.\n\nPlease save/discard your changes or refresh the list before running Auto-assign."
+      );
+      return;
+    }
+
     try {
       setIsAssigning(true);
       const res = await runOmAutoAssign({ user_id: userId });
@@ -650,6 +659,7 @@ export default function OM_LoadAssignment() {
       setTerm(typeof res?.term === "string" ? res.term : "");
       setMode("run");
       setApproved(false);
+      setHasLocalEdits(false); // result from algorithm is the new clean baseline
     } catch (e) {
       console.error(e);
       alert(`Auto-assign failed: ${String(e)}`);
@@ -712,6 +722,9 @@ export default function OM_LoadAssignment() {
     open: false,
   });
 
+  /** Track if there are unsaved/manual edits in the grid */
+  const [hasLocalEdits, setHasLocalEdits] = useState(false);
+
   // Show the main Load Assignment content only on /om or /om/load-assignment
   const loc = useLocation();
   const isIndex = /^\/om(\/(load-assignment|home))?$/.test(loc.pathname);
@@ -729,10 +742,12 @@ export default function OM_LoadAssignment() {
     };
   }, []);
 
-  const setCell = <K extends keyof Row>(id: string, key: K, val: Row[K]) =>
+  const setCell = <K extends keyof Row>(id: string, key: K, val: Row[K]) => {
+    setHasLocalEdits(true); // mark grid as dirty
     setRows((prev) =>
       prev.map((r) => (r.id === id ? { ...r, [key]: val } : r))
     );
+  };
 
   const filtered = rows.filter((r) => {
     const s = search.trim().toLowerCase();
@@ -762,6 +777,7 @@ export default function OM_LoadAssignment() {
     setTerm(typeof res?.term === "string" ? res.term : ""); // term label joined in backend
     setMode("run");
     setApproved(false);
+    setHasLocalEdits(false);
   };
 
   const addRow = () => {
@@ -789,6 +805,7 @@ export default function OM_LoadAssignment() {
     ]);
     setMode("manual");
     setApproved(false);
+    setHasLocalEdits(true);
   };
 
   const getEditFlags = (r: Row) => {
@@ -1226,7 +1243,9 @@ export default function OM_LoadAssignment() {
                                 align="center"
                               />
                             </td>
-                            <td className="px-2 py-2 text-center">{r.mode || "—"}</td>
+                            <td className="px-2 py-2 text-center">
+                              {r.mode || "—"}
+                            </td>
                             <td className="px-2 py-2 text-center">
                               <StatusChip r={r} />
                             </td>
@@ -1312,9 +1331,13 @@ export default function OM_LoadAssignment() {
                   <div className="flex items-center gap-2">
                     <button
                       onClick={runAutoAssign}
-                      disabled={isAssigning}
+                      disabled={isAssigning || hasLocalEdits}
                       className="inline-flex items-center gap-2 rounded-md border border-emerald-700 text-emerald-800 bg-white px-3.5 py-2 text-sm font-medium hover:bg-emerald-50 disabled:opacity-60"
-                      title="Run auto-assignment algorithm"
+                      title={
+                        hasLocalEdits
+                          ? "Auto-assign is disabled while you have manual edits. Save or refresh first."
+                          : "Run auto-assignment algorithm"
+                      }
                     >
                       <Play className="h-4 w-4" />
                       {isAssigning ? "Assigning…" : "Auto-assign"}
@@ -1344,7 +1367,6 @@ export default function OM_LoadAssignment() {
             }
           })();
         }}
-        
       />
 
       <SendModal
