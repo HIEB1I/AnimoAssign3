@@ -920,7 +920,11 @@ export default function FACULTY_Preferences() {
 
   const { past: openPassedPage } = useCountdown(prefsWindow.openISO || "");
   const { past: deadlinePassedPage } = useCountdown(prefsWindow.deadlineISO || "");
-  const editingLocked = !openPassedPage || deadlinePassedPage;
+  // const editingLocked = !openPassedPage || deadlinePassedPage;
+
+  // 🚫 TEMP: always allow editing so we can test DB updates
+  const editingLocked = false;
+
 
   const [kacOptions, setKacOptions] = useState<Array<{kac_id:string; kac_code:string; kac_name:string}>>([]);
   const [daysMaster, setDaysMaster] = useState<string[]>([]);

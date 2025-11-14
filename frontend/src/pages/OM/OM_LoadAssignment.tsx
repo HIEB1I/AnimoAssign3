@@ -6,9 +6,11 @@ import { submitOmLoadAssignment } from "../../api.ts";
 
 import {
   getOmLoadAssignmentList,
-  getOmLoadAssignmentProfile, // ← add this
-  getAllFaculty,
+  submitOmLoadAssignment,
+  getOmHeader,              // ✅ use shared header
 } from "../../api";
+
+
 
 import { cls } from "../../utilities/cls";
 import {
@@ -652,93 +654,53 @@ const RequestChangeModal = ({
 /* ---------------- Main ---------------- */
 export default function OM_LoadAssignment() {
   // Session (DB-driven, no hardcodes)
-  const session: {
-    userId?: string;
-    fullName?: string;
-    roles?: string[];
-  } | null = (() => {
-    try {
-      return JSON.parse(localStorage.getItem("animo.user") || "null");
-    } catch {
-      return null;
-    }
+    const session: { userId?: string; fullName?: string; roles?: string[] } | null = (() => {
+    try { return JSON.parse(localStorage.getItem("animo.user") || "null"); } catch { return null; }
   })();
+
 
   const userId = session?.userId || "";
 
-  const [isAssigning, setIsAssigning] = useState(false);
 
-  async function runAutoAssign() {
-    if (!userId) return;
 
-    // FRONTEND GUARD: block auto-assign while there are unsaved edits
-    if (hasLocalEdits) {
-      alert(
-        "Auto-assign is disabled while you have manual edits.\n\nPlease save/discard your changes or refresh the list before running Auto-assign."
-      );
-      return;
-    }
+    // TopBar profile from DB (fallback to session)
+  const [profileName, setProfileName] = useState<string>(session?.fullName || "");
+const [profileSubtitle, setProfileSubtitle] = useState<string>(
+  (session?.roles && session.roles[0]) || ""
+);
 
-    try {
-      setIsAssigning(true);
-      const res = await runOmAutoAssign({ user_id: userId });
-      setRows(Array.isArray(res?.rows) ? res.rows : []);
-      setTerm(typeof res?.term === "string" ? res.term : "");
-      setMode("run");
-      setApproved(false);
-      setHasLocalEdits(false); // result from algorithm is the new clean baseline
-    } catch (e) {
-      console.error(e);
-      alert(`Auto-assign failed: ${String(e)}`);
-    } finally {
-      setIsAssigning(false);
-    }
-  }
-
-  const normRoles = (session?.roles || []).map((r) =>
-    String(r).toLowerCase().replace(/\s+/g, "_")
-  );
-
-  // TopBar profile from DB (fallback to session)
-  const [profileName, setProfileName] = useState<string>(
-    session?.fullName || ""
-  );
-  const [profileSubtitle, setProfileSubtitle] = useState<string>("");
 
   // Term label from backend (no hardcoding)
   const [term, setTerm] = useState<string>("");
 
-  useEffect(() => {
-    (async () => {
-      if (!userId) return;
-      try {
-        const p = await getOmLoadAssignmentProfile(userId);
-        // role text
-        let roleTitle = p?.position_title || "";
-        // append " | Department of …" like CHAIR
-        if (roleTitle && p?.dept_name) roleTitle = `${roleTitle} | ${p.dept_name}`;
-        setProfileSubtitle(roleTitle);
-        setProfileName(p?.full_name || "");
+ useEffect(() => {
+  (async () => {
+    if (!userId) return;
 
-        // ✅ 2) Updated role/subtitle logic (replaces the old session?.roles check)
-        if (
-          normRoles.includes("office_manager") ||
-          normRoles.includes("role0006")
-        ) {
-          setProfileSubtitle("Office Manager");
-        } else if (p?.position_title) {
-          setProfileSubtitle(p.position_title);
-        }
+    try {
+      const header = await getOmHeader(undefined, userId);
 
-        // ✅ 3) Updated name fallback logic (after subtitle)
-        if (!profileName)
-          setProfileName(p?.full_name || session?.fullName || "");
-      } catch {
-        /* ignore; non-blocking for UI */
+      // Name: prefer header.profileName, then session
+      if (header?.profileName) {
+        setProfileName(header.profileName);
+      } else if (session?.fullName) {
+        setProfileName(session.fullName);
       }
-    })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [userId]);
+
+      // Subtitle: prefer header.profileSubtitle (which should be role_type-based)
+      if (header?.profileSubtitle) {
+        setProfileSubtitle(header.profileSubtitle);
+      } else if (header?.role_id && session?.roles?.length) {
+        // very light fallback if needed
+        setProfileSubtitle(session.roles[0]);
+      }
+    } catch {
+      // On error, keep existing state (session-based)
+    }
+  })();
+}, [userId]);
+
+
 
 
   const [search, setSearch] = useState("");

@@ -367,6 +367,13 @@ async def preferences_root(
         if not payload:
             raise HTTPException(status_code=400, detail="Missing payload")
 
+        # 1) Map userId -> faculty_id FIRST
+        fac = await db.faculty_profiles.find_one({"user_id": userId}, {"_id": 0, "faculty_id": 1})
+        if not fac:
+            raise HTTPException(status_code=400, detail="Faculty profile not found for user.")
+        faculty_id = fac["faculty_id"]
+
+        # 2) Resolve active term
         term_doc = await _active_term_doc()
         if not term_doc:
             raise HTTPException(status_code=400, detail="Active term not found; cannot submit preferences.")
@@ -374,29 +381,18 @@ async def preferences_root(
         if not term_id:
             raise HTTPException(status_code=400, detail="Active term not found; cannot submit preferences.")
 
-        open_dt, close_dt = _prefs_window_from_term(term_doc)
-        now = datetime.now(timezone.utc)
-        if now < open_dt:
-            raise HTTPException(status_code=403, detail="Preferences window has not opened yet.")
-        if now > close_dt:
-            raise HTTPException(status_code=403, detail="Preferences window is already closed.")
+        # 🚫 TEMP: disable window enforcement so you can test DB updates
+        # open_dt, close_dt = _prefs_window_from_term(term_doc)
+        # now = datetime.now(timezone.utc)
+        # if now < open_dt:
+        #     raise HTTPException(status_code=403, detail="Preferences window has not opened yet.")
+        # if now > close_dt:
+        #     raise HTTPException(status_code=403, detail="Preferences window is already closed.")
 
-        faculty_id = fac["faculty_id"]
-
-        # Map userId -> faculty_id
-        fac = await db.faculty_profiles.find_one({"user_id": userId}, {"_id": 0, "faculty_id": 1})
-        if not fac:
-            raise HTTPException(status_code=400, detail="Faculty profile not found for user.")
-
-        term_id = termId or await _active_term_id()
-        if not term_id:
-            raise HTTPException(status_code=400, detail="Active term not found; cannot submit preferences.")
-
-        faculty_id = fac["faculty_id"]
-
-        # 1) Canonical write to `deloadings` and get compact summary for faculty_preferences
+        # 3) Canonical write to `deloadings`
         deload_items = list(payload.get("deloading_data") or [])
         summary_deloading_data = await _sync_deloadings(db, faculty_id, term_id, deload_items)
+
 
         # 2) Coerce/normalize all other fields
         def _as_list_str(x: Any) -> List[str]:

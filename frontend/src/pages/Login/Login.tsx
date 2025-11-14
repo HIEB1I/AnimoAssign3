@@ -26,7 +26,7 @@ const Login: React.FC = () => {
       let dest: string | null = null;
       if (roles.includes("apo")) {
         dest = "/apo/preenlistment";
-      } else if (roles.includes("office manager")) {
+      }else if (roles.includes("office manager") || roles.includes("gs coordinator")) {
         dest = "/om/load-assignment";
       } else if (roles.includes("department chair") || roles.includes("deparment chair")) {
         dest = "/chair";
