@@ -472,10 +472,35 @@ export async function archiveApoPreenlistment(
   const { data } = await axios.post(url);
   return data;
 }
+export async function reactivateApoPreenlistment(
+  userId: string,
+  termId: string,
+  campusName?: "MANILA" | "LAGUNA"
+) {
+  const qs = new URLSearchParams({ userId, action: "reactivate", termId });
+  if (campusName) qs.set("campus", campusName);
+  const url = join(API_BASE, `apo/preenlistment?${qs.toString()}`);
+  const { data } = await axios.post(url);
+  return data;
+}
 
 /* =========================================================
    ===============  APO: COURSE OFFERINGS  =================
    ========================================================= */
+
+// --- Electives result typing (global pool comes from backend) ---
+export type SpecificElective = {
+  course_id: string;
+  course_code: string | string[];
+  course_title: string;
+};
+
+export type ApoOfferingsResponse = {
+  rows: any[];
+  course_options_by_group?: Record<string, any[]>;
+  all_specific_electives?: SpecificElective[]; // backend may omit; we’ll default it
+  [k: string]: any;
+};
 
 export type SlotPayload = {
   room_id?: string | null;
@@ -515,28 +540,31 @@ export type EditRowPayload = {
 
 export type AddRowPayload = {
   batch_id: string;
-  program_id?: string;
+  program_id: string;
 
-  /** Normal path uses course_id. Elective path uses for_placeholder_course_id + specific_course_id. */
-  course_id?: string;
-  for_placeholder_course_id?: string;
-  specific_course_id?: string;
-
-  enrollment_cap?: number | null;
-  remarks?: string;
-
-  // GE/SHS may send time-only or time+room on create; limited types must send room+valid time.
-  slot1?: SlotPayload;
-  slot2?: SlotPayload;
+  // one of these paths will be used:
+  course_id?: string;                       // normal (non-elective) OR placeholder w/o resolving
+  for_placeholder_course_id?: string;       // elective: placeholder (e.g. ITELEC1)
+  specific_course_id?: string;              // elective: chosen specific (e.g. ISDESTH)
 
   section_code?: string;
+  enrollment_cap?: number | "";
+  remarks?: string;
+
+  // optional inline schedule + faculty (unchanged)
+  slot1?: SlotPayload;
+  slot2?: SlotPayload;
+  faculty_user_id?: string | null;
+  faculty_id?: string | null;
+  faculty_name?: string;
+
+  // GE/relaxed rules
+  auto_override?: boolean;                  // <-- ADD THIS
+
+  // overrides (unchanged)
   override?: boolean;
   override_token?: string;
   override_reason?: string;
-
-  /** Backend expects auto_override; keep auto_approve for back-compat in callers. */
-  auto_override?: boolean;
-  auto_approve?: boolean;
 };
 
 /* ------------------------ qs helper ------------------------ */
@@ -593,43 +621,78 @@ function _coerceOnline<T extends Record<string, any>>(payload: T): T {
     if (o[key]) {
       const slot: Record<string, any> = { ...o[key] };
 
+      // Normalize room: "" -> null (explicit clear)
       if (Object.prototype.hasOwnProperty.call(slot, "room_id")) {
         slot.room_id = slot.room_id === "" ? null : slot.room_id;
       }
 
+      // Normalize times to HHMM (delete if invalid)
       if (Object.prototype.hasOwnProperty.call(slot, "start_time")) {
         const n = _normTime(slot.start_time);
         if (n != null) slot.start_time = n;
         else delete slot.start_time;
       }
-
       if (Object.prototype.hasOwnProperty.call(slot, "end_time")) {
         const n = _normTime(slot.end_time);
         if (n != null) slot.end_time = n;
         else delete slot.end_time;
       }
 
+      // NEW: drop purely-empty placeholders (only { room_id: null })
+      if (Object.keys(slot).length === 1 && "room_id" in slot && slot.room_id === null) {
+        delete o[key];
+        continue;
+      }
+
       const hasKeys = Object.keys(slot).length > 0;
-      if (hasKeys) o[key] = slot; // ← write via `o`
-      else delete o[key]; // ← delete via `o`
+      if (hasKeys) o[key] = slot;  // write via `o`
+      else delete o[key];          // delete via `o`
     }
   }
 
   // Normalize enrollment_cap (allow "" to mean clear/null)
   if ("enrollment_cap" in o) {
     const cap = o.enrollment_cap;
-    if (cap === "" || cap === undefined) o.enrollment_cap = null;
-    else if (typeof cap !== "number") o.enrollment_cap = Number(cap) || null;
+    if (cap === "" || cap === undefined) {
+      o.enrollment_cap = null;
+    } else if (typeof cap !== "number") {
+      const n = Number(cap);
+      o.enrollment_cap = Number.isFinite(n) ? n : null;
+    }
   }
 
-  return out;
+  return out; // ← IMPORTANT
 }
 
-/** Backward-compat: if callers still send auto_approve, forward it as auto_override. */
+
+/** Backward-compat + safe defaults for auto-override */
 function _applyAutoOverride<T extends Record<string, any>>(payload: T): T {
   const out = _clone(payload);
-  if ((out as any).auto_override == null && (out as any).auto_approve != null) {
+  // --- CHANGE #1: provide safe defaults ---
+  if ((out as any).auto_override == null) {
+    (out as any).auto_override = true;
+  }
+  if ((out as any).override_reason == null) {
+    (out as any).override_reason = "Proceed (UI)";
+  }
+  // Legacy flag still respected if present
+  if ((out as any).auto_approve != null) {
     (out as any).auto_override = (out as any).auto_approve;
+  }
+  return out;
+}
+/** If choosing a specific elective, never send course_id alongside it. */
+function _sanitizeElectiveIntent<
+  T extends { specific_course_id?: string; course_id?: string; for_placeholder_course_id?: string }
+>(payload: T): T {
+  const out = _clone(payload);
+  // Normalize empty strings to undefined
+  if ((out as any).specific_course_id === "") delete (out as any).specific_course_id;
+  if ((out as any).for_placeholder_course_id === "") delete (out as any).for_placeholder_course_id;
+
+  // Avoid conflicting intent: drop course_id if a specific elective is chosen
+  if ((out as any).specific_course_id) {
+    delete (out as any).course_id;
   }
   return out;
 }
@@ -679,29 +742,47 @@ function _extractConflict(e: AxiosError<any>): ApiConflict | null {
 export async function getApoCourseOfferings(
   userId: string,
   opts: OfferingsQuery = {}
-): Promise<any> {
+): Promise<ApoOfferingsResponse> {
   const { level, ...rest } = opts;
   const level_code = normalizeLevelForQuery(level);
   const url = `${API_BASE}/apo/courseofferings${q({ userId, ...rest, level, level_code })}`;
-  return get<any>(url);
-}
 
+  const data = await get<ApoOfferingsResponse>(url);
+
+  // Safe default + light coercion for course_code (string[] -> first string)
+  const list = Array.isArray(data.all_specific_electives) ? data.all_specific_electives : [];
+  data.all_specific_electives = list.map((e) => ({
+    ...e,
+    course_code: Array.isArray(e.course_code) ? (e.course_code[0] ?? "") : (e.course_code ?? ""),
+  }));
+
+  return data;
+}
+export function electivesToOptions(resp?: ApoOfferingsResponse) {
+  const arr = resp?.all_specific_electives ?? [];
+  return arr.map((e) => ({
+    value: e.course_id,
+    label: `${e.course_code} — ${e.course_title}`,
+  }));
+}
 /** Add row (capacity defaults server-side to courses.max_enrollee if not provided). */
 export async function addApoOfferingRow(
   userId: string,
   payload: AddRowPayload
 ): Promise<{ ok: true; section_id: string } | { conflict: ApiConflict }> {
   const url = `${API_BASE}/apo/courseofferings${q({ userId, action: "addRow" })}`;
-  const body = _coerceOnline(_applyAutoOverride(payload));
 
+  // NEW: make elective intent unambiguous before coercion/override defaults
+  const sanitized = _sanitizeElectiveIntent(payload);
+
+  const body = _coerceOnline(_applyAutoOverride(sanitized));
   try {
     return await post<{ ok: true; section_id: string }>(url, body);
   } catch (e) {
+    // (keep the rest of your conflict handling exactly as-is)
     const err = e as AxiosError<any>;
     if (err.response?.status === 409) {
       const conflict = _extractConflict(err);
-
-      // If caller asked for auto-override (e.g., GE), retry once with override token.
       if (conflict && (body as any).auto_override) {
         try {
           return await post<{ ok: true; section_id: string }>(url, {
@@ -721,7 +802,6 @@ export async function addApoOfferingRow(
           throw err2;
         }
       }
-
       if (conflict) return { conflict };
       const d = err.response?.data?.detail as GateError | undefined;
       if (d) throw new Error(d.message || "Action blocked by planning rules.");
@@ -730,35 +810,52 @@ export async function addApoOfferingRow(
   }
 }
 
+
 /** Edit row (capacity updates will be saved to sections.enrollment_cap). */
 export async function editApoOfferingRow(
   userId: string,
   payload: EditRowPayload
 ): Promise<{ ok: true; section_id: string } | { conflict: ApiConflict }> {
   const url = `${API_BASE}/apo/courseofferings${q({ userId, action: "editRow" })}`;
-  const body = _coerceOnline(_applyAutoOverride(payload));
+
+  // NEW: make elective intent unambiguous before coercion/override defaults
+  const sanitized = _sanitizeElectiveIntent(payload);
+
+  const body = _coerceOnline(_applyAutoOverride(sanitized));
   try {
     return await post(url, body);
   } catch (e) {
+    // (keep the rest exactly as-is)
     const err = e as AxiosError<any>;
     if (err.response?.status === 409) {
       const conflict = _extractConflict(err);
-      // If editor asked for auto_override → retry with override token automatically
       if (conflict && (body as any).auto_override) {
-        return await post(url, {
-          ...(body as any),
-          override: true,
-          override_token: conflict.override_token,
-          override_reason: (body as any).override_reason || "GE free-form edit",
-        });
+        try {
+          return await post(url, {
+            ...(body as any),
+            override: true,
+            override_token: conflict.override_token,
+            override_reason: (body as any).override_reason || "Proceed with seat-deficit override",
+          });
+        } catch (e2) {
+          const err2 = e2 as AxiosError<any>;
+          if (err2.response?.status === 409) {
+            const conflict2 = _extractConflict(err2);
+            if (conflict2) return { conflict: conflict2 };
+            const d2 = err2.response?.data?.detail as GateError | undefined;
+            if (d2) throw new Error(d2.message || "Action blocked by planning rules.");
+          }
+          throw err2;
+        }
       }
       if (conflict) return { conflict };
-      const d = err.response?.data?.detail as { message?: string } | undefined;
+      const d = err.response?.data?.detail as GateError | undefined;
       if (d) throw new Error(d.message || "Action blocked by planning rules.");
     }
     throw err;
   }
 }
+
 
 export type DeleteRowPayload = {
   section_id: string;
@@ -787,13 +884,20 @@ export async function deleteApoOfferingRow(
 }
 
 /* ---- Plan routing ---- */
-export async function forwardApoCourseOfferings(
+export function forwardApoCourseOfferings(
   userId: string,
-  payload: { to: string; subject?: string; message?: string; attachment_html?: string }
-): Promise<{ ok: true; queued: boolean; outbox_id: string }> {
-  const url = `${API_BASE}/apo/courseofferings${q({ userId, action: "forward" })}`;
-  return post(url, payload);
+  payload: {
+    to?: string;
+    subject?: string;
+    message?: string;
+    exclude_conflicts?: boolean; // <-- add this
+  }
+) {
+  return axios
+    .post(join(API_BASE, `/apo/forward/${userId}`), payload)
+    .then(r => r.data);
 }
+
 
 export async function approveApoOfferingsPlan(
   userId: string
@@ -848,8 +952,8 @@ export async function curriculumRemoveCourse(
 /* ---- Electives helper endpoints (placeholder → specific) ---- */
 export async function getElectiveOptions(
   userId: string,
-  placeholder_course_id: string
-): Promise<{ ok: boolean; options: Array<{ course_id: string; course_code: string; course_title: string }> }> {
+  placeholder_course_id?: string
+): Promise<{ ok: boolean; options: Array<{ course_id: string; course_code: string | string[]; course_title: string }> }> {
   const url = `${API_BASE}/apo/courseofferings${q({
     userId,
     action: "electiveOptions",
@@ -859,35 +963,137 @@ export async function getElectiveOptions(
 }
 
 /* ---- Eligible rooms for a section (capacity + room_type guard) ---- */
+/* ---- Eligible rooms for a section (capacity + room_type guard) ---- */
 export type EligibleRoomsParams = {
   section_id?: string;
+
+  /** Preferred: server reads this as a minimum seat requirement */
+  min_capacity?: number;
+  /** Back-compat from the caller: we’ll map this to min_capacity */
   enrollment_cap?: number;
+
+  /** Preferred: server expects this key */
+  required_type?: string;
+  /** Back-compat from the caller: we’ll map this to required_type */
   room_type?: string;
+
   campus_id?: string;
-  // optional time filter (if backend supports clash checks)
+
+  // time filter for clash checks
   day?: string;
+  /** Back-compat from the caller; we’ll emit as `start` */
   start_time?: string;
+  /** Back-compat from the caller; we’ll emit as `end` */
   end_time?: string;
+
+  /** IDs to ignore when checking conflicts (CSV or array) */
+  exclude_schedule_ids?: string | string[];
 };
+
 export async function getEligibleRoomsForOffering(
   userId: string,
   params: EligibleRoomsParams
-): Promise<
-  { ok: boolean; rooms: Array<{ room_id: string; room_number: string; room_type: string; capacity: number; building?: string }> }
-> {
-  const qp = { ...params };
-  // normalize times if present
-  if (qp.start_time) qp.start_time = _normTime(qp.start_time) || qp.start_time;
-  if (qp.end_time) qp.end_time = _normTime(qp.end_time) || qp.end_time;
+): Promise<{ ok: boolean; rooms: Array<{ room_id: string; room_number: string; room_type: string; capacity: number; building?: string }> }> {
+  const qp: Record<string, any> = { ...params };
+
+  // --- Times: send server's expected keys `start` / `end`
+  const s = _normTime(qp.start ?? qp.start_time);
+  const e = _normTime(qp.end ?? qp.end_time);
+  if (s) qp.start = s;
+  if (e) qp.end = e;
+  delete qp.start_time;
+  delete qp.end_time;
+
+  // --- Capacity/type: accept either naming, send server's expected keys
+  qp.required_type = qp.required_type ?? qp.room_type ?? undefined;
+  qp.min_capacity = qp.min_capacity ?? qp.enrollment_cap ?? undefined;
+  delete qp.room_type;
+  delete qp.enrollment_cap;
+
+  // --- Day normalization: accept "TH" or "H" for Thursday; backend is tolerant but we help it.
+  const rawDay = String(qp.day || "").toUpperCase().trim();
+  qp.day = rawDay === "TH" ? "H" : rawDay; // keep M T W H F S
+
+  // --- Exclusions: ensure comma-separated string
+  if (Array.isArray(qp.exclude_schedule_ids)) {
+    qp.exclude_schedule_ids = qp.exclude_schedule_ids.join(",");
+  }
 
   const url = `${API_BASE}/apo/courseofferings${q({
     userId,
     action: "eligibleRooms",
-    ...qp,
+    campus_id: qp.campus_id,
+    day: qp.day,
+    start: qp.start,
+    end: qp.end,
+    required_type: qp.required_type,
+    min_capacity: qp.min_capacity,
+    exclude_schedule_ids: qp.exclude_schedule_ids,
   })}`;
+
   return get(url);
 }
 
+export async function searchCourseCatalog(
+  userId: string,
+  params: { q?: string; limit?: number; department_id?: string; program_level?: string } = {}
+) {
+  const url = `${API_BASE}/apo/courseofferings?${new URLSearchParams({
+    userId,
+    action: "courseCatalog",
+    ...(params.q ? { q: params.q } : {}),
+    ...(params.limit != null ? { limit: String(params.limit) } : {}),
+    ...(params.department_id ? { department_id: params.department_id } : {}),
+    ...(params.program_level ? { program_level: params.program_level } : {}),
+  }).toString()}`;
+
+  const { data } = await axios.post(url, {}); // backend reads action from query
+  return data as {
+    ok: boolean;
+    results: Array<{
+      course_id: string;
+      course_code: string | string[]; // backend may return array
+      course_title: string;
+      department_id?: string;
+      program_level?: string;
+      units?: number | null;
+      type_of_course?: string | null;
+    }>;
+  };
+}
+
+export async function createCatalogCourse(userId: string, payload: CreateCoursePayload) {
+  const url = join(API_BASE, "apo/courseofferings"); // same base/path family as catalog.search
+  const { data } = await axios.post(
+    `${url}?userId=${encodeURIComponent(userId)}&action=catalog.create`,
+    payload
+  );
+  return data; // { ok: true, course: {...} }
+}
+
+// --- Types ---
+export type CreateCoursePayload = {
+  department_id: string;
+  program_level: "UGS" | "GS";           // UGS = Undergraduate, GS = Graduate Studies
+  course_code: string;
+  course_title: string;
+  units?: number | null;
+  type_of_course?: string | null;        // e.g., "Elective Course", "GE", "Major"
+  description?: string;
+  room_type?: string | null;             // e.g., "Classroom", "Comlab"
+  capacity?: number | null;              // max_enrollee
+  min_enrollee?: number | null;
+};
+
+export type CourseCatalogItem = {
+  course_id: string;
+  course_code: string | string[];
+  course_title: string;
+  department_id?: string;
+  program_level?: string;                // "UGS" | "GS" | human label
+  units?: number | null;
+  type_of_course?: string | null;
+};
 /* =========================================================
    ===============  APO: ROOM ALLOCATION  ==================
    ========================================================= */
@@ -1287,6 +1493,32 @@ export async function getCMHeader(userEmail?: string, userId?: string) {
   return data as { ok: boolean; profileName?: string; profileSubtitle?: string };
 }
 
+// === CHAIR: COURSE MANAGEMENT (mirrors OM) ===
+export async function getChairCMOptions(userEmail?: string, userId?: string): Promise<CMOptions> {
+  const { data } = await axios.post(`${API_BASE}/chair/course-management`, {}, {
+    params: { action: "options", userEmail, userId },
+  });
+  return data as CMOptions;
+}
+
+export async function listChairCMCourses(params: {
+  userEmail?: string; userId?: string; cluster?: string; search?: string;
+}) {
+  const { userEmail, userId, cluster, search } = params || {};
+  const { data } = await axios.post(`${API_BASE}/chair/course-management`, {}, {
+    params: { action: "list", userEmail, userId, cluster, search },
+  });
+  return data as { ok: boolean; rows: CMCourseRow[]; term?: any };
+}
+
+export async function getChairCMHeader(userEmail?: string, userId?: string) {
+  const { data } = await axios.post(`${API_BASE}/chair/course-management`, {}, {
+    params: { action: "header", userEmail, userId },
+  });
+  return data as { ok: boolean; profileName?: string; profileSubtitle?: string };
+}
+
+
 /* =========================================================
    ==============  OM: FACULTY FORM  ===================
    ========================================================= */
@@ -1301,7 +1533,14 @@ export type OMFOptions = {
     label?: string;
     submission_deadline?: string; // ISO
   };
+  // NEW: drives the countdown banner (same shape as backend payload)
+  prefs_window?: {
+    openISO?: string;
+    deadlineISO?: string;
+    term_id?: string;
+  };
 };
+
 
 export type OMFRow = {
   faculty_id: string;
@@ -1397,6 +1636,143 @@ export async function bulkForwardOMSP(course_ids: string[], status?: string) {
   });
   return data as { ok: boolean; matched: number; modified: number; status: string };
 }
+/* =========================================================
+   ==============  OM: CLASS RETENTION  ====================
+   ========================================================= */
+
+export type OMCRRow = {
+  retention_id: string;
+  term_id: string;
+  course_id: string;
+  section_id: string;
+  // derived/display
+  faculty_id?: string | null;     // derived from faculty_assignments
+  student_units?: number | null;
+  faculty_units?: number | null;
+  status?: string;
+  term_label?: string;
+  course_code?: string;
+  course_title?: string;
+  section_code?: string;
+  enrolled?: number | null;
+  faculty_name?: string;          // LASTNAME, FIRSTNAME (ALL CAPS) or UNASSIGNED
+};
+
+export type OMCROptions = {
+  ok: boolean;
+  statuses: string[];
+  activeTerm?: { term_id: string; term_number: number; acad_year_start: number } | null;
+  activeTermLabel?: string;
+};
+
+export type OMCRCourseOpt = { course_id: string; course_code: string; course_title: string };
+export type OMCRSectionOpt = {
+  section_id: string;
+  section_code: string;
+  enrolled?: number | null;
+  faculty_id?: string | null;
+  faculty_name?: string;          // LASTNAME, FIRSTNAME or UNASSIGNED
+};
+
+// ---------- OM: Class Retention endpoints ----------
+export async function getOMCR_Options(): Promise<OMCROptions> {
+  const { data } = await api.get(`/om/classretention`, {
+    params: { action: "options" },
+  });
+  return data as OMCROptions;
+}
+
+export async function listOMCR(params: {
+  term_id?: string;
+  status?: string;
+  q?: string;
+}): Promise<{ ok: boolean; rows: OMCRRow[] }> {
+  const { data } = await api.get(`/om/classretention`, {
+    params: { action: "list", ...params },
+  });
+  return data as { ok: boolean; rows: OMCRRow[] };
+}
+
+export async function getOMCR_CourseOptions(term_id?: string): Promise<{ ok: boolean; options: OMCRCourseOpt[] }> {
+  const { data } = await api.get(`/om/classretention`, {
+    params: { action: "courseOptions", term_id },
+  });
+  return data as { ok: boolean; options: OMCRCourseOpt[] };
+}
+
+export async function getOMCR_SectionOptions(
+  course_id: string,
+  term_id?: string
+): Promise<{ ok: boolean; options: OMCRSectionOpt[] }> {
+  const { data } = await api.get(`/om/classretention`, {
+    params: { action: "sectionOptions", course_id, term_id },
+  });
+  return data as { ok: boolean; options: OMCRSectionOpt[] };
+}
+
+export async function saveOMCR(
+  payload: Partial<OMCRRow>
+): Promise<{ ok: boolean; retention_id: string }> {
+  const copy = { ...payload };
+  // faculty is auto-derived on backend — do not send
+  delete (copy as any).faculty_id;
+  const { data } = await api.post(`/om/classretention`, copy, { params: { action: "save" } });
+  return data as { ok: boolean; retention_id: string };
+}
+
+export async function deleteOMCR(retention_id: string): Promise<{ ok: boolean }> {
+  const { data } = await api.post(`/om/classretention`, { retention_id }, { params: { action: "delete" } });
+  return data as { ok: boolean };
+}
+
+/* =========================================================
+   ==============  CHAIR: STUDENT PETITIONS  ===============
+   ========================================================= */
+
+export type ChairPetitionRow = {
+  course_id: string;
+  course_code: string;
+  course_title: string;
+  count: number;
+  status: string;
+  remarks?: string;
+};
+
+export type ChairPetitionOptions = {
+  ok: boolean;
+  statuses: string[];
+  activeTerm: { term_id: string; acad_year_start?: number; term_number?: number };
+};
+
+export async function getChairSPOptions() {
+  const { data } = await axios.post(`${API_BASE}/chair/student-petitions`, {}, {
+    params: { action: "options" },
+  });
+  return data as ChairPetitionOptions;
+}
+
+export async function listChairSP(params: { status?: string; search?: string; userId?: string } = {}) {
+  const { status = "", search = "", userId } = params;
+  const { data } = await axios.post(`${API_BASE}/chair/student-petitions`, {}, {
+    params: { action: "list", status, search, userId },
+  });
+  return data as { ok: boolean; rows: ChairPetitionRow[]; term_id: string };
+}
+
+export async function updateChairSPCourse(course_id: string, payload: { status?: string; remarks?: string }) {
+  const { data } = await axios.post(`${API_BASE}/chair/student-petitions`, payload, {
+    params: { action: "update", courseId: course_id },
+  });
+  return data as { ok: boolean; matched: number; modified: number };
+}
+
+export async function bulkForwardChairSP(course_ids: string[], status?: string) {
+  const { data } = await axios.post(`${API_BASE}/chair/student-petitions`, { course_ids, status }, {
+    params: { action: "bulkForward" },
+  });
+  return data as { ok: boolean; matched: number; modified: number; status: string };
+}
+
 
 /* =========================================================
    ===============  FACULTY: OVERVIEW  =====================
@@ -1512,22 +1888,32 @@ export async function getFacultyPreferencesProfile(userId: string) {
   });
   return data;
 }
+
 export async function submitFacultyPreferences(
   userId: string,
   payload: {
     preferred_units: number;
     availability_days: string[];
     preferred_times: string[];
-    preferred_kacs: string[]; // IDs (preferred) or names; backend normalizes
+    preferred_kacs: string[]; // IDs or names; backend normalizes
+
+    // Accept single object (preferred) or legacy array-of-objects.
     mode?:
-      | { mode?: string; campus_id?: string }
-      | { mode?: string; campus_id?: string }[]; // accepts single or array
-    deloading_data?: { deloading_type?: string; units?: string | number }[];
-    preferred_courses?: string[]; // <— add this
+      | { mode?: string; campus_id?: string | string[] }
+      | Array<{ mode?: string; campus_id?: string | string[] }>;
+
+    deloading_data?: { deloading_type?: string; units?: string | number; detail?: string }[];
+    preferred_courses?: string[];
     notes?: string;
     has_new_prep?: boolean;
     is_finished?: boolean;
     term_id?: string;
+
+    // Optional extras your page is sending (safe for backend to ignore)
+    on_break?: boolean;
+    break_reason?: string;
+    break_return_date?: string;
+    employment_type?: "FT" | "PT";
   }
 ) {
   const { data } = await axios.post(`${API_BASE}/faculty/preferences`, payload, {
@@ -1713,6 +2099,117 @@ export async function chairFacultyService(userId: string) {
   return data as { ok: boolean; services: any[] };
 }
 
+// frontend/src/api.ts
+// -----------------------------------------------------------------------------
+// ADDITIONS for Faculty Service (kept near the other CHAIR helpers)
+// -----------------------------------------------------------------------------
+
+export type ToDept =
+  | "Department of Computer Technology"
+  | "Department of Information Technology"
+  | "Department of Literature"
+  | "Department of Software Technology";
+export type DayShort = "M" | "T" | "W" | "H" | "F" | "S";
+export type FacultyLite = {
+  faculty_id?: string;
+  first_name?: string;
+  last_name?: string;
+  email?: string;
+};
+
+export type FacultyServiceRow = {
+  id?: string;
+  fs_id?: string;
+  course_code: string;
+  course_title: string;
+  units: number | null;
+  from_department: string; 
+  to_department: ToDept;
+  faculty: FacultyLite;
+  day1: DayShort | "";
+  begin1: string | "";
+  end1: string | "";
+  day2: DayShort | "";
+  begin2: string | "";
+  end2: string | "";
+  remarks: string;
+  status?: "draft" | "sent" | "responded" | "rejected";
+  created_at?: string;
+  updated_at?: string;
+};
+
+export async function getFSOptions(params?: { q?: string; toDepartment?: ToDept; requesterDepartment?: string }) {
+  const sp = new URLSearchParams();
+  if (params?.q) sp.set("q", params.q);
+  if (params?.toDepartment) sp.set("toDepartment", params.toDepartment);
+  if (params?.requesterDepartment) sp.set("requesterDepartment", params.requesterDepartment);
+  const { data } = await api.get(`/chair/faculty-service/options?${sp.toString()}`);
+  return data as {
+    ok: boolean;
+    courses: Array<{ code: string; title: string; units?: number }>;
+    departments: ToDept[];
+    timeBegins: string[]; // renamed: begin options only
+    days: DayShort[];
+    facultyOptions?: Array<{ faculty_id: string; first_name: string; last_name: string; email?: string; label: string }>;
+  };
+}
+
+
+export async function listFacultyService(params?: {
+  status?: string;
+  dept?: string;
+  search?: string;
+  box?: "sent" | "received"; 
+}) {
+  const sp = new URLSearchParams();
+  if (params?.status) sp.set("status", params.status);
+  if (params?.dept) sp.set("dept", params.dept);
+  if (params?.search) sp.set("search", params.search);
+  if (params?.box) sp.set("box", params.box); 
+
+  const { data } = await api.get(`/chair/faculty-service/list?${sp.toString()}`);
+  return data as { ok: boolean; rows: FacultyServiceRow[] };
+}
+
+
+export async function createFacultyService(payload: {
+  course_code: string;
+  course_title?: string;
+  units?: number | null;
+  to_department: ToDept;
+  from_department?: string; // NEW
+}) {
+  const { data } = await api.post(`/chair/faculty-service/create`, payload);
+  return data as { ok: boolean; row: FacultyServiceRow };
+}
+
+
+export async function sendFacultyService(fs_id: string) {
+  const { data } = await api.post(`/chair/faculty-service/send/${encodeURIComponent(fs_id)}`);
+  return data as { ok: boolean; row: FacultyServiceRow };
+}
+
+export async function respondFacultyService(fs_id: string, payload: {
+  faculty: FacultyLite;
+  day1?: DayShort | "";
+  begin1?: string | "";
+  end1?: string | "";
+  day2?: DayShort | "";
+  begin2?: string | "";
+  end2?: string | "";
+  remarks?: string;
+}) {
+  const { data } = await api.post(`/chair/faculty-service/respond/${encodeURIComponent(fs_id)}`, payload);
+  return data as { ok: boolean; row: FacultyServiceRow };
+}
+
+export async function rejectFacultyService(fs_id: string, payload?: { remarks?: string }) {
+  const { data } = await api.post(`/chair/faculty-service/reject/${encodeURIComponent(fs_id)}`, payload || {});
+  return data as { ok: boolean; row: FacultyServiceRow };
+}
+
+
+
 export async function chairClassRetention(userId: string) {
   const { data } = await api.post(`/chair/class-retention`, {}, {
     params: { userId, action: "fetch" },
@@ -1763,4 +2260,28 @@ export function userIsChair(): boolean {
   } catch {
     return false;
   }
+}
+
+
+/** Update coordinators & teaching team by names. Backend resolves user/faculty IDs. */
+export async function updateChairCoursePeople(
+  course_id: string,
+  payload: {
+    coordinators?: { first_name: string; last_name: string }[];
+    teaching_team?: { first_name: string; last_name: string }[];
+    userId?: string;
+    userEmail?: string;
+  }
+): Promise<{
+  ok: boolean;
+  updated?: number;
+  message?: string;
+  coordinators?: { name: string; email?: string }[];
+  teaching_team?: { name: string }[];
+}> {
+  const params: Record<string, any> = { action: "editPeople", courseId: course_id };
+  if (payload.userId) params.userId = payload.userId;
+  if (payload.userEmail) params.userEmail = payload.userEmail;
+  const { data } = await axios.post(`${API_BASE}/chair/course-management`, payload, { params });
+  return data;
 }

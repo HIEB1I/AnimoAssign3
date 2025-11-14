@@ -421,9 +421,72 @@ async def loadassignment_handler(
             "statuses": ["Confirmed", "Pending", "Unassigned", "Conflict"],
         }
 
+    # --- inside loadassignment_handler(), replace the current "profile" branch ---
     if action == "profile":
-        staff = await db[COL_STAFF].find_one({"user_id": userId}, {"_id": 0, "staff_id": 1, "position_title": 1})
-        return {"ok": bool(staff), **(staff or {})}
+        # --- existing lookups (users/staff) can stay as-is ---
+        staff = await db["staff_profiles"].find_one(
+            {"user_id": userId},
+            {"_id": 0, "staff_id": 1, "position_title": 1}
+        ) or {}
+
+        u = await db["users"].find_one(
+            {"user_id": userId},
+            {"_id": 0, "first_name": 1, "last_name": 1}
+        ) or {}
+        full_name = " ".join([p for p in [(u.get("first_name") or "").strip(),
+                                        (u.get("last_name") or "").strip()] if p])
+
+        # --- NEW: resolve department via role_assignments -> departments ---
+        # Grab the most recent active role assignment for this user
+        ra = await db["role_assignments"].find(
+            {
+                "user_id": userId,
+                # treat null/absent as active; you can tighten this if you track current term
+                "$or": [{"is_active": True}, {"is_active": {"$exists": False}}],
+            },
+            {
+                "_id": 0,
+                "role_id": 1,
+                "scope": 1,
+                "updated_at": 1,
+                "created_at": 1,
+                "until_term_id": 1,
+            },
+        ).sort([("updated_at", -1), ("created_at", -1)]).to_list(5)
+
+        dept_id = None
+        role_id = None
+        for row in ra or []:
+            role_id = role_id or row.get("role_id")
+            scopes = row.get("scope") or []
+            # find the first department scope
+            dep_scope = next((s for s in scopes if (s.get("type") == "department" and s.get("id"))), None)
+            if dep_scope:
+                dept_id = dep_scope["id"]
+                break
+
+        dept_name = ""
+        if dept_id:
+            d = await db["departments"].find_one(
+                {"department_id": dept_id},
+                {"_id": 0, "dept_name": 1, "department_name": 1, "name": 1, "dept_code": 1},
+            ) or {}
+            dept_name = (d.get("dept_name") or d.get("department_name") or d.get("name") or "").strip()
+
+        # Optional: normalize role display (example for ROLE0006)
+        position_title = staff.get("position_title") or ""
+        if not position_title and role_id == "ROLE0006":
+            position_title = "Office Manager"
+
+        return {
+            "ok": True,
+            "full_name": full_name,
+            "position_title": position_title,
+            "dept_name": dept_name,
+            # keep any other fields you already return
+        }
+
+
 
     if action == "submit":
         # Validate

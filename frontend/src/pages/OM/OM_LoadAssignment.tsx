@@ -713,7 +713,12 @@ export default function OM_LoadAssignment() {
       if (!userId) return;
       try {
         const p = await getOmLoadAssignmentProfile(userId);
-        // p: { ok: boolean; staff_id?: string; position_title?: string }
+        // role text
+        let roleTitle = p?.position_title || "";
+        // append " | Department of …" like CHAIR
+        if (roleTitle && p?.dept_name) roleTitle = `${roleTitle} | ${p.dept_name}`;
+        setProfileSubtitle(roleTitle);
+        setProfileName(p?.full_name || "");
 
         // ✅ 2) Updated role/subtitle logic (replaces the old session?.roles check)
         if (
@@ -734,6 +739,7 @@ export default function OM_LoadAssignment() {
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userId]);
+
 
   const [search, setSearch] = useState("");
   const [rows, setRows] = useState<Row[]>([]);

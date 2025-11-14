@@ -420,7 +420,7 @@ async def preenlistment_get(
 async def preenlistment_post(
     userId: str = Query(..., min_length=3),
     termId: Optional[str] = Query(None),
-    action: Literal["import", "archive"] = Query("import"),
+    action: Literal["import", "archive", "reactivate"] = Query("import"),  # ← add "reactivate"
     replaceCount: bool = Query(False),
     replaceStats: bool = Query(False),
     campus: Optional[str] = Query(None, description="Campus name, e.g., MANILA or LAGUNA"),
@@ -464,6 +464,62 @@ async def preenlistment_post(
             await db[COL_TERMS].update_one({"term_id": next_tid}, {"$set": {"is_current": True}})
 
         return {"ok": True, "archivedCounts": upd1.modified_count, "archivedStats": upd2.modified_count, "newActiveTermId": next_tid}
+    
+    if action == "reactivate":
+        if not termId:
+            raise HTTPException(status_code=400, detail="termId is required to reactivate.")
+
+        campus_uc = _norm_campus_name(campus)
+        if not campus_uc:
+            campus_label = await _apo_campus_label_for_user(userId)
+            campus_uc = _norm_campus_name(campus_label)
+        if not campus_uc:
+            raise HTTPException(status_code=400, detail="Cannot resolve campus; pass campus=MANILA|LAGUNA.")
+
+        camp_doc = await _campus_by_name(campus_uc)
+        campus_id_for_filter = (camp_doc or {}).get("campus_id")
+        if not campus_id_for_filter:
+            raise HTTPException(status_code=400, detail="Unknown campus.")
+
+        curr_tid = await _active_term_id()
+
+        # 1) Archive current active rows (if different term)
+        deactivated_counts = deactivated_stats = 0
+        if curr_tid and curr_tid != termId:
+            r1 = await db[COL_COUNT].update_many(
+                {"term_id": curr_tid, "is_archived": False, "campus_id": campus_id_for_filter},
+                {"$set": {"is_archived": True, "updated_at": _now()}}
+            )
+            r2 = await db[COL_STATS].update_many(
+                {"term_id": curr_tid, "is_archived": False, "campus_id": campus_id_for_filter},
+                {"$set": {"is_archived": True, "updated_at": _now()}}
+            )
+            deactivated_counts = r1.modified_count
+            deactivated_stats = r2.modified_count
+
+        # 2) Unarchive selected term rows
+        r3 = await db[COL_COUNT].update_many(
+            {"term_id": termId, "is_archived": True, "campus_id": campus_id_for_filter},
+            {"$set": {"is_archived": False, "updated_at": _now()}}
+        )
+        r4 = await db[COL_STATS].update_many(
+            {"term_id": termId, "is_archived": True, "campus_id": campus_id_for_filter},
+            {"$set": {"is_archived": False, "updated_at": _now()}}
+        )
+
+        # 3) Flip is_current to selected term
+        await db[COL_TERMS].update_many({}, {"$set": {"is_current": False}})
+        await db[COL_TERMS].update_one({"term_id": termId}, {"$set": {"is_current": True}})
+
+        return {
+            "ok": True,
+            "reactivatedTermId": termId,
+            "campus": campus_uc,
+            "deactivatedCounts": deactivated_counts,
+            "deactivatedStats": deactivated_stats,
+            "reactivatedCounts": r3.modified_count,
+            "reactivatedStats": r4.modified_count,
+        }
 
     # ---- action=import ----
     if not termId:

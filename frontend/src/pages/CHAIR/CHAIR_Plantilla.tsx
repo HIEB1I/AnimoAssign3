@@ -408,7 +408,38 @@ const DepartmentPlantilla: React.FC<{
           </thead>
 
           <tbody className="divide-y text-center">
-            {/* rows mapped elsewhere */}
+            {rows.length === 0 ? (
+              <tr>
+                <td colSpan={20} className="py-8 text-sm text-gray-500">
+                  No plantilla rows to display.
+                </td>
+              </tr>
+            ) : (
+              rows.map((r, i) => (
+                <tr key={i}>
+                  <td className="text-left font-medium text-emerald-700">{r.faculty_name || "—"}</td>
+                  <td>{r.course_code || "—"}</td>
+                  <td>{r.section_code || "—"}</td>
+                  <td><DayCell raw={r.day_text || "—"} /></td>
+                  <td>{r.time_text || "—"}</td>
+                  <td>{r.room_text || "—"}</td>
+                  <td>{r.student_count ?? "—"}</td>
+                  <td>{r.lec_hours ?? "—"}</td>
+                  <td>{r.lab_hours ?? "—"}</td>
+                  <td>{r.student_units ?? "—"}</td>
+                  <td>{r.on_leave || "N/A"}</td>
+                  <td>{r.course_type || "N/A"}</td>
+                  <td>{r.nature_teaching ?? "—"}</td>
+                  <td>{r.nature_admin ?? "—"}</td>
+                  <td>{r.nature_research ?? "—"}</td>
+                  <td>{r.nature_faculty_units ?? "—"}</td>
+                  <td>{r.premium_grad ?? "—"}</td>
+                  <td>{r.premium_4th_prep ?? "—"}</td>
+                  <td>{r.premium_overload ?? "—"}</td>
+                  <td className="text-left">{r.remarks || "—"}</td>
+                </tr>
+              ))
+            )}
           </tbody>
         </table>
       </div>

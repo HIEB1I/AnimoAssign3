@@ -36,6 +36,7 @@ import FACULTY_Overview from "./pages/FACULTY/FACULTY_Overview";
 import FACULTY_Inbox from "./pages/FACULTY/FACULTY_Inbox";
 import FACULTY_History from "./pages/FACULTY/FACULTY_History";
 import FACULTY_Preferences from "./pages/FACULTY/FACULTY_Preferences";
+import FACULTY_Deloadings from "./pages/FACULTY/FACULTY_Deloadings";
 
 // ---------------- Admin ----------------
 import ADMIN from "./pages/ADMIN/ADMIN";
@@ -45,6 +46,15 @@ import ADMIN_Inbox from "./pages/ADMIN/ADMIN_Inbox";
 import APO_PreEnlistment from "./pages/APO/APO_PreEnlistment";
 import APO_CourseOfferings from "./pages/APO/APO_CourseOfferings";
 import APO_RoomAllocation from "./pages/APO/APO_RoomAllocation";
+
+// ---------------- CHAIR ----------------
+import CHAIR_Plantilla from "./pages/CHAIR/CHAIR_Plantilla";
+import CHAIR_FacultyManagement from "./pages/CHAIR/CHAIR_FacultyManagement";
+import CHAIR_CourseManagement from "./pages/CHAIR/CHAIR_CourseManagement";
+import CHAIR_FacultyService from "./pages/CHAIR/CHAIR_FacultyService";
+import CHAIR_StudentPetition from "./pages/CHAIR/CHAIR_StudentPetition";
+import CHAIR_ClassRetention from "./pages/CHAIR/CHAIR_ClassRetention";
+import CHAIR_Inbox from "./pages/CHAIR/CHAIR_Inbox";
 
 const base = (import.meta.env.BASE_URL || "/").replace(/\/$/, "");
 
@@ -57,6 +67,38 @@ function RequireAuth() {
     ok = false;
   }
   return ok ? <Outlet /> : <Navigate to="/Login" replace />;
+}
+
+/**
+ * Small wrapper for the CHAIR Faculty Service route.
+ *
+ * It reads the logged-in user from localStorage ("animo.user") and tries to
+ * derive the department name/label, then passes it into CHAIR_FacultyService
+ * via the `chairDepartmentName` prop.
+ *
+ * This is where we effectively do:
+ *   <CHAIR_FacultyService chairDepartmentName={currentUser.dept_name} />
+ */
+function ChairFacultyServiceRoute() {
+  let deptName: string | undefined;
+
+  try {
+    const raw = localStorage.getItem("animo.user");
+    if (raw) {
+      const session = JSON.parse(raw);
+      // Adjust these keys to match whatever you store in animo.user.
+      // We try a few common shapes just in case:
+      deptName =
+        session?.dept_label || // e.g. from backend header
+        session?.deptName ||
+        session?.dept_name ||
+        session?.department?.dept_name;
+    }
+  } catch {
+    // ignore, deptName stays undefined
+  }
+
+  return <CHAIR_FacultyService chairDepartmentName={deptName} />;
 }
 
 export default function App() {
@@ -81,7 +123,6 @@ export default function App() {
           <Route path="/om/loadreco" element={<OM_LoadReco />} />
 
           <Route path="/om/inbox" element={<OM_Inbox />} />
-          <Route path="/om/class-retention" element={<OM_ClassRetention />} />
 
           {/* OM shell with children (ONE declaration only) */}
           <Route path="/om/home" element={<OM_LoadAssignment />}>
@@ -93,6 +134,7 @@ export default function App() {
             <Route path="course-management" element={<OM_CourseManagement />} />
             <Route path="faculty-form" element={<OM_FacultyForm />} />
             <Route path="student-petition" element={<OM_StudentPetition />} />
+            <Route path="class-retention" element={<OM_ClassRetention />} />
 
             {/* Reports & Analytics landing */}
             <Route path="reports-analytics" element={<OM_ReportsAnalytics />} />
@@ -110,6 +152,7 @@ export default function App() {
           <Route path="/om/course-management" element={<Navigate to="/om/home/course-management" replace />} />
           <Route path="/om/faculty-form" element={<Navigate to="/om/home/faculty-form" replace />} />
           <Route path="/om/student-petition" element={<Navigate to="/om/home/student-petition" replace />} />
+          <Route path="/om/class-retention" element={<Navigate to="/om/home/class-retention" replace />} />
           <Route path="/om/reports-analytics" element={<Navigate to="/om/home/reports-analytics" replace />} />
           <Route path="/om/reports-analytics/teaching-history" element={<Navigate to="/om/home/reports-analytics/teaching-history" replace />} />
           <Route path="/om/reports-analytics/course-history" element={<Navigate to="/om/home/reports-analytics/course-history" replace />} />
@@ -129,13 +172,30 @@ export default function App() {
           <Route path="/faculty/overview" element={<FACULTY_Overview />} />
           <Route path="/faculty/history" element={<FACULTY_History />} />
           <Route path="/faculty/preferences" element={<FACULTY_Preferences />} />
+          <Route path="/faculty/deloadings" element={<FACULTY_Deloadings />} />
           <Route path="/inbox" element={<FACULTY_Inbox />} />
 
           {/* Admin */}
           <Route path="/admin" element={<ADMIN />} />
           <Route path="/admin/inbox" element={<ADMIN_Inbox />} />
 
-          {/* Authenticated wildcard: unknown paths for logged-in users go home */}
+          {/* CHAIR */}
+          <Route path="/chair" element={<CHAIR_Plantilla />}>
+            {/* Parent landing */}
+            <Route index element={<div />} />
+            <Route path="plantilla" element={<div />} />
+
+            {/* Children per mapping */}
+            <Route path="faculty-management" element={<CHAIR_FacultyManagement />} />
+            <Route path="course-management" element={<CHAIR_CourseManagement />} />
+            {/* 🔽 CHANGED: use wrapper that passes chairDepartmentName */}
+            <Route path="faculty-service" element={<ChairFacultyServiceRoute />} />
+            <Route path="student-petitions" element={<CHAIR_StudentPetition />} />
+            <Route path="class-retention" element={<CHAIR_ClassRetention />} />
+          </Route>
+          <Route path="/chair/inbox" element={<CHAIR_Inbox />} />
+
+          {/* Authenticated wildcard: unknown paths for logged-in users go OM home */}
           <Route path="*" element={<Navigate to="/om/home" replace />} />
         </Route>
 

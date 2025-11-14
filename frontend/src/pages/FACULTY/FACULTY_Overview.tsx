@@ -1,16 +1,14 @@
 // frontend/src/pages/FACULTY/FAC_Overview.tsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import {
-  Send as SendIcon,
-  Calendar as CalIcon,
-  X,
-} from "lucide-react";
+import { Send as SendIcon, Calendar as CalIcon, X, BookOpen as SyllabusIcon } from "lucide-react";
+
 
 import { getFacultyOverviewList, getFacultyOverviewProfile } from "../../api";
 import TopBar from "../../component/TopBar";
 import Tabs from "../../component/Tabs";
 import HistoryMain from "./FACULTY_History";
 import PreferencesContent from "./FACULTY_Preferences";
+import DeloadingsContent from "./FACULTY_Deloadings";
 import { InboxContent } from "./FACULTY_Inbox";
 
 // FACULTY_Overview.tsx (top of file)
@@ -22,7 +20,7 @@ import { useNavigate } from "react-router-dom";
    0) Page
    ========================================= */
 export default function FAC_Overview() {
-  const [tab, setTab] = useState<"Overview" | "History" | "Preferences">("Overview");
+  const [tab, setTab] = useState<"Overview" | "History" | "Preferences" | "Deloadings">("Overview");
   const [showInbox, setShowInbox] = useState(false); // NEW
   const [data, setData] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
@@ -131,7 +129,7 @@ export default function FAC_Overview() {
           mode="state"
           activeTab={tab}
           onTabChange={(newTab) => setTab(newTab as typeof tab)}
-          items={[{ label: "Overview" }, { label: "History" }, { label: "Preferences" }]}
+          items={[{ label: "Overview" }, { label: "History" }, { label: "Preferences" }, { label: "Deloadings" }]}
         />
       )}
 
@@ -150,6 +148,7 @@ export default function FAC_Overview() {
             )}
             {tab === "History" && <HistoryMain />}
             {tab === "Preferences" && <PreferencesContent />}
+            {tab === "Deloadings" && <DeloadingsContent />}
           </>
         )}
       </main>
@@ -223,6 +222,7 @@ type TLItem = {
   mode: "Online" | "Onsite" | "Hybrid" | "Classroom" | string;
   room: string | "Online";
   time: string; // e.g., "11:00 – 12:30"
+  syllabus?: string; 
 };
 
 type TL = { day: DayLong; items: TLItem[] };
@@ -250,6 +250,7 @@ function makeTeachingLoad(dataArray: any[]): TL[] {
       mode: c.mode || "Online",
       room: c.room || "Online",
       time: c.time || "",
+      syllabus: c.syllabus || "",   // <-- NEW
     });
   });
 
@@ -335,6 +336,21 @@ function TeachingLoadEnhanced({ teachingLoad, term }: TeachingLoadEnhancedProps)
   const TLData = useMemo(() => makeTeachingLoad(teachingLoad || []), [teachingLoad]);
   const placed = useMemo(() => placeItems(TLData), [TLData]);
   const groups = useMemo(() => groupPlacedByCell(placed), [placed]);
+
+  const [showSyllabus, setShowSyllabus] = useState(false);
+  const [syllabusUrl, setSyllabusUrl] = useState<string>("");
+
+  const isDrive = (u?: string) => !!u && /(?:drive|docs)\.google\.com/i.test(u || "");
+  const toPreview = (u: string) =>
+    u.includes("/view") ? u.replace("/view", "/preview")
+    : u.includes("?usp=sharing") ? u.replace("?usp=sharing", "/preview")
+    : u;
+
+  const openSyllabus = (it: TLItem) => {
+    setSyllabusUrl(it.syllabus || "");
+    setShowSyllabus(true);
+  };
+
 
   return (
     <section className="mx-auto w-full max-w-screen-2xl px-4">
@@ -450,6 +466,7 @@ function TeachingLoadEnhanced({ teachingLoad, term }: TeachingLoadEnhancedProps)
                           "Day",
                           "Room",
                           "Time",
+                          "Syllabus", 
                         ].map((h) => (
                           <th key={h} className="px-4 py-2 font-medium text-center">
                             {h}
@@ -461,7 +478,7 @@ function TeachingLoadEnhanced({ teachingLoad, term }: TeachingLoadEnhancedProps)
                       {day.items.length === 0 ? (
                         <tr>
                           <td
-                            colSpan={9}
+                            colSpan={10}
                             className="px-4 py-6 text-center text-sm text-neutral-500"
                           >
                             No records.
@@ -470,24 +487,39 @@ function TeachingLoadEnhanced({ teachingLoad, term }: TeachingLoadEnhancedProps)
                       ) : (
                         day.items.map((it, idx) => (
                           <tr
-                            key={idx}
-                            className={cls(
-                              "text-sm text-neutral-800",
-                              idx % 2 === 0 ? "bg-white" : "bg-neutral-50"
-                            )}
-                          >
-                            <td className="px-4 py-2 text-center">{it.code}</td>
-                            <td className="px-4 py-2 text-center">{it.title}</td>
-                            <td className="px-4 py-2 text-center">{it.sec}</td>
-                            <td className="px-4 py-2 text-center">{it.units}</td>
-                            <td className="px-4 py-2 text-center">{it.campus}</td>
-                            <td className="px-4 py-2 text-center">{it.mode}</td>
-                            <td className="px-4 py-2 text-center">
-                              {day.day[0]}
-                            </td>
-                            <td className="px-4 py-2 text-center">{it.room}</td>
-                            <td className="px-4 py-2 text-center">{it.time}</td>
-                          </tr>
+                          key={idx}
+                          className={cls(
+                            "text-sm text-neutral-800",
+                            idx % 2 === 0 ? "bg-white" : "bg-neutral-50"
+                          )}
+                        >
+                          <td className="px-4 py-2 text-center">{it.code}</td>
+                          <td className="px-4 py-2 text-center">{it.title}</td>
+                          <td className="px-4 py-2 text-center">{it.sec}</td>
+                          <td className="px-4 py-2 text-center">{it.units}</td>
+                          <td className="px-4 py-2 text-center">{it.campus}</td>
+                          <td className="px-4 py-2 text-center">{it.mode}</td>
+                          <td className="px-4 py-2 text-center">{day.day[0]}</td>
+                          <td className="px-4 py-2 text-center">{it.room}</td>
+                          <td className="px-4 py-2 text-center">{it.time}</td>
+
+                          {/* Syllabus column */}
+                          <td className="px-4 py-2 text-center">
+                            <button
+                              type="button"
+                              onClick={() => openSyllabus(it)}
+                              className={cls(
+                                "inline-flex items-center justify-center rounded-md border px-2 py-1 text-xs",
+                                "border-emerald-200 bg-emerald-50 hover:bg-emerald-100 active:translate-y-[0.5px]"
+                              )}
+                              title={it.syllabus ? "View syllabus" : "No syllabus uploaded"}
+                              aria-label="View syllabus"
+                            >
+                              <SyllabusIcon className="h-4 w-4" />
+                            </button>
+                          </td>
+                        </tr>
+
                         ))
                       )}
                     </tbody>
@@ -498,6 +530,47 @@ function TeachingLoadEnhanced({ teachingLoad, term }: TeachingLoadEnhancedProps)
           </div>
         )}
       </div>
+
+       {/* Syllabus modal — add it here */}
+      {showSyllabus && (
+        <div className="fixed inset-0 z-[100] grid place-items-center bg-black/40 p-4">
+          <div className="w-full max-w-2xl rounded-2xl bg-white p-6 shadow-2xl overflow-y-auto max-h-[90vh]">
+            <h2 className="text-lg font-semibold text-emerald-700 mb-4">Syllabus</h2>
+            {!syllabusUrl ? (
+              <p className="text-gray-500 italic">No syllabus link provided.</p>
+            ) : (
+              <>
+                <p className="mb-3">
+                  Syllabus Link:
+                  <a
+                    href={syllabusUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-emerald-700 underline ml-2"
+                  >
+                    Open in New Tab
+                  </a>
+                </p>
+                {isDrive(syllabusUrl) && (
+                  <iframe
+                    className="w-full h-[500px] border rounded-xl"
+                    title="Syllabus"
+                    src={toPreview(syllabusUrl)}
+                  />
+                )}
+              </>
+            )}
+            <div className="flex justify-end mt-6">
+              <button
+                onClick={() => setShowSyllabus(false)}
+                className="px-4 py-2 rounded-lg bg-gray-100 hover:bg-gray-200 text-sm"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <ChangeRequestModal open={!!modal} onClose={() => setModal(null)} context={modal} />
     </section>

@@ -77,24 +77,58 @@ async def chair_plantilla_get(
         profile_subtitle = "Department Chair"
         dept_label = "Department"
         plantilla_file = "Faculty_Plantilla.pdf"
-        term_label = None
+        term_label: Optional[str] = None
 
         if userId:
             u = await db.users.find_one({"user_id": userId}) or {}
             first = (u.get("first_name") or "").strip()
             last  = (u.get("last_name")  or "").strip()
-
-            # NEW: Build a proper full name for the topbar
             full_name = " ".join(p for p in [first, last] if p).strip()
             profile_name = full_name or " "
 
             sp = await db.staff_profiles.find_one({"user_id": userId}) or {}
             if sp.get("position_title"):
                 profile_subtitle = sp["position_title"]
+           
+            # --- Append department name beside the role in the subtitle (no hardcoded IDs) ---
+            dept_name: Optional[str] = None
 
-            ra = await db.role_assignments.find_one({"user_id": userId}) or {}
-            dept_label = "Department"
-            # (scope mapping left as-is)
+            # 1) Prefer an explicit department on the staff profile
+            dept_id = sp.get("department_id") or sp.get("dept_id")
+
+            # 2) Otherwise: most recent *active* role assignment that has a department scope
+            if not dept_id:
+                ra = await db.role_assignments.find(
+                    {
+                        "user_id": userId,
+                        "is_active": {"$in": [True, None]},
+                        "$or": [
+                            {"department_id": {"$exists": True, "$ne": None}},
+                            {"dept_id": {"$exists": True, "$ne": None}},
+                        ],
+                    }
+                ).sort([("updated_at", -1), ("created_at", -1)]).to_list(1)
+                if ra:
+                    dept_id = ra[0].get("department_id") or ra[0].get("dept_id")
+
+            # 2b) Fallback: if this user also has a faculty profile, use its department_id
+            if not dept_id:
+                fprof = await db.faculty_profiles.find_one({"user_id": userId}) or {}
+                dept_id = fprof.get("department_id") or fprof.get("dept_id")
+
+            # 3) Resolve department name from departments collection
+            if dept_id:
+                d = await db.departments.find_one({"department_id": dept_id}) \
+                    or await db.departments.find_one({"dept_id": dept_id}) \
+                    or {}
+                dept_name = d.get("dept_name") or d.get("name")
+
+            # 4) If found, show "<role> | <dept_name>" and reuse for table/export labels
+            if dept_name:
+                profile_subtitle = f"{profile_subtitle} | {dept_name}"
+                dept_label = dept_name
+
+            # You can enrich dept_label later using role_assignments scope if needed.
 
         term = await db.terms.find_one({"is_current": True})
         if term:
@@ -105,14 +139,13 @@ async def chair_plantilla_get(
 
         return {
             "ok": True,
-            "profileName": profile_name,  # remains for compatibility
-            "full_name": profile_name,    # NEW: explicit field the FE can trust
+            "profileName": profile_name,
+            "full_name": profile_name,    # explicit field FE can trust
             "profileSubtitle": profile_subtitle,
             "term_label": term_label,
             "dept_label": dept_label,
             "plantilla_file": plantilla_file,
         }
-
 
     if action == "options":
         return {"ok": True, "buttons": [
@@ -128,54 +161,79 @@ async def chair_plantilla_get(
         """
         Build plantilla rows by joining:
           faculty_assignments -> sections -> courses -> section_schedules -> rooms
-          plus faculty_profiles (for leave) and simple computed fields.
-        We constrain by 'current term' when possible.
+          + faculty_profiles/users/leaves
+        Robust fallbacks are added for dev data where FK links or term IDs may not align.
         """
-        # current term
+        # current term (may not match sample sections)
         term = await db.terms.find_one({"is_current": True})
         term_id = term.get("term_id") if term else None
 
-        # basic section + assignment filter (if term present)
+        # try current-term sections first
         sec_match = {"term_id": term_id} if term_id else {}
-
-        # 1) sections in current term
         section_docs = await db.sections.find(sec_match).to_list(10000)
+
+        # --- Fallbacks for sparse sample data ---
+        # If no sections for current term, use sections referenced by non-archived assignments instead.
+        asg_docs: List[dict] = []
+        if not section_docs:
+            asg_docs = await db.faculty_assignments.find(
+                {"is_archived": {"$in": [False, None]}}
+            ).to_list(100000)
+
+            sec_ids = list({a.get("section_id") for a in asg_docs if a.get("section_id")})
+            if sec_ids:
+                section_docs = await db.sections.find({"section_id": {"$in": sec_ids}}).to_list(10000)
+        # If we already have sections (current term), pull assignments for those sections.
+        if not asg_docs and section_docs:
+            asg_docs = await db.faculty_assignments.find(
+                {"section_id": {"$in": [s.get("section_id") for s in section_docs]},
+                 "is_archived": {"$in": [False, None]}}
+            ).to_list(100000)
+
+        # At this point if either is empty, we will just return empty rows gracefully.
         by_section = {s["section_id"]: s for s in section_docs}
 
-        # 2) map courses
+        # map courses (guard missing FK)
         course_ids = list({s.get("course_id") for s in section_docs if s.get("course_id")})
-        course_docs = await db.courses.find({"course_id": {"$in": course_ids}}).to_list(10000)
+        course_docs = []
+        if course_ids:
+            course_docs = await db.courses.find({"course_id": {"$in": course_ids}}).to_list(10000)
         by_course = {c["course_id"]: c for c in course_docs}
 
-        # 3) schedules per section (aggregate day/time; pick two patterns if multiple)
-        sched_docs = await db.section_schedules.find(
-            {"section_id": {"$in": list(by_section.keys())}}
-        ).to_list(100000)
+        # schedules per section (aggregate)
+        sched_docs = []
+        if by_section:
+            sched_docs = await db.section_schedules.find(
+                {"section_id": {"$in": list(by_section.keys())}}
+            ).to_list(100000)
         by_sched: Dict[str, List[dict]] = {}
         for sc in sched_docs:
             by_sched.setdefault(sc["section_id"], []).append(sc)
 
-        # 4) rooms (for text)
+        # rooms
         room_ids = list({s.get("room_id") for s in sched_docs if s.get("room_id")})
-        room_docs = await db.rooms.find({"room_id": {"$in": room_ids}}).to_list(10000)
+        room_docs = []
+        if room_ids:
+            room_docs = await db.rooms.find({"room_id": {"$in": room_ids}}).to_list(10000)
         by_room = {r["room_id"]: r for r in room_docs}
 
-        # 5) assignments to link faculty -> sections
-        asg_docs = await db.faculty_assignments.find(
-            {"section_id": {"$in": list(by_section.keys())}, "is_archived": {"$in": [False, None]}}
-        ).to_list(100000)
-
-        # 6) faculty profiles + users for name
+        # faculty profiles + users for name
         faculty_ids = list({a.get("faculty_id") for a in asg_docs if a.get("faculty_id")})
-        fprof_docs = await db.faculty_profiles.find({"faculty_id": {"$in": faculty_ids}}).to_list(10000)
+        fprof_docs = []
+        if faculty_ids:
+            fprof_docs = await db.faculty_profiles.find({"faculty_id": {"$in": faculty_ids}}).to_list(10000)
         by_fprof = {f["faculty_id"]: f for f in fprof_docs}
 
         user_ids = list({f.get("user_id") for f in fprof_docs if f.get("user_id")})
-        user_docs = await db.users.find({"user_id": {"$in": user_ids}}).to_list(10000)
+        user_docs = []
+        if user_ids:
+            user_docs = await db.users.find({"user_id": {"$in": user_ids}}).to_list(10000)
         by_user = {u["user_id"]: u for u in user_docs}
 
-        # 7) leaves (for "On Leave" column – coarse)
-        leave_docs = await db.leaves.find({"faculty_id": {"$in": faculty_ids}}).to_list(10000)
+        # leaves (coarse)
+        leave_docs = []
+        if faculty_ids:
+            leave_docs = await db.leaves.find({"faculty_id": {"$in": faculty_ids}}).to_list(10000)
         on_leave_now = {lv["faculty_id"] for lv in leave_docs if lv.get("is_active")}
 
         # Build rows
@@ -185,19 +243,23 @@ async def chair_plantilla_get(
             sec = by_section.get(asg.get("section_id") or "")
             if not sec:
                 continue
+
             course = by_course.get(sec.get("course_id") or "")
             fprof = by_fprof.get(asg.get("faculty_id") or "")
             user = by_user.get(fprof.get("user_id") if fprof else "")
-            faculty_name = (f"{user.get('last_name','').upper()}, {user.get('first_name','')}".strip()
-                            if user else "—")
 
-            # day/time/room text from schedules (coalesced)
+            # Format "LAST, First" (falls back to em dash if unknown)
+            if user:
+                last = str(user.get("last_name") or "").strip().upper()
+                first = str(user.get("first_name") or "").strip()
+                faculty_name = (f"{last}, {first}".strip() or "—")
+            else:
+                faculty_name = "—"
+
+            # schedules → day/time/room text
             scheds = by_sched.get(sec["section_id"], [])
-            # Compose "M / H", "T / F", etc.
-            day_parts = []
-            time_parts = []
-            room_parts = []
-            for sc in scheds[:2]:  # keep UI compact
+            day_parts, time_parts, room_parts = [], [], []
+            for sc in scheds[:2]:
                 day_parts.append(str(sc.get("day") or ""))
                 time_parts.append(_fmt_time(str(sc.get("start_time") or ""), str(sc.get("end_time") or "")))
                 if sc.get("room_id"):
@@ -206,14 +268,13 @@ async def chair_plantilla_get(
                 else:
                     room_parts.append(sc.get("room_type") or "ONLINE")
             day_text = " / ".join([p for p in day_parts if p]) or "—"
-            # If mixed schedules, prefer the earliest start–latest end pair
             time_text = " / ".join([p for p in time_parts if p]) or "—"
             room_text = " / ".join([p for p in room_parts if p]) or "—"
 
-            # student counts
+            # students
             student_count = sec.get("enrolled") or None
 
-            # simple hours/units (use 1.5 + 1.5 for standard 3-unit courses if no breakdown)
+            # hours/units (simple rule)
             units = course.get("units") if course else None
             if units == 3:
                 lec_hours = 1.5
@@ -225,25 +286,31 @@ async def chair_plantilla_get(
             # type of course
             course_type = course.get("type_of_course") if course else "N/A"
 
-            # "nature of load" & premiums – placeholders derived from simple rules
+            # nature of load & premiums (simple placeholders)
             nature_teaching = float(units) if isinstance(units, (int, float)) else None
             nature_admin = 0.0
             nature_research = 0.0
             nature_faculty_units = (nature_teaching or 0.0) + nature_admin + nature_research
 
             premium_grad = 3.0 if (course_type and str(course_type).lower() == "grad") else 0.0
-            premium_4th_prep = 0.0  # needs policy engine; keep 0
-            premium_overload = 0.0  # needs policy engine; keep 0
+            premium_4th_prep = 0.0
+            premium_overload = 0.0
 
-            # leave / remarks
             on_leave = "Yes" if asg.get("faculty_id") in on_leave_now else "N/A"
-            remarks = "—"
+
+            # determine a course code safely; support array or string or missing course
+            if course:
+                if isinstance(course.get("course_code"), list) and course["course_code"]:
+                    course_code = str(course["course_code"][0])
+                else:
+                    course_code = str(course.get("course_code") or "—")
+            else:
+                course_code = "—"
 
             rows.append(
                 PlantillaRow(
                     faculty_name=faculty_name,
-                    course_code=(course.get("course_code")[0] if isinstance(course.get("course_code"), list) and course["course_code"] else course.get("course_code") or "—")
-                                if course else "—",
+                    course_code=course_code,
                     section_code=sec.get("section_code") or "—",
                     day_text=day_text,
                     time_text=time_text,
@@ -261,11 +328,10 @@ async def chair_plantilla_get(
                     premium_grad=premium_grad,
                     premium_4th_prep=premium_4th_prep,
                     premium_overload=premium_overload,
-                    remarks=remarks,
+                    remarks="—",
                 ).dict()
             )
 
-        # Sort by faculty then course for consistent display
         rows.sort(key=lambda r: (r.get("faculty_name", ""), r.get("course_code", "")))
         return {"ok": True, "rows": rows}
 
@@ -283,9 +349,7 @@ async def chair_plantilla_post(
     Marks/records a simple approval in plantilla_reviews (audit trail).
     """
     if action == "approve":
-        # pick or synthesize a plantilla_id for current dept/term; for dev we log a simple record
         now = datetime.now(timezone.utc).isoformat()
-        # Minimal write (idempotent-ish for dev): insert an audit-like document
         await db.plantilla_reviews.insert_one({
             "review_id": f"RVW-{int(datetime.now().timestamp())}",
             "plantilla_id": "PLT_DEV",
