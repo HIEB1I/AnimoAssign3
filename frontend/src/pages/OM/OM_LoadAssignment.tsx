@@ -1,8 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Outlet, useLocation } from "react-router-dom";
 import AppShell from "../../base/AppShell";
-import { runOmAutoAssign } from "../../api.ts"; // adjust path to your api.ts
-import { submitOmLoadAssignment } from "../../api.ts";
 
 import {
   getOmLoadAssignmentList,
@@ -46,10 +44,7 @@ function SelectBox({
 }) {
   const [open, setOpen] = useState(false);
   const [hover, setHover] = useState<number>(() =>
-    Math.max(
-      0,
-      options.findIndex((o) => o === value)
-    )
+    Math.max(0, options.findIndex((o) => o === value))
   );
   const btnRef = useRef<HTMLButtonElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
@@ -151,14 +146,12 @@ function ComboBox({
   placeholder = "— Select or type —",
   className = "",
 }: {
-  value?: string | null;
+  value: string;
   onChange: (v: string) => void;
-  options?: (string | null | undefined)[];
+  options: string[];
   placeholder?: string;
   className?: string;
 }) {
-  console.log("ComboBox options:", options);
-
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState(value ?? "");
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -175,44 +168,30 @@ function ComboBox({
   }, []);
 
   const filtered = useMemo(() => {
-    const safeOptions = (options ?? []).map((o) => (o ?? "").toString());
-    const q = (query ?? "").trim().toLowerCase();
-  
-    // If no search text, show everything
-    if (!q) return safeOptions;
-  
-    const matches = safeOptions.filter((o) =>
-      o.toLowerCase().includes(q)
-    );
-  
-    // If nothing matches the current text (like "Sahur, Thung"),
-    // fall back to showing all options instead of "No matches"
-    return matches.length > 0 ? matches : safeOptions;
-  }, [options, query]);  
+    const q = query.trim().toLowerCase();
+    if (!q) return options;
+    return options.filter((o) => o.toLowerCase().includes(q));
+  }, [options, query]);
 
   return (
     <div ref={wrapRef} className={cls("relative", className)}>
       <input
         className="w-full rounded-lg border border-gray-300 px-3 py-2 pr-8 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30"
-        value={query ?? ""}
+        value={query}
         onChange={(e) => {
-          const v = e.target.value;
-          setQuery(v);
+          setQuery(e.target.value);
           setOpen(true);
-          onChange(v);
+          onChange(e.target.value);
         }}
         onFocus={() => setOpen(true)}
         placeholder={placeholder}
       />
       <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-500" />
-          
+
       {open && (
         <div className="absolute z-30 mt-2 max-h-72 w-full overflow-auto rounded-xl border border-gray-300 bg-white shadow-xl">
           {filtered.length === 0 ? (
-            <div className="px-4 py-2 text-sm text-gray-500">
-              No matches{" "}
-              {(options?.length ?? 0) === 0 && " (no faculty loaded)"}
-            </div>
+            <div className="px-4 py-2 text-sm text-gray-500">No matches</div>
           ) : (
             filtered.map((opt) => (
               <button
@@ -224,7 +203,7 @@ function ComboBox({
                 }}
                 className="block w-full px-4 py-2 text-left text-sm hover:bg-emerald-50"
               >
-                {opt || "—"}
+                {opt}
               </button>
             ))
           )}
@@ -243,7 +222,6 @@ type Row = {
   units: number | "";
   section: string;
   faculty: string;
-  faculty_id?: string;
   day1: string;
   begin1: string;
   end1: string;
@@ -253,7 +231,6 @@ type Row = {
   end2: string;
   room2: string;
   capacity: number | "";
-  mode?: string;
   status?: "" | "Confirmed" | "Pending" | "Unassigned" | "Conflict";
   conflictNote?: string;
   editable?: boolean;
@@ -274,9 +251,6 @@ const timeRange = (begin?: string, end?: string) => {
 };
 
 const DAY_OPTIONS = ["M", "T", "W", "H", "F", "S"];
-const MODE_OPTIONS = ["FOL", "HYB", "F2F"];
-const ROOM_OPTIONS = ["Online", "Classroom", "Comlab"];
-
 function buildTimeStartOptions() {
   const out: string[] = [];
   let h = 7;
@@ -308,15 +282,9 @@ function buildTimeEndOptions() {
     return `${String(endH).padStart(2, "0")}${String(endM).padStart(2, "0")}`;
   });
 }
+const TIME_BEGIN_OPTIONS = buildTimeStartOptions();
+const TIME_END_OPTIONS = buildTimeEndOptions();
 
-const SECOND_TIME_OPTIONS = ["0900", "1230", "1415", "1600", "1745", "1930"];
-
-const TIME_BEGIN_OPTIONS = Array.from(
-  new Set([...buildTimeStartOptions(), ...SECOND_TIME_OPTIONS])
-).sort((a, b) => Number(a) - Number(b));
-const TIME_END_OPTIONS = Array.from(
-  new Set([...buildTimeEndOptions(), ...SECOND_TIME_OPTIONS])
-).sort((a, b) => Number(a) - Number(b));
 /* ---------------- Reusable small components ---------------- */
 const StatusChip = ({ r }: { r: Row }) => {
   const [show, setShow] = useState(false);
@@ -396,30 +364,15 @@ const ApproveModal = ({
         <div className="mx-auto mb-4 grid h-16 w-16 place-items-center rounded-full border-2 border-emerald-600 text-emerald-700">
           <Check className="h-8 w-8" strokeWidth={2.5} />
         </div>
-        <h3 className="mb-2 text-center text-2xl font-semibold">
-          Are you sure?
-        </h3>
+        <h3 className="mb-2 text-center text-2xl font-semibold">Are you sure?</h3>
         <p className="mx-auto mb-6 max-w-md text-center text-sm text-neutral-600">
-          Please confirm that this is the final{" "}
-          <span className="font-semibold">Faculty Load Assignment</span> to be
-          submitted to the{" "}
-          <span className="font-semibold">Office Assistant</span>. Once
-          submitted, this action cannot be undone and the button will be
-          disabled.
+          Please confirm that this is the final <span className="font-semibold">Faculty Load
+          Assignment</span> to be submitted to the <span className="font-semibold">Office Assistant</span>.
+          Once submitted, this action cannot be undone and the button will be disabled.
         </p>
         <div className="flex justify-end gap-2">
-          <button
-            onClick={onClose}
-            className="rounded-lg border border-neutral-300 bg-neutral-100 px-4 py-2 text-sm hover:bg-neutral-200"
-          >
-            Cancel
-          </button>
-          <button
-            onClick={onApprove}
-            className="rounded-lg bg-emerald-700 px-4 py-2 text-sm font-medium text-white hover:brightness-110"
-          >
-            Yes, I Approve
-          </button>
+          <button onClick={onClose} className="rounded-lg border border-neutral-300 bg-neutral-100 px-4 py-2 text-sm hover:bg-neutral-200">Cancel</button>
+          <button onClick={onApprove} className="rounded-lg bg-emerald-700 px-4 py-2 text-sm font-medium text-white hover:brightness-110">Yes, I Approve</button>
         </div>
       </div>
     </div>
@@ -452,16 +405,12 @@ const SendModal = ({
             Teaching Load Assignments for Term 1, AY 2025 - 2026
           </h3>
           <div className="mt-0.5 text-[11px] text-gray-600">
-            To:{" "}
-            {Array.from(
-              new Set(rows.map((r) => r.faculty || "Unassigned"))
-            ).join(", ")}
+            To: {Array.from(new Set(rows.map((r) => r.faculty || "Unassigned"))).join(", ")}
           </div>
         </div>
 
         <p className="mt-5 text-[13px] text-gray-700">
-          Please let me know if the following teaching load below is acceptable
-          to you:
+          Please let me know if the following teaching load below is acceptable to you:
         </p>
 
         <div className="mt-4">
@@ -480,12 +429,8 @@ const SendModal = ({
               </colgroup>
               <thead className="bg-gray-50 text-gray-700">
                 <tr className="[&>th]:border-b [&>th]:border-gray-200">
-                  <th className="px-4 py-3 text-left font-semibold">
-                    Course Code
-                  </th>
-                  <th className="px-4 py-3 text-left font-semibold">
-                    Course Title
-                  </th>
+                  <th className="px-4 py-3 text-left font-semibold">Course Code</th>
+                  <th className="px-4 py-3 text-left font-semibold">Course Title</th>
                   <th className="px-4 py-3 text-left font-semibold">Section</th>
                   <th className="px-4 py-3 text-left font-semibold">Units</th>
                   <th className="px-4 py-3 text-left font-semibold">Campus</th>
@@ -500,59 +445,29 @@ const SendModal = ({
                   <React.Fragment key={faculty}>
                     {manyGroups && (
                       <tr className="bg-white">
-                        <td
-                          colSpan={9}
-                          className="px-4 pt-5 pb-2 text-[12px] font-semibold text-gray-900"
-                        >
+                        <td colSpan={9} className="px-4 pt-5 pb-2 text-[12px] font-semibold text-gray-900">
                           {faculty}
                         </td>
                       </tr>
                     )}
                     {items.map((r) => (
-                      <tr
-                        key={r.id}
-                        className={cls(
-                          "bg-white",
-                          "[&>td]:border-t [&>td]:border-gray-100"
-                        )}
-                      >
-                        <td className="px-4 py-3 align-middle">
-                          {r.course || "—"}
-                        </td>
-                        <td className="px-4 py-3 align-middle truncate">
-                          {r.title || "—"}
-                        </td>
-                        <td className="px-4 py-3 align-middle">
-                          {r.section || "—"}
-                        </td>
-                        <td className="px-4 py-3 align-middle">
-                          {r.units !== "" ? String(r.units) : "—"}
-                        </td>
-                        <td className="px-4 py-3 align-middle text-gray-800">
-                          —
-                        </td>
-                        <td className="px-4 py-3 align-middle text-gray-800">
-                          —
-                        </td>
-                        <td className="px-4 py-3 align-middle">
-                          {r.day1 || "—"}
-                        </td>
-                        <td className="px-4 py-3 align-middle">
-                          {r.room1 || "—"}
-                        </td>
-                        <td className="px-4 py-3 align-middle">
-                          {timeRange(r.begin1, r.end1)}
-                        </td>
+                      <tr key={r.id} className={cls("bg-white", "[&>td]:border-t [&>td]:border-gray-100")}>
+                        <td className="px-4 py-3 align-middle">{r.course || "—"}</td>
+                        <td className="px-4 py-3 align-middle truncate">{r.title || "—"}</td>
+                        <td className="px-4 py-3 align-middle">{r.section || "—"}</td>
+                        <td className="px-4 py-3 align-middle">{r.units !== "" ? String(r.units) : "—"}</td>
+                        <td className="px-4 py-3 align-middle text-gray-800">—</td>
+                        <td className="px-4 py-3 align-middle text-gray-800">—</td>
+                        <td className="px-4 py-3 align-middle">{r.day1 || "—"}</td>
+                        <td className="px-4 py-3 align-middle">{r.room1 || "—"}</td>
+                        <td className="px-4 py-3 align-middle">{timeRange(r.begin1, r.end1)}</td>
                       </tr>
                     ))}
                   </React.Fragment>
                 ))}
                 {rows.length === 0 && (
                   <tr>
-                    <td
-                      colSpan={9}
-                      className="px-4 py-8 text-center text-sm text-gray-500"
-                    >
+                    <td colSpan={9} className="px-4 py-8 text-center text-sm text-gray-500">
                       No rows selected.
                     </td>
                   </tr>
@@ -563,16 +478,8 @@ const SendModal = ({
         </div>
 
         <div className="mt-6 flex items-center justify-end gap-2">
-          <button
-            onClick={onClose}
-            className="rounded-lg border border-neutral-300 bg-neutral-100 px-4 py-2 text-sm hover:bg-neutral-200"
-          >
-            Cancel
-          </button>
-          <button
-            onClick={onClose}
-            className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:brightness-110"
-          >
+          <button onClick={onClose} className="rounded-lg border border-neutral-300 bg-neutral-100 px-4 py-2 text-sm hover:bg-neutral-200">Cancel</button>
+          <button onClick={onClose} className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:brightness-110">
             <Send className="h-4 w-4" />
             Send
           </button>
@@ -602,9 +509,7 @@ const RequestChangeModal = ({
           <X className="h-5 w-5 text-gray-500" />
         </button>
 
-        <h3 className="text-lg font-semibold text-emerald-700 mb-4">
-          Request for Change
-        </h3>
+        <h3 className="text-lg font-semibold text-emerald-700 mb-4">Request for Change</h3>
         <div className="text-sm text-gray-600 mb-4">
           From: <span className="font-semibold">{from}</span>
         </div>
@@ -620,9 +525,7 @@ const RequestChangeModal = ({
           </div>
           <div>
             <div className="font-semibold text-gray-900">Other remarks</div>
-            <div className="text-gray-700">
-              Other commitments to that timeframe.
-            </div>
+            <div className="text-gray-700">Other commitments to that timeframe.</div>
           </div>
         </div>
 
@@ -634,16 +537,9 @@ const RequestChangeModal = ({
         />
 
         <div className="flex justify-end gap-2">
-          <button className="px-4 py-2 rounded-lg bg-red-600 text-white text-sm">
-            Reject
-          </button>
-          <button className="px-4 py-2 rounded-lg bg-emerald-700 text-white text-sm">
-            Approve
-          </button>
-          <button
-            className="px-4 py-2 rounded-lg bg-blue-600 text-white text-sm"
-            onClick={onClose}
-          >
+          <button className="px-4 py-2 rounded-lg bg-red-600 text-white text-sm">Reject</button>
+          <button className="px-4 py-2 rounded-lg bg-emerald-700 text-white text-sm">Approve</button>
+          <button className="px-4 py-2 rounded-lg bg-blue-600 text-white text-sm" onClick={onClose}>
             Reply
           </button>
         </div>
@@ -654,17 +550,14 @@ const RequestChangeModal = ({
 /* ---------------- Main ---------------- */
 export default function OM_LoadAssignment() {
   // Session (DB-driven, no hardcodes)
-    const session: { userId?: string; fullName?: string; roles?: string[] } | null = (() => {
-    try { return JSON.parse(localStorage.getItem("animo.user") || "null"); } catch { return null; }
-  })();
+const session: { userId?: string; fullName?: string; roles?: string[] } | null = (() => {
+  try { return JSON.parse(localStorage.getItem("animo.user") || "null"); } catch { return null; }
+})();
+
+const userId = session?.userId || "";
 
 
-  const userId = session?.userId || "";
-
-
-
-    // TopBar profile from DB (fallback to session)
-  const [profileName, setProfileName] = useState<string>(session?.fullName || "");
+const [profileName, setProfileName] = useState<string>(session?.fullName || "");
 const [profileSubtitle, setProfileSubtitle] = useState<string>(
   (session?.roles && session.roles[0]) || ""
 );
@@ -701,8 +594,6 @@ const [profileSubtitle, setProfileSubtitle] = useState<string>(
 }, [userId]);
 
 
-
-
   const [search, setSearch] = useState("");
   const [rows, setRows] = useState<Row[]>([]);
   type Mode = "idle" | "manual" | "run";
@@ -716,31 +607,6 @@ const [profileSubtitle, setProfileSubtitle] = useState<string>(
   const [reqChange, setReqChange] = useState<{ open: boolean; from?: string }>({
     open: false,
   });
-
-  /** Track if there are unsaved/manual edits in the grid */
-  const [hasLocalEdits, setHasLocalEdits] = useState(false);
-
-  const [facultyList, setFacultyList] = useState<Faculty[]>([]);
-
-
-  // Load all faculty once on mount
-  useEffect(() => {
-    (async () => {
-      try {
-        const list = await getAllFaculty(); // should be an array
-        console.log("DEBUG faculty list from API:", list);
-        if (Array.isArray(list)) {
-          setFacultyList(list);
-        } else {
-          console.warn("getAllFaculty returned non-array:", list);
-          setFacultyList([]);
-        }
-      } catch (e) {
-        console.error("Failed to load faculty list", e);
-        setFacultyList([]);
-      }
-    })();
-  }, []);
 
   // Show the main Load Assignment content only on /om or /om/load-assignment
   const loc = useLocation();
@@ -759,12 +625,8 @@ const [profileSubtitle, setProfileSubtitle] = useState<string>(
     };
   }, []);
 
-  const setCell = <K extends keyof Row>(id: string, key: K, val: Row[K]) => {
-    setHasLocalEdits(true); // mark grid as dirty
-    setRows((prev) =>
-      prev.map((r) => (r.id === id ? { ...r, [key]: val } : r))
-    );
-  };
+  const setCell = <K extends keyof Row>(id: string, key: K, val: Row[K]) =>
+    setRows((prev) => prev.map((r) => (r.id === id ? { ...r, [key]: val } : r)));
 
   const filtered = rows.filter((r) => {
     const s = search.trim().toLowerCase();
@@ -776,26 +638,24 @@ const [profileSubtitle, setProfileSubtitle] = useState<string>(
     );
   });
 
-  const allSelected =
-    isRunning && filtered.length > 0 && filtered.every((r) => r.selected);
+  const allSelected = isRunning && filtered.length > 0 && filtered.every((r) => r.selected);
   const toggleSelectAll = (checked: boolean) =>
     setRows((prev) =>
-      prev.map((r) =>
-        filtered.some((fr) => fr.id === r.id) ? { ...r, selected: checked } : r
-      )
+      prev.map((r) => (filtered.some((fr) => fr.id === r.id) ? { ...r, selected: checked } : r))
     );
   const selectedRows = rows.filter((r) => r.selected);
   const anySelected = selectedRows.length > 0;
 
-  const loadFromServer = async () => {
+    const loadFromServer = async () => {
     if (!userId) return;
     const res = await getOmLoadAssignmentList(userId);
     setRows(Array.isArray(res?.rows) ? res.rows : []);
     setTerm(typeof res?.term === "string" ? res.term : ""); // term label joined in backend
     setMode("run");
     setApproved(false);
-    setHasLocalEdits(false);
   };
+
+
 
   const addRow = () => {
     setRows((prev) => [
@@ -822,7 +682,6 @@ const [profileSubtitle, setProfileSubtitle] = useState<string>(
     ]);
     setMode("manual");
     setApproved(false);
-    setHasLocalEdits(true);
   };
 
   const getEditFlags = (r: Row) => {
@@ -843,7 +702,6 @@ const [profileSubtitle, setProfileSubtitle] = useState<string>(
       end2: editSchedule,
       room2: editAll,
       capacity: editAll,
-      mode: editSchedule,
     } as const;
   };
 
@@ -878,61 +736,23 @@ const [profileSubtitle, setProfileSubtitle] = useState<string>(
       <>—</>
     );
 
-  /** Fields that must be filled before a row can be approved */
-  const isRowIncompleteForApproval = (r: Row) => {
-    // treat “touched” rows as those with any scheduling/faculty info
-    const hasAnyData =
-      !!r.day1 || !!r.begin1 || !!r.end1 || !!r.day2 || !!r.begin2 || !!r.end2;
+    const facultyOptions = useMemo(() => {
+    // strictly DB-derived: only from fetched rows
+    const set = new Set<string>();
+    rows.forEach((r) => r.faculty && set.add(r.faculty));
+    return Array.from(set).sort();
+    }, [rows]);
 
-    if (!hasAnyData) return false; // completely empty row → ignore
-
-    // REQUIRED core fields
-    const missingCore =
-      !r.section || !r.faculty || !r.mode || !r.day1 || !r.begin1 || !r.end1;
-
-    // For meeting 2: if any of the 4 is filled, require all 4
-    const hasAnyMeet2 = !!r.day2 || !!r.begin2 || !!r.end2;
-    const missingMeet2 = hasAnyMeet2 && (!r.day2 || !r.begin2 || !r.end2);
-
-    return missingCore || missingMeet2;
-  };
-
-  /** true if there is at least one row that looks edited but incomplete */
-  const hasIncompleteRows = useMemo(
-    () => rows.some((r) => isRowIncompleteForApproval(r)),
-    [rows]
-  );
-
-  type Faculty = {
-    faculty_id: string;
-    faculty_name_display: string;
-  };
-
-  const facultyOptions = useMemo(() => {
-    return (facultyList ?? [])
-    .map(f => f.faculty_name_display || f.faculty_id)
-      .filter((name) => name.trim().length > 0)
-      .sort((a, b) => a.localeCompare(b));
-  }, [facultyList]);  
-
-  const facultyNameToId = useMemo(() => {
-    const map: Record<string, string> = {};
-    (facultyList ?? []).forEach((f) => {
-      const name = f.faculty_name_display || f.faculty_id;
-      if (name) map[name] = f.faculty_id;
-    });
-    console.log("DEBUG facultyNameToId map:", map);
-    return map;
-  }, [facultyList]);
 
   return (
-    <AppShell
+      <AppShell
       // make TopBar’s Inbox icon open our OM Inbox-as-tab
       topbarProfileName={profileName || " "}
       topbarProfileSubtitle={profileSubtitle || " "}
       // @ts-ignore
       topbarInboxEvent="om:openInbox"
     >
+
       {/* If Inbox is opened from the TopBar, show it like a tab */}
       {showInbox ? (
         <OMInboxContent />
@@ -944,518 +764,422 @@ const [profileSubtitle, setProfileSubtitle] = useState<string>(
           {/* Show the main Load Assignment UI only on /om or /om/load-assignment */}
           {isIndex && (
             <main className="w-full px-8 py-8">
-              <header className="mb-6 flex items-start justify-between">
-                <div>
-                  <h1 className="text-2xl font-bold">
-                    Load Assignment <span className="text-gray-400">|</span>{" "}
-                    <span className="font-black">{term}</span>
-                  </h1>
-                  <p className="text-sm text-gray-600">
-                    Manage course assignments and faculty workload distribution
-                  </p>
-                </div>
-              </header>
+          <header className="mb-6 flex items-start justify-between">
+            <div>
+              <h1 className="text-2xl font-bold">
+                Load Assignment <span className="text-gray-400">|</span>{" "}
+                <span className="font-black">{term}</span>
+              </h1>
+              <p className="text-sm text-gray-600">
+                Manage course assignments and faculty workload distribution
+              </p>
+            </div>
+          </header>
 
-              <div className="mb-6 flex flex-wrap items-center gap-3 rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
-                <div className="relative flex-1 min-w-[260px]">
-                  <SearchIcon className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-500" />
-                  <input
-                    value={search}
-                    onChange={(e) => setSearch(e.target.value)}
-                    placeholder="Search by course, section, or faculty..."
-                    className="w-full rounded-lg border border-gray-300 px-9 py-2 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30"
-                  />
-                </div>
+          <div className="mb-6 flex flex-wrap items-center gap-3 rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
+            <div className="relative flex-1 min-w-[260px]">
+              <SearchIcon className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-500" />
+              <input
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search by course, section, or faculty..."
+                className="w-full rounded-lg border border-gray-300 px-9 py-2 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30"
+              />
+            </div>
 
-                <div className="ml-auto flex items-center gap-2">
-                  <button
-                    disabled={!hasReco || approved}
-                    className={cls(
-                      "inline-flex items-center gap-2 rounded-md px-3.5 py-2 text-sm font-medium shadow-sm",
-                      hasReco && !approved
-                        ? "bg-gray-800 text-white hover:brightness-110"
-                        : "bg-gray-200 text-gray-500 cursor-not-allowed"
-                    )}
-                    title={
-                      !hasReco
-                        ? "No recommendations to save yet"
-                        : approved
-                        ? "Already approved"
-                        : "Save Draft"
-                    }
-                  >
-                    <Save className="h-4 w-4" />
-                    Save Draft
+            <div className="ml-auto flex items-center gap-2">
+              <button
+                disabled={!hasReco || approved}
+                className={cls(
+                  "inline-flex items-center gap-2 rounded-md px-3.5 py-2 text-sm font-medium shadow-sm",
+                  hasReco && !approved
+                    ? "bg-gray-800 text-white hover:brightness-110"
+                    : "bg-gray-200 text-gray-500 cursor-not-allowed"
+                )}
+                title={
+                  !hasReco
+                    ? "No recommendations to save yet"
+                    : approved
+                    ? "Already approved"
+                    : "Save Draft"
+                }
+              >
+                <Save className="h-4 w-4" />
+                Save Draft
+              </button>
+              <button
+                disabled={!hasReco || approved}
+                onClick={() => setShowApprove(true)}
+                className={cls(
+                  "inline-flex items-center gap-2 rounded-md px-3.5 py-2 text-sm font-medium shadow-sm",
+                  hasReco && !approved
+                    ? "bg-emerald-700 text-white hover:brightness-110"
+                    : "bg-gray-200 text-gray-500 cursor-not-allowed"
+                )}
+                title={
+                  !hasReco
+                    ? "No recommendations to approve yet"
+                    : approved
+                    ? "Already approved"
+                    : "Approve"
+                }
+              >
+                <CheckCheck className="h-4 w-4" />
+                Approve
+              </button>
+            </div>
+          </div>
+
+          <div className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
+            <div className="flex items-center justify-between px-4 pt-4">
+              <h2 className="text-lg font-semibold">Load Recommendations</h2>
+
+              {!isRunning ? (
+                <div className="flex items-center gap-2">
+                  <button className="inline-flex items-center gap-2 rounded-md bg-emerald-700 px-3.5 py-2 text-sm font-medium text-white shadow-sm hover:brightness-110">
+                    <Upload className="h-4 w-4" />
+                    Import CSV
                   </button>
                   <button
-                    disabled={!hasReco || approved || hasIncompleteRows}
-                    onClick={() => {
-                      if (hasIncompleteRows) {
-                        alert(
-                          "Some rows are incomplete.\n\n" +
-                            "Please make sure each edited row has Course, Title, Units, Section, Faculty, Mode, " +
-                            "and at least a full Day1/Begin1/End1/Room1 (and a complete Day2 block if used) before approving."
-                        );
-                        return;
-                      }
-                      setShowApprove(true);
-                    }}
-                    className={cls(
-                      "inline-flex items-center gap-2 rounded-md px-3.5 py-2 text-sm font-medium shadow-sm",
-                      hasReco && !approved && !hasIncompleteRows
-                        ? "bg-emerald-700 text-white hover:brightness-110"
-                        : "bg-gray-200 text-gray-500 cursor-not-allowed"
-                    )}
-                    title={
-                      !hasReco
-                        ? "No recommendations to approve yet"
-                        : approved
-                        ? "Already approved"
-                        : hasIncompleteRows
-                        ? "You have incomplete edited rows"
-                        : "Approve"
-                    }
+                    onClick={loadFromServer}
+                    className="inline-flex items-center gap-2 rounded-md border border-emerald-700 text-emerald-800 bg-white px-3.5 py-2 text-sm font-medium hover:bg-emerald-50"
                   >
-                    <CheckCheck className="h-4 w-4" />
-                    Approve
+                    <Play className="h-4 w-4" />
+                    Run
                   </button>
                 </div>
-              </div>
-
-              <div className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
-                <div className="flex items-center justify-between px-4 pt-4">
-                  <h2 className="text-lg font-semibold">
-                    Load Recommendations
-                  </h2>
-
-                  {!isRunning ? (
-                    <div className="flex items-center gap-2">
-                      <button className="inline-flex items-center gap-2 rounded-md bg-emerald-700 px-3.5 py-2 text-sm font-medium text-white shadow-sm hover:brightness-110">
-                        <Upload className="h-4 w-4" />
-                        Import CSV
-                      </button>
-                      <button
-                        onClick={loadFromServer}
-                        className="inline-flex items-center gap-2 rounded-md border border-emerald-700 text-emerald-800 bg-white px-3.5 py-2 text-sm font-medium hover:bg-emerald-50"
-                      >
-                        <Play className="h-4 w-4" />
-                        Run
-                      </button>
-                    </div>
-                  ) : (
-                    <div className="flex items-center gap-2">
-                      <button
-                        disabled={!anySelected}
-                        onClick={() => setShowSend(true)}
-                        className={cls(
-                          "inline-flex items-center gap-2 rounded-md px-3.5 py-2 text-sm font-medium shadow-sm",
-                          anySelected
-                            ? "bg-blue-600 text-white hover:brightness-110"
-                            : "bg-gray-200 text-gray-500 cursor-not-allowed"
-                        )}
-                        title={
-                          anySelected
-                            ? "Send to selected faculty"
-                            : "Select at least one row"
-                        }
-                      >
-                        <Send className="h-4 w-4" />
-                        To Faculty
-                      </button>
-                      <button
-                        onClick={loadFromServer}
-                        className="inline-flex items-center gap-2 rounded-md border border-gray-300 bg-white px-3.5 py-2 text-sm font-medium hover:bg-gray-50"
-                      >
-                        <RefreshCcw className="h-4 w-4" />
-                        Refresh
-                      </button>
-                    </div>
-                  )}
+              ) : (
+                <div className="flex items-center gap-2">
+                  <button
+                    disabled={!anySelected}
+                    onClick={() => setShowSend(true)}
+                    className={cls(
+                      "inline-flex items-center gap-2 rounded-md px-3.5 py-2 text-sm font-medium shadow-sm",
+                      anySelected
+                        ? "bg-blue-600 text-white hover:brightness-110"
+                        : "bg-gray-200 text-gray-500 cursor-not-allowed"
+                    )}
+                    title={anySelected ? "Send to selected faculty" : "Select at least one row"}
+                  >
+                    <Send className="h-4 w-4" />
+                    To Faculty
+                  </button>
+                  <button
+                    onClick={loadFromServer}
+                    className="inline-flex items-center gap-2 rounded-md border border-gray-300 bg-white px-3.5 py-2 text-sm font-medium hover:bg-gray-50"
+                  >
+                    <RefreshCcw className="h-4 w-4" />
+                    Refresh
+                  </button>
                 </div>
+              )}
+            </div>
 
-                <div className="overflow-x-auto overflow-y-auto max-h-[58vh] mt-3">
-                  <table className="min-w-full text-sm table-fixed">
-                    <colgroup>
-                      <col className="w-[46px]" />
-                      <col className="w-[160px]" />
-                      <col className="w-[26%]" />
-                      <col className="w-[70px]" />
-                      <col className="w-[80px]" />
-                      <col className="w-[18%]" />
-                      <col className="w-[72px]" />
-                      <col className="w-[96px]" />
-                      <col className="w-[96px]" />
-                      <col className="w-[96px]" />
-                      <col className="w-[72px]" />
-                      <col className="w-[96px]" />
-                      <col className="w-[96px]" />
-                      <col className="w-[96px]" />
-                      <col className="w-[80px]" />
-                      <col className="w-[100px]" />
-                      <col className="w-[110px]" />
-                    </colgroup>
+            <div className="overflow-x-auto overflow-y-auto max-h-[58vh] mt-3">
+              <table className="min-w-full text-sm table-fixed">
+                <colgroup>
+                  <col className="w-[46px]" />
+                  <col className="w-[160px]" />
+                  <col className="w-[26%]" />
+                  <col className="w-[70px]" />
+                  <col className="w-[80px]" />
+                  <col className="w-[18%]" />
+                  <col className="w-[72px]" />
+                  <col className="w-[96px]" />
+                  <col className="w-[96px]" />
+                  <col className="w-[96px]" />
+                  <col className="w-[72px]" />
+                  <col className="w-[96px]" />
+                  <col className="w-[96px]" />
+                  <col className="w-[96px]" />
+                  <col className="w-[80px]" />
+                  <col className="w-[100px]" />
+                  <col className="w-[110px]" />
+                </colgroup>
 
-                    <thead className="bg-gray-50 border-y text-gray-700">
-                      <tr className="whitespace-nowrap">
-                        <th className="px-3 py-2 text-center">
+                <thead className="bg-gray-50 border-y text-gray-700">
+                  <tr className="whitespace-nowrap">
+                    <th className="px-3 py-2 text-center">
+                      {isRunning && (
+                        <input
+                          type="checkbox"
+                          checked={allSelected}
+                          onChange={(e) => toggleSelectAll(e.target.checked)}
+                          className="rounded border-gray-300 text-emerald-600 focus:ring-emerald-500"
+                          title="Select all"
+                        />
+                      )}
+                    </th>
+                    <th className="text-left px-4 py-2">Course & Title</th>
+                    <th className="text-center px-2 py-2">Units</th>
+                    <th className="text-center px-2 py-2">Section</th>
+                    <th className="text-left px-4 py-2">Faculty</th>
+                    <th className="text-center px-2 py-2">Day 1</th>
+                    <th className="text-center px-2 py-2">Begin 1</th>
+                    <th className="text-center px-2 py-2">End 1</th>
+                    <th className="text-center px-2 py-2">Room 1</th>
+                    <th className="text-center px-2 py-2">Day 2</th>
+                    <th className="text-center px-2 py-2">Begin 2</th>
+                    <th className="text-center px-2 py-2">End 2</th>
+                    <th className="text-center px-2 py-2">Room 2</th>
+                    <th className="text-center px-2 py-2">Capacity</th>
+                    <th className="text-center px-2 py-2">Status</th>
+                    <th className="text-center px-2 py-2">Actions</th>
+                  </tr>
+                </thead>
+
+                <tbody className="divide-y">
+                  {filtered.map((r, idx) => {
+                    const e = getEditFlags(r);
+                    const unread = r.status === "Pending";
+                    return (
+                      <tr key={r.id} className="hover:bg-gray-50 whitespace-nowrap">
+                        <td className="px-3 py-2 text-center">
                           {isRunning && (
                             <input
                               type="checkbox"
-                              checked={allSelected}
-                              onChange={(e) =>
-                                toggleSelectAll(e.target.checked)
-                              }
+                              checked={!!r.selected}
+                              onChange={(ev) => setCell(r.id, "selected", ev.target.checked as any)}
                               className="rounded border-gray-300 text-emerald-600 focus:ring-emerald-500"
-                              title="Select all"
+                              title={`Select row ${idx + 1}`}
                             />
                           )}
-                        </th>
-                        <th className="text-left px-4 py-2">Course & Title</th>
-                        <th className="text-center px-2 py-2">Units</th>
-                        <th className="text-center px-2 py-2">Section</th>
-                        <th className="text-left px-4 py-2">Faculty</th>
-                        <th className="text-center px-2 py-2">Day 1</th>
-                        <th className="text-center px-2 py-2">Begin 1</th>
-                        <th className="text-center px-2 py-2">End 1</th>
-                        <th className="text-center px-2 py-2">Room 1</th>
-                        <th className="text-center px-2 py-2">Day 2</th>
-                        <th className="text-center px-2 py-2">Begin 2</th>
-                        <th className="text-center px-2 py-2">End 2</th>
-                        <th className="text-center px-2 py-2">Room 2</th>
-                        <th className="text-center px-2 py-2">Capacity</th>
-                        <th className="text-center px-2 py-2">Mode</th>
-                        <th className="text-center px-2 py-2">Status</th>
-                        <th className="text-center px-2 py-2">Actions</th>
+                        </td>
+
+                        <td className="px-4 py-2 align-top">
+                          <div>
+                            <div className="font-semibold text-emerald-700">{r.course || "—"}</div>
+                            <div className="text-gray-600 text-sm">{r.title || "—"}</div>
+                          </div>
+                        </td>
+
+                        <td className="px-2 py-2 text-center">
+                          <Cell
+                            editable={e.units}
+                            value={String(r.units ?? "")}
+                            onChange={(v) => setCell(r.id, "units", v as any)}
+                            className="w-[60px]"
+                            align="center"
+                          />
+                        </td>
+
+                        <td className="px-2 py-2 text-center">
+                          <Cell
+                            editable={e.section}
+                            value={r.section}
+                            onChange={(v) => setCell(r.id, "section", v)}
+                            className="w-[68px]"
+                            align="center"
+                          />
+                        </td>
+
+                        <td className="px-4 py-2">
+                          {e.faculty ? (
+                            <ComboBox
+                              value={r.faculty}
+                              onChange={(v) => setCell(r.id, "faculty", v)}
+                              options={facultyOptions}
+                              className="w-[200px] md:w-[240px] lg:w-[280px]"
+                            />
+                          ) : (
+                            <span className="block w-[200px] md:w-[240px] lg:w-[280px] truncate">
+                              {r.faculty || "—"}
+                            </span>
+                          )}
+                        </td>
+
+                        <td className="px-2 py-2 text-center">
+                          {e.day1 ? (
+                            <SelectBox
+                              value={r.day1}
+                              onChange={(v) => setCell(r.id, "day1", v)}
+                              options={DAY_OPTIONS}
+                              className="w-[70px] text-center"
+                            />
+                          ) : (
+                            <span>{r.day1 || "—"}</span>
+                          )}
+                        </td>
+
+                        <td className="px-2 py-2 text-center">
+                          {e.begin1 ? (
+                            <SelectBox
+                              value={r.begin1}
+                              onChange={(v) => setCell(r.id, "begin1", v)}
+                              options={TIME_BEGIN_OPTIONS}
+                              className="w-[70px] text-center"
+                            />
+                          ) : (
+                            <span>{r.begin1 || "—"}</span>
+                          )}
+                        </td>
+
+                        <td className="px-2 py-2 text-center">
+                          {e.end1 ? (
+                            <SelectBox
+                              value={r.end1}
+                              onChange={(v) => setCell(r.id, "end1", v)}
+                              options={TIME_END_OPTIONS}
+                              className="w-[70px] text-center"
+                            />
+                          ) : (
+                            <span>{r.end1 || "—"}</span>
+                          )}
+                        </td>
+
+                        <td className="px-2 py-2 text-center">
+                          <Cell
+                            editable={e.room1}
+                            value={r.room1}
+                            onChange={(v) => setCell(r.id, "room1", v)}
+                            className="w-[96px]"
+                            align="center"
+                          />
+                        </td>
+
+                        <td className="px-2 py-2 text-center">
+                          {e.day2 ? (
+                            <SelectBox
+                              value={r.day2}
+                              onChange={(v) => setCell(r.id, "day2", v)}
+                              options={DAY_OPTIONS}
+                              className="w-[70px] text-center"
+                            />
+                          ) : (
+                            <span>{r.day2 || "—"}</span>
+                          )}
+                        </td>
+
+                        <td className="px-2 py-2 text-center">
+                          {e.begin2 ? (
+                            <SelectBox
+                              value={r.begin2}
+                              onChange={(v) => setCell(r.id, "begin2", v)}
+                              options={TIME_BEGIN_OPTIONS}
+                              className="w-[70px] text-center"
+                            />
+                          ) : (
+                            <span>{r.begin2 || "—"}</span>
+                          )}
+                        </td>
+
+                        <td className="px-2 py-2 text-center">
+                          {e.end2 ? (
+                            <SelectBox
+                              value={r.end2}
+                              onChange={(v) => setCell(r.id, "end2", v)}
+                              options={TIME_END_OPTIONS}
+                              className="w-[70px] text-center"
+                            />
+                          ) : (
+                            <span>{r.end2 || "—"}</span>
+                          )}
+                        </td>
+
+                        <td className="px-2 py-2 text-center">
+                          <Cell
+                            editable={e.room2}
+                            value={r.room2}
+                            onChange={(v) => setCell(r.id, "room2", v)}
+                            className="w-[96px]"
+                            align="center"
+                          />
+                        </td>
+
+                        <td className="px-2 py-2 text-center">
+                          <Cell
+                            editable={e.capacity}
+                            value={String(r.capacity ?? "")}
+                            onChange={(v) => setCell(r.id, "capacity", v as any)}
+                            className="w-[64px]"
+                            align="center"
+                          />
+                        </td>
+
+                        <td className="px-2 py-2 text-center">
+                          <StatusChip r={r} />
+                        </td>
+
+                        <td className="px-2 py-2 text-center">
+                          {isRunning && (
+                            <div className="relative flex items-center justify-center gap-3 text-emerald-700">
+                              <button
+                                className="relative hover:brightness-110"
+                                title="Message"
+                                onClick={() => setReqChange({ open: true, from: r.faculty || "Faculty" })}
+                              >
+                                <MessageSquareText className="h-5 w-5" />
+                                {unread && (
+                                  <span className="absolute -top-1 -right-1 h-2.5 w-2.5 rounded-full bg-red-600" />
+                                )}
+                              </button>
+
+                              <button
+                                className="flex h-7 w-7 items-center justify-center rounded-full border-2 border-emerald-700 text-emerald-700 hover:bg-emerald-50"
+                                title="Approve row"
+                              >
+                                <Check className="h-4 w-4" strokeWidth={2.5} />
+                              </button>
+
+                              {String(r.id).startsWith("manual-") && (
+                                <button
+                                  className="flex h-7 w-7 items-center justify-center rounded-full border-2 border-red-600 text-red-600 hover:bg-red-50"
+                                  title="Remove this line"
+                                  onClick={() =>
+                                    setRows((prev) => prev.filter((row) => row.id !== r.id))
+                                  }
+                                >
+                                  <Trash2 className="h-4 w-4" />
+                                </button>
+                              )}
+                            </div>
+                          )}
+                        </td>
                       </tr>
-                    </thead>
+                    );
+                  })}
 
-                    <tbody className="divide-y">
-                      {filtered.map((r, idx) => {
-                        const e = getEditFlags(r);
-                        const unread = r.status === "Pending";
-                        return (
-                          <tr
-                            key={r.id}
-                            className="hover:bg-gray-50 whitespace-nowrap"
-                          >
-                            <td className="px-3 py-2 text-center">
-                              {isRunning && (
-                                <input
-                                  type="checkbox"
-                                  checked={!!r.selected}
-                                  onChange={(ev) =>
-                                    setCell(
-                                      r.id,
-                                      "selected",
-                                      ev.target.checked as any
-                                    )
-                                  }
-                                  className="rounded border-gray-300 text-emerald-600 focus:ring-emerald-500"
-                                  title={`Select row ${idx + 1}`}
-                                />
-                              )}
-                            </td>
+                  {filtered.length === 0 && (
+                    <tr>
+                      <td colSpan={17} className="px-4 py-10 text-center text-sm text-gray-500">
+                        No data yet. Click <span className="font-medium">Run</span> or{" "}
+                        <span className="font-medium">Add new line</span> to begin.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
 
-                            <td className="px-4 py-2 align-top">
-                              <div>
-                                <div className="font-semibold text-emerald-700">
-                                  {r.course || "—"}
-                                </div>
-                                <div className="text-gray-600 text-sm">
-                                  {r.title || "—"}
-                                </div>
-                              </div>
-                            </td>
-
-                            <td className="px-2 py-2 text-center">
-                              <Cell
-                                editable={e.units}
-                                value={String(r.units ?? "")}
-                                onChange={(v) =>
-                                  setCell(r.id, "units", v as any)
-                                }
-                                className="w-[60px]"
-                                align="center"
-                              />
-                            </td>
-
-                            <td className="px-2 py-2 text-center">
-                              <Cell
-                                editable={e.section}
-                                value={r.section}
-                                onChange={(v) => setCell(r.id, "section", v)}
-                                className="w-[68px]"
-                                align="center"
-                              />
-                            </td>
-
-                            <td className="px-4 py-2">
-                              {e.faculty ? (
-                                <ComboBox
-                                  value={r.faculty ?? ""}
-                                  onChange={(v) => {
-                                    setCell(r.id, "faculty", v);
-                                    const fid = facultyNameToId[v] || "";
-                                    setCell(r.id, "faculty_id", fid as any);
-                                  }}
-                                  options={facultyOptions}
-                                  className="w-[200px] md:w-[240px] lg:w-[280px]"
-                                />
-                              ) : (
-                                <span className="block w-[200px] md:w-[240px] lg:w-[280px] truncate">
-                                  {r.faculty || "—"}
-                                </span>
-                              )}
-                            </td>
-
-                            <td className="px-2 py-2 text-center">
-                              {e.day1 ? (
-                                <SelectBox
-                                  value={r.day1}
-                                  onChange={(v) => setCell(r.id, "day1", v)}
-                                  options={DAY_OPTIONS}
-                                  className="w-[70px] text-center"
-                                />
-                              ) : (
-                                <span>{r.day1 || "—"}</span>
-                              )}
-                            </td>
-
-                            <td className="px-2 py-2 text-center">
-                              {e.begin1 ? (
-                                <SelectBox
-                                  value={r.begin1}
-                                  onChange={(v) => setCell(r.id, "begin1", v)}
-                                  options={TIME_BEGIN_OPTIONS}
-                                  className="w-[70px] text-center"
-                                />
-                              ) : (
-                                <span>{r.begin1 || "—"}</span>
-                              )}
-                            </td>
-
-                            <td className="px-2 py-2 text-center">
-                              {e.end1 ? (
-                                <SelectBox
-                                  value={r.end1}
-                                  onChange={(v) => setCell(r.id, "end1", v)}
-                                  options={TIME_END_OPTIONS}
-                                  className="w-[70px] text-center"
-                                />
-                              ) : (
-                                <span>{r.end1 || "—"}</span>
-                              )}
-                            </td>
-
-                            <td className="px-2 py-2 text-center">
-                              {e.room1 ? (
-                                <SelectBox
-                                  value={r.room1 || ""}
-                                  onChange={(v) =>
-                                    setCell(r.id, "room1", v as Row["room1"])
-                                  }
-                                  options={ROOM_OPTIONS}
-                                  className="w-[100px] text-center"
-                                />
-                              ) : (
-                                <span>{r.room1 || "—"}</span>
-                              )}
-                            </td>
-
-                            <td className="px-2 py-2 text-center">
-                              {e.day2 ? (
-                                <SelectBox
-                                  value={r.day2}
-                                  onChange={(v) => setCell(r.id, "day2", v)}
-                                  options={DAY_OPTIONS}
-                                  className="w-[70px] text-center"
-                                />
-                              ) : (
-                                <span>{r.day2 || "—"}</span>
-                              )}
-                            </td>
-
-                            <td className="px-2 py-2 text-center">
-                              {e.begin2 ? (
-                                <SelectBox
-                                  value={r.begin2}
-                                  onChange={(v) => setCell(r.id, "begin2", v)}
-                                  options={TIME_BEGIN_OPTIONS}
-                                  className="w-[70px] text-center"
-                                />
-                              ) : (
-                                <span>{r.begin2 || "—"}</span>
-                              )}
-                            </td>
-
-                            <td className="px-2 py-2 text-center">
-                              {e.end2 ? (
-                                <SelectBox
-                                  value={r.end2}
-                                  onChange={(v) => setCell(r.id, "end2", v)}
-                                  options={TIME_END_OPTIONS}
-                                  className="w-[70px] text-center"
-                                />
-                              ) : (
-                                <span>{r.end2 || "—"}</span>
-                              )}
-                            </td>
-
-                            <td className="px-2 py-2 text-center">
-                              {e.room2 ? (
-                                <SelectBox
-                                  value={r.room2 || ""}
-                                  onChange={(v) =>
-                                    setCell(r.id, "room2", v as Row["room2"])
-                                  }
-                                  options={ROOM_OPTIONS}
-                                  className="w-[100px] text-center"
-                                />
-                              ) : (
-                                <span>{r.room2 || "—"}</span>
-                              )}
-                            </td>
-
-                            <td className="px-2 py-2 text-center">
-                              <Cell
-                                editable={e.capacity}
-                                value={String(r.capacity ?? "")}
-                                onChange={(v) =>
-                                  setCell(r.id, "capacity", v as any)
-                                }
-                                className="w-[64px]"
-                                align="center"
-                              />
-                            </td>
-                            <td className="px-2 py-2 text-center">
-                              {e.mode ? (
-                                <SelectBox
-                                  value={r.mode || ""}
-                                  onChange={(v) =>
-                                    setCell(r.id, "mode", v as Row["mode"])
-                                  }
-                                  options={MODE_OPTIONS}
-                                  className="w-[80px] text-center"
-                                />
-                              ) : (
-                                <span>{r.mode || "—"}</span>
-                              )}
-                            </td>
-                            <td className="px-2 py-2 text-center">
-                              <StatusChip r={r} />
-                            </td>
-
-                            <td className="px-2 py-2 text-center">
-                              {isRunning && (
-                                <div className="relative flex items-center justify-center gap-3 text-emerald-700">
-                                  <button
-                                    className="relative hover:brightness-110"
-                                    title="Message"
-                                    onClick={() =>
-                                      setReqChange({
-                                        open: true,
-                                        from: r.faculty || "Faculty",
-                                      })
-                                    }
-                                  >
-                                    <MessageSquareText className="h-5 w-5" />
-                                    {unread && (
-                                      <span className="absolute -top-1 -right-1 h-2.5 w-2.5 rounded-full bg-red-600" />
-                                    )}
-                                  </button>
-
-                                  <button
-                                    className="flex h-7 w-7 items-center justify-center rounded-full border-2 border-emerald-700 text-emerald-700 hover:bg-emerald-50"
-                                    title="Approve row"
-                                  >
-                                    <Check
-                                      className="h-4 w-4"
-                                      strokeWidth={2.5}
-                                    />
-                                  </button>
-
-                                  {String(r.id).startsWith("manual-") && (
-                                    <button
-                                      className="flex h-7 w-7 items-center justify-center rounded-full border-2 border-red-600 text-red-600 hover:bg-red-50"
-                                      title="Remove this line"
-                                      onClick={() =>
-                                        setRows((prev) =>
-                                          prev.filter((row) => row.id !== r.id)
-                                        )
-                                      }
-                                    >
-                                      <Trash2 className="h-4 w-4" />
-                                    </button>
-                                  )}
-                                </div>
-                              )}
-                            </td>
-                          </tr>
-                        );
-                      })}
-
-                      {filtered.length === 0 && (
-                        <tr>
-                          <td
-                            colSpan={17}
-                            className="px-4 py-10 text-center text-sm text-gray-500"
-                          >
-                            No data yet. Click{" "}
-                            <span className="font-medium">Run</span> or{" "}
-                            <span className="font-medium">Add new line</span> to
-                            begin.
-                          </td>
-                        </tr>
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-
-                <div className="border-t px-4 py-3">
-                  <div className="flex justify-start">
-                    <button
-                      onClick={addRow}
-                      className="inline-flex items-center gap-2 rounded-lg border border-gray-400 px-3 py-1.5 text-sm text-gray-800 hover:bg-gray-100"
-                      title="Add new line"
-                    >
-                      <Plus className="h-4 w-4" />
-                      Add new line
-                    </button>
-                  </div>
-                  {/* Right: Auto-assign (Run algorithm) */}
-                  <div className="flex items-center gap-2">
-                    <button
-                      onClick={runAutoAssign}
-                      disabled={isAssigning || hasLocalEdits}
-                      className="inline-flex items-center gap-2 rounded-md border border-emerald-700 text-emerald-800 bg-white px-3.5 py-2 text-sm font-medium hover:bg-emerald-50 disabled:opacity-60"
-                      title={
-                        hasLocalEdits
-                          ? "Auto-assign is disabled while you have manual edits. Save or refresh first."
-                          : "Run auto-assignment algorithm"
-                      }
-                    >
-                      <Play className="h-4 w-4" />
-                      {isAssigning ? "Assigning…" : "Auto-assign"}
-                    </button>
-                  </div>
-                </div>
+            <div className="border-t px-4 py-3">
+              <div className="flex justify-start">
+                <button
+                  onClick={addRow}
+                  className="inline-flex items-center gap-2 rounded-lg border border-gray-400 px-3 py-1.5 text-sm text-gray-800 hover:bg-gray-100"
+                  title="Add new line"
+                >
+                  <Plus className="h-4 w-4" />
+                  Add new line
+                </button>
               </div>
-            </main>
+            </div>
+          </div>
+        </main>
           )}
         </>
       )}
-
+      
       <ApproveModal
+
         open={showApprove}
         onClose={() => setShowApprove(false)}
-        onApprove={() => {
+                onApprove={() => {
           (async () => {
             try {
               if (userId) {
-                await submitOmLoadAssignment(userId, { rows }, "approve"); // <-- key change
+                // minimal optimistic submit; backend returns display-ready rows
+                await submitOmLoadAssignment(userId, { rows });
               }
-              // pull fresh data so you see persisted faculty + any created schedules
-              await loadFromServer();
               setApproved(true);
             } finally {
               setShowApprove(false);
@@ -1464,11 +1188,7 @@ const [profileSubtitle, setProfileSubtitle] = useState<string>(
         }}
       />
 
-      <SendModal
-        open={showSend}
-        onClose={() => setShowSend(false)}
-        rows={selectedRows}
-      />
+      <SendModal open={showSend} onClose={() => setShowSend(false)} rows={selectedRows} />
 
       <RequestChangeModal
         open={reqChange.open}
