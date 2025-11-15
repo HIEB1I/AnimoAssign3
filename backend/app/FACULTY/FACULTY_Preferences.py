@@ -9,6 +9,10 @@ from pymongo import ReturnDocument
 
 from ..main import db  # shared Motor client from main.py
 COL_PREFS_WINDOWS = "faculty_prefs_windows"
+COL_TERMS = "terms"
+COL_PREEN_COUNT = "preenlistment_count"
+
+
 router = APIRouter(prefix="/faculty/preferences", tags=["FACULTY: Preferences"])
 
 
@@ -57,12 +61,81 @@ class PrefDoc(SubmitPayload):
 from datetime import datetime, timezone, timedelta
 
 
-async def _active_term_doc() -> dict | None:
-  term = await db.terms.find_one(
-      {"$or": [{"status": "active"}, {"is_current": True}]},
-      {"_id": 0, "term_id": 1, "start_date": 1, "classes_start_date": 1}
-  )
-  return term or {}
+async def _active_term_doc() -> dict:
+    """
+    Mirror the OM Faculty Form active term resolution so that both sides
+    talk about the same 'working' term when computing the preference window.
+
+    Priority:
+    1) If there is an active (non-archived) pre-enlistment batch in
+       preenlistment_count, use that term_id.
+    2) Otherwise, use the *next* term after the current term
+       (where is_current = True or status = 'active').
+    3) If there is no "next" term configured, fall back to the current term
+       (or latest AY/term_number if nothing is flagged current/active).
+    """
+
+    term_fields = {
+        "_id": 0,
+        "term_id": 1,
+        "acad_year_start": 1,
+        "term_number": 1,
+        "submission_deadline": 1,
+        "start_date": 1,
+        "classes_start_date": 1,
+    }
+
+    # 1) Try to derive from an active pre-enlistment batch
+    pre_doc = await db[COL_PREEN_COUNT].find_one(
+        {"is_archived": {"$ne": True}},
+        {"_id": 0, "term_id": 1},
+    )
+    if pre_doc and pre_doc.get("term_id"):
+        t = await db[COL_TERMS].find_one(
+            {"term_id": pre_doc["term_id"]},
+            term_fields,
+        )
+        if t:
+            return t
+
+    # 2) Fallback: current term (status = active OR is_current = True)
+    current = await db[COL_TERMS].find_one(
+        {"$or": [{"status": "active"}, {"is_current": True}]},
+        term_fields,
+    )
+
+    if not current:
+        # Latest term by AY + term_number
+        last = await db[COL_TERMS].find({}, term_fields) \
+            .sort([("acad_year_start", -1), ("term_number", -1)]) \
+            .limit(1).to_list(1)
+        current = last[0] if last else None
+
+    if not current:
+        # No terms configured at all
+        return {}
+
+    # 3) Compute the "next" term after the current term
+    next_terms = await db[COL_TERMS].find(
+        {
+            "$or": [
+                {"acad_year_start": {"$gt": current["acad_year_start"]}},
+                {
+                    "acad_year_start": current["acad_year_start"],
+                    "term_number": {"$gt": current["term_number"]},
+                },
+            ]
+        },
+        term_fields,
+    ).sort([("acad_year_start", 1), ("term_number", 1)]).limit(1).to_list(1)
+
+    if next_terms:
+        # Use the next term as the working/planning term
+        return next_terms[0]
+
+    # If no next term, stick with current
+    return current
+
 
 
 def _parse_date_any(dt: str | datetime | None) -> datetime | None:
@@ -90,36 +163,100 @@ def _prefs_window_from_term(term: dict) -> tuple[datetime, datetime]:
 
   return open_dt, close_dt
 
+async def _prefs_window_override_for_term(term: dict | None) -> dict:
+    """
+    For Faculty UI: use the same manually-started window as OM.
+
+    If OM has never clicked “Start Window”, this returns empty ISO strings
+    so the UI will not show a running countdown.
+    """
+    term = term or {}
+    term_id = term.get("term_id")
+    if not term_id:
+        return {"openISO": "", "deadlineISO": "", "term_id": None}
+
+    override = await db[COL_PREFS_WINDOWS].find_one(
+        {"term_id": term_id},
+        {
+            "_id": 0,
+            "open_dt": 1,
+            "deadline_dt": 1,
+            "openISO": 1,
+            "deadlineISO": 1,
+            "term_id": 1,
+        },
+    )
+
+    if not override:
+        # No manual window yet → treat as “not started”
+        return {"openISO": "", "deadlineISO": "", "term_id": term_id}
+
+    # Normalize to datetime using the same parser you already have
+    open_dt = _parse_date_any(override.get("open_dt") or override.get("openISO"))
+    deadline_dt = _parse_date_any(
+        override.get("deadline_dt") or override.get("deadlineISO")
+    )
+
+    return {
+        "openISO": open_dt.isoformat() if open_dt else "",
+        "deadlineISO": deadline_dt.isoformat() if deadline_dt else "",
+        "term_id": term_id,
+    }
+
+
 async def _prefs_window_for_term(term: dict) -> dict:
-  """
-  Resolve preference window for the term:
+    """
+    Resolve preference window using ONLY the manual window that OM set.
 
-  1. Try override in faculty_prefs_windows (set by OM startWindow).
-  2. Fallback to default week-7 + 30 days window from term dates.
-  """
-  term = term or {}
-  term_id = term.get("term_id")
+    If OM has not started the window yet, return empty values so callers
+    can block submissions.
+    """
+    term = term or {}
+    term_id = term.get("term_id")
 
-  open_dt: Optional[datetime] = None
-  close_dt: Optional[datetime] = None
+    if not term_id:
+        return {
+            "open_dt": None,
+            "deadline_dt": None,
+            "openISO": "",
+            "deadlineISO": "",
+            "term_id": None,
+        }
 
-  if term_id:
-      override = await db[COL_PREFS_WINDOWS].find_one({"term_id": term_id})
-      if override:
-          open_dt = override.get("open_dt") or _parse_date_any(override.get("openISO"))
-          close_dt = override.get("deadline_dt") or _parse_date_any(override.get("deadlineISO"))
+    override = await db[COL_PREFS_WINDOWS].find_one(
+        {"term_id": term_id},
+        {
+            "_id": 0,
+            "open_dt": 1,
+            "deadline_dt": 1,
+            "openISO": 1,
+            "deadlineISO": 1,
+            "term_id": 1,
+        },
+    )
 
-  if not open_dt or not close_dt:
-      open_dt, close_dt = _prefs_window_from_term(term)
+    if not override:
+        # No manual window → treat as "not started"
+        return {
+            "open_dt": None,
+            "deadline_dt": None,
+            "openISO": "",
+            "deadlineISO": "",
+            "term_id": term_id,
+        }
 
-  return {
-      "open_dt": open_dt,
-      "deadline_dt": close_dt,
-      "openISO": open_dt.isoformat(),
-      "deadlineISO": close_dt.isoformat(),
-      "term_id": term_id,
-  }
+    open_dt = override.get("open_dt") or _parse_date_any(override.get("openISO"))
+    deadline_dt = override.get("deadline_dt") or _parse_date_any(
+        override.get("deadlineISO")
+    )
 
+    return {
+        "open_dt": open_dt,
+        "deadline_dt": deadline_dt,
+        "openISO": open_dt.isoformat() if open_dt else "",
+        "deadlineISO": deadline_dt.isoformat() if deadline_dt else "",
+        "term_id": term_id,
+    }
 
 
 async def _get_type_id(db, type_label: str) -> str | None:
@@ -325,29 +462,49 @@ async def preferences_root(
       return await _faculty_profile(userId)
 
   if action == "options":
-      kacs = []
+      kacs: List[Dict[str, Any]] = []
       async for k in db.kacs.find({}, {"_id": 0}).limit(200):
           kacs.append(k)
 
-      days_display = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
-      time_slots_display = [
-          "07:30 - 09:00", "09:15 - 10:45", "11:00 - 12:30", "12:45 - 14:15",
-          "14:30 - 16:00", "16:15 - 17:45", "18:00 - 19:30", "19:45 - 21:00",
+      days_display = [
+          "Monday",
+          "Tuesday",
+          "Wednesday",
+          "Thursday",
+          "Friday",
+          "Saturday",
       ]
+      time_slots_display = [
+          "07:30 - 09:00",
+          "09:15 - 10:45",
+          "11:00 - 12:30",
+          "12:45 - 14:15",
+          "14:30 - 16:00",
+          "16:15 - 17:45",
+          "18:00 - 19:30",
+          "19:45 - 21:00",
+      ]
+
+      # Use the same manual override window as OM
       term = await _active_term_doc()
-      window = await _prefs_window_for_term(term or {})
+      window = await _prefs_window_override_for_term(term)
+      prefs_window = {
+          "openISO": window.get("openISO") or "",
+          "deadlineISO": window.get("deadlineISO") or "",
+          "term_id": window.get("term_id"),
+      }
+
       return {
           "ok": True,
           "kacs": kacs,
           "days_display": days_display,
           "time_slots_display": time_slots_display,
-          "prefs_window": {
-              "openISO": window["openISO"],
-              "deadlineISO": window["deadlineISO"],
-              "term_id": window["term_id"],
+          "prefs_window": prefs_window,
+          # optional, not strictly needed by the TSX but harmless:
+          "activeTerm": {
+              "term_id": (term or {}).get("term_id"),
           },
       }
-
 
   if action == "fetch":
       fac = await db.faculty_profiles.find_one({"user_id": userId}, {"_id": 0, "faculty_id": 1})
@@ -384,17 +541,26 @@ async def preferences_root(
           raise HTTPException(status_code=400, detail="Active term not found; cannot submit preferences.")
 
       # NEW: enforce submission window (shared with OM)
+      # Enforce submission window (OM-controlled only)
       window = await _prefs_window_for_term(term_doc or {})
       now = _utcnow()
-      open_dt = window["open_dt"]
-      deadline_dt = window["deadline_dt"]
+      open_dt = window.get("open_dt")
+      deadline_dt = window.get("deadline_dt")
 
-      if open_dt and now < open_dt:
+      # If OM has not started the window at all, block submissions
+      if not open_dt or not deadline_dt:
+          raise HTTPException(
+              status_code=400,
+              detail="Preference submission window has not been started by the Office Manager yet. Please contact your OM."
+          )
+
+      if now < open_dt:
           raise HTTPException(
               status_code=400,
               detail="Preference submission window has not started yet. Please contact your OM."
           )
-      if deadline_dt and now > deadline_dt:
+
+      if now > deadline_dt:
           raise HTTPException(
               status_code=400,
               detail="Preference submission deadline has passed. Please contact your OM."
