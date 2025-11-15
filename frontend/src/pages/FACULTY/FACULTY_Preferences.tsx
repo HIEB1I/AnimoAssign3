@@ -464,7 +464,7 @@ function DeadlineBanner({ openISO, deadlineISO, className }: { openISO: string; 
           <span className="font-medium">{deadlineISO ? new Date(deadlineISO).toLocaleString() : "—"}</span>{" "}
           • <span className="font-bold text-amber-700">{deadlineISO ? deadlineLabel : "TBA"}</span>
         </div>
-        <div className="mt-1 text-[12px] opacity-80">Please finalize before the deadline. Drafts are allowed until lock.</div>
+        <div className="mt-1 text-[12px] opacity-80">Please finalize your preferences before the deadline.</div>
       </div>
     </div>
   );
@@ -528,7 +528,7 @@ function AELine1Schedule() {
             const L = get(ML, i),
               R = get(LM, i);
             return (
-              <tr key={i} className="odd:bg-white even:bg-neutral-50">
+              <tr key={i} className="odd:bg:white even:bg-neutral-50">
                 <td className="border-t border-r border-neutral-300 px-2 py-1.5 align-top text-center">
                   {L.trip || "\u00A0"}
                 </td>
@@ -596,7 +596,6 @@ function EditForm({
   initial,
   onClose,
   onSave,
-  onDraft,
   openISO,
   deadlineISO,
   employmentType,
@@ -607,7 +606,6 @@ function EditForm({
   initial: SavedPrefs;
   onClose: () => void;
   onSave: (v: SavedPrefs) => void;
-  onDraft: (v: SavedPrefs) => void;
   openISO: string;
   deadlineISO: string;
   employmentType: "FT" | "PT";
@@ -686,9 +684,43 @@ function EditForm({
         return { ok: false, msg: "Date of return is required." };
       return { ok: true };
     }
+
     if (!form.prefUnits || !prefUnitOptions.includes(form.prefUnits as any)) {
       return { ok: false, msg: "Please select Preferred Teaching Units." };
     }
+
+    // when there is a teaching load (not 0.0 units, not break),
+    // these fields are required:
+    const ZERO_LOAD_LABEL_LOCAL = "0.0 units - no teaching load (for full-time only)";
+    const hasZeroLoad = form.prefUnits === ZERO_LOAD_LABEL_LOCAL;
+
+    if (!hasZeroLoad) {
+      if (!form.delivery.trim()) {
+        return {
+          ok: false,
+          msg: "Preferred Delivery Mode is required when you have a teaching load.",
+        };
+      }
+      if (!form.days || form.days.length === 0) {
+        return {
+          ok: false,
+          msg: "Preferred Teaching Days are required when you have a teaching load.",
+        };
+      }
+      if (!form.timeSlots || form.timeSlots.length === 0) {
+        return {
+          ok: false,
+          msg: "Preferred Time Slots are required when you have a teaching load.",
+        };
+      }
+      if (!form.kac || form.kac.length === 0) {
+        return {
+          ok: false,
+          msg: "Knowledge Area Cluster (KAC) is required when you have a teaching load.",
+        };
+      }
+    }
+
     for (const r of deloadRows) {
       const needsSpecify = r.type === "Administrative" || r.type === "Research";
       if (!form.noDeloading && needsSpecify && !(r.detail || "").trim()) {
@@ -698,6 +730,7 @@ function EditForm({
         return { ok: false, msg: "Research deloading units must be between 1 and 9." };
       }
     }
+
     return { ok: true };
   }
 
@@ -976,30 +1009,6 @@ function EditForm({
                       onClick={() => {
                         const v = validate();
                         if (v.ok)
-                          onDraft({
-                            ...form,
-                            deloadings: form.noDeloading ? [] : deloadRows,
-                          });
-                      }}
-                      className={cls(
-                        "inline-flex h-9 items-center justify-center rounded-2xl px-4 text-sm font-medium shadow active:translate-y-[0.5px]",
-                        deadlinePassed
-                          ? "cursor-not-allowed bg-orange-200 text-white"
-                          : "bg-orange-500 text-white hover:brightness-110"
-                      )}
-                      title={
-                        deadlinePassed
-                          ? "Deadline passed — editing locked"
-                          : "Save a draft (not final)"
-                      }
-                    >
-                      Save Draft
-                    </button>
-                    <button
-                      disabled={deadlinePassed}
-                      onClick={() => {
-                        const v = validate();
-                        if (v.ok)
                           onSave({
                             ...form,
                             deloadings: form.noDeloading ? [] : deloadRows,
@@ -1204,30 +1213,6 @@ function EditForm({
                       onClick={() => {
                         const v = validate();
                         if (v.ok)
-                          onDraft({
-                            ...form,
-                            deloadings: form.noDeloading ? [] : deloadRows,
-                          });
-                      }}
-                      className={cls(
-                        "inline-flex h-9 items-center justify-center rounded-2xl px-4 text-sm font-medium shadow active:translate-y-[0.5px]",
-                        deadlinePassed
-                          ? "cursor-not-allowed bg-orange-200 text-white"
-                          : "bg-orange-500 text-white hover:brightness-110"
-                      )}
-                      title={
-                        deadlinePassed
-                          ? "Deadline passed — editing locked"
-                          : "Save a draft (not final)"
-                      }
-                    >
-                      Save Draft
-                    </button>
-                    <button
-                      disabled={deadlinePassed}
-                      onClick={() => {
-                        const v = validate();
-                        if (v.ok)
                           onSave({
                             ...form,
                             deloadings: form.noDeloading ? [] : deloadRows,
@@ -1254,7 +1239,7 @@ function EditForm({
                   {/* Delivery/Campus */}
                   <div className="grid grid-cols-1 gap-6 sm:grid-cols-2">
                     <div>
-                      <FieldLabel>Preferred Delivery Mode</FieldLabel>
+                      <FieldLabel required>Preferred Delivery Mode</FieldLabel>
                       <Dropdown
                         value={form.delivery}
                         onChange={(v) => {
@@ -1282,7 +1267,7 @@ function EditForm({
                   {/* Days / Time Slots */}
                   <div className="grid grid-cols-1 gap-6 sm:grid-cols-2">
                     <div>
-                      <FieldLabel>Preferred Teaching Days</FieldLabel>
+                      <FieldLabel required>Preferred Teaching Days</FieldLabel>
                       <div className="grid grid-cols-2 gap-2">
                         {daysMaster.map((d) => (
                           <label key={d} className="flex items-center gap-2 text-[15px]">
@@ -1299,7 +1284,7 @@ function EditForm({
                     </div>
 
                     <div>
-                      <FieldLabel>Preferred Time Slots</FieldLabel>
+                      <FieldLabel required>Preferred Time Slots</FieldLabel>
                       <div className="grid grid-cols-1 gap-1.5">
                         {timeSlotsMaster.map((t) => (
                           <label key={t} className="flex items-center gap-2 text-[15px]">
@@ -1318,7 +1303,7 @@ function EditForm({
 
                   {/* KAC */}
                   <div>
-                    <FieldLabel>Knowledge Area Cluster (KAC)</FieldLabel>
+                    <FieldLabel required>Knowledge Area Cluster (KAC)</FieldLabel>
                     <MultiSelectDropdown
                       values={form.kac as string[]}
                       onChange={(v) => setForm({ ...form, kac: v })}
@@ -1503,30 +1488,6 @@ function EditForm({
                       className="inline-flex h-9 items-center justify-center rounded-2xl border border-neutral-200 bg-neutral-100 px-4 text-sm text-slate-900 shadow-sm hover:bg-neutral-200/70 active:translate-y-[0.5px]"
                     >
                       Cancel
-                    </button>
-                    <button
-                      disabled={deadlinePassed}
-                      onClick={() => {
-                        const v = validate();
-                        if (v.ok)
-                          onDraft({
-                            ...form,
-                            deloadings: form.noDeloading ? [] : deloadRows,
-                          });
-                      }}
-                      className={cls(
-                        "inline-flex h-9 items-center justify-center rounded-2xl px-4 text-sm font-medium shadow active:translate-y-[0.5px]",
-                        deadlinePassed
-                          ? "cursor-not-allowed bg-orange-200 text-white"
-                          : "bg-orange-500 text-white hover:brightness-110"
-                      )}
-                      title={
-                        deadlinePassed
-                          ? "Deadline passed — editing locked"
-                          : "Save a draft (not final)"
-                      }
-                    >
-                      Save Draft
                     </button>
                     <button
                       disabled={deadlinePassed}
@@ -1780,7 +1741,7 @@ export default function FACULTY_Preferences() {
         onBreak || isZeroTeachingLoad
           ? { mode: "HYB", campus_id: [] }
           : toModePayload(v),
-      notes: v.remarks,
+      notes: onBreak ? "" : v.remarks,
       has_new_prep: false,
       is_finished: finished,
 
@@ -1810,16 +1771,6 @@ export default function FACULTY_Preferences() {
       alert(e?.response?.data?.detail || e?.message || "Failed to save preferences.");
     }
   };
-  const handleDraft = async (v: SavedPrefs) => {
-    try {
-      const payload = toServerPayload(v, false);
-      const res = await submitFacultyPreferences(userId, payload);
-      await afterSubmitRefresh(res);
-      alert("Draft saved.");
-    } catch (e: any) {
-      alert(e?.response?.data?.detail || e?.message || "Failed to save draft.");
-    }
-  };
 
   if (loading) {
     return (
@@ -1838,7 +1789,6 @@ export default function FACULTY_Preferences() {
           initial={coherentInitial}
           onClose={() => setOpenEdit(false)}
           onSave={handleSave}
-          onDraft={handleDraft}
           openISO={prefsWindow.openISO}
           deadlineISO={prefsWindow.deadlineISO}
           employmentType={employmentType}
