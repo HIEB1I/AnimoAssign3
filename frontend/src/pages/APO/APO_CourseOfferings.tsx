@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import Papa from "papaparse";
 import {
   Edit,
   Trash2,
@@ -26,7 +27,8 @@ import {
   getElectiveOptions,
   searchCourseCatalog,      
   createCatalogCourse, 
-  getEligibleRoomsForOffering,                    
+  getEligibleRoomsForOffering,          
+  importCurriculumCsv,          
   type ApiConflict,
   type CreateCoursePayload,  
   type CourseCatalogItem           
@@ -127,19 +129,38 @@ const toHHMM = (s?: string) => {
 
 const GE_TIME_SLOTS = [
   { label: "07:30 - 09:00", start: "0730", end: "0900" },
-  { label: "09:15 - 10:45", start: "0915", end: "1045" },
-  { label: "11:00 - 12:30", start: "1100", end: "1230" },
-  { label: "12:45 - 14:15", start: "1245", end: "1415" },
-  { label: "14:30 - 16:00", start: "1430", end: "1600" },
-  { label: "16:15 - 17:45", start: "1615", end: "1745" },
-  { label: "18:00 - 19:30", start: "1800", end: "1930" },
-  { label: "19:45 - 21:00", start: "1945", end: "2100" },
-    // NEW long blocks you requested
   { label: "08:00 - 10:00", start: "0800", end: "1000" },
+
+  { label: "09:00 - 12:00", start: "0900", end: "1200" },
+  { label: "09:15 - 10:45", start: "0915", end: "1045" },
+  { label: "09:15 - 12:30", start: "0915", end: "1230" },
+
   { label: "10:00 - 12:00", start: "1000", end: "1200" },
+  { label: "10:00 - 13:00", start: "1000", end: "1300" },
+
+  { label: "11:00 - 12:30", start: "1100", end: "1230" },
+  { label: "11:00 - 13:00", start: "1100", end: "1300" },
+
+  { label: "12:45 - 14:15", start: "1245", end: "1415" },
+
   { label: "13:00 - 15:00", start: "1300", end: "1500" },
+  { label: "13:00 - 16:00", start: "1300", end: "1600" },
+  { label: "13:15 - 14:15", start: "1315", end: "1415" },
+
+  { label: "14:00 - 16:00", start: "1400", end: "1600" },
+  { label: "14:30 - 16:00", start: "1430", end: "1600" },
+  { label: "14:40 - 16:00", start: "1440", end: "1600" },
+
   { label: "15:30 - 17:30", start: "1530", end: "1730" },
+
+  { label: "16:15 - 17:45", start: "1615", end: "1745" },
+
+  { label: "18:00 - 19:30", start: "1800", end: "1930" },
   { label: "18:00 - 20:00", start: "1800", end: "2000" },
+  { label: "18:00 - 21:00", start: "1800", end: "2100" },
+
+  { label: "19:45 - 21:00", start: "1945", end: "2100" },
+  { label: "19:45 - 21:15", start: "1945", end: "2115" },
 ];
 
 const GE_PLACEHOLDER = "— Select —";
@@ -661,7 +682,8 @@ const EligibleRoomSelect: React.FC<{
     batch_id?: string;
   } | null>(null);
   const [showCreateCourseModal, setShowCreateCourseModal] = useState(false);
-
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [importBusy, setImportBusy] = useState(false);
   // Offerings collapse state (keyed by "ID::PROGRAM")
   const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
 
@@ -1502,6 +1524,7 @@ if (isGE) {
             )}
           </div>
           {/* Curriculum filters */}
+          {/* Curriculum filters */}
           {view === "curriculum" && (
             <>
               <SelectBox
@@ -1521,15 +1544,113 @@ if (isGE) {
                 options={["All ID", ...currBatches.map((b) => b.code)]}
               />
 
-              {/* ADD: global catalog "Add Course" button */}
-              <button
-                className="ml-auto inline-flex items-center gap-2 rounded-md bg-emerald-700 px-4 py-2 text-sm font-medium text-white shadow-sm"
-                onClick={() => setShowCreateCourseModal(true)}
-                title="Create a new course in the global catalog"
-              >
-                <Plus className="h-4 w-4" />
-                Add Course
-              </button>
+              {/* Right-side actions: Import CSV + Add Course */}
+              <div className="ml-auto flex items-center gap-2">
+                <button
+                  type="button"
+                  className="inline-flex items-center gap-2 rounded-md border border-emerald-700 px-4 py-2 text-sm font-medium text-emerald-700 hover:bg-emerald-50 disabled:opacity-50"
+                  disabled={importBusy}
+                  onClick={() => fileInputRef.current?.click()}
+                  title="Import curriculum (IDs / flowcharts) from CSV"
+                >
+                  <Plus className="h-4 w-4" />
+                  Import CSV
+                </button>
+
+                <button
+                  className="inline-flex items-center gap-2 rounded-md bg-emerald-700 px-4 py-2 text-sm font-medium text-white shadow-sm"
+                  onClick={() => setShowCreateCourseModal(true)}
+                  title="Create a new course in the global catalog"
+                >
+                  <Plus className="h-4 w-4" />
+                  Add Course
+                </button>
+              </div>
+
+              {/* Hidden file input for CSV upload */}
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".csv"
+                className="hidden"
+                onChange={(e) => {
+                  const input = e.target as HTMLInputElement;
+                  const file = input.files?.[0];
+                  if (!file || !user?.userId) return;
+
+                  setImportBusy(true);
+
+                  Papa.parse<any>(file, {
+                    header: true,
+                    skipEmptyLines: true,
+                    complete: async (result) => {
+                      try {
+                        const rows = (result.data || []) as any[];
+
+                        const res = await importCurriculumCsv(
+                          user.userId,
+                          rows,
+                          {
+                            termId: curr?.term_id || data?.term_id,
+                            campus: curr?.campus?.campus_name || data?.campus?.campus_name,
+                          }
+                        );
+
+                        console.log("CSV import response:", res);
+
+                        if (res.ok) {
+                          alert(`Imported ${res.imported} row(s).`);
+                          await loadCurriculum(); // refresh curriculum view
+                        } else {
+                          alert("Import did not succeed (ok = false). Check console for full response.");
+                        }
+
+                        if (res.errors?.length) {
+                          const errors = res.errors;
+                          console.error("Row-level CSV errors:", errors);
+
+                          const lines = errors.map((e: any) => {
+                            if (typeof e === "string") return e;
+
+                            // our backend puts the text in `detail`
+                            if (typeof e.detail === "string") return e.detail;
+
+                            // if detail is something else (array/object), stringify it
+                            if (e.detail) return JSON.stringify(e.detail);
+
+                            // fallback
+                            const row = e.row ?? "?";
+                            const msg = e.message || JSON.stringify(e);
+                            return `Row ${row}: ${msg}`;
+                          });
+
+                          alert(
+                            "Some rows had issues during import:\n\n" +
+                              lines.join("\n")
+                          );
+                        }
+
+                      } catch (err: any) {
+                        console.error("CSV import failed:", err?.response?.data || err);
+                        alert(
+                          err?.response?.data?.detail ||
+                            err?.message ||
+                            "Failed to import CSV. See console for details."
+                        );
+                      } finally {
+                        setImportBusy(false);
+                        input.value = ""; // allow picking the same file again
+                      }
+                    },
+                    error: (err) => {
+                      console.error("CSV parse error:", err);
+                      alert("Failed to parse CSV file. Please check the format.");
+                      setImportBusy(false);
+                      input.value = "";
+                    },
+                  });
+                }}
+              />
             </>
           )}
         </div>

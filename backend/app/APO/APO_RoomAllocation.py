@@ -321,12 +321,30 @@ async def faculty_by_section_first(sec_ids: List[str], term_id: str) -> Dict[str
     return out
 
 @router.get("/roomallocation")
-async def get_room_allocation(userId: str = Query(..., min_length=3)):
-    term_id = await resolve_term_id_with_sections_fallback()
+async def get_room_allocation(
+    userId: str = Query(..., min_length=3),
+    termId: Optional[str] = Query(None),
+):
+    # Prefer the explicit term coming from Pre-Enlistment (via the frontend).
+    # This keeps Room Allocation in sync with the term the APO is currently working on.
+    effective_term_id: Optional[str] = None
+    if termId:
+        t = await db[COL_TERMS].find_one(
+            {"term_id": termId},
+            {"_id": 0, "term_id": 1},
+        )
+        if t:
+            # Always honor a valid termId from the client
+            effective_term_id = termId
+
+    term_id = effective_term_id or await resolve_term_id_with_sections_fallback()
+
     if not term_id:
         return {
             "campus": {"campus_id": "", "campus_name": ""},
             "term_id": "",
+            "term_number": None,
+            "acad_year_start": None,
             "buildings": [],
             "timeBands": TIME_BANDS,
             "rooms": [],
@@ -336,7 +354,16 @@ async def get_room_allocation(userId: str = Query(..., min_length=3)):
             "courses": [],
         }
 
+    # Fetch term meta so FE can render "Term X · AY YYYY-YYYY"
+    term_doc = await db[COL_TERMS].find_one(
+        {"term_id": term_id},
+        {"_id": 0, "term_number": 1, "acad_year_start": 1},
+    )
+    term_number = term_doc.get("term_number") if term_doc else None
+    acad_year_start = term_doc.get("acad_year_start") if term_doc else None
+
     campus_id, college_id = await apo_scope(userId)
+
     if not campus_id:
         raise HTTPException(status_code=400, detail="Unable to resolve APO campus from role_assignments.")
 
@@ -559,6 +586,8 @@ async def get_room_allocation(userId: str = Query(..., min_length=3)):
     return {
         "campus": campus,
         "term_id": term_id,
+        "term_number": term_number,
+        "acad_year_start": acad_year_start,
         "buildings": buildings,
         "timeBands": TIME_BANDS,
         "rooms": rooms_out,
@@ -575,9 +604,12 @@ async def post_room_allocation(
     action: Literal["addRoom", "updateRoom", "setAvailability", "assign", "unassign", "removeRoom"] = Query(...),
     payload: Dict[str, Any] = Body(...),
 ):
-    term_id = await resolve_term_id_with_sections_fallback()
+    # Prefer explicit planning term from the frontend (same term as GET /roomallocation)
+    payload_term_id = (payload.get("term_id") or "").strip()
+    term_id = payload_term_id or await resolve_term_id_with_sections_fallback()
     if not term_id:
         raise HTTPException(status_code=400, detail="No active term.")
+
     campus_id, college_id = await apo_scope(userId)
     if not campus_id:
         raise HTTPException(status_code=400, detail="Unable to resolve APO campus from role_assignments.")

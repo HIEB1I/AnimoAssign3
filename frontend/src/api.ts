@@ -373,8 +373,13 @@ export type ArchiveMetaItem = {
   programs?: number;
 };
 
-export type ArchivesMetaResponse = { archives: ArchiveMetaItem[] };
+export type ArchivesMetaResponse = {
+archives: ArchiveMetaItem[];
 
+  // NEW – matches what the backend sends & what your UI reads
+  planningTerm?: TermMeta | null;
+  activeTerm?: TermMeta | null;
+};
 export function campusFromRoles(roles: string[] = []): "MANILA" | "LAGUNA" | null {
   const r = roles.map((s) => s.toLowerCase());
   if (r.some((x) => x.includes("apo") && x.includes("manila"))) return "MANILA";
@@ -680,6 +685,11 @@ export type OfferingsQuery = {
   department_id?: string;
   batch_id?: string;
   program_id?: string;
+    /** Which term to use on the backend: 
+   *  - "active"   = current term (e.g., TERM0014)
+   *  - "planning" = next term used for loading (e.g., TERM0015)
+   */
+  term_mode?: "active" | "planning";
 };
 function normalizeLevelForQuery(level?: string) {
   const s = String(level || "").trim().toLowerCase();
@@ -1062,6 +1072,30 @@ export type CourseCatalogItem = {
   units?: number | null;
   type_of_course?: string | null;
 };
+// type near your other APO types (optional helper)
+export type CurriculumCsvRow = { [key: string]: any };
+
+export async function importCurriculumCsv(
+  userId: string,
+  rows: CurriculumCsvRow[],
+  opts?: { termId?: string; campus?: string }
+) {
+  const res = await api.post(
+    "/apo/courseofferings",
+    { rows },  // <-- send as { rows: [...] }
+    {
+      params: {
+        userId,
+        action: "curriculumImportCsv",  // <-- MUST match Python Literal
+        termId: opts?.termId,
+        campus: opts?.campus,
+      },
+    }
+  );
+
+  return res.data;
+}
+
 /* =========================================================
    ===============  APO: ROOM ALLOCATION  ==================
    ========================================================= */
@@ -1104,6 +1138,8 @@ export type RoomWithSchedule = RoomDoc & { schedule: RoomScheduleCell[] };
 export type RoomAllocationResponse = {
   campus: { campus_id: string; campus_name: string };
   term_id: string;
+  term_number?: number;
+  acad_year_start?: number;
   buildings: string[];
   timeBands: string[];
   rooms: RoomWithSchedule[];
@@ -1118,10 +1154,19 @@ export type RoomAllocationResponse = {
 
 const base = API_BASE.replace(/\/$/, "");
 
-export async function getApoRoomAllocation(userId: string): Promise<RoomAllocationResponse> {
-  const r = await fetch(
-    `${base}/apo/roomallocation?${new URLSearchParams({ userId }).toString()}`
-  );
+export async function getApoRoomAllocation(
+  userId: string,
+  termId?: string
+): Promise<RoomAllocationResponse> {
+  const params = new URLSearchParams({ userId });
+
+  // IMPORTANT: send the planning term so backend uses it
+  if (termId) {
+    // backend query param name is exactly "termId"
+    params.set("termId", termId);
+  }
+
+  const r = await fetch(`${base}/apo/roomallocation?${params.toString()}`);
   if (!r.ok) throw new Error(await r.text());
   return r.json();
 }
@@ -1164,11 +1209,15 @@ export async function setRoomAvailability(
 
 export async function assignRoom(
   userId: string,
-  data: { room_id: string; section_id: string; day: Day; time_band: string }
+  data: { room_id: string; section_id: string; day: Day; time_band: string; term_id?: string }
 ) {
   const r = await fetch(
     `${base}/apo/roomallocation?${new URLSearchParams({ userId, action: "assign" }).toString()}`,
-    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) }
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(data),
+    }
   );
   if (!r.ok) throw new Error(await r.text());
   return r.json();

@@ -18,8 +18,22 @@ import {
   campusFromRoles,
   reactivateApoPreenlistment,
 } from "../../api";
+
+const PREEN_TERM_KEY_PREFIX = "apo.preenTermId.";
+
+function setPlanningTermForCampus(
+  campusId: string,
+  termId: string | null | undefined
+) {
+  if (!campusId || !termId) return;
+  try {
+    window.localStorage.setItem(PREEN_TERM_KEY_PREFIX + campusId, termId);
+  } catch {
+    // ignore storage errors
+  }
+}
+
 // Compact, consistent pill wrappers
-// Compact, consistent pill wrappers (keep miniBase + MiniFieldInput as-is)
 const miniBase =
   "inline-flex items-center h-9 rounded-full border-2 border-emerald-200 bg-white px-2 shadow-sm focus-within:border-emerald-400";
 // Compact pill-style input (matches the dropdown box, no chevron)
@@ -200,39 +214,49 @@ export default function APO_PreEnlistment() {
   const normalizeProgramCode = (s: PreenlistmentStatDoc) =>
     (s as any).program_code ?? (s as any)?.programs?.program_code ?? "";
 
-  const refresh = async () => {
-    if (!user?.userId) return;
-    const { count, statistics, meta } = await getApoPreenlistment(
-      user.userId,
-      undefined,
-      "active",
-      campusName || undefined
-    );
+const refresh = async (forcedTermId?: string) => {
+  if (!user?.userId) return;
 
-    setActiveMeta((meta as TermMeta) ?? null);
+  // If a termId is forced (e.g. after re-activate / archive), use that.
+  // Otherwise, let the backend decide the planning term
+  // (it will pick "next after is_current").
+  const termToLoad = forcedTermId;
 
-    // IMPORTANT: we read `.count` which backend guarantees from `preenlistment_count`
-    setEnlistedCourses(
-      (count ?? ([] as PreenlistmentCountDoc[])).map((d) => [
-        d.preenlistment_code || "",
-        d.career || "",                                  // UGB / GSM as-is
-        (d as any).acad_group || "",                     // CSV 'Acad Group' or college_code fallback
-        d.campus_name || "",
-        d.course_code || "",
-        String((d as any).count ?? 0),
-      ])
-    );
+  const { count, statistics, meta } = await getApoPreenlistment(
+    user.userId,
+    termToLoad,
+    "active",
+    campusName || undefined
+  );
 
-    setEnrollmentStats(
-      (statistics ?? ([] as PreenlistmentStatDoc[])).map((s) => [
-        normalizeProgramCode(s),
-        String(s.freshman ?? 0),
-        String(s.sophomore ?? 0),
-        String(s.junior ?? 0),
-        String(s.senior ?? 0),
-      ])
-    );
-  };
+  const termMeta = (meta as TermMeta) ?? null;
+  setActiveMeta(termMeta);
+
+  if (campusName && termMeta?.term_id) {
+    setPlanningTermForCampus(campusName, termMeta.term_id);
+  }
+
+  setEnlistedCourses(
+    (count ?? ([] as PreenlistmentCountDoc[])).map((d) => [
+      d.preenlistment_code || "",
+      d.career || "",                  // UGB / GSM as-is
+      (d as any).acad_group || "",     // CSV 'Acad Group' or college_code
+      d.campus_name || "",
+      d.course_code || "",
+      String((d as any).count ?? 0),
+    ])
+  );
+
+  setEnrollmentStats(
+    (statistics ?? ([] as PreenlistmentStatDoc[])).map((s) => [
+      normalizeProgramCode(s),
+      String(s.freshman ?? 0),
+      String(s.sophomore ?? 0),
+      String(s.junior ?? 0),
+      String(s.senior ?? 0),
+    ])
+  );
+};
 
   const startEditCourses = (i: number) => {
     setEditIndexCourses(i);
@@ -260,7 +284,7 @@ export default function APO_PreEnlistment() {
           user.userId,
           rows,
           [],
-          undefined,
+          activeMeta?.term_id,
           { replaceCount: true },
           campusName || undefined
         );
@@ -306,7 +330,7 @@ const saveNewCourseRow = async () => {
       user.userId,
       rows,
       [],
-      undefined,
+      activeMeta?.term_id,
       { replaceCount: false },
       campusName || undefined
     );
@@ -354,7 +378,7 @@ const saveNewCourseRow = async () => {
           user.userId,
           [],
           rows,
-          undefined,
+          activeMeta?.term_id,
           { replaceStats: true },
           campusName || undefined
         );
@@ -383,7 +407,7 @@ const saveNewCourseRow = async () => {
           user.userId,
           rows,
           [],
-          undefined,
+          activeMeta?.term_id,
           { replaceCount: true },
           campusName || undefined
         );
@@ -404,7 +428,7 @@ const saveNewCourseRow = async () => {
           user.userId,
           [],
           rows,
-          undefined,
+          activeMeta?.term_id,
           { replaceStats: true },
           campusName || undefined
         );
@@ -430,12 +454,33 @@ const saveNewCourseRow = async () => {
 
   const moveToArchives = async () => {
     if (!user?.userId) return;
-    const label = activeMeta ? `Term ${activeMeta.term_number ?? ""} ${activeMeta.ay_label}` : "current term";
-    if (!confirm(`Archive ${label}? This will snapshot active rows for your campus and may advance the term.`)) return;
+    const label = activeMeta
+      ? `Term ${activeMeta.term_number ?? ""} ${activeMeta.ay_label}`
+      : "current term";
+
+    if (!confirm(`Archive ${label}? This will snapshot active rows for your campus and may advance the term.`)) {
+      return;
+    }
+
     try {
       setArchiving(true);
-      await archiveApoPreenlistment(user.userId, undefined, campusName || undefined);
-      await refresh();
+
+      // Archive the *same* planning term you are currently viewing
+      const res = await archiveApoPreenlistment(
+        user.userId,
+        activeMeta?.term_id,
+        campusName || undefined
+      );
+
+      const nextPlanningTermId = (res as any)?.newPlanningTermId as string | undefined;
+
+      // If backend tells us the next planning term, load that explicitly.
+      // Otherwise, let the backend compute it from is_current.
+      if (nextPlanningTermId) {
+        await refresh(nextPlanningTermId);
+      } else {
+        await refresh();
+      }
     } catch (e: any) {
       setErr(e?.message || "Failed to archive.");
     } finally {
@@ -871,9 +916,17 @@ const saveNewCourseRow = async () => {
 
                     setReactivating(true);
                     try {
-                      await reactivateApoPreenlistment(user.userId, archiveTermId, campusName || undefined);
+                      const res = await reactivateApoPreenlistment(
+                        user.userId,
+                        archiveTermId,
+                        campusName || undefined
+                      );
+                      const planningTermId =
+                        (res as any)?.planningTermId || archiveTermId;
+
                       setView("active");
-                      await refresh();
+                      // Show the planning term associated with this archive
+                      await refresh(planningTermId);
                     } catch (e: any) {
                       setErr(e?.message || "Failed to reactivate term.");
                     } finally {
