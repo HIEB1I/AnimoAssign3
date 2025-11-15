@@ -162,9 +162,35 @@ def _list_pipeline(term_id: Optional[str], status: Optional[str], q: Optional[st
         {"$unwind": {"path": "$fa", "preserveNullAndEmptyArrays": True}},
 
         # profiles & users from the derived assignment
-        {"$lookup": {"from": COL_FAC_PROFILES, "localField": "fa.faculty_id", "foreignField": "faculty_id", "as": "fac"}},
+        {"$lookup": {
+            "from": COL_FAC_PROFILES,
+            "localField": "fa.faculty_id",
+            "foreignField": "faculty_id",
+            "as": "fac",
+        }},
         {"$unwind": {"path": "$fac", "preserveNullAndEmptyArrays": True}},
-        {"$lookup": {"from": COL_USERS, "localField": "fac.user_id", "foreignField": "userId", "as": "u"}},
+
+        # users: support both userId and user_id in the users collection
+        {
+            "$lookup": {
+                "from": COL_USERS,
+                "let": {"uid": "$fac.user_id"},
+                "pipeline": [
+                    {
+                        "$match": {
+                            "$expr": {
+                                "$or": [
+                                    {"$eq": ["$userId", "$$uid"]},
+                                    {"$eq": ["$user_id", "$$uid"]},
+                                ]
+                            }
+                        }
+                    },
+                    {"$limit": 1},
+                ],
+                "as": "u",
+            }
+        },
         {"$unwind": {"path": "$u", "preserveNullAndEmptyArrays": True}},
 
         # optional text filter
@@ -431,16 +457,25 @@ async def cr_get(
             },
             {"$unwind": {"path": "$fac", "preserveNullAndEmptyArrays": True}},
 
-            # users (limit 1) via pipeline lookup to avoid fan-out
+            # users (limit 1) via pipeline lookup; support userId and user_id
             {
                 "$lookup": {
                     "from": COL_USERS,
                     "let": {"uid": "$fac.user_id"},
                     "pipeline": [
-                        {"$match": {"$expr": {"$eq": ["$userId", "$$uid"]}}},
+                        {
+                            "$match": {
+                                "$expr": {
+                                    "$or": [
+                                        {"$eq": ["$userId", "$$uid"]},
+                                        {"$eq": ["$user_id", "$$uid"]},
+                                    ]
+                                }
+                            }
+                        },
                         {"$limit": 1},
                     ],
-                    "as": "u"
+                    "as": "u",
                 }
             },
             {"$unwind": {"path": "$u", "preserveNullAndEmptyArrays": True}},
