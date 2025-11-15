@@ -38,12 +38,16 @@ DEPTS = [
     "Department of Literature",
     "Department of Software Technology",
 ]
+
+# Safe default recipients (email logging is optional; lack of mapping must NOT break send)
 RECIPIENT = {
     "Department of Information Technology": ("Danny Cheng", "danny.cheng@dlsu.edu.ph"),
     "Department of Computer Technology": ("Katrina Ysabel Solomon", "katrina.solomon@dlsu.edu.ph"),
     "Department of Literature": ("Shirley Lua", "shirley.lua@dlsu.edu.ph"),
-    # You can add more here when needed
+    "Department of Software Technology": ("Neil Patrick Del Gallego", "neil.delgallego@dlsu.edu.ph"),
 }
+
+# ------------------------ helpers ------------------------
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -79,30 +83,54 @@ async def _course_by_code(code: str) -> Optional[Dict[str, Any]]:
     return doc
 
 async def _faculty_dropdown(dept_name: Optional[str]) -> List[Dict[str, Any]]:
-    if not dept_name or dept_name not in DEPTS:
+    if not dept_name:
         return []
+
+    # Find department_id from any of (name / code / id)
     dept = await _find_department(dept_name)
     dep_id = (dept or {}).get("department_id")
     if not dep_id:
         return []
+
     pipeline = [
         {"$match": {"department_id": dep_id}},
-        {"$project": {"_id": 0, "faculty_id": 1, "user_id": 1, "first_name": 1, "last_name": 1}},
-        {"$lookup": {"from": "users", "localField": "user_id", "foreignField": "user_id", "as": "u"}},
-        {"$addFields": {"email": {"$ifNull": [{"$arrayElemAt": ["$u.email", 0]}, ""]}}},
-        {"$project": {"u": 0}},
+        {
+            "$lookup": {
+                "from": "users",
+                "localField": "user_id",
+                "foreignField": "user_id",
+                "as": "u",
+            }
+        },
+        {
+            "$addFields": {
+                "user": {"$arrayElemAt": ["$u", 0]},
+            }
+        },
+        {
+            "$project": {
+                "_id": 0,
+                "faculty_id": 1,
+                "user_id": 1,
+                "first_name": {"$ifNull": ["$user.first_name", ""]},
+                "last_name": {"$ifNull": ["$user.last_name", ""]},
+            }
+        },
         {"$sort": {"last_name": 1, "first_name": 1}},
     ]
+
     out: List[Dict[str, Any]] = []
     async for r in db.faculty_profiles.aggregate(pipeline):
-        out.append({
-            "faculty_id": r.get("faculty_id"),
-            "first_name": r.get("first_name") or "",
-            "last_name": r.get("last_name") or "",
-            "email": r.get("email") or "",
-            "label": f'{(r.get("last_name") or "").upper()}, {(r.get("first_name") or "").upper()}',
-        })
+        out.append(
+            {
+                "faculty_id": r.get("faculty_id"),
+                "first_name": r.get("first_name") or "",
+                "last_name": r.get("last_name") or "",
+                "label": f"{(r.get('last_name') or '').upper()}, {(r.get('first_name') or '').upper()}",
+            }
+        )
     return out
+
 
 # --------------------------- OPTIONS ---------------------------
 
@@ -138,7 +166,6 @@ async def fs_options(
     return {
         "ok": True,
         "courses": courses,
-        # the full long-form department names (spec)
         "departments": DEPTS,
         "timeBegins": BEGIN,
         "days": DAYS,
@@ -152,12 +179,18 @@ async def fs_list(
     status: Optional[str] = Query(None),
     dept: Optional[str] = Query(None),
     search: Optional[str] = Query(None),
+    box: Optional[str] = Query(None, description='"sent" or "received"'),
 ):
     q: Dict[str, Any] = {}
     if status:
         q["status"] = status
     if dept:
-        q["$or"] = [{"from_department": dept}, {"to_department": dept}]
+        if box == "sent":
+            q["from_department"] = dept
+        elif box == "received":
+            q["to_department"] = dept
+        else:
+            q["$or"] = [{"from_department": dept}, {"to_department": dept}]
     if search:
         q["$or"] = q.get("$or", []) + [
             {"course_code": {"$regex": search, "$options": "i"}},
@@ -176,7 +209,6 @@ async def fs_create(payload: Dict[str, Any] = Body(...)):
     units = payload.get("units", None)
     to_department = payload.get("to_department")
     course_title = (payload.get("course_title") or "").strip()
-    # NEW: accept actual requester department from payload; fallback to name if missing
     from_department = (payload.get("from_department") or "").strip()
 
     if to_department not in DEPTS:
@@ -188,18 +220,18 @@ async def fs_create(payload: Dict[str, Any] = Body(...)):
     if not course_title or units is None:
         c = await _course_by_code(course_code)
         if c:
-          if not course_title:
-            course_title = c.get("course_title") or ""
-          if units is None:
-            units = c.get("units", None)
+            if not course_title:
+                course_title = c.get("course_title") or ""
+            if units is None:
+                units = c.get("units", None)
 
-    # basic sanity on from_department (don’t let it be empty or equal to TO if clients misbehave)
+    # basic sanity on from_department (fallback to course owner dept if not provided)
     if not from_department:
-        # attempt to infer from the owning course department (best effort)
         c = await _course_by_code(course_code)
         if c and c.get("department_id"):
-            dept = await db.departments.find_one({"department_id": c["department_id"]}, {"_id":0, "dept_name":1})
-            if dept and dept.get("dept_name"): from_department = dept["dept_name"]
+            dept = await db.departments.find_one({"department_id": c["department_id"]}, {"_id": 0, "dept_name": 1})
+            if dept and dept.get("dept_name"):
+                from_department = dept["dept_name"]
     if not from_department:
         raise HTTPException(status_code=400, detail="from_department is required.")
 
@@ -207,7 +239,7 @@ async def fs_create(payload: Dict[str, Any] = Body(...)):
     now = _now_iso()
     doc = {
         "fs_id": fs_id,
-        "status": "sent",  # immediately mark as sent when created+emailed via UI button
+        "status": "sent",  # created via UI "Send" button
         "created_at": now,
         "updated_at": now,
         "from_department": from_department,
@@ -215,7 +247,6 @@ async def fs_create(payload: Dict[str, Any] = Body(...)):
         "course_code": course_code,
         "course_title": course_title,
         "units": units,
-        # owner side (empty until response)
         "faculty": {},
         "day1": "",
         "begin1": "",
@@ -229,40 +260,42 @@ async def fs_create(payload: Dict[str, Any] = Body(...)):
     return {"ok": True, "row": doc}
 
 # ----------------------------- SEND -----------------------------
+# Robust + idempotent: mark as sent and (optionally) log email. Lack of recipient mapping will NOT error.
 
 @router.post("/send/{fs_id}")
 async def fs_send(fs_id: str):
     row = await db.faculty_service.find_one({"fs_id": fs_id})
     if not row:
         raise HTTPException(status_code=404, detail="Not found.")
+
+    await db.faculty_service.update_one(
+        {"fs_id": fs_id}, {"$set": {"status": "sent", "updated_at": _now_iso()}}
+    )
+
     to_dept = row.get("to_department")
     rec = RECIPIENT.get(to_dept or "")
-    if not rec:
-        raise HTTPException(status_code=400, detail="Recipient not configured for target department.")
-    name, email = rec
-    subj = f"Faculty Service Request: {row.get('course_code','')} - {row.get('course_title','')}"
-    body = (
-        f"Requesting Dept: {row.get('from_department')}\n"
-        f"Requested Dept: {to_dept}\n"
-        f"Course: {row.get('course_code')} - {row.get('course_title')}\n"
-        f"Units: {row.get('units')}\n"
-        f"Request ID: {fs_id}\n"
-        f"Open in app: /chair/faculty-service?request={fs_id}\n"
-    )
-    await db.email_logs.insert_one({
-        "email_id": f"EM{uuid4().hex[:8].upper()}",
-        "to_name": name,
-        "to_email": email,
-        "subject": subj,
-        "body": body,
-        "created_at": _now_iso(),
-        "type": "faculty_service_send",
-        "fs_id": fs_id,
-    })
-    await db.faculty_service.update_one(
-        {"fs_id": fs_id},
-        {"$set": {"status": "sent", "updated_at": _now_iso()}},
-    )
+    if rec:
+        name, email = rec
+        subj = f"Faculty Service Request: {row.get('course_code','')} - {row.get('course_title','')}"
+        body = (
+            f"Requesting Dept: {row.get('from_department')}\n"
+            f"Requested Dept: {to_dept}\n"
+            f"Course: {row.get('course_code')} - {row.get('course_title')}\n"
+            f"Units: {row.get('units')}\n"
+            f"Request ID: {fs_id}\n"
+            f"Open in app: /chair/faculty-service?request={fs_id}\n"
+        )
+        await db.email_logs.insert_one({
+            "email_id": f"EM{uuid4().hex[:8].upper()}",
+            "to_name": name,
+            "to_email": email,
+            "subject": subj,
+            "body": body,
+            "created_at": _now_iso(),
+            "type": "faculty_service_send",
+            "fs_id": fs_id,
+        })
+
     doc = await db.faculty_service.find_one({"fs_id": fs_id}, {"_id": 0})
     return {"ok": True, "row": doc}
 

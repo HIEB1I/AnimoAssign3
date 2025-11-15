@@ -21,6 +21,13 @@ type TermLite = {
   is_current?: boolean;
 };
 
+type NextTermAdminWarning = {
+  faculty_id?: string;
+  faculty_name?: string;
+  deloading_type?: string;
+  units?: number;
+};
+
 type Payload = {
   term: TermLite | null;
   rows: Row[];
@@ -28,6 +35,7 @@ type Payload = {
   has_next: boolean;
   terms?: TermLite[];
   current_index?: number;
+  next_term_admin_warnings?: NextTermAdminWarning[];
 };
 
 export default function OM_RP_DeloadingUtilization() {
@@ -38,7 +46,9 @@ export default function OM_RP_DeloadingUtilization() {
 
   function labelOf(t: TermLite) {
     const ayEnd = t.acad_year_start + 1;
-    return `AY ${t.acad_year_start}–${ayEnd} • Term ${t.term_number}${t.is_current ? " (Current)" : ""}`;
+    return `AY ${t.acad_year_start}–${ayEnd} • Term ${t.term_number}${
+      t.is_current ? " (Current)" : ""
+    }`;
   }
 
   const currentLabel = useMemo(
@@ -55,7 +65,10 @@ export default function OM_RP_DeloadingUtilization() {
     try {
       setLoading(true);
       setError("");
-      const res = await fetchDeloadingsByTerm(anchor ?? data?.term?.term_id, direction);
+      const res = await fetchDeloadingsByTerm(
+        anchor ?? data?.term?.term_id,
+        direction
+      );
       setData(res);
       if (Array.isArray(res.terms)) setTerms(res.terms);
     } catch (err: any) {
@@ -145,7 +158,9 @@ export default function OM_RP_DeloadingUtilization() {
             {error}
           </div>
         )}
-        {loading && <div className="px-4 py-4 text-sm text-gray-500">Loading…</div>}
+        {loading && (
+          <div className="px-4 py-4 text-sm text-gray-500">Loading…</div>
+        )}
 
         {/* Empty state */}
         {!loading && (!data || data.rows.length === 0) && !error && (
@@ -161,7 +176,9 @@ export default function OM_RP_DeloadingUtilization() {
               Viewing{" "}
               <span className="font-semibold text-gray-900">
                 {data?.term
-                  ? `AY ${data.term.acad_year_start}–${data.term.acad_year_start + 1} • Term ${data.term.term_number}`
+                  ? `AY ${data.term.acad_year_start}–${
+                      data.term.acad_year_start + 1
+                    } • Term ${data.term.term_number}`
                   : "—"}
               </span>
             </div>
@@ -177,8 +194,17 @@ export default function OM_RP_DeloadingUtilization() {
                 </colgroup>
                 <thead className="bg-gray-50 text-gray-600 text-xs uppercase tracking-wide">
                   <tr>
-                    {["Faculty Name", "Deloading Type", "Units", "Notes", "Last Updated"].map((h) => (
-                      <th key={h} className="px-3 py-2 text-center font-medium whitespace-nowrap">
+                    {[
+                      "Faculty Name",
+                      "Deloading Type",
+                      "Units",
+                      "Notes",
+                      "Last Updated",
+                    ].map((h) => (
+                      <th
+                        key={h}
+                        className="px-3 py-2 text-center font-medium whitespace-nowrap"
+                      >
                         {h}
                       </th>
                     ))}
@@ -188,14 +214,28 @@ export default function OM_RP_DeloadingUtilization() {
                   {data.rows.map((r, i) => (
                     <tr
                       key={`${r.faculty_name}-${r.deloading_type}-${i}`}
-                      className={i % 2 === 0 ? "bg-white text-gray-800" : "bg-gray-50 text-gray-800"}
+                      className={
+                        i % 2 === 0
+                          ? "bg-white text-gray-800"
+                          : "bg-gray-50 text-gray-800"
+                      }
                     >
-                      <td className="px-3 py-2 text-center">{r.faculty_name || "—"}</td>
-                      <td className="px-3 py-2 text-center">{r.deloading_type || "—"}</td>
-                      <td className="px-3 py-2 text-center">{r.units_deloaded ?? "—"}</td>
-                      <td className="px-3 py-2 text-center">{r.notes || "—"}</td>
                       <td className="px-3 py-2 text-center">
-                        {r.updated_at ? new Date(r.updated_at).toLocaleString() : "—"}
+                        {r.faculty_name || "—"}
+                      </td>
+                      <td className="px-3 py-2 text-center">
+                        {r.deloading_type || "—"}
+                      </td>
+                      <td className="px-3 py-2 text-center">
+                        {r.units_deloaded ?? "—"}
+                      </td>
+                      <td className="px-3 py-2 text-center">
+                        {r.notes || "—"}
+                      </td>
+                      <td className="px-3 py-2 text-center">
+                        {r.updated_at
+                          ? new Date(r.updated_at).toLocaleString()
+                          : "—"}
                       </td>
                     </tr>
                   ))}
@@ -206,6 +246,56 @@ export default function OM_RP_DeloadingUtilization() {
             {/* Bottom controls remain removed */}
           </div>
         )}
+        {/* ADMIN NEXT-TERM WARNING TABLE */}
+        {!loading &&
+          data?.next_term_admin_warnings &&
+          data.next_term_admin_warnings.length > 0 && (
+            <div className="p-4 mt-6 bg-green-50 border border-green-300 rounded-lg">
+              <h2 className="text-lg font-semibold text-green-800 mb-3">
+                Possible Administrative Deloading Next Term
+              </h2>
+
+              <div className="overflow-x-auto">
+                <table className="min-w-full table-fixed text-sm border-t border-green-300">
+                  <colgroup>
+                    <col style={{ width: "40%" }} />
+                    <col style={{ width: "30%" }} />
+                    <col style={{ width: "30%" }} />
+                  </colgroup>
+
+                  <thead className="bg-green-100 text-green-900 text-xs uppercase tracking-wide">
+                    <tr>
+                      {["Faculty Name", "Deloading Type", "Units"].map((h) => (
+                        <th
+                          key={h}
+                          className="px-3 py-2 text-center font-medium whitespace-nowrap"
+                        >
+                          {h}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+
+                  <tbody>
+                    {data.next_term_admin_warnings.map((r, i) => (
+                      <tr
+                        key={`${r.faculty_id}-${i}`}
+                        className={i % 2 === 0 ? "bg-green-50" : "bg-green-100"}
+                      >
+                        <td className="px-3 py-2 text-center">
+                          {r.faculty_name}
+                        </td>
+                        <td className="px-3 py-2 text-center">
+                          {r.deloading_type}
+                        </td>
+                        <td className="px-3 py-2 text-center">{r.units}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
       </div>
     </div>
   );

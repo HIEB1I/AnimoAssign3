@@ -182,6 +182,38 @@ export async function getOneFacultyProfile(): Promise<FacultyProfile> {
   return data;
 }
 
+export type Status = "" | "Confirmed" | "Pending" | "Unassigned" | "Conflict";
+
+export type Row = {
+  id: string;
+  course: string;
+  title: string;
+  units: number | "";
+  section: string;
+  faculty: string;
+  day1: string; begin1: string; end1: string; room1: string;
+  day2: string; begin2: string; end2: string; room2: string;
+  capacity: number | "";
+  status: Status;
+  conflictNote?: string;
+  editable?: boolean;
+};
+
+
+export type LoadAssignmentResponse = {
+  term: string;
+  rows: Row[];
+};
+
+// // Automatically generate load recommendations (auto-assign)
+// export async function runOmAutoAssign({ user_id, department_id }: {user_id: string; department_id?: string}) {
+//   const base = (typeof API_BASE !== "undefined" ? API_BASE : "").replace(/\/+$/,"");
+//   const url = `${base}/om/load-assignment/run?user_id=${encodeURIComponent(user_id)}${department_id ? `&department_id=${encodeURIComponent(department_id)}` : ""}`;
+//   const r = await fetch(url, { method: "POST" });
+//   if (!r.ok) throw new Error(await r.text());
+//   return r.json() as Promise<{ term: string; rows: Row[] }>;
+// }
+
 /* =========================================================
    ===============  ADMIN: MANAGEMENT  =====================
    ========================================================= */
@@ -1949,6 +1981,7 @@ export type OmLoadRow = {
   units: number | "";
   section: string;
   faculty: string;
+  faculty_id?: string;
   day1: string;
   begin1: string;
   end1: string;
@@ -1958,23 +1991,25 @@ export type OmLoadRow = {
   end2: string;
   room2: string;
   capacity: number | "";
+  mode?: string;
   status?: "" | "Confirmed" | "Pending" | "Unassigned" | "Conflict";
   conflictNote?: string;
+  editable?: boolean;
 };
 
-export async function getOmLoadAssignmentList(userId: string) {
-  const { data } = await axios.post(`${API_BASE}/om/loadassignment`, {}, {
-    params: { userId, action: "fetch" },
-  });
-  return data as { term?: string; rows: OmLoadRow[] };
-}
+// export async function getOmLoadAssignmentList(userId: string) {
+//   const { data } = await axios.post(`${API_BASE}/om/loadassignment`, {}, {
+//     params: { userId, action: "fetch" },
+//   });
+//   return data as { term?: string; rows: OmLoadRow[] };
+// }
 
-export async function getOmLoadAssignmentOptions(userId: string) {
-  const { data } = await axios.post(`${API_BASE}/om/loadassignment`, {}, {
-    params: { userId, action: "options" },
-  });
-  return data;
-}
+// export async function getOmLoadAssignmentOptions(userId: string) {
+//   const { data } = await axios.post(`${API_BASE}/om/loadassignment`, {}, {
+//     params: { userId, action: "options" },
+//   });
+//   return data;
+// }
 
 export async function getOmLoadAssignmentProfile(userId: string) {
   const { data } = await axios.post(`${API_BASE}/om/loadassignment`, {}, {
@@ -1983,11 +2018,56 @@ export async function getOmLoadAssignmentProfile(userId: string) {
   return data;
 }
 
-export async function submitOmLoadAssignment(userId: string, payload: { rows: OmLoadRow[] }) {
+export async function submitOmLoadAssignment(
+  userId: string,
+  payload: { rows: OmLoadRow[] },
+  action: "submit" | "approve" = "submit"
+) {
   const { data } = await axios.post(`${API_BASE}/om/loadassignment`, payload, {
-    params: { userId, action: "submit" },
+    params: { userId, action },
   });
-  return data as { ok: boolean; rows: OmLoadRow[] };
+  return data as {
+    ok: boolean;
+    rows?: OmLoadRow[];
+    approved?: number;
+    term?: string;
+  };
+}
+
+type Faculty = {
+  faculty_id: string;
+  faculty_name_display: string;
+};
+
+/** List all sections for the current term (no algorithm) */
+export async function getOmLoadAssignmentList(user_id: string) {
+  const base = (typeof API_BASE !== "undefined" ? API_BASE : "").replace(/\/+$/, "");
+  const url = `${base}/om/load-assignment/list?user_id=${encodeURIComponent(user_id)}`;
+  const r = await fetch(url, { method: "GET" });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json() as Promise<{ term: string; rows: OmLoadRow[] }>;
+}
+
+/** Auto-assign algorithm run (fill faculty/day/time/room) */
+export async function runOmAutoAssign(params: {
+  user_id: string;
+  department_id?: string;
+}) {
+  const base = (typeof API_BASE !== "undefined" ? API_BASE : "").replace(/\/+$/, "");
+  const qs = new URLSearchParams({ user_id: params.user_id });
+  if (params.department_id) qs.set("department_id", params.department_id);
+  const url = `${base}/om/load-assignment/run?${qs.toString()}`;
+  const r = await fetch(url, { method: "POST" });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json() as Promise<{ term: string; rows: OmLoadRow[] }>;
+}
+
+export async function getAllFaculty() {
+  const base = (typeof API_BASE !== "undefined" ? API_BASE : "").replace(/\/+$/, "");
+  const url = `${base}/om/load-assignment/faculty-all`;
+
+  const { data } = await axios.get(url);
+  return data.faculty as Faculty[];
 }
 
 /* =========================================================
@@ -2092,7 +2172,7 @@ export type FacultyServiceRow = {
   course_code: string;
   course_title: string;
   units: number | null;
-  from_department: "Software Technology";
+  from_department: string; 
   to_department: ToDept;
   faculty: FacultyLite;
   day1: DayShort | "";
@@ -2124,14 +2204,22 @@ export async function getFSOptions(params?: { q?: string; toDepartment?: ToDept;
 }
 
 
-export async function listFacultyService(params?: { status?: string; dept?: string; search?: string }) {
+export async function listFacultyService(params?: {
+  status?: string;
+  dept?: string;
+  search?: string;
+  box?: "sent" | "received"; 
+}) {
   const sp = new URLSearchParams();
   if (params?.status) sp.set("status", params.status);
   if (params?.dept) sp.set("dept", params.dept);
   if (params?.search) sp.set("search", params.search);
+  if (params?.box) sp.set("box", params.box); 
+
   const { data } = await api.get(`/chair/faculty-service/list?${sp.toString()}`);
   return data as { ok: boolean; rows: FacultyServiceRow[] };
 }
+
 
 export async function createFacultyService(payload: {
   course_code: string;

@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { Eye, EyeOff } from "lucide-react";
 import AA_Logo from "@/assets/Images/AA_Logo.png";
 import Login_BG from "@/assets/Images/login_bg.png";
+import GoogleLogo from "@/assets/Images/google_logo.png";
 import { login as apiLogin, type LoginResponse } from "@/api";
 
 const Login: React.FC = () => {
@@ -93,7 +94,7 @@ const Login: React.FC = () => {
                 <input
                   type={showPw ? "text" : "password"}
                   className="w-full rounded-xl bg-gray-100 border border-gray-200 px-4 py-3 pr-11 shadow-inner focus:outline-none focus:ring-2 focus:ring-[#21804A]/60 focus:border-[#21804A]"
-                  placeholder="(not required)"
+                  placeholder=""
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   autoComplete="current-password"
@@ -123,6 +124,11 @@ const Login: React.FC = () => {
               className="w-full py-3 rounded-xl border border-gray-300 bg-white font-medium shadow-sm hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-gray-300 flex items-center justify-center gap-3"
               onClick={() => alert("Google SSO not yet configured")}
             >
+              <img
+                src={GoogleLogo}
+                alt="Google logo"
+                className="h-5 w-5"
+              />
               <span>Login with Google</span>
             </button>
           </form>
