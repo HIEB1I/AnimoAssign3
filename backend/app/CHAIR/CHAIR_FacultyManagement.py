@@ -1,9 +1,11 @@
-# ------------- CHAIR_FacultyManagement.py -------------
+# backend/app/CHAIR/facultymanagement.py
 from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Query, Body
+from datetime import datetime, timezone
+import re
+
 from ..main import db
 
-# NOTE: Identical logic to OM version; only prefix/tag changed to CHAIR
 router = APIRouter(prefix="/chair", tags=["chair"])
 
 # ---------- Collections ----------
@@ -58,6 +60,77 @@ def _fmt_time_band(start_raw: Any, end_raw: Any) -> str:
     en = _fmt_hhmm(end_raw)
     return f"{st} – {en}".strip(" –")
 
+# ---------- Small helpers for IDs & coercion ----------
+
+async def _next_id(collection_name: str, field: str, prefix: str) -> str:
+    """
+    Generate the next ID like USR0003 / FAC0001 based on the max existing value.
+    """
+    coll = db[collection_name]
+    cursor = coll.find(
+        {field: {"$regex": f"^{re.escape(prefix)}[0-9]+$"}},
+        {field: 1, "_id": 0},
+    ).sort(field, -1).limit(1)
+    docs = [d async for d in cursor]
+    if docs:
+        last = str(docs[0].get(field, "") or "")
+        num_part = "".join(ch for ch in last if ch.isdigit())
+        try:
+            n = int(num_part)
+        except (TypeError, ValueError):
+            n = 0
+    else:
+        n = 0
+    return f"{prefix}{n + 1:04d}"
+
+def _normalize_certifications(raw: Any) -> List[str]:
+    """
+    Accepts string, list of strings, or mixed and normalizes to a flat list.
+    """
+    if raw is None:
+        return []
+    parts: List[str] = []
+    if isinstance(raw, list):
+        for item in raw:
+            for piece in str(item or "").split(","):
+                parts.append(piece)
+    else:
+        for piece in str(raw or "").split(","):
+            parts.append(piece)
+    return [p.strip() for p in parts if p and p.strip()]
+
+def _coerce_int(val: Any) -> Optional[int]:
+    if val is None or val == "":
+        return None
+    try:
+        return int(val)
+    except (TypeError, ValueError):
+        return None
+
+def _validate_dlsu_email(email: str) -> bool:
+    """
+    Enforce firstname.lastname@dlsu.edu.ph style:
+    - domain must be dlsu.edu.ph
+    - local part must contain a dot
+    - no spaces
+    """
+    if not email:
+        return False
+    s = email.strip()
+    at_index = s.rfind("@")
+    if at_index <= 0:
+        return False
+    local = s[:at_index]
+    domain = s[at_index + 1 :]
+    if domain.lower() != "dlsu.edu.ph":
+        return False
+    if "." not in local or " " in local:
+        return False
+    # basic shape guard
+    if not re.match(r"^[^@\s]+@dlsu\.edu\.ph$", s, flags=re.IGNORECASE):
+        return False
+    return True
+
 # ---------- Expression helpers ----------
 def _dept_name_expr():
     return {"$ifNull": ["$dept.department_name", "$dept.dept_name"]}
@@ -90,7 +163,10 @@ async def _active_term() -> Dict[str, Any]:
 # ---------- Route ----------
 @router.post("/facultymanagement")
 async def facultymanagement_handler(
-    action: str = Query("list", description="header | options | list | profile | schedule | history"),
+    action: str = Query(
+        "list",
+        description="header | options | list | schedule | history | add | update"
+    ),
 
     # header (who’s logged in)
     userEmail: Optional[str] = Query(None),
@@ -108,6 +184,8 @@ async def facultymanagement_handler(
 
     payload: Optional[Dict[str, Any]] = Body(None),
 ):
+    payload = payload or {}
+
     # ----- HEADER -----
     if action == "header":
         if not userEmail and not userId:
@@ -203,14 +281,25 @@ async def facultymanagement_handler(
         terms = [t async for t in db[COL_TERMS]
                  .find({}, {"_id": 0, "acad_year_start": 1})
                  .sort([("acad_year_start", -1)])]
-        ay_list = sorted({t.get("acad_year_start") for t in terms if t.get("acad_year_start")},
-                         reverse=True)
+        ay_list = sorted(
+            {t.get("acad_year_start") for t in terms if t.get("acad_year_start")},
+            reverse=True
+        )
 
-        return {"ok": True, "departments": department_options,
-                "facultyTypes": faculty_types, "academicYears": ay_list}
+        return {
+            "ok": True,
+            "departments": department_options,
+            "facultyTypes": faculty_types,
+            "academicYears": ay_list,
+        }
 
     # ----- LIST -----
     if action == "list":
+
+        # Determine active term to prioritize its preferences
+        active = await _active_term()
+        active_term_id = active.get("term_id")
+
         early_match: Dict[str, Any] = {}
         if facultyType and facultyType.strip().lower() != "all type":
             code = {"Full-Time": "FT", "Part-Time": "PT"}.get(facultyType.strip())
@@ -237,28 +326,84 @@ async def facultymanagement_handler(
                     {"$match": {"$expr": {"$or": [
                         {"$and": [{"$ne": ["$$uid", None]}, {"$eq": ["$user_id", "$$uid"]}]},
                         {"$and": [{"$ne": ["$$femail", None]}, {"$eq": ["$email", "$$femail"]}]},
-                    ]}}},  # noqa: E231
+                    ]}}},
                     {"$project": {"_id": 0, "first_name": 1, "last_name": 1, "status": 1, "email": 1}}
                 ],
                 "as": "u"
             }},
             {"$unwind": {"path": "$u", "preserveNullAndEmptyArrays": True}},
-            {"$lookup": {
-                "from": COL_PREFS,
-                "let": {"fid": "$faculty_id"},
-                "pipeline": [
-                    {"$match": {"$expr": {"$eq": ["$faculty_id", "$$fid"]}}},
-                    {"$match": {"$expr": {"$eq": ["$faculty_id", "$$fid"]}}},
-                    {"$project": {"_id": 0, "preferred_units": 1}}
-                ],
-                "as": "pref"
-            }},
-            {"$unwind": {"path": "$pref", "preserveNullAndEmptyArrays": True}},
+            {
+                "$lookup": {
+                    "from": COL_PREFS,
+                    "let": {"fid": "$faculty_id"},
+                    "pipeline": [
+                        {
+                            # All prefs for this faculty
+                            "$match": {
+                                "$expr": {"$eq": ["$faculty_id", "$$fid"]},
+                            }
+                        },
+                        {
+                            # Flag rows that belong to the active term (if we have one)
+                            "$addFields": {
+                                "_is_active_term": {
+                                    "$cond": [
+                                        {
+                                            "$and": [
+                                                {"$ne": [active_term_id, None]},
+                                                {"$eq": ["$term_id", active_term_id]},
+                                            ]
+                                        },
+                                        1,
+                                        0,
+                                    ]
+                                }
+                            }
+                        },
+                        {
+                            # Prefer active-term row, then latest submission
+                            "$sort": {
+                                "_is_active_term": -1,
+                                "submitted_at": -1,
+                                "_id": -1,
+                            }
+                        },
+                        {
+                            # We only ever want one doc per faculty
+                            "$limit": 1
+                        },
+                        {
+                            "$project": {
+                                "_id": 0,
+                                "preferred_units": 1,
+                                "on_break": 1,  # used for status logic
+                            }
+                        },
+
+                    ],
+                    "as": "pref",
+                }
+            },
+            # Take the first (and only) element from the lookup array; null if none
+            {"$addFields": {"pref": {"$first": "$pref"}}},
+
             {"$addFields": {
                 "department_display": _dept_name_expr(),
                 "name": _full_name_expr(),
                 "email_display": {"$ifNull": ["$u.email", "$email"]},
-                "status_display": {"$cond": [{"$eq": ["$u.status", True]}, "Active", "On Leave"]},
+                "status_display": {
+                    "$cond": [
+                        {"$eq": ["$pref.on_break", True]},
+                        "On Leave",
+                        {
+                            "$cond": [
+                                {"$eq": ["$u.status", True]},
+                                "Active",
+                                "On Leave",
+                            ]
+                        },
+                    ]
+                },
                 "faculty_type_display": {
                     "$switch": {
                         "branches": [
@@ -302,193 +447,176 @@ async def facultymanagement_handler(
         rows = [r async for r in db[COL_FACULTY].aggregate(pipeline)]
         return {"ok": True, "rows": rows}
 
-    # ----- PROFILE (includes Course Coordinator list) -----
-    if action == "profile":
-        if not facultyId:
-            raise HTTPException(status_code=400, detail="facultyId is required.")
-
-        pipeline: List[Dict[str, Any]] = [
-            {"$match": {"faculty_id": facultyId}},
-            {"$lookup": {
-                "from": COL_DEPARTMENTS,
-                "localField": "department_id",
-                "foreignField": "department_id",
-                "as": "dept",
-            }},
-            {"$unwind": {"path": "$dept", "preserveNullAndEmptyArrays": True}},
-            {"$lookup": {
-                "from": COL_USERS,
-                "let": {"uid": "$user_id", "femail": "$email"},
-                "pipeline": [
-                    {"$match": {"$expr": {"$or": [
-                        {"$and": [{"$ne": ["$$uid", None]}, {"$eq": ["$user_id", "$$uid"]}]},
-                        {"$and": [{"$ne": ["$$femail", None]}, {"$eq": ["$email", "$$femail"]}]},
-                    ]}}},  # noqa: E231
-                    {"$project": {"_id": 0, "first_name": 1, "last_name": 1, "status": 1, "email": 1}}
-                ],
-                "as": "u"
-            }},
-            {"$unwind": {"path": "$u", "preserveNullAndEmptyArrays": True}},
-
-            # ---- course coordinator list from courses ----
-            {"$lookup": {
-                "from": COL_COURSES,
-                "let": {"uid": {"$ifNull": ["$user_id", "$u.user_id"]}},
-                "pipeline": [
-                    {"$addFields": {
-                        "cc_list": {
-                            "$cond": [
-                                {"$isArray": "$course_coordinator"},
-                                {"$ifNull": ["$course_coordinator", []]},
-                                {"$cond": [
-                                    {"$gt": [{"$type": "$course_coordinator"}, "missing"]},
-                                    [{"$ifNull": ["$course_coordinator", ""]}],
-                                    []
-                                ]}
-                            ]
-                        }
-                    }},
-                    {"$match": {"$expr": {"$in": ["$$uid", "$cc_list"]}}},
-                    {"$addFields": {
-                        "code_list": {
-                            "$cond": [
-                                {"$isArray": "$course_code"}, "$course_code",
-                                {"$cond": [{"$ne": ["$course_code", None]}, ["$course_code"], []]}
-                            ]
-                        }
-                    }},
-                    {"$addFields": {
-                        "code": {
-                            "$cond": [
-                                {"$gt": [{"$size": "$code_list"}, 0]},
-                                {"$reduce": {
-                                    "input": "$code_list",
-                                    "initialValue": "",
-                                    "in": {"$concat": ["$$value", {"$cond": [{"$eq": ["$$value", ""]}, "", " / "]}, "$$this"]}
-                                }},
-                                ""
-                            ]
-                        }
-                    }},
-                    {"$project": {"_id": 0, "code": 1, "course_title": 1}}
-                ],
-                "as": "cc_courses"
-            }},
-
-            {"$addFields": {
-                "department_display": _dept_name_expr(),
-                "name": _full_name_expr(),
-                "email_display": {"$ifNull": ["$u.email", "$email"]},
-                "status_display": {"$cond": [{"$eq": ["$u.status", True]}, "Active", "On Leave"]},
-                "faculty_type_display": {
-                    "$switch": {
-                        "branches": [
-                            {"case": {"$eq": ["$employment_type", "FT"]}, "then": "Full-Time"},
-                            {"case": {"$eq": ["$employment_type", "PT"]}, "then": "Part-Time"},
-                        ],
-                        "default": {"$ifNull": ["$employment_type", ""]}
-                    }
-                },
-                "cc_display": {
-                    "$map": {
-                        "input": {"$ifNull": ["$cc_courses", []]},
-                        "as": "c",
-                        "in": {"code": "$$c.code", "title": "$$c.course_title"}
-                    }
-                }
-            }},
-            {"$project": {
-                "_id": 0,
-                "faculty_id": 1,
-                "name": 1,
-                "email": "$email_display",
-                "department": "$department_display",
-                "faculty_type": "$faculty_type_display",
-                "status": "$status_display",
-                "position": {"$ifNull": ["$position", {"$ifNull": ["$fac_position", ""]}]},
-                "admin_position": 1,
-                "course_coordinator_of": "$cc_display",
-                "load": {
-                    "teaching": {"$ifNull": ["$load.teaching", 0]},
-                    "admin": {"$ifNull": ["$load.admin", 0]},
-                    "research": {"$ifNull": ["$load.research", 0]},
-                    "faculty_units": {"$ifNull": ["$load.faculty_units", 0]},
-                }
-            }},
-            {"$limit": 1}
-        ]
-
-        prof = [p async for p in db[COL_FACULTY].aggregate(pipeline)]
-        return {"ok": bool(prof), "profile": (prof[0] if prof else {})}
-
-    # ----- SCHEDULE -----
+    # ----- SCHEDULE: current/selected term sections (reuse FACULTY_Overview logic) -----
     if action == "schedule":
         if not facultyId:
             raise HTTPException(status_code=400, detail="facultyId is required.")
 
+        # Resolve active term if not provided (kept for parity with OM)
         if not termId:
             active = await _active_term()
             termId = active.get("term_id")
 
-        pipeline = [
+        # pipeline mirrors FACULTY_Overview (/faculty/overview?action=fetch)
+        pipeline: List[Dict[str, Any]] = [
             {"$match": {"faculty_id": facultyId, "is_archived": False}},
-            {"$lookup": {"from": "sections", "localField": "section_id", "foreignField": "section_id", "as": "sec"}},
+            {
+                "$lookup": {
+                    "from": "sections",
+                    "localField": "section_id",
+                    "foreignField": "section_id",
+                    "as": "sec",
+                }
+            },
             {"$unwind": {"path": "$sec", "preserveNullAndEmptyArrays": True}},
+        ]
 
-            {"$lookup": {"from": "courses", "localField": "sec.course_id", "foreignField": "course_id", "as": "course"}},
-            {"$unwind": {"path": "$course", "preserveNullAndEmptyArrays": True}},
+        # filter to selected / active term
+        if termId:
+            pipeline.append({"$match": {"sec.term_id": termId}})
 
-            {"$lookup": {"from": "section_schedules", "localField": "sec.section_id", "foreignField": "section_id", "as": "sched"}},
-            {"$unwind": {"path": "$sched", "preserveNullAndEmptyArrays": True}},
-
-            {"$lookup": {"from": "rooms", "localField": "sched.room_id", "foreignField": "room_id", "as": "room"}},
-            {"$unwind": {"path": "$room", "preserveNullAndEmptyArrays": True}},
-
-            {"$lookup": {"from": "campuses", "localField": "room.campus_id", "foreignField": "campus_id", "as": "camp"}},
-            {"$unwind": {"path": "$camp", "preserveNullAndEmptyArrays": True}},
-
-            {"$addFields": {
-                "course_code_display": {
-                    "$cond": [
-                        {"$isArray": "$course.course_code"},
-                        {"$ifNull": [{"$arrayElemAt": ["$course.course_code", 0]}, ""]},
-                        {"$ifNull": ["$course.course_code", ""]},
-                    ]
-                },
-                "day_display": {
-                    "$switch": {
-                        "branches": [
-                            {"case": {"$in": [{"$toUpper": "$sched.day"}, ["M","MON"]]}, "then": "Monday"},
-                            {"case": {"$in": [{"$toUpper": "$sched.day"}, ["T","TU","TUE"]]}, "then": "Tuesday"},
-                            {"case": {"$in": [{"$toUpper": "$sched.day"}, ["W","WED"]]}, "then": "Wednesday"},
-                            {"case": {"$in": [{"$toUpper": "$sched.day"}, ["TH","THU","R"]]}, "then": "Thursday"},
-                            {"case": {"$in": [{"$toUpper": "$sched.day"}, ["F","FRI"]]}, "then": "Friday"},
-                            {"case": {"$in": [{"$toUpper": "$sched.day"}, ["S","SAT"]]}, "then": "Saturday"},
-                        ],
-                        "default": "$sched.day"
+        pipeline.extend(
+            [
+                {
+                    "$lookup": {
+                        "from": "courses",
+                        "localField": "sec.course_id",
+                        "foreignField": "course_id",
+                        "as": "course",
                     }
                 },
-            }},
+                {"$unwind": {"path": "$course", "preserveNullAndEmptyArrays": True}},
 
-            {"$project": {
-                "_id": 0,
-                "day": "$day_display",
-                "course_code": "$course_code_display",
-                "course_title": "$course.course_title",
-                "section": "$sec.section_code",
-                "units": {"$ifNull": ["$course.units", 0]},
-                "campus": {"$ifNull": ["$camp.campus_name", "Online"]},
-                "mode": {"$ifNull": ["$sched.room_type", "Online"]},
-                "room": {"$ifNull": ["$room.room_number", "Online"]},
-                "start_raw": "$sched.start_time",
-                "end_raw": "$sched.end_time",
-            }},
-            {"$sort": {"day": 1, "start_raw": 1, "section": 1}},
-        ]
+                {
+                    "$lookup": {
+                        "from": "section_schedules",
+                        "localField": "sec.section_id",
+                        "foreignField": "section_id",
+                        "as": "sched",
+                    }
+                },
+                {"$unwind": {"path": "$sched", "preserveNullAndEmptyArrays": True}},
+
+                {
+                    "$lookup": {
+                        "from": "rooms",
+                        "localField": "sched.room_id",
+                        "foreignField": "room_id",
+                        "as": "room",
+                    }
+                },
+                {"$unwind": {"path": "$room", "preserveNullAndEmptyArrays": True}},
+
+                {
+                    "$lookup": {
+                        "from": "campuses",
+                        "localField": "room.campus_id",
+                        "foreignField": "campus_id",
+                        "as": "camp",
+                    }
+                },
+                {"$unwind": {"path": "$camp", "preserveNullAndEmptyArrays": True}},
+
+                {
+                    "$addFields": {
+                        "course_code_display": {
+                            "$cond": [
+                                {"$isArray": "$course.course_code"},
+                                {
+                                    "$ifNull": [
+                                        {"$arrayElemAt": ["$course.course_code", 0]},
+                                        "",
+                                    ]
+                                },
+                                {"$ifNull": ["$course.course_code", ""]},
+                            ]
+                        },
+                        "day_display": {
+                            "$switch": {
+                                "branches": [
+                                    {
+                                        "case": {
+                                            "$in": [
+                                                {"$toUpper": "$sched.day"},
+                                                ["M", "MON"],
+                                            ]
+                                        },
+                                        "then": "Monday",
+                                    },
+                                    {
+                                        "case": {
+                                            "$in": [
+                                                {"$toUpper": "$sched.day"},
+                                                ["T", "TU", "TUE"],
+                                            ]
+                                        },
+                                        "then": "Tuesday",
+                                    },
+                                    {
+                                        "case": {
+                                            "$in": [
+                                                {"$toUpper": "$sched.day"},
+                                                ["W", "WED"],
+                                            ]
+                                        },
+                                        "then": "Wednesday",
+                                    },
+                                    {
+                                        "case": {
+                                            "$in": [
+                                                {"$toUpper": "$sched.day"},
+                                                ["TH", "THU", "R"],
+                                            ]
+                                        },
+                                        "then": "Thursday",
+                                    },
+                                    {
+                                        "case": {
+                                            "$in": [
+                                                {"$toUpper": "$sched.day"},
+                                                ["F", "FRI"],
+                                            ]
+                                        },
+                                        "then": "Friday",
+                                    },
+                                    {
+                                        "case": {
+                                            "$in": [
+                                                {"$toUpper": "$sched.day"},
+                                                ["S", "SAT"],
+                                            ]
+                                        },
+                                        "then": "Saturday",
+                                    },
+                                ],
+                                "default": "$sched.day",
+                            }
+                        },
+                    }
+                },
+                {
+                    "$project": {
+                        "_id": 0,
+                        "day": "$day_display",
+                        "course_code": "$course_code_display",
+                        "course_title": "$course.course_title",
+                        "section": "$sec.section_code",
+                        "units": {"$ifNull": ["$course.units", 0]},
+                        "campus": {"$ifNull": ["$camp.campus_name", "Online"]},
+                        "mode": {"$ifNull": ["$sched.room_type", "Online"]},
+                        "room": {"$ifNull": ["$room.room_number", "Online"]},
+                        "start_raw": "$sched.start_time",
+                        "end_raw": "$sched.end_time",
+                    }
+                },
+                {"$sort": {"day": 1, "start_raw": 1, "section": 1}},
+            ]
+        )
 
         rows = [r async for r in db["faculty_assignments"].aggregate(pipeline)]
 
-        def _fmt_hhmm(raw):
+        # Format times same as overview
+        def _fmt_hhmm_local(raw):
             if raw is None:
                 return ""
             s = str(raw).strip()
@@ -504,36 +632,40 @@ async def facultymanagement_handler(
                 return s
             return f"{h:02d}:{m:02d}"
 
-        def _fmt_time_band(start_raw, end_raw):
-            st = _fmt_hhmm(start_raw)
-            en = _fmt_hhmm(end_raw)
+        def _fmt_time_band_local(start_raw, end_raw):
+            st = _fmt_hhmm_local(start_raw)
+            en = _fmt_hhmm_local(end_raw)
             return f"{st} – {en}".strip(" –")
 
         teaching_load = []
         for r in rows:
+            # normalize course_code if list
             code = r.get("course_code")
             if isinstance(code, list):
                 code = " / ".join(str(x) for x in code if x).strip()
 
-            teaching_load.append({
-                "day": r.get("day", ""),
-                "course_code": code or "",
-                "course_title": r.get("course_title", ""),
-                "section": r.get("section", ""),
-                "units": r.get("units", 0) or 0,
-                "campus": r.get("campus", "Online"),
-                "mode": r.get("mode", "Online"),
-                "room": r.get("room", "Online"),
-                "time": _fmt_time_band(r.get("start_raw"), r.get("end_raw")),
-            })
+            teaching_load.append(
+                {
+                    "day": r.get("day", ""),
+                    "course_code": code or "",
+                    "course_title": r.get("course_title", ""),
+                    "section": r.get("section", ""),
+                    "units": r.get("units", 0) or 0,
+                    "campus": r.get("campus", "Online"),
+                    "mode": r.get("mode", "Online"),
+                    "room": r.get("room", "Online"),
+                    "time": _fmt_time_band_local(r.get("start_raw"), r.get("end_raw")),
+                }
+            )
 
         return {"ok": True, "term_id": termId, "teaching_load": teaching_load}
 
-    # ----- HISTORY -----
+    # ----- HISTORY: per AY grouped by term -----
     if action == "history":
         if not facultyId:
             raise HTTPException(status_code=400, detail="facultyId is required.")
 
+        # Default AY = most recent
         if acadYearStart is None:
             latest = await db[COL_TERMS].find({}, {"_id": 0, "acad_year_start": 1}) \
                 .sort([("acad_year_start", -1)]).limit(1).to_list(1)
@@ -541,20 +673,53 @@ async def facultymanagement_handler(
             if acadYearStart is None:
                 return {"ok": True, "acad_year_start": None, "terms": {}}
 
+        # Build like FACULTY_History
         pipeline = [
             {"$match": {"faculty_id": facultyId, "is_archived": False}},
-            {"$lookup": {"from": "sections", "localField": "section_id", "foreignField": "section_id", "as": "sec"}},
+            {"$lookup": {
+                "from": "sections",
+                "localField": "section_id",
+                "foreignField": "section_id",
+                "as": "sec"
+            }},
             {"$unwind": {"path": "$sec", "preserveNullAndEmptyArrays": True}},
-            {"$lookup": {"from": "courses", "localField": "sec.course_id", "foreignField": "course_id", "as": "course"}},
+            {"$lookup": {
+                "from": "courses",
+                "localField": "sec.course_id",
+                "foreignField": "course_id",
+                "as": "course"
+            }},
             {"$unwind": {"path": "$course", "preserveNullAndEmptyArrays": True}},
-            {"$lookup": {"from": "terms", "localField": "sec.term_id", "foreignField": "term_id", "as": "t"}},
+            {"$lookup": {
+                "from": "terms",
+                "localField": "sec.term_id",
+                "foreignField": "term_id",
+                "as": "t"
+            }},
             {"$unwind": {"path": "$t", "preserveNullAndEmptyArrays": True}},
+            # Filter by AY via joined terms
             {"$match": {"t.acad_year_start": acadYearStart}},
-            {"$lookup": {"from": "section_schedules", "localField": "sec.section_id", "foreignField": "section_id", "as": "scheds"}},
+            # schedules fan-out
+            {"$lookup": {
+                "from": "section_schedules",
+                "localField": "sec.section_id",
+                "foreignField": "section_id",
+                "as": "scheds"
+            }},
             {"$unwind": {"path": "$scheds", "preserveNullAndEmptyArrays": True}},
-            {"$lookup": {"from": "rooms", "localField": "scheds.room_id", "foreignField": "room_id", "as": "room"}},
+            {"$lookup": {
+                "from": "rooms",
+                "localField": "scheds.room_id",
+                "foreignField": "room_id",
+                "as": "room"
+            }},
             {"$unwind": {"path": "$room", "preserveNullAndEmptyArrays": True}},
-            {"$lookup": {"from": "campuses", "localField": "room.campus_id", "foreignField": "campus_id", "as": "camp"}},
+            {"$lookup": {
+                "from": "campuses",
+                "localField": "room.campus_id",
+                "foreignField": "campus_id",
+                "as": "camp"
+            }},
             {"$unwind": {"path": "$camp", "preserveNullAndEmptyArrays": True}},
             {"$project": {
                 "_id": 0,
@@ -570,6 +735,7 @@ async def facultymanagement_handler(
                 "room_number": "$room.room_number",
                 "campus_name": "$camp.campus_name",
             }},
+            # Group back to section and collect meetings
             {"$group": {
                 "_id": "$section_id",
                 "section_code": {"$first": "$section_code"},
@@ -587,19 +753,31 @@ async def facultymanagement_handler(
             }},
         ]
 
-        DAY_MAP = {"M":"Monday","MON":"Monday","T":"Tuesday","TU":"Tuesday","TUE":"Tuesday","W":"Wednesday","WED":"Wednesday",
-                "TH":"Thursday","THU":"Thursday","R":"Thursday","F":"Friday","FRI":"Friday","S":"Saturday","SAT":"Saturday"}
-        DAY_ORDER = {"Monday":1,"Tuesday":2,"Wednesday":3,"Thursday":4,"Friday":5,"Saturday":6}
+        DAY_MAP = {
+            "M": "Monday", "MON": "Monday",
+            "T": "Tuesday", "TU": "Tuesday", "TUE": "Tuesday",
+            "W": "Wednesday", "WED": "Wednesday",
+            "TH": "Thursday", "THU": "Thursday", "R": "Thursday",
+            "F": "Friday", "FRI": "Friday",
+            "S": "Saturday", "SAT": "Saturday"
+        }
+        DAY_ORDER = {
+            "Monday": 1, "Tuesday": 2, "Wednesday": 3,
+            "Thursday": 4, "Friday": 5, "Saturday": 6
+        }
 
-        def _to_full_day(d):
+        def _to_full_day_local(d):
             s = str(d or "").strip().upper()
             return DAY_MAP.get(s, str(d or ""))
 
-        def _fmt_hhmm(raw):
-            if raw is None: return ""
+        def _fmt_hhmm_local(raw):
+            if raw is None:
+                return ""
             s = str(raw).strip()
-            if ":" in s: return s
-            if not s.isdigit(): return s
+            if ":" in s:
+                return s
+            if not s.isdigit():
+                return s
             if len(s) == 3:
                 h, m = int(s[0]), int(s[1:])
             elif len(s) == 4:
@@ -609,17 +787,18 @@ async def facultymanagement_handler(
             return f"{h:02d}:{m:02d}"
 
         def _band(start, end):
-            st, en = _fmt_hhmm(start), _fmt_hhmm(end)
+            st, en = _fmt_hhmm_local(start), _fmt_hhmm_local(end)
             return f"{st} – {en}".strip(" –")
 
         rows = [r async for r in db[COL_ASSIGNMENTS].aggregate(pipeline)]
 
+        # Section → flat UI row (take up to 2 meetings, sorted by day)
         flat = []
         for r in rows:
             meets = r.get("meetings") or []
             norm = []
             for m in meets:
-                full_day = _to_full_day(m.get("day"))
+                full_day = _to_full_day_local(m.get("day"))
                 norm.append((DAY_ORDER.get(full_day, 99), {
                     "day": full_day,
                     "room": m.get("room") or "Online",
@@ -629,14 +808,20 @@ async def facultymanagement_handler(
                 }))
             norm.sort(key=lambda x: (x[0], x[1]["time"] or ""))
 
+            # default fields
             day1 = room1 = day2 = room2 = None
             mode = None
             time_band = ""
             if norm:
-                day1, room1, mode, time_band = norm[0][1]["day"], norm[0][1]["room"], norm[0][1]["mode"], norm[0][1]["time"]
+                day1 = norm[0][1]["day"]
+                room1 = norm[0][1]["room"]
+                mode = norm[0][1]["mode"]
+                time_band = norm[0][1]["time"]
             if len(norm) > 1:
-                day2, room2 = norm[1][1]["day"], norm[1][1]["room"]
+                day2 = norm[1][1]["day"]
+                room2 = norm[1][1]["room"]
 
+            # normalize course code if array
             code = r.get("course_code_raw")
             if isinstance(code, list):
                 code = (code[0] if code else "") or ""
@@ -652,7 +837,8 @@ async def facultymanagement_handler(
                 "time": time_band,
             })
 
-        grouped = {"Term 1": [], "Term 2": [], "Term 3": []}
+        # Group by term: { "Term 1": [...] }
+        grouped: Dict[str, List[Dict[str, Any]]] = {"Term 1": [], "Term 2": [], "Term 3": []}
         for r in flat:
             grouped.setdefault(r["term"] or "Term 1", []).append({
                 "code": r["code"],
@@ -666,4 +852,196 @@ async def facultymanagement_handler(
 
         return {"ok": True, "acad_year_start": acadYearStart, "terms": grouped}
 
+    # ----- ADD: create new faculty (users → role_assignments → faculty_profiles) -----
+    if action == "add":
+        first_name = str(payload.get("first_name", "")).strip()
+        last_name = str(payload.get("last_name", "")).strip()
+        email = str(payload.get("email", "")).strip().lower()
+        dept_name = str(payload.get("department", "")).strip()
+        employment_type = str(payload.get("employment_type", "")).strip().upper()
+
+        if not first_name or not last_name or not email:
+            raise HTTPException(
+                status_code=400,
+                detail="first_name, last_name, and email are required.",
+            )
+
+        if employment_type not in {"FT", "PT"}:
+            raise HTTPException(
+                status_code=400,
+                detail="employment_type must be 'FT' or 'PT'.",
+            )
+
+        if not _validate_dlsu_email(email):
+            # match FE message
+            raise HTTPException(status_code=422, detail="Email is not a valid DLSU account")
+
+        # unique email guard
+        existing = await db[COL_USERS].find_one({"email": email}, {"_id": 1, "user_id": 1})
+        if existing:
+            raise HTTPException(status_code=409, detail="A user with this email already exists.")
+
+        # Resolve department_id (fallback to DEPT0001)
+        dept_id = "DEPT0001"
+        if dept_name:
+            dept_doc = await db[COL_DEPARTMENTS].find_one(
+                {
+                    "$or": [
+                        {"department_name": dept_name},
+                        {"dept_name": dept_name},
+                    ]
+                },
+                {"_id": 0, "department_id": 1},
+            )
+            if dept_doc and dept_doc.get("department_id"):
+                dept_id = dept_doc["department_id"]
+
+        # Find Faculty role (from user_roles master)
+        role_doc = await db[COL_USER_ROLES].find_one(
+            {"role_type": "Faculty"},
+            {"_id": 0, "role_id": 1, "role_type": 1},
+        )
+        if not role_doc or not role_doc.get("role_id"):
+            raise HTTPException(status_code=500, detail="Faculty role is not configured.")
+        role_id = role_doc["role_id"]
+
+        # Generate IDs
+        user_id = await _next_id(COL_USERS, "user_id", "USR")
+        faculty_id = await _next_id(COL_FACULTY, "faculty_id", "FAC")
+
+        now = datetime.now(timezone.utc)
+
+        # 1) Insert into users
+        user_doc: Dict[str, Any] = {
+            "user_id": user_id,
+            "email": email,
+            "first_name": first_name,
+            "last_name": last_name,
+            "status": True,
+            "profile_image": payload.get("profile_image", "") or "",
+            "created_at": now,
+            "last_login": now,
+        }
+        await db[COL_USERS].insert_one(user_doc)
+
+        # 2) Insert into role_assignments with default scope
+        scope = payload.get("scope")
+        if not isinstance(scope, list) or not scope:
+            scope = [
+                {"type": "campus", "id": "CMPS0001"},
+                {"type": "college", "id": "COLL0001"},
+            ]
+        # ensure department scope is present
+        if dept_id and not any(s.get("type") == "department" for s in scope):
+            scope.append({"type": "department", "id": dept_id})
+
+        ra_doc: Dict[str, Any] = {
+            "user_id": user_id,
+            "role_id": role_id,
+            "scope": scope,
+        }
+        await db[COL_ROLE_ASSIGN].insert_one(ra_doc)
+
+        # 3) Insert into faculty_profiles
+        certs = _normalize_certifications(payload.get("certifications"))
+        teaching_years = _coerce_int(payload.get("teaching_years"))
+
+        fac_doc: Dict[str, Any] = {
+            "faculty_id": faculty_id,
+            "user_id": user_id,
+            "email": email,
+            "employment_type": employment_type,
+            "department_id": dept_id or "DEPT0001",
+            "fac_position": "Lecturer",
+            "max_preps": 3,
+            "certifications": certs,
+            "teaching_years": teaching_years,
+        }
+        await db[COL_FACULTY].insert_one(fac_doc)
+
+        return {"ok": True, "user_id": user_id, "faculty_id": faculty_id}
+
+    # ----- UPDATE: partial update of faculty basics (optional, for future) -----
+    if action == "update":
+        if not facultyId:
+            raise HTTPException(status_code=400, detail="facultyId is required.")
+
+        fac = await db[COL_FACULTY].find_one({"faculty_id": facultyId})
+        if not fac:
+            raise HTTPException(status_code=404, detail="Faculty profile not found.")
+
+        user_id = fac.get("user_id")
+
+        user_update: Dict[str, Any] = {}
+        # names
+        if "first_name" in payload:
+            fn = str(payload.get("first_name") or "").strip()
+            if fn:
+                user_update["first_name"] = fn
+        if "last_name" in payload:
+            ln = str(payload.get("last_name") or "").strip()
+            if ln:
+                user_update["last_name"] = ln
+
+        email = None
+        if "email" in payload:
+            email = str(payload.get("email") or "").strip().lower()
+            if email:
+                if not _validate_dlsu_email(email):
+                    raise HTTPException(status_code=422, detail="Email is not a valid DLSU account")
+                existing = await db[COL_USERS].find_one(
+                    {"email": email, "user_id": {"$ne": user_id}}, {"_id": 1}
+                )
+                if existing:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="A user with this email already exists."
+                    )
+                user_update["email"] = email
+
+        if user_id and user_update:
+            await db[COL_USERS].update_one({"user_id": user_id}, {"$set": user_update})
+
+        faculty_update: Dict[str, Any] = {}
+
+        if "employment_type" in payload:
+            et = str(payload.get("employment_type") or "").strip().upper()
+            if et in {"FT", "PT"}:
+                faculty_update["employment_type"] = et
+
+        if "department" in payload:
+            dept_name = str(payload.get("department") or "").strip()
+            if dept_name:
+                dept_doc = await db[COL_DEPARTMENTS].find_one(
+                    {
+                        "$or": [
+                            {"department_name": dept_name},
+                            {"dept_name": dept_name},
+                        ]
+                    },
+                    {"_id": 0, "department_id": 1},
+                )
+                if dept_doc and dept_doc.get("department_id"):
+                    faculty_update["department_id"] = dept_doc["department_id"]
+
+        if "certifications" in payload:
+            faculty_update["certifications"] = _normalize_certifications(
+                payload.get("certifications")
+            )
+
+        if "teaching_years" in payload:
+            faculty_update["teaching_years"] = _coerce_int(payload.get("teaching_years"))
+
+        if email:
+            faculty_update["email"] = email
+
+        if faculty_update:
+            await db[COL_FACULTY].update_one(
+                {"faculty_id": facultyId}, {"$set": faculty_update}
+            )
+
+        return {"ok": True}
+    
+
+    # ----- fallback -----
     raise HTTPException(status_code=400, detail="Invalid action parameter.")

@@ -1,5 +1,5 @@
-/* ------------- CHAIR_FacultyManagement.tsx (modified) ------------- */
-import { useEffect, useMemo, useRef, useState } from "react";
+/* ------------- CHAIR_FacultyManagement.tsx ------------- */
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import SelectBox from "../../component/SelectBox";
 import { cls } from "../../utilities/cls";
 import {
@@ -7,22 +7,70 @@ import {
   MoreVertical,
   Calendar,
   BookOpen,
+  Plus,
+  PencilLine,
+  X,
 } from "lucide-react";
-
+// NEW (CHAIR-based)
 import {
-  getFacultyOptions,
-  listFaculty,
-  getFacultySchedule,
-  getFacultyHistory,
+  getChairFacultyOptions,
+  listChairFaculty,
+  getChairFacultySchedule,
+  getChairFacultyHistory,
+  addChairFacultyEntry,
   type FacultyRow,
   type FMOptions,
+  type FacultyUpsertPayload,
 } from "../../api";
 
-/* ---- Row actions menu (profile removed) ---- */
+
+/* ---- Small shared bits (from ADMIN pattern) ---- */
+function Modal({
+  open,
+  onClose,
+  children,
+  width = "max-w-3xl",
+}: {
+  open: boolean;
+  onClose: () => void;
+  children: ReactNode;
+  width?: string;
+}) {
+  useEffect(() => {
+    const onEsc = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    document.addEventListener("keydown", onEsc);
+    return () => document.removeEventListener("keydown", onEsc);
+  }, [onClose]);
+  if (!open) return null;
+  return (
+    <div className="fixed inset-0 z-50">
+      <div className="absolute inset-0 bg-black/50" onClick={onClose} />
+      <div className="absolute inset-0 grid place-items-center p-4">
+        <div className={cls("w-full rounded-2xl bg-white shadow-2xl", width)}>{children}</div>
+      </div>
+    </div>
+  );
+}
+const Label = ({ children }: { children: ReactNode }) => (
+  <label className="mb-1 block text-sm font-semibold text-gray-800">{children}</label>
+);
+const TextInput = (p: React.InputHTMLAttributes<HTMLInputElement>) => (
+  <input
+    {...p}
+    className={cls(
+      "w-full rounded-lg border border-gray-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-emerald-500/30",
+      p.className
+    )}
+  />
+);
+
+/* ---- Row actions menu ---- */
 function ActionMenu({
+  onEdit,
   onViewSchedule,
   onViewHistory,
 }: {
+  onEdit: () => void;
   onViewSchedule: () => void;
   onViewHistory: () => void;
 }) {
@@ -48,7 +96,16 @@ function ActionMenu({
       </button>
 
       {open && (
-        <div className="absolute right-0 mt-2 w-48 rounded-xl border border-gray-200 bg-white shadow-xl py-1 text-left z-50">
+        <div className="absolute right-0 mt-2 w-52 rounded-xl border border-gray-200 bg-white shadow-xl py-1 text-left z-50">
+          <button
+            onClick={() => {
+              setOpen(false);
+              onEdit();
+            }}
+            className="flex w-full items-center gap-2 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
+          >
+            <PencilLine className="h-4 w-4" /> <span>Edit Faculty Details</span>
+          </button>
           <button
             onClick={() => {
               setOpen(false);
@@ -92,7 +149,12 @@ type TL = { day: DayLong; items: TLItem[] };
 // (Same mapping as in FACULTY_Overview)
 function makeTeachingLoad(dataArray: any[]): TL[] {
   const byDay: Record<DayLong, TLItem[]> = {
-    Monday: [], Tuesday: [], Wednesday: [], Thursday: [], Friday: [], Saturday: [],
+    Monday: [],
+    Tuesday: [],
+    Wednesday: [],
+    Thursday: [],
+    Friday: [],
+    Saturday: [],
   };
   (dataArray || []).forEach((c: any) => {
     const day = (c.day || "") as DayLong;
@@ -141,13 +203,20 @@ function renderTeachingHistoryLikeFacultyFromArray(flatRows: HistRow[]) {
   const groups = groupHistoryByTerm(flatRows);
 
   const HEADERS = [
-    "Course Code","Course Title","Section",
-    "Mode","Day 1","Room 1","Day 2","Room 2","Time",
+    "Course Code",
+    "Course Title",
+    "Section",
+    "Mode",
+    "Day 1",
+    "Room 1",
+    "Day 2",
+    "Room 2",
+    "Time",
   ] as const;
 
   return (
     <div className="space-y-8">
-      {(["Term 1","Term 2","Term 3"] as const).map((t) => (
+      {(["Term 1", "Term 2", "Term 3"] as const).map((t) => (
         <div key={t} className="rounded-xl border border-gray-200 overflow-hidden bg-white">
           {/* Term header */}
           <div className="px-4 py-3 text-sm font-semibold text-emerald-700 bg-gray-50 border-b">
@@ -162,9 +231,9 @@ function renderTeachingHistoryLikeFacultyFromArray(flatRows: HistRow[]) {
                 <col className="w-[32ch]" /> {/* Title (can wrap) */}
                 <col className="w-[10ch]" /> {/* Section */}
                 <col className="w-[10ch]" /> {/* Mode */}
-                <col className="w-[8ch]"  /> {/* Day 1 */}
+                <col className="w-[8ch]" /> {/* Day 1 */}
                 <col className="w-[14ch]" /> {/* Room 1 */}
-                <col className="w-[8ch]"  /> {/* Day 2 */}
+                <col className="w-[8ch]" /> {/* Day 2 */}
                 <col className="w-[14ch]" /> {/* Room 2 */}
                 <col className="w-[16ch]" /> {/* Time */}
               </colgroup>
@@ -172,7 +241,9 @@ function renderTeachingHistoryLikeFacultyFromArray(flatRows: HistRow[]) {
               <thead>
                 <tr className="text-xs text-gray-600 bg-emerald-50">
                   {HEADERS.map((h) => (
-                    <th key={h} className="px-3 py-2 font-semibold text-center">{h}</th>
+                    <th key={h} className="px-3 py-2 font-semibold text-center">
+                      {h}
+                    </th>
                   ))}
                 </tr>
               </thead>
@@ -180,7 +251,10 @@ function renderTeachingHistoryLikeFacultyFromArray(flatRows: HistRow[]) {
               <tbody>
                 {(groups[t] ?? []).length === 0 ? (
                   <tr>
-                    <td colSpan={HEADERS.length} className="px-4 py-6 text-center text-sm text-gray-500 bg-white">
+                    <td
+                      colSpan={HEADERS.length}
+                      className="px-4 py-6 text-center text-sm text-gray-500 bg-white"
+                    >
                       No records.
                     </td>
                   </tr>
@@ -188,14 +262,30 @@ function renderTeachingHistoryLikeFacultyFromArray(flatRows: HistRow[]) {
                   groups[t].map((r, i) => (
                     <tr key={`${t}-${i}`} className={i % 2 ? "bg-gray-50" : "bg-white"}>
                       <td className="px-3 py-2 text-center text-[13px] whitespace-nowrap">{r.code}</td>
-                      <td className="px-3 py-2 text-center text-[13px] whitespace-normal break-words">{r.title}</td>
-                      <td className="px-3 py-2 text-center text-[13px] whitespace-nowrap">{r.section}</td>
-                      <td className="px-3 py-2 text-center text-[13px] whitespace-nowrap">{r.mode ?? ""}</td>
-                      <td className="px-3 py-2 text-center text-[13px] whitespace-nowrap">{r.day1 ?? ""}</td>
-                      <td className="px-3 py-2 text-center text-[13px] whitespace-nowrap">{r.room1 ?? ""}</td>
-                      <td className="px-3 py-2 text-center text-[13px] whitespace-nowrap">{r.day2 ?? ""}</td>
-                      <td className="px-3 py-2 text-center text-[13px] whitespace-nowrap">{r.room2 ?? ""}</td>
-                      <td className="px-3 py-2 text-center text-[13px] whitespace-nowrap">{r.time ?? ""}</td>
+                      <td className="px-3 py-2 text-center text-[13px] whitespace-normal break-words">
+                        {r.title}
+                      </td>
+                      <td className="px-3 py-2 text-center text-[13px] whitespace-nowrap">
+                        {r.section}
+                      </td>
+                      <td className="px-3 py-2 text-center text-[13px] whitespace-nowrap">
+                        {r.mode ?? ""}
+                      </td>
+                      <td className="px-3 py-2 text-center text-[13px] whitespace-nowrap">
+                        {r.day1 ?? ""}
+                      </td>
+                      <td className="px-3 py-2 text-center text-[13px] whitespace-nowrap">
+                        {r.room1 ?? ""}
+                      </td>
+                      <td className="px-3 py-2 text-center text-[13px] whitespace-nowrap">
+                        {r.day2 ?? ""}
+                      </td>
+                      <td className="px-3 py-2 text-center text-[13px] whitespace-nowrap">
+                        {r.room2 ?? ""}
+                      </td>
+                      <td className="px-3 py-2 text-center text-[13px] whitespace-nowrap">
+                        {r.time ?? ""}
+                      </td>
                     </tr>
                   ))
                 )}
@@ -209,8 +299,30 @@ function renderTeachingHistoryLikeFacultyFromArray(flatRows: HistRow[]) {
 }
 
 /* ---------------- Page ---------------- */
+
+/** Add Faculty form structure */
+type AddFacultyForm = {
+  first_name: string;
+  last_name: string;
+  email: string;
+  department: string; // department.dept_name / department_name (display)
+  employment_type: "" | "FT" | "PT";
+  certifications: string; // comma-separated; FE will split to array
+  teaching_years: string; // numeric string; FE will coerce to number
+};
+
+/** Edit modal still uses the simpler view-level structure */
+type EditFacultyForm = {
+  name: string;
+  email: string;
+  department: string;
+  faculty_type: string;
+  status: string;
+  teaching_units: string;
+};
+
 export default function CHAIR_FacultyManagement() {
-  type ModalType = null | "schedule" | "history"; // profile removed
+  type ModalType = null | "schedule" | "history";
 
   // filters
   const [department, setDepartment] = useState("All Departments");
@@ -230,7 +342,10 @@ export default function CHAIR_FacultyManagement() {
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string>("");
 
-  // modals
+  // refetch token (used after add)
+  const [reloadToken, setReloadToken] = useState(0);
+
+  // modals (Schedule / History)
   const [activeModal, setActiveModal] = useState<ModalType>(null);
   const [selected, setSelected] = useState<FacultyRow | null>(null);
 
@@ -241,11 +356,177 @@ export default function CHAIR_FacultyManagement() {
   const [history, setHistory] = useState<{ teaching_history: HistRow[] } | null>(null);
   const [historyYearIndex, setHistoryYearIndex] = useState(0);
 
+  // NEW: Add / Edit Faculty modals (patterned after ADMIN)
+  const emptyAddForm: AddFacultyForm = {
+    first_name: "",
+    last_name: "",
+    email: "",
+    department: "",
+    employment_type: "",
+    certifications: "",
+    teaching_years: "",
+  };
+  const [addOpen, setAddOpen] = useState(false);
+  const [addForm, setAddForm] = useState<AddFacultyForm>(emptyAddForm);
+  const [addEmailError, setAddEmailError] = useState("");
+  const [addError, setAddError] = useState("");
+  const [addSaving, setAddSaving] = useState(false);
+
+  const [editOpen, setEditOpen] = useState<FacultyRow | null>(null);
+  const [editForm, setEditForm] = useState<EditFacultyForm | null>(null);
+
+  const facultyTypeChoices = useMemo(
+    () => typeOptions.filter((t) => t && t !== "All Type"),
+    [typeOptions]
+  );
+  const statusChoices = useMemo(() => {
+    const s = new Set<string>();
+    rows.forEach((r) => r.status && s.add(r.status));
+    return Array.from(s);
+  }, [rows]);
+
+  const deptChoices = useMemo(
+    () => deptOptions.filter((d) => d && d !== "All Departments"),
+    [deptOptions]
+  );
+
+  const employmentTypeOptions = [
+    { code: "FT" as const, label: "Full-Time" },
+    { code: "PT" as const, label: "Part-Time" },
+  ];
+
+  const isValidDlsuEmail = (email: string) => {
+    const trimmed = (email || "").trim();
+    if (!trimmed) return true; // don't flag empty; required-check handles that
+
+    const atIndex = trimmed.lastIndexOf("@");
+    if (atIndex <= 0) return false;
+
+    const local = trimmed.slice(0, atIndex);
+    const domain = trimmed.slice(atIndex + 1);
+
+    if (domain.toLowerCase() !== "dlsu.edu.ph") return false;
+    if (!local.includes(".")) return false;
+    if (/\s/.test(local)) return false;
+
+    return true;
+  };
+
+  const openAddFaculty = () => {
+    setAddForm(emptyAddForm);
+    setAddEmailError("");
+    setAddError("");
+    setAddOpen(true);
+  };
+
+  const submitAddFaculty = async () => {
+    const { first_name, last_name, email, department, employment_type, certifications, teaching_years } =
+      addForm;
+
+    const trimmedEmail = email.trim();
+    const emailOk = isValidDlsuEmail(trimmedEmail);
+
+    if (!emailOk) {
+      setAddEmailError("Email is not a valid DLSU account");
+      return;
+    }
+
+    if (!first_name.trim() || !last_name.trim() || !trimmedEmail || !department || !employment_type) {
+      setAddError("Please fill out all required fields.");
+      return;
+    }
+
+    setAddError("");
+    setAddSaving(true);
+
+    try {
+      const payload: FacultyUpsertPayload = {
+        first_name: first_name.trim(),
+        last_name: last_name.trim(),
+        email: trimmedEmail.toLowerCase(),
+        department,
+        employment_type: employment_type as "FT" | "PT",
+      };
+
+      const certs = (certifications || "").trim();
+      if (certs) {
+        payload.certifications = certs
+          .split(",")
+          .map((c) => c.trim())
+          .filter(Boolean);
+      }
+
+      const yearsNum = Number((teaching_years || "").trim());
+      if (!Number.isNaN(yearsNum) && (teaching_years || "").trim() !== "") {
+        payload.teaching_years = yearsNum;
+      }
+
+     const res = await addChairFacultyEntry(payload);
+      if (!res || !res.ok) {
+        throw new Error("Failed to add faculty.");
+      }
+
+      // reset + close
+      setAddForm(emptyAddForm);
+      setAddEmailError("");
+      setAddError("");
+      setAddOpen(false);
+
+      // trigger table reload
+      setReloadToken((t) => t + 1);
+    } catch (e: any) {
+      const msg =
+        e?.response?.data?.detail ||
+        e?.message ||
+        "An error occurred while adding the faculty.";
+      setAddError(msg);
+    } finally {
+      setAddSaving(false);
+    }
+  };
+
+  const openEditFaculty = (row: FacultyRow) => {
+    setEditOpen(row);
+    setEditForm({
+      name: row.name || "",
+      email: row.email || "",
+      department: row.department || "",
+      faculty_type: row.faculty_type || "",
+      status: row.status || "",
+      teaching_units: String(row.teaching_units ?? ""),
+    });
+  };
+
+  const submitEditFaculty = () => {
+    if (!editOpen || !editForm) return;
+    // NOTE: This currently updates only the in-memory table.
+    // A true backend update can be wired via updateFacultyEntry later.
+    setRows((prev) =>
+      prev.map((r) =>
+        r.faculty_id === editOpen.faculty_id
+          ? {
+              ...r,
+              name: editForm.name.trim() || r.name,
+              email: editForm.email.trim() || r.email,
+              department: editForm.department.trim() || r.department,
+              faculty_type: editForm.faculty_type || r.faculty_type,
+              status: editForm.status || r.status,
+              teaching_units: editForm.teaching_units
+                ? Number(editForm.teaching_units) || editForm.teaching_units
+                : r.teaching_units,
+            }
+          : r
+      )
+    );
+    setEditOpen(null);
+  };
+
   // Load dropdown options
   useEffect(() => {
     (async () => {
       try {
-        const opt: FMOptions = await getFacultyOptions();
+        const opt: FMOptions = await getChairFacultyOptions();
+
         if (!opt.ok) throw new Error("Failed to load options");
         setDeptOptions(["All Departments", ...opt.departments]);
         setTypeOptions(["All Type", ...opt.facultyTypes]);
@@ -268,7 +549,7 @@ export default function CHAIR_FacultyManagement() {
       try {
         setLoading(true);
         setErr("");
-        const { ok, rows } = await listFaculty({ department, facultyType, search });
+        const { ok, rows } = await listChairFaculty({ department, facultyType, search });
         if (!ok) throw new Error("Failed to load faculty list");
         setRows(rows);
       } catch (e: any) {
@@ -278,9 +559,9 @@ export default function CHAIR_FacultyManagement() {
         setLoading(false);
       }
     })();
-  }, [department, facultyType, search]);
+  }, [department, facultyType, search, reloadToken]);
 
-  // modal open/close
+  // modal open/close (Schedule / History)
   const openModal = (type: Exclude<ModalType, null>, item: FacultyRow) => {
     setSelected(item);
     setActiveModal(type);
@@ -298,12 +579,12 @@ export default function CHAIR_FacultyManagement() {
       if (!activeModal || !selected) return;
       try {
         if (activeModal === "schedule") {
-          const data = await getFacultySchedule(selected.faculty_id);
+          const data = await getChairFacultySchedule(selected.faculty_id);
           setSchedule(data);
         } else if (activeModal === "history") {
           // Pass AY start (number) — api helper also accepts termId (string)
           const ay = academicYears[historyYearIndex];
-          const data = await getFacultyHistory(selected.faculty_id, ay);
+          const data = await getChairFacultyHistory(selected.faculty_id, ay);
           setHistory({ teaching_history: data?.teaching_history || [] });
         }
       } catch {
@@ -326,7 +607,10 @@ export default function CHAIR_FacultyManagement() {
     return (
       <div className="space-y-6">
         {TL.map((day) => (
-          <div key={day.day} className="rounded-xl border border-emerald-700/50 overflow-hidden bg-white">
+          <div
+            key={day.day}
+            className="rounded-xl border border-emerald-700/50 overflow-hidden bg-white"
+          >
             {/* Day header */}
             <div className="px-5 py-3">
               <div className="text-emerald-700 font-semibold text-[15px]">{day.day}</div>
@@ -349,9 +633,19 @@ export default function CHAIR_FacultyManagement() {
                   <thead>
                     <tr className="text-[11.5px] uppercase tracking-wide text-emerald-800 bg-emerald-50">
                       {[
-                        "Course Code","Course Title","Section","Units","Campus","Mode","Room","Time",
+                        "Course Code",
+                        "Course Title",
+                        "Section",
+                        "Units",
+                        "Campus",
+                        "Mode",
+                        "Room",
+                        "Time",
                       ].map((h) => (
-                        <th key={h} className="px-3 py-2 font-semibold text-center border-b border-emerald-700/40">
+                        <th
+                          key={h}
+                          className="px-3 py-2 font-semibold text-center border-b border-emerald-700/40"
+                        >
                           {h}
                         </th>
                       ))}
@@ -360,7 +654,10 @@ export default function CHAIR_FacultyManagement() {
                   <tbody>
                     {day.items.length === 0 ? (
                       <tr>
-                        <td colSpan={8} className="px-4 py-6 text-center text-sm text-neutral-500 bg-white">
+                        <td
+                          colSpan={8}
+                          className="px-4 py-6 text-center text-sm text-neutral-500 bg-white"
+                        >
                           No records.
                         </td>
                       </tr>
@@ -368,16 +665,35 @@ export default function CHAIR_FacultyManagement() {
                       day.items.map((it, idx) => (
                         <tr
                           key={`${day.day}-${it.code}-${it.sec}-${idx}`}
-                          className={cls("text-neutral-900 text-[13px]", idx % 2 === 0 ? "bg-white" : "bg-neutral-50")}
+                          className={cls(
+                            "text-neutral-900 text-[13px]",
+                            idx % 2 === 0 ? "bg-white" : "bg-neutral-50"
+                          )}
                         >
-                          <td className="px-3 py-2 text-center whitespace-nowrap border-t border-emerald-700/30">{it.code}</td>
-                          <td className="px-3 py-2 text-center whitespace-normal break-words border-t border-emerald-700/30">{it.title || "—"}</td>
-                          <td className="px-3 py-2 text-center whitespace-nowrap border-t border-emerald-700/30">{it.sec}</td>
-                          <td className="px-3 py-2 text-center whitespace-nowrap border-t border-emerald-700/30">{it.units}</td>
-                          <td className="px-3 py-2 text-center whitespace-nowrap border-t border-emerald-700/30">{it.campus}</td>
-                          <td className="px-3 py-2 text-center whitespace-nowrap border-t border-emerald-700/30">{it.mode}</td>
-                          <td className="px-3 py-2 text-center whitespace-nowrap border-t border-emerald-700/30">{it.room}</td>
-                          <td className="px-3 py-2 text-center whitespace-nowrap border-t border-emerald-700/30">{it.time}</td>
+                          <td className="px-3 py-2 text-center whitespace-nowrap border-t border-emerald-700/30">
+                            {it.code}
+                          </td>
+                          <td className="px-3 py-2 text-center whitespace-normal break-words border-t border-emerald-700/30">
+                            {it.title || "—"}
+                          </td>
+                          <td className="px-3 py-2 text-center whitespace-nowrap border-t border-emerald-700/30">
+                            {it.sec}
+                          </td>
+                          <td className="px-3 py-2 text-center whitespace-nowrap border-t border-emerald-700/30">
+                            {it.units}
+                          </td>
+                          <td className="px-3 py-2 text-center whitespace-nowrap border-t border-emerald-700/30">
+                            {it.campus}
+                          </td>
+                          <td className="px-3 py-2 text-center whitespace-nowrap border-t border-emerald-700/30">
+                            {it.mode}
+                          </td>
+                          <td className="px-3 py-2 text-center whitespace-nowrap border-t border-emerald-700/30">
+                            {it.room}
+                          </td>
+                          <td className="px-3 py-2 text-center whitespace-nowrap border-t border-emerald-700/30">
+                            {it.time}
+                          </td>
                         </tr>
                       ))
                     )}
@@ -395,7 +711,9 @@ export default function CHAIR_FacultyManagement() {
     <main className="w-full px-8 py-8">
       <header className="mb-6">
         <h1 className="text-2xl font-bold">Faculty Directory</h1>
-        <p className="text-sm text-gray-600">Browse and manage faculty schedules and history.</p>
+        <p className="text-sm text-gray-600">
+          Browse and manage faculty records, schedules, and teaching history.
+        </p>
       </header>
 
       {err && (
@@ -404,7 +722,7 @@ export default function CHAIR_FacultyManagement() {
         </div>
       )}
 
-      {/* Filters */}
+      {/* Filters + Add Faculty */}
       <div className="flex flex-wrap items-center gap-3 rounded-xl border border-gray-200 bg-white p-4 shadow-sm mb-6">
         <div className="relative flex-1 min-w-[260px]">
           <SearchIcon className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-500" />
@@ -418,6 +736,16 @@ export default function CHAIR_FacultyManagement() {
 
         <SelectBox value={department} onChange={setDepartment} options={deptOptions} />
         <SelectBox value={facultyType} onChange={setFacultyType} options={typeOptions} />
+
+        {/* Add Faculty button - to the right of the Type filter */}
+        <button
+          type="button"
+          onClick={openAddFaculty}
+          className="inline-flex h-10 items-center gap-2 rounded-lg bg-emerald-600 px-4 text-sm font-medium text-white hover:bg-emerald-700"
+        >
+          <Plus className="h-4 w-4" />
+          Add Faculty
+        </button>
       </div>
 
       {/* Table */}
@@ -461,6 +789,7 @@ export default function CHAIR_FacultyManagement() {
                   <td className="text-center text-gray-800">{r.status}</td>
                   <td className="text-center">
                     <ActionMenu
+                      onEdit={() => openEditFaculty(r)}
                       onViewSchedule={() => openModal("schedule", r)}
                       onViewHistory={() => openModal("history", r)}
                     />
@@ -472,9 +801,9 @@ export default function CHAIR_FacultyManagement() {
         </table>
       </div>
 
-      {/* -------- Modals -------- */}
+      {/* -------- Schedule / History Modals -------- */}
       {activeModal && selected && (
-        <div className="fixed inset-0 z-[100] grid place-items-center bg-black/40 p-4">
+        <div className="fixed inset-0 z-[40] grid place-items-center bg-black/40 p-4">
           <div className="w-full max-w-screen-xl rounded-2xl bg-white p-6 shadow-2xl overflow-y-auto max-h-[90vh]">
             {activeModal === "schedule" && (
               <>
@@ -505,10 +834,13 @@ export default function CHAIR_FacultyManagement() {
                   <p className="text-sm text-neutral-500">{selected?.name ?? ""}</p>
                 </div>
 
-                {/* Prev / Next AY controls (same behavior) */}
+                {/* Prev / Next AY controls */}
                 <div className="flex justify-between items-center mb-4">
                   <button
-                    onClick={() => setHistoryYearIndex((i) => Math.min(academicYears.length - 1, i + 1))}
+                    // Previous = go to OLDER AY (increase index)
+                    onClick={() =>
+                      setHistoryYearIndex((i) => Math.min(academicYears.length - 1, i + 1))
+                    }
                     disabled={historyYearIndex === academicYears.length - 1}
                     className={cls(
                       "px-3 py-1.5 rounded-lg text-sm font-medium border shadow-sm",
@@ -523,6 +855,7 @@ export default function CHAIR_FacultyManagement() {
                   <span className="text-base font-semibold text-gray-800">{historyYearLabel}</span>
 
                   <button
+                    // Next = go to NEWER AY (decrease index)
                     onClick={() => setHistoryYearIndex((i) => Math.max(0, i - 1))}
                     disabled={historyYearIndex === 0}
                     className={cls(
@@ -552,13 +885,313 @@ export default function CHAIR_FacultyManagement() {
             )}
 
             <div className="flex justify-end mt-8">
-              <button onClick={closeModal} className="px-4 py-2 rounded-lg bg-gray-100 hover:bg-gray-200 text-sm">
+              <button
+                onClick={closeModal}
+                className="px-4 py-2 rounded-lg bg-gray-100 hover:bg-gray-200 text-sm"
+              >
                 Close
               </button>
             </div>
           </div>
         </div>
       )}
+
+      {/* -------- Add Faculty Modal -------- */}
+      <Modal open={addOpen} onClose={() => setAddOpen(false)}>
+        <div className="p-6 sm:p-8">
+          <div className="mb-6 flex items-start justify-between">
+            <h3 className="text-xl font-semibold text-emerald-700">Add Faculty</h3>
+            <button
+              onClick={() => setAddOpen(false)}
+              className="rounded-full p-1 hover:bg-gray-100"
+              type="button"
+            >
+              <X className="h-5 w-5" />
+            </button>
+          </div>
+
+          {addError && (
+            <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+              {addError}
+            </div>
+          )}
+
+          <div className="grid grid-cols-1 gap-5">
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+              <div>
+                <Label>Last Name</Label>
+                <TextInput
+                  placeholder="e.g., Santos"
+                  value={addForm.last_name}
+                  onChange={(e) =>
+                    setAddForm((f) => ({
+                      ...f,
+                      last_name: e.target.value,
+                    }))
+                  }
+                />
+              </div>
+              <div>
+                <Label>First Name</Label>
+                <TextInput
+                  placeholder="e.g., Maria Ana"
+                  value={addForm.first_name}
+                  onChange={(e) =>
+                    setAddForm((f) => ({
+                      ...f,
+                      first_name: e.target.value,
+                    }))
+                  }
+                />
+              </div>
+            </div>
+
+            <div>
+              <Label>Email</Label>
+              <TextInput
+                placeholder="firstname.lastname@dlsu.edu.ph"
+                value={addForm.email}
+                onChange={(e) => {
+                  const value = e.target.value;
+                  setAddForm((f) => ({ ...f, email: value }));
+                  setAddEmailError(
+                    isValidDlsuEmail(value) ? "" : "Email is not a valid DLSU account"
+                  );
+                }}
+              />
+              {addEmailError && addForm.email.trim() && (
+                <p className="mt-1 text-xs text-red-600">{addEmailError}</p>
+              )}
+            </div>
+
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+              <div>
+                <Label>Department</Label>
+                <select
+                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-emerald-500/30 bg-white"
+                  value={addForm.department}
+                  onChange={(e) =>
+                    setAddForm((f) => ({
+                      ...f,
+                      department: e.target.value || "",
+                    }))
+                  }
+                >
+                  <option value="">-- Select Department --</option>
+                  {deptChoices.map((d) => (
+                    <option key={d} value={d}>
+                      {d}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <Label>Faculty Type</Label>
+                <select
+                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-emerald-500/30 bg-white"
+                  value={addForm.employment_type}
+                  onChange={(e) =>
+                    setAddForm((f) => ({
+                      ...f,
+                      employment_type: e.target.value as "" | "FT" | "PT",
+                    }))
+                  }
+                >
+                  <option value="">-- Select --</option>
+                  {employmentTypeOptions.map((opt) => (
+                    <option key={opt.code} value={opt.code}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <Label>Certifications</Label>
+                <TextInput
+                  placeholder="Comma-separated (e.g., AWS, Azure)"
+                  value={addForm.certifications}
+                  onChange={(e) =>
+                    setAddForm((f) => ({
+                      ...f,
+                      certifications: e.target.value,
+                    }))
+                  }
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+              <div>
+                <Label>Teaching Years</Label>
+                <TextInput
+                  type="number"
+                  min={0}
+                  placeholder="e.g., 5"
+                  value={addForm.teaching_years}
+                  onChange={(e) =>
+                    setAddForm((f) => ({
+                      ...f,
+                      teaching_years: e.target.value,
+                    }))
+                  }
+                />
+              </div>
+            </div>
+
+            <div className="mt-4 flex justify-end">
+              <button
+                onClick={submitAddFaculty}
+                type="button"
+                disabled={
+                  addSaving ||
+                  !addForm.first_name.trim() ||
+                  !addForm.last_name.trim() ||
+                  !addForm.email.trim() ||
+                  !addForm.department ||
+                  !addForm.employment_type ||
+                  !!addEmailError
+                }
+                className={cls(
+                  "rounded-lg px-6 py-2 text-sm font-medium",
+                  addSaving ||
+                    !addForm.first_name.trim() ||
+                    !addForm.last_name.trim() ||
+                    !addForm.email.trim() ||
+                    !addForm.department ||
+                    !addForm.employment_type ||
+                    !!addEmailError
+                    ? "bg-emerald-300 text-white cursor-not-allowed"
+                    : "bg-emerald-700 text-white hover:bg-emerald-800"
+                )}
+              >
+                {addSaving ? "Adding…" : "Add Faculty"}
+              </button>
+            </div>
+          </div>
+        </div>
+      </Modal>
+
+      {/* -------- Edit Faculty Details Modal -------- */}
+      <Modal open={!!editOpen} onClose={() => setEditOpen(null)}>
+        {editOpen && editForm && (
+          <div className="p-6 sm:p-8">
+            <div className="mb-1 flex items-start justify-between">
+              <div>
+                <h3 className="text-xl font-semibold text-emerald-700">
+                  Edit Faculty Details
+                </h3>
+                <div className="mt-1 text-sm text-gray-700">
+                  Faculty: <span className="font-medium">{editOpen.name}</span>
+                </div>
+              </div>
+              <button
+                onClick={() => setEditOpen(null)}
+                className="rounded-full p-1 hover:bg-gray-100"
+                type="button"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <div className="mt-4 grid grid-cols-1 gap-5">
+              <div>
+                <Label>Faculty Name</Label>
+                <TextInput
+                  placeholder="Full name"
+                  value={editForm.name}
+                  onChange={(e) =>
+                    setEditForm((f) => (f ? { ...f, name: e.target.value } : f))
+                  }
+                />
+              </div>
+              <div>
+                <Label>Email</Label>
+                <TextInput
+                  placeholder="name@dlsu.edu.ph"
+                  value={editForm.email}
+                  onChange={(e) =>
+                    setEditForm((f) => (f ? { ...f, email: e.target.value } : f))
+                  }
+                />
+              </div>
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+                <div>
+                  <Label>Department</Label>
+                  <TextInput
+                    placeholder="Department"
+                    value={editForm.department}
+                    onChange={(e) =>
+                      setEditForm((f) => (f ? { ...f, department: e.target.value } : f))
+                    }
+                  />
+                </div>
+                <div>
+                  <Label>Faculty Type</Label>
+                  <select
+                    className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-emerald-500/30 bg-white"
+                    value={editForm.faculty_type}
+                    onChange={(e) =>
+                      setEditForm((f) => (f ? { ...f, faculty_type: e.target.value } : f))
+                    }
+                  >
+                    <option value="">-- Select --</option>
+                    {facultyTypeChoices.map((t) => (
+                      <option key={t} value={t}>
+                        {t}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <Label>Status</Label>
+                  <select
+                    className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-emerald-500/30 bg-white"
+                    value={editForm.status}
+                    onChange={(e) =>
+                      setEditForm((f) => (f ? { ...f, status: e.target.value } : f))
+                    }
+                  >
+                    <option value="">-- Select --</option>
+                    {statusChoices.map((s) => (
+                      <option key={s} value={s}>
+                        {s}
+                      </option>
+                    ))}
+                    {!statusChoices.length && (
+                      <>
+                        <option value="Active">Active</option>
+                        <option value="On Leave">On Leave</option>
+                      </>
+                    )}
+                  </select>
+                </div>
+              </div>
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+                <div>
+                  <Label>Teaching Units</Label>
+                  <TextInput
+                    placeholder="e.g., 12"
+                    value={editForm.teaching_units}
+                    onChange={(e) =>
+                      setEditForm((f) =>
+                        f ? { ...f, teaching_units: e.target.value } : f
+                      )
+                    }
+                  />
+                </div>
+              </div>
+              <div className="mt-4 flex justify-end">
+                <button
+                  onClick={submitEditFaculty}
+                  type="button"
+                  className="rounded-lg bg-emerald-700 px-6 py-2 text-white hover:bg-emerald-800 text-sm font-medium"
+                >
+                  Save Changes
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+      </Modal>
     </main>
   );
 }

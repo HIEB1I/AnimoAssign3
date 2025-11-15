@@ -76,7 +76,7 @@ async def chair_plantilla_get(
         profile_name = " "
         profile_subtitle = "Department Chair"
         dept_label = "Department"
-        plantilla_file = "Faculty_Plantilla.pdf"
+        plantilla_file = "Faculty_Plantilla.xls"
         term_label: Optional[str] = None
 
         if userId:

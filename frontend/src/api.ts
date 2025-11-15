@@ -1338,6 +1338,17 @@ export type FMOptions = {
   academicYears: number[];
 };
 
+// NEW: payload for add / update faculty
+export type FacultyUpsertPayload = {
+  first_name: string;
+  last_name: string;
+  email: string;
+  department: string;              // department.dept_name
+  employment_type: "FT" | "PT";    // faculty_profiles.employment_type
+  certifications?: string | string[];
+  teaching_years?: number;
+};
+
 export async function getFacultyOptions(): Promise<FMOptions> {
   const { data } = await axios.post(`${API_BASE}/om/facultymanagement`, {}, {
     params: { action: "options" },
@@ -1355,6 +1366,25 @@ export async function listFaculty(params: {
     params: { action: "list", department, facultyType, search },
   });
   return data as { ok: boolean; rows: FacultyRow[] };
+}
+
+// NEW: create faculty (users → role_assignments → faculty_profiles)
+export async function addFacultyEntry(payload: FacultyUpsertPayload) {
+  const { data } = await axios.post(`${API_BASE}/om/facultymanagement`, payload, {
+    params: { action: "add" },
+  });
+  return data as { ok: boolean; faculty_id?: string; user_id?: string };
+}
+
+// NEW: update faculty basic info
+export async function updateFacultyEntry(
+  facultyId: string,
+  payload: Partial<FacultyUpsertPayload>
+) {
+  const { data } = await axios.post(`${API_BASE}/om/facultymanagement`, payload, {
+    params: { action: "update", facultyId },
+  });
+  return data as { ok: boolean };
 }
 
 /** Profile now returns an array: course_coordinator_of: [{ code, title }] */
@@ -2283,5 +2313,55 @@ export async function updateChairCoursePeople(
   if (payload.userId) params.userId = payload.userId;
   if (payload.userEmail) params.userEmail = payload.userEmail;
   const { data } = await axios.post(`${API_BASE}/chair/course-management`, payload, { params });
+  return data;
+}
+
+// === CHAIR: FACULTY DIRECTORY (mirrors OM but different base path) ===
+
+export async function getChairFacultyOptions(): Promise<FMOptions> {
+  const { data } = await axios.post(`${API_BASE}/chair/facultymanagement`, {}, {
+    params: { action: "options" },
+  });
+  return data;
+}
+
+export async function listChairFaculty(params: {
+  department?: string;
+  facultyType?: string;
+  search?: string;
+}) {
+  const { department, facultyType, search } = params || {};
+  const { data } = await axios.post(`${API_BASE}/chair/facultymanagement`, {}, {
+    params: { action: "list", department, facultyType, search },
+  });
+  return data as { ok: boolean; rows: FacultyRow[] };
+}
+
+export async function addChairFacultyEntry(payload: FacultyUpsertPayload) {
+  const { data } = await axios.post(`${API_BASE}/chair/facultymanagement`, payload, {
+    params: { action: "add" },
+  });
+  return data as { ok: boolean; faculty_id?: string; user_id?: string };
+}
+
+export async function getChairFacultySchedule(
+  facultyId: string,
+  termId?: string
+) {
+  const { data } = await axios.post(`${API_BASE}/chair/facultymanagement`, {}, {
+    params: { action: "schedule", facultyId, termId },
+  });
+  return data;
+}
+
+export async function getChairFacultyHistory(
+  facultyId: string,
+  termOrAy?: string | number
+) {
+  const params: Record<string, any> = { action: "history", facultyId };
+  if (typeof termOrAy === "number") params.acadYearStart = termOrAy;
+  else if (typeof termOrAy === "string" && termOrAy) params.termId = termOrAy;
+
+  const { data } = await axios.post(`${API_BASE}/chair/facultymanagement`, {}, { params });
   return data;
 }
