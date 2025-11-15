@@ -84,66 +84,87 @@ def _prefs_window_from_term(term: Dict[str, Any]) -> tuple[datetime, datetime]:
     close_dt = open_dt + timedelta(days=30)
     return open_dt, close_dt
 
+# make sure this exists near your other COL_* constants:
+COL_PREEN_COUNT = "preenlistment_count"
+
+
 async def _active_term():
-    # (unchanged) but now also grab start/classes_start for window calc
-    t = await db[COL_TERMS].find_one(
-        {"$or": [{"status": "active"}, {"is_current": True}]},
-        {
-            "_id": 0,
-            "term_id": 1,
-            "acad_year_start": 1,
-            "term_number": 1,
-            "submission_deadline": 1,
-            "start_date": 1,             # <-- added
-            "classes_start_date": 1,     # <-- added
-        },
-    )
-    if t:
-        return t
-    last = await db[COL_TERMS].find(
-        {},
-        {
-            "_id": 0,
-            "term_id": 1,
-            "acad_year_start": 1,
-            "term_number": 1,
-            "submission_deadline": 1,
-            "start_date": 1,
-            "classes_start_date": 1,
-        },
-    ).sort([("acad_year_start", -1), ("term_number", -1)]).limit(1).to_list(1)
-    return last[0] if last else {}
-
-async def _prefs_window_for_term(term: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Resolve the preference window for a term:
+    Return the WORKING / PLANNING term for OM Faculty Preferences.
 
-    1. If an override exists in faculty_prefs_windows, use that.
-    2. Otherwise, compute it from term dates (week 7 + 30 days).
+    Priority:
+    1) If there is an active (non-archived) pre-enlistment batch in
+       preenlistment_count, use that term_id.
+    2) Otherwise, use the *next* term after the current term
+       (where is_current = True or status = 'active').
+    3) If there is no "next" term configured, fall back to the current term
+       (or latest AY/term_number if nothing is flagged current/active).
 
-    Returns both datetime objects and ISO strings for reuse.
+    Always returns fields needed for window calculation:
+      term_id, acad_year_start, term_number, submission_deadline,
+      start_date, classes_start_date
     """
-    term = term or {}
-    term_id = term.get("term_id")
-    open_dt: Optional[datetime] = None
-    close_dt: Optional[datetime] = None
 
-    if term_id:
-        override = await db[COL_PREFS_WINDOWS].find_one({"term_id": term_id})
-        if override:
-            open_dt = override.get("open_dt") or _parse_date_any(override.get("openISO"))
-            close_dt = override.get("deadline_dt") or _parse_date_any(override.get("deadlineISO"))
-
-    if not open_dt or not close_dt:
-        open_dt, close_dt = _prefs_window_from_term(term)
-
-    return {
-        "open_dt": open_dt,
-        "deadline_dt": close_dt,
-        "openISO": open_dt.isoformat(),
-        "deadlineISO": close_dt.isoformat(),
-        "term_id": term_id,
+    term_fields = {
+        "_id": 0,
+        "term_id": 1,
+        "acad_year_start": 1,
+        "term_number": 1,
+        "submission_deadline": 1,
+        "start_date": 1,
+        "classes_start_date": 1,
     }
+
+    # 1) Try to derive from an active pre-enlistment batch
+    pre_doc = await db[COL_PREEN_COUNT].find_one(
+        {"is_archived": {"$ne": True}},
+        {"_id": 0, "term_id": 1},
+    )
+    if pre_doc and pre_doc.get("term_id"):
+        t = await db[COL_TERMS].find_one(
+            {"term_id": pre_doc["term_id"]},
+            term_fields,
+        )
+        if t:
+            return t
+
+    # 2) Fallback: current term (status = active OR is_current = True)
+    current = await db[COL_TERMS].find_one(
+        {"$or": [{"status": "active"}, {"is_current": True}]},
+        term_fields,
+    )
+
+    if not current:
+        # Latest term by AY + term_number
+        last = await db[COL_TERMS].find({}, term_fields) \
+            .sort([("acad_year_start", -1), ("term_number", -1)]) \
+            .limit(1).to_list(1)
+        current = last[0] if last else None
+
+    if not current:
+        # No terms configured at all
+        return {}
+
+    # 3) Compute the "next" term after the current term
+    next_terms = await db[COL_TERMS].find(
+        {
+            "$or": [
+                {"acad_year_start": {"$gt": current["acad_year_start"]}},
+                {
+                    "acad_year_start": current["acad_year_start"],
+                    "term_number": {"$gt": current["term_number"]},
+                },
+            ]
+        },
+        term_fields,
+    ).sort([("acad_year_start", 1), ("term_number", 1)]).limit(1).to_list(1)
+
+    if next_terms:
+        # Use the next term as the working/planning term
+        return next_terms[0]
+
+    # If no next term, stick with current (still better than returning nothing)
+    return current
 
 
 # ---------- Pretty-format helpers (OM-side only) ----------
@@ -418,15 +439,17 @@ async def facultyforms_handler(
             upsert=True,
         )
 
-        window = await _prefs_window_for_term(term_doc)
+        # After saving the override, read back the override-only window
+        window = await _prefs_window_override_for_term(term_doc)
         return {
             "ok": True,
             "prefs_window": {
-                "openISO": window["openISO"],
-                "deadlineISO": window["deadlineISO"],
-                "term_id": window["term_id"],
+                "openISO": window.get("openISO") or "",
+                "deadlineISO": window.get("deadlineISO") or "",
+                "term_id": window.get("term_id"),
             },
         }
+
 
 
     # ----- Resolve term (no parsing of termId strings) -----
