@@ -186,8 +186,14 @@ async def _sync_deloadings(db, faculty_id: str, term_id: str, items: list[dict])
         )
 
     # return summary for faculty_preferences.deloading_data
-    return [{"deloading_type": r["type"], "units": r["units"]} for r in normalized]
-
+    return [
+        {
+            "deloading_type": r["type"],
+            "units": r["units"],
+            "detail": r["notes"],  # keep detail so UI can restore it on edit
+        }
+        for r in normalized
+    ]
 
 # ---------- helpers ----------
 async def _active_term_id() -> Optional[str]:
