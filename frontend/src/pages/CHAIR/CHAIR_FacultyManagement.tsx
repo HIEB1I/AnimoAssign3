@@ -21,8 +21,9 @@ import {
   type FacultyRow,
   type FMOptions,
   type FacultyUpsertPayload,
+  // NEW: update endpoint
+  updateChairFacultyEntry,
 } from "../../api";
-
 
 /* ---- Small shared bits (from ADMIN pattern) ---- */
 function Modal({
@@ -311,14 +312,15 @@ type AddFacultyForm = {
   teaching_years: string; // numeric string; FE will coerce to number
 };
 
-/** Edit modal still uses the simpler view-level structure */
+/** Edit Faculty form uses the SAME structure as Add */
 type EditFacultyForm = {
-  name: string;
+  first_name: string;
+  last_name: string;
   email: string;
   department: string;
-  faculty_type: string;
-  status: string;
-  teaching_units: string;
+  employment_type: "" | "FT" | "PT";
+  certifications: string;
+  teaching_years: string;
 };
 
 export default function CHAIR_FacultyManagement() {
@@ -342,7 +344,7 @@ export default function CHAIR_FacultyManagement() {
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string>("");
 
-  // refetch token (used after add)
+  // refetch token (used after add/edit)
   const [reloadToken, setReloadToken] = useState(0);
 
   // modals (Schedule / History)
@@ -372,28 +374,17 @@ export default function CHAIR_FacultyManagement() {
   const [addError, setAddError] = useState("");
   const [addSaving, setAddSaving] = useState(false);
 
+  // EDIT modal state uses same structure as ADD
   const [editOpen, setEditOpen] = useState<FacultyRow | null>(null);
   const [editForm, setEditForm] = useState<EditFacultyForm | null>(null);
-
-  const facultyTypeChoices = useMemo(
-    () => typeOptions.filter((t) => t && t !== "All Type"),
-    [typeOptions]
-  );
-  const statusChoices = useMemo(() => {
-    const s = new Set<string>();
-    rows.forEach((r) => r.status && s.add(r.status));
-    return Array.from(s);
-  }, [rows]);
+  const [editEmailError, setEditEmailError] = useState("");
+  const [editError, setEditError] = useState("");
+  const [editSaving, setEditSaving] = useState(false);
 
   const deptChoices = useMemo(
     () => deptOptions.filter((d) => d && d !== "All Departments"),
     [deptOptions]
   );
-
-  const employmentTypeOptions = [
-    { code: "FT" as const, label: "Full-Time" },
-    { code: "PT" as const, label: "Part-Time" },
-  ];
 
   const isValidDlsuEmail = (email: string) => {
     const trimmed = (email || "").trim();
@@ -461,7 +452,7 @@ export default function CHAIR_FacultyManagement() {
         payload.teaching_years = yearsNum;
       }
 
-     const res = await addChairFacultyEntry(payload);
+      const res = await addChairFacultyEntry(payload);
       if (!res || !res.ok) {
         throw new Error("Failed to add faculty.");
       }
@@ -486,39 +477,113 @@ export default function CHAIR_FacultyManagement() {
   };
 
   const openEditFaculty = (row: FacultyRow) => {
+    const fullName = (row.name || "").trim();
+    let first_name = "";
+    let last_name = "";
+
+    if (fullName) {
+      const parts = fullName.split(/\s+/);
+      if (parts.length === 1) {
+        first_name = parts[0];
+      } else {
+        last_name = parts[parts.length - 1];
+        first_name = parts.slice(0, -1).join(" ");
+      }
+    }
+
+    let employment_type: "" | "FT" | "PT" = "";
+    const ftDisplay = (row.faculty_type || "").toLowerCase();
+    if (ftDisplay.includes("full")) employment_type = "FT";
+    else if (ftDisplay.includes("part")) employment_type = "PT";
+    else if (ftDisplay === "ft" || ftDisplay === "pt") {
+      employment_type = ftDisplay.toUpperCase() as "FT" | "PT";
+    }
+
     setEditOpen(row);
     setEditForm({
-      name: row.name || "",
+      first_name,
+      last_name,
       email: row.email || "",
       department: row.department || "",
-      faculty_type: row.faculty_type || "",
-      status: row.status || "",
-      teaching_units: String(row.teaching_units ?? ""),
+      employment_type,
+      certifications: "",
+      teaching_years: "",
     });
+    setEditEmailError("");
+    setEditError("");
   };
 
-  const submitEditFaculty = () => {
+  const submitEditFaculty = async () => {
     if (!editOpen || !editForm) return;
-    // NOTE: This currently updates only the in-memory table.
-    // A true backend update can be wired via updateFacultyEntry later.
-    setRows((prev) =>
-      prev.map((r) =>
-        r.faculty_id === editOpen.faculty_id
-          ? {
-              ...r,
-              name: editForm.name.trim() || r.name,
-              email: editForm.email.trim() || r.email,
-              department: editForm.department.trim() || r.department,
-              faculty_type: editForm.faculty_type || r.faculty_type,
-              status: editForm.status || r.status,
-              teaching_units: editForm.teaching_units
-                ? Number(editForm.teaching_units) || editForm.teaching_units
-                : r.teaching_units,
-            }
-          : r
-      )
-    );
-    setEditOpen(null);
+
+    const {
+      first_name,
+      last_name,
+      email,
+      department,
+      employment_type,
+      certifications,
+      teaching_years,
+    } = editForm;
+
+    const trimmedEmail = email.trim();
+    const emailOk = isValidDlsuEmail(trimmedEmail);
+
+    if (!emailOk) {
+      setEditEmailError("Email is not a valid DLSU account");
+      return;
+    }
+
+    if (!first_name.trim() || !last_name.trim() || !trimmedEmail || !department || !employment_type) {
+      setEditError("Please fill out all required fields.");
+      return;
+    }
+
+    setEditError("");
+    setEditSaving(true);
+
+    try {
+      const payload: FacultyUpsertPayload = {
+        first_name: first_name.trim(),
+        last_name: last_name.trim(),
+        email: trimmedEmail.toLowerCase(),
+        department,
+        employment_type: employment_type as "FT" | "PT",
+      };
+
+      const certs = (certifications || "").trim();
+      if (certs) {
+        payload.certifications = certs
+          .split(",")
+          .map((c) => c.trim())
+          .filter(Boolean);
+      }
+
+      const yearsNum = Number((teaching_years || "").trim());
+      if (!Number.isNaN(yearsNum) && (teaching_years || "").trim() !== "") {
+        payload.teaching_years = yearsNum;
+      }
+
+      const res = await updateChairFacultyEntry(editOpen.faculty_id, payload);
+      if (!res || !res.ok) {
+        throw new Error("Failed to update faculty.");
+      }
+
+      // Close + reset + reload
+      setEditOpen(null);
+      setEditForm(null);
+      setEditEmailError("");
+      setEditError("");
+      setReloadToken((t) => t + 1);
+    } catch (e: any) {
+      const msg =
+        e?.response?.data?.detail ||
+        e?.message ||
+        "An error occurred while updating the faculty.";
+      setEditError(msg);
+    } finally {
+      setEditSaving(false);
+    }
   };
 
   // Load dropdown options
@@ -967,44 +1032,41 @@ export default function CHAIR_FacultyManagement() {
             <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
               <div>
                 <Label>Department</Label>
-                <select
-                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-emerald-500/30 bg-white"
+                <SelectBox
                   value={addForm.department}
-                  onChange={(e) =>
+                  onChange={(v) =>
                     setAddForm((f) => ({
                       ...f,
-                      department: e.target.value || "",
+                      department: v || "",
                     }))
                   }
-                >
-                  <option value="">-- Select Department --</option>
-                  {deptChoices.map((d) => (
-                    <option key={d} value={d}>
-                      {d}
-                    </option>
-                  ))}
-                </select>
+                  options={deptChoices}
+                  placeholder="Select Department"
+                />
               </div>
-              <div>
-                <Label>Faculty Type</Label>
-                <select
-                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-emerald-500/30 bg-white"
-                  value={addForm.employment_type}
-                  onChange={(e) =>
-                    setAddForm((f) => ({
-                      ...f,
-                      employment_type: e.target.value as "" | "FT" | "PT",
-                    }))
-                  }
-                >
-                  <option value="">-- Select --</option>
-                  {employmentTypeOptions.map((opt) => (
-                    <option key={opt.code} value={opt.code}>
-                      {opt.label}
-                    </option>
-                  ))}
-                </select>
-              </div>
+
+            <div>
+              <Label>Faculty Type</Label>
+              <SelectBox
+                value={
+                  addForm.employment_type === "FT"
+                    ? "Full-Time"
+                    : addForm.employment_type === "PT"
+                    ? "Part-Time"
+                    : ""
+                }
+                onChange={(v) =>
+                  setAddForm((f) => ({
+                    ...f,
+                    employment_type:
+                      v === "Full-Time" ? "FT" : v === "Part-Time" ? "PT" : "",
+                  }))
+                }
+                options={["Full-Time", "Part-Time"]}
+                placeholder="Select Faculty Type"
+              />
+            </div>
+
               <div>
                 <Label>Certifications</Label>
                 <TextInput
@@ -1072,120 +1134,187 @@ export default function CHAIR_FacultyManagement() {
       </Modal>
 
       {/* -------- Edit Faculty Details Modal -------- */}
-      <Modal open={!!editOpen} onClose={() => setEditOpen(null)}>
+      <Modal
+        open={!!editOpen}
+        onClose={() => {
+          setEditOpen(null);
+          setEditForm(null);
+          setEditEmailError("");
+          setEditError("");
+        }}
+      >
         {editOpen && editForm && (
           <div className="p-6 sm:p-8">
-            <div className="mb-1 flex items-start justify-between">
+            <div className="mb-6 flex items-start justify-between">
               <div>
-                <h3 className="text-xl font-semibold text-emerald-700">
-                  Edit Faculty Details
-                </h3>
+                <h3 className="text-xl font-semibold text-emerald-700">Edit Faculty Details</h3>
                 <div className="mt-1 text-sm text-gray-700">
                   Faculty: <span className="font-medium">{editOpen.name}</span>
                 </div>
               </div>
               <button
-                onClick={() => setEditOpen(null)}
+                onClick={() => {
+                  setEditOpen(null);
+                  setEditForm(null);
+                  setEditEmailError("");
+                  setEditError("");
+                }}
                 className="rounded-full p-1 hover:bg-gray-100"
                 type="button"
               >
                 <X className="h-5 w-5" />
               </button>
             </div>
-            <div className="mt-4 grid grid-cols-1 gap-5">
-              <div>
-                <Label>Faculty Name</Label>
-                <TextInput
-                  placeholder="Full name"
-                  value={editForm.name}
-                  onChange={(e) =>
-                    setEditForm((f) => (f ? { ...f, name: e.target.value } : f))
-                  }
-                />
+
+            {editError && (
+              <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                {editError}
               </div>
-              <div>
-                <Label>Email</Label>
-                <TextInput
-                  placeholder="name@dlsu.edu.ph"
-                  value={editForm.email}
-                  onChange={(e) =>
-                    setEditForm((f) => (f ? { ...f, email: e.target.value } : f))
-                  }
-                />
-              </div>
-              <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+            )}
+
+            <div className="grid grid-cols-1 gap-5">
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
                 <div>
-                  <Label>Department</Label>
+                  <Label>Last Name</Label>
                   <TextInput
-                    placeholder="Department"
-                    value={editForm.department}
+                    placeholder="e.g., Santos"
+                    value={editForm.last_name}
                     onChange={(e) =>
-                      setEditForm((f) => (f ? { ...f, department: e.target.value } : f))
+                      setEditForm((f) =>
+                        f ? { ...f, last_name: e.target.value } : f
+                      )
                     }
                   />
                 </div>
                 <div>
-                  <Label>Faculty Type</Label>
-                  <select
-                    className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-emerald-500/30 bg-white"
-                    value={editForm.faculty_type}
-                    onChange={(e) =>
-                      setEditForm((f) => (f ? { ...f, faculty_type: e.target.value } : f))
-                    }
-                  >
-                    <option value="">-- Select --</option>
-                    {facultyTypeChoices.map((t) => (
-                      <option key={t} value={t}>
-                        {t}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <div>
-                  <Label>Status</Label>
-                  <select
-                    className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-emerald-500/30 bg-white"
-                    value={editForm.status}
-                    onChange={(e) =>
-                      setEditForm((f) => (f ? { ...f, status: e.target.value } : f))
-                    }
-                  >
-                    <option value="">-- Select --</option>
-                    {statusChoices.map((s) => (
-                      <option key={s} value={s}>
-                        {s}
-                      </option>
-                    ))}
-                    {!statusChoices.length && (
-                      <>
-                        <option value="Active">Active</option>
-                        <option value="On Leave">On Leave</option>
-                      </>
-                    )}
-                  </select>
-                </div>
-              </div>
-              <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-                <div>
-                  <Label>Teaching Units</Label>
+                  <Label>First Name</Label>
                   <TextInput
-                    placeholder="e.g., 12"
-                    value={editForm.teaching_units}
+                    placeholder="e.g., Maria Ana"
+                    value={editForm.first_name}
                     onChange={(e) =>
                       setEditForm((f) =>
-                        f ? { ...f, teaching_units: e.target.value } : f
+                        f ? { ...f, first_name: e.target.value } : f
                       )
                     }
                   />
                 </div>
               </div>
+
+              <div>
+                <Label>Email</Label>
+                <TextInput
+                  placeholder="firstname.lastname@dlsu.edu.ph"
+                  value={editForm.email}
+                  onChange={(e) => {
+                    const value = e.target.value;
+                    setEditForm((f) => (f ? { ...f, email: value } : f));
+                    setEditEmailError(
+                      isValidDlsuEmail(value) ? "" : "Email is not a valid DLSU account"
+                    );
+                  }}
+                />
+                {editEmailError && editForm.email.trim() && (
+                  <p className="mt-1 text-xs text-red-600">{editEmailError}</p>
+                )}
+              </div>
+
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+                <div>
+                  <Label>Department</Label>
+                  <SelectBox
+                    value={editForm.department}
+                    onChange={(v) =>
+                      setEditForm((f) => (f ? { ...f, department: v || "" } : f))
+                    }
+                    options={deptChoices}
+                    placeholder="Select Department"
+                  />
+                </div>
+
+                <div>
+                  <Label>Faculty Type</Label>
+                  <SelectBox
+                    value={
+                      editForm.employment_type === "FT"
+                        ? "Full-Time"
+                        : editForm.employment_type === "PT"
+                        ? "Part-Time"
+                        : ""
+                    }
+                    onChange={(v) =>
+                      setEditForm((f) =>
+                        f
+                          ? {
+                              ...f,
+                              employment_type:
+                                v === "Full-Time" ? "FT" : v === "Part-Time" ? "PT" : "",
+                            }
+                          : f
+                      )
+                    }
+                    options={["Full-Time", "Part-Time"]}
+                    placeholder="Select Faculty Type"
+                  />
+                </div>
+
+                <div>
+                  <Label>Certifications</Label>
+                  <TextInput
+                    placeholder="Comma-separated (e.g., AWS, Azure)"
+                    value={editForm.certifications}
+                    onChange={(e) =>
+                      setEditForm((f) =>
+                        f ? { ...f, certifications: e.target.value } : f
+                      )
+                    }
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+                <div>
+                  <Label>Teaching Years</Label>
+                  <TextInput
+                    type="number"
+                    min={0}
+                    placeholder="e.g., 5"
+                    value={editForm.teaching_years}
+                    onChange={(e) =>
+                      setEditForm((f) =>
+                        f ? { ...f, teaching_years: e.target.value } : f
+                      )
+                    }
+                  />
+                </div>
+              </div>
+
               <div className="mt-4 flex justify-end">
                 <button
                   onClick={submitEditFaculty}
                   type="button"
-                  className="rounded-lg bg-emerald-700 px-6 py-2 text-white hover:bg-emerald-800 text-sm font-medium"
+                  disabled={
+                    editSaving ||
+                    !editForm.first_name.trim() ||
+                    !editForm.last_name.trim() ||
+                    !editForm.email.trim() ||
+                    !editForm.department ||
+                    !editForm.employment_type ||
+                    !!editEmailError
+                  }
+                  className={cls(
+                    "rounded-lg px-6 py-2 text-sm font-medium",
+                    editSaving ||
+                      !editForm.first_name.trim() ||
+                      !editForm.last_name.trim() ||
+                      !editForm.email.trim() ||
+                      !editForm.department ||
+                      !editForm.employment_type ||
+                      !!editEmailError
+                      ? "bg-emerald-300 text-white cursor-not-allowed"
+                      : "bg-emerald-700 text-white hover:bg-emerald-800"
+                  )}
                 >
-                  Save Changes
+                  {editSaving ? "Saving…" : "Save Changes"}
                 </button>
               </div>
             </div>

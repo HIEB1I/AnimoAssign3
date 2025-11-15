@@ -2365,3 +2365,20 @@ export async function getChairFacultyHistory(
   const { data } = await axios.post(`${API_BASE}/chair/facultymanagement`, {}, { params });
   return data;
 }
+
+export async function updateChairFacultyEntry(
+  facultyId: string,
+  payload: FacultyUpsertPayload
+) {
+  const { data } = await axios.post(
+    `${API_BASE}/chair/facultymanagement`,
+    payload, // body is the payload itself
+    {
+      params: {
+        action: "update",
+        facultyId,
+      },
+    }
+  );
+  return data as { ok: boolean };
+}
