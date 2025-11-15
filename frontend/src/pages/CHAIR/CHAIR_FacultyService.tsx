@@ -274,23 +274,23 @@ const END_BY_BEGIN: Record<(typeof BEGIN_OPTIONS)[number], string> = {
   "19:45": "21:00",
 };
 
-/** full receiver layout (14 columns) */
+/** full receiver layout (13 columns) */
 const COLS_14 = [
-  "25ch",
-  "40ch",
-  "10ch",
-  "40ch",
-  "40ch",
-  "40ch",
-  "15ch",
-  "15ch",
-  "15ch",
-  "15ch",
-  "15ch",
-  "15ch",
-  "30ch",
-  "22ch", // wider Action column so buttons fit
+  "38ch", // Course Code & Title
+  "10ch", // Units
+  "36ch", // From
+  "36ch", // To
+  "40ch", // Faculty
+  "15ch", // Day1
+  "15ch", // Begin1
+  "15ch", // End1
+  "15ch", // Day2
+  "15ch", // Begin2
+  "15ch", // End2
+  "30ch", // Remarks
+  "22ch", // Action
 ];
+
 
 // Use only M/T/W for the first day, and auto-pair Day2
 const DAY1_OPTIONS: DayShort[] = ["M", "T", "W"];
@@ -323,6 +323,35 @@ function ColGroupReq() {
   );
 }
 
+/** sent-requests layout (5 evenly spaced columns) */
+const COLS_SENT = ["25%", "10%", "20%", "20%", "15%"];
+
+function ColGroupSent() {
+  return (
+    <colgroup>
+      {COLS_SENT.map((w, i) => (
+        <col key={i} style={{ width: w }} />
+      ))}
+    </colgroup>
+  );
+}
+
+/** accepted-requests layout (7 adjustable columns) */
+const COLS_ACCEPTED = ["18%", "8%", "18%", "18%", "18%", "8%", "12%"];
+// tweak these percentages as you like, they should total ~100%
+
+function ColGroupAccepted() {
+  return (
+    <colgroup>
+      {COLS_ACCEPTED.map((w, i) => (
+        <col key={i} style={{ width: w }} />
+      ))}
+    </colgroup>
+  );
+}
+
+
+
 type FSCreate = {
   course_code: string;
   course_title: string;
@@ -334,8 +363,9 @@ function facultyLabel(f?: { first_name?: string; last_name?: string; email?: str
   if (!f) return "";
   const L = (f.last_name || "").toUpperCase();
   const F = (f.first_name || "").toUpperCase();
-  return (L || F) ? `${L}, ${F}${f.email ? ` (${f.email})` : ""}` : "";
+  return (L || F) ? `${L}, ${F}` : "";
 }
+
 
 /* ---------------- Departments ---------------- */
 const REQUESTER_DEPT = "Department of Software Technology"; // only this can send
@@ -779,23 +809,22 @@ export default function CHAIR_FacultyService({
             </table>
           </div>
 
-          {/* 2) SENT REQUESTS (from Software Technology) */}
+         {/* 2) SENT REQUESTS (from Software Technology) */}
           <div className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-x-auto overflow-y-visible">
             <div className="px-5 pt-4 text-[14px] text-sm font-semibold text-neutral-800 text-center">
               Sent Requests
             </div>
             <table className={cls(SHARED_TABLE, "border-t border-gray-200")}>
-              <ColGroupReq />
-              <thead className="bg-neutral-50">
-                <tr>
-                  <th className={TH_TIGHT}>Course Code</th>
-                  <th className={TH_TIGHT}>Course Title</th>
-                  <th className={TH_TIGHT}>Units</th>
-                  <th className={TH_TIGHT}>From</th>
-                  <th className={TH_TIGHT}>To</th>
-                  <th className={TH_TIGHT}>Status</th>
-                </tr>
-              </thead>
+            <ColGroupSent />
+            <thead className="bg-neutral-50">
+              <tr>
+                <th className={TH_TIGHT}>Course Code & Title</th>
+                <th className={TH_TIGHT}>Units</th>
+                <th className={TH_TIGHT}>From</th>
+                <th className={TH_TIGHT}>To</th>
+                <th className={TH_TIGHT}>Status</th>
+              </tr>
+            </thead>
               <tbody className="text-gray-800">
                 {sentRows.map((r, i) => (
                   <tr
@@ -806,14 +835,13 @@ export default function CHAIR_FacultyService({
                       "border-b border-gray-200"
                     )}
                   >
-                    <td className={cls(CELL_TIGHT, "text-center")}>
-                      <span className="font-semibold text-emerald-700">{r.course_code}</span>
-                    </td>
-                    <td className={CELL_TIGHT}>
-                      <span className="block whitespace-normal break-words" title={r.course_title}>
+                    <td className={CELL}>
+                      <div className="font-semibold text-emerald-700">{r.course_code}</div>
+                      <div className="text-[12px] text-neutral-600 leading-tight">
                         {r.course_title}
-                      </span>
+                      </div>
                     </td>
+
                     <td className={cls(CELL_TIGHT, "text-center tabular-nums")}>{r.units ?? ""}</td>
                     <td className={cls(CELL_TIGHT, "text-center truncate")} title={r.from_department}>
                       {r.from_department}
@@ -872,34 +900,19 @@ export default function CHAIR_FacultyService({
               </div>
             </div>
             <div className="max-h-[420px] overflow-auto">
-              <table className="min-w-full table-fixed border-separate border-spacing-0 text-[13px] text-center">
-                <colgroup>
-                  {/* Course */}          {/* 40ch */}
-                  <col style={{ width: COLS_14[1] }} />
-                  {/* Units */}           {/* 10ch */}
-                  <col style={{ width: COLS_14[2] }} />
-                  {/* From Department */} {/* 40ch */}
-                  <col style={{ width: COLS_14[3] }} />
-                  {/* Faculty */}         {/* 40ch */}
-                  <col style={{ width: COLS_14[4] }} />
-                  {/* Schedule */}        {/* 40ch */}
-                  <col style={{ width: COLS_14[5] }} />
-                  {/* Status */}          {/* 15ch */}
-                  <col style={{ width: COLS_14[6] }} />
-                  {/* Remarks */}         {/* 30ch */}
-                  <col style={{ width: COLS_14[12] }} />
-                </colgroup>
-                <thead className="sticky top-0 z-[1] bg-neutral-50">
-                  <tr>
-                    <th className={`${TH_TIGHT} text-center`}>Course</th>
-                    <th className={`${TH_TIGHT} text-center`}>Units</th>
-                    <th className={`${TH_TIGHT} text-center`}>From Department</th>
-                    <th className={`${TH_TIGHT} text-center`}>Faculty</th>
-                    <th className={`${TH_TIGHT} text-center`}>Schedule</th>
-                    <th className={`${TH_TIGHT} text-center`}>Status</th>
-                    <th className={`${TH_TIGHT} text-center`}>Remarks</th>
-                  </tr>
-                </thead>
+            <table className="min-w-full table-fixed border-separate border-spacing-0 text-[13px] text-center">
+              <ColGroupAccepted />
+              <thead className="sticky top-0 z-[1] bg-neutral-50">
+                <tr>
+                  <th className={`${TH_TIGHT} text-center`}>Course</th>
+                  <th className={`${TH_TIGHT} text-center`}>Units</th>
+                  <th className={`${TH_TIGHT} text-center`}>From Department</th>
+                  <th className={`${TH_TIGHT} text-center`}>Faculty</th>
+                  <th className={`${TH_TIGHT} text-center`}>Schedule</th>
+                  <th className={`${TH_TIGHT} text-center`}>Status</th>
+                  <th className={`${TH_TIGHT} text-center`}>Remarks</th>
+                </tr>
+              </thead>
                 <tbody>
                   {!loadingList && acceptedRows.length === 0 && (
                     <tr>
@@ -1005,8 +1018,7 @@ export default function CHAIR_FacultyService({
               <ColGroup14 />
               <thead className="bg-neutral-50">
                 <tr>
-                  <th className={TH}>Course Code</th>
-                  <th className={TH}>Course Title</th>
+                  <th className={cls(TH, "text-left")}>Course Code &amp; Title</th>
                   <th className={TH}>Units</th>
                   <th className={TH}>From</th>
                   <th className={TH}>To</th>
@@ -1021,6 +1033,7 @@ export default function CHAIR_FacultyService({
                   <th className={TH}>Action</th>
                 </tr>
               </thead>
+
 
               <tbody className="text-gray-800">
                 {receivedRows.map((r, idx) => {
@@ -1040,14 +1053,13 @@ export default function CHAIR_FacultyService({
                       )}
                       onMouseEnter={() => ensureFacultyForDept(dept)}
                     >
-                      <td className={cls(CELL, "text-center")}>
-                        <span className="font-semibold text-emerald-700">{r.course_code}</span>
-                      </td>
                       <td className={CELL}>
-                        <span className="block whitespace-normal break-words" title={r.course_title}>
+                        <div className="font-semibold text-emerald-700">{r.course_code}</div>
+                        <div className="text-[12px] text-neutral-600 leading-tight">
                           {r.course_title}
-                        </span>
+                        </div>
                       </td>
+
 
                       <td className={cls(CELL, "text-center tabular-nums")}>{r.units ?? ""}</td>
                       <td className={cls(CELL, "text-center truncate")} title={r.from_department}>
