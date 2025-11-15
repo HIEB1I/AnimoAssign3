@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 from pymongo import ReturnDocument
 
 from ..main import db  # shared Motor client from main.py
-
+COL_PREFS_WINDOWS = "faculty_prefs_windows"
 router = APIRouter(prefix="/faculty/preferences", tags=["FACULTY: Preferences"])
 
 
@@ -89,6 +89,37 @@ def _prefs_window_from_term(term: dict) -> tuple[datetime, datetime]:
   close_dt = open_dt + timedelta(days=30)
 
   return open_dt, close_dt
+
+async def _prefs_window_for_term(term: dict) -> dict:
+  """
+  Resolve preference window for the term:
+
+  1. Try override in faculty_prefs_windows (set by OM startWindow).
+  2. Fallback to default week-7 + 30 days window from term dates.
+  """
+  term = term or {}
+  term_id = term.get("term_id")
+
+  open_dt: Optional[datetime] = None
+  close_dt: Optional[datetime] = None
+
+  if term_id:
+      override = await db[COL_PREFS_WINDOWS].find_one({"term_id": term_id})
+      if override:
+          open_dt = override.get("open_dt") or _parse_date_any(override.get("openISO"))
+          close_dt = override.get("deadline_dt") or _parse_date_any(override.get("deadlineISO"))
+
+  if not open_dt or not close_dt:
+      open_dt, close_dt = _prefs_window_from_term(term)
+
+  return {
+      "open_dt": open_dt,
+      "deadline_dt": close_dt,
+      "openISO": open_dt.isoformat(),
+      "deadlineISO": close_dt.isoformat(),
+      "term_id": term_id,
+  }
+
 
 
 async def _get_type_id(db, type_label: str) -> str | None:
@@ -304,17 +335,19 @@ async def preferences_root(
           "14:30 - 16:00", "16:15 - 17:45", "18:00 - 19:30", "19:45 - 21:00",
       ]
       term = await _active_term_doc()
-      open_dt, close_dt = _prefs_window_from_term(term)
+      window = await _prefs_window_for_term(term or {})
       return {
           "ok": True,
           "kacs": kacs,
           "days_display": days_display,
           "time_slots_display": time_slots_display,
           "prefs_window": {
-              "openISO": open_dt.isoformat(),
-              "deadlineISO": close_dt.isoformat(),
-              "term_id": term.get("term_id")
-          }}
+              "openISO": window["openISO"],
+              "deadlineISO": window["deadlineISO"],
+              "term_id": window["term_id"],
+          },
+      }
+
 
   if action == "fetch":
       fac = await db.faculty_profiles.find_one({"user_id": userId}, {"_id": 0, "faculty_id": 1})
@@ -349,6 +382,24 @@ async def preferences_root(
       term_id = termId or term_doc.get("term_id")
       if not term_id:
           raise HTTPException(status_code=400, detail="Active term not found; cannot submit preferences.")
+
+      # NEW: enforce submission window (shared with OM)
+      window = await _prefs_window_for_term(term_doc or {})
+      now = _utcnow()
+      open_dt = window["open_dt"]
+      deadline_dt = window["deadline_dt"]
+
+      if open_dt and now < open_dt:
+          raise HTTPException(
+              status_code=400,
+              detail="Preference submission window has not started yet. Please contact your OM."
+          )
+      if deadline_dt and now > deadline_dt:
+          raise HTTPException(
+              status_code=400,
+              detail="Preference submission deadline has passed. Please contact your OM."
+          )
+
 
       deload_items = list(payload.get("deloading_data") or [])
       summary_deloading_data = await _sync_deloadings(db, faculty_id, term_id, deload_items)

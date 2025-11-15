@@ -16,6 +16,7 @@ COL_TERMS = "terms"
 COL_PREFS = "faculty_preferences"
 COL_CAMPUSES = "campuses"
 COL_KACS = "kacs"
+COL_PREFS_WINDOWS = "faculty_prefs_windows"
 
 # ---- Helpers (same style as Faculty Management) ----
 def _dept_name_expr() -> Dict[str, Any]:
@@ -111,6 +112,38 @@ async def _active_term():
         },
     ).sort([("acad_year_start", -1), ("term_number", -1)]).limit(1).to_list(1)
     return last[0] if last else {}
+
+async def _prefs_window_for_term(term: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Resolve the preference window for a term:
+
+    1. If an override exists in faculty_prefs_windows, use that.
+    2. Otherwise, compute it from term dates (week 7 + 30 days).
+
+    Returns both datetime objects and ISO strings for reuse.
+    """
+    term = term or {}
+    term_id = term.get("term_id")
+    open_dt: Optional[datetime] = None
+    close_dt: Optional[datetime] = None
+
+    if term_id:
+        override = await db[COL_PREFS_WINDOWS].find_one({"term_id": term_id})
+        if override:
+            open_dt = override.get("open_dt") or _parse_date_any(override.get("openISO"))
+            close_dt = override.get("deadline_dt") or _parse_date_any(override.get("deadlineISO"))
+
+    if not open_dt or not close_dt:
+        open_dt, close_dt = _prefs_window_from_term(term)
+
+    return {
+        "open_dt": open_dt,
+        "deadline_dt": close_dt,
+        "openISO": open_dt.isoformat(),
+        "deadlineISO": close_dt.isoformat(),
+        "term_id": term_id,
+    }
+
 
 # ---------- Pretty-format helpers (OM-side only) ----------
 DAY_LETTER_TO_NAME = {"M": "Monday", "T": "Tuesday", "W": "Wednesday", "H": "Thursday", "F": "Friday", "S": "Saturday"}
@@ -239,16 +272,51 @@ def _deload_strings(raw: Any) -> List[str]:
             out.append(f"{t} — {u:g} units")
     return out
 
+async def _prefs_window_override_for_term(term: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    For OM UI: show ONLY manually-started windows.
+
+    If OM has never clicked “Start Window”, this returns empty ISO strings
+    so the UI can show 'Window not started'.
+    """
+    term = term or {}
+    term_id = term.get("term_id")
+    if not term_id:
+        return {"openISO": "", "deadlineISO": "", "term_id": None}
+
+    override = await db[COL_PREFS_WINDOWS].find_one(
+        {"term_id": term_id},
+        {"_id": 0, "open_dt": 1, "deadline_dt": 1, "openISO": 1, "deadlineISO": 1, "term_id": 1},
+    )
+
+    if not override:
+        return {"openISO": "", "deadlineISO": "", "term_id": term_id}
+
+    open_dt = _parse_date_any(override.get("open_dt") or override.get("openISO"))
+    deadline_dt = _parse_date_any(override.get("deadline_dt") or override.get("deadlineISO"))
+
+    openISO = open_dt.isoformat() if open_dt else ""
+    deadlineISO = deadline_dt.isoformat() if deadline_dt else ""
+
+    return {
+        "openISO": openISO,
+        "deadlineISO": deadlineISO,
+        "term_id": term_id,
+    }
+
+
 @router.post("/facultyforms")
 async def facultyforms_handler(
-    action: str = Query("list", description="options | list | view"),
+    action: str = Query("list", description="options | list | view | startWindow"),
     department: Optional[str] = Query(None),
     facultyType: Optional[str] = Query(None, description="Full-Time | Part-Time | All Faculty Type"),
     status: Optional[str] = Query(None, description="Submitted | Not Submitted | All Status"),
     search: Optional[str] = Query(None),
     facultyId: Optional[str] = Query(None),
     termId: Optional[str] = Query(None),
+    durationDays: Optional[int] = Query(None),  # NEW
 ):
+
     # ----- OPTIONS -----
     if action == "options":
         depts = [d async for d in db[COL_DEPARTMENTS].find({}, {"_id": 0, "department_name": 1, "dept_name": 1})]
@@ -266,12 +334,12 @@ async def facultyforms_handler(
         tn = active.get("term_number")
         label = f"Term {tn} AY {ay}–{(ay + 1) if ay else ''}" if (ay and tn) else None
 
-        # NEW: compute open/deadline like FACULTY_Preferences backend
-        open_dt, close_dt = _prefs_window_from_term(active or {})
+        # OM UI: show ONLY manual window override (if any)
+        window = await _prefs_window_override_for_term(active or {})
         prefs_window = {
-            "openISO": open_dt.isoformat(),
-            "deadlineISO": close_dt.isoformat(),
-            "term_id": active.get("term_id"),
+            "openISO": window.get("openISO") or "",
+            "deadlineISO": window.get("deadlineISO") or "",
+            "term_id": window.get("term_id"),
         }
 
         return {
@@ -285,8 +353,76 @@ async def facultyforms_handler(
                 "label": label,
                 "submission_deadline": active.get("submission_deadline"),
             },
-            "prefs_window": prefs_window,  # <-- added
+            "prefs_window": prefs_window,
         }
+
+    
+        # ----- START / RESTART WINDOW (OM only, called from OM UI) -----
+    if action == "startWindow":
+        # Resolve term (explicit termId, else active)
+        if termId:
+            term_doc = await db[COL_TERMS].find_one(
+                {"term_id": termId},
+                {
+                    "_id": 0,
+                    "term_id": 1,
+                    "acad_year_start": 1,
+                    "term_number": 1,
+                    "submission_deadline": 1,
+                    "start_date": 1,
+                    "classes_start_date": 1,
+                },
+            )
+        else:
+            term_doc = await _active_term()
+
+        if not term_doc or not term_doc.get("term_id"):
+            raise HTTPException(status_code=400, detail="Active term not found; cannot start window.")
+
+        term_id = term_doc["term_id"]
+
+        # Default duration: 7 days after start, unless caller overrides
+        days = durationDays if durationDays is not None else 7
+        try:
+            days = int(days)
+        except Exception:
+            days = 7
+        if days <= 0:
+            raise HTTPException(status_code=400, detail="durationDays must be a positive integer.")
+
+        now = datetime.now(timezone.utc)
+        open_dt = now
+        deadline_dt = now + timedelta(days=days)
+
+        # Upsert override for this term
+        await db[COL_PREFS_WINDOWS].update_one(
+            {"term_id": term_id},
+            {
+                "$set": {
+                    "term_id": term_id,
+                    "open_dt": open_dt,
+                    "deadline_dt": deadline_dt,
+                    "openISO": open_dt.isoformat(),
+                    "deadlineISO": deadline_dt.isoformat(),
+                    "updated_at": datetime.now(timezone.utc),
+                },
+                "$setOnInsert": {
+                    "created_at": datetime.now(timezone.utc),
+                },
+            },
+            upsert=True,
+        )
+
+        window = await _prefs_window_for_term(term_doc)
+        return {
+            "ok": True,
+            "prefs_window": {
+                "openISO": window["openISO"],
+                "deadlineISO": window["deadlineISO"],
+                "term_id": window["term_id"],
+            },
+        }
+
 
     # ----- Resolve term (no parsing of termId strings) -----
     term_doc = None

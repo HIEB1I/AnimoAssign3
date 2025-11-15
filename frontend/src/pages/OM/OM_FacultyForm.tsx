@@ -17,36 +17,83 @@ import {
   getOMFPreference,
   type OMFOptions,
   type OMFRow,
+  startOMFWindow, // NEW
+  userHasRole, // already exported from api.ts
 } from "../../api";
 
 /* ---------- countdown + banner (copied from FACULTY_Preferences) ---------- */
 function useCountdown(targetISO: string) {
   const [now, setNow] = useState<number>(() => Date.now());
-  useEffect(() => { const id = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(id); }, []);
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
   const target = new Date(targetISO || 0).getTime();
   const diff = Math.max(0, target - now);
   const past = targetISO ? now > target : false;
-  const d = Math.floor(diff / (1000*60*60*24));
-  const h = Math.floor((diff/(1000*60*60))%24);
-  const m = Math.floor((diff/(1000*60))%60);
-  const s = Math.floor((diff/1000))%60;
+  const d = Math.floor(diff / (1000 * 60 * 60 * 24));
+  const h = Math.floor((diff / (1000 * 60 * 60)) % 24);
+  const m = Math.floor((diff / (1000 * 60)) % 60);
+  const s = Math.floor(diff / 1000) % 60;
   const label = past ? "Deadline passed" : `${d}d ${h}h ${m}m ${s}s`;
   return { past, label };
 }
 
-function DeadlineBanner({ openISO, deadlineISO, className }: { openISO: string; deadlineISO: string; className?: string }) {
+function DeadlineBanner({
+  openISO,
+  deadlineISO,
+  className,
+}: {
+  openISO: string;
+  deadlineISO: string;
+  className?: string;
+}) {
+  const hasWindow = !!openISO && !!deadlineISO;
+
+  // NEW: no window started yet
+  if (!hasWindow) {
+    return (
+      <div
+        className={cls(
+          "mb-4 flex items-start gap-3 rounded-xl border p-4 border-gray-200 bg-gray-50 text-gray-700",
+          className
+        )}
+      >
+        <div className="mt-0.5 h-2.5 w-2.5 shrink-0 rounded-full bg-gray-400" />
+        <div className="text-sm">
+          <div className="font-semibold">Submission Window Not Started</div>
+          <div className="mt-0.5 text-[13px]">
+            The OM can start the submission window from this page. Until then,
+            faculty will not be able to submit their preferences for this term.
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   const { past: openPassed, label: openLabel } = useCountdown(openISO);
   const { past: deadlinePassed, label: deadlineLabel } = useCountdown(deadlineISO);
 
   if (!openPassed) {
     return (
-      <div className={cls("mb-4 flex items-start gap-3 rounded-xl border p-4 border-amber-300 bg-amber-50 text-amber-900", className)}>
+      <div
+        className={cls(
+          "mb-4 flex items-start gap-3 rounded-xl border p-4 border-amber-300 bg-amber-50 text-amber-900",
+          className
+        )}
+      >
         <div className="mt-0.5 h-2.5 w-2.5 shrink-0 rounded-full bg-amber-500" />
         <div className="text-sm">
           <div className="font-semibold">Submissions Open In</div>
           <div className="mt-0.5">
-            Opens: <span className="font-medium">{openISO ? new Date(openISO).toLocaleString() : "—"}</span>{" • "}
-            <span className="font-bold text-amber-700">{openISO ? openLabel : "TBA"}</span>
+            Opens:{" "}
+            <span className="font-medium">
+              {openISO ? new Date(openISO).toLocaleString() : "—"}
+            </span>{" "}
+            •{" "}
+            <span className="font-bold text-amber-700">
+              {openISO ? openLabel : "TBA"}
+            </span>
           </div>
         </div>
       </div>
@@ -55,12 +102,21 @@ function DeadlineBanner({ openISO, deadlineISO, className }: { openISO: string; 
 
   if (deadlinePassed) {
     return (
-      <div className={cls("mb-4 flex items-start gap-3 rounded-xl border p-4 border-red-300 bg-red-50 text-red-800", className)}>
+      <div
+        className={cls(
+          "mb-4 flex items-start gap-3 rounded-xl border p-4 border-red-300 bg-red-50 text-red-800",
+          className
+        )}
+      >
         <div className="mt-0.5 h-2.5 w-2.5 shrink-0 rounded-full bg-red-500" />
         <div className="text-sm">
           <div className="font-semibold">Editing Locked</div>
           <div className="mt-0.5">
-            Deadline: <span className="font-medium">{deadlineISO ? new Date(deadlineISO).toLocaleString() : "—"}</span>{" • "}
+            Deadline:{" "}
+            <span className="font-medium">
+              {deadlineISO ? new Date(deadlineISO).toLocaleString() : "—"}
+            </span>{" "}
+            •{" "}
             <span className="font-bold text-red-700">Deadline passed</span>
           </div>
         </div>
@@ -69,15 +125,28 @@ function DeadlineBanner({ openISO, deadlineISO, className }: { openISO: string; 
   }
 
   return (
-    <div className={cls("mb-4 flex items-start gap-3 rounded-xl border p-4 border-amber-300 bg-amber-50 text-amber-900", className)}>
+    <div
+      className={cls(
+        "mb-4 flex items-start gap-3 rounded-xl border p-4 border-amber-300 bg-amber-50 text-amber-900",
+        className
+      )}
+    >
       <div className="mt-0.5 h-2.5 w-2.5 shrink-0 rounded-full bg-amber-500" />
       <div className="text-sm">
         <div className="font-semibold">Submission Deadline Approaching</div>
         <div className="mt-0.5">
-          Deadline: <span className="font-medium">{deadlineISO ? new Date(deadlineISO).toLocaleString() : "—"}</span>{" • "}
-          <span className="font-bold text-amber-700">{deadlineISO ? deadlineLabel : "TBA"}</span>
+          Deadline:{" "}
+          <span className="font-medium">
+            {deadlineISO ? new Date(deadlineISO).toLocaleString() : "—"}
+          </span>{" "}
+          •{" "}
+          <span className="font-bold text-amber-700">
+            {deadlineISO ? deadlineLabel : "TBA"}
+          </span>
         </div>
-        <div className="mt-1 text-[12px] opacity-80">Please finalize before the deadline. Drafts are allowed until lock.</div>
+        <div className="mt-1 text-[12px] opacity-80">
+          Please finalize before the deadline. Drafts are allowed until lock.
+        </div>
       </div>
     </div>
   );
@@ -142,8 +211,15 @@ export default function OM_FacultyForm() {
   // header/term
   const [activeTerm, setActiveTerm] = useState<OMFOptions["activeTerm"] | null>(null);
 
-  // NEW: prefs window (open/deadline) for banner
-  const [prefsWindow, setPrefsWindow] = useState<{ openISO: string; deadlineISO: string }>({ openISO: "", deadlineISO: "" });
+  // prefs window (open/deadline) for banner
+  const [prefsWindow, setPrefsWindow] = useState<{ openISO: string; deadlineISO: string }>({
+    openISO: "",
+    deadlineISO: "",
+  });
+
+  const [startingWindow, setStartingWindow] = useState(false);
+  const [durationDays, setDurationDays] = useState<string>("7"); // NEW: configurable duration
+  const isOm = userHasRole("Office Manager");
 
   // table rows
   const [rows, setRows] = useState<OMFRow[]>([]);
@@ -155,6 +231,51 @@ export default function OM_FacultyForm() {
   const [pref, setPref] = useState<any>(null);
   const [prefLoading, setPrefLoading] = useState(false);
 
+  const handleStartWindow = async () => {
+    if (startingWindow) return;
+
+    // Validate duration input
+    const days = parseInt(durationDays || "0", 10);
+    if (!Number.isFinite(days) || days <= 0) {
+      setErr("Duration (days) must be a positive number.");
+      return;
+    }
+
+    const verb = prefsWindow.openISO ? "Restart" : "Start";
+    const message = `${verb} submission window now for ${days} day${
+      days === 1 ? "" : "s"
+    }? This will override the existing schedule.`;
+
+    if (!window.confirm(message)) return;
+
+    try {
+      setStartingWindow(true);
+      setErr("");
+
+      const data = await startOMFWindow({
+        termId: activeTerm?.term_id,
+        durationDays: days,
+      });
+
+      if (!data?.ok || !data.prefs_window) {
+        throw new Error("Failed to start submission window.");
+      }
+
+      setPrefsWindow({
+        openISO: data.prefs_window.openISO || "",
+        deadlineISO: data.prefs_window.deadlineISO || "",
+      });
+    } catch (e: any) {
+      setErr(
+        e?.response?.data?.detail ||
+          e?.message ||
+          "Failed to start submission window."
+      );
+    } finally {
+      setStartingWindow(false);
+    }
+  };
+
   // Load dropdown options
   useEffect(() => {
     (async () => {
@@ -164,13 +285,17 @@ export default function OM_FacultyForm() {
         setDeptOptions(["All Departments", ...opt.departments]);
         setTypeOptions(["All Faculty Type", ...opt.facultyTypes]);
         setActiveTerm(opt.activeTerm || null);
-        // NEW: pick up window from backend
+        // pick up window from backend
         setPrefsWindow({
           openISO: opt?.prefs_window?.openISO || "",
           deadlineISO: opt?.prefs_window?.deadlineISO || "",
         });
       } catch (e: any) {
-        setErr(e?.response?.data?.detail || e?.message || "Failed to load options.");
+        setErr(
+          e?.response?.data?.detail ||
+            e?.message ||
+            "Failed to load options."
+        );
       }
     })();
   }, []);
@@ -188,15 +313,25 @@ export default function OM_FacultyForm() {
         setLoading(true);
         setErr("");
         const { ok, rows } = await listOMFFaculty({
-          department, facultyType, status, search, termId: activeTerm?.term_id
+          department,
+          facultyType,
+          status,
+          search,
+          termId: activeTerm?.term_id,
         });
         if (!ok) throw new Error("Failed to load faculty preferences");
         setRows(rows);
-        const unique = Array.from(new Set(rows.map(r => r.status).filter(Boolean)));
+        const unique = Array.from(
+          new Set(rows.map((r) => r.status).filter(Boolean))
+        );
         setStatusOptions(["All Status", ...unique.sort()]);
       } catch (e: any) {
         setRows([]);
-        setErr(e?.response?.data?.detail || e?.message || "Failed to load faculty preferences.");
+        setErr(
+          e?.response?.data?.detail ||
+            e?.message ||
+            "Failed to load faculty preferences."
+        );
       } finally {
         setLoading(false);
       }
@@ -208,13 +343,19 @@ export default function OM_FacultyForm() {
     setPref(null);
     setPrefLoading(true);
     try {
-      const { ok, preference } = await getOMFPreference(row.faculty_id, activeTerm?.term_id);
+      const { ok, preference } = await getOMFPreference(
+        row.faculty_id,
+        activeTerm?.term_id
+      );
       if (ok) setPref(preference);
     } finally {
       setPrefLoading(false);
     }
   };
-  const closeView = () => { setSelected(null); setPref(null); };
+  const closeView = () => {
+    setSelected(null);
+    setPref(null);
+  };
 
   const fmtDate = (iso?: string) => {
     if (!iso) return "N/A";
@@ -234,15 +375,48 @@ export default function OM_FacultyForm() {
             Faculty load assignment submissions for {headerLabel}
           </p>
         </div>
-        {activeTerm?.submission_deadline && (
-          <p className="text-sm font-semibold text-red-600">
-            Due Date: <span className="text-gray-800">{fmtDate(activeTerm.submission_deadline)}</span>
-          </p>
-        )}
+
+        <div className="flex items-center gap-3">
+          {activeTerm?.submission_deadline && (
+            <p className="text-sm font-semibold text-red-600">
+              Due Date:{" "}
+              <span className="text-gray-800">
+                {fmtDate(activeTerm.submission_deadline)}
+              </span>
+            </p>
+          )}
+
+          {isOm && (
+            <div className="flex items-center gap-2">
+              <label className="flex items-center gap-2 text-xs text-gray-600">
+                <span>Duration (days)</span>
+                <input
+                  type="number"
+                  min={1}
+                  value={durationDays}
+                  onChange={(e) => setDurationDays(e.target.value)}
+                  className="w-20 rounded-md border border-gray-300 px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500/40"
+                />
+              </label>
+              <button
+                type="button"
+                onClick={handleStartWindow}
+                disabled={startingWindow}
+                className="rounded-lg bg-emerald-600 px-3 py-2 text-xs font-semibold text-white shadow-sm hover:bg-emerald-700 disabled:opacity-60"
+              >
+                {prefsWindow.openISO ? "Restart Window" : "Start Submission Window"}
+              </button>
+            </div>
+          )}
+        </div>
       </header>
 
-      {/* NEW: same banner as in Faculty Preferences */}
-      <DeadlineBanner openISO={prefsWindow.openISO} deadlineISO={prefsWindow.deadlineISO} className="mb-6" />
+      {/* Banner */}
+      <DeadlineBanner
+        openISO={prefsWindow.openISO}
+        deadlineISO={prefsWindow.deadlineISO}
+        className="mb-6"
+      />
 
       {err && (
         <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
@@ -283,11 +457,15 @@ export default function OM_FacultyForm() {
           <tbody className="divide-y">
             {loading ? (
               <tr>
-                <td className="px-4 py-6 text-center text-gray-500" colSpan={6}>Loading…</td>
+                <td className="px-4 py-6 text-center text-gray-500" colSpan={6}>
+                  Loading…
+                </td>
               </tr>
             ) : rows.length === 0 ? (
               <tr>
-                <td className="px-4 py-6 text-center text-gray-500" colSpan={6}>No results</td>
+                <td className="px-4 py-6 text-center text-gray-500" colSpan={6}>
+                  No results
+                </td>
               </tr>
             ) : (
               rows.map((r) => (
@@ -303,7 +481,9 @@ export default function OM_FacultyForm() {
                     <span
                       className={cls(
                         "inline-block rounded-full px-3 py-1 text-xs font-semibold",
-                        r.status === "Submitted" ? "bg-emerald-100 text-emerald-700" : "bg-gray-100 text-gray-700"
+                        r.status === "Submitted"
+                          ? "bg-emerald-100 text-emerald-700"
+                          : "bg-gray-100 text-gray-700"
                       )}
                     >
                       {r.status || "—"}
@@ -322,27 +502,39 @@ export default function OM_FacultyForm() {
         {selected && (
           <div className="fixed inset-0 z-[100] grid place-items-center bg-black/40 p-4">
             <div className="w-full max-w-xl rounded-2xl bg-white p-8 shadow-2xl">
-              <h2 className="text-lg font-semibold text-emerald-700 mb-1">Faculty Preference</h2>
+              <h2 className="text-lg font-semibold text-emerald-700 mb-1">
+                Faculty Preference
+              </h2>
               <p className="text-sm text-gray-600 mb-6">
-                Instructor: <span className="font-medium text-gray-800">{selected.name}</span>
+                Instructor:{" "}
+                <span className="font-medium text-gray-800">{selected.name}</span>
               </p>
 
-              {prefLoading && <div className="text-sm text-gray-600">Loading preference…</div>}
-              {!prefLoading && !pref && <div className="text-sm text-gray-600">No preference record found for this term.</div>}
+              {prefLoading && (
+                <div className="text-sm text-gray-600">Loading preference…</div>
+              )}
+              {!prefLoading && !pref && (
+                <div className="text-sm text-gray-600">
+                  No preference record found for this term.
+                </div>
+              )}
 
               {!prefLoading && pref && (
                 <div className="grid grid-cols-2 gap-x-10 gap-y-6 text-sm">
                   <div>
                     <h4 className="font-semibold flex items-center gap-2 mb-2 text-gray-800">
-                      <GraduationCap className="h-4 w-4 text-emerald-700" /> Teaching Load
+                      <GraduationCap className="h-4 w-4 text-emerald-700" /> Teaching
+                      Load
                     </h4>
                     <p>Preferred Teaching Units</p>
-                    <p className="text-gray-500">{pref.teaching?.preferred_units ?? "—"}</p>
+                    <p className="text-gray-500">
+                      {pref.teaching?.preferred_units ?? "—"}
+                    </p>
                     <p className="mt-1">Deloading</p>
                     <p className="text-gray-500">
                       {Array.isArray(pref.teaching?.deloading)
                         ? pref.teaching?.deloading.join(", ")
-                        : (pref.teaching?.deloading ?? "—")}
+                        : pref.teaching?.deloading ?? "—"}
                     </p>
                   </div>
 
@@ -354,7 +546,7 @@ export default function OM_FacultyForm() {
                     <p className="text-gray-500">
                       {typeof pref.location_mode?.mode === "object"
                         ? JSON.stringify(pref.location_mode?.mode)
-                        : (pref.location_mode?.mode ?? "—")}
+                        : pref.location_mode?.mode ?? "—"}
                     </p>
                   </div>
 
@@ -363,34 +555,53 @@ export default function OM_FacultyForm() {
                       <Calendar className="h-4 w-4 text-emerald-700" /> Schedule
                     </h4>
                     <p>Days</p>
-                    <p className="text-gray-500">{(pref.schedule?.days || []).length ? pref.schedule.days.join(", ") : "—"}</p>
+                    <p className="text-gray-500">
+                      {(pref.schedule?.days || []).length
+                        ? pref.schedule.days.join(", ")
+                        : "—"}
+                    </p>
                     <p className="mt-1">Time Slots</p>
-                    <p className="text-gray-500">{(pref.schedule?.times || []).length ? pref.schedule.times.join(", ") : "—"}</p>
+                    <p className="text-gray-500">
+                      {(pref.schedule?.times || []).length
+                        ? pref.schedule.times.join(", ")
+                        : "—"}
+                    </p>
                   </div>
 
                   <div>
                     <h4 className="font-semibold flex items-center gap-2 mb-2 text-gray-800">
-                      <BookOpen className="h-4 w-4 text-emerald-700" /> Academic Specialization
+                      <BookOpen className="h-4 w-4 text-emerald-700" /> Academic
+                      Specialization
                     </h4>
                     <p>Courses</p>
                     <p className="text-gray-500">
-                      {(pref.specialization?.courses || []).length ? pref.specialization.courses.join(", ") : "—"}
+                      {(pref.specialization?.courses || []).length
+                        ? pref.specialization.courses.join(", ")
+                        : "—"}
                     </p>
                   </div>
 
                   <div className="col-span-2 mt-2">
                     <h4 className="font-semibold mb-1">Submission</h4>
                     <p className="text-gray-700">
-                      Status: <span className="font-medium">{pref.submission?.status ?? "Not Submitted"}</span>
-                      {"  "}•{"  "}
-                      Date: <span className="font-medium">{fmtDate(pref.submission?.date)}</span>
+                      Status:{" "}
+                      <span className="font-medium">
+                        {pref.submission?.status ?? "Not Submitted"}
+                      </span>{" "}
+                      • Date:{" "}
+                      <span className="font-medium">
+                        {fmtDate(pref.submission?.date)}
+                      </span>
                     </p>
                   </div>
                 </div>
               )}
 
               <div className="flex justify-end mt-8">
-                <button onClick={closeView} className="px-4 py-2 rounded-lg bg-gray-100 hover:bg-gray-200 text-sm">
+                <button
+                  onClick={closeView}
+                  className="px-4 py-2 rounded-lg bg-gray-100 hover:bg-gray-200 text-sm"
+                >
                   Close
                 </button>
               </div>

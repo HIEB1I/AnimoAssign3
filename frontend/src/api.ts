@@ -1620,6 +1620,21 @@ export async function getOMFPreference(facultyId: string, termId?: string) {
   };
 }
 
+export async function startOMFWindow(args: { termId?: string; durationDays?: number } = {}) {
+  const params: any = { action: "startWindow" };
+  if (args.termId) params.termId = args.termId;
+  if (args.durationDays != null) params.durationDays = args.durationDays;
+
+  const { data } = await axios.post(`${API_BASE}/om/facultyforms`, {}, { params });
+  return data as {
+    ok: boolean;
+    prefs_window?: { openISO?: string; deadlineISO?: string; term_id?: string };
+  };
+}
+
+
+
+
 /* =========================================================
    ==============  OM: STUDENT PETITION  ===================
    ========================================================= */
