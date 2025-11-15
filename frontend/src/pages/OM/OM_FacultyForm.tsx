@@ -372,7 +372,7 @@ export default function OM_FacultyForm() {
         <div>
           <h1 className="text-2xl font-bold">Faculty Preferences</h1>
           <p className="text-sm text-gray-600">
-            Faculty load assignment submissions for {headerLabel}
+            Manage faculty preference submissions for {headerLabel}
           </p>
         </div>
 

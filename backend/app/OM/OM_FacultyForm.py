@@ -16,6 +16,7 @@ COL_TERMS = "terms"
 COL_PREFS = "faculty_preferences"
 COL_CAMPUSES = "campuses"
 COL_KACS = "kacs"
+COL_PREEN_COUNT = "preenlistment_count" 
 COL_PREFS_WINDOWS = "faculty_prefs_windows"
 
 # ---- Helpers (same style as Faculty Management) ----
@@ -332,7 +333,11 @@ async def facultyforms_handler(
         active = await _active_term()
         ay = active.get("acad_year_start")
         tn = active.get("term_number")
-        label = f"Term {tn} AY {ay}–{(ay + 1) if ay else ''}" if (ay and tn) else None
+        label = (
+            f"Term {tn} · AY {ay}-{ay + 1}"
+            if (ay is not None and tn is not None)
+            else None
+        )
 
         # OM UI: show ONLY manual window override (if any)
         window = await _prefs_window_override_for_term(active or {})
