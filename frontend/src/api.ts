@@ -1385,6 +1385,7 @@ export type FMOptions = {
   departments: string[];
   facultyTypes: string[];
   academicYears: number[];
+  activeTerm?: { term_id: string; term_number: number; acad_year_start: number } | null;
 };
 
 export async function getFacultyOptions(): Promise<FMOptions> {

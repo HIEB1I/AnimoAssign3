@@ -16,6 +16,7 @@ COL_TERMS = "terms"
 COL_PREFS = "faculty_preferences"
 COL_CAMPUSES = "campuses"
 COL_KACS = "kacs"
+COL_PREEN_COUNT = "preenlistment_count" 
 
 # ---- Helpers (same style as Faculty Management) ----
 def _dept_name_expr() -> Dict[str, Any]:
@@ -83,34 +84,77 @@ def _prefs_window_from_term(term: Dict[str, Any]) -> tuple[datetime, datetime]:
     return open_dt, close_dt
 
 async def _active_term():
-    # (unchanged) but now also grab start/classes_start for window calc
-    t = await db[COL_TERMS].find_one(
-        {"$or": [{"status": "active"}, {"is_current": True}]},
-        {
-            "_id": 0,
-            "term_id": 1,
-            "acad_year_start": 1,
-            "term_number": 1,
-            "submission_deadline": 1,
-            "start_date": 1,             # <-- added
-            "classes_start_date": 1,     # <-- added
-        },
+    """
+    Return the WORKING / PLANNING term for OM Faculty Preferences.
+
+    Priority:
+    1) If there is an active (non-archived) pre-enlistment batch in
+       preenlistment_count, use that term_id.
+    2) Otherwise, use the *next* term after the current term
+       (where is_current = True or status = 'active').
+    3) If there is no "next" term configured, fall back to the current term
+       (or latest AY/term_number if nothing is flagged current/active).
+    """
+    term_fields = {
+        "_id": 0,
+        "term_id": 1,
+        "acad_year_start": 1,
+        "term_number": 1,
+        "submission_deadline": 1,
+        "start_date": 1,
+        "classes_start_date": 1,
+    }
+
+    # 1) Try to derive from an active pre-enlistment batch
+    pre_doc = await db[COL_PREEN_COUNT].find_one(
+        {"is_archived": {"$ne": True}},
+        {"_id": 0, "term_id": 1},
     )
-    if t:
-        return t
-    last = await db[COL_TERMS].find(
-        {},
+    if pre_doc and pre_doc.get("term_id"):
+        t = await db[COL_TERMS].find_one(
+            {"term_id": pre_doc["term_id"]},
+            term_fields,
+        )
+        if t:
+            return t
+
+    # 2) Fallback: current term (status = active OR is_current = True)
+    current = await db[COL_TERMS].find_one(
+        {"$or": [{"status": "active"}, {"is_current": True}]},
+        term_fields,
+    )
+
+    if not current:
+        # Latest term by AY + term_number
+        last = await db[COL_TERMS].find({}, term_fields) \
+            .sort([("acad_year_start", -1), ("term_number", -1)]) \
+            .limit(1).to_list(1)
+        current = last[0] if last else None
+
+    if not current:
+        # No terms configured at all
+        return {}
+
+    # 3) Compute the "next" term after the current term
+    next_terms = await db[COL_TERMS].find(
         {
-            "_id": 0,
-            "term_id": 1,
-            "acad_year_start": 1,
-            "term_number": 1,
-            "submission_deadline": 1,
-            "start_date": 1,
-            "classes_start_date": 1,
+            "$or": [
+                {"acad_year_start": {"$gt": current["acad_year_start"]}},
+                {
+                    "acad_year_start": current["acad_year_start"],
+                    "term_number": {"$gt": current["term_number"]},
+                },
+            ]
         },
-    ).sort([("acad_year_start", -1), ("term_number", -1)]).limit(1).to_list(1)
-    return last[0] if last else {}
+        term_fields,
+    ).sort([("acad_year_start", 1), ("term_number", 1)]).limit(1).to_list(1)
+
+    if next_terms:
+        # Use the next term as the working/planning term
+        return next_terms[0]
+
+    # If no next term, stick with current (still better than returning nothing)
+    return current
 
 # ---------- Pretty-format helpers (OM-side only) ----------
 DAY_LETTER_TO_NAME = {"M": "Monday", "T": "Tuesday", "W": "Wednesday", "H": "Thursday", "F": "Friday", "S": "Saturday"}
@@ -264,7 +308,11 @@ async def facultyforms_handler(
         active = await _active_term()
         ay = active.get("acad_year_start")
         tn = active.get("term_number")
-        label = f"Term {tn} AY {ay}–{(ay + 1) if ay else ''}" if (ay and tn) else None
+        label = (
+            f"Term {tn} · AY {ay}-{ay + 1}"
+            if (ay is not None and tn is not None)
+            else None
+        )
 
         # NEW: compute open/deadline like FACULTY_Preferences backend
         open_dt, close_dt = _prefs_window_from_term(active or {})

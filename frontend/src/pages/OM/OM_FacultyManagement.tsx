@@ -227,6 +227,7 @@ export default function OM_FacultyManagement() {
   const [deptOptions, setDeptOptions] = useState<string[]>(["All Departments"]);
   const [typeOptions, setTypeOptions] = useState<string[]>(["All Type"]);
   const [academicYears, setAcademicYears] = useState<number[]>([]);
+  const [termLabel, setTermLabel] = useState("");
 
   // table rows
   const [rows, setRows] = useState<FacultyRow[]>([]);
@@ -244,15 +245,21 @@ export default function OM_FacultyManagement() {
   const [history, setHistory] = useState<{ teaching_history: HistRow[] } | null>(null);
   const [historyYearIndex, setHistoryYearIndex] = useState(0);
 
-  // Load dropdown options
+  // Load dropdown options + working-term label
   useEffect(() => {
     (async () => {
       try {
         const opt: FMOptions = await getFacultyOptions();
         if (!opt.ok) throw new Error("Failed to load options");
-        setDeptOptions(["All Departments", ...opt.departments]);
-        setTypeOptions(["All Type", ...opt.facultyTypes]);
-        setAcademicYears(opt.academicYears);
+
+        setDeptOptions(["All Departments", ...(opt.departments || [])]);
+        setTypeOptions(["All Type", ...(opt.facultyTypes || [])]);
+        setAcademicYears(opt.academicYears || []);
+
+        // Build AY/Term label just like Course Management
+        const ay = opt.activeTerm?.acad_year_start;
+        const tn = opt.activeTerm?.term_number;
+        setTermLabel(ay ? `Term ${tn ?? "—"} · AY ${ay}-${ay + 1}` : "");
       } catch (e: any) {
         setErr(e?.response?.data?.detail || e?.message || "Failed to load options.");
       }
@@ -406,6 +413,9 @@ export default function OM_FacultyManagement() {
     <main className="w-full px-8 py-8">
       <header className="mb-6">
         <h1 className="text-2xl font-bold">Faculty Directory</h1>
+        <p className="text-sm text-gray-600">
+          Manage faculty list and their schedules for {termLabel || ""}
+        </p>
       </header>
 
       {err && (

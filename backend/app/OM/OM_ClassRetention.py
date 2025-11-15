@@ -53,10 +53,12 @@ def _course_code_expr() -> Dict[str, Any]:
 
 
 def _term_label_expr() -> Dict[str, Any]:
-    # AY {acad_year_start}-{acad_year_start+1} · Term {term_number}
+    # Term {term_number} · AY {acad_year_start}-{acad_year_start+1}
     return {
         "$concat": [
-            "AY ",
+            "Term ",
+            {"$toString": {"$ifNull": ["$term.term_number", ""]}},
+            " · AY ",
             {"$toString": {"$ifNull": ["$term.acad_year_start", ""]}},
             "-",
             {
@@ -67,11 +69,8 @@ def _term_label_expr() -> Dict[str, Any]:
                     ]
                 }
             },
-            " · Term ",
-            {"$toString": {"$ifNull": ["$term.term_number", ""]}},
         ]
     }
-
 
 def _upper_last_first_from_user_expr() -> Dict[str, Any]:
     """
@@ -352,14 +351,14 @@ async def cr_get(
         if active:
             ay = active.get("acad_year_start", 0)
             tn = active.get("term_number", "")
-            label = f"AY {ay}-{ay+1} · Term {tn}"
+            label = f"Term {tn} · AY {ay}-{ay+1}"
         return {
             "ok": True,
             "statuses": STATUS_OPTIONS,
             "terms": [
                 {
                     "term_id": t["term_id"],
-                    "label": f"AY {t.get('acad_year_start','')}-{(t.get('acad_year_start') or 0)+1} · Term {t.get('term_number','')}",
+                    "label": f"Term {t.get('term_number','')} · AY {t.get('acad_year_start','')}-{(t.get('acad_year_start') or 0)+1}",
                     "term_number": t.get("term_number"),
                     "acad_year_start": t.get("acad_year_start"),
                 } for t in terms
