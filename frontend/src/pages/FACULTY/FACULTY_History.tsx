@@ -225,8 +225,11 @@ function HistoryMain() {
       }
     })();
     return () => ctrl.abort();
-  }, [userId]);
+  }, [userId]); // Note: 'ay' is intentionally omitted, it's set here.
 
+  // This effect now runs ONCE on load (or when userId is found)
+  // It fetches ALL teaching history.
+  // The 'filtered' memo below will handle filtering by AY and query.
   useEffect(() => {
     const run = async () => {
       setLoading(true);
@@ -236,9 +239,15 @@ function HistoryMain() {
 
       try {
         const params = new URLSearchParams();
-        // Backend accepts AY as "2024-2025" or "2024" (we send normalized) + q
-        if (ay) params.set("ay", normAy(ay));
-        if (query.trim()) params.set("q", query.trim());
+        
+        // MODIFICATION:
+        // We no longer send 'ay' or 'q' to the backend here.
+        // We fetch ALL rows, and let the 'filtered' memo handle
+        // client-side filtering for 'ay' and 'q'.
+        
+        // if (ay) params.set("ay", normAy(ay)); // <- REMOVED
+        // if (query.trim()) params.set("q", query.trim()); // <- REMOVED
+
         params.set("action", "fetch");
         params.set("userId", String(userId || ""));
 
@@ -279,17 +288,25 @@ function HistoryMain() {
     };
 
     if (userId) run();
-  }, [ay, query, userId]);
+  }, [userId]); // MODIFICATION: Only depends on userId now.
 
   // Client-side filter (fast)
+  // This memo now filters the complete 'rows' array based on
+  // the currently selected 'ay' and 'query' state.
   const filtered = useMemo(() => {
     let r = rows;
+    
+    // 1. Filter by Academic Year
     if (ay) {
       const wanted = normAy(ay);
       r = r.filter((x) => normAy(x.ay) === wanted);
     }
+
+    // 2. Filter by Search Query
     const q = query.trim().toLowerCase();
-    if (!q) return r;
+    if (!q) return r; // Return AY-filtered list if no query
+    
+    // Return AY-filtered list that also matches query
     return r.filter((x) =>
       [
         x.code, x.title, x.section,
@@ -299,8 +316,9 @@ function HistoryMain() {
         x.time, x.term ?? "", x.ay
       ].join(" ").toLowerCase().includes(q)
     );
-  }, [rows, ay, query]);
+  }, [rows, ay, query]); // This logic is correct and unchanged
 
+  // This logic is also correct and unchanged
   const groups = useMemo(() => {
     const byTerm: Record<string, Row[]> = { "Term 1": [], "Term 2": [], "Term 3": [] };
     filtered.forEach((r) => {

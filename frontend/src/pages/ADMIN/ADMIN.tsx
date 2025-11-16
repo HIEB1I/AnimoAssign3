@@ -3,14 +3,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Search, Plus, PencilLine, Trash2, X } from "lucide-react";
 import { InboxContent as AdminInboxContent } from "./ADMIN_Inbox";
 import TopBar from "../../component/TopBar";
-import {
-  getAdminUsersList,
-  getAdminLogs,
-  // keep these for pattern parity; not used by this page yet
-  // getAdminOptions,
-  // getAdminProfile,
-  // submitAdminUser,
-} from "../../api";
+
 
 
 /* ===================== small utils ===================== */
@@ -231,8 +224,6 @@ const TextInput = (p: React.InputHTMLAttributes<HTMLInputElement>) => (
 export default function ADMIN() {
   // Identity & shared TopBar props
   const rawUser = JSON.parse(localStorage.getItem("animo.user") || "{}");
-  const userId: string | null =
-    rawUser.userId || rawUser.user_id || null;
   const fullName =
     rawUser.fullName ||
     [rawUser.firstName || rawUser.first_name, rawUser.lastName || rawUser.last_name]
