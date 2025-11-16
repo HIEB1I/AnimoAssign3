@@ -646,14 +646,30 @@ const [profileSubtitle, setProfileSubtitle] = useState<string>(
   const selectedRows = rows.filter((r) => r.selected);
   const anySelected = selectedRows.length > 0;
 
-    const loadFromServer = async () => {
-    if (!userId) return;
-    const res = await getOmLoadAssignmentList(userId);
-    setRows(Array.isArray(res?.rows) ? res.rows : []);
-    setTerm(typeof res?.term === "string" ? res.term : ""); // term label joined in backend
-    setMode("run");
-    setApproved(false);
-  };
+  const loadFromServer = async () => {
+  if (!userId) return;
+  const res = await getOmLoadAssignmentList(userId);
+  setRows(Array.isArray(res?.rows) ? res.rows : []);
+
+  // --- Build “Term 2 · AY 2025-2026” from backend value ---
+  const raw = typeof res?.term === "string" ? res.term.trim() : "";
+  let t = raw;
+
+  // Handle formats like: "AY 2025-2026 T2" or "AY 2025-2026 · T2"
+  const match = raw.replace("·", " ").match(/^AY\s+(\d{4}-\d{4})\s*T?(\d+)/i);
+  if (match) {
+    const ay = match[1];      // "2025-2026"
+    const termNo = match[2];  // "2"
+    t = `Term ${termNo} · AY ${ay}`;
+  }
+
+  setTerm(t);
+  // --------------------------------------------------------
+
+  setMode("run");
+  setApproved(false);
+};
+
 
 
 
