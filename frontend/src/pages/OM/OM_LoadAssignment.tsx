@@ -175,18 +175,16 @@ function ComboBox({
   const filtered = useMemo(() => {
     const safeOptions = (options ?? []).map((o) => (o ?? "").toString());
     const q = (query ?? "").trim().toLowerCase();
-  
+
     // If no search text, show everything
     if (!q) return safeOptions;
-  
-    const matches = safeOptions.filter((o) =>
-      o.toLowerCase().includes(q)
-    );
-  
+
+    const matches = safeOptions.filter((o) => o.toLowerCase().includes(q));
+
     // If nothing matches the current text (like "Sahur, Thung"),
     // fall back to showing all options instead of "No matches"
     return matches.length > 0 ? matches : safeOptions;
-  }, [options, query]);  
+  }, [options, query]);
 
   return (
     <div ref={wrapRef} className={cls("relative", className)}>
@@ -203,7 +201,7 @@ function ComboBox({
         placeholder={placeholder}
       />
       <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-500" />
-          
+
       {open && (
         <div className="absolute z-30 mt-2 max-h-72 w-full overflow-auto rounded-xl border border-gray-300 bg-white shadow-xl">
           {filtered.length === 0 ? (
@@ -668,6 +666,10 @@ export default function OM_LoadAssignment() {
 
   const [isAssigning, setIsAssigning] = useState(false);
 
+  const [preferredByFaculty, setPreferredByFaculty] = useState<
+    Record<string, number>
+  >({});
+
   async function runAutoAssign() {
     if (!userId) return;
 
@@ -682,6 +684,15 @@ export default function OM_LoadAssignment() {
     try {
       setIsAssigning(true);
       const res = await runOmAutoAssign({ user_id: userId });
+
+      // NEW: capture preferred units coming from backend debug
+      const debug = (res as any)?.debug || {};
+      const prefMap = debug.preferred_units_by_faculty || {};
+      setPreferredByFaculty(prefMap);
+
+      console.log("DEBUG from run:", debug);
+      console.log("Preferred map:", prefMap);
+
       setRows(Array.isArray(res?.rows) ? res.rows : []);
       setTerm(typeof res?.term === "string" ? res.term : "");
       setMode("run");
@@ -716,7 +727,8 @@ export default function OM_LoadAssignment() {
         // role text
         let roleTitle = p?.position_title || "";
         // append " | Department of …" like CHAIR
-        if (roleTitle && p?.dept_name) roleTitle = `${roleTitle} | ${p.dept_name}`;
+        if (roleTitle && p?.dept_name)
+          roleTitle = `${roleTitle} | ${p.dept_name}`;
         setProfileSubtitle(roleTitle);
         setProfileName(p?.full_name || "");
 
@@ -740,7 +752,6 @@ export default function OM_LoadAssignment() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userId]);
 
-
   const [search, setSearch] = useState("");
   const [rows, setRows] = useState<Row[]>([]);
   type Mode = "idle" | "manual" | "run";
@@ -759,7 +770,6 @@ export default function OM_LoadAssignment() {
   const [hasLocalEdits, setHasLocalEdits] = useState(false);
 
   const [facultyList, setFacultyList] = useState<Faculty[]>([]);
-
 
   // Load all faculty once on mount
   useEffect(() => {
@@ -797,6 +807,8 @@ export default function OM_LoadAssignment() {
     };
   }, []);
 
+  const [initialLoaded, setInitialLoaded] = useState(false);
+
   const setCell = <K extends keyof Row>(id: string, key: K, val: Row[K]) => {
     setHasLocalEdits(true); // mark grid as dirty
     setRows((prev) =>
@@ -828,12 +840,23 @@ export default function OM_LoadAssignment() {
   const loadFromServer = async () => {
     if (!userId) return;
     const res = await getOmLoadAssignmentList(userId);
+
+    // NEW: preferred units per faculty from /list
+    const prefMap = (res as any)?.preferred_units_by_faculty || {};
+    setPreferredByFaculty(prefMap);
+
     setRows(Array.isArray(res?.rows) ? res.rows : []);
-    setTerm(typeof res?.term === "string" ? res.term : ""); // term label joined in backend
+    setTerm(typeof res?.term === "string" ? res.term : "");
     setMode("run");
     setApproved(false);
     setHasLocalEdits(false);
   };
+
+  useEffect(() => {
+    if (initialLoaded) return; // prevent double loading
+    setInitialLoaded(true);
+    loadFromServer(); // auto-load on page open
+  }, [initialLoaded]);
 
   const addRow = () => {
     setRows((prev) => [
@@ -916,6 +939,19 @@ export default function OM_LoadAssignment() {
       <>—</>
     );
 
+  async function handleSaveDraft() {
+    if (!userId) return;
+
+    try {
+      await submitOmLoadAssignment(userId, { rows }, "save");
+      await loadFromServer(); // pull fresh rows from DB
+      setHasLocalEdits(false); // grid now matches DB
+    } catch (e) {
+      console.error(e);
+      alert(`Save draft failed: ${String(e)}`);
+    }
+  }
+
   /** Fields that must be filled before a row can be approved */
   const isRowIncompleteForApproval = (r: Row) => {
     // treat “touched” rows as those with any scheduling/faculty info
@@ -944,14 +980,15 @@ export default function OM_LoadAssignment() {
   type Faculty = {
     faculty_id: string;
     faculty_name_display: string;
+    preferred_units?: number | null;
   };
 
   const facultyOptions = useMemo(() => {
     return (facultyList ?? [])
-    .map(f => f.faculty_name_display || f.faculty_id)
+      .map((f) => f.faculty_name_display || f.faculty_id)
       .filter((name) => name.trim().length > 0)
       .sort((a, b) => a.localeCompare(b));
-  }, [facultyList]);  
+  }, [facultyList]);
 
   const facultyNameToId = useMemo(() => {
     const map: Record<string, string> = {};
@@ -962,6 +999,82 @@ export default function OM_LoadAssignment() {
     console.log("DEBUG facultyNameToId map:", map);
     return map;
   }, [facultyList]);
+
+  const facultyById = useMemo(() => {
+    const map: Record<string, Faculty> = {};
+    (facultyList ?? []).forEach((f) => {
+      if (f.faculty_id) {
+        map[f.faculty_id] = f;
+      }
+    });
+    return map;
+  }, [facultyList]);
+
+  type FacultySummaryRow = {
+    facultyId: string;
+    facultyName: string;
+    assignedUnits: number;
+    preferredUnits: number | null;
+    diff: number | null;
+  };
+
+  const facultySummary: FacultySummaryRow[] = useMemo(() => {
+    const acc: Record<string, FacultySummaryRow> = {};
+
+    for (const r of rows) {
+      if (!r.faculty && !r.faculty_id) continue;
+
+      const key = r.faculty_id || r.faculty || "";
+      if (!key) continue;
+
+      const numericUnits =
+        typeof r.units === "number"
+          ? r.units
+          : parseFloat(String(r.units || "0")) || 0;
+
+      if (!acc[key]) {
+        const meta = r.faculty_id ? facultyById[r.faculty_id] : undefined;
+        const facultyName =
+          r.faculty || meta?.faculty_name_display || r.faculty_id || "—";
+
+        // NEW: first try map from backend, then fallback to meta.preferred_units
+        const prefFromMap = r.faculty_id
+          ? preferredByFaculty[r.faculty_id]
+          : undefined;
+
+        const preferredUnits =
+          typeof prefFromMap === "number"
+            ? prefFromMap
+            : meta && typeof meta.preferred_units === "number"
+            ? meta.preferred_units
+            : null;
+
+        acc[key] = {
+          facultyId: r.faculty_id || "",
+          facultyName,
+          assignedUnits: 0,
+          preferredUnits,
+          diff: null,
+        };
+      }
+
+      acc[key].assignedUnits += numericUnits;
+    }
+
+    // compute diff after accumulating
+    Object.values(acc).forEach((row) => {
+      if (row.preferredUnits != null) {
+        row.diff = row.assignedUnits - row.preferredUnits;
+      }
+    });
+
+    return Object.values(acc).sort((a, b) =>
+      a.facultyName.localeCompare(b.facultyName)
+    );
+  }, [rows, facultyById, preferredByFaculty]);
+
+  // 👇 tiny tab state for the new Summary section
+  const [summaryTab, setSummaryTab] = useState<"units" | "second">("units");
 
   return (
     <AppShell
@@ -1007,32 +1120,29 @@ export default function OM_LoadAssignment() {
 
                 <div className="ml-auto flex items-center gap-2">
                   <button
-                    disabled={!hasReco || approved}
+                    disabled={!hasReco}
+                    onClick={handleSaveDraft}
                     className={cls(
                       "inline-flex items-center gap-2 rounded-md px-3.5 py-2 text-sm font-medium shadow-sm",
-                      hasReco && !approved
+                      hasReco
                         ? "bg-gray-800 text-white hover:brightness-110"
                         : "bg-gray-200 text-gray-500 cursor-not-allowed"
                     )}
                     title={
                       !hasReco
                         ? "No recommendations to save yet"
-                        : approved
-                        ? "Already approved"
-                        : "Save Draft"
+                        : "Save current assignments to the database"
                     }
                   >
                     <Save className="h-4 w-4" />
                     Save Draft
                   </button>
                   <button
-                    disabled={!hasReco || approved || hasIncompleteRows}
+                    disabled={!hasReco || hasIncompleteRows || approved}
                     onClick={() => {
                       if (hasIncompleteRows) {
                         alert(
-                          "Some rows are incomplete.\n\n" +
-                            "Please make sure each edited row has Course, Title, Units, Section, Faculty, Mode, " +
-                            "and at least a full Day1/Begin1/End1/Room1 (and a complete Day2 block if used) before approving."
+                          "Some rows are incomplete.\n\nFill required fields before approving."
                         );
                         return;
                       }
@@ -1040,18 +1150,14 @@ export default function OM_LoadAssignment() {
                     }}
                     className={cls(
                       "inline-flex items-center gap-2 rounded-md px-3.5 py-2 text-sm font-medium shadow-sm",
-                      hasReco && !approved && !hasIncompleteRows
+                      hasReco
                         ? "bg-emerald-700 text-white hover:brightness-110"
                         : "bg-gray-200 text-gray-500 cursor-not-allowed"
                     )}
                     title={
                       !hasReco
-                        ? "No recommendations to approve yet"
-                        : approved
-                        ? "Already approved"
-                        : hasIncompleteRows
-                        ? "You have incomplete edited rows"
-                        : "Approve"
+                        ? "No recommendations yet"
+                        : "Approve and finalize the load assignment"
                     }
                   >
                     <CheckCheck className="h-4 w-4" />
@@ -1478,6 +1584,170 @@ export default function OM_LoadAssignment() {
                   </div>
                 </div>
               </div>
+              {/* ---- Summary section under Load Recommendations ---- */}
+              {rows.length > 0 && (
+                <div className="mt-6 rounded-xl border border-gray-200 bg-white shadow-sm">
+                  <div className="flex items-center justify-between px-4 pt-4 pb-2">
+                    <div>
+                      <h2 className="text-lg font-semibold">
+                        Faculty Load Summary
+                      </h2>
+                      <p className="text-xs text-gray-500">
+                        Total assigned units vs preferred units per faculty for{" "}
+                        <span className="font-semibold">
+                          {term || "this term"}
+                        </span>
+                        .
+                      </p>
+                    </div>
+
+                    {/* Summary internal tabs */}
+                    {/* Summary internal tabs – Chrome style */}
+                    <div className="flex items-end text-xs">
+                      <button
+                        type="button"
+                        onClick={() => setSummaryTab("units")}
+                        className={cls(
+                          "px-4 py-2 border border-b-0 rounded-t-md -mb-px transition text-xs",
+                          summaryTab === "units"
+                            ? "bg-white text-gray-900 shadow-sm"
+                            : "bg-gray-100 text-gray-500 hover:text-gray-800"
+                        )}
+                      >
+                        Units vs Prefs
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => setSummaryTab("second")}
+                        className={cls(
+                          "px-4 py-2 border border-b-0 rounded-t-md -mb-px transition text-xs ml-1",
+                          summaryTab === "second"
+                            ? "bg-white text-gray-900 shadow-sm"
+                            : "bg-gray-100 text-gray-500 hover:text-gray-800"
+                        )}
+                      >
+                        Tab 2 (TBD)
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Tab 1: Units vs Preferred Units */}
+                  {summaryTab === "units" && (
+                    <div className="border-t px-4 pb-4 overflow-x-auto w-full">
+                      <table className="w-full text-sm table-fixed">
+                        <thead className="bg-gray-50 border-y text-gray-700">
+                          <tr>
+                            <th className="px-3 py-2 text-left font-semibold">
+                              Faculty
+                            </th>
+                            <th className="px-3 py-2 text-right font-semibold">
+                              Assigned Units
+                            </th>
+                            <th className="px-3 py-2 text-right font-semibold">
+                              Preferred Units
+                            </th>
+                            <th className="px-3 py-2 text-right font-semibold">
+                              Δ (Assigned - Pref)
+                            </th>
+                            <th className="px-3 py-2 text-center font-semibold">
+                              Status
+                            </th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y">
+                          {facultySummary.length === 0 && (
+                            <tr>
+                              <td
+                                colSpan={5}
+                                className="px-3 py-6 text-center text-xs text-gray-500"
+                              >
+                                No faculty have assignments yet for this term.
+                              </td>
+                            </tr>
+                          )}
+
+                          {facultySummary.map((f) => {
+                            const hasPref = f.preferredUnits != null;
+                            let statusLabel = "—";
+                            let statusTone =
+                              "bg-gray-100 text-gray-700 border-gray-200";
+
+                            if (hasPref && f.diff != null) {
+                              if (f.diff > 0) {
+                                statusLabel = `Over by ${f.diff}`;
+                                statusTone =
+                                  "bg-red-50 text-red-700 border-red-200";
+                              } else if (f.diff < 0) {
+                                statusLabel = `Under by ${Math.abs(f.diff)}`;
+                                statusTone =
+                                  "bg-amber-50 text-amber-700 border-amber-200";
+                              } else {
+                                statusLabel = "Match";
+                                statusTone =
+                                  "bg-emerald-50 text-emerald-700 border-emerald-200";
+                              }
+                            }
+
+                            return (
+                              <tr key={f.facultyId || f.facultyName}>
+                                <td className="px-3 py-2 align-middle">
+                                  <div className="font-medium text-gray-900">
+                                    {f.facultyName}
+                                  </div>
+                                  {f.facultyId && (
+                                    <div className="text-[11px] text-gray-400">
+                                      {f.facultyId}
+                                    </div>
+                                  )}
+                                </td>
+                                <td className="px-3 py-2 text-right align-middle">
+                                  {f.assignedUnits
+                                    .toFixed(1)
+                                    .replace(/\.0$/, "")}
+                                </td>
+                                <td className="px-3 py-2 text-right align-middle">
+                                  {hasPref
+                                    ? f
+                                        .preferredUnits!.toFixed(1)
+                                        .replace(/\.0$/, "")
+                                    : "—"}
+                                </td>
+                                <td className="px-3 py-2 text-right align-middle">
+                                  {hasPref && f.diff != null
+                                    ? f.diff > 0
+                                      ? `+${f.diff}`
+                                      : `${f.diff}`
+                                    : "—"}
+                                </td>
+                                <td className="px-3 py-2 text-center align-middle">
+                                  <span
+                                    className={cls(
+                                      "inline-flex items-center justify-center rounded-full border px-2.5 py-0.5 text-[11px] font-medium",
+                                      statusTone
+                                    )}
+                                  >
+                                    {statusLabel}
+                                  </span>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+
+                  {/* Tab 2: placeholder */}
+                  {summaryTab === "second" && (
+                    <div className="border-t px-4 pb-6 text-sm text-gray-500">
+                      This secondary summary view is still empty for now. You
+                      can wire this up later (e.g., by section, by course,
+                      etc.).
+                    </div>
+                  )}
+                </div>
+              )}
             </main>
           )}
         </>

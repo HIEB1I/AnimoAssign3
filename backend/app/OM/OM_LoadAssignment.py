@@ -33,9 +33,30 @@ COL_DEPTS = "departments"
 COL_CAMPUSES = "campuses"
 COL_LEAVES = "leaves"
 COL_PREFERENCES = "faculty_preferences"
+COL_FACULTY_LOADS = "faculty_loads"
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+async def _next_load_id(db) -> str:
+    """
+    Find the last load_id in faculty_loads and return the next one, e.g.
+    LOAD0004 -> LOAD0005. If none, start at LOAD0001.
+    """
+    rows = await db[COL_FACULTY_LOADS].find(
+        {}, {"_id": 0, "load_id": 1}
+    ).sort("load_id", -1).to_list(1)
+
+    last = (rows[0]["load_id"] if rows and rows[0].get("load_id") else None)
+    if not last or not last.startswith("LOAD"):
+        return "LOAD0001"
+
+    num_part = last.replace("LOAD", "")
+    try:
+        n = int(num_part) + 1
+    except ValueError:
+        n = 1
+    return f"LOAD{n:04d}"
 
 async def _active_term() -> Dict[str, Any]:
     # 1) find the current anchor (must be is_current=True)
@@ -209,6 +230,11 @@ async def _fetch_rows(user_id: str, term_id: str, db) -> Dict[str, Any]:
 
         {"$lookup": {"from": COL_COURSES, "localField": "course_id", "foreignField": "course_id", "as": "course"}},
         {"$unwind": {"path": "$course", "preserveNullAndEmptyArrays": True}},
+        {
+        "$match": {
+            "$or": [
+                {"course.type_of_course": {"$in": ["Major", "Foundation", "SHS", "GS"]}},
+                {"course.type": {"$in": ["Major", "Foundation", "SHS", "GS"]}},]}},
 
         {"$lookup": {"from": COL_SCHED, "localField": "section_id", "foreignField": "section_id", "as": "scheds"}},
 
@@ -486,7 +512,30 @@ async def loadassignment_handler(
             # keep any other fields you already return
         }
 
+    if action == "save":
+        # same validation as approve
+        if not isinstance(payload, dict) or not isinstance(payload.get("rows"), list):
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid payload; expected { rows: [...] }",
+            )
 
+        active = await _active_term()
+        if not active:
+            raise HTTPException(
+                409, "No upcoming term found (is_current anchor missing?)"
+            )
+
+        rows = payload["rows"]
+
+        # Just persist assignments/schedules – no faculty_loads header yet
+        await _approve_and_persist(active["term_id"], rows, db)
+
+        return {
+            "ok": True,
+            "saved": len(rows),
+            "term": _term_label(active),
+        }
 
     if action == "submit":
         # Validate
@@ -496,21 +545,37 @@ async def loadassignment_handler(
         return {"ok": True, "rows": submitted_rows}
 
     if action == "approve":
-        # Validate
         if not isinstance(payload, dict) or not isinstance(payload.get("rows"), list):
-            raise HTTPException(status_code=400, detail="Invalid payload; expected { rows: [...] }")
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid payload; expected { rows: [...] }",
+            )
 
         active = await _active_term()
         if not active:
-            raise HTTPException(409, "No upcoming term found (is_current anchor missing?)")
+            raise HTTPException(
+                409, "No upcoming term found (is_current anchor missing?)"
+            )
 
         rows = payload["rows"]
-        # Optional: re-check feasibility for the batch before committing (guard against stale UI)
-        # (We keep it minimal and rely on your latest compute run.)
 
+        # 1) persist the final assignments/schedules
         await _approve_and_persist(active["term_id"], rows, db)
 
-        return {"ok": True, "approved": len(rows), "term": _term_label(active)}
+        # 2) create/update faculty_loads header for this term
+        await _upsert_faculty_load_header(
+            active,
+            db,
+            department_id="DEPT0001",  # per your spec
+            user_id=userId,            # query param from the route
+        )
+
+        return {
+            "ok": True,
+            "approved": len(rows),
+            "term": _term_label(active),
+        }
+
 
     raise HTTPException(status_code=400, detail="Invalid action parameter.")
 
@@ -554,15 +619,33 @@ async def om_get_all_faculty(db = Depends(get_db)):
     docs = await db[COL_FACULTY].aggregate(pipeline).to_list(None)
     return {"ok": True, "faculty": docs}
 
-
 @router.get("/load-assignment/list")
 async def get_om_load_assignment_list(user_id: str, db=Depends(get_db)):
     active = await _active_term()
-    if not active:
-        raise HTTPException(409, "No upcoming term found (is_current anchor missing?)")
 
+    # Fetch table rows
     base = await _fetch_rows(user_id, term_id=active["term_id"], db=db)
-    return {"term": _term_label(active), "rows": base["rows"]}
+    rows = base["rows"]
+
+    # Get faculty preferences for the active term
+    ctx = await phase0_load(active["term_id"], db)
+    fac_prefs = ctx.prefs_by_faculty or {}
+
+    # Build preferred units map
+    preferred_units_by_faculty = {}
+    for fid, pref in fac_prefs.items():
+        val = pref.get("preferred_units") or pref.get("load_units")
+        try:
+            if val:
+                preferred_units_by_faculty[fid] = int(val)
+        except:
+            continue
+
+    return {
+        "term": _term_label(active),
+        "rows": rows,
+        "preferred_units_by_faculty": preferred_units_by_faculty,   #  ← NEW
+    }
 
 @router.post("/load-assignment/run")
 async def run_auto_assignment(
@@ -599,6 +682,21 @@ async def run_auto_assignment(
         mode_str = str(mode_obj.get("mode") or "").strip().upper()
         if fid and mode_str:
             fac_pref_mode[fid] = mode_str
+
+    # Build a quick map → faculty_id -> preferred_units (or load_units fallback)
+    preferred_units_by_faculty: dict[str, int] = {}
+    for fid, pref in fac_prefs.items():
+        val = pref.get("preferred_units") or pref.get("load_units")
+        try:
+            if val is not None:
+                preferred_units_by_faculty[fid] = int(val)
+        except (TypeError, ValueError):
+            # ignore bad values; you can also default to 12 if you want
+            continue
+
+    prefs_debug = {
+        "preferred_units_by_faculty": preferred_units_by_faculty
+    }
 
     # NEW: section_id → campus_id and course_room_type
     sid_to_campus: dict[str, str] = {
@@ -688,6 +786,7 @@ async def run_auto_assignment(
                 "course_order_len": len(sugg.get("courses_order", [])),
                 "assignments_len": 0,
                 **debug,
+                **prefs_debug,
                 "candidate_sizes": {
                     cid: len(info.get("candidates", []))
                     for cid, info in (sugg.get("by_course", {}) or {}).items()
@@ -811,7 +910,7 @@ async def run_auto_assignment(
     return {
         "term": _term_label(active),
         "rows": rows,
-        "debug": {**debug, "overlay_no_time_details": overlay_reasons},
+        "debug": {**debug, **prefs_debug, "overlay_no_time_details": overlay_reasons},
     }
 
 #    ===========================================================
@@ -943,6 +1042,34 @@ async def phase0_load(term_id: str, db, department_id: str | None = None) -> Con
             if sid:
                 schedules_by_section.setdefault(sid, []).append(s)
 
+    # 3b) Campus-level blocked windows (for now we care about CMPS0002)
+    campus_blocked: dict[str, dict[int, list[tuple[int, int]]]] = {}
+    for s in sections:
+        sid = s.get("section_id")
+        campus = (s.get("campus_id") or "").strip().upper()
+        if not sid or not campus:
+            continue
+        slots = _slots_from_scheds(schedules_by_section.get(sid, []))
+        if not slots:
+            continue
+        # Store all CMPS0002 schedules as blocked windows
+        if campus == "CMPS0002":
+            for di, itv in slots:
+                campus_blocked.setdefault(campus, {}).setdefault(di, []).append(itv)
+
+    # Coalesce per day for faster checks later
+    for camp, days in campus_blocked.items():
+        for di, arr in days.items():
+            arr.sort()
+            merged: list[tuple[int, int]] = []
+            for st, en in arr:
+                if not merged or merged[-1][1] <= st:
+                    merged.append((st, en))
+                else:
+                    last_st, last_en = merged[-1]
+                    merged[-1] = (last_st, max(last_en, en))
+            days[di] = merged
+
     # ------------------------------
     # 4) Faculty & Names (bulk user lookup; filter archived)
     # ------------------------------
@@ -961,6 +1088,7 @@ async def phase0_load(term_id: str, db, department_id: str | None = None) -> Con
             "remaining_units": 1,
             "qualified_kacs": 1,
             "kac_ids": 1,
+            "certifications": 1,
         },
     ).to_list(None)
 
@@ -1102,6 +1230,7 @@ async def phase0_load(term_id: str, db, department_id: str | None = None) -> Con
     ctx.course_to_kacs = course_to_kacs          # type: ignore[attr-defined]
     ctx.leave_blocked = blocked
     ctx.pref_windows_quality = debug_pref_windows  # type: ignore[attr-defined]
+    ctx.campus_blocked = campus_blocked
     print("phase0_load → leave_rows:", len(leave_rows), "blocked:", len(blocked), "has FAC0002:", "FAC0002" in blocked)  # debug
     
     # Build exclusion sets
@@ -1438,6 +1567,50 @@ def _mm_to_hhmm(m: int) -> str:
     h = m // 60
     mm = m % 60
     return f"{h:02d}:{mm:02d}"
+
+MAX_CONSEC_TEACH_MIN = 4 * 60 + 30   # 4.5 hours
+MAX_GAP_FOR_STREAK   = 15            # minutes between classes still counted in a streak
+
+
+def _streak_ok_for_day(
+    existing: list[tuple[int, int]],
+    new_slots: list[tuple[int, int]],
+    max_minutes: int = MAX_CONSEC_TEACH_MIN,
+    gap_tol: int = MAX_GAP_FOR_STREAK,
+) -> bool:
+    """
+    Ensure that, on a single day, the total length of a 'teaching streak'
+    (blocks separated by <= gap_tol minutes) never exceeds max_minutes.
+
+    Example:
+      07:30–09:00, 09:15–10:45, 11:00–12:30 on the same day
+      → 3 x 90min = 270min teaching in a 5h window → REJECT when max_minutes=270.
+    """
+    intervals = [(s, e) for (s, e) in (existing + new_slots) if s >= 0 and e > s]
+    if not intervals:
+        return True
+
+    intervals.sort()  # by start time
+    streak_start, streak_end = intervals[0]
+    streak_teach = streak_end - streak_start
+
+    for st, en in intervals[1:]:
+        gap = st - streak_end
+        dur = en - st
+
+        if gap <= gap_tol:
+            # extend current streak
+            streak_end = en
+            streak_teach += dur
+        else:
+            # start a new streak
+            streak_start, streak_end = st, en
+            streak_teach = dur
+
+        if streak_teach > max_minutes:
+            return False
+
+    return True
 
 def _slots_from_scheds(scheds: list[dict]) -> list[tuple[int, tuple[int,int]]]:
     """
@@ -2018,6 +2191,10 @@ async def run_milestone_c_phase6a(term_id: str, db, department_id: str | None = 
         "phase6a_per_kac": {k: {"assigned": int(kac_assigned.get(k, 0)), "total": int(kac_total_sections.get(k, 0))}
                             for k in sorted(set(kac_total_sections) | set(kac_assigned))},
         "phase6a_used_units": {fid: int(u) for fid, u in phase6a_used_units.items()},
+        "phase6a_preferred_units": {
+            fid: int(preferred_cap.get(fid, 12))
+            for fid in caps.keys()
+        },
         "phase6a_caps_left": {
             fid: f"{int(phase6a_used_units.get(fid, 0))}/{int(preferred_cap.get(fid, 12))}"
             for fid in caps.keys()
@@ -2070,15 +2247,25 @@ async def run_milestone_d_phase6b(term_id: str, db, department_id: str | None = 
         slots = _slots_from_scheds((ctx.schedules_by_section or {}).get(sid, []))
         if not slots:
             return True  # no schedule registered → treat as okay
+
         for di, itv in slots:
-            # check preference acceptance
+            # 1) preference acceptance
             if not _pref_accepts_slot(fac_pref.get(fid, {}), di, itv):
                 return False
-            # check overlapped with faculty grid
-            for cur in grid.get(fid, {}).get(di, []):
+
+            existing = grid.get(fid, {}).get(di, [])
+
+            # 2) hard conflict with existing intervals
+            for cur in existing:
                 if _conflict(cur, itv):
                     return False
+
+            # 3) 4.5h consecutive-teaching rule
+            if not _streak_ok_for_day(existing, [itv]):
+                return False
+
         return True
+
 
     # 4) First pass: keep feasible, collect conflict pool
     for a in assignments:
@@ -2244,6 +2431,9 @@ async def run_milestone_d2_rebalance_shs_to_cover_nshs(term_id: str, db, departm
     def _campus_mode_ok(fid: str, sid: str) -> bool:
         sec = next((x for x in ctx.sections if x["section_id"] == sid), {})
         fpref = (ctx.prefs_by_faculty or {}).get(fid, {}) or {}
+        cid = section_to_course.get(sid, "")
+        if not _gs_ok(ctx, fid, cid):
+            return False
         return (
             _campus_compat_pref(fpref, sec.get("campus_id") or "") and
             _mode_compat_pref(fpref, sec.get("mode"))
@@ -2381,7 +2571,29 @@ def _section_course(ctx, sid: str) -> str:
     s = next((x for x in ctx.sections if x.get("section_id") == sid), {})
     return s.get("course_id") or ""
 
+def _course_requires_phd(ctx: ContextA, cid: str) -> bool:
+    c = (ctx.courses.get(cid) or {})
+    lvl = str(c.get("program_level") or "").strip().upper()
+    return lvl == "GS"
+
+def _has_phd_cert(ctx: ContextA, fid: str) -> bool:
+    f = next((x for x in ctx.faculty if x.get("faculty_id") == fid), {})
+    certs = [str(x).strip().upper() for x in (f.get("certifications") or [])]
+    return "PHD" in certs
+
+def _gs_ok(ctx: ContextA, fid: str, cid: str) -> bool:
+    """
+    GS courses (program_level=GS) must be taught by faculty with a PhD.
+    """
+    if not _course_requires_phd(ctx, cid):
+        return True
+    return _has_phd_cert(ctx, fid)
+
 def _kac_ok(ctx, fid: str, cid: str) -> bool:
+    # GS rule first: if the course requires PhD and faculty is not PhD → reject
+    if not _gs_ok(ctx, fid, cid):
+        return False
+
     course_kacs = set((getattr(ctx, "course_to_kacs", {}) or {}).get(cid, set()))
     if not course_kacs:
         return True
@@ -2403,15 +2615,22 @@ def _sched_ok_ctx(ctx, fid: str, sid: str, assignments: list[dict]) -> bool:
     if not slots:
         return True
     fpref = (ctx.prefs_by_faculty or {}).get(fid, {})
-    # build grid from all other assns of this fid
+    # build grid from all other assignments of this faculty
     tentative = [x for x in assignments if x.get("faculty_id") == fid and x.get("section_id") != sid]
     grid = _build_faculty_grid(ctx, tentative)
+
     for di, itv in slots:
         if not _pref_accepts_slot(fpref, di, itv):
             return False
-        for cur in grid.get(fid, {}).get(di, []):
+
+        existing = grid.get(fid, {}).get(di, [])
+        for cur in existing:
             if _conflict(cur, itv):
                 return False
+
+        if not _streak_ok_for_day(existing, [itv]):
+            return False
+
     return True
 
 def _swap_assign(assignments: list[dict], sid: str, new_fid: str, new_name: str) -> list[dict]:
@@ -2877,6 +3096,27 @@ async def run_milestone_e_phase7(term_id: str, db, department_id: str | None = N
     fac_prefs = courses_ctx.prefs_by_faculty or {}
     sections_by_id = {s["section_id"]: s for s in courses_ctx.sections}
 
+    campus_blocked = getattr(courses_ctx, "campus_blocked", {}) or {}
+
+    def _is_blocked_ge_cmps2_slot(sid: str, di: int, interval: tuple[int, int]) -> bool:
+        """
+        CMPS0002 GE sections should not be scheduled in a time window that exactly
+        matches any existing CMPS0002 section (blocked windows).
+        """
+        sec = sections_by_id.get(sid, {})
+        campus = (sec.get("campus_id") or "").strip().upper()
+        cid = sec.get("course_id")
+        c = (courses.get(cid) or {})
+        ttype = str(c.get("type_of_course") or c.get("type") or "").strip().upper()
+
+        if campus != "CMPS0002" or ttype != "GE":
+            return False
+
+        day_map = campus_blocked.get("CMPS0002", {})
+        blocked_arr = day_map.get(di, [])
+        return interval in blocked_arr
+
+
     def _course_is_shs(cid: str) -> bool:
         t = (courses.get(cid) or {}).get("type") or (courses.get(cid) or {}).get("type_of_course")
         return str(t).strip().upper() == "SHS"
@@ -2970,6 +3210,24 @@ async def run_milestone_e_phase7(term_id: str, db, department_id: str | None = N
             continue
 
         st, en = win if win else (None, None)
+
+        # For CMPS0002 GE: avoid proposing into blocked campus windows
+        if st is not None and en is not None:
+            di1 = _DAY_MAP.get(d1, _DAY_MAP.get(d1[:1], -1)) if d1 else -1
+            di2 = _DAY_MAP.get(d2, _DAY_MAP.get(d2[:1], -1)) if d2 else -1
+            sid = a["section_id"]
+            interval = (st, en)
+
+            if (di1 > 0 and _is_blocked_ge_cmps2_slot(sid, di1, interval)) or \
+               (di2 > 0 and _is_blocked_ge_cmps2_slot(sid, di2, interval)):
+                kept.append(a)
+                debug_no_time_phase7[sid] = {
+                    "reason": "blocked_ge_cmps2_slot",
+                    "days": [d1, d2],
+                    "window_min": interval,
+                }
+                continue
+
         assn = dict(a)
         # inject proposal into standard fields so UI shows times
         if d1:
@@ -3166,6 +3424,75 @@ async def _approve_and_persist(term_id: str, rows: list[dict], db):
 
             _add_used(fid, day, begin_hhmm, end_hhmm)
 
+async def _upsert_faculty_load_header(
+    term: dict,
+    db,
+    *,
+    department_id: str,
+    user_id: str,
+) -> None:
+    """
+    Ensure a faculty_loads header exists for this term+department
+    with status='approved' and total_units computed from the term's sections.
+    If it already exists, update status/total_units/timestamps.
+    """
+    if not term:
+        return
+
+    term_id = term.get("term_id")
+    if not term_id:
+        return
+
+    # Use phase0 context to compute total units for all sections in this term.
+    ctx = await phase0_load(term_id, db, department_id=None)
+    total_units = 0
+    for s in ctx.sections or []:
+        # section.units, else course.units
+        cid = s.get("course_id")
+        units = s.get("units") or (ctx.courses.get(cid, {}) or {}).get("units")
+        try:
+            total_units += int(units or 0)
+        except Exception:
+            continue
+
+    now = _utcnow()
+
+    # Check if we already have a header for this term+department
+    existing = await db[COL_FACULTY_LOADS].find_one(
+        {"term_id": term_id, "department_id": department_id}
+    )
+
+    if not existing:
+        # create new
+        new_load_id = await _next_load_id(db)
+        doc = {
+            "load_id": new_load_id,
+            "term_id": term_id,
+            "department_id": department_id,
+            "status": "approved",
+            "total_units": total_units,
+            "created_by": user_id,
+            "created_at": now,
+            "finalized_at": now,
+            "updated_at": now,
+        }
+        await db[COL_FACULTY_LOADS].insert_one(doc)
+    else:
+        # update existing header
+        await db[COL_FACULTY_LOADS].update_one(
+            {"_id": existing["_id"]},
+            {
+                "$set": {
+                    "status": "approved",
+                    "total_units": total_units,
+                    "updated_at": now,
+                    "finalized_at": now,
+                    # keep old created_by/created_at if already set
+                    "created_by": existing.get("created_by") or user_id,
+                }
+            },
+        )
+
 async def run_milestone_b(term_id: str, db, department_id: str | None = None) -> dict:
     """
     Outputs ordered worklist with per-course prioritized faculty pools,
@@ -3208,7 +3535,10 @@ async def run_milestone_b(term_id: str, db, department_id: str | None = None) ->
             cap = int(caps.get(fid, 0))
             if cap <= 0:
                 continue
-            
+             # GS rule: only PhD faculty can teach GS-program courses
+            if _course_requires_phd(ctx, cid) and not _has_phd_cert(ctx, fid):
+                continue        
+
             # (0) Require a submitted preference for the upcoming term
             # if fid not in ctx.prefs_by_faculty:
             #     continue
