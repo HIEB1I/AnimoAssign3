@@ -2165,12 +2165,15 @@ export async function fetchOmRpFacultyTeachingHistory(params: {
    ========================================================= */
 
 export async function getChairHeader(userId?: string) {
-  const params = new URLSearchParams();
-  if (userId) params.set("userId", userId);
-  params.set("action", "header");
-  const r = await fetch(join(API_BASE, `chair/plantilla?${params.toString()}`));
-  if (!r.ok) throw new Error(await r.text());
-  return r.json();
+  const params: Record<string, any> = { action: "header" };
+  if (userId) params.userId = userId;
+
+  const { data } = await axios.post(
+    `${API_BASE}/chair/facultymanagement`,
+    {}, // empty body; backend reads only from query params
+    { params }
+  );
+  return data;
 }
 
 export async function chairFacultyList(userId: string) {

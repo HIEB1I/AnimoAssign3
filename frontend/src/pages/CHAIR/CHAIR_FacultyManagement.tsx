@@ -11,7 +11,7 @@ import {
   PencilLine,
   X,
 } from "lucide-react";
-// NEW (CHAIR-based)
+
 import {
   getChairFacultyOptions,
   listChairFaculty,
@@ -21,8 +21,8 @@ import {
   type FacultyRow,
   type FMOptions,
   type FacultyUpsertPayload,
-  // NEW: update endpoint
   updateChairFacultyEntry,
+  getChairHeader,
 } from "../../api";
 
 /* ---- Small shared bits (from ADMIN pattern) ---- */
@@ -326,6 +326,16 @@ type EditFacultyForm = {
 export default function CHAIR_FacultyManagement() {
   type ModalType = null | "schedule" | "history";
 
+  // get userId from localStorage (same pattern as other pages)
+  const [userId] = useState(() => {
+    try {
+      const u = JSON.parse(localStorage.getItem("animo.user") || "null");
+      return u?.userId || u?.user_id || "";
+    } catch {
+      return "";
+    }
+  });
+
   // filters
   const [department, setDepartment] = useState("All Departments");
   const [facultyType, setFacultyType] = useState("All Type");
@@ -338,6 +348,12 @@ export default function CHAIR_FacultyManagement() {
   const [deptOptions, setDeptOptions] = useState<string[]>(["All Departments"]);
   const [typeOptions, setTypeOptions] = useState<string[]>(["All Type"]);
   const [academicYears, setAcademicYears] = useState<number[]>([]);
+
+  // profile header info (same idea as OM_FacultyForm)
+  const [profileSubtitle, setProfileSubtitle] = useState<string>("");
+  const [termLabel, setTermLabel] = useState<string>("");
+
+
 
   // table rows
   const [rows, setRows] = useState<FacultyRow[]>([]);
@@ -586,21 +602,51 @@ export default function CHAIR_FacultyManagement() {
     }
   };
 
-  // Load dropdown options
   useEffect(() => {
     (async () => {
       try {
         const opt: FMOptions = await getChairFacultyOptions();
 
         if (!opt.ok) throw new Error("Failed to load options");
-        setDeptOptions(["All Departments", ...opt.departments]);
-        setTypeOptions(["All Type", ...opt.facultyTypes]);
-        setAcademicYears(opt.academicYears);
+        setDeptOptions(["All Departments", ...(opt.departments || [])]);
+        setTypeOptions(["All Type", ...(opt.facultyTypes || [])]);
+        setAcademicYears(opt.academicYears || []);
+
+        // === Build OM-style term label from activeTerm ===
+        const ay = opt.activeTerm?.acad_year_start;
+        const tn = opt.activeTerm?.term_number;
+
+        const label =
+          ay != null
+            ? `Term ${tn ?? "—"} · AY ${ay}-${ay + 1}`
+            : "";
+
+        // If acad_year_start is missing, label must be empty
+        setTermLabel(label);
       } catch (e: any) {
         setErr(e?.response?.data?.detail || e?.message || "Failed to load options.");
       }
     })();
   }, []);
+
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const hdr = await getChairHeader(userId || undefined);
+        if (hdr?.ok) {
+          setProfileSubtitle(hdr.profileSubtitle || "");
+          // active term label is now derived strictly from opt.activeTerm (planning term logic)
+        }
+      } catch {
+        // ignore header errors; page still works
+      }
+    })();
+  }, [userId]);
+
+
+
+
 
   // Debounce search input
   useEffect(() => {
@@ -777,9 +823,13 @@ export default function CHAIR_FacultyManagement() {
       <header className="mb-6">
         <h1 className="text-2xl font-bold">Faculty Directory</h1>
         <p className="text-sm text-gray-600">
-          Browse and manage faculty records, schedules, and teaching history.
+          Manage faculty list and their schedules for {termLabel || ""}
         </p>
       </header>
+
+
+
+
 
       {err && (
         <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
