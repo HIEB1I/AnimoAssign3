@@ -1047,28 +1047,33 @@ export async function searchCourseCatalog(
   userId: string,
   params: { q?: string; limit?: number; department_id?: string; program_level?: string } = {}
 ) {
-  const url = `${API_BASE}/apo/courseofferings?${new URLSearchParams({
+  // Use the POST /apo/courseofferings action that the backend wired for searching
+  const url = `${API_BASE}/apo/courseofferings${q({
     userId,
-    action: "courseCatalog",
-    ...(params.q ? { q: params.q } : {}),
-    ...(params.limit != null ? { limit: String(params.limit) } : {}),
-    ...(params.department_id ? { department_id: params.department_id } : {}),
-    ...(params.program_level ? { program_level: params.program_level } : {}),
-  }).toString()}`;
+    action: "search_catalog",   // <-- match backend action
+  })}`;
 
-  const { data } = await axios.post(url, {}); // backend reads action from query
-  return data as {
+  // Backend reads filters from JSON body
+  const body: any = {};
+  if (params.q != null) body.q = params.q;
+  if (params.limit != null) body.limit = params.limit;
+  if (params.department_id) body.department_id = params.department_id;
+  if (params.program_level) body.program_level = params.program_level;
+
+  const data = await post<{
     ok: boolean;
     results: Array<{
       course_id: string;
-      course_code: string | string[]; // backend may return array
+      course_code: string | string[];
       course_title: string;
       department_id?: string;
       program_level?: string;
       units?: number | null;
       type_of_course?: string | null;
     }>;
-  };
+  }>(url, body);
+
+  return data;
 }
 
 export async function createCatalogCourse(userId: string, payload: CreateCoursePayload) {
@@ -1078,6 +1083,36 @@ export async function createCatalogCourse(userId: string, payload: CreateCourseP
     payload
   );
   return data; // { ok: true, course: {...} }
+}
+export async function editCatalogCourse(
+  userId: string,
+  payload: EditCoursePayload
+): Promise<{ ok: boolean; course_id: string }> {
+  const { course_id, course_code, course_title, units } = payload;
+
+  // Build the shape expected by backend's `curriculumEditCourse` global-update path:
+  // { old_course_id, update_course: { ... } }
+  const body: any = {
+    old_course_id: course_id,
+    update_course: {},
+  };
+
+  if (Array.isArray(course_code)) {
+    body.update_course.course_code = course_code;
+  }
+  if (typeof course_title === "string") {
+    body.update_course.course_title = course_title;
+  }
+  if (units !== undefined) {
+    body.update_course.units = units;
+  }
+
+  const url = `${API_BASE}/apo/courseofferings${q({
+    userId,
+    action: "curriculumEditCourse",   // <-- reuse existing backend action
+  })}`;
+
+  return post<{ ok: true; course_id: string }>(url, body);
 }
 
 // --- Types ---
@@ -1093,7 +1128,12 @@ export type CreateCoursePayload = {
   capacity?: number | null;              // max_enrollee
   min_enrollee?: number | null;
 };
-
+export type EditCoursePayload = {
+  course_id: string;
+  course_code?: string[];     // stored as array in DB
+  course_title?: string;
+  units?: number | null;
+};
 export type CourseCatalogItem = {
   course_id: string;
   course_code: string | string[];
