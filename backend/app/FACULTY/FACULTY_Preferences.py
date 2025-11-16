@@ -245,10 +245,23 @@ async def _prefs_window_for_term(term: dict) -> dict:
             "term_id": term_id,
         }
 
-    open_dt = override.get("open_dt") or _parse_date_any(override.get("openISO"))
-    deadline_dt = override.get("deadline_dt") or _parse_date_any(
-        override.get("deadlineISO")
-    )
+    # Always run through the parser, whether DB stored a datetime or a string
+    raw_open = override.get("open_dt") or override.get("openISO")
+    raw_deadline = override.get("deadline_dt") or override.get("deadlineISO")
+
+    open_dt = _parse_date_any(raw_open)
+    deadline_dt = _parse_date_any(raw_deadline)
+
+    # Normalize to UTC, so comparison with _utcnow() is safe
+    def _ensure_utc(dt: datetime | None) -> datetime | None:
+        if dt is None:
+            return None
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt
+
+    open_dt = _ensure_utc(open_dt)
+    deadline_dt = _ensure_utc(deadline_dt)
 
     return {
         "open_dt": open_dt,
@@ -257,7 +270,6 @@ async def _prefs_window_for_term(term: dict) -> dict:
         "deadlineISO": deadline_dt.isoformat() if deadline_dt else "",
         "term_id": term_id,
     }
-
 
 async def _get_type_id(db, type_label: str) -> str | None:
   if not type_label:
