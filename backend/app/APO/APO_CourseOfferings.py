@@ -7,7 +7,8 @@ import json
 import hashlib
 import secrets
 from bson import ObjectId
-from typing import Any, Dict, List, Optional, Tuple, Literal
+from typing import Any, Dict, List, Optional, Tuple, Literal, Set
+from collections import defaultdict
 
 from fastapi import APIRouter, HTTPException, Query, Body
 from pymongo.errors import DuplicateKeyError
@@ -1671,24 +1672,77 @@ async def _planning_flags(term_id: str, campus_id: str, campus_prefix: str):
     )
     return needs_import, approval_required, pending, preen_hash, cohort_hash, plan_state
 # --- room availability helpers (capacity/type/time overlap) ---
-def _time_overlap(a_start: str, a_end: str, b_start: str, b_end: str) -> bool:
-    if not (a_start and a_end and b_start and b_end):
-        return False
-    return not (a_end <= b_start or a_start >= b_end)
+# --- room availability helpers (capacity/type/time overlap) ---
 
-# keep the earlier normalize_day() that returns full names (Monday..Saturday)
-# and add a code-only normalizer for convenience here:
-DAY_MAP_CODE = {
-    "MONDAY": "M", "MON": "M", "M": "M",
-    "TUESDAY": "T", "TUE": "T", "T": "T",
-    "WEDNESDAY": "W", "WED": "W", "W": "W",
-    "THURSDAY": "TH", "THU": "TH", "H": "TH", "R": "TH", "TH": "TH",
-    "FRIDAY": "F", "FRI": "F", "F": "F",
-    "SATURDAY": "S", "SAT": "S", "SA": "S", "S": "S",
+# Reuse the same day aliases and time bands as Room Allocation,
+# but keep them local to this file so we don't import from apo.py.
+
+DAY_ALIASES: Dict[str, List[str]] = {
+    "Monday": ["Monday", "M", "MON", "MONDAY"],
+    "Tuesday": ["Tuesday", "T", "TU", "TUE", "TUESDAY"],
+    "Wednesday": ["Wednesday", "W", "WED", "WEDNESDAY"],
+    "Thursday": ["Thursday", "TH", "H", "R", "THU", "THUR", "THURS", "THURSDAY"],
+    "Friday": ["Friday", "F", "FRI", "FRIDAY"],
+    "Saturday": ["Saturday", "S", "SAT", "SATURDAY"],
 }
-def normalize_day_code(v: str) -> str:
-    k = (v or "").strip().upper()
-    return DAY_MAP_CODE.get(k, k)
+
+TIME_BANDS = [
+    "07:30 – 09:00",
+    "09:15 – 10:45",
+    "11:00 – 12:30",
+    "12:45 – 14:15",
+    "14:30 – 16:00",
+    "16:15 – 17:45",
+    "18:00 – 19:30",
+]
+
+DEFAULT_OPEN_DAYS_MANILA = ["Thursday", "Friday", "Saturday"]
+DEFAULT_OPEN_DAYS_LAGUNA = ["Monday", "Tuesday", "Wednesday", "Saturday"]
+
+
+def day_aliases(day_full: str) -> List[str]:
+    """Return all code/name variants for a day: 'Monday' -> ['Monday','M','MON',...]"""
+    return DAY_ALIASES.get(day_full, [day_full])
+
+
+def default_open_days_for_campus(campus_name: str) -> List[str]:
+    n = (campus_name or "").lower()
+    # Laguna variants
+    if "laguna" in n or "canlubang" in n or "biñan" in n or "binan" in n:
+        return DEFAULT_OPEN_DAYS_LAGUNA
+    # Default to Manila if not Laguna
+    return DEFAULT_OPEN_DAYS_MANILA
+
+
+def _t4(v: Any) -> Optional[str]:
+    """Normalize time to 'HHMM' (e.g. '7:30' -> '0730')."""
+    if v is None:
+        return None
+    s = "".join(ch for ch in str(v) if ch.isdigit())
+    if len(s) == 0:
+        return None
+    if len(s) < 4:
+        s = ("0000" + s)[-4:]
+    return s[:4]
+
+
+def fmt_pair(t: Any) -> str:
+    """Format 'HHMM' -> 'HH:MM'; return '' if malformed."""
+    s = _t4(t)
+    if not s or len(s) != 4:
+        return ""
+    h, m = s[:2], s[2:]
+    try:
+        return f"{int(h):02d}:{m}"
+    except Exception:
+        return ""
+
+
+def band_of(start: Any, end: Any) -> str:
+    """Return 'HH:MM – HH:MM' or '' if either side is missing."""
+    a, b = fmt_pair(start), fmt_pair(end)
+    return f"{a} – {b}" if (a and b) else ""
+
 
 async def _rooms_available_for_slot(
     campus_id: str,
@@ -1699,173 +1753,140 @@ async def _rooms_available_for_slot(
     min_capacity: Optional[int] = None,
     exclude_schedule_ids: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
-    # --- helpers -------------------------------------------------------------
-    def t4(v: Optional[str]) -> Optional[str]:
-        if not v:
-            return None
-        d = re.sub(r"\D+", "", str(v))
-        if len(d) < 4:
-            d = ("0000" + d)[-4:]
-        return d[:4]
-
-    DAY_MAP_CODE = {
-        "MONDAY": "M", "MON": "M", "M": "M",
-        "TUESDAY": "T", "TUE": "T", "TU": "T", "T": "T",
-        "WEDNESDAY": "W", "WED": "W", "W": "W",
-        "THURSDAY": "TH", "THU": "TH", "H": "TH", "R": "TH", "TH": "TH",
-        "FRIDAY": "F", "FRI": "F", "F": "F",
-        "SATURDAY": "S", "SAT": "S", "SA": "S", "S": "S",
-    }
-    def normalize_day_code(v: str) -> str:
-        k = (v or "").strip().upper()
-        return DAY_MAP_CODE.get(k, k)
-
-    def day_codes_from(raw: Any) -> set[str]:
-        """Parse things like 'MWF', 'TTh', 'M TH' -> {'M','W','F'} or {'T','TH'}."""
-        if not raw:
-            return set()
-        if isinstance(raw, list):
-            raw = " ".join(str(x or "") for x in raw)
-        s = re.sub(r"[,/|-]+", " ", str(raw or "").upper())
-        s = re.sub(r"\s+", "", s)
-        codes = set()
-        i = 0
-        while i < len(s):
-            ch = s[i]
-            if ch == "T":
-                if i + 1 < len(s) and s[i + 1] == "H":
-                    codes.add("TH"); i += 2; continue
-                codes.add("T"); i += 1; continue
-            if ch in ("H", "R"):
-                codes.add("TH"); i += 1; continue
-            if ch in ("M", "W", "F", "S"):
-                codes.add(ch); i += 1; continue
-            i += 1
-        return codes
-
-    def overlaps(a1: str, a2: str, b1: str, b2: str) -> bool:
-        # strict overlap for half-open intervals [start, end)
-        return max(a1, b1) < min(a2, b2)
-
-    def win_covers(win: Any, a_start: str, a_end: str) -> bool:
-        """
-        Accepts win as:
-          {"start":"0730","end":"0900"} OR ["0730","0900"] OR "0730-0900"
-        Returns True if [a_start,a_end) is fully inside window.
-        """
-        if isinstance(win, dict):
-            ws, we = t4(win.get("start")), t4(win.get("end"))
-        elif isinstance(win, (list, tuple)) and len(win) >= 2:
-            ws, we = t4(win[0]), t4(win[1])
-        else:
-            m = re.match(r"(\d{1,4})\D+(\d{1,4})", str(win or ""))
-            ws, we = (t4(m.group(1)) if m else None, t4(m.group(2)) if m else None)
-        if not (ws and we):
-            return False
-        return ws <= a_start and a_end <= we
+    """
+    Return rooms that:
+      * belong to the given campus
+      * match required_type (if provided)
+      * match min_capacity EXACTLY (sections.enrollment_cap == rooms.capacity)
+      * have this specific day + time slot allowed in Room Allocation
+        (via section_schedules availability placeholders or campus defaults)
+      * are not already booked by another section at an overlapping slot.
+    """
 
     # --- normalize inputs ----------------------------------------------------
-    target_code = normalize_day_code(day)       # "M","T","W","TH","F","S"
-    start = t4(start); end = t4(end)
+    day_full = normalize_day(day)  # this is already defined earlier in this file
+    start4 = _t4(start)
+    end4 = _t4(end)
     exclude_schedule_ids = exclude_schedule_ids or []
-    if not (target_code and start and end):
+
+    if not (day_full and start4 and end4):
         return []
 
-    # --- candidate rooms (campus + optional type + exact cap) ----------------
+    # --- 1) Candidate rooms in campus, filtered by type + exact capacity ----
     room_q: Dict[str, Any] = {"campus_id": campus_id}
     if required_type:
+        # section_schedules.room_type must match rooms.room_type
         room_q["room_type"] = required_type
     if min_capacity is not None:
-        # exact equality: sections.enrollment_cap == rooms.capacity
+        # EXACT equality: sections.enrollment_cap == rooms.capacity
         room_q["capacity"] = min_capacity
 
-    rooms_list = [r async for r in db[COL_ROOMS].find(room_q, {"_id": 0})]
-    if not rooms_list:
+    rooms: List[Dict[str, Any]] = [
+        r async for r in db[COL_ROOMS].find(
+            room_q,
+            {
+                "_id": 0,
+                "room_id": 1,
+                "room_number": 1,
+                "room_type": 1,
+                "capacity": 1,
+                "building": 1,
+                "campus_id": 1,
+                "status": 1,
+            },
+        )
+    ]
+    if not rooms:
         return []
-    room_ids = [r["room_id"] for r in rooms_list]
 
-    # --- AVAILABILITY FILTER (Room Allocation) -------------------------------
-    # We consider a room "known-open" for a slot only if we find availability
-    # data for that day and a window that fully covers [start,end).
-    # Sources supported:
-    #   1) collection "room_availability" with docs per room/day
-    #   2) embedded "rooms.availability": {"Monday":[{"start":"0730","end":"0900"}, ...], ...}
-    open_ok: set[str] = set()
-    has_day_info: set[str] = set()  # rooms for which we found availability windows for the TARGET day
+    room_ids = [r["room_id"] for r in rooms]
 
-    # 1) availability in external collections
-    for coll_name in ("room_availability", "roomallocation", "room_allocations"):
-        try:
-            if await db[coll_name].count_documents({"room_id": {"$in": room_ids}}, limit=1):
-                day_variants = {
-                    target_code,
-                    normalize_day(day),
-                    target_code.lower(),
-                    target_code.upper(),
-                    normalize_day(day).lower(),
-                }
-                cur = db[coll_name].find(
-                    {"room_id": {"$in": room_ids}},
-                    {"_id": 0, "room_id": 1, "day": 1, "windows": 1, "slots": 1, "availability": 1},
-                )
-                async for av in cur:
-                    rid = av.get("room_id")
-                    if not rid:
-                        continue
-                    dval = str(av.get("day") or "").strip()
-                    dcode = normalize_day_code(dval)
-                    dfull = normalize_day(dval)
-                    # only treat as "known" if the doc is for the target day
-                    if dval and (dval in day_variants or dcode in day_variants or dfull in day_variants):
-                        has_day_info.add(rid)
-                        windows = av.get("windows") or av.get("slots") or av.get("availability") or []
-                        if any(win_covers(w, start, end) for w in windows):
-                            open_ok.add(rid)
-                # don’t break here — some rooms may live in another collection alias
-        except Exception:
-            pass
+    # --- 2) Availability placeholders for these rooms on this *day* ---------
+    # These are the AVAIL-* rows from Room Allocation:
+    #   section_id is ABSENT -> "this slot is open for this room".
+    from collections import defaultdict
+    avail_pairs_by_room: Dict[str, Set[Tuple[str, str]]] = defaultdict(set)
 
-    # 2) fallback: embedded availability in the rooms doc
-    for r in rooms_list:
-        rid = r.get("room_id")
-        avail = r.get("availability")
-        if not rid or not avail:
+    avail_cur = db[COL_SCHEDS].find(
+        {
+            "room_id": {"$in": room_ids},
+            "section_id": {"$exists": False},              # availability rows only
+            "day": {"$in": day_aliases(day_full)},         # M / MON / Monday, etc.
+        },
+        {"_id": 0, "room_id": 1, "start_time": 1, "end_time": 1},
+    )
+
+    async for a in avail_cur:
+        rid = a.get("room_id")
+        if not rid:
             continue
-        day_key = normalize_day(day)
-        windows = avail.get(day_key) or avail.get(target_code) or []
-        if windows:  # only mark "known" if this room has a window list for the target day
-            has_day_info.add(rid)
-            if any(win_covers(w, start, end) for w in windows):
-                open_ok.add(rid)
+        st = _t4(a.get("start_time"))
+        et = _t4(a.get("end_time"))
+        if not (st and et):
+            continue
+        # Each pair represents one available band for this day
+        avail_pairs_by_room[rid].add((st, et))
 
-    # Enforce availability ONLY for rooms we actually have windows for on the target day.
-    if has_day_info:
-        rooms_list = [r for r in rooms_list if (r["room_id"] in open_ok) or (r["room_id"] not in has_day_info)]
+    # Campus default open days (same logic as Room Allocation grid)
+    campus = await campus_meta(campus_id)
+    default_days = default_open_days_for_campus(campus.get("campus_name", ""))
 
+    # Convert our start/end into the canonical band string ("07:30 – 09:00")
+    band_str = band_of(start4, end4)
+    band_is_standard = band_str in TIME_BANDS
 
-    if not rooms_list:
+    # Decide which rooms are allowed *by availability rules*
+    allowed_room_ids: Set[str] = set()
+    for rid in room_ids:
+        pairs_for_day = avail_pairs_by_room.get(rid)
+
+        if pairs_for_day:
+            # Room has explicit availability rows for this day:
+            # only allow if this exact (start,end) pair exists.
+            if (start4, end4) in pairs_for_day:
+                allowed_room_ids.add(rid)
+        else:
+            # No explicit availability rows for this day:
+            # fall back to campus default open days (and only for standard bands).
+            if day_full in default_days and band_is_standard:
+                allowed_room_ids.add(rid)
+
+    if not allowed_room_ids:
         return []
 
-    # --- BUSY FILTER (existing schedules that overlap) -----------------------
-    sched_q: Dict[str, Any] = {
-        "room_id": {"$in": [r["room_id"] for r in rooms_list]},
-        "schedule_id": {"$nin": exclude_schedule_ids},
+    # Narrow candidate rooms to those that pass the availability check
+    rooms = [r for r in rooms if r["room_id"] in allowed_room_ids]
+    if not rooms:
+        return []
+
+    allowed_ids = [r["room_id"] for r in rooms]
+
+    # --- 3) BUSY FILTER: exclude rooms already booked in this slot ----------
+    # A room is BUSY if there is any section_schedules row with:
+    #   - section_id present
+    #   - same day (any alias)
+    #   - overlapping time [start4,end4)
+    conflict_q: Dict[str, Any] = {
+        "room_id": {"$in": allowed_ids},
+        "section_id": {"$exists": True},
+        "day": {"$in": day_aliases(day_full)},
+        "start_time": {"$lt": end4},
+        "end_time": {"$gt": start4},
     }
+    if exclude_schedule_ids:
+        conflict_q["schedule_id"] = {"$nin": exclude_schedule_ids}
 
-    busy_set: set[str] = set()
+    busy_room_ids: Set[str] = set()
     async for s in db[COL_SCHEDS].find(
-        sched_q, {"_id": 0, "room_id": 1, "day": 1, "start_time": 1, "end_time": 1}
+        conflict_q,
+        {"_id": 0, "room_id": 1},
     ):
-        codes = day_codes_from(s.get("day"))
-        if target_code not in codes:
-            continue
-        s_start = t4(s.get("start_time"))
-        s_end   = t4(s.get("end_time"))
-        if s_start and s_end and overlaps(start, end, s_start, s_end):
-            busy_set.add(s["room_id"])
+        rid = s.get("room_id")
+        if rid:
+            busy_room_ids.add(rid)
 
-    return [r for r in rooms_list if r["room_id"] not in busy_set]
-
+    # --- 4) Final list: available-by-timeslot AND not busy -------------------
+    return [r for r in rooms if r["room_id"] not in busy_room_ids]
 
 # ---------- GET ----------
 @router.get("/courseofferings")

@@ -77,13 +77,13 @@ function toAbbrevDay(d?: string | null): DayAbbr | "" {
   const s = String(d || "").trim();
   if (!s) return "";
   const key = s.replace(/\./g, "").replace(/\s+/g, "").toUpperCase();
+
   if (["M", "MON", "MONDAY"].includes(key)) return "M";
   if (["T", "TU", "TUE", "TUES", "TUESDAY"].includes(key)) return "T";
   if (["W", "WED", "WEDNESDAY"].includes(key)) return "W";
-  if (["T", "THU", "THUR", "THURS", "THURSDAY"].includes(key)) return "H";
+  if (["H", "TH", "THU", "THUR", "THURS", "THURSDAY"].includes(key)) return "H";
   if (["F", "FRI", "FRIDAY"].includes(key)) return "F";
   if (["S", "SA", "SAT", "SATURDAY"].includes(key)) return "S";
-  // already full name?
   if ((DAYS as readonly string[]).includes(s)) return DAY_FULL_TO_ABBR[s as Day];
   return "";
 }
@@ -110,21 +110,23 @@ const filterRoomsByCap = (options: RoomOption[], cap?: number | null) => {
 
 const cls = (...s: (string | false | undefined)[]) => s.filter(Boolean).join(" ");
 
-// Display: "HH:MM" or "—"
-const fmtTime = (s?: string) => {
-  const t = (s || "").replace(/\D/g, "");
-  if (t.length !== 4) return s || "—";
-  return `${t.slice(0, 2)}:${t.slice(2)}`;
+// Allow user to type anything; coerce to exactly HHMM on save
+const toHHMM = (s?: string | number | null) => {
+  const raw = String(s ?? "").trim();
+  const t = raw.replace(/\D/g, "").slice(0, 4);
+
+  if (t.length === 4) return t;          // H1H2M1M2
+  if (t.length === 3) return `0${t}`;    // HMM -> 0HMM
+  if (t.length === 2) return `${t}00`;   // HH  -> HH00
+  if (t.length === 1) return `0${t}00`;  // H   -> 0H00
+  return "";
 };
 
-// Allow user to type anything; coerce to exactly HHMM on save
-const toHHMM = (s?: string) => {
-  const t = (s || "").replace(/\D/g, "").slice(0, 4);
-  if (t.length === 4) return t;          // H1H2M1M2
-  if (t.length === 3) return `0${t}`;    // H M M -> 0HMM
-  if (t.length === 2) return `${t}00`;   // HH   -> HH00
-  if (t.length === 1) return `0${t}00`;  // H    -> 0H00
-  return "";
+// Display: always normalize to HHMM then show "HH:MM"
+const fmtTime = (s?: string | number | null) => {
+  const hhmm = toHHMM(s);
+  if (!hhmm) return "—";
+  return `${hhmm.slice(0, 2)}:${hhmm.slice(2)}`;
 };
 
 const GE_TIME_SLOTS = [
@@ -174,6 +176,138 @@ const geFindByTimes = (start?: string | null, end?: string | null) => {
 const geCurrentLabel = (slot?: { start_time?: string | null; end_time?: string | null }) => {
   const hit = geFindByTimes(slot?.start_time, slot?.end_time);
   return hit ? hit.label : GE_PLACEHOLDER;
+};
+// Format a slot as "HH:MM - HH:MM" for display when it's not one of the standard GE_TIME_SLOTS
+const geCustomLabel = (slot?: { start_time?: string | null; end_time?: string | null }) => {
+  const st = slot?.start_time ? fmtTime(slot.start_time) : "";
+  const en = slot?.end_time ? fmtTime(slot.end_time) : "";
+  if (!st && !en) return "";
+  if (st && en) return `${st} - ${en}`;
+  return st || en || "";
+};
+
+// Parse free-text into start/end HHMM (accepts "07:30 - 09:00", "0730-0900", "07300900", etc.)
+const parseTimeRangeFromText = (
+  text: string
+): { start_time: string; end_time: string } | undefined => {
+  const raw = (text || "").trim();
+  if (!raw) return undefined;
+
+  // Case 1: split by dash
+  const parts = raw.split(/[-–—]/);
+  if (parts.length >= 2) {
+    const s = toHHMM(parts[0]);
+    const e = toHHMM(parts[1]);
+    if (s.length === 4 && e.length === 4) return { start_time: s, end_time: e };
+  }
+
+  // Case 2: just digits → 8-digit "HHMMHHMM"
+  const digits = raw.replace(/\D/g, "");
+  if (digits.length === 8) {
+    const s = digits.slice(0, 4);
+    const e = digits.slice(4, 8);
+    return { start_time: s, end_time: e };
+  }
+
+  // Otherwise, leave it unchanged (we won't override slot times)
+  return undefined;
+};
+
+type TimeBandInputProps = {
+  slot?: { start_time?: string | null; end_time?: string | null };
+  onChange: (update: { start_time?: string; end_time?: string }) => void;
+  className?: string;
+  placeholder?: string;
+};
+
+/**
+ * Searchable + free-text time band input:
+ * - shows a text field
+ * - filters GE_TIME_SLOTS as you type
+ * - can also accept custom ranges not in GE_TIME_SLOTS
+ */
+const TimeBandInput: React.FC<TimeBandInputProps> = ({
+  slot,
+  onChange,
+  className,
+  placeholder = "e.g. 07:30 - 09:00",
+}) => {
+  const [open, setOpen] = useState(false);
+  const [text, setText] = useState<string>("");
+
+  // Sync when slot changes from the outside (e.g., opening a different row)
+  useEffect(() => {
+    const label = geCurrentLabel(slot);
+    if (label !== GE_PLACEHOLDER) {
+      setText(label);
+    } else {
+      setText(geCustomLabel(slot));
+    }
+  }, [slot?.start_time, slot?.end_time]);
+
+  const filtered = useMemo(() => {
+    const q = text.toLowerCase();
+    return GE_TIME_SLOTS.filter((t) => t.label.toLowerCase().includes(q));
+  }, [text]);
+
+  const pick = (label: string) => {
+    const hit = geFindByLabel(label);
+    if (!hit) return;
+    setText(label);
+    onChange({ start_time: hit.start, end_time: hit.end });
+    setOpen(false);
+  };
+
+  const handleBlur = () => {
+    // allow click on dropdown items
+    setTimeout(() => setOpen(false), 120);
+
+    const parsed = parseTimeRangeFromText(text);
+    if (parsed) {
+      onChange(parsed);
+    }
+  };
+
+  return (
+    <div className={cls("relative inline-block min-w-[140px] whitespace-nowrap", className)}>
+      <input
+        className={cls(
+          "w-full rounded-lg border border-gray-300 bg-white px-2.5 py-2 text-sm shadow-sm",
+          "focus:outline-none focus:ring-2 focus:ring-emerald-200 focus:border-emerald-300"
+        )}
+        value={text}
+        placeholder={placeholder}
+        onFocus={() => {
+          setOpen(true);
+          if (!text) {
+            const label = geCurrentLabel(slot);
+            if (label !== GE_PLACEHOLDER) setText(label);
+          }
+        }}
+        onChange={(e) => {
+          setText(e.target.value);
+          setOpen(true);
+        }}
+        onBlur={handleBlur}
+      />
+
+      {open && filtered.length > 0 && (
+        <div className="absolute left-0 right-0 z-20 mt-1 max-h-48 overflow-auto rounded-md border border-slate-200 bg-white shadow-lg">
+          {filtered.map((t) => (
+            <button
+              key={t.label}
+              type="button"
+              onMouseDown={(e) => e.preventDefault()} // prevent input blur
+              onClick={() => pick(t.label)}
+              className="block w-full px-2 py-1 text-left text-sm hover:bg-emerald-50"
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 };
 
 // A slot can only receive a room if it has day + full HHMM times
@@ -2077,33 +2211,29 @@ if (isGE) {
 
                                           </td>
                                           <td className="px-3 py-2 border border-gray-200 bg-white">
-                                          {ge ? (
-                                            <div className="inline-block min-w-[140px] whitespace-nowrap">
-                                              <SelectBox
-                                              value={geCurrentLabel(editing?.draft.slot1)}
-                                              options={[GE_PLACEHOLDER, ...GE_TIME_SLOTS.map(t => t.label)]}
-                                              onChange={(label: string) => {
-                                                if (label === GE_PLACEHOLDER) {
-                                                  setEditing(p => p && ({
-                                                    ...p,
-                                                    draft: { ...p.draft, slot1: { ...(p.draft.slot1 || {}), start_time: "", end_time: "" } }
-                                                  }));
-                                                  return;
+                                            {ge ? (
+                                              <TimeBandInput
+                                                slot={editing?.draft.slot1}
+                                                onChange={(update) =>
+                                                  setEditing((p) =>
+                                                    p && {
+                                                      ...p,
+                                                      draft: {
+                                                        ...p.draft,
+                                                        slot1: {
+                                                          ...(p.draft.slot1 || {}),
+                                                          ...update, // { start_time, end_time }
+                                                        },
+                                                      },
+                                                    }
+                                                  )
                                                 }
-                                                const hit = geFindByLabel(label);
-                                                setEditing(p => p && ({
-                                                  ...p,
-                                                  draft: { ...p.draft, slot1: { ...(p.draft.slot1 || {}), start_time: hit?.start || "", end_time: hit?.end || "" } }
-                                                }));
-                                              }}
-                                              className="w-auto whitespace-nowrap"
-                                            />
-                                            </div>
-                                          ) : (
-                                            fmtTime(r.slot1?.start_time)
-                                          )}
-
+                                              />
+                                            ) : (
+                                              fmtTime(r.slot1?.start_time)
+                                            )}
                                           </td>
+
                                           <td className="px-3 py-2 border border-gray-200 bg-white">
                                           {ge ? (
                                             <div className="text-sm">{fmtTime(editing?.draft.slot1?.end_time) || "—"}</div>
@@ -2157,32 +2287,27 @@ if (isGE) {
                                             )}
                                           </td>
                                           <td className="px-3 py-2 border border-gray-200 bg-white">
-                                          {ge ? (
-                                            <div className="inline-block min-w-[140px] whitespace-nowrap">
-                                            <SelectBox
-                                              value={geCurrentLabel(editing?.draft.slot2)}
-                                              options={[GE_PLACEHOLDER, ...GE_TIME_SLOTS.map(t => t.label)]}
-                                              onChange={(label: string) => {
-                                                if (label === GE_PLACEHOLDER) {
-                                                  setEditing(p => p && ({
-                                                    ...p,
-                                                    draft: { ...p.draft, slot2: { ...(p.draft.slot2 || {}), start_time: "", end_time: "" } }
-                                                  }));
-                                                  return;
+                                            {ge ? (
+                                              <TimeBandInput
+                                                slot={editing?.draft.slot2}
+                                                onChange={(update) =>
+                                                  setEditing((p) =>
+                                                    p && {
+                                                      ...p,
+                                                      draft: {
+                                                        ...p.draft,
+                                                        slot2: {
+                                                          ...(p.draft.slot2 || {}),
+                                                          ...update, // { start_time, end_time }
+                                                        },
+                                                      },
+                                                    }
+                                                  )
                                                 }
-                                                const hit = geFindByLabel(label);
-                                                setEditing(p => p && ({
-                                                  ...p,
-                                                  draft: { ...p.draft, slot2: { ...(p.draft.slot2 || {}), start_time: hit?.start || "", end_time: hit?.end || "" } }
-                                                }));
-                                              }}
-                                              className="!min-w-0 w-full max-w-full"
-                                            />
-                                            </div>
-                                          ) : (
-                                            fmtTime(r.slot2?.start_time)
-                                          )}
-
+                                              />
+                                            ) : (
+                                              fmtTime(r.slot2?.start_time)
+                                            )}
                                           </td>
                                           <td className="px-3 py-2 border border-gray-200 bg-white">
                                           {ge ? (
