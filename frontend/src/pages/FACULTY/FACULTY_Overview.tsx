@@ -1,6 +1,6 @@
 // frontend/src/pages/FACULTY/FAC_Overview.tsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { Send as SendIcon, Calendar as CalIcon, X, BookOpen as SyllabusIcon } from "lucide-react";
+import { Send as SendIcon, X, BookOpen as SyllabusIcon } from "lucide-react";
 
 import TopBar from "../../component/TopBar";
 import Tabs from "../../component/Tabs";
@@ -159,12 +159,18 @@ export default function FAC_Overview() {
   );
 }
 /* =========================================
-   1) Stat Cards (unchanged)
+   1) Stat Cards (MODIFIED)
    ========================================= */
 function StatCards({ summary }: { summary: any }) {
+  // --- *** FIX: Calculate progress for Course Prep *** ---
+  const prepValue = summary?.course_preps ?? "0/0";
+  const [prepCurrent, prepMax] = prepValue.split('/').map(Number);
+  // Handle division by zero if max preps is 0
+  const prepProgress = (prepMax > 0) ? Math.round((prepCurrent / prepMax) * 100) : 0;
+
   const cards = [
     { title: "Teaching Units", value: summary?.teaching_units ?? "0/0", progress: summary?.percent ?? 0 },
-    { title: "Course Prep", value: summary?.course_preps ?? "0/0", progress: 100 },
+    { title: "Course Prep", value: prepValue, progress: prepProgress }, // <-- Use calculated progress
   ];
 
   return (
@@ -198,14 +204,17 @@ function StatCards({ summary }: { summary: any }) {
    2) Enhanced Teaching Load (Calendar/List + Modal)
    ========================================= */
 
+// --- *** MODIFIED: Add "TBA" as a valid day *** ---
 type DayLong =
   | "Monday"
   | "Tuesday"
   | "Wednesday"
   | "Thursday"
   | "Friday"
-  | "Saturday";
+  | "Saturday"
+  | "TBA"; // <-- NEW
 
+// --- *** MODIFIED: Add "TBA" to list of days *** ---
 const DAY_ORDER: DayLong[] = [
   "Monday",
   "Tuesday",
@@ -213,51 +222,39 @@ const DAY_ORDER: DayLong[] = [
   "Thursday",
   "Friday",
   "Saturday",
+  "TBA", // <-- NEW
 ];
 
+// --- *** NEW: This type matches the backend (Python) output *** ---
 type TLItem = {
+  course_code: string;
+  course_title: string;
+  section: string;
+  units: number;
+  mode: string;
+  day1?: string;
+  room1?: string;
+  time1?: string;
+  day2?: string;
+  room2?: string;
+  time2?: string;
+  syllabus?: string;
+};
+
+// --- *** NEW: This type is for the Calendar items *** ---
+type TLItemForCalendar = {
   code: string;
   title: string;
   sec: string;
   units: number;
-  campus: string;
-  mode: "Online" | "Onsite" | "Hybrid" | "Classroom" | string;
-  room: string | "Online";
-  time: string; // e.g., "11:00 – 12:30"
-  syllabus?: string; 
+  mode: string;
+  room: string; // The specific room for this day
+  time: string; // The specific time for this day
+  syllabus?: string;
+  // Store original item for modal
+  originalItem: TLItem;
 };
 
-type TL = { day: DayLong; items: TLItem[] };
-
-function makeTeachingLoad(dataArray: any[]): TL[] {
-  const byDay: Record<DayLong, TLItem[]> = {
-    Monday: [],
-    Tuesday: [],
-    Wednesday: [],
-    Thursday: [],
-    Friday: [],
-    Saturday: [],
-  };
-
-  (dataArray || []).forEach((c: any) => {
-    const day = (c.day || "") as DayLong;
-    if (!DAY_ORDER.includes(day)) return;
-
-    byDay[day].push({
-      code: c.course_code ?? "",
-      title: c.course_title ?? "",
-      sec: c.section ?? "",
-      units: Number(c.units) || 0,
-      campus: c.campus || "—",
-      mode: c.mode || "Online",
-      room: c.room || "Online",
-      time: c.time || "",
-      syllabus: c.syllabus || "",   // <-- NEW
-    });
-  });
-
-  return DAY_ORDER.map((d) => ({ day: d, items: byDay[d] }));
-}
 
 const TIME_BANDS_LABEL = [
   "7:30 – 9:00",
@@ -291,9 +288,10 @@ function hmToMinutes(hm: string): number | null {
   return h * 60 + min;
 }
 
-type Placed = { day: DayLong; row: number; data: TLItem };
+type Placed = { day: DayLong; row: number; data: TLItemForCalendar };
 
-function placeItems(data: TL[]): Placed[] {
+// --- *** NEW: This function splits the combined rows for the calendar *** ---
+function placeItems(teachingLoad: TLItem[]): Placed[] {
   const out: Placed[] = [];
 
   // Build band ranges from your canonical labels, e.g. "7:30 – 9:00"
@@ -303,14 +301,17 @@ function placeItems(data: TL[]): Placed[] {
     const endMin = hmToMinutes(endPart || "") ?? startMin;
     return { startMin: startMin ?? 0, endMin: endMin ?? (startMin ?? 0), idx };
   });
-
-  data.forEach((d) =>
-    d.items.forEach((it) => {
-      const rawStart = String(it.time || "").split("–")[0].trim(); // e.g. "12:45"
+  
+  (teachingLoad || []).forEach((it) => {
+    // Helper function to place a single schedule item
+    const place = (day: string | undefined, time: string | undefined, room: string | undefined) => {
+      if (!day || day === "TBA" || !time || time === "TBA" || !DAY_ORDER.includes(day as DayLong)) {
+        return; // Don't place on calendar
+      }
+      const rawStart = String(time || "").split("–")[0].trim();
       const startMin = hmToMinutes(rawStart);
-
+      
       let rowIdx = 0;
-
       if (startMin != null) {
         // 1) try to find a band whose [start,end) range contains this time
         let match = bandRanges.find((b) => startMin >= b.startMin && startMin < b.endMin)?.idx;
@@ -328,22 +329,40 @@ function placeItems(data: TL[]): Placed[] {
           }
           match = bestIdx;
         }
-
         rowIdx = match ?? 0;
       }
 
-      out.push({ day: d.day, row: rowIdx, data: it });
-    })
-  );
+      out.push({
+        day: day as DayLong,
+        row: rowIdx,
+        data: {
+          code: it.course_code,
+          title: it.course_title,
+          sec: it.section,
+          units: it.units,
+          mode: it.mode,
+          room: room || "Online",
+          time: time,
+          syllabus: it.syllabus,
+          originalItem: it, // Pass the full original item
+        },
+      });
+    };
+
+    // Place both Day 1 and Day 2
+    place(it.day1, it.time1, it.room1);
+    place(it.day2, it.time2, it.room2);
+  });
 
   return out;
 }
 
 
-type CellGroup = { day: DayLong; row: number; items: TLItem[] };
+type CellGroup = { day: DayLong; row: number; items: TLItemForCalendar[] };
 function groupPlacedByCell(placed: Placed[]): CellGroup[] {
   const map = new Map<string, CellGroup>();
   for (const p of placed) {
+    if (p.day === "TBA") continue; 
     const key = `${p.day}|${p.row}`;
     if (!map.has(key)) map.set(key, { day: p.day, row: p.row, items: [] });
     map.get(key)!.items.push(p.data);
@@ -356,7 +375,7 @@ function groupPlacedByCell(placed: Placed[]): CellGroup[] {
 
 const cls = (...s: (string | false | undefined)[]) => s.filter(Boolean).join(" ");
 
-const ClassBlock = ({ onClick, it }: { onClick?: () => void; it: TLItem }) => (
+const ClassBlock = ({ onClick, it }: { onClick?: () => void; it: TLItemForCalendar }) => (
   <button
     onClick={onClick}
     className={cls(
@@ -372,16 +391,30 @@ const ClassBlock = ({ onClick, it }: { onClick?: () => void; it: TLItem }) => (
 );
 
 type TeachingLoadEnhancedProps = {
-  teachingLoad: any[];
+  teachingLoad: TLItem[]; // <-- Use the new type
   term: any;
 };
 
+// --- *** NEW: Headers for the new list view *** ---
+const LIST_HEADERS = [
+  "Course Code",
+  "Course Title",
+  "Section",
+  "Units",
+  "Mode",
+  "Day1 / Day2",
+  "Room1 / Room2",
+  "Time1 / Time2",
+  "Syllabus",
+];
+
 function TeachingLoadEnhanced({ teachingLoad, term }: TeachingLoadEnhancedProps) {
   const [view, setView] = useState<"Calendar" | "List">("Calendar");
-  const [modal, setModal] = useState<{ day: DayLong; item: TLItem } | null>(null);
+  const [modal, setModal] = useState<{ day: DayLong; item: TLItemForCalendar } | null>(null);
+  const [isAccepted, setIsAccepted] = useState(false);
 
-  const TLData = useMemo(() => makeTeachingLoad(teachingLoad || []), [teachingLoad]);
-  const placed = useMemo(() => placeItems(TLData), [TLData]);
+  // --- *** MODIFIED: Remove TLData, pass teachingLoad to placeItems *** ---
+  const placed = useMemo(() => placeItems(teachingLoad || []), [teachingLoad]);
   const groups = useMemo(() => groupPlacedByCell(placed), [placed]);
 
   const [showSyllabus, setShowSyllabus] = useState(false);
@@ -393,6 +426,7 @@ function TeachingLoadEnhanced({ teachingLoad, term }: TeachingLoadEnhancedProps)
     : u.includes("?usp=sharing") ? u.replace("?usp=sharing", "/preview")
     : u;
 
+  // --- *** MODIFIED: openSyllabus now takes TLItem *** ---
   const openSyllabus = (it: TLItem) => {
     setSyllabusUrl(it.syllabus || "");
     setShowSyllabus(true);
@@ -407,28 +441,43 @@ function TeachingLoadEnhanced({ teachingLoad, term }: TeachingLoadEnhancedProps)
             <h3 className="text-lg font-bold text-neutral-900">Teaching Load Summary</h3>
             <p className="text-sm text-neutral-500">{term?.term_label || ""}</p>
           </div>
-          <div className="inline-flex gap-2">
-            {(["Calendar", "List"] as const).map((label) => {
-              const active = view === label;
-              return (
-                <button
-                  key={label}
-                  type="button"
-                  onClick={() => setView(label)}
-                  aria-pressed={active}
-                  className={cls(
-                    "inline-flex h-9 min-w-[120px] items-center justify-center rounded-lg px-4 text-sm font-medium",
-                    active
-                      ? "bg-emerald-600 text-white"
-                      : "bg-neutral-100 text-neutral-700 hover:bg-neutral-200"
-                  )}
-                >
-                  {label}
-                </button>
-              );
-            })}
-          </div>
+          <div className="flex gap-2">
+          {["Calendar", "List"].map((v) => (
+            <button
+              key={v}
+              type="button"
+              onClick={() => setView(v as any)}
+              className={cls(
+                "inline-flex h-9 items-center justify-center rounded-lg px-4 text-sm font-medium shadow",
+                view === v
+                  ? "bg-emerald-700 text-white shadow-inner"
+                  : "bg-neutral-100 text-neutral-700 hover:bg-neutral-200 active:translate-y-[0.5px]"
+              )}
+            >
+              {v}
+            </button>
+          ))}
+
+          <button
+            type="button"
+            onClick={() => {
+              console.log("ACCEPT_SCHEDULE");
+              setIsAccepted(true);
+              // You would also call an API endpoint here
+            }}
+            disabled={isAccepted}
+            className={cls(
+              "inline-flex h-9 items-center justify-center rounded-lg px-4 text-sm font-medium shadow",
+              "focus:outline-none focus:ring-2 focus:ring-emerald-600/40",
+              isAccepted
+                ? "bg-neutral-300 text-neutral-600 cursor-not-allowed"
+                : "bg-blue-700 text-white hover:bg-blue-800 active:translate-y-[0.5px]"
+            )}
+          >
+            {isAccepted ? "Accepted" : "Accept"}
+          </button>
         </div>
+      </div>
 
         {view === "Calendar" ? (
           <div className="overflow-x-auto">
@@ -437,7 +486,8 @@ function TeachingLoadEnhanced({ teachingLoad, term }: TeachingLoadEnhancedProps)
                 <div className="flex items-center justify-center px-3 py-2 text-sm font-semibold">
                   Time
                 </div>
-                {DAY_ORDER.map((d) => (
+                {/* --- MODIFIED: Do not render "TBA" column header --- */}
+                {DAY_ORDER.filter(d => d !== "TBA").map((d) => (
                   <div
                     key={d}
                     className="flex items-center justify-center px-3 py-2 text-sm font-semibold"
@@ -459,7 +509,8 @@ function TeachingLoadEnhanced({ teachingLoad, term }: TeachingLoadEnhancedProps)
                     >
                       {band}
                     </div>
-                    {DAY_ORDER.map((_, c) => (
+                     {/* --- MODIFIED: Do not render "TBA" column cells --- */}
+                    {DAY_ORDER.filter(d => d !== "TBA").map((_, c) => (
                       <div
                         key={`${c}-${r}`}
                         className="border border-neutral-300"
@@ -493,87 +544,77 @@ function TeachingLoadEnhanced({ teachingLoad, term }: TeachingLoadEnhancedProps)
             </div>
           </div>
         ) : (
+           // --- *** MODIFIED: New List View *** ---
           <div className="space-y-6">
-            {TLData.map((day) => (
-              <div key={day.day}>
-                <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-neutral-800">
-                  <CalIcon className="h-4 w-4" /> {day.day}
-                </div>
-                <div className="overflow-x-auto rounded-xl border border-neutral-200">
-                  <table className="min-w-full">
-                    <thead>
-                      <tr className="text-xs text-neutral-500">
-                        {[
-                          "Course Code",
-                          "Course Title",
-                          "Section",
-                          "Units",
-                          "Campus",
-                          "Mode",
-                          "Day",
-                          "Room",
-                          "Time",
-                          "Syllabus", 
-                        ].map((h) => (
-                          <th key={h} className="px-4 py-2 font-medium text-center">
-                            {h}
-                          </th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {day.items.length === 0 ? (
-                        <tr>
-                          <td
-                            colSpan={10}
-                            className="px-4 py-6 text-center text-sm text-neutral-500"
-                          >
-                            No records.
-                          </td>
-                        </tr>
-                      ) : (
-                        day.items.map((it, idx) => (
-                          <tr
-                          key={idx}
-                          className={cls(
-                            "text-sm text-neutral-800",
-                            idx % 2 === 0 ? "bg-white" : "bg-neutral-50"
-                          )}
-                        >
-                          <td className="px-4 py-2 text-center">{it.code}</td>
-                          <td className="px-4 py-2 text-center">{it.title}</td>
-                          <td className="px-4 py-2 text-center">{it.sec}</td>
-                          <td className="px-4 py-2 text-center">{it.units}</td>
-                          <td className="px-4 py-2 text-center">{it.campus}</td>
-                          <td className="px-4 py-2 text-center">{it.mode}</td>
-                          <td className="px-4 py-2 text-center">{day.day[0]}</td>
-                          <td className="px-4 py-2 text-center">{it.room}</td>
-                          <td className="px-4 py-2 text-center">{it.time}</td>
-
-                          {/* Syllabus column */}
-                          <td className="px-4 py-2 text-center">
-                            <button
-                              type="button"
-                              onClick={() => openSyllabus(it)}
-                              className={cls(
-                                "inline-flex items-center justify-center rounded-md border px-2 py-1 text-xs",
-                                "border-emerald-200 bg-emerald-50 hover:bg-emerald-100 active:translate-y-[0.5px]"
-                              )}
-                              title={it.syllabus ? "View syllabus" : "No syllabus uploaded"}
-                              aria-label="View syllabus"
-                            >
-                              <SyllabusIcon className="h-4 w-4" />
-                            </button>
-                          </td>
-                        </tr>
-
-                        ))
+            <div className="overflow-x-auto rounded-xl border border-neutral-200">
+              <table className="min-w-full">
+                <thead>
+                  <tr className="text-xs text-neutral-500">
+                    {LIST_HEADERS.map((h) => (
+                      <th key={h} className="px-4 py-2 font-medium text-center">
+                        {h}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {teachingLoad.length === 0 ? (
+                    <tr>
+                      <td
+                        colSpan={LIST_HEADERS.length}
+                        className="px-4 py-6 text-center text-sm text-neutral-500"
+                      >
+                        No records.
+                      </td>
+                    </tr>
+                  ) : (
+                    teachingLoad.map((it, idx) => (
+                      <tr
+                      key={idx}
+                      className={cls(
+                        "text-sm text-neutral-800",
+                        idx % 2 === 0 ? "bg-white" : "bg-neutral-50"
                       )}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            ))}
+                    >
+                      <td className="px-4 py-2 text-center">{it.course_code}</td>
+                      <td className="px-4 py-2 text-center">{it.course_title}</td>
+                      <td className="px-4 py-2 text-center">{it.section}</td>
+                      <td className="px-4 py-2 text-center">{it.units}</td>
+                      <td className="px-4 py-2 text-center">{it.mode}</td>
+                      <td className="px-4 py-2 text-center">
+                        {it.day1 && it.day1 !== "TBA" ? it.day1 : '—'}
+                        {it.day2 && it.day2 !== "TBA" && ` / ${it.day2}`}
+                      </td>
+                      <td className="px-4 py-2 text-center">
+                         {it.room1 || '—'}
+                        {it.room2 && ` / ${it.room2}`}
+                      </td>
+                      <td className="px-4 py-2 text-center">
+                        {it.time1 && it.time1 !== "TBA" ? it.time1 : '—'}
+                        {it.time2 && it.time2 !== "TBA" && ` / ${it.time2}`}
+                      </td>
+                      <td className="px-4 py-2 text-center">
+                        <button
+                          type="button"
+                          onClick={() => openSyllabus(it)}
+                          className={cls(
+                            "inline-flex items-center justify-center rounded-md border px-2 py-1 text-xs",
+                            "border-emerald-200 bg-emerald-50 hover:bg-emerald-100 active:translate-y-[0.5px]",
+                            // --- *** FIX 3: Allow clicking even if no syllabus *** ---
+                            !it.syllabus && "opacity-60" 
+                          )}
+                          title={it.syllabus ? "View syllabus" : "No syllabus uploaded"}
+                          aria-label="View syllabus"
+                        >
+                          <SyllabusIcon className="h-4 w-4" />
+                        </button>
+                      </td>
+                    </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
           </div>
         )}
       </div>
@@ -626,7 +667,6 @@ function TeachingLoadEnhanced({ teachingLoad, term }: TeachingLoadEnhancedProps)
 
 /* =========================================
    3) Change Request Modal (UI-only)
-      — mirrors the older file’s UX, no backend change
    ========================================= */
 type ChangeKind = "Change class time" | "Change class day" | "Other";
 const ALL_DAYS: DayLong[] = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
@@ -738,17 +778,17 @@ function ChangeRequestModal({
 }: {
   open: boolean;
   onClose: () => void;
-  context: { day: DayLong; item: TLItem } | null;
+  context: { day: DayLong; item: TLItemForCalendar } | null; // <-- MODIFIED
 }) {
   const TIME_SLOTS = [
-    "7:30 – 9:00 AM",
-    "9:15 – 10:45 AM",
-    "11:00 – 12:30 PM",
-    "12:30 – 2:15 PM",
-    "2:30 – 4:00 PM",
-    "4:15 – 5:45 PM",
-    "6:00 – 7:30 PM",
-    "7:45 – 9:00 PM",
+    "07:30 – 09:00",
+    "09:15 – 10:45",
+    "11:00 – 12:30",
+    "12:30 – 14:15",
+    "14:30 – 16:00",
+    "16:15 – 17:45",
+    "18:00 – 19:30",
+    "19:45 – 21:00"
   ];
 
   const [choices, setChoices] = useState<ChangeKind[]>([]);
@@ -798,6 +838,7 @@ function ChangeRequestModal({
           <div>
             <h3 className="text-xl font-semibold text-emerald-700">Request for Change</h3>
             <p className="text-sm text-neutral-500">
+              {/* --- MODIFIED: Use calendar item data --- */}
               {context.item.code} {context.item.sec} • {context.day} • {context.item.time}
             </p>
           </div>
