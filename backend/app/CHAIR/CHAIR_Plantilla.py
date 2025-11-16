@@ -11,6 +11,110 @@ from ..main import db
 
 router = APIRouter(prefix="/chair", tags=["chair"])
 
+# ---------- Collections ----------
+COL_TERMS = "terms"
+COL_PREEN_COUNT = "preenlistment_count"
+
+
+async def _active_term() -> Dict[str, Any]:
+    """
+    Return the WORKING / PLANNING term for a module.
+
+    Selection rules (in order):
+
+    (a) Prefer active pre-enlistment batch:
+        - Look up a document in preenlistment_count where is_archived != True.
+        - If found and it has term_id, fetch that term from terms and return
+          { term_id, acad_year_start, term_number }.
+
+    (b) Otherwise, find the “current” term:
+        - Query terms where any of these indicate current:
+            status: "active" or "Active"
+            is_current: True
+            is_active: True
+            active: True
+        - Project only term_id, acad_year_start, term_number.
+
+    (c) If no “current” term matches, fall back to the latest term:
+        - Sort all terms by acad_year_start DESC, term_number DESC and take 1.
+
+        If there are still no terms at all, return {}.
+
+    (d) Compute the planning term (next term):
+        - Given the current term from (b)/(c), search terms where:
+            acad_year_start > current.acad_year_start
+            OR
+            acad_year_start == current.acad_year_start
+            AND term_number > current.term_number
+        - Sort by acad_year_start ASC, term_number ASC and take 1.
+        - If a “next” term exists, return that.
+        - Otherwise, return the current term.
+    """
+
+    # (a) Active pre-enlistment batch → use its term
+    pre_doc = await db[COL_PREEN_COUNT].find_one(
+        {"is_archived": {"$ne": True}},
+        {"_id": 0, "term_id": 1},
+    )
+    if pre_doc and pre_doc.get("term_id"):
+        t = await db[COL_TERMS].find_one(
+            {"term_id": pre_doc["term_id"]},
+            {"_id": 0, "term_id": 1, "acad_year_start": 1, "term_number": 1},
+        )
+        if t:
+            return t
+
+    # (b) “Current” term by flags
+    current = await db[COL_TERMS].find_one(
+        {
+            "$or": [
+                {"status": "active"},
+                {"status": "Active"},
+                {"is_current": True},
+                {"is_active": True},
+                {"active": True},
+            ]
+        },
+        {"_id": 0, "term_id": 1, "acad_year_start": 1, "term_number": 1},
+    )
+
+    # (b.5) Fallback to latest term if no current flagged
+    if not current:
+        last = await db[COL_TERMS].find(
+            {},
+            {"_id": 0, "term_id": 1, "acad_year_start": 1, "term_number": 1},
+        ).sort(
+            [("acad_year_start", -1), ("term_number", -1)]
+        ).limit(1).to_list(1)
+        current = last[0] if last else None
+
+    # (c) No terms at all → empty dict
+    if not current:
+        return {}
+
+    # (d) Try to find the "next" term after current
+    next_terms = await db[COL_TERMS].find(
+        {
+            "$or": [
+                {"acad_year_start": {"$gt": current["acad_year_start"]}},
+                {
+                    "acad_year_start": current["acad_year_start"],
+                    "term_number": {"$gt": current["term_number"]},
+                },
+            ]
+        },
+        {"_id": 0, "term_id": 1, "acad_year_start": 1, "term_number": 1},
+    ).sort(
+        [("acad_year_start", 1), ("term_number", 1)]
+    ).limit(1).to_list(1)
+
+    if next_terms:
+        return next_terms[0]
+
+    # No “next” term configured → stick with current
+    return current
+
+
 
 # ---------------- Models (response helpers) ----------------
 class PlantillaRow(BaseModel):
@@ -130,12 +234,15 @@ async def chair_plantilla_get(
 
             # You can enrich dept_label later using role_assignments scope if needed.
 
-        term = await db.terms.find_one({"is_current": True})
-        if term:
-            ay = term.get("acad_year_start")
-            tn = term.get("term_number")
+        # Use shared working / planning term logic (OM-style)
+        active_term = await _active_term()
+        if active_term:
+            ay = active_term.get("acad_year_start")
+            tn = active_term.get("term_number")
             if ay and tn:
-                term_label = f"AY {ay}-{int(ay)+1} · Term {tn}"
+                # Spec: Term {term_number} · AY {start}-{start+1}
+                term_label = f"Term {tn} · AY {ay}-{int(ay) + 1}"
+
 
         return {
             "ok": True,

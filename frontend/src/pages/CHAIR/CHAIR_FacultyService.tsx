@@ -404,12 +404,27 @@ export default function CHAIR_FacultyService({
    * - Otherwise, it acts as RECEIVER (IT, CT, LIT).
    */
 
+  // Working / planning term coming from backend activeTerm
+  const [termLabel, setTermLabel] = useState<string>("");
+
   // Start with ST (requester) as a safe default while we load the real dept.
   const [activeDeptName, setActiveDeptName] = useState<string>(
     chairDepartmentName || REQUESTER_DEPT
   );
 
-  const isRequesterDept = eqDept(activeDeptName, REQUESTER_DEPT);
+
+   const isRequesterDept = eqDept(activeDeptName, REQUESTER_DEPT);
+
+  // Build a header label from options.activeTerm
+  const updateTermLabelFromOptions = (o: any) => {
+    const ay = o?.activeTerm?.acad_year_start;
+    const tn = o?.activeTerm?.term_number;
+    if (ay) {
+      setTermLabel(`Term ${tn ?? "—"} · AY ${ay}-${ay + 1}`);
+    } else {
+      setTermLabel("");
+    }
+  };
 
   // If parent doesn’t pass chairDepartmentName, derive it from the chair header.
   useEffect(() => {
@@ -497,14 +512,16 @@ export default function CHAIR_FacultyService({
     if (!isRequesterDept) return;
 
     (async () => {
-      try {
+            try {
         const o = await getFSOptions({ requesterDepartment: REQUESTER_DEPT });
         if (o?.ok) {
           setToDepts(
             (o.departments || []).filter((d: string) => !eqDept(d, REQUESTER_DEPT)) as ToDept[]
           );
+          updateTermLabelFromOptions(o); // NEW
         }
       } catch {
+
         // ignore
       }
     })();
@@ -701,14 +718,17 @@ export default function CHAIR_FacultyService({
   /* ---------------- UI ---------------- */
   return (
     <div className="min-h-screen w-full bg-gray-50 text-slate-900 px-8 py-8">
-      <header className="mb-4">
-        <h1 className="text-2xl font-bold">Faculty Service</h1>
-        <p className="text-sm text-neutral-600">
-          {isRequesterDept
-            ? "Create faculty service requests from Software Technology and track their status."
-            : `View and respond to faculty service requests addressed to your department.`}
-        </p>
-      </header>
+    <header className="mb-6">
+      <h1 className="text-2xl font-bold">Faculty Service</h1>
+      <p className="text-sm text-gray-600">
+        {isRequesterDept
+          ? "Create faculty service requests from Software Technology and track their status"
+          : "View and respond to faculty service requests addressed to your department"}
+        {termLabel ? ` for ${termLabel}` : ""}
+      </p>
+    </header>
+
+
 
       {/* REQUESTER VIEW (ST only): Create Request + Sent Requests + Accepted Requests */}
       {isRequesterDept && (

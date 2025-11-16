@@ -62,6 +62,7 @@ const normalizeCommaName = (n: string) =>
 
 const hasTwoWords = (n: string) => /\S+\s+\S+/.test(n);
 
+
 /* ---------------- Types ---------------- */
 type PlantillaRow = {
   // NEW: Rank column (currently empty because not fetched from DB)
@@ -242,8 +243,7 @@ const DepartmentPlantilla: React.FC<{
     <section className="mt-6">
       <header className="mb-2">
         <h2 className="text-xl font-semibold">
-          Department Faculty Plantilla of CCS – {deptLabel}
-          {termLabel ? ` · ${termLabel}` : ""}
+          Department Faculty Plantilla of CCS {termLabel ? ` · ${termLabel}` : ""}
         </h2>
       </header>
 
