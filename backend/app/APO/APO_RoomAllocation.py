@@ -439,8 +439,17 @@ async def get_room_allocation(
         }
         for a in assigned_raw
     ]
-    # keep only those whose section is NOT in scope (to avoid duplicates)
-    assigned_out_of_scope = [x for x in assigned_norm if x.get("section_id") not in s_map]
+
+    # sections for the *current planning term* (all campuses/colleges)
+    in_term_sec_ids: Set[str] = set(s_map_all.keys())
+
+    # keep only those whose section belongs to this term but is NOT in APO scope
+    assigned_out_of_scope = [
+        x
+        for x in assigned_norm
+        if x.get("section_id") not in s_map
+        and x.get("section_id") in in_term_sec_ids
+    ]
 
     # union for building the room grid
     section_scheds_for_grid = section_scheds_scoped + assigned_out_of_scope
@@ -777,19 +786,40 @@ async def post_room_allocation(
         if not sched:
             raise HTTPException(status_code=404, detail="Section has no schedule at this day/time.")
 
-        # prevent double-booking of the room
-        conflict = await db[COL_SCHEDS].find_one(
-            {
-                "section_id": {"$ne": section_id},
-                "day": {"$in": day_aliases(day_full)},
-                "start_time": st,
-                "end_time": et,
-                "room_id": room_id,
-            },
-            {"_id": 1},
-        )
-        if conflict:
-            raise HTTPException(status_code=400, detail="Room already assigned at this day/time.")
+        # prevent double-booking of the room, but only against sections
+        # that belong to the SAME term we are planning for
+        potential_conflicts = [
+            x
+            async for x in db[COL_SCHEDS].find(
+                {
+                    "section_id": {"$ne": section_id},
+                    "day": {"$in": day_aliases(day_full)},
+                    "start_time": st,
+                    "end_time": et,
+                    "room_id": room_id,
+                },
+                {"_id": 0, "section_id": 1},
+            )
+        ]
+
+        if potential_conflicts:
+            other_sec_ids = [
+                c.get("section_id") for c in potential_conflicts if c.get("section_id")
+            ]
+            if other_sec_ids:
+                # any of these sections in the *current planning term*?
+                in_same_term = await db[COL_SECTIONS].find_one(
+                    {
+                        "section_id": {"$in": other_sec_ids},
+                        "term_id": term_id,
+                    },
+                    {"_id": 1},
+                )
+                if in_same_term:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Room already assigned at this day/time.",
+                    )
 
         await db[COL_SCHEDS].update_one(
             {"schedule_id": sched["schedule_id"]}, {"$set": {"room_id": room_id, "updated_at": now()}}
