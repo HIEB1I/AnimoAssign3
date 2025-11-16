@@ -973,7 +973,6 @@ export async function getElectiveOptions(
 }
 
 /* ---- Eligible rooms for a section (capacity + room_type guard) ---- */
-/* ---- Eligible rooms for a section (capacity + room_type guard) ---- */
 export type EligibleRoomsParams = {
   section_id?: string;
 
