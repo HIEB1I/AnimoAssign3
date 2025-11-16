@@ -2,8 +2,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Send as SendIcon, Calendar as CalIcon, X, BookOpen as SyllabusIcon } from "lucide-react";
 
-
-import { getFacultyOverviewList, getFacultyOverviewProfile } from "../../api";
 import TopBar from "../../component/TopBar";
 import Tabs from "../../component/Tabs";
 import HistoryMain from "./FACULTY_History";
@@ -11,8 +9,13 @@ import PreferencesContent from "./FACULTY_Preferences";
 import DeloadingsContent from "./FACULTY_Deloadings";
 import { InboxContent } from "./FACULTY_Inbox";
 
-// FACULTY_Overview.tsx (top of file)
-import { getActiveRole, setActiveRole, userIsChair } from "@/api";
+import {
+  getFacultyOverviewList,
+  getFacultyOverviewProfile,
+  getActiveRole,
+  setActiveRole,
+  userIsChair,
+} from "../../api";
 import { useNavigate } from "react-router-dom";
 
 
@@ -162,11 +165,10 @@ function StatCards({ summary }: { summary: any }) {
   const cards = [
     { title: "Teaching Units", value: summary?.teaching_units ?? "0/0", progress: summary?.percent ?? 0 },
     { title: "Course Prep", value: summary?.course_preps ?? "0/0", progress: 100 },
-    { title: "Load Status", value: summary?.load_status ?? "Pending", progress: 100 },
   ];
 
   return (
-    <div className="mx-auto grid w-full max-w-screen-2xl grid-cols-1 gap-3 px-4 sm:grid-cols-3">
+    <div className="mx-auto grid w-full max-w-screen-2xl grid-cols-1 gap-3 px-4 sm:grid-cols-2">
       {cards.map(({ title, value, progress }) => (
         <div
           key={title}
@@ -279,19 +281,64 @@ const BANDS_STARTS = [
   "19:45",
 ];
 
+// NEW: helper to convert "HH:MM" to minutes since midnight
+function hmToMinutes(hm: string): number | null {
+  const m = hm.match(/(\d{1,2}):(\d{2})/);
+  if (!m) return null;
+  const h = parseInt(m[1], 10);
+  const min = parseInt(m[2], 10);
+  if (Number.isNaN(h) || Number.isNaN(min)) return null;
+  return h * 60 + min;
+}
+
 type Placed = { day: DayLong; row: number; data: TLItem };
 
 function placeItems(data: TL[]): Placed[] {
   const out: Placed[] = [];
+
+  // Build band ranges from your canonical labels, e.g. "7:30 – 9:00"
+  const bandRanges = TIME_BANDS_LABEL.map((label, idx) => {
+    const [startPart, endPart] = label.split("–").map((s) => s.trim());
+    const startMin = hmToMinutes(startPart) ?? hmToMinutes(BANDS_STARTS[idx] || "");
+    const endMin = hmToMinutes(endPart || "") ?? startMin;
+    return { startMin: startMin ?? 0, endMin: endMin ?? (startMin ?? 0), idx };
+  });
+
   data.forEach((d) =>
     d.items.forEach((it) => {
-      const start = String(it.time || "").split("–")[0].trim(); // "11:00"
-      const idx = BANDS_STARTS.findIndex((b) => start.includes(b));
-      out.push({ day: d.day, row: Math.max(0, idx), data: it });
+      const rawStart = String(it.time || "").split("–")[0].trim(); // e.g. "12:45"
+      const startMin = hmToMinutes(rawStart);
+
+      let rowIdx = 0;
+
+      if (startMin != null) {
+        // 1) try to find a band whose [start,end) range contains this time
+        let match = bandRanges.find((b) => startMin >= b.startMin && startMin < b.endMin)?.idx;
+
+        // 2) if none, snap to the nearest band by start time
+        if (match == null) {
+          let bestIdx = 0;
+          let bestDiff = Infinity;
+          for (const b of bandRanges) {
+            const diff = Math.abs(startMin - b.startMin);
+            if (diff < bestDiff) {
+              bestDiff = diff;
+              bestIdx = b.idx;
+            }
+          }
+          match = bestIdx;
+        }
+
+        rowIdx = match ?? 0;
+      }
+
+      out.push({ day: d.day, row: rowIdx, data: it });
     })
   );
+
   return out;
 }
+
 
 type CellGroup = { day: DayLong; row: number; items: TLItem[] };
 function groupPlacedByCell(placed: Placed[]): CellGroup[] {

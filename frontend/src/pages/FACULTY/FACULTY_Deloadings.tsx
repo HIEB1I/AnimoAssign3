@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { ChevronLeft } from "lucide-react";
 import { Link } from "react-router-dom";
 import SelectBox from "../../component/SelectBox";
-import { API_BASE } from "@/api";
+import { API_BASE } from "../../api";
 
 type Row = {
   deloading_type?: string;
