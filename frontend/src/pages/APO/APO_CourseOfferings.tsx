@@ -1726,12 +1726,10 @@ if (isGE) {
 
                   setImportBusy(true);
 
-                  //Papa.parse<any>(file, {
-                  Papa.parse(file, {
+                  Papa.parse<any>(file, {
                     header: true,
                     skipEmptyLines: true,
-                    //complete: async (result) => {
-                    complete: async (result: any) => {
+                    complete: async (result) => {
                       try {
                         const rows = (result.data || []) as any[];
 
@@ -1784,8 +1782,7 @@ if (response.ok) {
                         if (fileInputRef.current) fileInputRef.current.value = "";
                       }
                     },
-                    //error: (err) => {
-                    error: (err: unknown) => {
+                    error: (err) => {
                       console.error("CSV parse error:", err);
                       alert("Failed to parse CSV file. Please check the format.");
                       setImportBusy(false);

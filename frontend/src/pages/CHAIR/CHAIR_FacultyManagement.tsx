@@ -346,8 +346,7 @@ export default function CHAIR_FacultyManagement() {
   const [typeOptions, setTypeOptions] = useState<string[]>(["All Type"]);
 
   // profile header info
-  //const [profileSubtitle, setProfileSubtitle] = useState<string>("");
-  const [, setProfileSubtitle] = useState<string>("");
+  const [profileSubtitle, setProfileSubtitle] = useState<string>("");
   const [termLabel, setTermLabel] = useState<string>("");
 
   // table rows
@@ -574,7 +573,6 @@ export default function CHAIR_FacultyManagement() {
     (async () => {
       try {
         const hdr = await getChairHeader(userId || undefined);
-        //if (hdr?.ok) setProfileSubtitle(hdr.profileSubtitle || "");
         if (hdr?.ok) setProfileSubtitle(hdr.profileSubtitle || "");
       } catch { /* ignore */ }
     })();

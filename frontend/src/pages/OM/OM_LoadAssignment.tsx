@@ -568,7 +568,6 @@ function checkGeBlockedSlots(
   return result;
 }
 
-/*
 function toMinutes(t?: string): number | null {
   if (!t) return null;
   const s = t.trim();
@@ -579,7 +578,7 @@ function toMinutes(t?: string): number | null {
   const m = Number(mm);
   if (Number.isNaN(h) || Number.isNaN(m)) return null;
   return h * 60 + m;
-}*/
+}
 
 function checkDoubleBookings(rows: Row[]): RowFlagsById {
   const result: RowFlagsById = {};
@@ -1464,12 +1463,11 @@ export default function OM_LoadAssignment() {
     return missingCore || missingMeet2;
   };
 
-  /*
-true if there is at least one row that looks edited but incomplete
+  /** true if there is at least one row that looks edited but incomplete */
   const hasIncompleteRows = useMemo(
     () => rows.some((r) => isRowIncompleteForApproval(r)),
     [rows]
-  );*/
+  );
 
   type Faculty = {
     faculty_id: string;
@@ -1899,6 +1897,47 @@ true if there is at least one row that looks edited but incomplete
           } is using a GE-reserved schedule at CMPS0002.`,
       });
     });
+
+  // 3i) Faculty with 4+ distinct preps (courses)
+  {
+    const prepsByFaculty: Record<string, Set<string>> = {};
+    const facultyLabel: Record<string, { name: string; id?: string }> = {};
+
+    rows.forEach((r) => {
+      const fid = r.faculty_id;
+      const courseCode = r.course;
+      if (!fid || !courseCode) return;
+
+      if (!prepsByFaculty[fid]) prepsByFaculty[fid] = new Set();
+      prepsByFaculty[fid].add(courseCode);
+
+      if (!facultyLabel[fid]) {
+        facultyLabel[fid] = {
+          name: r.faculty || fid,
+          id: fid,
+        };
+      }
+    });
+
+    Object.entries(prepsByFaculty).forEach(([fid, courseSet]) => {
+      const prepCount = courseSet.size;
+      if (prepCount < 4) return; // only flag 4+ preps
+
+      const labelInfo = facultyLabel[fid] || { name: fid, id: fid };
+      const facultyName = labelInfo.name;
+      const facultyId = labelInfo.id;
+      const courseList = Array.from(courseSet).join(", ");
+
+      alerts.push({
+        id: `max-preps-${fid}`,
+        rule: "MAX_PREPS",
+        severity: "warning", // or "error" if you want it hard-blocking
+        facultyName,
+        facultyId,
+        message: `${facultyName} has ${prepCount} different preps (${courseList}). Recommended maximum is 3.`,
+      });
+    });
+  }
 
     // 4) Sections where auto-assign had to drop a faculty
     //    (backend marks them as Unassigned + conflictNote)

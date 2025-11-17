@@ -1747,9 +1747,6 @@ export async function startOMFWindow(args: { termId?: string; durationDays?: num
   };
 }
 
-
-
-
 /* =========================================================
    ==============  OM: STUDENT PETITION  ===================
    ========================================================= */
@@ -1790,12 +1787,6 @@ export async function updateOMSPCourse(course_id: string, payload: { status?: st
   return data as { ok: boolean; matched: number; modified: number };
 }
 
-export async function bulkForwardOMSP(course_ids: string[], status?: string) {
-  const { data } = await axios.post(`${API_BASE}/om/student-petition`, { course_ids, status }, {
-    params: { action: "bulkForward" },
-  });
-  return data as { ok: boolean; matched: number; modified: number; status: string };
-}
 /* =========================================================
    ==============  OM: CLASS RETENTION  ====================
    ========================================================= */

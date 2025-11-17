@@ -1,12 +1,11 @@
 import { useEffect, useState } from "react";
 import SelectBox from "../../component/SelectBox";
 import { cls } from "../../utilities/cls";
-import { Send, Check, Search as SearchIcon, Edit } from "lucide-react";
+import { Check, Search as SearchIcon, Edit } from "lucide-react";
 import {
   getOMSPOptions,
   listOMSP,
   updateOMSPCourse,
-  bulkForwardOMSP,
   type OMPetitionRow,
   type OMPetitionOptions,
 } from "../../api";
@@ -161,25 +160,6 @@ export default function OM_StudentPetition() {
     }
   };
 
-  const forwardSelected = async () => {
-    if (!selected.length) return;
-    try {
-      setLoading(true);
-      setErr("");
-      const target =
-        statuses.find((s) => s.toLowerCase().startsWith("forwarded")) ||
-        "Forwarded To Department";
-      await bulkForwardOMSP(selected, target);
-      const { rows } = await listOMSP({ status, search });
-      setRows(rows);
-      setSelected([]);
-    } catch (e: any) {
-      setErr(e?.response?.data?.detail || e?.message || "Failed to forward petitions.");
-    } finally {
-      setLoading(false);
-    }
-  };
-
   return (
     <main className="w-full px-8 py-8">
       <header className="mb-6">
@@ -208,18 +188,6 @@ export default function OM_StudentPetition() {
         </div>
 
         <SelectBox value={status} onChange={setStatus} options={statuses} />
-
-        <button
-          onClick={forwardSelected}
-          disabled={!selected.length || loading}
-          className={cls(
-            "ml-auto inline-flex items-center gap-2 rounded-md px-4 py-2 text-sm font-medium text-white shadow-sm",
-            selected.length ? "bg-emerald-700 hover:brightness-110" : "bg-gray-300 cursor-not-allowed"
-          )}
-        >
-          <Send className="h-4 w-4" />
-          Forward
-        </button>
       </div>
 
       {/* Table */}
