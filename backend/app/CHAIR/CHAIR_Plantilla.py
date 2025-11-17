@@ -301,36 +301,39 @@ async def chair_plantilla_get(
                 faculty_name = "—"
 
             scheds = by_sched.get(sec["section_id"], [])
+            # Sort schedules to ensure Day 1 (e.g., Mon) comes before Day 2 (e.g., Thu)
+            # Assumes schedule_id ends in -01, -02 or simply by creation
+            scheds.sort(key=lambda x: x.get("schedule_id", ""))
+
             day_parts, time_parts, room_parts = [], [], []
             
             for sc in scheds[:2]:
+                # 1. Day & Time Logic
                 day_parts.append(str(sc.get("day") or ""))
                 time_parts.append(_fmt_time(str(sc.get("start_time") or ""), str(sc.get("end_time") or "")))
                 
-                # --- [UPDATED] Room Logic ---
-                # Goal: Show room_number if assigned.
-                # If room_id is null/invalid, show "TBA" (unless it is explicitly ONLINE).
-                # Do NOT show generic room types like "Classroom".
-
+                # 2. Room Logic (Specific Request)
+                raw_type = str(sc.get("room_type") or "").strip()
                 room_id = sc.get("room_id")
-                if room_id:
-                    r = by_room.get(room_id)
-                    if r:
-                        # Found the room -> show Room Number (fallback to TBA if number missing)
-                        r_num = r.get("room_number")
-                        room_parts.append(str(r_num) if r_num else "TBA")
+
+                # CASE A: Online Course
+                # Check if type is "Online" (case-insensitive)
+                if raw_type.lower() == "online":
+                    room_parts.append("ONLINE")
+
+                # CASE B: Classroom / Physical Room
+                # If there is a room_id, look it up in the rooms table
+                elif room_id:
+                    r_obj = by_room.get(room_id)
+                    if r_obj and r_obj.get("room_number"):
+                        room_parts.append(str(r_obj["room_number"]))
                     else:
-                        # ID exists but room doc missing -> TBA
+                        # room_id exists but not found in DB (or has no number)
                         room_parts.append("TBA")
+                
+                # CASE C: Fallback (No ID, not Online)
                 else:
-                    # No Room ID assigned. 
-                    # If type is "ONLINE", we show "ONLINE".
-                    # Otherwise (Classroom, Comlab, null) -> "TBA".
-                    val = str(sc.get("room_type") or "").strip().upper()
-                    if val == "ONLINE":
-                        room_parts.append("ONLINE")
-                    else:
-                        room_parts.append("TBA")
+                    room_parts.append("TBA")
 
             day_text = " / ".join([p for p in day_parts if p]) or "—"
             time_text = " / ".join([p for p in time_parts if p]) or "—"
