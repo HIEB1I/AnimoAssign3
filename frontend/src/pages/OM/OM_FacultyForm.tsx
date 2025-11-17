@@ -582,7 +582,15 @@ export default function OM_FacultyForm() {
                   </div>
 
                   <div className="col-span-2 mt-2">
-                    <h4 className="font-semibold mb-1">Submission</h4>
+                    <h4 className="font-semibold mb-1">Remarks</h4>
+                    <p className="text-gray-700">
+                      {pref.submission?.notes && pref.submission.notes.trim()
+                        ? pref.submission.notes
+                        : "—"}
+                    </p>
+
+                    {/* add mt-3 (or mt-4) for a little space */}
+                    <h4 className="font-semibold mt-3 mb-1">Submission</h4>
                     <p className="text-gray-700">
                       Status:{" "}
                       <span className="font-medium">
@@ -594,6 +602,7 @@ export default function OM_FacultyForm() {
                       </span>
                     </p>
                   </div>
+
                 </div>
               )}
 
