@@ -1144,27 +1144,53 @@ export type CourseCatalogItem = {
   type_of_course?: string | null;
 };
 // type near your other APO types (optional helper)
-export type CurriculumCsvRow = { [key: string]: any };
+export interface CurriculumCsvRow {
+  batch_code: string;
+  program_level: string;
+  program_code: string;
+  term_number: number;
+  acad_year_start: number;
+  campus_name: string;
+  course_codes: string[];
+}
+
+export interface ImportCurriculumCsvPayload {
+  rows: any[];
+  term_id: string;
+  campus_name: string;
+}
+
+export interface ImportCurriculumCsvResponse {
+  ok: boolean;
+  imported?: number;
+  created_batches?: string[];
+  curricula?: { batch_id: string; curriculum_id: string; course_count: number }[];
+  errors?: any[]; // backend may also send row-level errors
+}
 
 export async function importCurriculumCsv(
   userId: string,
-  rows: CurriculumCsvRow[],
-  opts?: { termId?: string; campus?: string }
-) {
-  const res = await api.post(
-    "/apo/courseofferings",
-    { rows },  // <-- send as { rows: [...] }
+  payload: ImportCurriculumCsvPayload
+): Promise<ImportCurriculumCsvResponse> {
+  const res = await fetch(
+    `/api/apo/courseofferings?userId=${encodeURIComponent(
+      userId
+    )}&action=import_curriculum_csv`,
     {
-      params: {
-        userId,
-        action: "curriculumImportCsv",  // <-- MUST match Python Literal
-        termId: opts?.termId,
-        campus: opts?.campus,
-      },
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
     }
   );
 
-  return res.data;
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(
+      text || `CSV import failed with status ${res.status} ${res.statusText}`
+    );
+  }
+
+  return (await res.json()) as ImportCurriculumCsvResponse;
 }
 
 /* =========================================================

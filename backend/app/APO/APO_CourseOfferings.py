@@ -42,6 +42,33 @@ COL_PLANSTATE = "planning_state"
 
 DEFAULT_CAP = 20
 
+# ---------- helpers for ID generation ----------
+
+async def _next_seq(col_name: str, id_field: str, prefix: str, width: int = 4) -> str:
+    """Generate the next ID like BATCH0001 / CUR0001 without new collections."""
+    last = await db[col_name].find_one(
+        {id_field: {"$regex": f"^{prefix}\\d+$"}},
+        sort=[(id_field, -1)],
+    )
+    if not last:
+        return f"{prefix}{1:0{width}d}"
+
+    m = re.match(rf"^{prefix}(\d+)$", last[id_field])
+    if not m:
+        # fallback if format changed
+        return f"{prefix}{1:0{width}d}"
+
+    n = int(m.group(1)) + 1
+    return f"{prefix}{n:0{width}d}"
+
+
+async def _next_batch_id() -> str:
+    return await _next_seq(COL_BATCHES, "batch_id", "BATCH")
+
+
+async def _next_curriculum_id() -> str:
+    return await _next_seq(COL_CURRICULUM, "curriculum_id", "CUR")
+
 def _norm_course_code(s: str | None) -> str:
     """Normalize course code: trim, uppercase, collapse spaces."""
     if not s:
@@ -684,6 +711,198 @@ async def apo_scope(user_id: str) -> Tuple[Optional[str], Optional[str]]:
         campus_id = (u or {}).get("campus_id")
 
     return (campus_id, college_id)
+async def apo_import_curriculum_csv(userId: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Import curriculum rows from CSV.
+
+    Expected payload from frontend:
+    {
+        "rows": [
+          {
+            "Batch": "ID 126",
+            "Program Level": "Undergraduate",
+            "Program": "BSCS-ST",
+            "Term Number": "1",
+            "Academic Year": "2027",
+            "Campus": "Manila",
+            "Course 1": "CCDSALG",
+            "Course 2": "CCPROG2",
+            "Course 3": "ITSTRAG"
+          },
+          ...
+        ],
+        "term_id": "TERM0015",
+        "campus_name": "Manila"
+    }
+    """
+    rows = payload.get("rows") or []
+    term_id = payload.get("term_id")
+    campus_name = payload.get("campus_name")
+
+    if not isinstance(rows, list) or not term_id or not campus_name:
+        raise HTTPException(
+            status_code=400,
+            detail="rows, term_id and campus_name are required for import_curriculum_csv",
+        )
+
+    # Validate term
+    term = await db[COL_TERMS].find_one({"term_id": term_id})
+    if not term:
+        raise HTTPException(status_code=400, detail=f"Unknown term_id {term_id!r}")
+
+    # Resolve campus_name -> campus_id
+    campus = await db["campuses"].find_one(
+        {"$or": [{"campus_name": campus_name}, {"campus_id": campus_name}]}
+    )
+    if not campus:
+        raise HTTPException(status_code=400, detail=f"Unknown campus {campus_name!r}")
+    campus_id = campus["campus_id"]
+
+    created_batches: List[str] = []
+    updated_curricula: List[Dict[str, Any]] = []
+
+    for raw in rows:
+        if not raw:
+            continue
+
+        # ---- CSV columns ----
+        batch_code = (str(raw.get("Batch") or raw.get("batch") or "")).strip()
+        program_level = (str(raw.get("Program Level") or raw.get("ProgramLevel") or "")).strip()
+        program_code = (str(raw.get("Program") or raw.get("Program Code") or "")).strip()
+
+        # not strictly needed for DB, but read them if you want to log/use later
+        term_number_csv = raw.get("Term Number") or raw.get("TermNumber")
+        acad_year_csv = raw.get("Academic Year") or raw.get("AY")
+
+        if not batch_code or not program_code:
+            # skip incomplete row
+            continue
+
+        # 1) Resolve program_id from Program column (e.g., "BSCS-ST")
+        program = await db[COL_PROGRAMS].find_one({"program_code": program_code})
+        if not program:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Program {program_code!r} not found in programs collection",
+            )
+        program_id = program["program_id"]
+
+        # 2) Ensure batch exists (CSV "Batch" = batches.batch_code)
+        batch = await db[COL_BATCHES].find_one(
+            {"batch_code": batch_code, "program_id": program_id}
+        )
+
+        if not batch:
+            # Generate next batch_id, e.g., BATCH0001, BATCH0002, ...
+            last_batch = await db[COL_BATCHES].find(
+                {"batch_id": {"$regex": r"^BATCH[0-9]+$"}}
+            ).sort("batch_id", -1).limit(1).to_list(1)
+            if last_batch:
+                last_num = int(last_batch[0]["batch_id"][5:])
+            else:
+                last_num = 0
+            batch_id = f"BATCH{last_num + 1:04d}"
+
+            batch_doc = {
+                "batch_id": batch_id,
+                "batch_code": batch_code,      # <-- "ID 126"
+                "program_id": program_id,
+                "intake_term_id": term_id,
+                "curriculum_id": None,         # filled after curriculum insert
+                "status": "active",
+                "created_at": datetime.utcnow(),
+                "updated_at": datetime.utcnow(),
+            }
+            await db[COL_BATCHES].insert_one(batch_doc)
+            created_batches.append(batch_id)
+        else:
+            batch_id = batch["batch_id"]
+
+        # 3) Collect course codes from Course 1, Course 2, ...
+        course_codes: List[str] = []
+        for key, value in raw.items():
+            if key.lower().startswith("course"):
+                v = str(value or "").strip()
+                if v:
+                    course_codes.append(v)
+
+        if not course_codes:
+            continue
+
+        # 4) Resolve course_ids using courses.course_code (ARRAY)
+        course_docs = await db[COL_COURSES].find(
+            {"course_code": {"$in": course_codes}}
+        ).to_list(None)
+
+        found_codes = {
+            code for doc in course_docs for code in doc.get("course_code", [])
+        }
+        missing = sorted(set(course_codes) - found_codes)
+        if missing:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Unknown course_code(s) in CSV for program {program_code!r}: "
+                    + ", ".join(missing)
+                ),
+            )
+
+        course_ids = [doc["course_id"] for doc in course_docs]
+
+        # 5) Upsert curriculum (one per batch_id + term_id + campus_id)
+        existing_cur = await db[COL_CURRICULUM].find_one(
+            {"batch_id": batch_id, "term_id": term_id, "campus_id": campus_id}
+        )
+        if existing_cur:
+            curriculum_id = existing_cur["curriculum_id"]
+        else:
+            last_cur = await db[COL_CURRICULUM].find(
+                {"curriculum_id": {"$regex": r"^CUR[0-9]+$"}}
+            ).sort("curriculum_id", -1).limit(1).to_list(1)
+            if last_cur:
+                last_num = int(last_cur[0]["curriculum_id"][3:])
+            else:
+                last_num = 0
+            curriculum_id = f"CUR{last_num + 1:04d}"
+
+        curriculum_doc = {
+            "curriculum_id": curriculum_id,
+            "batch_id": batch_id,
+            "program_id": program_id,
+            "term_id": term_id,
+            "campus_id": campus_id,
+            # *** IMPORTANT: list of course_id strings ***
+            "course_list": course_ids,
+            "created_at": datetime.utcnow(),
+            "updated_at": datetime.utcnow(),
+        }
+
+        await db[COL_CURRICULUM].update_one(
+            {"curriculum_id": curriculum_id},
+            {"$set": curriculum_doc},
+            upsert=True,
+        )
+
+        # 6) Link batch -> curriculum
+        await db[COL_BATCHES].update_one(
+            {"batch_id": batch_id},
+            {"$set": {"curriculum_id": curriculum_id, "updated_at": datetime.utcnow()}},
+        )
+
+        updated_curricula.append(
+            {
+                "batch_id": batch_id,
+                "curriculum_id": curriculum_id,
+                "course_count": len(course_ids),
+            }
+        )
+
+    return {
+        "ok": True,
+        "imported": len(updated_curricula),
+        "created_batches": created_batches,
+        "curricula": updated_curricula,
+    }
 
 async def campus_meta(campus_id: Optional[str]) -> Dict[str, str]:
     if not campus_id:
@@ -2822,6 +3041,7 @@ async def post_course_offerings(
         "courseCatalog", "search_catalog",
         "catalog.create", 
         "curriculumImportCsv", "curriculum.importCsv",
+        "import_curriculum_csv"
     ] = Query(...),
     payload: Optional[Dict[str, Any]] = Body(None),
 ):
@@ -2843,7 +3063,7 @@ async def post_course_offerings(
     prefix_default = campus_section_prefix(campus.get("campus_name", "")) or ""
 
     # ---------- NEW: CSV CURRICULUM IMPORT ----------
-    if action in ("curriculumImportCsv", "curriculum.importCsv"):
+    if action in ("curriculumImportCsv", "curriculum.importCsv", "import_curriculum_csv"):
         if payload is None:
             raise HTTPException(status_code=400, detail="Missing payload.")
 
@@ -2892,6 +3112,10 @@ async def post_course_offerings(
         for idx, raw in enumerate(rows, start=1):
             try:
                 row = raw or {}
+
+                # --- NEW: skip rows that are completely empty (common trailing CSV row) ---
+                if not any((str(v).strip() for v in row.values() if v is not None)):
+                    continue
 
                 batch_label        = _get(row, "Batch")
                 program_level_lbl  = _get(row, "Program Level", "Level")

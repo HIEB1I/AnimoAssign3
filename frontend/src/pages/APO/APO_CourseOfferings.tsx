@@ -1733,59 +1733,53 @@ if (isGE) {
                       try {
                         const rows = (result.data || []) as any[];
 
-                        const res = await importCurriculumCsv(
-                          user.userId,
-                          rows,
-                          {
-                            termId: curr?.term_id || data?.term_id,
-                            campus: curr?.campus?.campus_name || data?.campus?.campus_name,
-                          }
-                        );
+                        // ---- NEW: make termId and campusName guaranteed strings ----
+                        const termId = curr?.term_id ?? data?.term_id;
+                        const campusName =
+                          curr?.campus?.campus_name ?? data?.campus?.campus_name;
 
-                        console.log("CSV import response:", res);
-
-                        if (res.ok) {
-                          alert(`Imported ${res.imported} row(s).`);
-                          await loadCurriculum(); // refresh curriculum view
-                        } else {
-                          alert("Import did not succeed (ok = false). Check console for full response.");
-                        }
-
-                        if (res.errors?.length) {
-                          const errors = res.errors;
-                          console.error("Row-level CSV errors:", errors);
-
-                          const lines = errors.map((e: any) => {
-                            if (typeof e === "string") return e;
-
-                            // our backend puts the text in `detail`
-                            if (typeof e.detail === "string") return e.detail;
-
-                            // if detail is something else (array/object), stringify it
-                            if (e.detail) return JSON.stringify(e.detail);
-
-                            // fallback
-                            const row = e.row ?? "?";
-                            const msg = e.message || JSON.stringify(e);
-                            return `Row ${row}: ${msg}`;
+                        if (!termId || !campusName) {
+                          console.error("Missing term_id or campus_name for CSV import", {
+                            termId,
+                            campusName,
                           });
-
                           alert(
-                            "Some rows had issues during import:\n\n" +
-                              lines.join("\n")
+                            "Cannot import CSV: missing term or campus for this curriculum."
                           );
+                          return;
                         }
 
+           const response = await importCurriculumCsv(user.userId, {
+  rows,
+  term_id: termId,
+  campus_name: campusName,
+});
+
+console.log("CSV import response:", response);
+
+if (response.ok) {
+  const imported =
+    response.imported ?? response.curricula?.length ?? 0;
+
+  // NEW: always fall back to an empty array
+  const created = response.created_batches ?? [];
+  const createdText = created.length
+    ? `\nCreated batches: ${created.join(", ")}`
+    : "";
+
+  alert(
+    `CSV import successful.\n` +
+      `Imported ${imported} row(s).` +
+      createdText
+  );
+
+                        }
                       } catch (err: any) {
-                        console.error("CSV import failed:", err?.response?.data || err);
-                        alert(
-                          err?.response?.data?.detail ||
-                            err?.message ||
-                            "Failed to import CSV. See console for details."
-                        );
+                        console.error("CSV import failed:", err);
+                        alert(err.message || "CSV import failed");
                       } finally {
                         setImportBusy(false);
-                        input.value = ""; // allow picking the same file again
+                        if (fileInputRef.current) fileInputRef.current.value = "";
                       }
                     },
                     error: (err) => {
