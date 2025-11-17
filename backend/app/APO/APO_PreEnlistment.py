@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple, Literal
+from typing import Any, Dict, List, Optional, Literal
 
 from fastapi import APIRouter, HTTPException, Query, Body
 from pymongo import ReturnDocument
@@ -112,6 +112,113 @@ async def _next_term_id(current_tid: str) -> Optional[str]:
     )
     return nxt2["term_id"] if nxt2 else None
 
+# ------------ term helpers (shared by preenlistment + course offerings) ------------
+async def _get_current_term_doc() -> Dict[str, Any]:
+    """
+    Returns the term document where is_current=True.
+    This is the term where classes are currently running.
+    """
+    term = await db[COL_TERMS].find_one(
+        {"is_current": True},
+        {"term_id": 1, "acad_year_start": 1, "term_number": 1},
+    )
+    if not term:
+        raise HTTPException(
+            status_code=500,
+            detail="No current term (is_current=True) in terms collection",
+        )
+    return term
+
+
+async def _get_next_term_doc(base: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """
+    Given a 'base' term (normally the one with is_current=True),
+    return the *next* term chronologically.
+
+    If there is no later term configured, we fall back to 'base'
+    so the system still works.
+    """
+    if base is None:
+        base = await _get_current_term_doc()
+
+    cursor = db[COL_TERMS].find(
+        {
+            "$or": [
+                # same AY, higher term_number
+                {
+                    "acad_year_start": base["acad_year_start"],
+                    "term_number": {"$gt": base["term_number"]},
+                },
+                # or any later AY
+                {"acad_year_start": {"$gt": base["acad_year_start"]}},
+            ]
+        },
+        {"term_id": 1, "acad_year_start": 1, "term_number": 1},
+        sort=[("acad_year_start", 1), ("term_number", 1)],
+    )
+
+    next_terms = await cursor.to_list(length=1)
+    if not next_terms:
+        # No future term configured: reuse base so we don't crash
+        return base
+
+    return next_terms[0]
+
+
+async def _get_planning_term_doc() -> Dict[str, Any]:
+    """
+    Term used for PLANNING (Preenlistment + Course Offerings).
+
+    Rule: planning term = the NEXT term after the one with is_current=True.
+    Example: if TERM0014 has is_current=True, planning term is TERM0015.
+    """
+    base = await _get_current_term_doc()
+    return await _get_next_term_doc(base)
+
+# NEW helper: get the term immediately *before* a given base term
+async def _get_prev_term_doc(base: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Return the term immediately *before* `base` in chronological order.
+    If there is no earlier term, returns `base` itself.
+    """
+    cursor = db[COL_TERMS].find(
+        {
+            "$or": [
+                {
+                    "acad_year_start": base["acad_year_start"],
+                    "term_number": {"$lt": base["term_number"]},
+                },
+                {
+                    "acad_year_start": {"$lt": base["acad_year_start"]},
+                },
+            ]
+        },
+        {"term_id": 1, "acad_year_start": 1, "term_number": 1},
+        sort=[("acad_year_start", -1), ("term_number", -1)],
+    )
+
+    prev_terms = await cursor.to_list(length=1)
+    if not prev_terms:
+        return base
+    return prev_terms[0]
+
+# NEW: planning term for APO (same idea as Course Offerings)
+async def _planning_term_id() -> Optional[str]:
+    """
+    For APO pre-enlistment, use the *next* term after the current active term.
+
+    Example:
+      - Active term (current)   → TERM0014 (Term 2)
+      - Planning pre-enlistment → TERM0015 (Term 3)
+
+    If there is no “next” term yet, fall back to the current active term.
+    """
+    try:
+        planning = await _get_planning_term_doc()
+    except HTTPException:
+        # No term at all configured
+        return None
+    return planning.get("term_id")
 
 async def _campus_by_name(name: Optional[str]) -> Optional[Dict[str, Any]]:
     if not name:
@@ -241,9 +348,23 @@ async def preenlistment_get(
         campus_id_for_filter = (camp or {}).get("campus_id")
 
     if scope == "active" and not termId:
-        termId = await _active_term_id()
+        # Active Pre-Enlistment should follow the PLANNING term:
+        # the NEXT term after the one with is_current = True.
+        termId = await _planning_term_id()
         if not termId:
-            return {"count": [], "statistics": [], "meta": {"term_id": "", "ay_label": "AY —", "campus_label": campus_label}}
+            # Fallback: if we cannot resolve a planning term,
+            # at least fall back to the current term.
+            termId = await _active_term_id()
+        if not termId:
+            return {
+                "count": [],
+                "statistics": [],
+                "meta": {
+                    "term_id": "",
+                    "ay_label": "AY —",
+                    "campus_label": campus_label,
+                },
+            }
 
     if scope in ("active", "archive"):
         arch_val = (scope == "archive")
@@ -433,37 +554,92 @@ async def preenlistment_post(
     - Statistics: robust program_code lookup (handles 'BSCS (CBL)' and similar).
     """
     campus_uc = _norm_campus_name(campus)
+    campus_id_for_filter: Optional[str] = None  # ← NEW: always define this once
 
     if action == "archive":
         if not termId:
-            termId = await _active_term_id()
+            # Archive the same PLANNING term shown in the Active view
+            termId = await _planning_term_id()
+            if not termId:
+                termId = await _active_term_id()
         if not termId:
-            raise HTTPException(status_code=400, detail="No active term to archive.")
+            raise HTTPException(
+                status_code=400,
+                detail="No term to archive (no active/planning term found).",
+            )
 
         if not campus_uc:
             campus_label = await _apo_campus_label_for_user(userId)
             campus_uc = _norm_campus_name(campus_label)
 
-        campus_id_for_filter = None
         if campus_uc:
             camp_doc = await _campus_by_name(campus_uc)
             campus_id_for_filter = (camp_doc or {}).get("campus_id")
 
         if not campus_id_for_filter:
-            raise HTTPException(status_code=400, detail="Cannot resolve campus; pass campus=MANILA|LAGUNA.")
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot resolve campus; pass campus=MANILA|LAGUNA.",
+            )
 
-        count_q = {"term_id": termId, "is_archived": False, "campus_id": campus_id_for_filter}
-        stats_q = {"term_id": termId, "is_archived": False, "campus_id": campus_id_for_filter}
+        count_q = {
+            "term_id": termId,
+            "is_archived": False,
+            "campus_id": campus_id_for_filter,
+        }
+        stats_q = {
+            "term_id": termId,
+            "is_archived": False,
+            "campus_id": campus_id_for_filter,
+        }
 
-        upd1 = await db[COL_COUNT].update_many(count_q, {"$set": {"is_archived": True, "updated_at": _now()}})
-        upd2 = await db[COL_STATS].update_many(stats_q, {"$set": {"is_archived": True, "updated_at": _now()}})
+        # 1) Archive all active rows for the planning term (per campus)
+        upd1 = await db[COL_COUNT].update_many(
+            count_q,
+            {"$set": {"is_archived": True, "updated_at": _now()}},
+        )
+        upd2 = await db[COL_STATS].update_many(
+            stats_q,
+            {"$set": {"is_archived": True, "updated_at": _now()}},
+        )
 
-        next_tid = await _next_term_id(termId)
-        if next_tid:
+        # 2) Promote this planning term to be the new current term
+        prev_active_tid = await _active_term_id()
+
+        term_doc = await db[COL_TERMS].find_one(
+            {"term_id": termId},
+            {"_id": 0, "term_id": 1, "acad_year_start": 1, "term_number": 1},
+        )
+        if not term_doc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown termId {termId!r} for archive operation.",
+            )
+
+        if prev_active_tid != termId:
             await db[COL_TERMS].update_many({}, {"$set": {"is_current": False}})
-            await db[COL_TERMS].update_one({"term_id": next_tid}, {"$set": {"is_current": True}})
+            await db[COL_TERMS].update_one(
+                {"term_id": termId},
+                {"$set": {"is_current": True}},
+            )
 
-        return {"ok": True, "archivedCounts": upd1.modified_count, "archivedStats": upd2.modified_count, "newActiveTermId": next_tid}
+        new_current_tid = termId
+
+        # 3) Compute the next planning term after this one
+        next_term_doc = await _get_next_term_doc(term_doc)
+        new_planning_tid = next_term_doc.get("term_id", termId)
+
+        return {
+            "ok": True,
+            "archivedCounts": upd1.modified_count,
+            "archivedStats": upd2.modified_count,
+            "previousActiveTermId": prev_active_tid,
+            # newActiveTermId now means "new current term" after promotion
+            "newActiveTermId": new_current_tid,
+            # this is the term the Pre-Enlistment screen should show next
+            "newPlanningTermId": new_planning_tid,
+            "archivedTermId": termId,  # helpful for debugging, UI can ignore
+        }
     
     if action == "reactivate":
         if not termId:
@@ -481,35 +657,53 @@ async def preenlistment_post(
         if not campus_id_for_filter:
             raise HTTPException(status_code=400, detail="Unknown campus.")
 
+        # This termId is the PLANNING term P we want to restore
+        planning_term = await db[COL_TERMS].find_one(
+            {"term_id": termId},
+            {"_id": 0, "term_id": 1, "acad_year_start": 1, "term_number": 1},
+        )
+        if not planning_term:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown termId {termId!r} for reactivate operation.",
+            )
+
         curr_tid = await _active_term_id()
 
-        # 1) Archive current active rows (if different term)
+        # 1) Archive current active rows (if different term) for this campus
         deactivated_counts = deactivated_stats = 0
         if curr_tid and curr_tid != termId:
             r1 = await db[COL_COUNT].update_many(
                 {"term_id": curr_tid, "is_archived": False, "campus_id": campus_id_for_filter},
-                {"$set": {"is_archived": True, "updated_at": _now()}}
+                {"$set": {"is_archived": True, "updated_at": _now()}},
             )
             r2 = await db[COL_STATS].update_many(
                 {"term_id": curr_tid, "is_archived": False, "campus_id": campus_id_for_filter},
-                {"$set": {"is_archived": True, "updated_at": _now()}}
+                {"$set": {"is_archived": True, "updated_at": _now()}},
             )
             deactivated_counts = r1.modified_count
             deactivated_stats = r2.modified_count
 
-        # 2) Unarchive selected term rows
+        # 2) Unarchive selected term's rows for this campus
         r3 = await db[COL_COUNT].update_many(
             {"term_id": termId, "is_archived": True, "campus_id": campus_id_for_filter},
-            {"$set": {"is_archived": False, "updated_at": _now()}}
+            {"$set": {"is_archived": False, "updated_at": _now()}},
         )
         r4 = await db[COL_STATS].update_many(
             {"term_id": termId, "is_archived": True, "campus_id": campus_id_for_filter},
-            {"$set": {"is_archived": False, "updated_at": _now()}}
+            {"$set": {"is_archived": False, "updated_at": _now()}},
         )
 
-        # 3) Flip is_current to selected term
+        # 3) Flip is_current back to the term that should *precede* this planning term.
+        #    That way, "planning term = next-after-current" becomes this termId again.
+        prev_term = await _get_prev_term_doc(planning_term)
+        new_current_tid = prev_term.get("term_id", termId)
+
         await db[COL_TERMS].update_many({}, {"$set": {"is_current": False}})
-        await db[COL_TERMS].update_one({"term_id": termId}, {"$set": {"is_current": True}})
+        await db[COL_TERMS].update_one(
+            {"term_id": new_current_tid},
+            {"$set": {"is_current": True}},
+        )
 
         return {
             "ok": True,
@@ -519,13 +713,23 @@ async def preenlistment_post(
             "deactivatedStats": deactivated_stats,
             "reactivatedCounts": r3.modified_count,
             "reactivatedStats": r4.modified_count,
+            "newCurrentTermId": new_current_tid,
+            # For the frontend: this is the planning term Pre-Enlistment should show
+            "planningTermId": termId,
         }
 
     # ---- action=import ----
     if not termId:
-        termId = await _active_term_id()
+        # Align with Course Offerings: import pre-enlistment into the *planning* term
+        # (TERM0015 if TERM0014 is the current/active term).
+        termId = await _planning_term_id()
+        if not termId:
+            termId = await _active_term_id()
     if not termId:
-        raise HTTPException(status_code=400, detail="No active term; specify termId to import.")
+        raise HTTPException(
+            status_code=400,
+            detail="No term found; specify termId to import."
+        )
 
     count_rows: List[Dict[str, Any]] = (payload or {}).get("countRows") or []
     stat_rows: List[Dict[str, Any]] = (payload or {}).get("statRows") or []

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Search, Plus, Check, X, Trash2, Edit } from "lucide-react";
 import { cls } from "../../utilities/cls";
 import SelectBox from "../../component/SelectBox";
@@ -14,6 +14,9 @@ import {
   type OMCRCourseOpt,
   type OMCRSectionOpt,
 } from "../../api";
+
+type ExtraActionsRender = (ctx: { rows: OMCRRow[]; loading: boolean }) => ReactNode;
+
 
 const SOFT_INPUT =
   "w-full min-w-0 rounded-lg border border-gray-300 bg-white px-2.5 py-2 text-sm shadow-sm " +
@@ -35,8 +38,10 @@ function Pill({ text }: { text?: string }) {
 
 const toNumOrNull = (v: string) => (v.trim() === "" ? null : Number(v));
 
-export default function OM_ClassRetention() {
-  // active term (for saving and options)
+export default function OM_ClassRetention(
+  { renderExtraActions }: { renderExtraActions?: ExtraActionsRender } = {}
+) {
+
   const [activeTermId, setActiveTermId] = useState<string>("");
   const [activeTermLabel, setActiveTermLabel] = useState<string>("");
 
@@ -218,15 +223,20 @@ export default function OM_ClassRetention() {
           />
         </div>
 
-        <SelectBox value={status} onChange={setStatus} options={statuses} />
+              <SelectBox value={status} onChange={setStatus} options={statuses} />
 
-        <button
-          onClick={startAdd}
-          className="ml-auto inline-flex items-center gap-2 rounded-md bg-emerald-700 px-3 py-2 text-sm font-medium text-white shadow-sm hover:brightness-110"
-        >
-          <Plus className="h-4 w-4" />
-          Add Class
-        </button>
+        <div className="ml-auto flex items-center gap-2">
+          <button
+            onClick={startAdd}
+            className="inline-flex items-center gap-2 rounded-md bg-emerald-600 px-3 py-2 text-sm font-medium text-white shadow-sm hover:brightness-110"
+          >
+            <Plus className="h-4 w-4" />
+            Add Class
+          </button>
+
+          {renderExtraActions?.({ rows, loading })}
+        </div>
+
       </div>
 
       {/* Table */}

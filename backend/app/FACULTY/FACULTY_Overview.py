@@ -2,7 +2,7 @@
 from fastapi import APIRouter, Query, HTTPException, Body
 from ..main import db
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 router = APIRouter(prefix="/faculty", tags=["faculty"])
 
@@ -11,6 +11,34 @@ def _now_utc():
 
 
 # --- Helpers tied to your actual terms schema (augmented JSON) ---
+
+# --- NEW: Added _active_term helper (copied from OM_LoadAssignment.py) ---
+async def _active_term() -> Dict[str, Any]:
+    # 1) find the current anchor (must be is_current=True)
+    cur = await db.terms.find_one(
+        {"is_current": True},
+        {"_id": 0, "term_id": 1, "acad_year_start": 1, "term_number": 1},
+    )
+    if not cur:
+        return {} # No anchor, so no "next" term
+
+    # 2) get the next term in chronological order
+    nxt = await db.terms.find(
+        {
+            "$or": [
+                {"acad_year_start": {"$gt": cur["acad_year_start"]}},
+                {
+                    "acad_year_start": cur["acad_year_start"],
+                    "term_number": {"$gt": cur["term_number"]},
+                },
+            ]
+        },
+        {"_id": 0, "term_id": 1, "acad_year_start": 1, "term_number": 1, "is_current": 1}, # Added is_current
+    ).sort([("acad_year_start", 1), ("term_number", 1)]).to_list(1)
+    
+    # Return the next term, or an empty dict if no "next" term is found
+    return (nxt[0] if nxt else {})
+
 async def _get_current_term() -> Optional[Dict[str, Any]]:
     # 1) prefer is_current == True
     term = await db.terms.find_one({"is_current": True}, {"_id": 0})
@@ -32,7 +60,8 @@ def _term_label(t: Dict[str, Any]) -> str:
         return f"AY {ay}-{ay_next} • Term {tn}"
     if tn:
         return f"Term {tn}"
-    return "Current Term"
+    # --- MODIFIED Fallback ---
+    return "Term"
 
 def _as_code_str(val) -> str:
     if isinstance(val, list):
@@ -50,12 +79,16 @@ _DAY_MAP = {
     "WED": "Wednesday",
     "TH": "Thursday",
     "THU": "Thursday",
+    "H": "Thursday", # <-- ADDED "H"
     "R": "Thursday",   # sometimes used
     "F": "Friday",
     "FRI": "Friday",
     "S": "Saturday",
     "SAT": "Saturday",
 }
+# --- NEW: Day order for sorting meetings ---
+_DAY_ORDER = {"Monday": 1, "Tuesday": 2, "Wednesday": 3, "Thursday": 4, "Friday": 5, "Saturday": 6}
+
 
 def _to_full_day(day_val: str) -> str:
     s = (day_val or "").strip().upper()
@@ -149,15 +182,19 @@ async def overview_handler(
 
     # ---------- fetch (list) ----------
     if action == "fetch":
-        term = await _get_current_term()
+        # --- MODIFIED: Fetch planning term first, fallback to current ---
+        term = await _active_term()
         if not term:
-            term = await _get_previous_term()
-
+            term = await _get_current_term()
+        
         if not term:
             term = {"term_id": None, "term_label": "No Term Found"}
-
         else:
-            term.setdefault("term_label", _term_label(term))
+            # --- MODIFIED: Re-label if it's the planning term ---
+            if not term.get("is_current"):
+                term["term_label"] = _term_label(term) + " (Planning)"
+            else:
+                 term.setdefault("term_label", _term_label(term))
 
         # Single pipeline: assignments -> sections -> courses -> schedules -> rooms -> campuses
         pipeline: List[Dict[str, Any]] = [
@@ -165,10 +202,16 @@ async def overview_handler(
             {"$lookup": {"from": "sections", "localField": "section_id", "foreignField": "section_id", "as": "sec"}},
             {"$unwind": {"path": "$sec", "preserveNullAndEmptyArrays": True}},
 
+            # --- MODIFIED: Filter by TERM_ID here ---
+            # This ensures we only get sections for the term we care about
+            {"$match": {"sec.term_id": term.get("term_id")}},
+
             {"$lookup": {"from": "courses", "localField": "sec.course_id", "foreignField": "course_id", "as": "course"}},
             {"$unwind": {"path": "$course", "preserveNullAndEmptyArrays": True}},
 
             {"$lookup": {"from": "section_schedules", "localField": "sec.section_id", "foreignField": "section_id", "as": "sched"}},
+            # --- MODIFIED: preserveNullAndEmptyArrays must be True ---
+            # This keeps sections even if they have NO schedule (e.g., TBA)
             {"$unwind": {"path": "$sched", "preserveNullAndEmptyArrays": True}},
 
             {"$lookup": {"from": "rooms", "localField": "sched.room_id", "foreignField": "room_id", "as": "room"}},
@@ -197,7 +240,8 @@ async def overview_handler(
                             {"case": {"$in": [{"$toUpper": "$sched.day"}, ["M","MON"]]}, "then": "Monday"},
                             {"case": {"$in": [{"$toUpper": "$sched.day"}, ["T","TU","TUE"]]}, "then": "Tuesday"},
                             {"case": {"$in": [{"$toUpper": "$sched.day"}, ["W","WED"]]}, "then": "Wednesday"},
-                            {"case": {"$in": [{"$toUpper": "$sched.day"}, ["TH","THU","R"]]}, "then": "Thursday"},
+                            # --- *** THE FIX IS HERE *** ---
+                            {"case": {"$in": [{"$toUpper": "$sched.day"}, ["TH","THU","R", "H"]]}, "then": "Thursday"},
                             {"case": {"$in": [{"$toUpper": "$sched.day"}, ["F","FRI"]]}, "then": "Friday"},
                             {"case": {"$in": [{"$toUpper": "$sched.day"}, ["S","SAT"]]}, "then": "Saturday"},
                         ],
@@ -205,11 +249,13 @@ async def overview_handler(
                     }
                 },
             }},
-
+            
+            # --- *** MODIFIED: Project section_id, remove sort *** ---
             {"$project": {
                 "_id": 0,
+                "section_id": "$sec.section_id", 
                 "day": "$day_display",
-                "course_code": {"$ifNull": ["$course.course_code", ""]},  # <-- FIXED
+                "course_code": {"$ifNull": ["$course.course_code", ""]},
                 "course_title": "$course.course_title",
                 "section": "$sec.section_code",
                 "units": {"$ifNull": ["$course.units", 0]},
@@ -220,31 +266,115 @@ async def overview_handler(
                 "end_raw": "$sched.end_time",
                 "syllabus": "$syllabus_display"
             }},
-
-            {"$sort": {"day": 1, "start_raw": 1, "section": 1}},
+            
+            # --- *** NEW: Group by section_id *** ---
+            {"$group": {
+                "_id": "$section_id",
+                "course_code": {"$first": "$course_code"},
+                "course_title": {"$first": "$course_title"},
+                "section": {"$first": "$section"},
+                "units": {"$first": "$units"},
+                "syllabus": {"$first": "$syllabus"},
+                
+                "meetings": {"$push": {
+                    "day": "$day",
+                    "room_type": "$mode",
+                    "start": "$start_raw",
+                    "end": "$end_raw",
+                    "room": "$room",
+                    "campus": "$campus",
+                }},
+            }},
         ]
 
         rows = [r async for r in db.faculty_assignments.aggregate(pipeline)]
 
         # Final display normalization (time formatting)
-        teaching_load: List[Dict[str, Any]] = []
+        final_teaching_load: List[Dict[str, Any]] = []
+        unique_units_calc = {}
+
         for r in rows:
-            teaching_load.append({
-                "day": r.get("day", ""),
+            sec_id = r.get("_id")
+            if sec_id:
+                unique_units_calc[sec_id] = r.get("units", 0) or 0
+            
+            meetings = r.get("meetings", [])
+            
+            # Normalize and sort meetings
+            norm_meet: List[Tuple[int, Dict[str, Any]]] = []
+            for m in meetings:
+                day = m.get("day", "")
+                # Only add if it has schedule info
+                if day or m.get("start") or m.get("end"):
+                    order = _DAY_ORDER.get(day, 99)
+                    norm_meet.append((order, m))
+            
+            norm_meet.sort(key=lambda x: x[0])
+            
+            # Extract schedule info
+            day1, room1, mode, time1 = "TBA", "Online", "Online", "TBA"
+            day2, room2, time2 = None, None, None
+            
+            if norm_meet:
+                m1 = norm_meet[0][1]
+                day1 = m1.get("day") or "TBA"
+                room1 = m1.get("room") or "Online"
+                mode = m1.get("room_type") or "Online"
+                time1 = _fmt_time_band(m1.get("start"), m1.get("end")) or "TBA"
+
+            if len(norm_meet) > 1:
+                m2 = norm_meet[1][1]
+                day2 = m2.get("day") or "TBA"
+                room2 = m2.get("room") or "Online"
+                time2 = _fmt_time_band(m2.get("start"), m2.get("end")) or "TBA"
+                # Use mode from first entry, or second if first was blank
+                mode = mode if mode != "Online" else (m2.get("room_type") or "Online")
+
+
+            final_teaching_load.append({
                 "course_code": _as_code_str(r.get("course_code")),
                 "course_title": r.get("course_title", ""),
                 "section": r.get("section", ""),
                 "units": r.get("units", 0) or 0,
-                "campus": r.get("campus", "Online"),
-                "mode": r.get("mode", "Online"),
-                "room": r.get("room", "Online"),
-                "time": _fmt_time_band(r.get("start_raw"), r.get("end_raw")),
-                "syllabus": r.get("syllabus", ""),    # <-- NEW
+                "mode": mode, # Use mode from first schedule
+                "day1": day1,
+                "day2": day2,
+                "room1": room1,
+                "room2": room2,
+                "time1": time1,
+                "time2": time2,
+                "syllabus": r.get("syllabus", ""),
             })
+            
+        # Sort the final list by course code then section
+        final_teaching_load.sort(key=lambda x: (x.get("course_code", ""), x.get("section", "")))
 
-        total_units = sum((row.get("units") or 0) for row in teaching_load)
-        max_units = faculty.get("max_units", 18) or 18
-        course_preps = len(set(r.get("course_code", "") for r in teaching_load if r.get("course_code")))
+        # --- *** MODIFIED: Calculate units/preps based on preferences *** ---
+        faculty_id = faculty.get("faculty_id")
+        term_id = term.get("term_id")
+        prefs = await db.faculty_preferences.find_one(
+            {"faculty_id": faculty_id, "term_id": term_id},
+            {"_id": 0, "preferred_units": 1, "on_break": 1}
+        ) or {}
+
+        on_break = prefs.get("on_break", False)
+        preferred_units = float(prefs.get("preferred_units", 0) or 0)
+        
+        pref_units_for_calc = 0.0 if on_break else preferred_units
+        
+        if pref_units_for_calc >= 12:
+            max_preps = 3
+        elif pref_units_for_calc >= 6:
+            max_preps = 2
+        elif pref_units_for_calc > 0:
+            max_preps = 1 # Assuming 1 prep for 3 units
+        else: # 0 units or on break
+            max_preps = 0
+            
+        total_units = sum(unique_units_calc.values())
+        course_preps = len(set(r.get("course_code", "") for r in final_teaching_load if r.get("course_code")))
+        # --- *** END OF MODIFICATION *** ---
+
 
         load_header = await db.faculty_loads.find_one(
             {"department_id": faculty.get("department_id"), "term_id": term.get("term_id")},
@@ -253,13 +383,14 @@ async def overview_handler(
         status = (load_header or {}).get("status", "pending").capitalize()
 
         summary = {
-            "teaching_units": f"{total_units}/{max_units}",
-            "course_preps": f"{course_preps}/{faculty.get('max_preps', 3) or 3}",
+            # --- *** MODIFIED: Use new preference-based denominators *** ---
+            "teaching_units": f"{total_units}/{int(pref_units_for_calc)}",
+            "course_preps": f"{course_preps}/{max_preps}",
             "load_status": status,
-            "percent": int((total_units / max_units) * 100) if max_units else 0,
+            "percent": int((total_units / pref_units_for_calc) * 100) if pref_units_for_calc > 0 else 0,
         }
 
-        return {"ok": True, "term": term, "summary": summary, "teaching_load": teaching_load}
+        return {"ok": True, "term": term, "summary": summary, "teaching_load": final_teaching_load}
 
     raise HTTPException(status_code=400, detail="Invalid action parameter.")
 
@@ -286,78 +417,179 @@ async def get_faculty_overview(userId: str = Query(...)):
     )
 
     # ---- Term (graceful resolve using your schema) ----
-    term = await _get_current_term()
+    # --- MODIFIED: Fetch planning term first, fallback to current ---
+    term = await _active_term()
+    if not term:
+        term = await _get_current_term()
+    
     if not term:
         term = {"term_id": None, "term_label": "No Active Term"}
     else:
-        term.setdefault("term_label", _term_label(term))
+        # --- MODIFIED: Re-label if it's the planning term ---
+        if not term.get("is_current"):
+            term["term_label"] = _term_label(term) + " (Planning)"
+        else:
+                term.setdefault("term_label", _term_label(term))
 
-    # ---- Assignments for this faculty (optional) ----
-    assignments: List[Dict[str, Any]] = await db.faculty_assignments.find(
-        {"faculty_id": faculty.get("faculty_id"), "is_archived": False},
-        {"_id": 0},
-    ).to_list(None)
+    # --- *** MODIFIED: Replaced N+1 queries with single pipeline *** ---
+    
+    # Single pipeline: assignments -> sections -> courses -> schedules -> rooms -> campuses
+    pipeline: List[Dict[str, Any]] = [
+        {"$match": {"faculty_id": faculty.get("faculty_id"), "is_archived": False}},
+        {"$lookup": {"from": "sections", "localField": "section_id", "foreignField": "section_id", "as": "sec"}},
+        {"$unwind": {"path": "$sec", "preserveNullAndEmptyArrays": True}},
+        {"$match": {"sec.term_id": term.get("term_id")}},
+        {"$lookup": {"from": "courses", "localField": "sec.course_id", "foreignField": "course_id", "as": "course"}},
+        {"$unwind": {"path": "$course", "preserveNullAndEmptyArrays": True}},
+        {"$lookup": {"from": "section_schedules", "localField": "sec.section_id", "foreignField": "section_id", "as": "sched"}},
+        {"$unwind": {"path": "$sched", "preserveNullAndEmptyArrays": True}},
+        {"$lookup": {"from": "rooms", "localField": "sched.room_id", "foreignField": "room_id", "as": "room"}},
+        {"$unwind": {"path": "$room", "preserveNullAndEmptyArrays": True}},
+        {"$lookup": {"from": "campuses", "localField": "room.campus_id", "foreignField": "campus_id", "as": "camp"}},
+        {"$unwind": {"path": "$camp", "preserveNullAndEmptyArrays": True}},
+        {"$addFields": {
+            "day_display": {
+                "$switch": {
+                    "branches": [
+                        {"case": {"$in": [{"$toUpper": "$sched.day"}, ["M","MON"]]}, "then": "Monday"},
+                        {"case": {"$in": [{"$toUpper": "$sched.day"}, ["T","TU","TUE"]]}, "then": "Tuesday"},
+                        {"case": {"$in": [{"$toUpper": "$sched.day"}, ["W","WED"]]}, "then": "Wednesday"},
+                        # --- *** THE FIX IS HERE *** ---
+                        {"case": {"$in": [{"$toUpper": "$sched.day"}, ["TH","THU","R", "H"]]}, "then": "Thursday"},
+                        {"case": {"$in": [{"$toUpper": "$sched.day"}, ["F","FRI"]]}, "then": "Friday"},
+                        {"case": {"$in": [{"$toUpper": "$sched.day"}, ["S","SAT"]]}, "then": "Saturday"},
+                    ],
+                    "default": "$sched.day"
+                }
+            },
+        }},
+        {"$project": {
+            "_id": 0,
+            "section_id": "$sec.section_id", 
+            "day": "$day_display",
+            "course_code": {"$ifNull": ["$course.course_code", ""]},
+            "course_title": "$course.course_title",
+            "section": "$sec.section_code",
+            "units": {"$ifNull": ["$course.units", 0]},
+            "campus": {"$ifNull": ["$camp.campus_name", "Online"]},
+            "mode": {"$ifNull": ["$sched.room_type", "Online"]},
+            "room": {"$ifNull": ["$room.room_number", "Online"]},
+            "start_raw": "$sched.start_time",
+            "end_raw": "$sched.end_time",
+            "syllabus": "$course.syllabus" # Simplified from POST, assuming it's just a field
+        }},
+        # --- *** NEW: Group by section_id *** ---
+        {"$group": {
+            "_id": "$section_id",
+            "course_code": {"$first": "$course_code"},
+            "course_title": {"$first": "$course_title"},
+            "section": {"$first": "$section"},
+            "units": {"$first": "$units"},
+            "syllabus": {"$first": "$syllabus"},
+            
+            "meetings": {"$push": {
+                "day": "$day",
+                "room_type": "$mode",
+                "start": "$start_raw",
+                "end": "$end_raw",
+                "room": "$room",
+                "campus": "$campus",
+            }},
+        }},
+    ]
 
-    section_ids = [a["section_id"] for a in assignments if "section_id" in a]
+    rows = [r async for r in db.faculty_assignments.aggregate(pipeline)]
 
-    sections: List[Dict[str, Any]] = []
-    if section_ids:
-        sections = await db.sections.find(
-            {"section_id": {"$in": section_ids}}, {"_id": 0}
-        ).to_list(None)
+    # Final display normalization (time formatting)
+    final_teaching_load: List[Dict[str, Any]] = []
+    unique_units_calc = {}
 
-    # Schedules for those sections
-    schedules: List[Dict[str, Any]] = []
-    if section_ids:
-        schedules = await db.section_schedules.find(
-            {"section_id": {"$in": section_ids}}, {"_id": 0}
-        ).to_list(None)
+    for r in rows:
+        sec_id = r.get("_id")
+        if sec_id:
+            unique_units_calc[sec_id] = r.get("units", 0) or 0
+        
+        meetings = r.get("meetings", [])
+        
+        # Normalize and sort meetings
+        norm_meet: List[Tuple[int, Dict[str, Any]]] = []
+        for m in meetings:
+            day = m.get("day", "")
+            # Only add if it has schedule info
+            if day or m.get("start") or m.get("end"):
+                order = _DAY_ORDER.get(day, 99)
+                norm_meet.append((order, m))
+        
+        norm_meet.sort(key=lambda x: x[0])
+        
+        # Extract schedule info
+        day1, room1, mode, time1 = "TBA", "Online", "Online", "TBA"
+        day2, room2, time2 = None, None, None
+        
+        if norm_meet:
+            m1 = norm_meet[0][1]
+            day1 = m1.get("day") or "TBA"
+            room1 = m1.get("room") or "Online"
+            mode = m1.get("room_type") or "Online"
+            time1 = _fmt_time_band(m1.get("start"), m1.get("end")) or "TBA"
 
-    # Courses for those sections
-    course_ids = [s.get("course_id") for s in sections if "course_id" in s]
-    courses: List[Dict[str, Any]] = []
-    if course_ids:
-        courses = await db.courses.find(
-            {"course_id": {"$in": course_ids}}, {"_id": 0}
-        ).to_list(None)
+        if len(norm_meet) > 1:
+            m2 = norm_meet[1][1]
+            day2 = m2.get("day") or "TBA"
+            room2 = m2.get("room") or "Online"
+            time2 = _fmt_time_band(m2.get("start"), m2.get("end")) or "TBA"
+            # Use mode from first entry, or second if first was blank
+            mode = mode if mode != "Online" else (m2.get("room_type") or "Online")
 
-    # Build teaching load rows (safe defaults)
-    teaching_load: List[Dict[str, Any]] = []
-    for sc in schedules:
-        sec = next((s for s in sections if s.get("section_id") == sc.get("section_id")), {})
-        course = next((c for c in courses if c.get("course_id") == sec.get("course_id")), {})
 
-        # Resolve room and campus name (if any)
-        campus_name = "Online"
-        room_label = "Online"
-        if sc.get("room_id"):
-            room = await db.rooms.find_one({"room_id": sc["room_id"]}, {"_id": 0})
-            if room:
-                room_label = room.get("room_number", room_label)
-                campus_id = room.get("campus_id")
-                if campus_id:
-                    campus = await db.campuses.find_one({"campus_id": campus_id}, {"_id": 0})
-                    if campus:
-                        campus_name = campus.get("campus_name", campus_name)
+        final_teaching_load.append({
+            "course_code": _as_code_str(r.get("course_code")),
+            "course_title": r.get("course_title", ""),
+            "section": r.get("section", ""),
+            "units": r.get("units", 0) or 0,
+            "mode": mode, # Use mode from first schedule
+            "day1": day1,
+            "day2": day2,
+            "room1": room1,
+            "room2": room2,
+            "time1": time1,
+            "time2": time2,
+            "syllabus": r.get("syllabus", ""),
+        })
+        
+    # Sort the final list by course code then section
+    final_teaching_load.sort(key=lambda x: (x.get("course_code", ""), x.get("section", "")))
 
-        teaching_load.append(
-            {
-                "day": _to_full_day(sc.get("day", "")),
-                "course_code": _as_code_str(course.get("course_code")),
-                "course_title": course.get("course_title", ""),
-                "section": sec.get("section_code", ""),
-                "units": course.get("units", 0) or 0,
-                "campus": campus_name,
-                "mode": sc.get("room_type", "Online"),  # Online / Classroom / Hybrid
-                "room": room_label,
-                "time": _fmt_time_band(sc.get("start_time"), sc.get("end_time")),
-            }
-        )
+    # --- *** END OF PIPELINE REPLACEMENT *** ---
 
-    # Summary (defensive defaults; your faculty_profiles has min_units but no max_units in sample)
-    total_units = sum((row.get("units") or 0) for row in teaching_load)
-    max_units = faculty.get("max_units", 18) or 18
-    course_preps = len(set(r.get("course_code", "") for r in teaching_load if r.get("course_code")))
+
+    # --- *** MODIFIED: Calculate units/preps based on preferences *** ---
+    faculty_id = faculty.get("faculty_id")
+    term_id = term.get("term_id")
+    prefs = await db.faculty_preferences.find_one(
+        {"faculty_id": faculty_id, "term_id": term_id},
+        {"_id": 0, "preferred_units": 1, "on_break": 1}
+    ) or {}
+
+    on_break = prefs.get("on_break", False)
+    preferred_units = float(prefs.get("preferred_units", 0) or 0)
+    
+    pref_units_for_calc = 0.0 if on_break else preferred_units
+    
+    if pref_units_for_calc >= 12:
+        max_preps = 3
+    elif pref_units_for_calc >= 6:
+        max_preps = 2
+    elif pref_units_for_calc > 0:
+        max_preps = 1 # Assuming 1 prep for 3 units
+    else: # 0 units or on break
+        max_preps = 0
+        
+    total_units = sum(unique_units_calc.values())
+    # --- *** FIX 1: Corrected variable name *** ---
+    course_preps = len(set(r.get("course_code", "") for r in final_teaching_load if r.get("course_code")))
+    # --- *** END OF MODIFICATION *** ---
+
     # Try to read a load header for status, but keep graceful default
     load_header = await db.faculty_loads.find_one(
         {"department_id": faculty.get("department_id"), "term_id": term.get("term_id")},
@@ -366,10 +598,11 @@ async def get_faculty_overview(userId: str = Query(...)):
     status = (load_header or {}).get("status", "pending").capitalize()
 
     summary = {
-        "teaching_units": f"{total_units}/{max_units}",
-        "course_preps": f"{course_preps}/{faculty.get('max_preps', 3) or 3}",
+        # --- *** MODIFIED: Use new preference-based denominators *** ---
+        "teaching_units": f"{total_units}/{int(pref_units_for_calc)}",
+        "course_preps": f"{course_preps}/{max_preps}",
         "load_status": status,
-        "percent": int((total_units / max_units) * 100) if max_units else 0,
+        "percent": int((total_units / pref_units_for_calc) * 100) if pref_units_for_calc > 0 else 0,
     }
 
     notifications = await db.faculty_notifications.find(
@@ -406,6 +639,9 @@ async def get_faculty_overview(userId: str = Query(...)):
         email_local = _pick(user_doc.get("email"), faculty.get("email")).split("@")[0]
         if email_local:
             full_name = email_local.replace(".", " ").replace("_", " ").title()
+            
+    # --- *** FIX 2: Corrected variable name *** ---
+    final_teaching_load.sort(key=lambda x: (x.get("day", ""), x.get("time", ""), x.get("section", "")))
 
     return {
         "ok": True,
@@ -417,7 +653,7 @@ async def get_faculty_overview(userId: str = Query(...)):
         },
         "term": term,
         "summary": summary,
-        "teaching_load": teaching_load,
+        "teaching_load": final_teaching_load,
         "notifications": notifications,
     }
 

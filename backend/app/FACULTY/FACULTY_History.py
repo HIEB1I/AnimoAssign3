@@ -12,11 +12,12 @@ Pattern parity with STUDENT_Petition: one POST endpoint with action=fetch|option
 
 router = APIRouter(prefix="/faculty", tags=["faculty"])
 
+# Updated Day Map to include 'H' for Thursday and ensure single letters resolve correctly
 DAY_MAP = {
     "M": "Monday", "MON": "Monday",
     "T": "Tuesday", "TU": "Tuesday", "TUE": "Tuesday",
     "W": "Wednesday", "WED": "Wednesday",
-    "TH": "Thursday", "THU": "Thursday", "R": "Thursday",
+    "TH": "Thursday", "THU": "Thursday", "R": "Thursday", "H": "Thursday",
     "F": "Friday", "FRI": "Friday",
     "S": "Saturday", "SAT": "Saturday",
 }
