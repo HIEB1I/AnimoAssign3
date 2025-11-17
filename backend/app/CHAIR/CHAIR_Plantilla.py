@@ -272,7 +272,7 @@ async def chair_plantilla_get(
         Robust fallbacks are added for dev data where FK links or term IDs may not align.
         """
         # current term (may not match sample sections)
-        term = await db.terms.find_one({"is_current": True})
+        term = await _active_term()
         term_id = term.get("term_id") if term else None
 
         # try current-term sections first
@@ -369,10 +369,28 @@ async def chair_plantilla_get(
             for sc in scheds[:2]:
                 day_parts.append(str(sc.get("day") or ""))
                 time_parts.append(_fmt_time(str(sc.get("start_time") or ""), str(sc.get("end_time") or "")))
-                if sc.get("room_id"):
-                    r = by_room.get(sc["room_id"])
-                    room_parts.append(r["room_number"] if r and r.get("room_number") else str(sc.get("room_id")))
+                
+                # --- [NEW] Updated Room Logic ---
+                room_id = sc.get("room_id")
+                if room_id:
+                    r = by_room.get(room_id) # Get the full room document
+                    if r:
+                        room_type = str(r.get("room_type") or "").strip().lower()
+                        
+                        # Show room_number if it's a physical room type
+                        if room_type in ("classroom", "comlab"):
+                            room_parts.append(r.get("room_number") or str(room_id))
+                        # Otherwise, show the room's name/type (e.g., "Online", "TBA")
+                        elif r.get("room_type"):
+                            room_parts.append(r.get("room_type"))
+                        # Fallback: just show the number if type is missing
+                        else:
+                            room_parts.append(r.get("room_number") or str(room_id))
+                    else:
+                        # Dangling room_id, show the ID as a fallback
+                        room_parts.append(str(room_id))
                 else:
+                    # No room_id. Use the room_type from the schedule doc (e.g., "ONLINE")
                     room_parts.append(sc.get("room_type") or "ONLINE")
             day_text = " / ".join([p for p in day_parts if p]) or "—"
             time_text = " / ".join([p for p in time_parts if p]) or "—"
