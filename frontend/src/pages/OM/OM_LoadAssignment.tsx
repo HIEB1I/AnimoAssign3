@@ -1,12 +1,12 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Outlet, useLocation } from "react-router-dom";
 import AppShell from "../../base/AppShell";
-import { runOmAutoAssign } from "../../api.ts"; // adjust path to your api.ts
+import { runOmAutoAssign } from "../../api.ts"; 
 import { submitOmLoadAssignment } from "../../api.ts";
 
 import {
   getOmLoadAssignmentList,
-  getOmLoadAssignmentProfile, // ← add this
+  getOmLoadAssignmentProfile,
   getAllFaculty,
 } from "../../api";
 
@@ -203,7 +203,6 @@ function ComboBox({
   placeholder?: string;
   className?: string;
 }) {
-  console.log("ComboBox options:", options);
 
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState(value ?? "");
@@ -746,6 +745,7 @@ const TIME_BEGIN_OPTIONS = Array.from(
 const TIME_END_OPTIONS = Array.from(
   new Set([...buildTimeEndOptions(), ...SECOND_TIME_OPTIONS])
 ).sort((a, b) => Number(a) - Number(b));
+
 /* ---------------- Reusable small components ---------------- */
 const StatusChip = ({ r }: { r: Row }) => {
   const [show, setShow] = useState(false);
@@ -1157,27 +1157,29 @@ export default function OM_LoadAssignment() {
       if (!userId) return;
       try {
         const p = await getOmLoadAssignmentProfile(userId);
-        // role text
+
+        // 1. Determine Base Title
         let roleTitle = p?.position_title || "";
         // append " | Department of …" like CHAIR
-        if (roleTitle && p?.dept_name)
-          roleTitle = `${roleTitle} | ${p.dept_name}`;
+        if (roleTitle && p?.dept_name) roleTitle = `${roleTitle} | ${p.dept_name}`;
         setProfileSubtitle(roleTitle);
         setProfileName(p?.full_name || "");
 
-        // ✅ 2) Updated role/subtitle logic (replaces the old session?.roles check)
-        if (
-          normRoles.includes("office_manager") ||
-          normRoles.includes("role0006")
-        ) {
-          setProfileSubtitle("Office Manager");
-        } else if (p?.position_title) {
-          setProfileSubtitle(p.position_title);
+        // Fallback: If no title in DB, but has OM role in session
+        if (!roleTitle && (normRoles.includes("office_manager") || normRoles.includes("role0006"))) {
+           roleTitle = "Office Manager";
         }
 
-        // ✅ 3) Updated name fallback logic (after subtitle)
-        if (!profileName)
-          setProfileName(p?.full_name || session?.fullName || "");
+        // 2. Append Department if available (Formatter logic like CHAIR_Plantilla)
+        if (roleTitle && p?.dept_name) {
+           roleTitle = `${roleTitle} | ${p.dept_name}`;
+        }
+
+        setProfileSubtitle(roleTitle);
+
+        // 3. Name Fallback
+        setProfileName(p?.full_name || session?.fullName || "");
+
       } catch {
         /* ignore; non-blocking for UI */
       }

@@ -17,10 +17,15 @@ from ..main import db
 
 router = APIRouter(prefix="/chair/faculty-service", tags=["chair", "faculty-service"])
 
+# --- collections for term logic ---
+COL_TERMS = "terms"
+COL_PREEN_COUNT = "preenlistment_count"
+
 # --- constants per spec ---
 DAYS = ["M", "T", "W", "H", "F", "S"]
 BEGIN = ["07:30", "09:15", "11:00", "12:45", "14:30", "16:15", "18:00", "19:45"]
 END_BY_BEGIN = {
+
     "07:30": "09:00",
     "09:15": "10:45",
     "11:00": "12:30",
@@ -52,10 +57,110 @@ RECIPIENT = {
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
+
+async def _active_term() -> Dict[str, Any]:
+    """
+    Shared WORKING / PLANNING term logic (OM-style).
+
+    Returns a dict with at least:
+      - term_id
+      - acad_year_start
+      - term_number
+
+    Selection rules:
+
+      (a) Prefer active pre-enlistment batch
+          - Look up in preenlistment_count where is_archived != True.
+          - If it has a term_id and that term exists in terms, return that term.
+
+      (b) Otherwise, find the “current” term
+          - Query terms where any of these flags indicate it's current:
+              status: "active" or "Active"
+              is_current: True
+              is_active: True
+              active: True
+          - Project only term_id, acad_year_start, term_number.
+          - If none match, fall back to the latest term by
+              acad_year_start DESC, term_number DESC.
+
+      (c) If still nothing
+          - If there are no terms at all, return {} (empty dict).
+
+      (d) Compute the planning term (next term)
+          - Given the current term from step (b), try to find the next term:
+              acad_year_start > current.acad_year_start, OR
+              acad_year_start == current.acad_year_start
+                AND term_number > current.term_number
+          - Sort by acad_year_start ASC, term_number ASC and take the first result.
+          - If a “next” term exists, return that as the working / planning term.
+          - If no next term exists, return the current term.
+    """
+
+    # (a) Prefer active pre-enlistment batch
+    pre_doc = await db[COL_PREEN_COUNT].find_one(
+        {"is_archived": {"$ne": True}},
+        {"_id": 0, "term_id": 1},
+    )
+    if pre_doc and pre_doc.get("term_id"):
+        t = await db[COL_TERMS].find_one(
+            {"term_id": pre_doc["term_id"]},
+            {"_id": 0, "term_id": 1, "acad_year_start": 1, "term_number": 1},
+        )
+        if t:
+            return t
+
+    # (b) Otherwise, find the “current” term via flags
+    current = await db[COL_TERMS].find_one(
+        {
+            "$or": [
+                {"status": "active"},
+                {"status": "Active"},
+                {"is_current": True},
+                {"is_active": True},
+                {"active": True},
+            ]
+        },
+        {"_id": 0, "term_id": 1, "acad_year_start": 1, "term_number": 1},
+    )
+
+    # Fallback: latest by acad_year_start DESC, term_number DESC
+    if not current:
+        last = await db[COL_TERMS].find(
+            {},
+            {"_id": 0, "term_id": 1, "acad_year_start": 1, "term_number": 1},
+        ).sort([("acad_year_start", -1), ("term_number", -1)]).limit(1).to_list(1)
+        current = last[0] if last else None
+
+    # (c) If still nothing, no terms at all
+    if not current:
+        return {}
+
+    # (d) Compute the planning term (next term)
+    next_terms = await db[COL_TERMS].find(
+        {
+            "$or": [
+                {"acad_year_start": {"$gt": current["acad_year_start"]}},
+                {
+                    "acad_year_start": current["acad_year_start"],
+                    "term_number": {"$gt": current["term_number"]},
+                },
+            ]
+        },
+        {"_id": 0, "term_id": 1, "acad_year_start": 1, "term_number": 1},
+    ).sort([("acad_year_start", 1), ("term_number", 1)]).limit(1).to_list(1)
+
+    if next_terms:
+        return next_terms[0]
+
+    # If no next term exists, return the current/latest term
+    return current
+
+
 def _normalize_code(code: Any) -> str:
     if isinstance(code, list):
         return (code[0] or "").upper()
     return str(code or "").upper()
+
 
 async def _find_department(query: str) -> Optional[Dict[str, Any]]:
     """Find a department by name/code/id."""
@@ -163,6 +268,9 @@ async def fs_options(
 
     faculty_opts = await _faculty_dropdown(toDepartment) if toDepartment else []
 
+    # NEW: shared working / planning term
+    active_term = await _active_term()
+
     return {
         "ok": True,
         "courses": courses,
@@ -170,7 +278,9 @@ async def fs_options(
         "timeBegins": BEGIN,
         "days": DAYS,
         "facultyOptions": faculty_opts,
+        "activeTerm": active_term,  # <--- added
     }
+
 
 # ---------------------------- LIST ----------------------------
 

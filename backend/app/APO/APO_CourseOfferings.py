@@ -7,7 +7,8 @@ import json
 import hashlib
 import secrets
 from bson import ObjectId
-from typing import Any, Dict, List, Optional, Tuple, Literal
+from typing import Any, Dict, List, Optional, Tuple, Literal, Set
+from collections import defaultdict
 
 from fastapi import APIRouter, HTTPException, Query, Body
 from pymongo.errors import DuplicateKeyError
@@ -40,6 +41,79 @@ COL_OVR_AUDIT = "override_audit"
 COL_PLANSTATE = "planning_state"
 
 DEFAULT_CAP = 20
+
+# ---------- helpers for ID generation ----------
+
+async def _next_seq(col_name: str, id_field: str, prefix: str, width: int = 4) -> str:
+    """Generate the next ID like BATCH0001 / CUR0001 without new collections."""
+    last = await db[col_name].find_one(
+        {id_field: {"$regex": f"^{prefix}\\d+$"}},
+        sort=[(id_field, -1)],
+    )
+    if not last:
+        return f"{prefix}{1:0{width}d}"
+
+    m = re.match(rf"^{prefix}(\d+)$", last[id_field])
+    if not m:
+        # fallback if format changed
+        return f"{prefix}{1:0{width}d}"
+
+    n = int(m.group(1)) + 1
+    return f"{prefix}{n:0{width}d}"
+
+
+async def _next_batch_id() -> str:
+    return await _next_seq(COL_BATCHES, "batch_id", "BATCH")
+
+
+async def _next_curriculum_id() -> str:
+    return await _next_seq(COL_CURRICULUM, "curriculum_id", "CUR")
+
+def _norm_course_code(s: str | None) -> str:
+    """Normalize course code: trim, uppercase, collapse spaces."""
+    if not s:
+        return ""
+    s = s.strip().upper()
+    s = re.sub(r"\s+", " ", s)
+    return s
+
+async def _get_planning_term() -> Dict[str, Any]:
+    """
+    Returns the 'planning' term for offerings/preen planning.
+
+      - base = result of _ensure_current_term()
+               (the term where is_current == True, or the latest term if none is flagged yet)
+      - planning = next term in sequence (TERM0015 after TERM0014, etc.)
+      - if the next term does not exist, we fall back to the base term
+    """
+    base = await _ensure_current_term()
+    if not base or not base.get("term_id"):
+        raise HTTPException(status_code=404, detail="No current term found in terms collection.")
+
+    base_id = base["term_id"]  # e.g., "TERM0014"
+
+    # Compute next term id (TERM0015) from suffix
+    try:
+        prefix = base_id[:4]
+        num = int(base_id[4:])
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=500, detail=f"Invalid term_id format: {base_id}")
+
+    next_id = f"{prefix}{num + 1:04d}"
+
+    planning = await db[COL_TERMS].find_one(
+        {"term_id": next_id},
+        {"_id": 0, "term_id": 1, "acad_year_start": 1, "term_number": 1},
+    )
+
+    # If there is no TERM0015 (or next), just fall back to the current term
+    if not planning:
+        planning = await db[COL_TERMS].find_one(
+            {"term_id": base_id},
+            {"_id": 0, "term_id": 1, "acad_year_start": 1, "term_number": 1},
+        ) or {}
+
+    return planning
 
 def _parse_course_seq(course_id: str) -> int:
     m = re.match(r"^CRS(\d+)$", course_id or "")
@@ -253,6 +327,93 @@ def _build_full_course_document(data: Dict[str, Any], *, course_id: str) -> Dict
         "updated_at": now(),
     }
     return doc
+async def _create_catalog_course(user_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Create a new course in the catalog, used by the Course Offerings UI.
+
+    This is the extracted logic from the old `if action == "catalog.create"` block
+    in `post_course_offerings`.
+    """
+    if not payload:
+        raise HTTPException(status_code=400, detail="Missing payload.")
+
+    # Required fields
+    course_code = _norm_code((payload.get("course_code") or ""))
+    course_title = (payload.get("course_title") or "").strip()
+    department_id = (payload.get("department_id") or "").strip()
+    program_level_in = payload.get("program_level")  # accepts UG/GS/UGS/GSM or labels
+    if not (course_code and course_title and department_id and program_level_in):
+        raise HTTPException(
+            status_code=422,
+            detail="course_code, course_title, department_id, and program_level are required."
+        )
+
+    # Validate department exists (optional but safer)
+    dep_exists = await db[COL_DEPARTMENTS].find_one({"department_id": department_id}, {"_id": 1})
+    if not dep_exists:
+        raise HTTPException(status_code=422, detail="department_id not found.")
+
+    # Units (optional)
+    units = None
+    if "units" in payload and payload.get("units") not in (None, ""):
+        try:
+            units = float(payload.get("units"))
+        except Exception:
+            raise HTTPException(status_code=422, detail="units must be a number.")
+
+    # Capacity for planning defaults — we use 'max_enrollee' in this codebase
+    max_enrollee = payload.get("max_enrollee", payload.get("capacity"))
+    if max_enrollee in (None, ""):
+        max_enrollee = DEFAULT_CAP
+    try:
+        max_enrollee = int(max_enrollee)
+        if max_enrollee < 0:
+            raise ValueError()
+    except Exception:
+        raise HTTPException(status_code=422, detail="max_enrollee/capacity must be a non-negative integer.")
+
+    # Optional description
+    description = (payload.get("description") or "").strip()
+
+    # Deduplicate by course_code (string or array[0])
+    dup = await db[COL_COURSES].find_one(
+        {"$or": [{"course_code": course_code}, {"course_code.0": course_code}]},
+        {"_id": 1}
+    )
+    if dup:
+        raise HTTPException(status_code=409, detail="Course with the same course_code already exists.")
+
+    # Generate a new course_id (sequential CRS0001... if available)
+    try:
+        course_id = await _next_course_id()
+    except Exception:
+        # Fall back to timestamp style if sequence fails
+        course_id = _id("CRS")
+
+    # Build a full doc with defaults for missing fields
+    doc = _build_full_course_document(
+        {
+            "course_code": course_code,            # string -> will be stored as ["CODE"]
+            "course_title": course_title,
+            "department_id": department_id,
+            "program_level": program_level_in,     # accept label or code; builder normalizes
+            "type_of_course": payload.get("type_of_course"),
+            "units": units,
+            "max_enrollee": max_enrollee,
+            "description": description,
+            # optional inputs if your UI ever sends them:
+            "min_enrollee": payload.get("min_enrollee"),
+            "room_type": payload.get("room_type"),
+            "syllabus": payload.get("syllabus"),
+            "course_coordinator": payload.get("course_coordinator"),
+            "prerequisites": payload.get("prerequisites"),
+            "teaching_team": payload.get("teaching_team"),
+        },
+        course_id=course_id,
+    )
+
+    await db[COL_COURSES].insert_one(doc)
+    return {"ok": True, "course": _clean_mongo_doc(doc)}
 
 # ------------ utils ------------
 def now() -> datetime:
@@ -550,6 +711,198 @@ async def apo_scope(user_id: str) -> Tuple[Optional[str], Optional[str]]:
         campus_id = (u or {}).get("campus_id")
 
     return (campus_id, college_id)
+async def apo_import_curriculum_csv(userId: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Import curriculum rows from CSV.
+
+    Expected payload from frontend:
+    {
+        "rows": [
+          {
+            "Batch": "ID 126",
+            "Program Level": "Undergraduate",
+            "Program": "BSCS-ST",
+            "Term Number": "1",
+            "Academic Year": "2027",
+            "Campus": "Manila",
+            "Course 1": "CCDSALG",
+            "Course 2": "CCPROG2",
+            "Course 3": "ITSTRAG"
+          },
+          ...
+        ],
+        "term_id": "TERM0015",
+        "campus_name": "Manila"
+    }
+    """
+    rows = payload.get("rows") or []
+    term_id = payload.get("term_id")
+    campus_name = payload.get("campus_name")
+
+    if not isinstance(rows, list) or not term_id or not campus_name:
+        raise HTTPException(
+            status_code=400,
+            detail="rows, term_id and campus_name are required for import_curriculum_csv",
+        )
+
+    # Validate term
+    term = await db[COL_TERMS].find_one({"term_id": term_id})
+    if not term:
+        raise HTTPException(status_code=400, detail=f"Unknown term_id {term_id!r}")
+
+    # Resolve campus_name -> campus_id
+    campus = await db["campuses"].find_one(
+        {"$or": [{"campus_name": campus_name}, {"campus_id": campus_name}]}
+    )
+    if not campus:
+        raise HTTPException(status_code=400, detail=f"Unknown campus {campus_name!r}")
+    campus_id = campus["campus_id"]
+
+    created_batches: List[str] = []
+    updated_curricula: List[Dict[str, Any]] = []
+
+    for raw in rows:
+        if not raw:
+            continue
+
+        # ---- CSV columns ----
+        batch_code = (str(raw.get("Batch") or raw.get("batch") or "")).strip()
+        program_level = (str(raw.get("Program Level") or raw.get("ProgramLevel") or "")).strip()
+        program_code = (str(raw.get("Program") or raw.get("Program Code") or "")).strip()
+
+        # not strictly needed for DB, but read them if you want to log/use later
+        term_number_csv = raw.get("Term Number") or raw.get("TermNumber")
+        acad_year_csv = raw.get("Academic Year") or raw.get("AY")
+
+        if not batch_code or not program_code:
+            # skip incomplete row
+            continue
+
+        # 1) Resolve program_id from Program column (e.g., "BSCS-ST")
+        program = await db[COL_PROGRAMS].find_one({"program_code": program_code})
+        if not program:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Program {program_code!r} not found in programs collection",
+            )
+        program_id = program["program_id"]
+
+        # 2) Ensure batch exists (CSV "Batch" = batches.batch_code)
+        batch = await db[COL_BATCHES].find_one(
+            {"batch_code": batch_code, "program_id": program_id}
+        )
+
+        if not batch:
+            # Generate next batch_id, e.g., BATCH0001, BATCH0002, ...
+            last_batch = await db[COL_BATCHES].find(
+                {"batch_id": {"$regex": r"^BATCH[0-9]+$"}}
+            ).sort("batch_id", -1).limit(1).to_list(1)
+            if last_batch:
+                last_num = int(last_batch[0]["batch_id"][5:])
+            else:
+                last_num = 0
+            batch_id = f"BATCH{last_num + 1:04d}"
+
+            batch_doc = {
+                "batch_id": batch_id,
+                "batch_code": batch_code,      # <-- "ID 126"
+                "program_id": program_id,
+                "intake_term_id": term_id,
+                "curriculum_id": None,         # filled after curriculum insert
+                "status": "active",
+                "created_at": datetime.utcnow(),
+                "updated_at": datetime.utcnow(),
+            }
+            await db[COL_BATCHES].insert_one(batch_doc)
+            created_batches.append(batch_id)
+        else:
+            batch_id = batch["batch_id"]
+
+        # 3) Collect course codes from Course 1, Course 2, ...
+        course_codes: List[str] = []
+        for key, value in raw.items():
+            if key.lower().startswith("course"):
+                v = str(value or "").strip()
+                if v:
+                    course_codes.append(v)
+
+        if not course_codes:
+            continue
+
+        # 4) Resolve course_ids using courses.course_code (ARRAY)
+        course_docs = await db[COL_COURSES].find(
+            {"course_code": {"$in": course_codes}}
+        ).to_list(None)
+
+        found_codes = {
+            code for doc in course_docs for code in doc.get("course_code", [])
+        }
+        missing = sorted(set(course_codes) - found_codes)
+        if missing:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Unknown course_code(s) in CSV for program {program_code!r}: "
+                    + ", ".join(missing)
+                ),
+            )
+
+        course_ids = [doc["course_id"] for doc in course_docs]
+
+        # 5) Upsert curriculum (one per batch_id + term_id + campus_id)
+        existing_cur = await db[COL_CURRICULUM].find_one(
+            {"batch_id": batch_id, "term_id": term_id, "campus_id": campus_id}
+        )
+        if existing_cur:
+            curriculum_id = existing_cur["curriculum_id"]
+        else:
+            last_cur = await db[COL_CURRICULUM].find(
+                {"curriculum_id": {"$regex": r"^CUR[0-9]+$"}}
+            ).sort("curriculum_id", -1).limit(1).to_list(1)
+            if last_cur:
+                last_num = int(last_cur[0]["curriculum_id"][3:])
+            else:
+                last_num = 0
+            curriculum_id = f"CUR{last_num + 1:04d}"
+
+        curriculum_doc = {
+            "curriculum_id": curriculum_id,
+            "batch_id": batch_id,
+            "program_id": program_id,
+            "term_id": term_id,
+            "campus_id": campus_id,
+            # *** IMPORTANT: list of course_id strings ***
+            "course_list": course_ids,
+            "created_at": datetime.utcnow(),
+            "updated_at": datetime.utcnow(),
+        }
+
+        await db[COL_CURRICULUM].update_one(
+            {"curriculum_id": curriculum_id},
+            {"$set": curriculum_doc},
+            upsert=True,
+        )
+
+        # 6) Link batch -> curriculum
+        await db[COL_BATCHES].update_one(
+            {"batch_id": batch_id},
+            {"$set": {"curriculum_id": curriculum_id, "updated_at": datetime.utcnow()}},
+        )
+
+        updated_curricula.append(
+            {
+                "batch_id": batch_id,
+                "curriculum_id": curriculum_id,
+                "course_count": len(course_ids),
+            }
+        )
+
+    return {
+        "ok": True,
+        "imported": len(updated_curricula),
+        "created_batches": created_batches,
+        "curricula": updated_curricula,
+    }
 
 async def campus_meta(campus_id: Optional[str]) -> Dict[str, str]:
     if not campus_id:
@@ -1634,24 +1987,77 @@ async def _planning_flags(term_id: str, campus_id: str, campus_prefix: str):
     )
     return needs_import, approval_required, pending, preen_hash, cohort_hash, plan_state
 # --- room availability helpers (capacity/type/time overlap) ---
-def _time_overlap(a_start: str, a_end: str, b_start: str, b_end: str) -> bool:
-    if not (a_start and a_end and b_start and b_end):
-        return False
-    return not (a_end <= b_start or a_start >= b_end)
+# --- room availability helpers (capacity/type/time overlap) ---
 
-# keep the earlier normalize_day() that returns full names (Monday..Saturday)
-# and add a code-only normalizer for convenience here:
-DAY_MAP_CODE = {
-    "MONDAY": "M", "MON": "M", "M": "M",
-    "TUESDAY": "T", "TUE": "T", "T": "T",
-    "WEDNESDAY": "W", "WED": "W", "W": "W",
-    "THURSDAY": "TH", "THU": "TH", "H": "TH", "R": "TH", "TH": "TH",
-    "FRIDAY": "F", "FRI": "F", "F": "F",
-    "SATURDAY": "S", "SAT": "S", "SA": "S", "S": "S",
+# Reuse the same day aliases and time bands as Room Allocation,
+# but keep them local to this file so we don't import from apo.py.
+
+DAY_ALIASES: Dict[str, List[str]] = {
+    "Monday": ["Monday", "M", "MON", "MONDAY"],
+    "Tuesday": ["Tuesday", "T", "TU", "TUE", "TUESDAY"],
+    "Wednesday": ["Wednesday", "W", "WED", "WEDNESDAY"],
+    "Thursday": ["Thursday", "TH", "H", "R", "THU", "THUR", "THURS", "THURSDAY"],
+    "Friday": ["Friday", "F", "FRI", "FRIDAY"],
+    "Saturday": ["Saturday", "S", "SAT", "SATURDAY"],
 }
-def normalize_day_code(v: str) -> str:
-    k = (v or "").strip().upper()
-    return DAY_MAP_CODE.get(k, k)
+
+TIME_BANDS = [
+    "07:30 – 09:00",
+    "09:15 – 10:45",
+    "11:00 – 12:30",
+    "12:45 – 14:15",
+    "14:30 – 16:00",
+    "16:15 – 17:45",
+    "18:00 – 19:30",
+]
+
+DEFAULT_OPEN_DAYS_MANILA = ["Thursday", "Friday", "Saturday"]
+DEFAULT_OPEN_DAYS_LAGUNA = ["Monday", "Tuesday", "Wednesday", "Saturday"]
+
+
+def day_aliases(day_full: str) -> List[str]:
+    """Return all code/name variants for a day: 'Monday' -> ['Monday','M','MON',...]"""
+    return DAY_ALIASES.get(day_full, [day_full])
+
+
+def default_open_days_for_campus(campus_name: str) -> List[str]:
+    n = (campus_name or "").lower()
+    # Laguna variants
+    if "laguna" in n or "canlubang" in n or "biñan" in n or "binan" in n:
+        return DEFAULT_OPEN_DAYS_LAGUNA
+    # Default to Manila if not Laguna
+    return DEFAULT_OPEN_DAYS_MANILA
+
+
+def _t4(v: Any) -> Optional[str]:
+    """Normalize time to 'HHMM' (e.g. '7:30' -> '0730')."""
+    if v is None:
+        return None
+    s = "".join(ch for ch in str(v) if ch.isdigit())
+    if len(s) == 0:
+        return None
+    if len(s) < 4:
+        s = ("0000" + s)[-4:]
+    return s[:4]
+
+
+def fmt_pair(t: Any) -> str:
+    """Format 'HHMM' -> 'HH:MM'; return '' if malformed."""
+    s = _t4(t)
+    if not s or len(s) != 4:
+        return ""
+    h, m = s[:2], s[2:]
+    try:
+        return f"{int(h):02d}:{m}"
+    except Exception:
+        return ""
+
+
+def band_of(start: Any, end: Any) -> str:
+    """Return 'HH:MM – HH:MM' or '' if either side is missing."""
+    a, b = fmt_pair(start), fmt_pair(end)
+    return f"{a} – {b}" if (a and b) else ""
+
 
 async def _rooms_available_for_slot(
     campus_id: str,
@@ -1662,173 +2068,140 @@ async def _rooms_available_for_slot(
     min_capacity: Optional[int] = None,
     exclude_schedule_ids: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
-    # --- helpers -------------------------------------------------------------
-    def t4(v: Optional[str]) -> Optional[str]:
-        if not v:
-            return None
-        d = re.sub(r"\D+", "", str(v))
-        if len(d) < 4:
-            d = ("0000" + d)[-4:]
-        return d[:4]
-
-    DAY_MAP_CODE = {
-        "MONDAY": "M", "MON": "M", "M": "M",
-        "TUESDAY": "T", "TUE": "T", "TU": "T", "T": "T",
-        "WEDNESDAY": "W", "WED": "W", "W": "W",
-        "THURSDAY": "TH", "THU": "TH", "H": "TH", "R": "TH", "TH": "TH",
-        "FRIDAY": "F", "FRI": "F", "F": "F",
-        "SATURDAY": "S", "SAT": "S", "SA": "S", "S": "S",
-    }
-    def normalize_day_code(v: str) -> str:
-        k = (v or "").strip().upper()
-        return DAY_MAP_CODE.get(k, k)
-
-    def day_codes_from(raw: Any) -> set[str]:
-        """Parse things like 'MWF', 'TTh', 'M TH' -> {'M','W','F'} or {'T','TH'}."""
-        if not raw:
-            return set()
-        if isinstance(raw, list):
-            raw = " ".join(str(x or "") for x in raw)
-        s = re.sub(r"[,/|-]+", " ", str(raw or "").upper())
-        s = re.sub(r"\s+", "", s)
-        codes = set()
-        i = 0
-        while i < len(s):
-            ch = s[i]
-            if ch == "T":
-                if i + 1 < len(s) and s[i + 1] == "H":
-                    codes.add("TH"); i += 2; continue
-                codes.add("T"); i += 1; continue
-            if ch in ("H", "R"):
-                codes.add("TH"); i += 1; continue
-            if ch in ("M", "W", "F", "S"):
-                codes.add(ch); i += 1; continue
-            i += 1
-        return codes
-
-    def overlaps(a1: str, a2: str, b1: str, b2: str) -> bool:
-        # strict overlap for half-open intervals [start, end)
-        return max(a1, b1) < min(a2, b2)
-
-    def win_covers(win: Any, a_start: str, a_end: str) -> bool:
-        """
-        Accepts win as:
-          {"start":"0730","end":"0900"} OR ["0730","0900"] OR "0730-0900"
-        Returns True if [a_start,a_end) is fully inside window.
-        """
-        if isinstance(win, dict):
-            ws, we = t4(win.get("start")), t4(win.get("end"))
-        elif isinstance(win, (list, tuple)) and len(win) >= 2:
-            ws, we = t4(win[0]), t4(win[1])
-        else:
-            m = re.match(r"(\d{1,4})\D+(\d{1,4})", str(win or ""))
-            ws, we = (t4(m.group(1)) if m else None, t4(m.group(2)) if m else None)
-        if not (ws and we):
-            return False
-        return ws <= a_start and a_end <= we
+    """
+    Return rooms that:
+      * belong to the given campus
+      * match required_type (if provided)
+      * match min_capacity EXACTLY (sections.enrollment_cap == rooms.capacity)
+      * have this specific day + time slot allowed in Room Allocation
+        (via section_schedules availability placeholders or campus defaults)
+      * are not already booked by another section at an overlapping slot.
+    """
 
     # --- normalize inputs ----------------------------------------------------
-    target_code = normalize_day_code(day)       # "M","T","W","TH","F","S"
-    start = t4(start); end = t4(end)
+    day_full = normalize_day(day)  # this is already defined earlier in this file
+    start4 = _t4(start)
+    end4 = _t4(end)
     exclude_schedule_ids = exclude_schedule_ids or []
-    if not (target_code and start and end):
+
+    if not (day_full and start4 and end4):
         return []
 
-    # --- candidate rooms (campus + optional type + exact cap) ----------------
+    # --- 1) Candidate rooms in campus, filtered by type + exact capacity ----
     room_q: Dict[str, Any] = {"campus_id": campus_id}
     if required_type:
+        # section_schedules.room_type must match rooms.room_type
         room_q["room_type"] = required_type
     if min_capacity is not None:
-        # exact equality: sections.enrollment_cap == rooms.capacity
+        # EXACT equality: sections.enrollment_cap == rooms.capacity
         room_q["capacity"] = min_capacity
 
-    rooms_list = [r async for r in db[COL_ROOMS].find(room_q, {"_id": 0})]
-    if not rooms_list:
+    rooms: List[Dict[str, Any]] = [
+        r async for r in db[COL_ROOMS].find(
+            room_q,
+            {
+                "_id": 0,
+                "room_id": 1,
+                "room_number": 1,
+                "room_type": 1,
+                "capacity": 1,
+                "building": 1,
+                "campus_id": 1,
+                "status": 1,
+            },
+        )
+    ]
+    if not rooms:
         return []
-    room_ids = [r["room_id"] for r in rooms_list]
 
-    # --- AVAILABILITY FILTER (Room Allocation) -------------------------------
-    # We consider a room "known-open" for a slot only if we find availability
-    # data for that day and a window that fully covers [start,end).
-    # Sources supported:
-    #   1) collection "room_availability" with docs per room/day
-    #   2) embedded "rooms.availability": {"Monday":[{"start":"0730","end":"0900"}, ...], ...}
-    open_ok: set[str] = set()
-    has_day_info: set[str] = set()  # rooms for which we found availability windows for the TARGET day
+    room_ids = [r["room_id"] for r in rooms]
 
-    # 1) availability in external collections
-    for coll_name in ("room_availability", "roomallocation", "room_allocations"):
-        try:
-            if await db[coll_name].count_documents({"room_id": {"$in": room_ids}}, limit=1):
-                day_variants = {
-                    target_code,
-                    normalize_day(day),
-                    target_code.lower(),
-                    target_code.upper(),
-                    normalize_day(day).lower(),
-                }
-                cur = db[coll_name].find(
-                    {"room_id": {"$in": room_ids}},
-                    {"_id": 0, "room_id": 1, "day": 1, "windows": 1, "slots": 1, "availability": 1},
-                )
-                async for av in cur:
-                    rid = av.get("room_id")
-                    if not rid:
-                        continue
-                    dval = str(av.get("day") or "").strip()
-                    dcode = normalize_day_code(dval)
-                    dfull = normalize_day(dval)
-                    # only treat as "known" if the doc is for the target day
-                    if dval and (dval in day_variants or dcode in day_variants or dfull in day_variants):
-                        has_day_info.add(rid)
-                        windows = av.get("windows") or av.get("slots") or av.get("availability") or []
-                        if any(win_covers(w, start, end) for w in windows):
-                            open_ok.add(rid)
-                # don’t break here — some rooms may live in another collection alias
-        except Exception:
-            pass
+    # --- 2) Availability placeholders for these rooms on this *day* ---------
+    # These are the AVAIL-* rows from Room Allocation:
+    #   section_id is ABSENT -> "this slot is open for this room".
+    from collections import defaultdict
+    avail_pairs_by_room: Dict[str, Set[Tuple[str, str]]] = defaultdict(set)
 
-    # 2) fallback: embedded availability in the rooms doc
-    for r in rooms_list:
-        rid = r.get("room_id")
-        avail = r.get("availability")
-        if not rid or not avail:
+    avail_cur = db[COL_SCHEDS].find(
+        {
+            "room_id": {"$in": room_ids},
+            "section_id": {"$exists": False},              # availability rows only
+            "day": {"$in": day_aliases(day_full)},         # M / MON / Monday, etc.
+        },
+        {"_id": 0, "room_id": 1, "start_time": 1, "end_time": 1},
+    )
+
+    async for a in avail_cur:
+        rid = a.get("room_id")
+        if not rid:
             continue
-        day_key = normalize_day(day)
-        windows = avail.get(day_key) or avail.get(target_code) or []
-        if windows:  # only mark "known" if this room has a window list for the target day
-            has_day_info.add(rid)
-            if any(win_covers(w, start, end) for w in windows):
-                open_ok.add(rid)
+        st = _t4(a.get("start_time"))
+        et = _t4(a.get("end_time"))
+        if not (st and et):
+            continue
+        # Each pair represents one available band for this day
+        avail_pairs_by_room[rid].add((st, et))
 
-    # Enforce availability ONLY for rooms we actually have windows for on the target day.
-    if has_day_info:
-        rooms_list = [r for r in rooms_list if (r["room_id"] in open_ok) or (r["room_id"] not in has_day_info)]
+    # Campus default open days (same logic as Room Allocation grid)
+    campus = await campus_meta(campus_id)
+    default_days = default_open_days_for_campus(campus.get("campus_name", ""))
 
+    # Convert our start/end into the canonical band string ("07:30 – 09:00")
+    band_str = band_of(start4, end4)
+    band_is_standard = band_str in TIME_BANDS
 
-    if not rooms_list:
+    # Decide which rooms are allowed *by availability rules*
+    allowed_room_ids: Set[str] = set()
+    for rid in room_ids:
+        pairs_for_day = avail_pairs_by_room.get(rid)
+
+        if pairs_for_day:
+            # Room has explicit availability rows for this day:
+            # only allow if this exact (start,end) pair exists.
+            if (start4, end4) in pairs_for_day:
+                allowed_room_ids.add(rid)
+        else:
+            # No explicit availability rows for this day:
+            # fall back to campus default open days (and only for standard bands).
+            if day_full in default_days and band_is_standard:
+                allowed_room_ids.add(rid)
+
+    if not allowed_room_ids:
         return []
 
-    # --- BUSY FILTER (existing schedules that overlap) -----------------------
-    sched_q: Dict[str, Any] = {
-        "room_id": {"$in": [r["room_id"] for r in rooms_list]},
-        "schedule_id": {"$nin": exclude_schedule_ids},
+    # Narrow candidate rooms to those that pass the availability check
+    rooms = [r for r in rooms if r["room_id"] in allowed_room_ids]
+    if not rooms:
+        return []
+
+    allowed_ids = [r["room_id"] for r in rooms]
+
+    # --- 3) BUSY FILTER: exclude rooms already booked in this slot ----------
+    # A room is BUSY if there is any section_schedules row with:
+    #   - section_id present
+    #   - same day (any alias)
+    #   - overlapping time [start4,end4)
+    conflict_q: Dict[str, Any] = {
+        "room_id": {"$in": allowed_ids},
+        "section_id": {"$exists": True},
+        "day": {"$in": day_aliases(day_full)},
+        "start_time": {"$lt": end4},
+        "end_time": {"$gt": start4},
     }
+    if exclude_schedule_ids:
+        conflict_q["schedule_id"] = {"$nin": exclude_schedule_ids}
 
-    busy_set: set[str] = set()
+    busy_room_ids: Set[str] = set()
     async for s in db[COL_SCHEDS].find(
-        sched_q, {"_id": 0, "room_id": 1, "day": 1, "start_time": 1, "end_time": 1}
+        conflict_q,
+        {"_id": 0, "room_id": 1},
     ):
-        codes = day_codes_from(s.get("day"))
-        if target_code not in codes:
-            continue
-        s_start = t4(s.get("start_time"))
-        s_end   = t4(s.get("end_time"))
-        if s_start and s_end and overlaps(start, end, s_start, s_end):
-            busy_set.add(s["room_id"])
+        rid = s.get("room_id")
+        if rid:
+            busy_room_ids.add(rid)
 
-    return [r for r in rooms_list if r["room_id"] not in busy_set]
-
+    # --- 4) Final list: available-by-timeslot AND not busy -------------------
+    return [r for r in rooms if r["room_id"] not in busy_room_ids]
 
 # ---------- GET ----------
 @router.get("/courseofferings")
@@ -1850,12 +2223,17 @@ async def get_course_offerings(
     exclude: Optional[str] = Query(None),
     section_id: Optional[str] = Query(None),
     course_id: Optional[str] = Query(None),
-    slot: Optional[int] = Query(None),               # <-- new (optional)
-    schedule_id: Optional[str] = Query(None),        # <-- new (fixes the error)
+    slot: Optional[int] = Query(None),              
+    schedule_id: Optional[str] = Query(None),      
+    # NEW: used only when action == "catalogSearch"
+    q: Optional[str] = Query(None),
+    limit: int = Query(20),
 ):
 
-    t = await current_term() or await _ensure_current_term()
-    term_id = (t or {}).get("term_id")
+    # Use PLANNING term (next term after is_current), same as Preenlistment
+    planning_term = await _get_planning_term()
+    term_id = (planning_term or {}).get("term_id")
+
     if not term_id:
         return {
             "campus": {"campus_id": "", "campus_name": ""},
@@ -1864,6 +2242,8 @@ async def get_course_offerings(
             "rows": [], "course_options_by_group": {}, "room_options": [],
             "planning": {"needs_import": True, "approval_required": False}
         }
+
+    # Mark sections “active” for the PLANNING term, others “inactive”
     await _sync_section_status_flags(term_id)
 
     campus_id, _ = await apo_scope(userId)
@@ -2090,7 +2470,7 @@ async def get_course_offerings(
         return {
             "campus": campus,
             "term_id": term_id,
-            "term_label": term_label(t),
+            "term_label": term_label(planning_term), 
             "items": items,
             "course_options_by_program": course_options_by_program,
             "departments": departments
@@ -2637,7 +3017,7 @@ async def get_course_offerings(
     return {
         "campus": campus,
         "term_id": term_id,
-        "term_label": term_label(t),
+        "term_label": term_label(planning_term), 
         "filters": {"levels": levels, "departments": dep_opts, "ids": id_opts, "programs": prog_opts},
         "rows": rows,
         "course_options_by_group": options_by_group,
@@ -2658,16 +3038,22 @@ async def post_course_offerings(
         "addRow", "editRow", "deleteRow", "forward",
         "curriculumAddCourse", "curriculumEditCourse", "curriculumRemoveCourse",
         "approvePlan",
-        "courseCatalog",
-        "catalog.create"
+        "courseCatalog", "search_catalog",
+        "catalog.create", 
+        "curriculumImportCsv", "curriculum.importCsv",
+        "import_curriculum_csv"
     ] = Query(...),
     payload: Optional[Dict[str, Any]] = Body(None),
 ):
 
-    t = await current_term() or await _ensure_current_term()
-    term_id = (t or {}).get("term_id")
+    # Use the same PLANNING term as Preenlistment
+    planning_term = await _get_planning_term()
+    term_id = (planning_term or {}).get("term_id")
+
     if not term_id:
-        raise HTTPException(status_code=400, detail="No active term.")
+        raise HTTPException(status_code=400, detail="No planning term (next term) found.")
+
+    # Keep status flags in sync for the planning term
     await _sync_section_status_flags(term_id)
 
     campus_id, _ = await apo_scope(userId)
@@ -2675,15 +3061,290 @@ async def post_course_offerings(
         raise HTTPException(status_code=400, detail="Unable to resolve APO campus from role_assignments.")
     campus = await campus_meta(campus_id)
     prefix_default = campus_section_prefix(campus.get("campus_name", "")) or ""
+
+    # ---------- NEW: CSV CURRICULUM IMPORT ----------
+    if action in ("curriculumImportCsv", "curriculum.importCsv", "import_curriculum_csv"):
+        if payload is None:
+            raise HTTPException(status_code=400, detail="Missing payload.")
+
+        # Allow either { "rows": [...] } or [ ... ] from the frontend
+        if isinstance(payload, list):
+            rows = payload
+        elif isinstance(payload, dict):
+            rows = payload.get("rows") or []
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="Payload must be either an array of rows or an object with a 'rows' array."
+            )
+
+        if not isinstance(rows, list):
+            raise HTTPException(
+                status_code=400,
+                detail="payload.rows must be a list of row dicts parsed from the CSV."
+            )
+
+        results: List[Dict[str, Any]] = []
+        errors: List[Dict[str, Any]] = []
+
+        # helpers to read columns regardless of exact casing
+        def _get(row: Dict[str, Any], *names: str) -> str:
+            if not row:
+                return ""
+            lower_map = {k.lower(): k for k in row.keys() if isinstance(k, str)}
+            for name in names:
+                if name in row:
+                    return str(row[name] or "").strip()
+                key = lower_map.get(name.lower())
+                if key:
+                    return str(row[key] or "").strip()
+            return ""
+
+        meta_keys = {
+            "batch", "program level", "level",
+            "program", "program code",
+            "term number", "term",
+            "academic year", "ay",
+            "campus",
+        }
+        meta_keys_lower = {k.lower() for k in meta_keys}
+
+        for idx, raw in enumerate(rows, start=1):
+            try:
+                row = raw or {}
+
+                # --- NEW: skip rows that are completely empty (common trailing CSV row) ---
+                if not any((str(v).strip() for v in row.values() if v is not None)):
+                    continue
+
+                batch_label        = _get(row, "Batch")
+                program_level_lbl  = _get(row, "Program Level", "Level")
+                program_code       = _get(row, "Program", "Program Code")
+                term_number_str    = _get(row, "Term Number", "Term")
+                acad_year_str      = _get(row, "Academic Year", "AY")
+                campus_label       = _get(row, "Campus")
+
+                if not batch_label or not program_code or not term_number_str or not acad_year_str:
+                    raise HTTPException(
+                        status_code=422,
+                        detail=f"Row {idx}: Batch, Program, Term Number, and Academic Year are required."
+                    )
+
+                # parse ints
+                try:
+                    term_number = int(term_number_str)
+                except Exception:
+                    raise HTTPException(status_code=422, detail=f"Row {idx}: invalid Term Number '{term_number_str}'.")
+
+                try:
+                    acad_year_start = int(acad_year_str)
+                except Exception:
+                    raise HTTPException(status_code=422, detail=f"Row {idx}: invalid Academic Year '{acad_year_str}'.")
+
+                # campus: if cell empty, default to APO campus
+                campus_name_csv = campus_label.strip() if campus_label else ""
+                campus_id_row = campus_id
+                campus_name_row = campus.get("campus_name", "")
+
+                if campus_name_csv:
+                    # Try a flexible match (substring / case-insensitive) against campus_name
+                    campus_doc = await db[COL_CAMPUSES].find_one(
+                        {"campus_name": {"$regex": re.escape(campus_name_csv), "$options": "i"}},
+                        {"_id": 0, "campus_id": 1, "campus_name": 1},
+                    )
+                    if campus_doc:
+                        campus_id_row = campus_doc["campus_id"]
+                        campus_name_row = campus_doc.get("campus_name", campus_name_row)
+                        # still enforce APO scope: can't import to another campus
+                        if campus_id_row != campus_id:
+                            raise HTTPException(
+                                status_code=422,
+                                detail=f"Row {idx}: campus '{campus_name_csv}' does not match your APO campus."
+                            )
+                    # if no doc found, just ignore the CSV campus label and stick to APO campus
+
+                # term: by AY + term_number
+                term_doc = await db[COL_TERMS].find_one(
+                    {"acad_year_start": acad_year_start, "term_number": term_number},
+                    {"_id": 0, "term_id": 1},
+                )
+                if not term_doc:
+                    raise HTTPException(
+                        status_code=422,
+                        detail=f"Row {idx}: Term {term_number} AY {acad_year_start}-{acad_year_start + 1} not found in terms collection."
+                    )
+                term_id_row = term_doc["term_id"]
+
+                # program: by program_code
+                prog_doc = await db[COL_PROGRAMS].find_one(
+                    {"program_code": program_code},
+                    {"_id": 0, "program_id": 1, "program_level": 1},
+                )
+                if not prog_doc:
+                    raise HTTPException(
+                        status_code=422,
+                        detail=f"Row {idx}: program code '{program_code}' not found in programs collection."
+                    )
+                program_id_row = prog_doc["program_id"]
+
+                # optional: check program level consistency
+                lvl_from_csv  = level_code(program_level_lbl) if program_level_lbl else None
+                lvl_from_prog = prog_doc.get("program_level")
+                level_mismatch = bool(
+                    lvl_from_csv and lvl_from_prog and lvl_from_csv != lvl_from_prog
+                )
+
+                # batch: reuse existing or create new in batches
+                batch_code_norm = _norm_code(batch_label)
+                batch_doc = await db[COL_BATCHES].find_one(
+                    {
+                        "program_id": program_id_row,
+                        "campus_id": campus_id_row,
+                        "$or": [
+                            {"batch_code": batch_code_norm},
+                            {"batch_code": {"$regex": f"^{re.escape(batch_label)}$", "$options": "i"}},
+                        ],
+                    },
+                    {"_id": 0, "batch_id": 1, "batch_code": 1, "batch_number": 1},
+                )
+
+                if batch_doc:
+                    batch_id_row = batch_doc["batch_id"]
+                    batch_number = batch_doc.get("batch_number")
+                else:
+                    m = re.search(r"(\d+)", batch_label)
+                    batch_number = int(m.group(1)) if m else None
+                    batch_id_row = await _next_seq_id(COL_BATCHES, "batch_id", "BCH", 4)
+                    await db[COL_BATCHES].insert_one(
+                        {
+                            "batch_id": batch_id_row,
+                            "batch_code": batch_code_norm or batch_label,
+                            "batch_number": batch_number,
+                            "program_id": program_id_row,
+                            "campus_id": campus_id_row,
+                            "created_at": now(),
+                            "updated_at": now(),
+                        }
+                    )
+
+                # collect course codes from all non-meta columns (Course 1, Course 2, ...)
+                course_codes: List[str] = []
+                for col_name, value in row.items():
+                    if not isinstance(col_name, str):
+                        continue
+                    if col_name.lower() in meta_keys_lower:
+                        continue
+                    if value is None:
+                        continue
+                    s_val = str(value).strip()
+                    if not s_val:
+                        continue
+                    # allow comma-separated course codes in a single cell
+                    for part in s_val.split(","):
+                        code = _norm_code(part)
+                        if code:
+                            course_codes.append(code)
+
+                if not course_codes:
+                    raise HTTPException(status_code=422, detail=f"Row {idx}: no course codes found.")
+
+                # map course_code -> courses.course_id
+                course_ids: List[str] = []
+                missing_codes: List[str] = []
+                for c_code in course_codes:
+                    c_doc = await db[COL_COURSES].find_one(
+                        {"$or": [{"course_code": c_code}, {"course_code.0": c_code}]},
+                        {"_id": 0, "course_id": 1},
+                    )
+                    if not c_doc:
+                        missing_codes.append(c_code)
+                    else:
+                        cid = c_doc["course_id"]
+                        if cid not in course_ids:
+                            course_ids.append(cid)
+
+                if missing_codes:
+                    raise HTTPException(
+                        status_code=422,
+                        detail=f"Row {idx}: course code(s) not found: {', '.join(missing_codes)}."
+                    )
+
+                # curriculum: upsert per (term, campus, program, batch)
+                cur_doc = await db[COL_CURRICULUM].find_one(
+                    {
+                        "term_id": term_id_row,
+                        "campus_id": campus_id_row,
+                        "program_id": program_id_row,
+                        "batch_id": batch_id_row,
+                    }
+                )
+
+                if not cur_doc:
+                    cur_doc = {
+                        "curriculum_id": _id("CURR"),
+                        "term_id": term_id_row,
+                        "campus_id": campus_id_row,
+                        "program_id": program_id_row,
+                        "batch_id": batch_id_row,
+                        "course_list": course_ids,
+                        "created_at": now(),
+                        "updated_at": now(),
+                    }
+                    await db[COL_CURRICULUM].insert_one(cur_doc)
+                    added_codes = course_codes
+                else:
+                    existing_ids = ensure_list(cur_doc.get("course_list"))
+                    new_ids = [cid for cid in course_ids if cid not in existing_ids]
+                    if new_ids:
+                        await db[COL_CURRICULUM].update_one(
+                            {"_id": cur_doc["_id"]},
+                            {
+                                "$set": {
+                                    "course_list": existing_ids + new_ids,
+                                    "updated_at": now(),
+                                }
+                            },
+                        )
+                    added_codes = [
+                        course_codes[i]
+                        for i, cid in enumerate(course_ids)
+                        if cid in new_ids
+                    ]
+
+                results.append(
+                    {
+                        "row": idx,
+                        "term_id": term_id_row,
+                        "program_id": program_id_row,
+                        "batch_id": batch_id_row,
+                        "campus_id": campus_id_row,
+                        "added_course_codes": added_codes,
+                        "level_mismatch": level_mismatch,
+                    }
+                )
+
+            except HTTPException as e:
+                errors.append({"row": idx, "detail": e.detail})
+            except Exception as e:
+                errors.append({"row": idx, "detail": str(e)})
+
+        return {
+            "ok": len(errors) == 0,
+            "imported_rows": len(results),
+            "rows": results,
+            "errors": errors,
+        }
     
-    if action == "courseCatalog":
+    if action in ("courseCatalog", "search_catalog"):
         # inputs
         q_raw = (payload or {}).get("q") or ""
         req_limit = int((payload or {}).get("limit", 500))
         limit = max(1, min(req_limit, 1000))  # clamp
 
-        department_id = (payload or {}).get("department_id") or None
-        program_level = (payload or {}).get("program_level") or None  # accepts 'UGS'/'GSM' or 'Undergraduate'/'Graduate Studies'
+        body = payload or {}
+        department_id = body.get("department_id") or body.get("departmentId") or None
+        # accept either program_level or level from the UI
+        program_level = body.get("program_level") or body.get("level") or None  # 'UGS'/'GSM' or 'Undergraduate'/'Graduate'
 
         # base filter
         flt: Dict[str, Any] = {}
@@ -2942,26 +3603,55 @@ async def post_course_offerings(
     if action == "curriculumEditCourse":
         if not payload:
             raise HTTPException(status_code=400, detail="Missing payload.")
+
         pid = (payload.get("program_id") or "").strip()
         bid = (payload.get("batch_id") or "").strip()
-        old_cid = (payload.get("old_course_id") or "").strip()
+        # allow either old_course_id OR course_id from the UI
+        old_cid = (
+            (payload.get("old_course_id") or "")
+            or (payload.get("course_id") or "")
+        ).strip()
         new_cid = (payload.get("new_course_id") or "").strip()
         upd = payload.get("update_course")
-        if not (pid and bid and old_cid):
-            raise HTTPException(status_code=422, detail="program_id, batch_id, old_course_id are required.")
 
-        cur_doc = await db[COL_CURRICULUM].find_one(
-            {"term_id": term_id, "campus_id": campus_id, "program_id": pid, "batch_id": bid}
-        )
-        if not cur_doc:
-            raise HTTPException(status_code=404, detail="Curriculum not found.")
-
+        # ---- CASE 1: EDIT GLOBAL COURSE FIELDS (code/title/units) ----
         if upd:
+            if not old_cid:
+                raise HTTPException(
+                    status_code=422,
+                    detail="old_course_id (or course_id) is required when updating a course."
+                )
+
             f: Dict[str, Any] = {}
+
+            # 1) course_code (CAN BE MULTIPLE)
+            #    Accepts:
+            #      - "CCINF 1"
+            #      - "CCINF 1, CCINF 1L"
+            #      - ["CCINF 1", "CCINF 1L"]
+            if "course_code" in upd:
+                raw_codes = upd.get("course_code")
+
+                if isinstance(raw_codes, str) and "," in raw_codes:
+                    raw_codes = [
+                        part.strip()
+                        for part in raw_codes.split(",")
+                        if str(part).strip()
+                    ]
+
+                codes_list = _as_list(raw_codes)
+                if codes_list:
+                    f["course_code"] = codes_list
+
+            # 2) course_title
             if "course_title" in upd:
                 f["course_title"] = (upd.get("course_title") or "").strip()
+
+            # 3) program_level (optional, still supported)
             if "program_level" in upd and upd.get("program_level"):
                 f["program_level"] = level_code(upd.get("program_level"))
+
+            # 4) units
             if "units" in upd:
                 units_val = upd.get("units")
                 if units_val in (None, ""):
@@ -2970,18 +3660,52 @@ async def post_course_offerings(
                     try:
                         f["units"] = float(units_val)
                     except Exception:
+                        # silently ignore invalid units (same behavior as before)
                         pass
+
             if f:
-                await db[COL_COURSES].update_one({"course_id": old_cid}, {"$set": {**f, "updated_at": now()}})
+                res = await db[COL_COURSES].update_one(
+                    {"course_id": old_cid},
+                    {"$set": {**f, "updated_at": now()}}
+                )
+                if res.matched_count == 0:
+                    raise HTTPException(status_code=404, detail="Course not found.")
+
             return {"ok": True, "course_id": old_cid}
 
+        # ---- CASE 2: SWAP COURSE IN A SPECIFIC CURRICULUM (old_id -> new_id) ----
+        if not (pid and bid and old_cid):
+            raise HTTPException(
+                status_code=422,
+                detail="program_id, batch_id, old_course_id are required when swapping a course in the curriculum."
+            )
+
+        cur_doc = await db[COL_CURRICULUM].find_one(
+            {
+                "term_id": term_id,
+                "campus_id": campus_id,
+                "program_id": pid,
+                "batch_id": bid,
+            }
+        )
+        if not cur_doc:
+            raise HTTPException(status_code=404, detail="Curriculum not found.")
+
         if not new_cid:
-            raise HTTPException(status_code=422, detail="new_course_id or update_course must be provided.")
+            raise HTTPException(
+                status_code=422,
+                detail="new_course_id or update_course must be provided."
+            )
+
         clist = [c for c in ensure_list(cur_doc.get("course_list")) if c != old_cid]
         clist.append(new_cid)
-        await db[COL_CURRICULUM].update_one({"_id": cur_doc["_id"]}, {"$set": {"course_list": clist, "updated_at": now()}})
-        return {"ok": True, "course_id": new_cid}
 
+        await db[COL_CURRICULUM].update_one(
+            {"_id": cur_doc["_id"]},
+            {"$set": {"course_list": clist, "updated_at": now()}}
+        )
+        return {"ok": True, "course_id": new_cid}
+    
     if action == "curriculumRemoveCourse":
         if not payload:
             raise HTTPException(status_code=400, detail="Missing payload.")

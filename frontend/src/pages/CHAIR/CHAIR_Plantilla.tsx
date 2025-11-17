@@ -1,4 +1,3 @@
-// src/pages/CHAIR/CHAIR_Plantilla.tsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
 import AppShell from "@/base/AppShell";
@@ -14,8 +13,7 @@ import {
   Check,
   FileSpreadsheet,
 } from "lucide-react";
-import jsPDF from "jspdf";
-import autoTable from "jspdf-autotable";
+// Removed jsPDF + autoTable imports since we now export to Excel
 import { setActiveRole, userHasRole } from "@/api";
 
 /* ---------------- Sidebar ---------------- */
@@ -64,8 +62,12 @@ const normalizeCommaName = (n: string) =>
 
 const hasTwoWords = (n: string) => /\S+\s+\S+/.test(n);
 
+
 /* ---------------- Types ---------------- */
 type PlantillaRow = {
+  // NEW: Rank column (currently empty because not fetched from DB)
+  rank?: string;
+
   faculty_name: string;
   course_code: string;
   section_code: string;
@@ -109,155 +111,118 @@ const DepartmentPlantilla: React.FC<{
   const [approved, setApproved] = useState(false);
   const tableRef = useRef<HTMLTableElement | null>(null);
 
-  const handleExportPDF = () => {
-    const tbl = tableRef.current;
-    if (!tbl) return alert("No plantilla table found!");
+  const safeExcelFilename =
+    (plantillaFile && plantillaFile.replace(/\.pdf$/i, ".xls")) || "Faculty_Plantilla.xls";
 
-    const doc = new jsPDF({ orientation: "landscape", format: "a3" });
-    const generated = new Date().toLocaleString();
+  const handleExportExcel = () => {
+    if (!rows || rows.length === 0) {
+      alert("No plantilla rows to export.");
+      return;
+    }
 
-    // Title + meta
-    doc.setFontSize(14);
-    doc.text(`Department Faculty Plantilla of CCS – ${deptLabel}`, 14, 14);
-    doc.setFontSize(10);
-    doc.text(termLabel || "Academic Year • Term", 14, 22);
-    doc.text(`File: ${plantillaFile}`, 14, 28);
-    doc.text(`Generated: ${generated}`, doc.internal.pageSize.getWidth() - 14, 28, { align: "right" });
-
-    // Build body rows from data
-    const body = rows.map((r) => [
-      r.faculty_name || "—",
-      r.course_code || "—",
-      r.section_code || "—",
-      r.day_text || "—",
-      r.time_text || "—",
-      r.room_text || "—",
-      r.student_count ?? "—",
-      r.lec_hours ?? "—",
-      r.lab_hours ?? "—",
-      r.student_units ?? "—",
-      r.on_leave || "N/A",
-      r.course_type || "N/A",
-      r.nature_teaching ?? "—",
-      r.nature_admin ?? "—",
-      r.nature_research ?? "—",
-      r.nature_faculty_units ?? "—",
-      r.premium_grad ?? "—",
-      r.premium_4th_prep ?? "—",
-      r.premium_overload ?? "—",
-      r.remarks || "—",
-    ]);
-
-    const headRow1 = [
-      { content: "Faculty", rowSpan: 2 },
-      { content: "Course", rowSpan: 2 },
-      { content: "Section", rowSpan: 2 },
-      { content: "Day", rowSpan: 2 },
-      { content: "Time", rowSpan: 2 },
-      { content: "Room", rowSpan: 2 },
-      { content: "No. of Students", rowSpan: 2 },
-      { content: "Lecture Hours", rowSpan: 2 },
-      { content: "Lab Hours", rowSpan: 2 },
-      { content: "Student Unit(s)", rowSpan: 2 },
-      { content: "On Leave", rowSpan: 2 },
-      { content: "Type of Course", rowSpan: 2 },
-      { content: "NATURE OF LOAD", colSpan: 4 },
-      { content: "PREMIUMS", colSpan: 3 },
-      { content: "Remarks", rowSpan: 2 },
-    ] as const;
-    const headRow2 = ["Teaching", "Admin", "Research", "Faculty Unit(s)", "Grad Load", "Premium 4th Prep", "Overload (NCA)"];
-
-    const pageW = doc.internal.pageSize.getWidth();
-    const margin = 14;
-    const usableW = pageW - margin * 2;
-    const P = (pct: number) => (usableW * pct) / 100;
-    const widths = [
-      P(9),  // Faculty
-      P(6),  // Course
-      P(4.5),
-      P(4),
-      P(6),
-      P(4.5),
-      P(4.5),
-      P(4.5),
-      P(4),
-      P(4.5),
-      P(4),
-      P(4.5),
-      P(4.5),
-      P(4.5),
-      P(4.5),
-      P(4),
-      P(4.5),
-      P(4.5),
-      P(4.5),
-      P(9.5),
+    // 21 columns including Rank
+    const headers = [
+      "Rank",
+      "Faculty",
+      "Course",
+      "Section",
+      "Day",
+      "Time",
+      "Room",
+      "No. of Students",
+      "Lecture Hours",
+      "Lab Hours",
+      "Student Unit(s)",
+      "On Leave",
+      "Type of Course",
+      "Teaching",
+      "Admin",
+      "Research",
+      "Faculty Unit(s)",
+      "Grad Load",
+      "Premium 4th Prep",
+      "Overload (NCA)",
+      "Remarks",
     ];
 
-    autoTable(doc, {
-      head: [headRow1 as any, headRow2],
-      body,
-      startY: 34,
-      margin: { left: margin, right: margin, top: 34, bottom: 18 },
-      theme: "grid",
-      styles: {
-        fontSize: 5,
-        cellPadding: { top: 2, right: 3, bottom: 2, left: 3 },
-        overflow: "linebreak",
-        lineWidth: 0.2,
-        lineColor: [217, 217, 217],
-      },
-      headStyles: {
-        fillColor: [244, 246, 250],
-        textColor: 31,
-        halign: "center",
-        valign: "middle",
-        fontStyle: "bold",
-      },
-      alternateRowStyles: { fillColor: [249, 250, 251] },
-      columnStyles: {
-        0: { cellWidth: widths[0], halign: "left", fontStyle: "bold", textColor: [13, 113, 74] },
-        1: { cellWidth: widths[1], halign: "center" },
-        2: { cellWidth: widths[2], halign: "center" },
-        3: { cellWidth: widths[3], halign: "center" },
-        4: { cellWidth: widths[4], halign: "center" },
-        5: { cellWidth: widths[5], halign: "center" },
-        6: { cellWidth: widths[6], halign: "center" },
-        7: { cellWidth: widths[7], halign: "center" },
-        8: { cellWidth: widths[8], halign: "center" },
-        9: { cellWidth: widths[9], halign: "center" },
-        10: { cellWidth: widths[10], halign: "center" },
-        11: { cellWidth: widths[11], halign: "center" },
-        12: { cellWidth: widths[12], halign: "center" },
-        13: { cellWidth: widths[13], halign: "center" },
-        14: { cellWidth: widths[14], halign: "center" },
-        15: { cellWidth: widths[15], halign: "center" },
-        16: { cellWidth: widths[16], halign: "center" },
-        17: { cellWidth: widths[17], halign: "center" },
-        18: { cellWidth: widths[18], halign: "center" },
-        19: { cellWidth: widths[19], halign: "left" },
-      },
-      didParseCell: (data: any) => {
-        if (data.section === "body") {
-          if (data.column.index === 0) {
-            data.cell.styles.fontStyle = "bold";
-            data.cell.styles.textColor = [13, 113, 74];
-            data.cell.styles.halign = "left";
-          }
-          if (data.column.index === 19) data.cell.styles.halign = "left";
-        }
-      },
-      didDrawPage: () => {
-        doc.setFontSize(8);
-        doc.text(
-          "Notes: Hours and units are computed based on official loading policies. Premiums apply per college guidelines.",
-          margin,
-          doc.internal.pageSize.getHeight() - 10
-        );
-      },
+    const dataRows = rows.map((r) => [
+      r.rank ?? "",
+      r.faculty_name || "",
+      r.course_code || "",
+      r.section_code || "",
+      r.day_text || "",
+      r.time_text || "",
+      r.room_text || "",
+      r.student_count ?? "",
+      r.lec_hours ?? "",
+      r.lab_hours ?? "",
+      r.student_units ?? "",
+      r.on_leave || "",
+      r.course_type || "",
+      r.nature_teaching ?? "",
+      r.nature_admin ?? "",
+      r.nature_research ?? "",
+      r.nature_faculty_units ?? "",
+      r.premium_grad ?? "",
+      r.premium_4th_prep ?? "",
+      r.premium_overload ?? "",
+      r.remarks || "",
+    ]);
+
+    // Normalize text for Excel to avoid mojibake like â€“ / â—
+    const normalizeForExcel = (value: string) => {
+      let v = value ?? "";
+
+      // Treat our UI placeholder em dash as empty in export
+      if (v === "—") v = "";
+
+      // Replace typographic dashes/quotes with ASCII
+      v = v
+        .replace(/[\u2012\u2013\u2014\u2015]/g, "-") // en/em dashes → hyphen
+        .replace(/[\u2018\u2019]/g, "'") // curly single quotes → '
+        .replace(/[\u201C\u201D]/g, '"') // curly double quotes → "
+        .replace(/\u00A0/g, " ") // non-breaking space → normal space
+        .replace(/[\r\n\t]/g, " "); // strip control chars
+
+      // Trim excessive spaces
+      v = v.replace(/\s+/g, " ").trim();
+
+      return v;
+    };
+
+    const esc = (v: string) =>
+      v.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+    // Wrap in full HTML with UTF-8 meta so modern Excel can detect encoding
+    let html = "<html><head><meta charset=\"utf-8\" /></head><body><table><thead><tr>";
+    headers.forEach((h) => {
+      html += `<th>${esc(String(h))}</th>`;
+    });
+    html += "</tr></thead><tbody>";
+
+    dataRows.forEach((row) => {
+      html += "<tr>";
+      row.forEach((cell) => {
+        const raw = cell == null ? "" : String(cell);
+        const normalized = normalizeForExcel(raw);
+        html += `<td>${esc(normalized)}</td>`;
+      });
+      html += "</tr>";
     });
 
-    doc.save(plantillaFile);
+    html += "</tbody></table></body></html>";
+
+    const blob = new Blob([html], {
+      type: "application/vnd.ms-excel;charset=utf-8",
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = safeExcelFilename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   };
 
   const handleApprove = async () => {
@@ -266,7 +231,7 @@ const DepartmentPlantilla: React.FC<{
     try {
       await fetch(`/api/chair/plantilla?action=approve`, { method: "POST" });
       setApproved(true);
-      requestAnimationFrame(handleExportPDF);
+      // NOTE: export is now manual; button becomes enabled after approval
     } catch {
       // Non-blocking for UI
     } finally {
@@ -278,8 +243,7 @@ const DepartmentPlantilla: React.FC<{
     <section className="mt-6">
       <header className="mb-2">
         <h2 className="text-xl font-semibold">
-          Department Faculty Plantilla of CCS – {deptLabel}
-          {termLabel ? ` · ${termLabel}` : ""}
+          Department Faculty Plantilla of CCS {termLabel ? ` · ${termLabel}` : ""}
         </h2>
       </header>
 
@@ -290,21 +254,34 @@ const DepartmentPlantilla: React.FC<{
           aria-disabled={approved || isApproving}
           className={cls(
             "inline-flex items-center gap-2 rounded-md px-5 py-2 text-sm font-medium text-white",
-            approved || isApproving ? "bg-emerald-400 cursor-not-allowed opacity-70" : "bg-emerald-700 hover:brightness-110"
+            approved || isApproving
+              ? "bg-emerald-400 cursor-not-allowed opacity-70"
+              : "bg-emerald-700 hover:brightness-110"
           )}
-          title={approved ? "Already approved" : "Approve and export PDF"}
+          title={approved ? "Already approved" : "Approve plantilla"}
         >
           <CheckCheck className="h-4 w-4" />
           {approved ? "Approved" : isApproving ? "Approving…" : "Approve"}
         </button>
 
         <button
-          onClick={handleExportPDF}
-          className="inline-flex items-center gap-2 rounded-md bg-blue-600 px-5 py-2 text-sm font-medium text-white hover:brightness-110"
-          title="Export plantilla as PDF"
+          onClick={handleExportExcel}
+          disabled={!approved}
+          aria-disabled={!approved}
+          className={cls(
+            "inline-flex items-center gap-2 rounded-md px-5 py-2 text-sm font-medium text-white",
+            !approved
+              ? "bg-blue-300 cursor-not-allowed opacity-60"
+              : "bg-blue-600 hover:brightness-110"
+          )}
+          title={
+            !approved
+              ? "Approve the plantilla first to enable export"
+              : "Export plantilla as Excel (.xls)"
+          }
         >
           <FileSpreadsheet className="h-4 w-4" />
-          Export PDF
+          Export Excel
         </button>
 
         {showApprovePrompt && (
@@ -315,8 +292,10 @@ const DepartmentPlantilla: React.FC<{
               </div>
               <h3 className="mb-2 text-center text-2xl font-semibold">Are you sure?</h3>
               <p className="mx-auto mb-6 max-w-md text-center text-sm text-neutral-600">
-                Confirm this as the final <span className="font-semibold">Faculty Plantilla</span> for{" "}
-                <span className="font-semibold">{deptLabel}</span>. On confirm, the Approve button will be disabled and the PDF will open for printing.
+                Confirm this as the final{" "}
+                <span className="font-semibold">Faculty Plantilla</span> for{" "}
+                <span className="font-semibold">{deptLabel}</span>. After confirming, the{" "}
+                <span className="font-semibold">Export Excel</span> button will be enabled.
               </p>
               <div className="flex justify-end gap-2">
                 <button
@@ -329,7 +308,7 @@ const DepartmentPlantilla: React.FC<{
                   onClick={handleApprove}
                   className="rounded-lg bg-emerald-700 px-4 py-2 text-sm font-medium text-white hover:brightness-110"
                 >
-                  Yes, Approve & Export
+                  Yes, Approve
                 </button>
               </div>
             </div>
@@ -346,55 +325,89 @@ const DepartmentPlantilla: React.FC<{
                   [&_thead_tr]:border-b [&_thead_tr]:border-gray-200
                   [&_tbody_tr:nth-child(even)]:bg-gray-50
                   [&_tbody_tr:hover]:bg-gray-100/60
-                  [&_td:first-child]:text-left [&_td:first-child]:font-medium [&_td:first-child]:text-emerald-700
-                  [&_th:first-child]:text-left [&_th:first-child]:font-semibold
+                  [&_td:nth-child(2)]:text-left [&_td:nth-child(2)]:font-medium [&_td:nth-child(2)]:text-emerald-700
+                  [&_th:nth-child(2)]:text-left [&_th:nth-child(2)]:font-semibold
                   [&_td]:break-words [&_td]:tabular-nums [&_th]:tabular-nums
-                  [&_td:nth-child(4)]:whitespace-nowrap [&_td:nth-child(5)]:whitespace-nowrap [&_td:nth-child(6)]:whitespace-nowrap [&_td:nth-child(7)]:whitespace-nowrap
-                  [&_td:nth-child(n+8)]:text-center
+                  [&_td:nth-child(5)]:whitespace-nowrap [&_td:nth-child(6)]:whitespace-nowrap [&_td:nth-child(7)]:whitespace-nowrap [&_td:nth-child(8)]:whitespace-nowrap
+                  [&_td:nth-child(n+9)]:text-center
                   [&_th:last-child]:w-[28rem] [&_td:last-child]:w-[28rem]
                   [&_td:last-child]:text-left [&_td:last-child]:align-top"
         >
-          {/* Explicit 20 columns so rowSpan/colSpan align perfectly */}
+          {/* Explicit 21 columns so rowSpan/colSpan align perfectly */}
           <colgroup>
-            <col className="w-[14rem]" /> {/* 1 Faculty */}
-            <col className="w-[7.5rem]" />{/* 2 Course */}
-            <col className="w-[6rem]" />  {/* 3 Section */}
-            <col className="w-[6.5rem]" />{/* 4 Day */}
-            <col className="w-[8rem]" />  {/* 5 Time */}
-            <col className="w-[7rem]" />  {/* 6 Room */}
-            <col className="w-[8rem]" />  {/* 7 # Students */}
-            <col className="w-[7rem]" />  {/* 8 Lec Hrs */}
-            <col className="w-[6.5rem]" />{/* 9 Lab Hrs */}
-            <col className="w-[8rem]" />  {/* 10 Student Units */}
-            <col className="w-[6.5rem]" />{/* 11 On Leave */}
-            <col className="w-[8rem]" />  {/* 12 Type of Course */}
-            <col className="w-[6.5rem]" />{/* 13 Nature: Teach */}
-            <col className="w-[6.5rem]" />{/* 14 Nature: Admin */}
-            <col className="w-[7rem]" />  {/* 15 Nature: Research */}
-            <col className="w-[8rem]" />  {/* 16 Nature: Faculty Units */}
-            <col className="w-[7rem]" />  {/* 17 Premium: Grad */}
-            <col className="w-[9rem]" />  {/* 18 Premium: 4th Prep */}
-            <col className="w-[9rem]" />  {/* 19 Premium: Overload */}
-            <col className="w-[28rem]" /> {/* 20 Remarks */}
+            <col className="w-[5rem]" />   {/* 1 Rank */}
+            <col className="w-[14rem]" />  {/* 2 Faculty */}
+            <col className="w-[7.5rem]" />{/* 3 Course */}
+            <col className="w-[6rem]" />  {/* 4 Section */}
+            <col className="w-[6.5rem]" />{/* 5 Day */}
+            <col className="w-[8rem]" />  {/* 6 Time */}
+            <col className="w-[7rem]" />  {/* 7 Room */}
+            <col className="w-[8rem]" />  {/* 8 # Students */}
+            <col className="w-[7rem]" />  {/* 9 Lec Hrs */}
+            <col className="w-[6.5rem]" />{/* 10 Lab Hrs */}
+            <col className="w-[8rem]" />  {/* 11 Student Units */}
+            <col className="w-[6.5rem]" />{/* 12 On Leave */}
+            <col className="w-[8rem]" />  {/* 13 Type of Course */}
+            <col className="w-[6.5rem]" />{/* 14 Nature: Teach */}
+            <col className="w-[6.5rem]" />{/* 15 Nature: Admin */}
+            <col className="w-[7rem]" />  {/* 16 Nature: Research */}
+            <col className="w-[8rem]" />  {/* 17 Nature: Faculty Units */}
+            <col className="w-[7rem]" />  {/* 18 Premium: Grad */}
+            <col className="w-[9rem]" />  {/* 19 Premium: 4th Prep */}
+            <col className="w-[9rem]" />  {/* 20 Premium: Overload */}
+            <col className="w-[28rem]" /> {/* 21 Remarks */}
           </colgroup>
 
           <thead className="text-xs">
             <tr className="bg-gray-50 text-gray-700 text-center border-b">
-              <th rowSpan={2} className="px-3 py-2 font-semibold text-left whitespace-nowrap">Faculty</th>
-              <th rowSpan={2} className="px-3 py-2 font-semibold whitespace-nowrap">Course</th>
-              <th rowSpan={2} className="px-3 py-2 font-semibold whitespace-nowrap">Section</th>
-              <th rowSpan={2} className="px-3 py-2 font-semibold whitespace-nowrap">Day</th>
-              <th rowSpan={2} className="px-3 py-2 font-semibold whitespace-nowrap">Time</th>
-              <th rowSpan={2} className="px-3 py-2 font-semibold whitespace-nowrap">Room</th>
-              <th rowSpan={2} className="px-2 py-2 font-semibold whitespace-nowrap">No. of Students</th>
-              <th rowSpan={2} className="px-2 py-2 font-semibold whitespace-nowrap">Lecture Hours</th>
-              <th rowSpan={2} className="px-2 py-2 font-semibold whitespace-nowrap">Lab Hours</th>
-              <th rowSpan={2} className="px-2 py-2 font-semibold whitespace-nowrap">Student Unit(s)</th>
-              <th rowSpan={2} className="px-2 py-2 font-semibold whitespace-nowrap">On Leave</th>
-              <th rowSpan={2} className="px-2 py-2 font-semibold whitespace-nowrap">Type of Course</th>
-              <th colSpan={4} className="px-3 py-2 font-semibold border-l border-gray-300">NATURE OF LOAD</th>
-              <th colSpan={3} className="px-3 py-2 font-semibold border-l border-gray-300">PREMIUMS</th>
-              <th rowSpan={2} className="px-3 py-2 font-semibold">Remarks</th>
+              <th rowSpan={2} className="px-3 py-2 font-semibold whitespace-nowrap">
+                Rank
+              </th>
+              <th rowSpan={2} className="px-3 py-2 font-semibold text-left whitespace-nowrap">
+                Faculty
+              </th>
+              <th rowSpan={2} className="px-3 py-2 font-semibold whitespace-nowrap">
+                Course
+              </th>
+              <th rowSpan={2} className="px-3 py-2 font-semibold whitespace-nowrap">
+                Section
+              </th>
+              <th rowSpan={2} className="px-3 py-2 font-semibold whitespace-nowrap">
+                Day
+              </th>
+              <th rowSpan={2} className="px-3 py-2 font-semibold whitespace-nowrap">
+                Time
+              </th>
+              <th rowSpan={2} className="px-3 py-2 font-semibold whitespace-nowrap">
+                Room
+              </th>
+              <th rowSpan={2} className="px-2 py-2 font-semibold whitespace-nowrap">
+                No. of Students
+              </th>
+              <th rowSpan={2} className="px-2 py-2 font-semibold whitespace-nowrap">
+                Lecture Hours
+              </th>
+              <th rowSpan={2} className="px-2 py-2 font-semibold whitespace-nowrap">
+                Lab Hours
+              </th>
+              <th rowSpan={2} className="px-2 py-2 font-semibold whitespace-nowrap">
+                Student Unit(s)
+              </th>
+              <th rowSpan={2} className="px-2 py-2 font-semibold whitespace-nowrap">
+                On Leave
+              </th>
+              <th rowSpan={2} className="px-2 py-2 font-semibold whitespace-nowrap">
+                Type of Course
+              </th>
+              <th colSpan={4} className="px-3 py-2 font-semibold border-l border-gray-300">
+                NATURE OF LOAD
+              </th>
+              <th colSpan={3} className="px-3 py-2 font-semibold border-l border-gray-300">
+                PREMIUMS
+              </th>
+              <th rowSpan={2} className="px-3 py-2 font-semibold">
+                Remarks
+              </th>
             </tr>
             <tr className="bg-gray-50 text-gray-700 text-center border-b">
               <th className="px-2 py-2 font-semibold whitespace-nowrap">Teaching</th>
@@ -410,17 +423,22 @@ const DepartmentPlantilla: React.FC<{
           <tbody className="divide-y text-center">
             {rows.length === 0 ? (
               <tr>
-                <td colSpan={20} className="py-8 text-sm text-gray-500">
+                <td colSpan={21} className="py-8 text-sm text-gray-500">
                   No plantilla rows to display.
                 </td>
               </tr>
             ) : (
               rows.map((r, i) => (
                 <tr key={i}>
-                  <td className="text-left font-medium text-emerald-700">{r.faculty_name || "—"}</td>
+                  <td>{r.rank ?? ""}</td>
+                  <td className="text-left font-medium text-emerald-700">
+                    {r.faculty_name || "—"}
+                  </td>
                   <td>{r.course_code || "—"}</td>
                   <td>{r.section_code || "—"}</td>
-                  <td><DayCell raw={r.day_text || "—"} /></td>
+                  <td>
+                    <DayCell raw={r.day_text || "—"} />
+                  </td>
                   <td>{r.time_text || "—"}</td>
                   <td>{r.room_text || "—"}</td>
                   <td>{r.student_count ?? "—"}</td>
@@ -531,7 +549,7 @@ export default function CHAIR_Plantilla() {
               ? serverFull
               : hasTwoWords(displayName)
               ? displayName
-              : (serverFull || displayName || prev.profileName || " ");
+              : serverFull || displayName || prev.profileName || " ";
 
             return {
               ...prev,
@@ -588,13 +606,15 @@ export default function CHAIR_Plantilla() {
           <header className="mb-6 flex items-start justify-between">
             <div>
               <h1 className="text-2xl font-bold">Plantilla</h1>
-              <p className="text-sm text-gray-600">Manage and review faculty plantilla submissions</p>
+              <p className="text-sm text-gray-600">
+                Manage and review faculty plantilla submissions
+              </p>
             </div>
           </header>
 
           <DepartmentPlantilla
             deptLabel={header.dept_label || "Department"}
-            plantillaFile={header.plantilla_file || "Faculty_Plantilla.pdf"}
+            plantillaFile={header.plantilla_file || "Faculty_Plantilla.xls"}
             rows={rows}
             termLabel={header.term_label}
           />
