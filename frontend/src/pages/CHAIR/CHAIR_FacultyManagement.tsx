@@ -147,7 +147,6 @@ type TLItem = {
 };
 type TL = { day: DayLong; items: TLItem[] };
 
-// (Same mapping as in FACULTY_Overview)
 function makeTeachingLoad(dataArray: any[]): TL[] {
   const byDay: Record<DayLong, TLItem[]> = {
     Monday: [],
@@ -176,6 +175,7 @@ function makeTeachingLoad(dataArray: any[]): TL[] {
 
 /* ---------- History helpers (mirror FACULTY_History grouping/columns) ---------- */
 type HistRow = {
+  ay: string; // "AY 2024-2025"
   code: string;
   title: string;
   section: string;
@@ -199,7 +199,7 @@ function groupHistoryByTerm(rows: HistRow[]) {
   return groups;
 }
 
-// Excel-like, single-line cells except title (no horizontal scroll)
+// Excel-like, single-line cells except title
 function renderTeachingHistoryLikeFacultyFromArray(flatRows: HistRow[]) {
   const groups = groupHistoryByTerm(flatRows);
 
@@ -224,12 +224,12 @@ function renderTeachingHistoryLikeFacultyFromArray(flatRows: HistRow[]) {
             {t}
           </div>
 
-          {/* Excel-inspired fixed table */}
+          {/* Fixed table */}
           <div>
             <table className="w-full table-fixed border-t border-gray-200">
               <colgroup>
                 <col className="w-[12ch]" /> {/* Code */}
-                <col className="w-[32ch]" /> {/* Title (can wrap) */}
+                <col className="w-[32ch]" /> {/* Title */}
                 <col className="w-[10ch]" /> {/* Section */}
                 <col className="w-[10ch]" /> {/* Mode */}
                 <col className="w-[8ch]" /> {/* Day 1 */}
@@ -240,7 +240,7 @@ function renderTeachingHistoryLikeFacultyFromArray(flatRows: HistRow[]) {
               </colgroup>
 
               <thead>
-                <tr className="text-xs text-gray-600 bg-emerald-50">
+                <tr className="text-xs text-gray-500">
                   {HEADERS.map((h) => (
                     <th key={h} className="px-3 py-2 font-semibold text-center">
                       {h}
@@ -261,30 +261,30 @@ function renderTeachingHistoryLikeFacultyFromArray(flatRows: HistRow[]) {
                   </tr>
                 ) : (
                   groups[t].map((r, i) => (
-                    <tr key={`${t}-${i}`} className={i % 2 ? "bg-gray-50" : "bg-white"}>
-                      <td className="px-3 py-2 text-center text-[13px] whitespace-nowrap">{r.code}</td>
-                      <td className="px-3 py-2 text-center text-[13px] whitespace-normal break-words">
+                    <tr key={`${t}-${i}`} className={cls("text-sm text-gray-700", i % 2 === 0 ? "bg-white" : "bg-gray-50")}>
+                      <td className="px-3 py-2 text-center whitespace-nowrap">{r.code}</td>
+                      <td className="px-3 py-2 text-center whitespace-normal break-words">
                         {r.title}
                       </td>
-                      <td className="px-3 py-2 text-center text-[13px] whitespace-nowrap">
+                      <td className="px-3 py-2 text-center whitespace-nowrap">
                         {r.section}
                       </td>
-                      <td className="px-3 py-2 text-center text-[13px] whitespace-nowrap">
+                      <td className="px-3 py-2 text-center whitespace-nowrap">
                         {r.mode ?? ""}
                       </td>
-                      <td className="px-3 py-2 text-center text-[13px] whitespace-nowrap">
+                      <td className="px-3 py-2 text-center whitespace-nowrap">
                         {r.day1 ?? ""}
                       </td>
-                      <td className="px-3 py-2 text-center text-[13px] whitespace-nowrap">
+                      <td className="px-3 py-2 text-center whitespace-nowrap">
                         {r.room1 ?? ""}
                       </td>
-                      <td className="px-3 py-2 text-center text-[13px] whitespace-nowrap">
+                      <td className="px-3 py-2 text-center whitespace-nowrap">
                         {r.day2 ?? ""}
                       </td>
-                      <td className="px-3 py-2 text-center text-[13px] whitespace-nowrap">
+                      <td className="px-3 py-2 text-center whitespace-nowrap">
                         {r.room2 ?? ""}
                       </td>
-                      <td className="px-3 py-2 text-center text-[13px] whitespace-nowrap">
+                      <td className="px-3 py-2 text-center whitespace-nowrap">
                         {r.time ?? ""}
                       </td>
                     </tr>
@@ -301,18 +301,16 @@ function renderTeachingHistoryLikeFacultyFromArray(flatRows: HistRow[]) {
 
 /* ---------------- Page ---------------- */
 
-/** Add Faculty form structure */
 type AddFacultyForm = {
   first_name: string;
   last_name: string;
   email: string;
-  department: string; // department.dept_name / department_name (display)
+  department: string;
   employment_type: "" | "FT" | "PT";
-  certifications: string; // comma-separated; FE will split to array
-  teaching_years: string; // numeric string; FE will coerce to number
+  certifications: string;
+  teaching_years: string;
 };
 
-/** Edit Faculty form uses the SAME structure as Add */
 type EditFacultyForm = {
   first_name: string;
   last_name: string;
@@ -326,7 +324,6 @@ type EditFacultyForm = {
 export default function CHAIR_FacultyManagement() {
   type ModalType = null | "schedule" | "history";
 
-  // get userId from localStorage (same pattern as other pages)
   const [userId] = useState(() => {
     try {
       const u = JSON.parse(localStorage.getItem("animo.user") || "null");
@@ -347,34 +344,33 @@ export default function CHAIR_FacultyManagement() {
   // options
   const [deptOptions, setDeptOptions] = useState<string[]>(["All Departments"]);
   const [typeOptions, setTypeOptions] = useState<string[]>(["All Type"]);
-  const [academicYears, setAcademicYears] = useState<number[]>([]);
 
-  // profile header info (same idea as OM_FacultyForm)
+  // profile header info
   const [profileSubtitle, setProfileSubtitle] = useState<string>("");
   const [termLabel, setTermLabel] = useState<string>("");
-
-
 
   // table rows
   const [rows, setRows] = useState<FacultyRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string>("");
 
-  // refetch token (used after add/edit)
+  // refetch token
   const [reloadToken, setReloadToken] = useState(0);
 
-  // modals (Schedule / History)
+  // modals
   const [activeModal, setActiveModal] = useState<ModalType>(null);
   const [selected, setSelected] = useState<FacultyRow | null>(null);
 
   // modal data
   const [schedule, setSchedule] = useState<any>(null);
+  
+  // History state (New logic: parallel load style)
+  const [historyRows, setHistoryRows] = useState<HistRow[]>([]);
+  const [historyAyOptions, setHistoryAyOptions] = useState<string[]>([]);
+  const [historyAy, setHistoryAy] = useState<string>("");
+  const [historyLoading, setHistoryLoading] = useState(false);
 
-  // history now expects { teaching_history: HistRow[] }
-  const [history, setHistory] = useState<{ teaching_history: HistRow[] } | null>(null);
-  const [historyYearIndex, setHistoryYearIndex] = useState(0);
-
-  // NEW: Add / Edit Faculty modals (patterned after ADMIN)
+  // Add / Edit Faculty forms
   const emptyAddForm: AddFacultyForm = {
     first_name: "",
     last_name: "",
@@ -390,7 +386,6 @@ export default function CHAIR_FacultyManagement() {
   const [addError, setAddError] = useState("");
   const [addSaving, setAddSaving] = useState(false);
 
-  // EDIT modal state uses same structure as ADD
   const [editOpen, setEditOpen] = useState<FacultyRow | null>(null);
   const [editForm, setEditForm] = useState<EditFacultyForm | null>(null);
   const [editEmailError, setEditEmailError] = useState("");
@@ -404,18 +399,14 @@ export default function CHAIR_FacultyManagement() {
 
   const isValidDlsuEmail = (email: string) => {
     const trimmed = (email || "").trim();
-    if (!trimmed) return true; // don't flag empty; required-check handles that
-
+    if (!trimmed) return true;
     const atIndex = trimmed.lastIndexOf("@");
     if (atIndex <= 0) return false;
-
     const local = trimmed.slice(0, atIndex);
     const domain = trimmed.slice(atIndex + 1);
-
     if (domain.toLowerCase() !== "dlsu.edu.ph") return false;
     if (!local.includes(".")) return false;
     if (/\s/.test(local)) return false;
-
     return true;
   };
 
@@ -432,7 +423,6 @@ export default function CHAIR_FacultyManagement() {
 
     const trimmedEmail = email.trim();
     const emailOk = isValidDlsuEmail(trimmedEmail);
-
     if (!emailOk) {
       setAddEmailError("Email is not a valid DLSU account");
       return;
@@ -454,14 +444,8 @@ export default function CHAIR_FacultyManagement() {
         department,
         employment_type: employment_type as "FT" | "PT",
       };
-
       const certs = (certifications || "").trim();
-      if (certs) {
-        payload.certifications = certs
-          .split(",")
-          .map((c) => c.trim())
-          .filter(Boolean);
-      }
+      if (certs) payload.certifications = certs.split(",").map((c) => c.trim()).filter(Boolean);
 
       const yearsNum = Number((teaching_years || "").trim());
       if (!Number.isNaN(yearsNum) && (teaching_years || "").trim() !== "") {
@@ -469,24 +453,15 @@ export default function CHAIR_FacultyManagement() {
       }
 
       const res = await addChairFacultyEntry(payload);
-      if (!res || !res.ok) {
-        throw new Error("Failed to add faculty.");
-      }
+      if (!res || !res.ok) throw new Error("Failed to add faculty.");
 
-      // reset + close
       setAddForm(emptyAddForm);
       setAddEmailError("");
       setAddError("");
       setAddOpen(false);
-
-      // trigger table reload
       setReloadToken((t) => t + 1);
     } catch (e: any) {
-      const msg =
-        e?.response?.data?.detail ||
-        e?.message ||
-        "An error occurred while adding the faculty.";
-      setAddError(msg);
+      setAddError(e?.response?.data?.detail || e?.message || "Error adding faculty.");
     } finally {
       setAddSaving(false);
     }
@@ -496,12 +471,10 @@ export default function CHAIR_FacultyManagement() {
     const fullName = (row.name || "").trim();
     let first_name = "";
     let last_name = "";
-
     if (fullName) {
       const parts = fullName.split(/\s+/);
-      if (parts.length === 1) {
-        first_name = parts[0];
-      } else {
+      if (parts.length === 1) first_name = parts[0];
+      else {
         last_name = parts[parts.length - 1];
         first_name = parts.slice(0, -1).join(" ");
       }
@@ -511,9 +484,7 @@ export default function CHAIR_FacultyManagement() {
     const ftDisplay = (row.faculty_type || "").toLowerCase();
     if (ftDisplay.includes("full")) employment_type = "FT";
     else if (ftDisplay.includes("part")) employment_type = "PT";
-    else if (ftDisplay === "ft" || ftDisplay === "pt") {
-      employment_type = ftDisplay.toUpperCase() as "FT" | "PT";
-    }
+    else if (ftDisplay === "ft" || ftDisplay === "pt") employment_type = ftDisplay.toUpperCase() as "FT" | "PT";
 
     setEditOpen(row);
     setEditForm({
@@ -531,25 +502,14 @@ export default function CHAIR_FacultyManagement() {
 
   const submitEditFaculty = async () => {
     if (!editOpen || !editForm) return;
-
-    const {
-      first_name,
-      last_name,
-      email,
-      department,
-      employment_type,
-      certifications,
-      teaching_years,
-    } = editForm;
+    const { first_name, last_name, email, department, employment_type, certifications, teaching_years } = editForm;
 
     const trimmedEmail = email.trim();
     const emailOk = isValidDlsuEmail(trimmedEmail);
-
     if (!emailOk) {
       setEditEmailError("Email is not a valid DLSU account");
       return;
     }
-
     if (!first_name.trim() || !last_name.trim() || !trimmedEmail || !department || !employment_type) {
       setEditError("Please fill out all required fields.");
       return;
@@ -566,14 +526,8 @@ export default function CHAIR_FacultyManagement() {
         department,
         employment_type: employment_type as "FT" | "PT",
       };
-
       const certs = (certifications || "").trim();
-      if (certs) {
-        payload.certifications = certs
-          .split(",")
-          .map((c) => c.trim())
-          .filter(Boolean);
-      }
+      if (certs) payload.certifications = certs.split(",").map((c) => c.trim()).filter(Boolean);
 
       const yearsNum = Number((teaching_years || "").trim());
       if (!Number.isNaN(yearsNum) && (teaching_years || "").trim() !== "") {
@@ -581,47 +535,32 @@ export default function CHAIR_FacultyManagement() {
       }
 
       const res = await updateChairFacultyEntry(editOpen.faculty_id, payload);
-      if (!res || !res.ok) {
-        throw new Error("Failed to update faculty.");
-      }
+      if (!res || !res.ok) throw new Error("Failed to update faculty.");
 
-      // Close + reset + reload
       setEditOpen(null);
       setEditForm(null);
       setEditEmailError("");
       setEditError("");
       setReloadToken((t) => t + 1);
     } catch (e: any) {
-      const msg =
-        e?.response?.data?.detail ||
-        e?.message ||
-        "An error occurred while updating the faculty.";
-      setEditError(msg);
+      setEditError(e?.response?.data?.detail || e?.message || "Error updating faculty.");
     } finally {
       setEditSaving(false);
     }
   };
 
+  // Load page options
   useEffect(() => {
     (async () => {
       try {
         const opt: FMOptions = await getChairFacultyOptions();
-
         if (!opt.ok) throw new Error("Failed to load options");
         setDeptOptions(["All Departments", ...(opt.departments || [])]);
         setTypeOptions(["All Type", ...(opt.facultyTypes || [])]);
-        setAcademicYears(opt.academicYears || []);
-
-        // === Build OM-style term label from activeTerm ===
+        
         const ay = opt.activeTerm?.acad_year_start;
         const tn = opt.activeTerm?.term_number;
-
-        const label =
-          ay != null
-            ? `Term ${tn ?? "—"} · AY ${ay}-${ay + 1}`
-            : "";
-
-        // If acad_year_start is missing, label must be empty
+        const label = ay != null ? `Term ${tn ?? "—"} · AY ${ay}-${ay + 1}` : "";
         setTermLabel(label);
       } catch (e: any) {
         setErr(e?.response?.data?.detail || e?.message || "Failed to load options.");
@@ -629,32 +568,23 @@ export default function CHAIR_FacultyManagement() {
     })();
   }, []);
 
-
+  // Load Header profile
   useEffect(() => {
     (async () => {
       try {
         const hdr = await getChairHeader(userId || undefined);
-        if (hdr?.ok) {
-          setProfileSubtitle(hdr.profileSubtitle || "");
-          // active term label is now derived strictly from opt.activeTerm (planning term logic)
-        }
-      } catch {
-        // ignore header errors; page still works
-      }
+        if (hdr?.ok) setProfileSubtitle(hdr.profileSubtitle || "");
+      } catch { /* ignore */ }
     })();
   }, [userId]);
 
-
-
-
-
-  // Debounce search input
+  // Debounce search
   useEffect(() => {
     const t = setTimeout(() => setSearch(searchInput.trim()), 300);
     return () => clearTimeout(t);
   }, [searchInput]);
 
-  // Fetch table rows when filters/search change
+  // Fetch list rows
   useEffect(() => {
     (async () => {
       try {
@@ -672,62 +602,89 @@ export default function CHAIR_FacultyManagement() {
     })();
   }, [department, facultyType, search, reloadToken]);
 
-  // modal open/close (Schedule / History)
   const openModal = (type: Exclude<ModalType, null>, item: FacultyRow) => {
     setSelected(item);
     setActiveModal(type);
+    
+    if (type === "history") {
+      setHistoryRows([]);
+      setHistoryAyOptions([]);
+      setHistoryAy("");
+      setHistoryLoading(true);
+    }
   };
+  
   const closeModal = () => {
     setActiveModal(null);
     setSelected(null);
     setSchedule(null);
-    setHistory(null);
+    setHistoryRows([]);
   };
 
-  // Load modal content
+  // Load Modal Content
   useEffect(() => {
     (async () => {
       if (!activeModal || !selected) return;
-      try {
-        if (activeModal === "schedule") {
+
+      // SCHEDULE
+      if (activeModal === "schedule") {
+        try {
           const data = await getChairFacultySchedule(selected.faculty_id);
           setSchedule(data);
-        } else if (activeModal === "history") {
-          // Pass AY start (number) — api helper also accepts termId (string)
-          const ay = academicYears[historyYearIndex];
-          const data = await getChairFacultyHistory(selected.faculty_id, ay);
-          setHistory({ teaching_history: data?.teaching_history || [] });
+        } catch { /* ignore */ }
+      }
+
+      // HISTORY (Single load of everything)
+      if (activeModal === "history") {
+        try {
+          setHistoryLoading(true);
+          // Calls backend which now returns flat "rows"
+          const data = await getChairFacultyHistory(selected.faculty_id); 
+          const rawRows: HistRow[] = data?.rows || [];
+          
+          setHistoryRows(rawRows);
+
+          // Derive AY options client-side
+          const uniqAys = Array.from(new Set(rawRows.map((r) => r.ay))).sort().reverse();
+          setHistoryAyOptions(uniqAys);
+          if (uniqAys.length > 0) {
+            setHistoryAy(uniqAys[0]);
+          }
+        } catch { 
+          setHistoryRows([]);
+        } finally {
+          setHistoryLoading(false);
         }
-      } catch {
-        /* ignore per-modal fetch errors */
       }
     })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeModal, selected, historyYearIndex, academicYears]);
+  }, [activeModal, selected]);
 
-  const historyYearLabel = useMemo(() => {
-    const ay = academicYears[historyYearIndex];
-    return ay ? `AY ${ay}–${ay + 1}` : "—";
-  }, [historyYearIndex, academicYears]);
+  // Derived History Display
+  const filteredHistory = useMemo(() => {
+    if (!historyAy) return [];
+    return historyRows.filter((r) => r.ay === historyAy);
+  }, [historyRows, historyAy]);
 
-  /* ---------- Renderers ---------- */
+  const historyIndex = historyAyOptions.indexOf(historyAy);
+  const hasPrev = historyIndex < historyAyOptions.length - 1 && historyIndex !== -1;
+  const hasNext = historyIndex > 0 && historyIndex !== -1;
+
+  const goPrevAy = () => {
+    if (hasPrev) setHistoryAy(historyAyOptions[historyIndex + 1]);
+  };
+  const goNextAy = () => {
+    if (hasNext) setHistoryAy(historyAyOptions[historyIndex - 1]);
+  };
+
   const renderTeachingLoadSummaryList = (s: any) => {
-    // backend returns { teaching_load: [...] }
     const TL = makeTeachingLoad(s?.teaching_load || []);
-
     return (
       <div className="space-y-6">
         {TL.map((day) => (
-          <div
-            key={day.day}
-            className="rounded-xl border border-emerald-700/50 overflow-hidden bg-white"
-          >
-            {/* Day header */}
+          <div key={day.day} className="rounded-xl border border-emerald-700/50 overflow-hidden bg-white">
             <div className="px-5 py-3">
               <div className="text-emerald-700 font-semibold text-[15px]">{day.day}</div>
             </div>
-
-            {/* Excel-like table (no horizontal scroll) */}
             <div className="px-4 pb-4">
               <div className="rounded-xl border border-emerald-700/40">
                 <table className="w-full table-fixed">
@@ -743,68 +700,25 @@ export default function CHAIR_FacultyManagement() {
                   </colgroup>
                   <thead>
                     <tr className="text-[11.5px] uppercase tracking-wide text-emerald-800 bg-emerald-50">
-                      {[
-                        "Course Code",
-                        "Course Title",
-                        "Section",
-                        "Units",
-                        "Campus",
-                        "Mode",
-                        "Room",
-                        "Time",
-                      ].map((h) => (
-                        <th
-                          key={h}
-                          className="px-3 py-2 font-semibold text-center border-b border-emerald-700/40"
-                        >
-                          {h}
-                        </th>
+                      {["Course Code","Course Title","Section","Units","Campus","Mode","Room","Time"].map((h) => (
+                        <th key={h} className="px-3 py-2 font-semibold text-center border-b border-emerald-700/40">{h}</th>
                       ))}
                     </tr>
                   </thead>
                   <tbody>
                     {day.items.length === 0 ? (
-                      <tr>
-                        <td
-                          colSpan={8}
-                          className="px-4 py-6 text-center text-sm text-neutral-500 bg-white"
-                        >
-                          No records.
-                        </td>
-                      </tr>
+                      <tr><td colSpan={8} className="px-4 py-6 text-center text-sm text-neutral-500 bg-white">No records.</td></tr>
                     ) : (
                       day.items.map((it, idx) => (
-                        <tr
-                          key={`${day.day}-${it.code}-${it.sec}-${idx}`}
-                          className={cls(
-                            "text-neutral-900 text-[13px]",
-                            idx % 2 === 0 ? "bg-white" : "bg-neutral-50"
-                          )}
-                        >
-                          <td className="px-3 py-2 text-center whitespace-nowrap border-t border-emerald-700/30">
-                            {it.code}
-                          </td>
-                          <td className="px-3 py-2 text-center whitespace-normal break-words border-t border-emerald-700/30">
-                            {it.title || "—"}
-                          </td>
-                          <td className="px-3 py-2 text-center whitespace-nowrap border-t border-emerald-700/30">
-                            {it.sec}
-                          </td>
-                          <td className="px-3 py-2 text-center whitespace-nowrap border-t border-emerald-700/30">
-                            {it.units}
-                          </td>
-                          <td className="px-3 py-2 text-center whitespace-nowrap border-t border-emerald-700/30">
-                            {it.campus}
-                          </td>
-                          <td className="px-3 py-2 text-center whitespace-nowrap border-t border-emerald-700/30">
-                            {it.mode}
-                          </td>
-                          <td className="px-3 py-2 text-center whitespace-nowrap border-t border-emerald-700/30">
-                            {it.room}
-                          </td>
-                          <td className="px-3 py-2 text-center whitespace-nowrap border-t border-emerald-700/30">
-                            {it.time}
-                          </td>
+                        <tr key={`${day.day}-${it.code}-${it.sec}-${idx}`} className={cls("text-neutral-900 text-[13px]", idx % 2 === 0 ? "bg-white" : "bg-neutral-50")}>
+                          <td className="px-3 py-2 text-center whitespace-nowrap border-t border-emerald-700/30">{it.code}</td>
+                          <td className="px-3 py-2 text-center whitespace-normal break-words border-t border-emerald-700/30">{it.title || "—"}</td>
+                          <td className="px-3 py-2 text-center whitespace-nowrap border-t border-emerald-700/30">{it.sec}</td>
+                          <td className="px-3 py-2 text-center whitespace-nowrap border-t border-emerald-700/30">{it.units}</td>
+                          <td className="px-3 py-2 text-center whitespace-nowrap border-t border-emerald-700/30">{it.campus}</td>
+                          <td className="px-3 py-2 text-center whitespace-nowrap border-t border-emerald-700/30">{it.mode}</td>
+                          <td className="px-3 py-2 text-center whitespace-nowrap border-t border-emerald-700/30">{it.room}</td>
+                          <td className="px-3 py-2 text-center whitespace-nowrap border-t border-emerald-700/30">{it.time}</td>
                         </tr>
                       ))
                     )}
@@ -827,17 +741,12 @@ export default function CHAIR_FacultyManagement() {
         </p>
       </header>
 
-
-
-
-
       {err && (
         <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
           {err}
         </div>
       )}
 
-      {/* Filters + Add Faculty */}
       <div className="flex flex-wrap items-center gap-3 rounded-xl border border-gray-200 bg-white p-4 shadow-sm mb-6">
         <div className="relative flex-1 min-w-[260px]">
           <SearchIcon className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-500" />
@@ -848,22 +757,17 @@ export default function CHAIR_FacultyManagement() {
             className="w-full rounded-lg border border-gray-300 px-9 py-2 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30"
           />
         </div>
-
         <SelectBox value={department} onChange={setDepartment} options={deptOptions} />
         <SelectBox value={facultyType} onChange={setFacultyType} options={typeOptions} />
-
-        {/* Add Faculty button - to the right of the Type filter */}
         <button
           type="button"
           onClick={openAddFaculty}
           className="inline-flex h-10 items-center gap-2 rounded-lg bg-emerald-600 px-4 text-sm font-medium text-white hover:bg-emerald-700"
         >
-          <Plus className="h-4 w-4" />
-          Add Faculty
+          <Plus className="h-4 w-4" /> Add Faculty
         </button>
       </div>
 
-      {/* Table */}
       <div className="border border-gray-200 bg-gray-50 shadow-sm overflow-visible rounded-xl">
         <table className="w-full text-sm">
           <thead className="bg-gray-50 border-b text-gray-700">
@@ -879,17 +783,9 @@ export default function CHAIR_FacultyManagement() {
           </thead>
           <tbody className="divide-y">
             {loading ? (
-              <tr>
-                <td className="px-4 py-6 text-center text-gray-500" colSpan={7}>
-                  Loading…
-                </td>
-              </tr>
+              <tr><td className="px-4 py-6 text-center text-gray-500" colSpan={7}>Loading…</td></tr>
             ) : rows.length === 0 ? (
-              <tr>
-                <td className="px-4 py-6 text-center text-gray-500" colSpan={7}>
-                  No results
-                </td>
-              </tr>
+              <tr><td className="px-4 py-6 text-center text-gray-500" colSpan={7}>No results</td></tr>
             ) : (
               rows.map((r) => (
                 <tr key={r.faculty_id} className="hover:bg-gray-50">
@@ -920,21 +816,17 @@ export default function CHAIR_FacultyManagement() {
       {activeModal && selected && (
         <div className="fixed inset-0 z-[40] grid place-items-center bg-black/40 p-4">
           <div className="w-full max-w-screen-xl rounded-2xl bg-white p-6 shadow-2xl overflow-y-auto max-h-[90vh]">
+            
             {activeModal === "schedule" && (
               <>
                 <div className="text-center mb-4">
                   <h2 className="text-lg font-semibold text-emerald-700">Faculty Schedule</h2>
                   <p className="text-sm text-neutral-500">{selected?.name ?? ""}</p>
                 </div>
-
                 {!schedule ? (
-                  <div className="rounded-lg border border-neutral-200 bg-neutral-50 px-3 py-2 text-sm text-neutral-600">
-                    Loading schedule…
-                  </div>
+                  <div className="rounded-lg border border-neutral-200 bg-neutral-50 px-3 py-2 text-sm text-neutral-600">Loading schedule…</div>
                 ) : (schedule?.teaching_load || []).length === 0 ? (
-                  <div className="rounded-lg border border-neutral-200 bg-neutral-50 px-3 py-3 text-sm text-neutral-600">
-                    No schedule records for the current term.
-                  </div>
+                  <div className="rounded-lg border border-neutral-200 bg-neutral-50 px-3 py-3 text-sm text-neutral-600">No schedule records for the current term.</div>
                 ) : (
                   renderTeachingLoadSummaryList(schedule)
                 )}
@@ -943,239 +835,90 @@ export default function CHAIR_FacultyManagement() {
 
             {activeModal === "history" && (
               <>
-                {/* Title + faculty name */}
                 <div className="text-center mb-4">
                   <h2 className="text-lg font-semibold text-emerald-700">Teaching History</h2>
                   <p className="text-sm text-neutral-500">{selected?.name ?? ""}</p>
                 </div>
 
-                {/* Prev / Next AY controls */}
+                {/* Client-side pagination controls for AY */}
                 <div className="flex justify-between items-center mb-4">
                   <button
-                    // Previous = go to OLDER AY (increase index)
-                    onClick={() =>
-                      setHistoryYearIndex((i) => Math.min(academicYears.length - 1, i + 1))
-                    }
-                    disabled={historyYearIndex === academicYears.length - 1}
+                    onClick={goPrevAy}
+                    disabled={!hasPrev || historyLoading}
                     className={cls(
                       "px-3 py-1.5 rounded-lg text-sm font-medium border shadow-sm",
-                      historyYearIndex === academicYears.length - 1
-                        ? "bg-gray-100 text-gray-400 cursor-not-allowed"
-                        : "bg-white hover:bg-gray-50 text-gray-700"
+                      (!hasPrev || historyLoading) ? "bg-gray-100 text-gray-400 cursor-not-allowed" : "bg-white hover:bg-gray-50 text-gray-700"
                     )}
                   >
                     ← Previous
                   </button>
 
-                  <span className="text-base font-semibold text-gray-800">{historyYearLabel}</span>
+                  <span className="text-base font-semibold text-gray-800">
+                    {historyLoading ? "Loading..." : (historyAy || "—")}
+                  </span>
 
                   <button
-                    // Next = go to NEWER AY (decrease index)
-                    onClick={() => setHistoryYearIndex((i) => Math.max(0, i - 1))}
-                    disabled={historyYearIndex === 0}
+                    onClick={goNextAy}
+                    disabled={!hasNext || historyLoading}
                     className={cls(
                       "px-3 py-1.5 rounded-lg text-sm font-medium border shadow-sm",
-                      historyYearIndex === 0
-                        ? "bg-gray-100 text-gray-400 cursor-not-allowed"
-                        : "bg-white hover:bg-gray-50 text-gray-700"
+                      (!hasNext || historyLoading) ? "bg-gray-100 text-gray-400 cursor-not-allowed" : "bg-white hover:bg-gray-50 text-gray-700"
                     )}
                   >
                     Next →
                   </button>
                 </div>
 
-                {/* Body */}
-                {!history ? (
-                  <div className="rounded-lg border border-neutral-200 bg-neutral-50 px-3 py-2 text-sm text-neutral-600">
-                    Loading history…
-                  </div>
-                ) : (history?.teaching_history || []).length === 0 ? (
+                {historyLoading ? (
+                  <div className="rounded-lg border border-neutral-200 bg-neutral-50 px-3 py-2 text-sm text-neutral-600">Loading history…</div>
+                ) : filteredHistory.length === 0 ? (
                   <div className="rounded-lg border border-neutral-200 bg-neutral-50 px-3 py-3 text-sm text-neutral-600">
-                    No history records for {historyYearLabel}.
+                    {historyAyOptions.length === 0 ? "No history records found." : `No history records for ${historyAy}.`}
                   </div>
                 ) : (
-                  renderTeachingHistoryLikeFacultyFromArray(history.teaching_history)
+                  renderTeachingHistoryLikeFacultyFromArray(filteredHistory)
                 )}
               </>
             )}
 
             <div className="flex justify-end mt-8">
-              <button
-                onClick={closeModal}
-                className="px-4 py-2 rounded-lg bg-gray-100 hover:bg-gray-200 text-sm"
-              >
-                Close
-              </button>
+              <button onClick={closeModal} className="px-4 py-2 rounded-lg bg-gray-100 hover:bg-gray-200 text-sm">Close</button>
             </div>
           </div>
         </div>
       )}
 
-      {/* -------- Add Faculty Modal -------- */}
+      {/* -------- Add/Edit Modals (unchanged structure) -------- */}
       <Modal open={addOpen} onClose={() => setAddOpen(false)}>
         <div className="p-6 sm:p-8">
           <div className="mb-6 flex items-start justify-between">
             <h3 className="text-xl font-semibold text-emerald-700">Add Faculty</h3>
-            <button
-              onClick={() => setAddOpen(false)}
-              className="rounded-full p-1 hover:bg-gray-100"
-              type="button"
-            >
-              <X className="h-5 w-5" />
-            </button>
+            <button onClick={() => setAddOpen(false)} className="rounded-full p-1 hover:bg-gray-100"><X className="h-5 w-5" /></button>
           </div>
-
-          {addError && (
-            <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
-              {addError}
-            </div>
-          )}
-
+          {addError && <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{addError}</div>}
           <div className="grid grid-cols-1 gap-5">
             <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-              <div>
-                <Label>Last Name</Label>
-                <TextInput
-                  placeholder="e.g., Santos"
-                  value={addForm.last_name}
-                  onChange={(e) =>
-                    setAddForm((f) => ({
-                      ...f,
-                      last_name: e.target.value,
-                    }))
-                  }
-                />
-              </div>
-              <div>
-                <Label>First Name</Label>
-                <TextInput
-                  placeholder="e.g., Maria Ana"
-                  value={addForm.first_name}
-                  onChange={(e) =>
-                    setAddForm((f) => ({
-                      ...f,
-                      first_name: e.target.value,
-                    }))
-                  }
-                />
-              </div>
+              <div><Label>Last Name</Label><TextInput placeholder="e.g., Santos" value={addForm.last_name} onChange={(e) => setAddForm(f => ({...f, last_name: e.target.value}))} /></div>
+              <div><Label>First Name</Label><TextInput placeholder="e.g., Maria Ana" value={addForm.first_name} onChange={(e) => setAddForm(f => ({...f, first_name: e.target.value}))} /></div>
             </div>
-
             <div>
               <Label>Email</Label>
-              <TextInput
-                placeholder="firstname.lastname@dlsu.edu.ph"
-                value={addForm.email}
-                onChange={(e) => {
-                  const value = e.target.value;
-                  setAddForm((f) => ({ ...f, email: value }));
-                  setAddEmailError(
-                    isValidDlsuEmail(value) ? "" : "Email is not a valid DLSU account"
-                  );
-                }}
-              />
-              {addEmailError && addForm.email.trim() && (
-                <p className="mt-1 text-xs text-red-600">{addEmailError}</p>
-              )}
+              <TextInput placeholder="first.last@dlsu.edu.ph" value={addForm.email} onChange={(e) => {
+                const v = e.target.value; setAddForm(f => ({...f, email: v}));
+                setAddEmailError(isValidDlsuEmail(v) ? "" : "Email is not a valid DLSU account");
+              }} />
+              {addEmailError && addForm.email.trim() && <p className="mt-1 text-xs text-red-600">{addEmailError}</p>}
             </div>
-
             <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-              <div>
-                <Label>Department</Label>
-                <SelectBox
-                  value={addForm.department}
-                  onChange={(v) =>
-                    setAddForm((f) => ({
-                      ...f,
-                      department: v || "",
-                    }))
-                  }
-                  options={deptChoices}
-                  placeholder="Select Department"
-                />
-              </div>
-
-            <div>
-              <Label>Faculty Type</Label>
-              <SelectBox
-                value={
-                  addForm.employment_type === "FT"
-                    ? "Full-Time"
-                    : addForm.employment_type === "PT"
-                    ? "Part-Time"
-                    : ""
-                }
-                onChange={(v) =>
-                  setAddForm((f) => ({
-                    ...f,
-                    employment_type:
-                      v === "Full-Time" ? "FT" : v === "Part-Time" ? "PT" : "",
-                  }))
-                }
-                options={["Full-Time", "Part-Time"]}
-                placeholder="Select Faculty Type"
-              />
+              <div><Label>Department</Label><SelectBox value={addForm.department} onChange={(v) => setAddForm(f => ({...f, department: v || ""}))} options={deptChoices} placeholder="Select Dept" /></div>
+              <div><Label>Faculty Type</Label><SelectBox value={addForm.employment_type === "FT" ? "Full-Time" : addForm.employment_type === "PT" ? "Part-Time" : ""} onChange={(v) => setAddForm(f => ({...f, employment_type: v === "Full-Time" ? "FT" : v === "Part-Time" ? "PT" : ""}))} options={["Full-Time", "Part-Time"]} placeholder="Select Type" /></div>
+              <div><Label>Certifications</Label><TextInput placeholder="e.g., AWS, Azure" value={addForm.certifications} onChange={(e) => setAddForm(f => ({...f, certifications: e.target.value}))} /></div>
             </div>
-
-              <div>
-                <Label>Certifications</Label>
-                <TextInput
-                  placeholder="Comma-separated (e.g., AWS, Azure)"
-                  value={addForm.certifications}
-                  onChange={(e) =>
-                    setAddForm((f) => ({
-                      ...f,
-                      certifications: e.target.value,
-                    }))
-                  }
-                />
-              </div>
-            </div>
-
             <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-              <div>
-                <Label>Teaching Years</Label>
-                <TextInput
-                  type="number"
-                  min={0}
-                  placeholder="e.g., 5"
-                  value={addForm.teaching_years}
-                  onChange={(e) =>
-                    setAddForm((f) => ({
-                      ...f,
-                      teaching_years: e.target.value,
-                    }))
-                  }
-                />
-              </div>
+              <div><Label>Teaching Years</Label><TextInput type="number" min={0} value={addForm.teaching_years} onChange={(e) => setAddForm(f => ({...f, teaching_years: e.target.value}))} /></div>
             </div>
-
             <div className="mt-4 flex justify-end">
-              <button
-                onClick={submitAddFaculty}
-                type="button"
-                disabled={
-                  addSaving ||
-                  !addForm.first_name.trim() ||
-                  !addForm.last_name.trim() ||
-                  !addForm.email.trim() ||
-                  !addForm.department ||
-                  !addForm.employment_type ||
-                  !!addEmailError
-                }
-                className={cls(
-                  "rounded-lg px-6 py-2 text-sm font-medium",
-                  addSaving ||
-                    !addForm.first_name.trim() ||
-                    !addForm.last_name.trim() ||
-                    !addForm.email.trim() ||
-                    !addForm.department ||
-                    !addForm.employment_type ||
-                    !!addEmailError
-                    ? "bg-emerald-300 text-white cursor-not-allowed"
-                    : "bg-emerald-700 text-white hover:bg-emerald-800"
-                )}
-              >
+              <button onClick={submitAddFaculty} disabled={addSaving || !!addEmailError} className="rounded-lg bg-emerald-700 px-6 py-2 text-sm font-medium text-white hover:bg-emerald-800 disabled:bg-emerald-300">
                 {addSaving ? "Adding…" : "Add Faculty"}
               </button>
             </div>
@@ -1183,187 +926,40 @@ export default function CHAIR_FacultyManagement() {
         </div>
       </Modal>
 
-      {/* -------- Edit Faculty Details Modal -------- */}
-      <Modal
-        open={!!editOpen}
-        onClose={() => {
-          setEditOpen(null);
-          setEditForm(null);
-          setEditEmailError("");
-          setEditError("");
-        }}
-      >
+      <Modal open={!!editOpen} onClose={() => { setEditOpen(null); setEditForm(null); }}>
         {editOpen && editForm && (
           <div className="p-6 sm:p-8">
             <div className="mb-6 flex items-start justify-between">
               <div>
                 <h3 className="text-xl font-semibold text-emerald-700">Edit Faculty Details</h3>
-                <div className="mt-1 text-sm text-gray-700">
-                  Faculty: <span className="font-medium">{editOpen.name}</span>
-                </div>
+                <div className="mt-1 text-sm text-gray-700">Faculty: <span className="font-medium">{editOpen.name}</span></div>
               </div>
-              <button
-                onClick={() => {
-                  setEditOpen(null);
-                  setEditForm(null);
-                  setEditEmailError("");
-                  setEditError("");
-                }}
-                className="rounded-full p-1 hover:bg-gray-100"
-                type="button"
-              >
-                <X className="h-5 w-5" />
-              </button>
+              <button onClick={() => { setEditOpen(null); setEditForm(null); }} className="rounded-full p-1 hover:bg-gray-100"><X className="h-5 w-5" /></button>
             </div>
-
-            {editError && (
-              <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
-                {editError}
-              </div>
-            )}
-
+            {editError && <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{editError}</div>}
             <div className="grid grid-cols-1 gap-5">
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-                <div>
-                  <Label>Last Name</Label>
-                  <TextInput
-                    placeholder="e.g., Santos"
-                    value={editForm.last_name}
-                    onChange={(e) =>
-                      setEditForm((f) =>
-                        f ? { ...f, last_name: e.target.value } : f
-                      )
-                    }
-                  />
-                </div>
-                <div>
-                  <Label>First Name</Label>
-                  <TextInput
-                    placeholder="e.g., Maria Ana"
-                    value={editForm.first_name}
-                    onChange={(e) =>
-                      setEditForm((f) =>
-                        f ? { ...f, first_name: e.target.value } : f
-                      )
-                    }
-                  />
-                </div>
+                <div><Label>Last Name</Label><TextInput value={editForm.last_name} onChange={(e) => setEditForm(f => f ? {...f, last_name: e.target.value} : f)} /></div>
+                <div><Label>First Name</Label><TextInput value={editForm.first_name} onChange={(e) => setEditForm(f => f ? {...f, first_name: e.target.value} : f)} /></div>
               </div>
-
               <div>
                 <Label>Email</Label>
-                <TextInput
-                  placeholder="firstname.lastname@dlsu.edu.ph"
-                  value={editForm.email}
-                  onChange={(e) => {
-                    const value = e.target.value;
-                    setEditForm((f) => (f ? { ...f, email: value } : f));
-                    setEditEmailError(
-                      isValidDlsuEmail(value) ? "" : "Email is not a valid DLSU account"
-                    );
-                  }}
-                />
-                {editEmailError && editForm.email.trim() && (
-                  <p className="mt-1 text-xs text-red-600">{editEmailError}</p>
-                )}
+                <TextInput value={editForm.email} onChange={(e) => {
+                  const v = e.target.value; setEditForm(f => f ? {...f, email: v} : f);
+                  setEditEmailError(isValidDlsuEmail(v) ? "" : "Email is not a valid DLSU account");
+                }} />
+                {editEmailError && editForm.email.trim() && <p className="mt-1 text-xs text-red-600">{editEmailError}</p>}
               </div>
-
               <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-                <div>
-                  <Label>Department</Label>
-                  <SelectBox
-                    value={editForm.department}
-                    onChange={(v) =>
-                      setEditForm((f) => (f ? { ...f, department: v || "" } : f))
-                    }
-                    options={deptChoices}
-                    placeholder="Select Department"
-                  />
-                </div>
-
-                <div>
-                  <Label>Faculty Type</Label>
-                  <SelectBox
-                    value={
-                      editForm.employment_type === "FT"
-                        ? "Full-Time"
-                        : editForm.employment_type === "PT"
-                        ? "Part-Time"
-                        : ""
-                    }
-                    onChange={(v) =>
-                      setEditForm((f) =>
-                        f
-                          ? {
-                              ...f,
-                              employment_type:
-                                v === "Full-Time" ? "FT" : v === "Part-Time" ? "PT" : "",
-                            }
-                          : f
-                      )
-                    }
-                    options={["Full-Time", "Part-Time"]}
-                    placeholder="Select Faculty Type"
-                  />
-                </div>
-
-                <div>
-                  <Label>Certifications</Label>
-                  <TextInput
-                    placeholder="Comma-separated (e.g., AWS, Azure)"
-                    value={editForm.certifications}
-                    onChange={(e) =>
-                      setEditForm((f) =>
-                        f ? { ...f, certifications: e.target.value } : f
-                      )
-                    }
-                  />
-                </div>
+                <div><Label>Department</Label><SelectBox value={editForm.department} onChange={(v) => setEditForm(f => f ? {...f, department: v || ""} : f)} options={deptChoices} /></div>
+                <div><Label>Faculty Type</Label><SelectBox value={editForm.employment_type === "FT" ? "Full-Time" : editForm.employment_type === "PT" ? "Part-Time" : ""} onChange={(v) => setEditForm(f => f ? {...f, employment_type: v === "Full-Time" ? "FT" : v === "Part-Time" ? "PT" : ""} : f)} options={["Full-Time", "Part-Time"]} /></div>
+                <div><Label>Certifications</Label><TextInput value={editForm.certifications} onChange={(e) => setEditForm(f => f ? {...f, certifications: e.target.value} : f)} /></div>
               </div>
-
               <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-                <div>
-                  <Label>Teaching Years</Label>
-                  <TextInput
-                    type="number"
-                    min={0}
-                    placeholder="e.g., 5"
-                    value={editForm.teaching_years}
-                    onChange={(e) =>
-                      setEditForm((f) =>
-                        f ? { ...f, teaching_years: e.target.value } : f
-                      )
-                    }
-                  />
-                </div>
+                <div><Label>Teaching Years</Label><TextInput type="number" min={0} value={editForm.teaching_years} onChange={(e) => setEditForm(f => f ? {...f, teaching_years: e.target.value} : f)} /></div>
               </div>
-
               <div className="mt-4 flex justify-end">
-                <button
-                  onClick={submitEditFaculty}
-                  type="button"
-                  disabled={
-                    editSaving ||
-                    !editForm.first_name.trim() ||
-                    !editForm.last_name.trim() ||
-                    !editForm.email.trim() ||
-                    !editForm.department ||
-                    !editForm.employment_type ||
-                    !!editEmailError
-                  }
-                  className={cls(
-                    "rounded-lg px-6 py-2 text-sm font-medium",
-                    editSaving ||
-                      !editForm.first_name.trim() ||
-                      !editForm.last_name.trim() ||
-                      !editForm.email.trim() ||
-                      !editForm.department ||
-                      !editForm.employment_type ||
-                      !!editEmailError
-                      ? "bg-emerald-300 text-white cursor-not-allowed"
-                      : "bg-emerald-700 text-white hover:bg-emerald-800"
-                  )}
-                >
+                <button onClick={submitEditFaculty} disabled={editSaving || !!editEmailError} className="rounded-lg bg-emerald-700 px-6 py-2 text-sm font-medium text-white hover:bg-emerald-800 disabled:bg-emerald-300">
                   {editSaving ? "Saving…" : "Save Changes"}
                 </button>
               </div>

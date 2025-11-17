@@ -432,6 +432,7 @@ function TeachingLoadEnhanced({ teachingLoad, term }: TeachingLoadEnhancedProps)
     setShowSyllabus(true);
   };
 
+  const hasTBA = teachingLoad.some(item => item.day1 === 'TBA' || item.time1 === 'TBA');
 
   return (
     <section className="mx-auto w-full max-w-screen-2xl px-4">
@@ -496,6 +497,12 @@ function TeachingLoadEnhanced({ teachingLoad, term }: TeachingLoadEnhancedProps)
                   </div>
                 ))}
               </div>
+
+              {view === "Calendar" && hasTBA && (
+                <div className="mb-4 rounded-lg bg-yellow-50 p-3 text-sm text-yellow-800 border border-yellow-200">
+                    <strong>Note:</strong> You have courses with <strong>TBA</strong> schedules. Switch to <strong>List View</strong> to see them.
+                </div>
+              )}
 
               <div
                 className="relative grid grid-cols-[140px_repeat(6,1fr)]"
