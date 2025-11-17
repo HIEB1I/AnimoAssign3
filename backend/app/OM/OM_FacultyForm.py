@@ -626,7 +626,7 @@ async def facultyforms_handler(
                         "preferred_kacs": 1,
                         "mode": 1,
                         "deloading_data": 1,
-                        "notes": 1,
+                        "notes": 1,  # remarks from faculty_preferences.notes
                         "is_finished": 1,
                         "submitted_at": 1
                     }}
@@ -652,7 +652,9 @@ async def facultyforms_handler(
                     "courses": {"$ifNull": ["$pref.preferred_kacs", []]},
                 },
                 "submission": {
-                    "status": {"$cond": [{"$eq": ["$pref.is_finished", True]}, "Submitted", "Not Submitted"]},
+                    "status": {
+                        "$cond": [{"$eq": ["$pref.is_finished", True]}, "Submitted", "Not Submitted"]
+                    },
                     "date": {
                         "$cond": [
                             {"$eq": ["$pref.is_finished", True]},
@@ -660,6 +662,7 @@ async def facultyforms_handler(
                             None
                         ]
                     },
+                    # remarks exposed as submission.notes
                     "notes": {"$ifNull": ["$pref.notes", None]},
                 }
             }},

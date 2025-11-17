@@ -274,6 +274,19 @@ async def _fetch_rows(user_id: str, term_id: str, db) -> Dict[str, Any]:
 
     docs = [x async for x in db[COL_SECTIONS].aggregate(pipe)]
 
+    # --- Preload rooms into a lookup: { room_id → room_number } ---
+    room_docs = [
+        x async for x in db[COL_ROOMS].find(
+            {},
+            {"room_id": 1, "room_number": 1, "_id": 0}
+        )
+    ]
+
+    rooms_map = {
+        (r.get("room_id") or "").strip(): (r.get("room_number") or "").strip()
+        for r in room_docs
+    }
+
     def schedule_pair(
         scheds: List[Dict[str, Any]],
         section: Dict[str, Any],
@@ -281,43 +294,7 @@ async def _fetch_rows(user_id: str, term_id: str, db) -> Dict[str, Any]:
         mode_override: Optional[str] = None,   # NEW
     ) -> Dict[str, str]:
         s1 = (scheds[0] if len(scheds) > 0 else {}) or {}
-        s2 = (scheds[1] if len(scheds) > 1 else {}) or {}
-
-        # Decide effective mode FIRST, then rooms use that
-        mode = _derive_mode(section, scheds, course, pref_mode=mode_override)
-        campus_id = (section.get("campus_id") or "").strip().upper()
-        course_rt = (course.get("room_type") or "").strip()
-
-        def _fallback_from_policy(slot_ord: int, s: Dict[str, Any]) -> str:
-            """Return placeholder room for this slot (1 or 2) using your rules."""
-            # If DB already has explicit values, use them.
-            rid = (s.get("room_id") or "").strip()
-            rty = (s.get("room_type") or "").strip()
-            if rty in ("Online", "TBA", "Classroom"):
-                return rty
-            if rid:
-                return rid
-
-            # Policy when empty:
-            if mode == "HYB":
-                if campus_id == "CMPS0001":
-                    # Manila: room1 Online, room2 course room (or TBA)
-                    if slot_ord == 1:
-                        return "Online"
-                    return course_rt or "TBA"
-                if campus_id == "CMPS0002":
-                    # Laguna: swap
-                    if slot_ord == 1:
-                        return course_rt or "TBA"
-                    return "Online"
-            elif mode == "FOL":
-                # Fully online: both Online
-                return "Online"
-
-            if not mode:
-                return ""  # leave blank; UI shows "—"
-            # (keep any other explicit modes if you add later)
-            return ""
+        s2 = (scheds[1] if len(scheds) > 1 else {}) or {}        
 
         def _get_day(s: Dict[str, Any]) -> str:
             return (s.get("day") or s.get("day_of_week") or s.get("day1") or s.get("day2") or "") or ""
@@ -325,16 +302,24 @@ async def _fetch_rows(user_id: str, term_id: str, db) -> Dict[str, Any]:
             return _fmt_time(s.get("start_time") or s.get("begin") or s.get("begin1") or s.get("start"))
         def _get_end(s: Dict[str, Any]) -> str:
             return _fmt_time(s.get("end_time") or s.get("end") or s.get("end1") or s.get("finish"))
+        def _room_display(s: Dict[str, Any]) -> str:
+            """Show room_number if room_id exists; otherwise TBA."""
+            rid = (s.get("room_id") or "").strip()
+            if not rid:
+                return "TBA"
+            # Lookup room_number
+            rn = rooms_map.get(rid)
+            return rn if rn else "TBA"
 
         return {
             "day1": _get_day(s1),
             "begin1": _get_start(s1) or "",
             "end1": _get_end(s1) or "",
-            "room1": _fallback_from_policy(1, s1),
+            "room1": _room_display(s1),
             "day2": _get_day(s2),
             "begin2": _get_start(s2) or "",
             "end2": _get_end(s2) or "",
-            "room2": _fallback_from_policy(2, s2),
+            "room2": _room_display(s2),
         }
 
     rows_by_sid: Dict[str, Dict[str, Any]] = {}
@@ -4118,9 +4103,6 @@ async def run_milestone_e_phase7(term_id: str, db, department_id: str | None = N
     # 2) optional: improve CMPS0002 concentration (keeps rules; we keep loads balanced)
     assignments = run_pass_campus_concentrate_cmps2(ctx, assignments)
 
-    # --- NEW: use campus_blocked from phase0_load ---
-    campus_blocked = getattr(courses_ctx, "campus_blocked", {}) or {}
-
     def _section_campus(ctx, section_id: str) -> str:
         for sec in (ctx.sections or []):
             if sec.get("section_id") == section_id:
@@ -4648,55 +4630,25 @@ async def _approve_and_persist(term_id: str, rows: list[dict], db):
             # duplicate-slot check only if we actually know the faculty
             if fid and _dup(fid, day, begin_hhmm, end_hhmm):
                 continue
-
+            
             schedule_id = _sched_id(sid, ordn)
 
-            # --- NEW: preserve existing room_id if already saved for this schedule ---
-            existing_sched = await db[COL_SCHED].find_one(
-                {"schedule_id": schedule_id},
-                {"_id": 0, "room_id": 1}
-            )
-            existing_room_id = (existing_sched or {}).get("room_id") or ""
-
-            # Only accept a REAL room id from the row; ignore placeholders like "Online"/"Classroom"/"TBA"
-            row_room_val = (r.get(f"room{ordn}") or "").strip()
-            final_room_id = existing_room_id
-            if not final_room_id and _looks_like_room_id(row_room_val):
-                final_room_id = row_room_val
-
-            # --- NEW: derive room_type from final_room_id (do not guess otherwise) ---
-            if final_room_id:
-                # map room_id → rooms.room_type
-                room_doc = await db[COL_ROOMS].find_one(
-                    {"room_id": final_room_id},
-                    {"_id": 0, "room_type": 1}
-                )
-                final_room_type = (room_doc or {}).get("room_type") or ""
-            else:
-                # no room selected → treat as fully online for this slot
-                final_room_type = "Online"
-
+            # Only update existing schedules; do NOT touch room_id / room_type and do NOT create new docs
             await db[COL_SCHED].update_one(
                 {"schedule_id": schedule_id},
                 {
                     "$set": {
-                        "schedule_id": schedule_id,
+                        # optional: you can also drop schedule_id here since it’s in the filter
                         "term_id": term_id,
                         "section_id": sid,
                         "day": day,
                         "start_time": _to_compact_hhmm(begin_hhmm),
                         "end_time": _to_compact_hhmm(end_hhmm),
-                        # keep existing room_id if it exists; otherwise set what the row proposes
-                        "room_id": final_room_id,
-                        # always align room_type to the final room choice (or Online when no room)
-                        "room_type": final_room_type,
-                        "created_at": r.get("created_at") or "",
-                        "updated_at": r.get("updated_at") or "",
+                        "updated_at": r.get("updated_at") or _utcnow(),
                     }
                 },
-                upsert=True,
+                upsert=False,  # <— no more creating section_schedules here
             )
-
             _add_used(fid, day, begin_hhmm, end_hhmm)
 
 # for action = "save"
@@ -4797,51 +4749,25 @@ async def _persist_rows_no_auto(term_id: str, rows: list[dict], db):
             # duplicate-slot check only if we actually know the faculty
             if fid and _dup(fid, day, begin_hhmm, end_hhmm):
                 continue
-
+            
             schedule_id = _sched_id(sid, ordn)
 
-            # --- preserve existing room_id if already saved for this schedule ---
-            existing_sched = await db[COL_SCHED].find_one(
-                {"schedule_id": schedule_id},
-                {"_id": 0, "room_id": 1},
-            )
-            existing_room_id = (existing_sched or {}).get("room_id") or ""
-
-            # Only accept a REAL room id from the row; ignore placeholders like "Online"/"Classroom"/"TBA"
-            row_room_val = (r.get(f"room{ordn}") or "").strip()
-            final_room_id = existing_room_id
-            if not final_room_id and _looks_like_room_id(row_room_val):
-                final_room_id = row_room_val
-
-            # derive room_type from final_room_id (or Online when no room)
-            if final_room_id:
-                room_doc = await db[COL_ROOMS].find_one(
-                    {"room_id": final_room_id},
-                    {"_id": 0, "room_type": 1},
-                )
-                final_room_type = (room_doc or {}).get("room_type") or ""
-            else:
-                final_room_type = "Online"
-
+            # Only update existing schedules; do NOT touch room_id / room_type and do NOT create new docs
             await db[COL_SCHED].update_one(
                 {"schedule_id": schedule_id},
                 {
                     "$set": {
-                        "schedule_id": schedule_id,
+                        # optional: you can also drop schedule_id here since it’s in the filter
                         "term_id": term_id,
                         "section_id": sid,
                         "day": day,
                         "start_time": _to_compact_hhmm(begin_hhmm),
                         "end_time": _to_compact_hhmm(end_hhmm),
-                        "room_id": final_room_id,
-                        "room_type": final_room_type,
-                        "created_at": r.get("created_at") or "",
-                        "updated_at": r.get("updated_at") or "",
+                        "updated_at": r.get("updated_at") or _utcnow(),
                     }
                 },
-                upsert=True,
+                upsert=False,  # <— no more creating section_schedules here
             )
-
             _add_used(fid, day, begin_hhmm, end_hhmm)
 
 async def _upsert_faculty_load_header(

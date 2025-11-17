@@ -1727,7 +1727,7 @@ if (isGE) {
                   setImportBusy(true);
 
                   //Papa.parse<any>(file, {
-                  Papa.parse(file, {
+                   Papa.parse(file, {
                     header: true,
                     skipEmptyLines: true,
                     //complete: async (result) => {

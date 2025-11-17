@@ -56,15 +56,26 @@ async def fetch_teaching_history(faculty_id: str) -> List[Dict[str, Any]]:
 
         formatted_sched: List[Dict[str, Any]] = []
         for s in sched_docs:
-            stored_rt = s.get("room_type")
-            room_val = s.get("room") or s.get("room_id")
-            rt = stored_rt if stored_rt is not None else _derive_room_type_from_room(room_val)
+            raw_room_id = (s.get("room_id") or "").strip()
+ 
+            display_room = "TBA"
+
+            if raw_room_id:
+                room_doc = await db["rooms"].find_one({"room_id": raw_room_id})
+                print("sched debug:", s, "room_doc:", room_doc)  # TEMP DEBUG
+
+                if room_doc:
+                    rn = (room_doc.get("room_number") or "").strip()
+                    if rn:
+                        display_room = rn
+
+            print("sched debug:", s, "display_room:", display_room)
+
             formatted_sched.append({
                 "day": s.get("day"),
                 "start_time": _fmt_hhmm(s.get("start_time")),
                 "end_time": _fmt_hhmm(s.get("end_time")),
-                "room": room_val,
-                "room_type": rt,
+                "room": display_room,
             })
 
         def _course_code(val):
