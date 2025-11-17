@@ -28,6 +28,40 @@ import {
 } from "lucide-react";
 import { InboxContent as OMInboxContent } from "./OM_Inbox";
 
+export type FlagSeverity = "warning" | "error";
+
+export type RowFlagType =
+  | "KAC_MISMATCH"
+  | "SCHEDULE_PREF_MISMATCH"
+  | "DOUBLE_BOOKED"
+  | "MODE_MISMATCH"
+  | "INCOMPLETE_ROW";
+
+export interface RowFlag {
+  type: RowFlagType;
+  severity: FlagSeverity;
+  message: string;
+}
+
+export type RowFlagsById = Record<string, RowFlag[]>;
+
+interface FacultyPref {
+  day: string;
+  begin: number;
+  end: number;
+}
+
+interface ValidationContext {
+  courseToKac: Record<string, string>; // course_id → kac_id
+  facultyToKacs: Record<string, string[]>; // faculty_id → allowed kac_ids
+
+  facultyPrefWindows: Record<string, FacultyPref[]>; // faculty_id → time windows
+  facultyAllowedModes: Record<string, string[]>; // faculty_id → ["F2F","HYB","FOL"]
+
+  // optional: section/course allowed modes if different
+  courseAllowedModes?: Record<string, string[]>;
+}
+
 /* ---------------- Small inputs ---------------- */
 function SelectBox({
   value,
@@ -49,6 +83,7 @@ function SelectBox({
       options.findIndex((o) => o === value)
     )
   );
+
   const btnRef = useRef<HTMLButtonElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
 
@@ -229,11 +264,11 @@ function ComboBox({
     </div>
   );
 }
-
 /* ---------------- Types + helpers ---------------- */
 type Row = {
   id: string;
   selected?: boolean;
+  course_id?: string;
   course: string;
   title: string;
   units: number | "";
@@ -254,6 +289,193 @@ type Row = {
   conflictNote?: string;
   editable?: boolean;
 };
+
+// --- Validation helpers & engine (row-level flags) ---
+
+function checkKacMismatch(row: Row, ctx: ValidationContext): RowFlag | null {
+  if (!row.faculty_id) return null;
+
+  // Prefer course_id (from backend), fall back to course code if needed
+  const courseKey = (row as any).course_id || row.course;
+  if (!courseKey) return null;
+
+  const courseKac = ctx.courseToKac[courseKey];
+  const allowedKacs = ctx.facultyToKacs[row.faculty_id] || [];
+
+  if (courseKac && !allowedKacs.includes(courseKac)) {
+    return {
+      type: "KAC_MISMATCH",
+      severity: "error",
+      message:
+        "KAC mismatch: this course is outside the faculty’s KAC cluster.",
+    };
+  }
+  return null;
+}
+
+function checkSchedulePrefMismatch(
+  _row: Row,
+  _ctx: ValidationContext
+): RowFlag | null {
+  // TODO: wire this once you expose actual pref windows from backend.
+  // For now, keep it as a no-op so the compiler is happy.
+  return null;
+}
+
+function checkModeMismatch(row: Row, ctx: ValidationContext): RowFlag | null {
+  const fid = row.faculty_id;
+  const rowMode = (row.mode || "").trim().toUpperCase();
+  if (!fid || !rowMode) return null;
+
+  const allowed = ctx.facultyAllowedModes[fid] || [];
+  if (!allowed.length) return null;
+
+  const allowedUpper = allowed.map((m) => (m || "").trim().toUpperCase());
+  if (allowedUpper.includes(rowMode)) return null;
+
+  return {
+    type: "MODE_MISMATCH",
+    severity: "error",
+    message: `Mode mismatch: faculty prefers ${allowed.join(
+      ", "
+    )} but this section is set to ${rowMode}.`,
+  };
+}
+
+function checkIncompleteRow(row: Row): RowFlag | null {
+  const hasAnyData =
+    !!row.faculty ||
+    !!row.faculty_id ||
+    !!row.day1 ||
+    !!row.begin1 ||
+    !!row.end1 ||
+    !!row.day2 ||
+    !!row.begin2 ||
+    !!row.end2 ||
+    !!row.mode;
+
+  if (!hasAnyData) return null;
+
+  const missingCore =
+    !row.section ||
+    !row.faculty ||
+    !row.mode ||
+    !row.day1 ||
+    !row.begin1 ||
+    !row.end1;
+
+  const hasAnyMeet2 = !!row.day2 || !!row.begin2 || !!row.end2;
+  const missingMeet2 = hasAnyMeet2 && (!row.day2 || !row.begin2 || !row.end2);
+
+  if (!missingCore && !missingMeet2) return null;
+
+  return {
+    type: "INCOMPLETE_ROW",
+    severity: "warning",
+    message: "Row is incomplete: please fill required fields before approval.",
+  };
+}
+
+function toMinutes(t?: string): number | null {
+  if (!t) return null;
+  const s = t.trim();
+  if (!/^\d{3,4}$/.test(s)) return null;
+  const hh = s.length === 3 ? s.slice(0, 1) : s.slice(0, 2);
+  const mm = s.slice(-2);
+  const h = Number(hh);
+  const m = Number(mm);
+  if (Number.isNaN(h) || Number.isNaN(m)) return null;
+  return h * 60 + m;
+}
+
+function checkDoubleBookings(rows: Row[]): RowFlagsById {
+  const result: RowFlagsById = {};
+
+  // key = faculty_id|day|begin|end  → list of rowIds
+  const slotMap: Record<string, string[]> = {};
+
+  for (const row of rows) {
+    const fid = row.faculty_id;
+    if (!fid) continue;
+
+    const slots = [
+      { day: row.day1, begin: row.begin1, end: row.end1 },
+      { day: row.day2, begin: row.begin2, end: row.end2 },
+    ];
+
+    for (const s of slots) {
+      const day = (s.day || "").trim();
+      const begin = (s.begin || "").trim();
+      const end = (s.end || "").trim();
+      if (!day || !begin || !end) continue;
+
+      const key = `${fid}|${day}|${begin}|${end}`;
+      if (!slotMap[key]) slotMap[key] = [];
+      slotMap[key].push(row.id);
+    }
+  }
+
+  for (const [key, rowIds] of Object.entries(slotMap)) {
+    if (rowIds.length <= 1) continue; // no conflict
+
+    const [, day, begin, end] = key.split("|");
+    const msg = `Schedule conflict: faculty has multiple sections on ${day} at ${begin}-${end}.`;
+
+    for (const rowId of rowIds) {
+      if (!result[rowId]) result[rowId] = [];
+      result[rowId].push({
+        type: "DOUBLE_BOOKED",
+        severity: "error",
+        message: msg,
+      });
+    }
+  }
+
+  return result;
+}
+
+function validateAllRows(rows: Row[], ctx: ValidationContext): RowFlagsById {
+  const flags: RowFlagsById = {};
+
+  // 1) group by faculty for cross-row checks
+  const rowsByFaculty: Record<string, Row[]> = {};
+  for (const row of rows) {
+    const fid = row.faculty_id;
+    if (!fid) continue;
+    if (!rowsByFaculty[fid]) rowsByFaculty[fid] = [];
+    rowsByFaculty[fid].push(row);
+  }
+
+  // 2) per-row checks
+  for (const row of rows) {
+    const rowFlags: RowFlag[] = [];
+
+    const kacFlag = checkKacMismatch(row, ctx);
+    if (kacFlag) rowFlags.push(kacFlag);
+
+    const schedPrefFlag = checkSchedulePrefMismatch(row, ctx);
+    if (schedPrefFlag) rowFlags.push(schedPrefFlag);
+
+    const modeFlag = checkModeMismatch(row, ctx);
+    if (modeFlag) rowFlags.push(modeFlag);
+
+    const incompleteFlag = checkIncompleteRow(row);
+    if (incompleteFlag) rowFlags.push(incompleteFlag);
+
+    if (rowFlags.length > 0) {
+      flags[row.id] = rowFlags;
+    }
+  }
+
+  // 3) cross-row: same faculty double-booked (exact day/time match)
+  const doubleBookedFlags = checkDoubleBookings(rows);
+  for (const [rowId, conflictFlags] of Object.entries(doubleBookedFlags)) {
+    if (!flags[rowId]) flags[rowId] = [];
+    flags[rowId].push(...conflictFlags);
+  }
+
+  return flags;
+}
 
 const toPrettyTime = (t?: string) => {
   if (!t) return "";
@@ -754,6 +976,22 @@ export default function OM_LoadAssignment() {
 
   const [search, setSearch] = useState("");
   const [rows, setRows] = useState<Row[]>([]);
+  const [validationContext, setValidationContext] = useState<ValidationContext>(
+    {
+      courseToKac: {},
+      facultyToKacs: {},
+      facultyPrefWindows: {},
+      facultyAllowedModes: {},
+      courseAllowedModes: {},
+    }
+  );
+
+  const [rowFlags, setRowFlags] = useState<RowFlagsById>({});
+
+  useEffect(() => {
+    const newFlags = validateAllRows(rows, validationContext);
+    setRowFlags(newFlags);
+  }, [rows, validationContext]);
   type Mode = "idle" | "manual" | "run";
   const [mode, setMode] = useState<Mode>("idle");
   const isRunning = mode !== "idle";
@@ -841,9 +1079,17 @@ export default function OM_LoadAssignment() {
     if (!userId) return;
     const res = await getOmLoadAssignmentList(userId);
 
-    // NEW: preferred units per faculty from /list
     const prefMap = (res as any)?.preferred_units_by_faculty || {};
     setPreferredByFaculty(prefMap);
+
+    // hydrate validation context for row flags
+    setValidationContext({
+      courseToKac: (res as any)?.courseToKac || {},
+      facultyToKacs: (res as any)?.facultyToKacs || {},
+      facultyPrefWindows: {}, // we'll wire later
+      facultyAllowedModes: (res as any)?.facultyAllowedModes || {},
+      courseAllowedModes: {}, // optional
+    });
 
     setRows(Array.isArray(res?.rows) ? res.rows : []);
     setTerm(typeof res?.term === "string" ? res.term : "");
@@ -952,6 +1198,29 @@ export default function OM_LoadAssignment() {
     }
   }
 
+  // function RowFlagBadges({ flags }: { flags?: RowFlag[] }) {
+  //   if (!flags || flags.length === 0) return null;
+
+  //   return (
+  //     <div className="mt-1 space-y-0.5">
+  //       {flags.map((f, i) => (
+  //         <div
+  //           key={i}
+  //           className={cls(
+  //             "inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold",
+  //             f.severity === "error"
+  //               ? "bg-red-50 text-red-700 border border-red-200"
+  //               : "bg-amber-50 text-amber-700 border border-amber-200"
+  //           )}
+  //           title={f.message}
+  //         >
+  //           {f.type.replace(/_/g, " ")}
+  //         </div>
+  //       ))}
+  //     </div>
+  //   );
+  // }
+
   /** Fields that must be filled before a row can be approved */
   const isRowIncompleteForApproval = (r: Row) => {
     // treat “touched” rows as those with any scheduling/faculty info
@@ -1009,6 +1278,14 @@ export default function OM_LoadAssignment() {
     });
     return map;
   }, [facultyList]);
+
+  const hasAnyErrors = useMemo(
+    () =>
+      Object.values(rowFlags).some((flags) =>
+        flags.some((f) => f.severity === "error")
+      ),
+    [rowFlags]
+  );
 
   type FacultySummaryRow = {
     facultyId: string;
@@ -1072,6 +1349,264 @@ export default function OM_LoadAssignment() {
       a.facultyName.localeCompare(b.facultyName)
     );
   }, [rows, facultyById, preferredByFaculty]);
+
+  // ---- Rule alerts for Tab 2 (violations / warnings) ----
+  type RuleAlert = {
+    id: string;
+    rule: string;
+    severity: "error" | "warning";
+    facultyName?: string;
+    facultyId?: string;
+    rowNumber?: number;
+    message: string;
+  };
+
+  const ruleAlerts: RuleAlert[] = useMemo(() => {
+    const alerts: RuleAlert[] = [];
+
+    // Helper: hhmm -> minutes since midnight (e.g. "0730" -> 450)
+    const toMinutes = (t?: string): number | null => {
+      if (!t) return null;
+      const s = t.trim();
+      if (!/^\d{3,4}$/.test(s)) return null;
+      const hh = s.length === 3 ? s.slice(0, 1) : s.slice(0, 2);
+      const mm = s.slice(-2);
+      const h = Number(hh);
+      const m = Number(mm);
+      if (Number.isNaN(h) || Number.isNaN(m)) return null;
+      return h * 60 + m;
+    };
+
+    // 1) Build intervals per faculty+day from rows
+    type Interval = {
+      facultyKey: string;
+      facultyName: string;
+      facultyId?: string;
+      day: string;
+      start: number;
+      end: number;
+      row: Row;
+    };
+
+    const byKey: Record<string, Interval[]> = {};
+
+    rows.forEach((r) => {
+      const facultyKey = r.faculty_id || r.faculty;
+      if (!facultyKey) return;
+      const facultyName = r.faculty || facultyKey;
+      const facultyId = r.faculty_id;
+
+      const d1 = (r.day1 || "").trim();
+      const b1 = toMinutes(r.begin1);
+      const e1 = toMinutes(r.end1);
+      if (d1 && b1 != null && e1 != null && e1 > b1) {
+        const k = `${facultyKey}__${d1}`;
+        (byKey[k] ||= []).push({
+          facultyKey,
+          facultyName,
+          facultyId,
+          day: d1,
+          start: b1,
+          end: e1,
+          row: r,
+        });
+      }
+
+      const d2 = (r.day2 || "").trim();
+      const b2 = toMinutes(r.begin2);
+      const e2 = toMinutes(r.end2);
+      if (d2 && b2 != null && e2 != null && e2 > b2) {
+        const k = `${facultyKey}__${d2}`;
+        (byKey[k] ||= []).push({
+          facultyKey,
+          facultyName,
+          facultyId,
+          day: d2,
+          start: b2,
+          end: e2,
+          row: r,
+        });
+      }
+    });
+
+    const MAX_CONSEC = 4 * 60 + 30; // 4.5 hours
+    const GAP_TOL = 15; // minutes
+
+    // 2) For each faculty+day, detect 4.5h+ consecutive teaching streaks
+    Object.entries(byKey).forEach(([key, arr]) => {
+      if (arr.length === 0) return;
+      arr.sort((a, b) => a.start - b.start);
+
+      let streakStart = arr[0].start;
+      let streakEnd = arr[0].end;
+      let streakTeach = streakEnd - streakStart;
+      let streakIntervals: Interval[] = [arr[0]];
+
+      for (let i = 1; i < arr.length; i++) {
+        const iv = arr[i];
+        const gap = iv.start - streakEnd;
+        const dur = iv.end - iv.start;
+
+        if (gap <= GAP_TOL) {
+          // extend streak
+          streakEnd = iv.end;
+          streakTeach += dur;
+          streakIntervals.push(iv);
+        } else {
+          // new streak
+          streakStart = iv.start;
+          streakEnd = iv.end;
+          streakTeach = dur;
+          streakIntervals = [iv];
+        }
+
+        if (streakTeach > MAX_CONSEC) {
+          const sample = streakIntervals[0];
+          const facultyName = sample.facultyName;
+          const facultyId = sample.facultyId;
+          const day = sample.day;
+
+          const sections = Array.from(
+            new Set(
+              streakIntervals.map((x) =>
+                `${x.row.course || "?"} ${x.row.section || ""}`.trim()
+              )
+            )
+          ).join(", ");
+
+          // use the first row in the streak as the reference row
+          const rowIndex = rows.findIndex((x) => x.id === sample.row.id);
+
+          alerts.push({
+            id: `${key}-streak`,
+            rule: "MAX_CONSEC_4_5H",
+            severity: "warning",
+            facultyName,
+            facultyId,
+            rowNumber: rowIndex >= 0 ? rowIndex + 1 : undefined,
+            message: `${facultyName} has more than 4.5 consecutive hours of teaching on ${day} (sections: ${sections}).`,
+          });
+
+          break; // one alert per faculty+day is enough
+        }
+      }
+    });
+
+    // 3) Incomplete rows (same logic as hasIncompleteRows)
+    rows.forEach((r, idx) => {
+      if (isRowIncompleteForApproval(r)) {
+        const rowIndex = rows.findIndex((x) => x.id === r.id);
+        alerts.push({
+          id: `incomplete-${idx}-${r.id}`,
+          rule: "INCOMPLETE_ROW",
+          severity: "error",
+          facultyName: r.faculty || undefined,
+          facultyId: r.faculty_id,
+          rowNumber: rowIndex + 1,
+          message: `Row ${
+            idx + 1
+          } has missing required fields but contains partial schedule/faculty data.`,
+        });
+      }
+    });
+
+    // 3b) KAC mismatch (same pattern as INCOMPLETE_ROW)
+    rows.forEach((r) => {
+      const flags = rowFlags[r.id];
+      if (!flags) return;
+
+      const kac = flags.find((f) => f.type === "KAC_MISMATCH");
+      if (!kac) return;
+
+      const rowIndex = rows.findIndex((x) => x.id === r.id);
+
+      alerts.push({
+        id: `kac-${r.id}`,
+        rule: "KAC_MISMATCH",
+        severity: "error",
+        facultyName: r.faculty || undefined,
+        facultyId: r.faculty_id,
+        rowNumber: rowIndex + 1,
+        message: `KAC mismatch: ${
+          r.faculty || "This faculty"
+        } is not aligned with the KAC cluster for ${r.course} ${r.section}.`,
+      });
+    });
+
+    // 3c) Mode mismatch between faculty preference and row.mode
+    rows.forEach((r) => {
+      const flags = rowFlags[r.id];
+      if (!flags) return;
+
+      const modeFlag = flags.find((f) => f.type === "MODE_MISMATCH");
+      if (!modeFlag) return;
+
+      const fid = r.faculty_id || "";
+      const allowed = validationContext.facultyAllowedModes[fid] || [];
+      const prefLabel = allowed.join(", ") || "another mode";
+      const rowModeLabel = (r.mode || "").toUpperCase() || "unspecified";
+      const rowIndex = rows.findIndex((x) => x.id === r.id);
+
+      alerts.push({
+        id: `mode-${r.id}`,
+        rule: "MODE_MISMATCH",
+        severity: "error",
+        facultyName: r.faculty || undefined,
+        facultyId: r.faculty_id,
+        rowNumber: rowIndex + 1,
+        message: `Mode mismatch: ${
+          r.faculty || "This faculty"
+        } prefers ${prefLabel} but this row is ${rowModeLabel}.`,
+      });
+    });
+
+    // 3d) Same day/time double-booking (from rowFlags)
+    rows.forEach((r) => {
+      const flags = rowFlags[r.id];
+      if (!flags) return;
+
+      const dbl = flags.find((f) => f.type === "DOUBLE_BOOKED");
+      if (!dbl) return;
+
+      const rowIndex = rows.findIndex((x) => x.id === r.id);
+
+      alerts.push({
+        id: `double-${r.id}`,
+        rule: "DOUBLE_BOOKED",
+        severity: "error",
+        facultyName: r.faculty || undefined,
+        facultyId: r.faculty_id,
+        rowNumber: rowIndex + 1,
+        message:
+          dbl.message ||
+          "Schedule conflict: faculty is assigned to multiple sections at the same day and time.",
+      });
+    });
+
+    // 4) Sections where auto-assign had to drop a faculty
+    //    (backend marks them as Unassigned + conflictNote)
+    rows.forEach((r, idx) => {
+      if (
+        r.status === "Unassigned" &&
+        !r.faculty &&
+        r.conflictNote &&
+        r.conflictNote.toLowerCase().includes("no compatible time slot")
+      ) {
+        alerts.push({
+          id: `no-slot-${idx}-${r.id}`,
+          rule: "NO_SLOT_FROM_PREFS",
+          severity: "warning",
+          facultyName: undefined,
+          facultyId: undefined,
+          message:
+            `Section ${r.course || "?"} ${r.section || ""} ` +
+            `was left unassigned: ${r.conflictNote}`,
+        });
+      }
+    });
+
+    return alerts;
+  }, [rows, rowFlags, validationContext, isRowIncompleteForApproval]);
 
   // 👇 tiny tab state for the new Summary section
   const [summaryTab, setSummaryTab] = useState<"units" | "second">("units");
@@ -1138,34 +1673,33 @@ export default function OM_LoadAssignment() {
                     Save Draft
                   </button>
                   <button
-                    disabled={!hasReco || hasIncompleteRows || approved}
+                    disabled={!hasReco || approved}
+                    className={cls(
+                      "rounded-lg px-4 py-2 font-semibold shadow-sm flex items-center gap-2",
+                      !(!hasReco || approved)
+                        ? "bg-emerald-600 text-white hover:bg-emerald-700" // enabled (GREEN)
+                        : "bg-gray-200 text-gray-400 cursor-not-allowed" // disabled
+                    )}
                     onClick={() => {
-                      if (hasIncompleteRows) {
-                        alert(
-                          "Some rows are incomplete.\n\nFill required fields before approving."
+                      if (hasAnyErrors) {
+                        const proceed = window.confirm(
+                          [
+                            "There are validation errors (e.g., KAC mismatch, mode mismatch, or schedule conflicts).",
+                            "",
+                            "Do you still want to proceed with approval?",
+                          ].join("\n")
                         );
-                        return;
+                        if (!proceed) return;
                       }
+
                       setShowApprove(true);
                     }}
-                    className={cls(
-                      "inline-flex items-center gap-2 rounded-md px-3.5 py-2 text-sm font-medium shadow-sm",
-                      hasReco
-                        ? "bg-emerald-700 text-white hover:brightness-110"
-                        : "bg-gray-200 text-gray-500 cursor-not-allowed"
-                    )}
-                    title={
-                      !hasReco
-                        ? "No recommendations yet"
-                        : "Approve and finalize the load assignment"
-                    }
                   >
                     <CheckCheck className="h-4 w-4" />
                     Approve
                   </button>
                 </div>
               </div>
-
               <div className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
                 <div className="flex items-center justify-between px-4 pt-4">
                   <h2 className="text-lg font-semibold">
@@ -1627,7 +2161,7 @@ export default function OM_LoadAssignment() {
                             : "bg-gray-100 text-gray-500 hover:text-gray-800"
                         )}
                       >
-                        Tab 2 (TBD)
+                        Violation Flags
                       </button>
                     </div>
                   </div>
@@ -1738,12 +2272,78 @@ export default function OM_LoadAssignment() {
                     </div>
                   )}
 
-                  {/* Tab 2: placeholder */}
+                  {/* Tab 2: Rule / condition flags */}
                   {summaryTab === "second" && (
-                    <div className="border-t px-4 pb-6 text-sm text-gray-500">
-                      This secondary summary view is still empty for now. You
-                      can wire this up later (e.g., by section, by course,
-                      etc.).
+                    <div className="border-t px-4 pb-6 text-sm">
+                      {ruleAlerts.length === 0 ? (
+                        <p className="py-4 text-xs text-gray-500">
+                          No rule violations detected for the current
+                          assignments. 🎉
+                        </p>
+                      ) : (
+                        <div className="mt-2 overflow-x-auto">
+                          <table className="w-full text-xs table-fixed">
+                            <thead className="bg-gray-50 border-y text-gray-700">
+                              <tr>
+                                <th className="px-3 py-2 text-left font-semibold">
+                                  Rule
+                                </th>
+                                <th className="px-3 py-2 text-left font-semibold">
+                                  Faculty
+                                </th>
+                                <th className="px-3 py-2 text-left font-semibold">
+                                  Row
+                                </th>
+                                <th className="px-3 py-2 text-left font-semibold">
+                                  Message
+                                </th>
+                                <th className="px-3 py-2 text-center font-semibold">
+                                  Severity
+                                </th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y">
+                              {ruleAlerts.map((a) => (
+                                <tr key={a.id}>
+                                  <td className="px-3 py-2 align-top">
+                                    <span className="font-mono text-[11px]">
+                                      {a.rule}
+                                    </span>
+                                  </td>
+                                  <td className="px-3 py-2 align-top">
+                                    <div className="font-medium text-gray-900">
+                                      {a.facultyName || "—"}
+                                    </div>
+                                    {a.facultyId && (
+                                      <div className="text-[10px] text-gray-400">
+                                        {a.facultyId}
+                                      </div>
+                                    )}
+                                  </td>
+                                  <td className="px-4 py-2 text-sm text-gray-600 text-center">
+                                    {a.rowNumber ?? "—"}
+                                  </td>
+                                  <td className="px-3 py-2 align-top">
+                                    {a.message}
+                                  </td>
+                                  <td className="px-3 py-2 text-center align-top">
+                                    <span
+                                      className={cls(
+                                        "inline-flex items-center justify-center rounded-full px-2.5 py-0.5 text-[10px] font-semibold border",
+                                        a.severity === "error"
+                                          ? "bg-red-50 text-red-700 border-red-200"
+                                          : "bg-amber-50 text-amber-700 border-amber-200"
+                                      )}
+                                    >
+                                      {a.severity.toUpperCase()}
+                                    </span>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>

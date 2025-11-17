@@ -368,6 +368,8 @@ async def _fetch_rows(user_id: str, term_id: str, db) -> Dict[str, Any]:
 
         rows_by_sid[sid] = {
             "id": sid,
+            # NEW: expose course_id for KAC checks
+            "course_id": course_doc.get("course_id") or d.get("course_id") or "",
             "course": d.get("course_code_display") or "",
             "title": course_doc.get("course_title","") or "",
             "units": course_doc.get("units","") or "",
@@ -382,7 +384,80 @@ async def _fetch_rows(user_id: str, term_id: str, db) -> Dict[str, Any]:
         }
 
     rows = list(rows_by_sid.values())
+
+    _flag_faculty_conflicts(rows, resolve_conflicts=False)
+
     return {"rows": rows}
+
+async def _apply_mode_and_rooms_to_rows(rows: list[dict], db):
+    """
+    Ensure each row has consistent mode, room1, room2, and room_type.
+
+    This should mirror whatever you're currently doing in _approve_and_persist
+    so that Save/Approve and Run all behave the same.
+    """
+
+    # Collect section_ids from rows
+    section_ids = [r.get("id") for r in rows if r.get("id")]
+
+    if not section_ids:
+        return
+
+    # Fetch sections so we can pull existing mode/room info if needed
+    sections = await db["sections"].find(
+        {"section_id": {"$in": section_ids}},
+        {"_id": 0, "section_id": 1, "mode": 1},
+    ).to_list(None)
+    sections_by_id = {s["section_id"]: s for s in sections}
+
+    # (Optional) fetch courses if you base defaults on course room_type
+    # courses = await db["courses"].find(...)
+
+    for row in rows:
+        sec_id = row.get("id")
+        sec = sections_by_id.get(sec_id) if sec_id else None
+
+        # --- MODE ---
+        # If row already has mode from UI or auto-assign, keep it.
+        # Otherwise, fall back to section.mode (if any).
+        if not row.get("mode"):
+            if sec and sec.get("mode"):
+                row["mode"] = sec["mode"]
+            else:
+                # default fallback (adjust if you have a different default)
+                row["mode"] = "HYB"
+
+        # --- ROOM PLACEHOLDERS (row["room1"], row["room2"]) ---
+        # Adjust this part to exactly match what you do on approve.
+        mode = row.get("mode")
+
+        if mode == "FOL":
+            # Fully online: both meetings online
+            row.setdefault("room1", "Online")
+            row.setdefault("room2", "Online")
+        elif mode == "HYB":
+            # Hybrid example: day1 classroom, day2 online
+            row.setdefault("room1", "Classroom")
+            row.setdefault("room2", "Online")
+        else:
+            # Assume F2F or similar
+            row.setdefault("room1", "Classroom")
+            # room2 can stay as-is / optional
+
+        # --- ROOM TYPE (derived) ---
+        room1 = (row.get("room1") or "").strip()
+        room2 = (row.get("room2") or "").strip()
+
+        # Your rules you asked me to remember:
+        # - If ROOM1 or ROOM2 is "Online" or blank → room_type = "Online".
+        # - If ROOM1 or ROOM2 is "TBA"         → room_type = None.
+        # - If ROOM1/ROOM2 has a valid room or "Classroom" → room_type = "Classroom".
+        if room1 == "TBA" or room2 == "TBA":
+            row["room_type"] = None
+        elif (not room1 and not room2) or room1 == "Online" or room2 == "Online":
+            row["room_type"] = "Online"
+        else:
+            row["room_type"] = "Classroom"
 
 # ------------------ Algorithm lives HERE ------------------
 # Make sure the name matches what the route calls,
@@ -529,7 +604,7 @@ async def loadassignment_handler(
         rows = payload["rows"]
 
         # Just persist assignments/schedules – no faculty_loads header yet
-        await _approve_and_persist(active["term_id"], rows, db)
+        await _persist_rows_no_auto(active["term_id"], rows, db)
 
         return {
             "ok": True,
@@ -631,6 +706,56 @@ async def get_om_load_assignment_list(user_id: str, db=Depends(get_db)):
     ctx = await phase0_load(active["term_id"], db)
     fac_prefs = ctx.prefs_by_faculty or {}
 
+    # --- NEW: KAC mappings for frontend flags ---
+    # course_to_kacs from phase0_load: course_id -> set(kac_id)
+    course_to_kacs = getattr(ctx, "course_to_kacs", {}) or {}
+
+    # Simplify to a single "primary" KAC per course for the frontend
+    course_kac_simple: dict[str, str] = {}
+    for cid, kset in course_to_kacs.items():
+        if not kset:
+            continue
+        # pick a deterministic one (e.g., first sorted)
+        course_kac_simple[cid] = sorted(list(kset))[0]
+
+    # faculty_id -> list of KACs (union of qualified_kacs, kac_ids, preferred_kacs)
+    faculty_to_kacs: dict[str, list[str]] = {}
+    fac_rows = getattr(ctx, "faculty", []) or []
+
+    for f in fac_rows:
+        fid = f.get("faculty_id")
+        if not fid:
+            continue
+
+        acc: set[str] = set()
+
+        # from faculty_profiles
+        for kid in (f.get("qualified_kacs") or []):
+            if kid:
+                acc.add(kid)
+        for kid in (f.get("kac_ids") or []):
+            if kid:
+                acc.add(kid)
+
+        # from faculty_preferences.preferred_kacs
+        pref = fac_prefs.get(fid) or {}
+        for kid in (pref.get("preferred_kacs") or []):
+            if kid:
+                acc.add(kid)
+
+        if acc:
+            faculty_to_kacs[fid] = sorted(acc)
+
+    # --- NEW: faculty preferred modes for MODE_MISMATCH flag ---
+    faculty_allowed_modes: dict[str, list[str]] = {}
+    for fid, pref in fac_prefs.items():
+        mode_obj = pref.get("mode") or {}
+        mode_str = str(mode_obj.get("mode") or "").strip().upper()
+        if fid and mode_str:
+            # store as a 1-item list so we can support multi-modes later
+            faculty_allowed_modes[fid] = [mode_str]
+
+
     # Build preferred units map
     preferred_units_by_faculty = {}
     for fid, pref in fac_prefs.items():
@@ -644,7 +769,10 @@ async def get_om_load_assignment_list(user_id: str, db=Depends(get_db)):
     return {
         "term": _term_label(active),
         "rows": rows,
-        "preferred_units_by_faculty": preferred_units_by_faculty,   #  ← NEW
+        "preferred_units_by_faculty": preferred_units_by_faculty,
+        "courseToKac": course_kac_simple,
+        "facultyToKacs": faculty_to_kacs,
+        "facultyAllowedModes": faculty_allowed_modes,
     }
 
 @router.post("/load-assignment/run")
@@ -670,6 +798,10 @@ async def run_auto_assignment(
 
     base = await _fetch_rows(user_id, term_id=active["term_id"], db=db)
     rows = [dict(r) for r in base["rows"]]
+
+    rows_by_id: dict[str, dict] = {
+        str(r.get("id")): r for r in rows if r.get("id")
+    }
 
     # Prefs (used for alt-window search on duplicates)
     ctx_for_prefs = await phase0_load(active["term_id"], db, department_id=department_id)
@@ -715,6 +847,25 @@ async def run_auto_assignment(
         rt = str(c.get("room_type") or "").strip()
         sid_to_crt[sid] = rt  # e.g., "Classroom", "Comlab", "Online", or ""
 
+    # --- NEW: course tier helper for conflict resolution ---
+    def _course_tier_for_sid(section_id: str) -> int:
+        """
+        Lower = higher priority when resolving clashes.
+        Foundation (0) < Major (1) < SHS (2) < everything else (3).
+        """
+        cid = sid_to_course.get(section_id)
+        if not cid:
+            return 3
+        cinfo = (ctx_for_prefs.courses or {}).get(cid) or {}
+        t = str(cinfo.get("type") or cinfo.get("type_of_course") or "Major").strip().upper()
+        if t == "FOUNDATION":
+            return 0
+        if t == "MAJOR":
+            return 1
+        if t == "SHS":
+            return 2
+        return 3
+
     # Track used slots per faculty to avoid duplicates
     used: dict[str, set[tuple[str, str, str]]] = {}
 
@@ -737,6 +888,28 @@ async def run_auto_assignment(
             st, en = _to_min(a), _to_min(b)
         return (_mm_to_hhmm(st), _mm_to_hhmm(en)) if (st is not None and en is not None and st >= 0 and en > st) else None
 
+    def _streak_violation_for(fid: str, day: str, b_hhmm: str, e_hhmm: str) -> bool:
+        """Return True if adding (day, b_hhmm, e_hhmm) creates a >4.5h streak."""
+        if not (fid and day and b_hhmm and e_hhmm):
+            return False
+
+        st_min = _to_min(b_hhmm)
+        en_min = _to_min(e_hhmm)
+        if st_min is None or en_min is None or en_min <= st_min:
+            return False
+
+        day_key = day.upper().strip()
+        existing: list[tuple[int, int]] = []
+        for (d0, b0, e0) in used.get(fid, set()):
+            if d0.upper().strip() == day_key:
+                eb = _to_min(b0)
+                ee = _to_min(e0)
+                if eb is not None and ee is not None and ee > eb:
+                    existing.append((eb, ee))
+
+        # True means “this would violate the rule”
+        return not _streak_ok_for_day(existing, [(st_min, en_min)])
+
     # Standard grid you listed
     GRID = [
         ("07:30", "09:00"),
@@ -750,24 +923,51 @@ async def run_auto_assignment(
     ]
 
     def _pick_alt_slot(fid: str, day: str, pref: dict) -> tuple[str, str] | None:
-        # 1) try other explicit preferred windows first
-        wins = pref.get("preferred_times")
-        if wins:
-            seq = wins if isinstance(wins, list) else [wins]
-            for w in seq:
-                hhmm = _parse_win_to_hhmm_pair(w)
-                if not hhmm:
-                    continue
-                b_alt, e_alt = hhmm
-                if not _would_reuse(fid, day, b_alt, e_alt):
-                    return (b_alt, e_alt)
+        """
+        Strict alt-slot picker:
 
-        # 2) fallback: iterate the standard grid for that day
-        for b_alt, e_alt in GRID:
+        - If faculty has preferred_times: ONLY use those windows (no grid).
+        - If faculty has NO preferred_times at all (even from fallback):
+              → return None, meaning this faculty cannot host another section
+                for this day via auto-assigned slot.
+        """
+        wins = pref.get("preferred_times")
+
+        # Normalize to a list
+        seq = []
+        if isinstance(wins, list):
+            seq = wins
+        elif wins:
+            seq = [wins]
+
+        # No preferred_times at all → no alt slot; do not use GRID
+        if not seq:
+            print(
+                f"DEBUG-ALT-SLOT: fid={fid} day={day} has NO preferred_times; "
+                "no alt slot will be proposed."
+            )
+            return None
+
+        # Try each preferred window in order, skipping those already used
+        for w in seq:
+            hhmm = _parse_win_to_hhmm_pair(w)
+            if not hhmm:
+                continue
+            b_alt, e_alt = hhmm
             if not _would_reuse(fid, day, b_alt, e_alt):
+                print(
+                    f"DEBUG-ALT-SLOT: fid={fid} day={day} "
+                    f"picked preferred window {b_alt}-{e_alt}"
+                )
                 return (b_alt, e_alt)
 
+        # All preferred windows are exhausted / taken
+        print(
+            f"DEBUG-ALT-SLOT: fid={fid} day={day} has preferred_times but "
+            "all are exhausted or conflicting → no alt slot."
+        )
         return None
+
     
     # Seed current used slots from table rows
     for r in rows:
@@ -777,6 +977,7 @@ async def run_auto_assignment(
 
     sugg = await compute_load_recommendations(term_id=active["term_id"], db=db)
     debug = sugg.get("debug", {}) or {}
+    phase7_no_time = (debug.get("phase7_no_time_details") or {}) if isinstance(debug, dict) else {}
 
     if not sugg.get("assignments"):
         return {
@@ -794,12 +995,30 @@ async def run_auto_assignment(
             },
         }
 
+
     suggestions = {s["section_id"]: s for s in sugg.get("assignments", [])}
 
     overlay_reasons: dict[str, dict] = {}
     for r in rows:
-        a = suggestions.get(r["id"])
+        sid = r.get("id")
+        a = suggestions.get(sid)
+
         if not a:
+            # If Phase 7 explicitly failed to find a slot for this section,
+            # clear faculty so UI shows it as unassigned, and mark a note.
+            info = phase7_no_time.get(sid) or {}
+            if info.get("reason") == "no_free_slot_from_pool":
+                # we know there was a faculty_id in Phase 7 (info["faculty_id"])
+                r["faculty"] = ""
+                r["faculty_id"] = ""
+                # mark as unassigned but with a conflict note so it's traceable
+                r["status"] = "Unassigned"
+                r["conflictNote"] = (
+                    "Auto-assign removed previous faculty: no compatible " 
+                    "time slot found (preferences / 4.5h rule)."
+                )
+
+            # nothing else to overlay for this row
             continue
 
         fid = a.get("faculty_id")
@@ -807,6 +1026,7 @@ async def run_auto_assignment(
         d2, b2, e2 = a.get("day2"), a.get("begin2"), a.get("end2")
         why: dict[str, str] = {}
 
+        # Avoid duplicate slots, try alt from prefs if needed
         if _would_reuse(fid, d1, b1, e1):
             alt = _pick_alt_slot(fid, (d1 or "").upper(), fac_prefs.get(fid, {}))
             if alt:
@@ -830,14 +1050,13 @@ async def run_auto_assignment(
         if old_pair != (d1, d2):
             why["pairing"] = f"normalized_from_{old_pair}_to_{(d1, d2)}"
 
+        # --- Write faculty label for the row (but we may clear it later if no slots) ---
         r["faculty"] = a.get("faculty", r["faculty"])
+        # Also ensure faculty_id is mirrored from suggestion if missing
+        if fid and not r.get("faculty_id"):
+            r["faculty_id"] = fid
 
-        # NEW: set Mode on the row from assigned faculty’s preferred_mode
-        if fid:
-            pm = fac_pref_mode.get(fid, "")
-            if pm:
-                r["mode"] = pm  # rows show the decided mode immediately
-
+        # --- Apply final slots to the row ---
         if d1 and b1 and e1:
             r["day1"], r["begin1"], r["end1"] = d1, b1, e1
             _add_used(fid, d1, b1, e1)
@@ -850,29 +1069,57 @@ async def run_auto_assignment(
         else:
             why.setdefault("slot2", "left_blank")
 
-        # --- NEW: derive rooms from row-level mode + campus (only if blank) ---
+        # --- GOAL 2: if faculty has NO valid slots left for this section, drop assignment ---
+        if not (r.get("day1") or r.get("day2")) and fid:
+            # Clear faculty + schedule so this section is truly unassigned
+            print(
+                f"[GOAL2] Dropping faculty {fid} from section {r.get('id') or r.get('section_id')} "
+                "because no valid non-conflicting preferred slots could be assigned."
+            )
+            r["faculty"] = ""
+            r["faculty_id"] = ""
+            r["mode"] = r.get("mode")  # keep mode as-is or blank if you prefer
+            r["status"] = "Unassigned"
+            # wipe any stale times just in case
+            for key in ("day1","begin1","end1","day2","begin2","end2"):
+                r[key] = ""
+            why["dropped_faculty_goal2"] = "no_valid_slots_available_after_overlay"
+
+        # --- NEW: ensure mode is set so room derivation works on run, too ---
+        if not (r.get("mode") or "").strip():
+            sid = r.get("id") or r.get("section_id")
+            crt = (sid_to_crt.get(sid) or "").strip().upper()  # course room type
+            # 1st priority: faculty preferred mode if available
+            fac_mode = (fac_pref_mode.get(fid) or "").strip().upper() if fid else ""
+            if fac_mode:
+                r["mode"] = fac_mode
+            else:
+                # 2nd priority: course room type
+                if crt == "ONLINE":
+                    r["mode"] = "FOL"
+                else:
+                    # default fallback, adjust if you like
+                    r["mode"] = "HYB"
+
+        # --- derive rooms from row-level mode + campus (only if blank) ---
         def _derive_rooms_from_mode_row(row: dict) -> tuple[str, str]:
             mode = (row.get("mode") or "").strip().upper()
             if not mode:
                 return (row.get("room1") or "", row.get("room2") or "")
             sid = row.get("id") or row.get("section_id")
             campus = (sid_to_campus.get(sid) or "").upper()
-            crt = sid_to_crt.get(sid) or ""          # course room type (e.g., "Classroom","Comlab","Online")
+            crt = sid_to_crt.get(sid) or ""  # course room type
 
-            # FOL: both Online
             if mode == "FOL":
                 return ("Online", "Online")
 
-            # HYB: Manila (CMPS0001) → Online then campus/classroom; Laguna (CMPS0002) reversed
             if mode == "HYB":
                 if campus == "CMPS0001":
                     return ("Online", crt or "TBA")
                 if campus == "CMPS0002":
                     return (crt or "TBA", "Online")
-                # unknown campus → don't guess
                 return (row.get("room1") or "", row.get("room2") or "")
 
-            # Other modes: leave as-is
             return (row.get("room1") or "", row.get("room2") or "")
 
         # Only fill when currently blank (don’t stomp explicit suggestions)
@@ -883,16 +1130,15 @@ async def run_auto_assignment(
             if not (r.get("room2") or "").strip():
                 r["room2"] = dr2
 
-        # Keep status/conflict overlay, but if there are times and no faculty, mark Pending
-        r["status"] = a.get("status", "Pending")
+        # Status / conflict overlay
+        r["status"] = a.get("status", r.get("status") or "Pending")
         if a.get("conflictNote"):
             r["conflictNote"] = a["conflictNote"]
 
+        # cosmetic: rows with proposed times but no faculty shouldn’t show "Unassigned"
         if not r.get("faculty") and (r.get("day1") or r.get("day2")):
-            # cosmetic: rows with proposed times shouldn’t appear as “Unassigned”
             if r.get("status", "").lower() == "unassigned":
                 r["status"] = "Pending"
-
 
         overlay_reasons[r["id"]] = {
             "faculty_id": fid,
@@ -907,11 +1153,334 @@ async def run_auto_assignment(
             "reason": why,
         }
 
+    _flag_faculty_conflicts(rows, resolve_conflicts=True)
+
+    # --- NEW: faculty-level hard conflict detection (any overlapping slots) ---
+    # Gather all (faculty, day, time-window, section_id) from final rows
+    fac_day_windows: dict[str, dict[str, list[tuple[int, int, str]]]] = {}
+
+    for r in rows:
+        fid = (r.get("faculty_id") or "").strip()
+        if not fid:
+            continue
+
+        for which in ("1", "2"):
+            day = (r.get(f"day{which}") or "").strip()
+            b = (r.get(f"begin{which}") or "").strip()
+            e = (r.get(f"end{which}") or "").strip()
+            if not (day and b and e):
+                continue
+
+            st = _to_min(b)
+            en = _to_min(e)
+            if st is None or en is None or en <= st:
+                continue
+
+            sid = str(r.get("id") or r.get("section_id") or "")
+            if not sid:
+                continue
+
+            fac_day_windows.setdefault(fid, {}).setdefault(day, []).append((st, en, sid))
+
+    # For each faculty/day, detect overlapping windows and flag both sections
+    hard_conflicts: dict[str, dict[str, list[tuple[str, str]]]] = {}
+
+    for fid, day_map in fac_day_windows.items():
+        for day, slots in day_map.items():
+            # sort by start time
+            slots.sort(key=lambda x: x[0])  # (st, en, sid)
+            prev_st = prev_en = None
+            prev_sid: str | None = None
+
+            for st, en, sid in slots:
+                if prev_st is not None and st < prev_en:
+                    # overlap between prev_sid and sid
+                    hard_conflicts.setdefault(fid, {}).setdefault(day, []).append((prev_sid, sid))
+                # keep the "outermost" interval as reference
+                if prev_en is None or en > prev_en:
+                    prev_st, prev_en, prev_sid = st, en, sid
+
+    # Apply flags to the rows and optionally drop weaker assignments
+    def _row_conflict_priority(row: dict, sid: str) -> tuple[int, int]:
+        """
+        Lower tuple = stronger (we prefer to KEEP).
+        (course_tier, status_score)
+
+        - course_tier: Foundation (0) < Major (1) < SHS (2) < other (3)
+        - status_score: Confirmed (0) < Pending (1) < others (2)
+        """
+        tier = _course_tier_for_sid(sid)
+        status = (row.get("status") or "").lower()
+        if status == "confirmed":
+            status_score = 0
+        elif status == "pending":
+            status_score = 1
+        else:
+            status_score = 2
+        return (tier, status_score)
+
+    for fid, day_map in hard_conflicts.items():
+        for day, pairs in day_map.items():
+            for sid1, sid2 in pairs:
+                r1 = rows_by_id.get(str(sid1))
+                r2 = rows_by_id.get(str(sid2))
+
+                # Both rows must exist AND belong to this faculty
+                if not r1 or not r2:
+                    continue
+                if (r1.get("faculty_id") or "").strip() != fid:
+                    continue
+                if (r2.get("faculty_id") or "").strip() != fid:
+                    continue
+
+                # 1) Always flag both rows as conflicting (for transparency)
+                for rr, sid in ((r1, str(sid1)), (r2, str(sid2))):
+                    if (rr.get("status") or "").lower() != "unassigned":
+                        rr["status"] = "Conflict"
+
+                    msg = f"Faculty schedule clash on {day} (overlapping time slot)."
+                    existing_note = (rr.get("conflictNote") or "").strip()
+                    if msg not in existing_note:
+                        rr["conflictNote"] = (existing_note + " " + msg).strip().lstrip()
+
+                # 2) Decide which one to drop based on course tier + status
+                p1 = _row_conflict_priority(r1, str(sid1))
+                p2 = _row_conflict_priority(r2, str(sid2))
+
+                # smaller tuple is stronger → we KEEP that one
+                if p1 <= p2:
+                    stronger_row, weaker_row = r1, r2
+                    weaker_sid = str(sid2)
+                else:
+                    stronger_row, weaker_row = r2, r1
+                    weaker_sid = str(sid1)
+
+                # If weaker_row is already unassigned, nothing to drop
+                if (weaker_row.get("faculty_id") or "").strip() == "":
+                    continue
+
+                # Unassign weaker row: this removes the double-booking
+                weaker_row["faculty_id"] = ""
+                weaker_row["faculty"] = ""
+                weaker_row["status"] = "Unassigned"
+
+                extra_msg = (
+                    " Auto-assign dropped this faculty from this section due to a "
+                    "schedule clash with a higher-priority class."
+                )
+                existing_note = (weaker_row.get("conflictNote") or "").strip()
+                if extra_msg not in existing_note:
+                    weaker_row["conflictNote"] = (existing_note + " " + extra_msg).strip().lstrip()
+
+        # For each faculty/day, detect overlapping windows and flag both sections
+    hard_conflicts: dict[str, dict[str, list[tuple[str, str]]]] = {}
+
+    for fid, day_map in fac_day_windows.items():
+        for day, slots in day_map.items():
+            # sort by start time
+            slots.sort(key=lambda x: x[0])  # (st, en, sid)
+            prev_st = prev_en = None
+            prev_sid: str | None = None
+
+            for st, en, sid in slots:
+                if prev_st is not None and st < prev_en:
+                    # overlap between prev_sid and sid
+                    hard_conflicts.setdefault(fid, {}).setdefault(day, []).append((prev_sid, sid))
+                # keep the "outermost" interval as reference
+                if prev_en is None or en > prev_en:
+                    prev_st, prev_en, prev_sid = st, en, sid
+
+    # Apply flags to the rows
+    for fid, day_map in hard_conflicts.items():
+        for day, pairs in day_map.items():
+            for sid1, sid2 in pairs:
+                for sid in (sid1, sid2):
+                    row = rows_by_id.get(str(sid))
+                    if not row:
+                        continue
+                    if (row.get("faculty_id") or "").strip() != fid:
+                        continue
+
+                    # Don't override unassigned rows, but everything else becomes Conflict
+                    if (row.get("status") or "").lower() != "unassigned":
+                        row["status"] = "Conflict"
+
+                    # Build a readable message with the exact window(s)
+                    # (use existing times, since they’re already in the row)
+                    msg = f"Faculty schedule clash on {day} (overlapping time slot)."
+                    existing_note = (row.get("conflictNote") or "").strip()
+                    if msg not in existing_note:
+                        row["conflictNote"] = (existing_note + " " + msg).strip().lstrip()
+
+        # --- NEW: conservative SHS refill after conflicts (low-risk) ---
+    def _shs_refill_after_conflicts():
+        """
+        After all phases + conflict flags, try to use remaining capacity to
+        fill UNASSIGNED SHS sections with compatible, underloaded faculty.
+
+        This does NOT touch non-SHS sections and does NOT move anyone;
+        it only fills blanks if:
+          - faculty has remaining units (preferred_units cap),
+          - SHS fixed schedule does not clash,
+          - streak rule is still respected.
+        """
+        courses = ctx_for_prefs.courses or {}
+        by_course = (sugg.get("by_course") or {}) if isinstance(sugg, dict) else {}
+
+        # 1) Recompute current units from final rows
+        current_units: dict[str, int] = {}
+        for r in rows:
+            fid = (r.get("faculty_id") or "").strip()
+            if not fid:
+                continue
+            try:
+                u = int(r.get("units") or 0)
+            except (TypeError, ValueError):
+                u = 0
+            if u > 0:
+                current_units[fid] = current_units.get(fid, 0) + u
+
+        # 2) Gather UNASSIGNED SHS rows
+        shs_rows: list[dict] = []
+        for r in rows:
+            sid = r.get("id") or r.get("section_id")
+            if not sid:
+                continue
+            cid = sid_to_course.get(sid)
+            if not cid:
+                continue
+            cinfo = courses.get(cid) or {}
+            ctype = str(
+                cinfo.get("type") or cinfo.get("type_of_course") or ""
+            ).strip().upper()
+            if ctype != "SHS":
+                continue
+            if (r.get("faculty_id") or "").strip():
+                continue  # already has a faculty
+            shs_rows.append(r)
+
+        if not shs_rows:
+            return  # nothing to do
+
+        def _faculty_label(fid: str) -> str:
+            # Reuse existing helper + users_by_faculty from phase0_load
+            u = (ctx_for_prefs.users_by_faculty or {}).get(fid) or {}
+            return _display_name_from_users(u)
+
+        def _slots_for_faculty_day(fid: str, day: str) -> list[tuple[int, int]]:
+            """Collect existing [start_min, end_min] slots for this faculty on a given day."""
+            intervals: list[tuple[int, int]] = []
+            day_key = (day or "").upper().strip()
+            if not day_key:
+                return intervals
+
+            for rr in rows:
+                if (rr.get("faculty_id") or "").strip() != fid:
+                    continue
+                for ord_s in ("1", "2"):
+                    d = (rr.get(f"day{ord_s}") or "").upper().strip()
+                    if d != day_key:
+                        continue
+                    b = rr.get(f"begin{ord_s}") or ""
+                    e = rr.get(f"end{ord_s}") or ""
+                    st = _to_min(b)
+                    en = _to_min(e)
+                    if st is None or en is None or en <= st:
+                        continue
+                    intervals.append((st, en))
+            return intervals
+
+        def _slot_ok_for_faculty(fid: str, day: str, b_hhmm: str, e_hhmm: str) -> bool:
+            """Check both overlap + 4.5h streak for a candidate slot."""
+            st_new = _to_min(b_hhmm)
+            en_new = _to_min(e_hhmm)
+            if st_new is None or en_new is None or en_new <= st_new:
+                return False
+
+            existing = _slots_for_faculty_day(fid, day)
+
+            # Overlap check
+            for eb, ee in existing:
+                # intervals overlap if not (new ends before old starts OR new starts after old ends)
+                if not (en_new <= eb or st_new >= ee):
+                    return False
+
+            # Streak rule (reuse your global helper)
+            if not _streak_ok_for_day(existing, [(st_new, en_new)]):
+                return False
+
+            return True
+
+        # 3) Greedily try to fill SHS blanks using original candidate pools
+        for r in shs_rows:
+            sid = r.get("id") or r.get("section_id")
+            cid = sid_to_course.get(sid)
+            try:
+                units = int(r.get("units") or 0)
+            except (TypeError, ValueError):
+                units = 0
+
+            if not cid or units <= 0:
+                continue
+
+            course_dbg = by_course.get(cid) or {}
+            cand_list = course_dbg.get("candidates") or []
+            if not cand_list:
+                continue  # no known candidates for this course
+
+            for cand in cand_list:
+                fid = (cand.get("faculty_id") or "").strip()
+                if not fid:
+                    continue
+
+                cap = preferred_units_by_faculty.get(fid)
+                if cap is None:
+                    continue  # no cap info, skip to be safe
+
+                cur = current_units.get(fid, 0)
+                if cur + units > cap:
+                    continue  # would overflow their preferred_units
+
+                # SHS uses fixed schedule already in the row
+                day1, b1, e1 = r.get("day1"), r.get("begin1"), r.get("end1")
+                day2, b2, e2 = r.get("day2"), r.get("begin2"), r.get("end2")
+
+                ok = True
+                if day1 and b1 and e1:
+                    if not _slot_ok_for_faculty(fid, day1, b1, e1):
+                        ok = False
+                if ok and day2 and b2 and e2:
+                    if not _slot_ok_for_faculty(fid, day2, b2, e2):
+                        ok = False
+
+                if not ok:
+                    continue
+
+                r["faculty_id"] = fid
+                r["faculty"] = _faculty_label(fid)
+                if not (r.get("status") or "").strip():
+                    r["status"] = "Pending"
+
+                current_units[fid] = cur + units
+                # no need to change times; they are fixed on SHS
+
+                # Optional: note in debug for inspection
+                overlay_reasons.setdefault(sid, {}).setdefault(
+                    "shs_refill", {}
+                )["assigned_to"] = fid
+
+                # move to next SHS row
+                break
+
+    # Run the conservative SHS refill pass (after conflicts)
+    _shs_refill_after_conflicts()
+
     return {
         "term": _term_label(active),
         "rows": rows,
         "debug": {**debug, **prefs_debug, "overlay_no_time_details": overlay_reasons},
     }
+
 
 #    ===========================================================
 #    =====================  LOAD RECO ==========================
@@ -1131,6 +1700,36 @@ async def phase0_load(term_id: str, db, department_id: str | None = None) -> Con
         r["faculty_id"]: r for r in pref_rows if r.get("faculty_id")
     }
 
+    # --- DEBUG: Print final faculty preferences (after applying fallback logic) ---
+    print("DEBUG-PREF-SUMMARY: ============================")
+    for fid, pref in prefs_by_faculty.items():
+        days = pref.get("availability_days") or []
+        times_raw = pref.get("preferred_times") or []
+        
+        # Normalize time windows to HH:MM-HH:MM for clean debugging
+        times_norm = []
+        for w in times_raw:
+            hhmm = None
+            if isinstance(w, dict):
+                hhmm = (_mm_to_hhmm(_to_min(w.get("start") or w.get("begin"))),
+                        _mm_to_hhmm(_to_min(w.get("end") or w.get("finish"))))
+            elif isinstance(w, (list, tuple)) and len(w) == 2:
+                hhmm = (_mm_to_hhmm(_to_min(w[0])),
+                        _mm_to_hhmm(_to_min(w[1])))
+            elif isinstance(w, str) and "-" in w:
+                s = w.replace("–", "-").replace("—", "-")
+                a, b = s.split("-", 1)
+                hhmm = (_mm_to_hhmm(_to_min(a)), _mm_to_hhmm(_to_min(b)))
+
+            if hhmm and hhmm[0] and hhmm[1]:
+                times_norm.append(f"{hhmm[0]}-{hhmm[1]}")
+        
+        print(
+            f"DEBUG-PREF-SUMMARY: Faculty {fid} "
+            f"days={days} | windows={times_norm}"
+        )
+    print("DEBUG-PREF-SUMMARY: ============================")
+
     # after prefs_by_faculty (DEBUG)
     debug_pref_windows = {}
     for fid, p in prefs_by_faculty.items():
@@ -1166,6 +1765,60 @@ async def phase0_load(term_id: str, db, department_id: str | None = None) -> Con
     # ------------------------------
     # 7) Leaves
     term_rank = {t["term_id"]: i for i, t in enumerate(all_terms or [])}
+
+    # --- NEW: Fallback preferences from previous terms ---
+    # If a faculty has no prefs for this upcoming term, reuse their most recent
+    # finished preference record from any past term (if it exists).
+    faculty_ids_all = [
+        f["faculty_id"] for f in (faculty or []) if f.get("faculty_id")
+    ]
+    missing_pref_fids = set(faculty_ids_all) - set((prefs_by_faculty or {}).keys())
+
+    if missing_pref_fids:
+        fallback_rows = await db[COL_PREFERENCES].find(
+            {
+                "faculty_id": {"$in": list(missing_pref_fids)},
+                "is_finished": True,
+            },
+            {
+                "_id": 0,
+                "faculty_id": 1,
+                "preferred_units": 1,
+                "availability_days": 1,
+                "preferred_times": 1,
+                "preferred_kacs": 1,
+                "campus_id": 1,
+                "leave_data": 1,
+                "mode": 1,
+                "term_id": 1,
+            },
+        ).to_list(None)
+
+        latest_by_fac: dict[str, dict] = {}
+        for row in fallback_rows:
+            fid = row.get("faculty_id")
+            t_id = row.get("term_id")
+            if not fid or not t_id:
+                continue
+
+            prev = latest_by_fac.get(fid)
+            if not prev:
+                latest_by_fac[fid] = row
+                continue
+
+            prev_rank = term_rank.get(prev.get("term_id"), -1)
+            cur_rank = term_rank.get(t_id, -1)
+            if cur_rank > prev_rank:
+                latest_by_fac[fid] = row
+
+        for fid, prow in latest_by_fac.items():
+            if fid not in prefs_by_faculty:
+                prefs_by_faculty[fid] = prow
+                print(
+                    f"DEBUG-PREF-FALLBACK: using previous-term preferences for "
+                    f"faculty {fid} from term {prow.get('term_id')}"
+                )
+
 
     # Case-insensitive "approved" + only the fields we need
     leave_rows = await db[COL_LEAVES].find(
@@ -1568,9 +2221,131 @@ def _mm_to_hhmm(m: int) -> str:
     mm = m % 60
     return f"{h:02d}:{mm:02d}"
 
+def _flag_faculty_conflicts(rows: list[dict], resolve_conflicts: bool = False) -> None:
+    """
+    - Looks at final rows (faculty_id, day1/2, begin1/2, end1/2).
+    - Flags any overlapping time windows per faculty+day.
+    - If resolve_conflicts=True:
+         "weaker" row gets unassigned (no overlap in final timetable).
+      If resolve_conflicts=False:
+         we only tag them as Conflict in status/conflictNote.
+    """
+
+    # Build: faculty_id -> day -> list of slots (st_min, en_min, row)
+    fac_day_slots: dict[str, dict[str, list[dict]]] = {}
+
+    for r in rows:
+        fid = (r.get("faculty_id") or "").strip()
+        if not fid:
+            continue
+
+        for which in ("1", "2"):
+            day = (r.get(f"day{which}") or "").strip()
+            b = (r.get(f"begin{which}") or "").strip()
+            e = (r.get(f"end{which}") or "").strip()
+            if not (day and b and e):
+                continue
+
+            st = _to_min(b)
+            en = _to_min(e)
+            if st is None or en is None or en <= st:
+                continue
+
+            fac_day_slots.setdefault(fid, {}).setdefault(day, []).append(
+                {"st": st, "en": en, "row": r}
+            )
+
+    def _priority(row: dict) -> int:
+        """
+        Smaller number = stronger row we prefer to keep.
+        Example priorities (tweak if you want):
+        - Confirmed < Pending < others
+        """
+        status = (row.get("status") or "").lower()
+        if status == "confirmed":
+            return 0
+        if status == "pending":
+            return 1
+        return 2
+
+    # Detect overlaps per faculty+day
+    for fid, day_map in fac_day_slots.items():
+        for day, slots in day_map.items():
+            if len(slots) < 2:
+                continue
+
+            # Sort by start time
+            slots.sort(key=lambda s: s["st"])
+
+            kept: list[dict] = []
+            for slot in slots:
+                st, en, row = slot["st"], slot["en"], slot["row"]
+                conflict_with = None
+
+                # Check overlap with any kept slot
+                for k in kept:
+                    ks, ke, krow = k["st"], k["en"], k["row"]
+                    # overlapping if intervals intersect with positive length
+                    if st < ke and ks < en:
+                        conflict_with = k
+                        break
+
+                if conflict_with is None:
+                    kept.append(slot)
+                    continue
+
+                # We have a clash between row and conflict_with["row"]
+                row_a = row
+                row_b = conflict_with["row"]
+
+                # Mark both as having a clash in conflictNote/status
+                for rr in (row_a, row_b):
+                    # Don't override unassigned status, but tag everything else
+                    if (rr.get("status") or "").lower() != "unassigned":
+                        rr["status"] = "Conflict"
+
+                    msg = (
+                        f"Faculty schedule clash on {day} "
+                        f"({ _mm_to_hhmm(st) }–{ _mm_to_hhmm(en) })."
+                    )
+                    existing = (rr.get("conflictNote") or "").strip()
+                    if msg not in existing:
+                        rr["conflictNote"] = (existing + " " + msg).strip().lstrip()
+
+                if not resolve_conflicts:
+                    # For fetch/conflict-tab use: just flag, keep both
+                    kept.append(slot)
+                    continue
+
+                # --- resolve_conflicts=True: choose which row to drop ---
+                # Prefer to keep row with "better" priority (smaller number)
+                if _priority(row_a) < _priority(row_b):
+                    stronger, weaker = row_a, row_b
+                else:
+                    stronger, weaker = row_b, row_a
+
+                # Unassign weaker row to remove clash in final timetable
+                weaker["faculty_id"] = ""
+                weaker["faculty"] = ""
+                # Keep mode as-is; just unassign and mark appropriately
+                weaker["status"] = "Unassigned"
+                extra_msg = f" Auto-assign dropped this faculty due to clash with another section."
+                existing = (weaker.get("conflictNote") or "").strip()
+                if extra_msg not in existing:
+                    weaker["conflictNote"] = (existing + " " + extra_msg).strip().lstrip()
+
+                # Stronger stays in kept; weaker is not added (no future overlap from it)
+                if conflict_with not in kept:
+                    kept.append(conflict_with)
+                # current slot is the weaker one (or stronger); ensure the stronger is in kept
+                if stronger is row_a:
+                    # ensure current slot references stronger
+                    slot["row"] = stronger
+                    slot["st"], slot["en"] = st, en
+                    kept.append(slot)
+
 MAX_CONSEC_TEACH_MIN = 4 * 60 + 30   # 4.5 hours
 MAX_GAP_FOR_STREAK   = 15            # minutes between classes still counted in a streak
-
 
 def _streak_ok_for_day(
     existing: list[tuple[int, int]],
@@ -1607,7 +2382,7 @@ def _streak_ok_for_day(
             streak_start, streak_end = st, en
             streak_teach = dur
 
-        if streak_teach > max_minutes:
+        if streak_teach >= max_minutes:
             return False
 
     return True
@@ -1676,83 +2451,69 @@ def _build_faculty_grid(
 
 def _pref_accepts_slot(fpref: dict, di: int, interval: tuple[int,int]) -> bool:
     """
-    Accept if:
-      - no prefs set, OR
-      - day allowed AND any preferred time window overlaps.
-
-    Supports preferred_times entries shaped as:
-      • {"start":"07:30","end":"12:00"} / {"begin":"0730","finish":"1200"}
-      • ["07:30","12:00"] or ("0730","1200")
-      • "915-1045" / "7:30-9:00"
-      • buckets: "AM","PM","MORNING","AFTERNOON","EVENING","NIGHT"
+    STRICT VERSION:
+      - Faculty must allow the day.
+      - The section interval must be fully inside one of the faculty’s preferred windows.
+      - If no preferred_times set: accept any time on allowed days.
     """
-    if not isinstance(fpref, dict):
-        return True  # defensive: bad shape → accept
+    if not fpref:
+        print("DEBUG-PREF: fpref empty → ACCEPT (no preferences)")
+        return True
 
-    # --- day filtering ---
-    days = fpref.get("availability_days") or []
-    if days:
-        dset = set()
-        for d in days:
-            s = str(d).strip().upper()
-            if s == "TH": s = "H"
-            di_norm = _DAY_MAP.get(s, _DAY_MAP.get(s[:1], -1))
-            if di_norm > 0:
-                dset.add(di_norm)
-        if di not in dset:
+    start, end = interval
+
+    # --- Day filtering ---
+    avail = fpref.get("availability_days") or []
+    if avail:
+        allowed: set[int] = set()
+        for d in avail:
+            if not d: continue
+            k = d[0].upper()
+            if k == "M": allowed.add(1)
+            elif k == "T": allowed.add(2)
+            elif k == "W": allowed.add(3)
+            elif k in ("H","T","TH"): allowed.add(4)
+            elif k == "F": allowed.add(5)
+            elif k == "S": allowed.add(6)
+
+        if di not in allowed:
+            print(f"DEBUG-PREF: Day {di} not in availability_days {avail} → REJECT")
             return False
 
-    # --- time windows ---
-    times = fpref.get("preferred_times")
-    if not times:
-        return True  # no time prefs → accept
+    # --- Time-window strict filtering ---
+    raw = fpref.get("preferred_times") or []
+    windows: list[tuple[int,int]] = []
 
-    def _parse_time_window(t):
-        # dict form
-        if isinstance(t, dict):
-            st = _to_min(t.get("start") or t.get("begin"))
-            en = _to_min(t.get("end")   or t.get("finish"))
-            return (st, en) if st >= 0 and en >= 0 else None
-        # list/tuple form
-        if isinstance(t, (list, tuple)) and len(t) == 2:
-            st = _to_min(t[0]); en = _to_min(t[1])
-            return (st, en) if st >= 0 and en >= 0 else None
-        # string form
-        if isinstance(t, str):
-            s = t.strip().upper().replace("\u2013", "-").replace("\u2014", "-")
-            # bucket keywords
-            buckets = {
-                "AM": (0, 12*60),
-                "PM": (12*60, 24*60),
-                "MORNING": (6*60, 12*60),
-                "AFTERNOON": (12*60, 18*60),
-                "EVENING": (17*60, 21*60),
-                "NIGHT": (21*60, 24*60),
-            }
-            if s in buckets:
-                return buckets[s]
-            # "HH:MM-HH:MM" or "HHMM-HHMM" or "H:MM-H:MM" etc.
+    for w in raw:
+        st = en = None
+        if isinstance(w, dict):
+            st = w.get("start") or w.get("begin")
+            en = w.get("end") or w.get("finish")
+        elif isinstance(w, (list,tuple)) and len(w)==2:
+            st, en = w
+        elif isinstance(w, str):
+            s = w.replace("–","-").replace("—","-")
             if "-" in s:
-                a, b = s.split("-", 1)
-                st = _to_min(a); en = _to_min(b)
-                return (st, en) if st >= 0 and en >= 0 else None
-        return None
+                a,b = s.split("-",1)
+                st,en = a,b
 
-    # accept if ANY window overlaps the section interval
-    seq = times if isinstance(times, list) else [times]
-    accepted = False
-    for t in seq:
-        win = _parse_time_window(t)
-        if not win:
-            # unknown shape → skip (lenient)
-            continue
-        if _conflict(win, interval):
-            accepted = True
-            break
+        if st and en:
+            st_min = _to_min(st)
+            en_min = _to_min(en)
+            if st_min is not None and en_min is not None and en_min > st_min:
+                windows.append((st_min, en_min))
 
-    # if we had explicit windows but none overlapped, reject
-    return accepted
-# ------------------------------------------------------------------------------
+    if not windows:
+        print("DEBUG-PREF: No preferred_times → ACCEPT (day allowed)")
+        return True
+
+    for ws, we in windows:
+        if start >= ws and end <= we:
+            print(f"DEBUG-PREF: interval {interval} fits inside preferred window {(ws,we)} → ACCEPT")
+            return True
+
+    print(f"DEBUG-PREF: interval {interval} does NOT fit preferred windows {windows} → REJECT")
+    return False
 
 # --- IDs / normalize helpers (place near _fmt_time / _mm_to_hhmm) ---
 def _sched_id(section_id: str, ordinal: int) -> str:
@@ -2343,7 +3104,7 @@ async def run_milestone_d_phase6b(term_id: str, db, department_id: str | None = 
         "phase6b_unresolved": len(unresolved),
         "phase6b_unresolved_sections": [a["section_id"] for a in unresolved],
     }
-
+    
     return {
         **res6a,
         "assignments": final_assignments,
@@ -2611,26 +3372,61 @@ def _campus_mode_ok_ctx(ctx, fid: str, sid: str) -> bool:
     )
 
 def _sched_ok_ctx(ctx, fid: str, sid: str, assignments: list[dict]) -> bool:
+    """
+    Check if faculty fid can teach section sid under ctx,
+    given the current partial assignments.
+    """
+
+    # 1) Get fixed section schedule (if any)
     slots = _slots_from_scheds((ctx.schedules_by_section or {}).get(sid, []))
     if not slots:
+        # Section has no fixed schedule; Phase 7 will handle proposals
         return True
+
+    # 2) Faculty preferences
     fpref = (ctx.prefs_by_faculty or {}).get(fid, {})
-    # build grid from all other assignments of this faculty
-    tentative = [x for x in assignments if x.get("faculty_id") == fid and x.get("section_id") != sid]
+
+    # 3) Build faculty grid from other assignments of this faculty
+    tentative = [
+        a for a in assignments
+        if a.get("faculty_id") == fid and a.get("section_id") != sid
+    ]
     grid = _build_faculty_grid(ctx, tentative)
 
+    # 4) Check each slot of the section
     for di, itv in slots:
+        # STRICT: preferences must accept the entire slot
         if not _pref_accepts_slot(fpref, di, itv):
+            print(
+                f"DEBUG-SCHED: Faculty {fid} REJECTS section {sid} interval {itv} "
+                f"(day {di}) due to STRICT preference rule."
+            )
             return False
+        else:
+            print(
+                f"DEBUG-SCHED: Faculty {fid} ACCEPTS section {sid} interval {itv} "
+                f"(day {di}) via preference rule."
+            )
 
+        # Conflicts (same day overlap)
         existing = grid.get(fid, {}).get(di, [])
         for cur in existing:
             if _conflict(cur, itv):
+                print(
+                    f"DEBUG-SCHED: Faculty {fid} REJECTS section {sid} interval {itv} "
+                    f"due to CONFLICT with {cur}."
+                )
                 return False
 
+        # 4.5-hour streak rule
         if not _streak_ok_for_day(existing, [itv]):
+            print(
+                f"DEBUG-SCHED: Faculty {fid} REJECTS section {sid} interval {itv} "
+                f"due to 4.5-HOUR STREAK violation."
+            )
             return False
 
+    # All good
     return True
 
 def _swap_assign(assignments: list[dict], sid: str, new_fid: str, new_name: str) -> list[dict]:
@@ -3098,6 +3894,169 @@ async def run_milestone_e_phase7(term_id: str, db, department_id: str | None = N
 
     campus_blocked = getattr(courses_ctx, "campus_blocked", {}) or {}
 
+        # Inverse map of day_int -> day_code (1->'M', etc.)
+    INV_DAY_MAP = {v: k for k, v in _DAY_MAP.items()}
+
+    def _all_pref_windows(fp: dict) -> list[tuple[int, int]]:
+        """
+        Return *all* usable preferred windows for a faculty as minute pairs.
+        Mirrors _first_window but returns a list instead of just one.
+        """
+        times = (fp or {}).get("preferred_times")
+        if not times:
+            return []
+        seq = times if isinstance(times, list) else [times]
+        out: list[tuple[int, int]] = []
+        for t in seq:
+            st = en = None
+            if isinstance(t, dict):
+                st = _to_min(t.get("start") or t.get("begin"))
+                en = _to_min(t.get("end")   or t.get("finish"))
+            elif isinstance(t, (list, tuple)) and len(t) == 2:
+                st, en = _to_min(t[0]), _to_min(t[1])
+            elif isinstance(t, str):
+                s = (
+                    t.replace("–", "-")
+                     .replace("—", "-")
+                     .replace("―", "-")
+                     .replace("‒", "-")
+                     .strip()
+                     .upper()
+                )
+                if "-" in s:
+                    a, b = s.split("-", 1)
+                    st, en = _to_min(a), _to_min(b)
+                else:
+                    buckets = {
+                        "AM": (0, 12 * 60), "PM": (12 * 60, 24 * 60),
+                        "MORNING": (6 * 60, 12 * 60), "AFTERNOON": (12 * 60, 18 * 60),
+                        "EVENING": (17 * 60, 21 * 60), "NIGHT": (21 * 60, 24 * 60),
+                    }
+                    if s in buckets:
+                        st, en = buckets[s]
+            else:
+                continue
+
+            if st is not None and en is not None and st >= 0 and en > st:
+                out.append((st, en))
+        return out
+
+    def _build_faculty_slot_pool(
+        prefs: dict[str, dict]
+    ) -> dict[str, list[dict]]:
+        """
+        Build a pool of (day1, day2, st, en) slots per faculty, based on:
+          - availability_days
+          - preferred_times
+
+        Day buckets are still grouped as (M/H), (T/F), (W/S), but:
+          - If BOTH days of the pair are available -> slot is (anchor, mate) (e.g. T/F).
+          - If ONLY ONE day is available       -> slot is that single day, day2=None.
+        """
+        pair = {"M": "H", "T": "F", "W": "S"}  # group buckets
+        pool: dict[str, list[dict]] = {}
+
+        for fid, fp in (prefs or {}).items():
+            days = (fp or {}).get("availability_days") or []
+            norm_days: list[str] = []
+            for d in days:
+                s = str(d).strip().upper()
+                if s == "TH":
+                    s = "H"
+                if s in ("M", "T", "W", "H", "F", "S"):
+                    norm_days.append(s)
+            day_set = set(norm_days)
+
+            # collect usable "buckets" (M/H, T/F, W/S) if at least one day is present
+            buckets: list[list[str]] = []
+            for anchor, mate in pair.items():
+                has_anchor = anchor in day_set
+                has_mate = mate in day_set
+                if not (has_anchor or has_mate):
+                    continue  # this bucket is not available at all
+
+                actual_days: list[str] = []
+                if has_anchor:
+                    actual_days.append(anchor)
+                if has_mate:
+                    actual_days.append(mate)
+
+                # actual_days is now:
+                #   - [anchor, mate] if both picked (e.g. ["T","F"])
+                #   - [anchor]       if only anchor
+                #   - [mate]         if only mate
+                buckets.append(actual_days)
+
+            if not buckets:
+                continue  # no usable day buckets
+
+            wins = _all_pref_windows(fp)
+            if not wins:
+                continue  # no usable time windows
+
+            slots: list[dict] = []
+            for day_list in buckets:
+                for st, en in wins:
+                    if len(day_list) == 2:
+                        d1, d2 = day_list[0], day_list[1]
+                    else:
+                        d1, d2 = day_list[0], None  # single-day slot
+
+                    slots.append({"day1": d1, "day2": d2, "st": st, "en": en})
+
+            if slots:
+                pool[fid] = slots
+                print(
+                    f"DEBUG-SLOT-POOL: faculty {fid} has {len(slots)} "
+                    f"slots from buckets={buckets} windows={wins}"
+                )
+                # Detailed breakdown of each concrete slot
+                for s in slots:
+                    d1 = s["day1"]
+                    d2 = s["day2"]
+                    st = s["st"]
+                    en = s["en"]
+                    b_str = _mm_to_hhmm(st)
+                    e_str = _mm_to_hhmm(en)
+                    if d2:
+                        day_repr = f"{d1}/{d2}"
+                    else:
+                        day_repr = d1
+                    print(
+                        f"DEBUG-SLOT-POOL-DETAIL: faculty {fid} slot "
+                        f"{day_repr} {b_str}-{e_str}"
+                    )
+
+        return pool
+
+    # Build in-memory slot pool: fid -> list of concrete (day1, day2, st, en)
+    faculty_slot_pool = _build_faculty_slot_pool(fac_prefs)
+
+    print("DEBUG-SLOT-POOL-SUMMARY: ============================")
+    for fid, slots in faculty_slot_pool.items():
+        combos = []
+        for s in slots:
+            b = _mm_to_hhmm(s["st"])
+            e = _mm_to_hhmm(s["en"])
+            combos.append(f"{s['day1']}/{s['day2']} {b}-{e}")
+        print(f"DEBUG-SLOT-POOL-SUMMARY: {fid} -> {combos}")
+    print("DEBUG-SLOT-POOL-SUMMARY: ============================")
+
+    # Track existing intervals per faculty/day from already-scheduled sections
+    faculty_day_intervals: dict[str, dict[str, list[tuple[int, int]]]] = {}
+    for a in assignments:
+        fid = a.get("faculty_id")
+        sid = a.get("section_id")
+        if not fid or not sid:
+            continue
+        slots = _slots_from_scheds(schedules_by_section.get(sid, []))
+        for di, (st, en) in slots:
+            day_code = INV_DAY_MAP.get(di)
+            if not day_code:
+                continue
+            faculty_day_intervals.setdefault(fid, {}).setdefault(day_code, []).append((st, en))
+
+
     def _is_blocked_ge_cmps2_slot(sid: str, di: int, interval: tuple[int, int]) -> bool:
         """
         CMPS0002 GE sections should not be scheduled in a time window that exactly
@@ -3193,15 +4152,22 @@ async def run_milestone_e_phase7(term_id: str, db, department_id: str | None = N
             debug_no_time_phase7[sid] = {"reason": "SHS_soft_lock"}
             continue
 
-        fp = fac_prefs.get(fid, {})  # faculty preferences
-        win = _first_window(fp)
-        d1, d2 = _pick_days(fp)
-
-        if not win and not d1:
+        # Use STRICT slot pool: only precomputed faculty slots, no grid.
+        fp = fac_prefs.get(fid)
+        if not fp:
             kept.append(a)
-            # NEW: no usable window/days parsed from prefs
             debug_no_time_phase7[sid] = {
-                "reason": "no_pref_window_or_days",
+                "reason": "no_prefs_for_faculty_in_phase7",
+                "faculty_id": fid,
+            }
+            continue
+
+        pool = faculty_slot_pool.get(fid, [])
+        if not pool:
+            kept.append(a)
+            debug_no_time_phase7[sid] = {
+                "reason": "no_slot_pool_for_faculty",
+                "faculty_id": fid,
                 "pref_snapshot": {
                     "availability_days": (fp or {}).get("availability_days"),
                     "preferred_times": (fp or {}).get("preferred_times"),
@@ -3209,38 +4175,80 @@ async def run_milestone_e_phase7(term_id: str, db, department_id: str | None = N
             }
             continue
 
-        st, en = win if win else (None, None)
+        # Try to pick ONE usable slot from this faculty's pool
+        chosen_idx: int | None = None
+        chosen_slot: dict | None = None
 
-        # For CMPS0002 GE: avoid proposing into blocked campus windows
-        if st is not None and en is not None:
+        for idx, slot in enumerate(pool):
+            d1 = slot["day1"]
+            d2 = slot["day2"]
+            st = slot["st"]
+            en = slot["en"]
+
+            # Avoid CMPS0002 GE blocked windows
             di1 = _DAY_MAP.get(d1, _DAY_MAP.get(d1[:1], -1)) if d1 else -1
             di2 = _DAY_MAP.get(d2, _DAY_MAP.get(d2[:1], -1)) if d2 else -1
-            sid = a["section_id"]
             interval = (st, en)
 
             if (di1 > 0 and _is_blocked_ge_cmps2_slot(sid, di1, interval)) or \
                (di2 > 0 and _is_blocked_ge_cmps2_slot(sid, di2, interval)):
-                kept.append(a)
-                debug_no_time_phase7[sid] = {
-                    "reason": "blocked_ge_cmps2_slot",
-                    "days": [d1, d2],
-                    "window_min": interval,
-                }
+                continue  # try next slot
+
+            # Enforce 4.5h streak rule per day
+            day_ints = faculty_day_intervals.setdefault(fid, {})
+            existing_d1 = day_ints.get(d1, [])
+            existing_d2 = day_ints.get(d2, [])
+
+            if not _streak_ok_for_day(existing_d1, [(st, en)]):
+                continue
+            if not _streak_ok_for_day(existing_d2, [(st, en)]):
                 continue
 
+            chosen_idx = idx
+            chosen_slot = {"day1": d1, "day2": d2, "st": st, "en": en}
+            break
+
+        if chosen_slot is None:
+            # IMPORTANT:
+            # We DO NOT keep this assignment anymore.
+            # This means the faculty cannot be assigned to this section
+            # because no compatible slot exists (prefs / 4.5h rule / conflicts).
+            debug_no_time_phase7[sid] = {
+                "reason": "no_free_slot_from_pool",
+                "faculty_id": fid,
+                "pref_snapshot": {
+                    "availability_days": (fp or {}).get("availability_days"),
+                    "preferred_times": (fp or {}).get("preferred_times"),
+                },
+            }
+            # don't append `a` to kept -> effectively "unassign" this section in Phase 7
+            continue
+
+        # Consume the chosen slot from the pool (so it can't be reused)
+        pool.pop(chosen_idx)
+        faculty_slot_pool[fid] = pool
+
+        d1 = chosen_slot["day1"]
+        d2 = chosen_slot["day2"]
+        st = chosen_slot["st"]
+        en = chosen_slot["en"]
+
+        # Update faculty's day-wise intervals (for streak checks later)
+        day_ints = faculty_day_intervals.setdefault(fid, {})
+        day_ints.setdefault(d1, []).append((st, en))
+        day_ints.setdefault(d2, []).append((st, en))
+
+        # Inject the proposed schedule into the assignment
         assn = dict(a)
-        # inject proposal into standard fields so UI shows times
         if d1:
             assn["day1"] = d1
-            if st is not None: assn["begin1"] = _mm_to_hhmm(st)
-            if en is not None: assn["end1"]   = _mm_to_hhmm(en)
+            assn["begin1"] = _mm_to_hhmm(st)
+            assn["end1"]   = _mm_to_hhmm(en)
         if d2:
             assn["day2"] = d2
-            if st is not None: assn["begin2"] = _mm_to_hhmm(st)
-            if en is not None: assn["end2"]   = _mm_to_hhmm(en)
-        # leave room blank; status remains Pending
-        # NEW: note that we did propose times
-        debug_no_time_phase7.pop(sid, None)
+            assn["begin2"] = _mm_to_hhmm(st)
+            assn["end2"]   = _mm_to_hhmm(en)
+
         proposed.append(assn)
 
     final_assignments = kept + proposed
@@ -3320,39 +4328,44 @@ async def _approve_and_persist(term_id: str, rows: list[dict], db):
                 upsert=False,
             )
 
-        # Skip only if truly missing faculty (except SHS, which may show 'Unassigned')
-        if not fid:
-            continue
+        # # Skip only if truly missing faculty (except SHS, which may show 'Unassigned')
+        # if not fid:
+        #     continue
 
-        # For non-SHS courses, skip if marked Conflict/Unassigned
-        if status in ("Conflict", "Unassigned") and not _course_is_shs(cid):
-            continue
+        # # For non-SHS courses, skip if marked Conflict/Unassigned
+        # if status in ("Conflict", "Unassigned") and not _course_is_shs(cid):
+        #     continue
+            
+        allow_assignment = bool(fid)
 
         # ---------- 1) faculty_assignments upsert (preserve legacy; not archived) ----------
         # If there is already an assignment doc for this section (legacy or new schema),
         # update it in-place and KEEP its legacy fields (assignment_id, load_id).
-        existing = await db[COL_ASSIGN].find_one(
-            {"section_id": sid},
-            {"_id": 0, "assignment_id": 1, "load_id": 1}
-        )
+        if allow_assignment:
+            existing = await db[COL_ASSIGN].find_one(
+                {"section_id": sid},
+                {"_id": 0, "assignment_id": 1, "load_id": 1}
+            )
 
-        set_fields = {
-            "section_id": sid,
-            "faculty_id": fid,
-            "created_at": _utcnow(),
-            "is_archived": False,   
-        }
-        # preserve legacy identifiers if present
-        if existing:
-            if existing.get("assignment_id"): set_fields["assignment_id"] = existing["assignment_id"]
-            if existing.get("load_id"):       set_fields["load_id"] = existing["load_id"]
+            set_fields = {
+                "section_id": sid,
+                "faculty_id": fid,
+                "course_id": cid,
+                "term_id": term_id,
+                "status": "Confirmed",
+                "is_archived": False,
+            }
+            # Preserve legacy identifiers if present
+            if existing and existing.get("assignment_id"):
+                set_fields["assignment_id"] = existing["assignment_id"]
+            if existing and existing.get("load_id"):
+                set_fields["load_id"] = existing["load_id"]
 
-        # Use section_id-only filter so we update a legacy row if it exists
-        await db[COL_ASSIGN].update_one(
-            {"section_id": sid},
-            {"$set": set_fields},
-            upsert=True,
-        )
+            await db[COL_ASSIGN].update_one(
+                {"section_id": sid},
+                {"$set": set_fields},
+                upsert=True,
+            )
 
         # ---------- 2) section_schedules upsert (non-SHS only) ----------
         if not cid:
@@ -3414,6 +4427,151 @@ async def _approve_and_persist(term_id: str, rows: list[dict], db):
                         # keep existing room_id if it exists; otherwise set what the row proposes
                         "room_id": final_room_id,
                         # always align room_type to the final room choice (or Online when no room)
+                        "room_type": final_room_type,
+                        "created_at": r.get("created_at") or "",
+                        "updated_at": r.get("updated_at") or "",
+                    }
+                },
+                upsert=True,
+            )
+
+            _add_used(fid, day, begin_hhmm, end_hhmm)
+
+# for action = "save"
+async def _persist_rows_no_auto(term_id: str, rows: list[dict], db):
+    """
+    Lightweight persister for SAVE DRAFT.
+
+    - DOES NOT call compute_load_recommendations (no auto-assign).
+    - Only persists what is explicitly present in the incoming rows:
+      * sections.mode (from row['mode'], if any)
+      * faculty_assignments (only if row['faculty_id'] is set)
+      * section_schedules (non-SHS only, from row day/begin/end + room1/room2)
+    """
+    # Load context once (course types, existing schedules, section→course map, etc.)
+    ctx = await phase0_load(term_id, db, department_id=None)
+    section_to_course = {s["section_id"]: s["course_id"] for s in ctx.sections}
+
+    def _course_is_shs(cid: str | None) -> bool:
+        if not cid:
+            return False
+        c = (ctx.courses.get(cid) or {})
+        t = c.get("type") or c.get("type_of_course")
+        return str(t or "").strip().upper() == "SHS"
+
+    # --- Prevent duplicate slots within this SAVE batch (per faculty) ---
+    used: dict[str, set[tuple[str, str, str]]] = {}
+
+    def _add_used(fid: str | None, d: str | None, b: str | None, e: str | None) -> None:
+        if not fid or not d or not b or not e:
+            return
+        used.setdefault(fid, set()).add((str(d).upper(), str(b), str(e)))
+
+    def _dup(fid: str | None, d: str | None, b: str | None, e: str | None) -> bool:
+        if not fid or not d or not b or not e:
+            return False
+        return (str(d).upper(), str(b), str(e)) in used.get(fid, set())
+
+    for r in rows:
+        sid = r.get("id") or r.get("section_id")
+        if not sid:
+            continue
+
+        cid = section_to_course.get(sid)
+        fid = r.get("faculty_id") or None
+
+        # --- 0) Keep sections.mode in sync with the row's mode (if present) ---
+        row_mode = str(r.get("mode") or "").strip().upper()
+        if row_mode:
+            await db[COL_SECTIONS].update_one(
+                {"section_id": sid},
+                {"$set": {"mode": row_mode}},
+                upsert=False,
+            )
+
+        # ---------- 1) faculty_assignments upsert (only if faculty explicitly set) ----------
+        if fid:
+            # If there is already an assignment doc for this section, update it and
+            # KEEP legacy identifiers (assignment_id, load_id) if they exist.
+            existing = await db[COL_ASSIGN].find_one(
+                {"section_id": sid},
+                {"_id": 0, "assignment_id": 1, "load_id": 1},
+            )
+
+            set_fields: dict[str, Any] = {
+                "section_id": sid,
+                "faculty_id": fid,
+                "created_at": _utcnow(),
+                "is_archived": False,
+            }
+            if existing:
+                if existing.get("assignment_id"):
+                    set_fields["assignment_id"] = existing["assignment_id"]
+                if existing.get("load_id"):
+                    set_fields["load_id"] = existing["load_id"]
+
+            await db[COL_ASSIGN].update_one(
+                {"section_id": sid},
+                {"$set": set_fields},
+                upsert=True,
+            )
+
+        # ---------- 2) section_schedules upsert (non-SHS only, based on row times) ----------
+        if not cid:
+            continue
+        if _course_is_shs(cid):
+            # For SHS, keep schedules as-is (soft-locked) even on save draft.
+            continue
+
+        # pull proposed times from the row (already normalized in UI/run)
+        pairs = [("day1", "begin1", "end1", 1), ("day2", "begin2", "end2", 2)]
+        for dkey, bkey, ekey, ordn in pairs:
+            day = (r.get(dkey) or "").strip().upper()
+            begin_hhmm = _norm_hhmm(r.get(bkey))
+            end_hhmm = _norm_hhmm(r.get(ekey))
+            if not day or not begin_hhmm or not end_hhmm:
+                continue
+
+            # duplicate-slot check only if we actually know the faculty
+            if fid and _dup(fid, day, begin_hhmm, end_hhmm):
+                continue
+
+            schedule_id = _sched_id(sid, ordn)
+
+            # --- preserve existing room_id if already saved for this schedule ---
+            existing_sched = await db[COL_SCHED].find_one(
+                {"schedule_id": schedule_id},
+                {"_id": 0, "room_id": 1},
+            )
+            existing_room_id = (existing_sched or {}).get("room_id") or ""
+
+            # Only accept a REAL room id from the row; ignore placeholders like "Online"/"Classroom"/"TBA"
+            row_room_val = (r.get(f"room{ordn}") or "").strip()
+            final_room_id = existing_room_id
+            if not final_room_id and _looks_like_room_id(row_room_val):
+                final_room_id = row_room_val
+
+            # derive room_type from final_room_id (or Online when no room)
+            if final_room_id:
+                room_doc = await db[COL_ROOMS].find_one(
+                    {"room_id": final_room_id},
+                    {"_id": 0, "room_type": 1},
+                )
+                final_room_type = (room_doc or {}).get("room_type") or ""
+            else:
+                final_room_type = "Online"
+
+            await db[COL_SCHED].update_one(
+                {"schedule_id": schedule_id},
+                {
+                    "$set": {
+                        "schedule_id": schedule_id,
+                        "term_id": term_id,
+                        "section_id": sid,
+                        "day": day,
+                        "start_time": _to_compact_hhmm(begin_hhmm),
+                        "end_time": _to_compact_hhmm(end_hhmm),
+                        "room_id": final_room_id,
                         "room_type": final_room_type,
                         "created_at": r.get("created_at") or "",
                         "updated_at": r.get("updated_at") or "",
