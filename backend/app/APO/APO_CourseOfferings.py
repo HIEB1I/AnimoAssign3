@@ -1137,49 +1137,151 @@ def expected_section_prefix(campus_name: str, level_label: Optional[str]) -> str
     return "S"
 
 async def _resolve_or_create_faculty_by_name(name: str) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Given a free-text faculty name from the UI, resolve or create:
+      • a USERS row (user_id) with first_name / last_name only
+      • a FACULTY_PROFILES row (faculty_id) linked via user_id
+
+    Returns: (user_id, faculty_id)
+    """
     nm = _parse_person_name(name)
     if not nm:
+        return (None, None)
+
+    first = (nm.get("first_name") or "").strip()
+    last = (nm.get("last_name") or "").strip()
+
+    if not first and not last:
         return (None, None)
 
     def _eq_ci(field: str, val: str) -> Dict[str, Any]:
         return {field: {"$regex": f"^{re.escape(val)}$", "$options": "i"}}
 
+    async def _create_user_stub(first_name: str, last_name: str) -> str:
+        """
+        Create a minimal USERS row that matches your sample:
+
+          users {
+            "user_id": "USR####",
+            "email": "",                 # keep other fields null/empty
+            "first_name": "...",
+            "last_name": "...",
+            "status": true,
+            "profile_image": "",
+            "created_at": now(),
+            "last_login": now()
+          }
+        """
+        uid = await _next_seq_id(COL_USERS, "user_id", "USR", 4)
+        user_doc = {
+            "user_id": uid,
+            "email": "",
+            "first_name": first_name,
+            "last_name": last_name,
+            "status": True,
+            "profile_image": "",
+            "created_at": now(),
+            "last_login": now(),
+        }
+        await db[COL_USERS].insert_one(user_doc)
+        return uid
+
+    async def _create_faculty_profile_stub(user_id: str) -> str:
+        """
+        Create a FACULTY_PROFILES row that matches your sample shape:
+
+          faculty_profiles {
+            "faculty_id": "FAC####",
+            "user_id": "USR####",
+            "employment_type": "",
+            "min_units": "",
+            "max_preps": None,
+            "certifications": [],
+            "qualified_kacs": [],
+            "teaching_years": None,
+            "department_id": "",
+            "fac_position": "",
+            "created_at": now(),
+            "updated_at": now()
+          }
+        """
+        fid = await _next_seq_id(COL_FAC_PROFILES, "faculty_id", "FAC", 4)
+        fac_doc = {
+            "faculty_id": fid,
+            "user_id": user_id,
+            "employment_type": "",
+            "min_units": "",
+            "max_preps": None,
+            "certifications": [],
+            "qualified_kacs": [],
+            "teaching_years": None,
+            "department_id": "",
+            "fac_position": "",
+            "created_at": now(),
+            "updated_at": now(),
+        }
+        await db[COL_FAC_PROFILES].insert_one(fac_doc)
+        return fid
+
+    # ---------- 1) Try to find an existing USER by first/last name ----------
     users_q: Dict[str, Any] = {}
-    if nm["first_name"]: users_q.update(_eq_ci("first_name", nm["first_name"]))
-    if nm["last_name"]: users_q.update(_eq_ci("last_name", nm["last_name"]))
-    if nm["middle_name"]:
-        users_q["middle_name"] = {"$regex": f"^{re.escape(nm['middle_name'])}$", "$options": "i"}
-    else:
-        users_q["$or"] = [{"middle_name": {"$exists": False}}, {"middle_name": ""}]
-    u = await db[COL_USERS].find_one(users_q, {"_id": 0, "user_id": 1})
-    if u and u.get("user_id"):
-        return (u["user_id"], None)
+    if first:
+        users_q.update(_eq_ci("first_name", first))
+    if last:
+        users_q.update(_eq_ci("last_name", last))
 
+    user_id: Optional[str] = None
+    faculty_id: Optional[str] = None
+
+    if users_q:
+        u = await db[COL_USERS].find_one(users_q, {"_id": 0, "user_id": 1})
+        if u and u.get("user_id"):
+            user_id = u["user_id"]
+
+    if user_id:
+        # If a USER exists, either re-use or create a FACULTY_PROFILE linked to it
+        fp = await db[COL_FAC_PROFILES].find_one(
+            {"user_id": user_id},
+            {"_id": 0, "faculty_id": 1},
+        )
+        if fp and fp.get("faculty_id"):
+            faculty_id = fp["faculty_id"]
+        else:
+            faculty_id = await _create_faculty_profile_stub(user_id)
+        return (user_id, faculty_id)
+
+    # ---------- 2) Legacy fallback: faculty_profiles that stored names ----------
+    # (some old data may have first_name / last_name in faculty_profiles)
     fac_q: Dict[str, Any] = {}
-    if nm["first_name"]: fac_q.update(_eq_ci("first_name", nm["first_name"]))
-    if nm["last_name"]: fac_q.update(_eq_ci("last_name", nm["last_name"]))
-    if nm["middle_name"]:
-        fac_q["middle_name"] = {"$regex": f"^{re.escape(nm['middle_name'])}$", "$options": "i"}
-    else:
-        fac_q["$or"] = [{"middle_name": {"$exists": False}}, {"middle_name": ""}]
-    fp = await db[COL_FAC_PROFILES].find_one(fac_q, {"_id": 0, "faculty_id": 1, "user_id": 1})
-    if fp:
-        if fp.get("user_id"):
-            return (fp["user_id"], None)
-        if fp.get("faculty_id"):
-            return (None, fp["faculty_id"])
+    if first:
+        fac_q.update(_eq_ci("first_name", first))
+    if last:
+        fac_q.update(_eq_ci("last_name", last))
 
-    fid = await _next_seq_id(COL_FAC_PROFILES, "faculty_id", "FAC", 4)
-    doc = {
-        "faculty_id": fid,
-        "first_name": nm["first_name"],
-        "middle_name": nm["middle_name"],
-        "last_name": nm["last_name"],
-        "created_at": now(),
-        "updated_at": now(),
-    }
-    await db[COL_FAC_PROFILES].insert_one(doc)
-    return (None, fid)
+    fp_legacy = None
+    if fac_q:
+        fp_legacy = await db[COL_FAC_PROFILES].find_one(
+            fac_q,
+            {"_id": 0, "faculty_id": 1, "user_id": 1},
+        )
+
+    if fp_legacy:
+        faculty_id = fp_legacy.get("faculty_id")
+        user_id = fp_legacy.get("user_id")
+
+        # If the legacy faculty_profile has no user_id, create one and link it.
+        if not user_id:
+            user_id = await _create_user_stub(first, last)
+            await db[COL_FAC_PROFILES].update_one(
+                {"faculty_id": faculty_id},
+                {"$set": {"user_id": user_id, "updated_at": now()}},
+            )
+        return (user_id, faculty_id)
+
+    # ---------- 3) No matches: create BOTH user and faculty_profile ----------
+    user_id = await _create_user_stub(first, last)
+    faculty_id = await _create_faculty_profile_stub(user_id)
+    return (user_id, faculty_id)
 
 # ------------ mappers ------------
 async def map_courses(course_ids: List[str]) -> Dict[str, Dict[str, Any]]:
