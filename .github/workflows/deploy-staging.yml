@@ -21,6 +21,7 @@ jobs:
         working-directory: frontend
         run: |
           npm ci
+          npm install
           npm run build
 
       - name: Backend tests (best-effort)
