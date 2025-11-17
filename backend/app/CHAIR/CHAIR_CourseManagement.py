@@ -12,6 +12,7 @@ COL_USER_ROLES = "user_roles"
 COL_ROLE_ASSIGN = "role_assignments"
 
 COL_TERMS = "terms"
+COL_PREEN_COUNT = "preenlistment_count"  # NEW: for active pre-enlistment batch
 COL_COURSES = "courses"
 COL_KACS = "kacs"
 COL_FACULTY = "faculty_profiles"
@@ -24,17 +25,76 @@ def _now():
 
 
 async def _active_term() -> Dict[str, Any]:
-    t = await db[COL_TERMS].find_one(
-        {"$or": [{"status": "active"}, {"is_current": True}]},
+    """
+    Return the WORKING / PLANNING term for CHAIR modules (OM-style).
+
+    Selection rules:
+    (a) Prefer active pre-enlistment batch (non-archived) from preenlistment_count.
+    (b) Otherwise, find the 'current' term via status/is_current/is_active/active flags.
+        If none, fall back to latest term by acad_year_start DESC, term_number DESC.
+    (c) If still nothing, return {}.
+    (d) Compute the planning term (next term after current); if none, use current.
+    """
+
+    # (a) Try to derive from an active pre-enlistment batch
+    pre_doc = await db[COL_PREEN_COUNT].find_one(
+        {"is_archived": {"$ne": True}},
+        {"_id": 0, "term_id": 1},
+    )
+    if pre_doc and pre_doc.get("term_id"):
+        t = await db[COL_TERMS].find_one(
+            {"term_id": pre_doc["term_id"]},
+            {"_id": 0, "term_id": 1, "acad_year_start": 1, "term_number": 1},
+        )
+        if t:
+            return t
+
+    # (b) Fallback: "current" term (any of the usual flags)
+    current = await db[COL_TERMS].find_one(
+        {
+            "$or": [
+                {"status": "active"},
+                {"status": "Active"},
+                {"is_current": True},
+                {"is_active": True},
+                {"active": True},
+            ]
+        },
         {"_id": 0, "term_id": 1, "acad_year_start": 1, "term_number": 1},
     )
-    if t:
-        return t
-    last = await db[COL_TERMS].find(
-        {}, {"_id": 0, "term_id": 1, "acad_year_start": 1, "term_number": 1}
-    ).sort([("acad_year_start", -1), ("term_number", -1)]).limit(1).to_list(1)
-    return last[0] if last else {}
 
+    if not current:
+        # If nothing is flagged, use the latest by AY + term_number
+        last = await db[COL_TERMS].find(
+            {},
+            {"_id": 0, "term_id": 1, "acad_year_start": 1, "term_number": 1},
+        ).sort([("acad_year_start", -1), ("term_number", -1)]).limit(1).to_list(1)
+        current = last[0] if last else None
+
+    # (c) No terms at all
+    if not current:
+        return {}
+
+    # (d) Compute the "next" term after the current term
+    next_terms = await db[COL_TERMS].find(
+        {
+            "$or": [
+                {"acad_year_start": {"$gt": current["acad_year_start"]}},
+                {
+                    "acad_year_start": current["acad_year_start"],
+                    "term_number": {"$gt": current["term_number"]},
+                },
+            ]
+        },
+        {"_id": 0, "term_id": 1, "acad_year_start": 1, "term_number": 1},
+    ).sort([("acad_year_start", 1), ("term_number", 1)]).limit(1).to_list(1)
+
+    if next_terms:
+        # Use the next term as the working/planning term
+        return next_terms[0]
+
+    # If no next term, stick with current (still better than nothing)
+    return current
 
 async def _user_scope(userId: Optional[str], userEmail: Optional[str]) -> Dict[str, Any]:
     if not userId and not userEmail:

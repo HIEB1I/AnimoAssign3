@@ -97,6 +97,48 @@ async def fetch_deloading_utilization_term_paged(
     # Sort: faculty_name asc, then most recent update
     rows.sort(key=lambda x: (x.get("faculty_name") or "", -(x["updated_at"].timestamp() if x.get("updated_at") else 0)))
 
+    # --- Next-term admin risk -------------------------
+    next_term_admin_warnings: List[Dict[str, Any]] = []
+
+    if idx > 0:
+        prev_term_id = terms[idx - 1].get("term_id")
+
+        prev_term_deloadings = await db["deloadings"].find(
+            {"term_id": prev_term_id}
+        ).to_list(None)
+
+        for d in prev_term_deloadings:
+            # Look up deloading type
+            dt = await db["deloading_types"].find_one({
+                "$or": [
+                    {"type_id": d.get("type_id")},
+                    {"deloadingtype_id": d.get("type_id")},
+                ]
+            })
+            deload_type = ((dt or {}).get("type") or "").strip()
+
+            # Only keep administrative deloadings
+            if not deload_type.lower().startswith("admin"):
+                continue
+
+            # Look up faculty + user for name
+            faculty = await db["faculty_profiles"].find_one(
+                {"faculty_id": d.get("faculty_id")}
+            )
+            if not faculty:
+                continue
+
+            user = await db["users"].find_one(
+                {"user_id": faculty.get("user_id")}
+            )
+
+            next_term_admin_warnings.append({
+                "faculty_id": faculty.get("faculty_id"),
+                "faculty_name": f"{(user or {}).get('first_name','')} {(user or {}).get('last_name','')}".strip() or None,
+                "deloading_type": deload_type,
+                "units": d.get("units_deloaded"),
+            })
+
     return {
         "term": {
             "term_id": target_term.get("term_id"),
@@ -109,6 +151,7 @@ async def fetch_deloading_utilization_term_paged(
         "has_next": idx < len(terms) - 1,
         "terms": terms_list,         # all terms for dropdown
         "current_index": idx,        # index of the term you're viewing
+        "next_term_admin_warnings": next_term_admin_warnings,
     }
 
 # NOTE:

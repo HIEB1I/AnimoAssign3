@@ -182,6 +182,38 @@ export async function getOneFacultyProfile(): Promise<FacultyProfile> {
   return data;
 }
 
+export type Status = "" | "Confirmed" | "Pending" | "Unassigned" | "Conflict";
+
+export type Row = {
+  id: string;
+  course: string;
+  title: string;
+  units: number | "";
+  section: string;
+  faculty: string;
+  day1: string; begin1: string; end1: string; room1: string;
+  day2: string; begin2: string; end2: string; room2: string;
+  capacity: number | "";
+  status: Status;
+  conflictNote?: string;
+  editable?: boolean;
+};
+
+
+export type LoadAssignmentResponse = {
+  term: string;
+  rows: Row[];
+};
+
+// // Automatically generate load recommendations (auto-assign)
+// export async function runOmAutoAssign({ user_id, department_id }: {user_id: string; department_id?: string}) {
+//   const base = (typeof API_BASE !== "undefined" ? API_BASE : "").replace(/\/+$/,"");
+//   const url = `${base}/om/load-assignment/run?user_id=${encodeURIComponent(user_id)}${department_id ? `&department_id=${encodeURIComponent(department_id)}` : ""}`;
+//   const r = await fetch(url, { method: "POST" });
+//   if (!r.ok) throw new Error(await r.text());
+//   return r.json() as Promise<{ term: string; rows: Row[] }>;
+// }
+
 /* =========================================================
    ===============  ADMIN: MANAGEMENT  =====================
    ========================================================= */
@@ -373,8 +405,13 @@ export type ArchiveMetaItem = {
   programs?: number;
 };
 
-export type ArchivesMetaResponse = { archives: ArchiveMetaItem[] };
+export type ArchivesMetaResponse = {
+archives: ArchiveMetaItem[];
 
+  // NEW – matches what the backend sends & what your UI reads
+  planningTerm?: TermMeta | null;
+  activeTerm?: TermMeta | null;
+};
 export function campusFromRoles(roles: string[] = []): "MANILA" | "LAGUNA" | null {
   const r = roles.map((s) => s.toLowerCase());
   if (r.some((x) => x.includes("apo") && x.includes("manila"))) return "MANILA";
@@ -680,6 +717,11 @@ export type OfferingsQuery = {
   department_id?: string;
   batch_id?: string;
   program_id?: string;
+    /** Which term to use on the backend: 
+   *  - "active"   = current term (e.g., TERM0014)
+   *  - "planning" = next term used for loading (e.g., TERM0015)
+   */
+  term_mode?: "active" | "planning";
 };
 function normalizeLevelForQuery(level?: string) {
   const s = String(level || "").trim().toLowerCase();
@@ -931,7 +973,6 @@ export async function getElectiveOptions(
 }
 
 /* ---- Eligible rooms for a section (capacity + room_type guard) ---- */
-/* ---- Eligible rooms for a section (capacity + room_type guard) ---- */
 export type EligibleRoomsParams = {
   section_id?: string;
 
@@ -1006,28 +1047,33 @@ export async function searchCourseCatalog(
   userId: string,
   params: { q?: string; limit?: number; department_id?: string; program_level?: string } = {}
 ) {
-  const url = `${API_BASE}/apo/courseofferings?${new URLSearchParams({
+  // Use the POST /apo/courseofferings action that the backend wired for searching
+  const url = `${API_BASE}/apo/courseofferings${q({
     userId,
-    action: "courseCatalog",
-    ...(params.q ? { q: params.q } : {}),
-    ...(params.limit != null ? { limit: String(params.limit) } : {}),
-    ...(params.department_id ? { department_id: params.department_id } : {}),
-    ...(params.program_level ? { program_level: params.program_level } : {}),
-  }).toString()}`;
+    action: "search_catalog",   // <-- match backend action
+  })}`;
 
-  const { data } = await axios.post(url, {}); // backend reads action from query
-  return data as {
+  // Backend reads filters from JSON body
+  const body: any = {};
+  if (params.q != null) body.q = params.q;
+  if (params.limit != null) body.limit = params.limit;
+  if (params.department_id) body.department_id = params.department_id;
+  if (params.program_level) body.program_level = params.program_level;
+
+  const data = await post<{
     ok: boolean;
     results: Array<{
       course_id: string;
-      course_code: string | string[]; // backend may return array
+      course_code: string | string[];
       course_title: string;
       department_id?: string;
       program_level?: string;
       units?: number | null;
       type_of_course?: string | null;
     }>;
-  };
+  }>(url, body);
+
+  return data;
 }
 
 export async function createCatalogCourse(userId: string, payload: CreateCoursePayload) {
@@ -1037,6 +1083,36 @@ export async function createCatalogCourse(userId: string, payload: CreateCourseP
     payload
   );
   return data; // { ok: true, course: {...} }
+}
+export async function editCatalogCourse(
+  userId: string,
+  payload: EditCoursePayload
+): Promise<{ ok: boolean; course_id: string }> {
+  const { course_id, course_code, course_title, units } = payload;
+
+  // Build the shape expected by backend's `curriculumEditCourse` global-update path:
+  // { old_course_id, update_course: { ... } }
+  const body: any = {
+    old_course_id: course_id,
+    update_course: {},
+  };
+
+  if (Array.isArray(course_code)) {
+    body.update_course.course_code = course_code;
+  }
+  if (typeof course_title === "string") {
+    body.update_course.course_title = course_title;
+  }
+  if (units !== undefined) {
+    body.update_course.units = units;
+  }
+
+  const url = `${API_BASE}/apo/courseofferings${q({
+    userId,
+    action: "curriculumEditCourse",   // <-- reuse existing backend action
+  })}`;
+
+  return post<{ ok: true; course_id: string }>(url, body);
 }
 
 // --- Types ---
@@ -1052,7 +1128,12 @@ export type CreateCoursePayload = {
   capacity?: number | null;              // max_enrollee
   min_enrollee?: number | null;
 };
-
+export type EditCoursePayload = {
+  course_id: string;
+  course_code?: string[];     // stored as array in DB
+  course_title?: string;
+  units?: number | null;
+};
 export type CourseCatalogItem = {
   course_id: string;
   course_code: string | string[];
@@ -1062,6 +1143,56 @@ export type CourseCatalogItem = {
   units?: number | null;
   type_of_course?: string | null;
 };
+// type near your other APO types (optional helper)
+export interface CurriculumCsvRow {
+  batch_code: string;
+  program_level: string;
+  program_code: string;
+  term_number: number;
+  acad_year_start: number;
+  campus_name: string;
+  course_codes: string[];
+}
+
+export interface ImportCurriculumCsvPayload {
+  rows: any[];
+  term_id: string;
+  campus_name: string;
+}
+
+export interface ImportCurriculumCsvResponse {
+  ok: boolean;
+  imported?: number;
+  created_batches?: string[];
+  curricula?: { batch_id: string; curriculum_id: string; course_count: number }[];
+  errors?: any[]; // backend may also send row-level errors
+}
+
+export async function importCurriculumCsv(
+  userId: string,
+  payload: ImportCurriculumCsvPayload
+): Promise<ImportCurriculumCsvResponse> {
+  const res = await fetch(
+    `/api/apo/courseofferings?userId=${encodeURIComponent(
+      userId
+    )}&action=import_curriculum_csv`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }
+  );
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(
+      text || `CSV import failed with status ${res.status} ${res.statusText}`
+    );
+  }
+
+  return (await res.json()) as ImportCurriculumCsvResponse;
+}
+
 /* =========================================================
    ===============  APO: ROOM ALLOCATION  ==================
    ========================================================= */
@@ -1104,6 +1235,8 @@ export type RoomWithSchedule = RoomDoc & { schedule: RoomScheduleCell[] };
 export type RoomAllocationResponse = {
   campus: { campus_id: string; campus_name: string };
   term_id: string;
+  term_number?: number;
+  acad_year_start?: number;
   buildings: string[];
   timeBands: string[];
   rooms: RoomWithSchedule[];
@@ -1118,10 +1251,19 @@ export type RoomAllocationResponse = {
 
 const base = API_BASE.replace(/\/$/, "");
 
-export async function getApoRoomAllocation(userId: string): Promise<RoomAllocationResponse> {
-  const r = await fetch(
-    `${base}/apo/roomallocation?${new URLSearchParams({ userId }).toString()}`
-  );
+export async function getApoRoomAllocation(
+  userId: string,
+  termId?: string
+): Promise<RoomAllocationResponse> {
+  const params = new URLSearchParams({ userId });
+
+  // IMPORTANT: send the planning term so backend uses it
+  if (termId) {
+    // backend query param name is exactly "termId"
+    params.set("termId", termId);
+  }
+
+  const r = await fetch(`${base}/apo/roomallocation?${params.toString()}`);
   if (!r.ok) throw new Error(await r.text());
   return r.json();
 }
@@ -1164,11 +1306,15 @@ export async function setRoomAvailability(
 
 export async function assignRoom(
   userId: string,
-  data: { room_id: string; section_id: string; day: Day; time_band: string }
+  data: { room_id: string; section_id: string; day: Day; time_band: string; term_id?: string }
 ) {
   const r = await fetch(
     `${base}/apo/roomallocation?${new URLSearchParams({ userId, action: "assign" }).toString()}`,
-    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) }
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(data),
+    }
   );
   if (!r.ok) throw new Error(await r.text());
   return r.json();
@@ -1304,6 +1450,18 @@ export type FMOptions = {
   departments: string[];
   facultyTypes: string[];
   academicYears: number[];
+  activeTerm?: { term_id: string; term_number: number; acad_year_start: number } | null;
+};
+
+// NEW: payload for add / update faculty
+export type FacultyUpsertPayload = {
+  first_name: string;
+  last_name: string;
+  email: string;
+  department: string;              // department.dept_name
+  employment_type: "FT" | "PT";    // faculty_profiles.employment_type
+  certifications?: string | string[];
+  teaching_years?: number;
 };
 
 export async function getFacultyOptions(): Promise<FMOptions> {
@@ -1323,6 +1481,25 @@ export async function listFaculty(params: {
     params: { action: "list", department, facultyType, search },
   });
   return data as { ok: boolean; rows: FacultyRow[] };
+}
+
+// NEW: create faculty (users → role_assignments → faculty_profiles)
+export async function addFacultyEntry(payload: FacultyUpsertPayload) {
+  const { data } = await axios.post(`${API_BASE}/om/facultymanagement`, payload, {
+    params: { action: "add" },
+  });
+  return data as { ok: boolean; faculty_id?: string; user_id?: string };
+}
+
+// NEW: update faculty basic info
+export async function updateFacultyEntry(
+  facultyId: string,
+  payload: Partial<FacultyUpsertPayload>
+) {
+  const { data } = await axios.post(`${API_BASE}/om/facultymanagement`, payload, {
+    params: { action: "update", facultyId },
+  });
+  return data as { ok: boolean };
 }
 
 /** Profile now returns an array: course_coordinator_of: [{ code, title }] */
@@ -1557,6 +1734,21 @@ export async function getOMFPreference(facultyId: string, termId?: string) {
     };
   };
 }
+
+export async function startOMFWindow(args: { termId?: string; durationDays?: number } = {}) {
+  const params: any = { action: "startWindow" };
+  if (args.termId) params.termId = args.termId;
+  if (args.durationDays != null) params.durationDays = args.durationDays;
+
+  const { data } = await axios.post(`${API_BASE}/om/facultyforms`, {}, { params });
+  return data as {
+    ok: boolean;
+    prefs_window?: { openISO?: string; deadlineISO?: string; term_id?: string };
+  };
+}
+
+
+
 
 /* =========================================================
    ==============  OM: STUDENT PETITION  ===================
@@ -1900,6 +2092,7 @@ export type OmLoadRow = {
   units: number | "";
   section: string;
   faculty: string;
+  faculty_id?: string;
   day1: string;
   begin1: string;
   end1: string;
@@ -1909,23 +2102,25 @@ export type OmLoadRow = {
   end2: string;
   room2: string;
   capacity: number | "";
+  mode?: string;
   status?: "" | "Confirmed" | "Pending" | "Unassigned" | "Conflict";
   conflictNote?: string;
+  editable?: boolean;
 };
 
-export async function getOmLoadAssignmentList(userId: string) {
-  const { data } = await axios.post(`${API_BASE}/om/loadassignment`, {}, {
-    params: { userId, action: "fetch" },
-  });
-  return data as { term?: string; rows: OmLoadRow[] };
-}
+// export async function getOmLoadAssignmentList(userId: string) {
+//   const { data } = await axios.post(`${API_BASE}/om/loadassignment`, {}, {
+//     params: { userId, action: "fetch" },
+//   });
+//   return data as { term?: string; rows: OmLoadRow[] };
+// }
 
-export async function getOmLoadAssignmentOptions(userId: string) {
-  const { data } = await axios.post(`${API_BASE}/om/loadassignment`, {}, {
-    params: { userId, action: "options" },
-  });
-  return data;
-}
+// export async function getOmLoadAssignmentOptions(userId: string) {
+//   const { data } = await axios.post(`${API_BASE}/om/loadassignment`, {}, {
+//     params: { userId, action: "options" },
+//   });
+//   return data;
+// }
 
 export async function getOmLoadAssignmentProfile(userId: string) {
   const { data } = await axios.post(`${API_BASE}/om/loadassignment`, {}, {
@@ -1934,11 +2129,56 @@ export async function getOmLoadAssignmentProfile(userId: string) {
   return data;
 }
 
-export async function submitOmLoadAssignment(userId: string, payload: { rows: OmLoadRow[] }) {
+export async function submitOmLoadAssignment(
+  userId: string,
+  payload: { rows: OmLoadRow[] },
+  action: "submit" | "approve" | "save" = "submit"
+) {
   const { data } = await axios.post(`${API_BASE}/om/loadassignment`, payload, {
-    params: { userId, action: "submit" },
+    params: { userId, action },
   });
-  return data as { ok: boolean; rows: OmLoadRow[] };
+  return data as {
+    ok: boolean;
+    rows?: OmLoadRow[];
+    approved?: number;
+    term?: string;
+  };
+}
+
+type Faculty = {
+  faculty_id: string;
+  faculty_name_display: string;
+};
+
+/** List all sections for the current term (no algorithm) */
+export async function getOmLoadAssignmentList(user_id: string) {
+  const base = (typeof API_BASE !== "undefined" ? API_BASE : "").replace(/\/+$/, "");
+  const url = `${base}/om/load-assignment/list?user_id=${encodeURIComponent(user_id)}`;
+  const r = await fetch(url, { method: "GET" });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json() as Promise<{ term: string; rows: OmLoadRow[] }>;
+}
+
+/** Auto-assign algorithm run (fill faculty/day/time/room) */
+export async function runOmAutoAssign(params: {
+  user_id: string;
+  department_id?: string;
+}) {
+  const base = (typeof API_BASE !== "undefined" ? API_BASE : "").replace(/\/+$/, "");
+  const qs = new URLSearchParams({ user_id: params.user_id });
+  if (params.department_id) qs.set("department_id", params.department_id);
+  const url = `${base}/om/load-assignment/run?${qs.toString()}`;
+  const r = await fetch(url, { method: "POST" });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json() as Promise<{ term: string; rows: OmLoadRow[] }>;
+}
+
+export async function getAllFaculty() {
+  const base = (typeof API_BASE !== "undefined" ? API_BASE : "").replace(/\/+$/, "");
+  const url = `${base}/om/load-assignment/faculty-all`;
+
+  const { data } = await axios.get(url);
+  return data.faculty as Faculty[];
 }
 
 /* =========================================================
@@ -1990,12 +2230,15 @@ export async function fetchOmRpFacultyTeachingHistory(params: {
    ========================================================= */
 
 export async function getChairHeader(userId?: string) {
-  const params = new URLSearchParams();
-  if (userId) params.set("userId", userId);
-  params.set("action", "header");
-  const r = await fetch(join(API_BASE, `chair/plantilla?${params.toString()}`));
-  if (!r.ok) throw new Error(await r.text());
-  return r.json();
+  const params: Record<string, any> = { action: "header" };
+  if (userId) params.userId = userId;
+
+  const { data } = await axios.post(
+    `${API_BASE}/chair/facultymanagement`,
+    {}, // empty body; backend reads only from query params
+    { params }
+  );
+  return data;
 }
 
 export async function chairFacultyList(userId: string) {
@@ -2204,4 +2447,71 @@ export async function updateChairCoursePeople(
   if (payload.userEmail) params.userEmail = payload.userEmail;
   const { data } = await axios.post(`${API_BASE}/chair/course-management`, payload, { params });
   return data;
+}
+
+// === CHAIR: FACULTY DIRECTORY (mirrors OM but different base path) ===
+
+export async function getChairFacultyOptions(): Promise<FMOptions> {
+  const { data } = await axios.post(`${API_BASE}/chair/facultymanagement`, {}, {
+    params: { action: "options" },
+  });
+  return data;
+}
+
+export async function listChairFaculty(params: {
+  department?: string;
+  facultyType?: string;
+  search?: string;
+}) {
+  const { department, facultyType, search } = params || {};
+  const { data } = await axios.post(`${API_BASE}/chair/facultymanagement`, {}, {
+    params: { action: "list", department, facultyType, search },
+  });
+  return data as { ok: boolean; rows: FacultyRow[] };
+}
+
+export async function addChairFacultyEntry(payload: FacultyUpsertPayload) {
+  const { data } = await axios.post(`${API_BASE}/chair/facultymanagement`, payload, {
+    params: { action: "add" },
+  });
+  return data as { ok: boolean; faculty_id?: string; user_id?: string };
+}
+
+export async function getChairFacultySchedule(
+  facultyId: string,
+  termId?: string
+) {
+  const { data } = await axios.post(`${API_BASE}/chair/facultymanagement`, {}, {
+    params: { action: "schedule", facultyId, termId },
+  });
+  return data;
+}
+
+export async function getChairFacultyHistory(
+  facultyId: string,
+  termOrAy?: string | number
+) {
+  const params: Record<string, any> = { action: "history", facultyId };
+  if (typeof termOrAy === "number") params.acadYearStart = termOrAy;
+  else if (typeof termOrAy === "string" && termOrAy) params.termId = termOrAy;
+
+  const { data } = await axios.post(`${API_BASE}/chair/facultymanagement`, {}, { params });
+  return data;
+}
+
+export async function updateChairFacultyEntry(
+  facultyId: string,
+  payload: FacultyUpsertPayload
+) {
+  const { data } = await axios.post(
+    `${API_BASE}/chair/facultymanagement`,
+    payload, // body is the payload itself
+    {
+      params: {
+        action: "update",
+        facultyId,
+      },
+    }
+  );
+  return data as { ok: boolean };
 }

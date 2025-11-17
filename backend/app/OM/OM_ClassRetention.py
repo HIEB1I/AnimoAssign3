@@ -20,6 +20,7 @@ COL_SECTIONS = "sections"
 COL_USERS = "users"
 COL_FAC_PROFILES = "faculty_profiles"
 COL_FAC_ASSIGN = "faculty_assignments"
+COL_PREEN_COUNT = "preenlistment_count" 
 
 STATUS_OPTIONS = ["Approved", "Under Review", "Dissolved", "Special Class"]
 
@@ -33,9 +34,10 @@ try:
     db[COL_FAC_ASSIGN].create_index([("section_id", ASCENDING), ("created_at", ASCENDING)])
     # Prevent duplicates: one retention row per term + section
     db[COL_CLASS_RETENTION].create_index(
-        [("term_id", ASCENDING), ("section_id", ASCENDING)],
+        [("term_id", ASCENDING), ("course_id", ASCENDING), ("section_id", ASCENDING)],
         unique=True
     )
+
 except Exception:
     pass
 
@@ -51,10 +53,12 @@ def _course_code_expr() -> Dict[str, Any]:
 
 
 def _term_label_expr() -> Dict[str, Any]:
-    # AY {acad_year_start}-{acad_year_start+1} · Term {term_number}
+    # Term {term_number} · AY {acad_year_start}-{acad_year_start+1}
     return {
         "$concat": [
-            "AY ",
+            "Term ",
+            {"$toString": {"$ifNull": ["$term.term_number", ""]}},
+            " · AY ",
             {"$toString": {"$ifNull": ["$term.acad_year_start", ""]}},
             "-",
             {
@@ -65,11 +69,8 @@ def _term_label_expr() -> Dict[str, Any]:
                     ]
                 }
             },
-            " · Term ",
-            {"$toString": {"$ifNull": ["$term.term_number", ""]}},
         ]
     }
-
 
 def _upper_last_first_from_user_expr() -> Dict[str, Any]:
     """
@@ -116,6 +117,10 @@ def _list_pipeline(term_id: Optional[str], status: Optional[str], q: Optional[st
     base_match: Dict[str, Any] = {
         "section_id": {"$type": "string", "$ne": ""}
     }
+    # Only consider retention rows that belong to the WORKING term
+    if term_id:
+        base_match["term_id"] = term_id
+
     if status and status not in ("All Status", ""):
         base_match["status"] = status
 
@@ -156,9 +161,35 @@ def _list_pipeline(term_id: Optional[str], status: Optional[str], q: Optional[st
         {"$unwind": {"path": "$fa", "preserveNullAndEmptyArrays": True}},
 
         # profiles & users from the derived assignment
-        {"$lookup": {"from": COL_FAC_PROFILES, "localField": "fa.faculty_id", "foreignField": "faculty_id", "as": "fac"}},
+        {"$lookup": {
+            "from": COL_FAC_PROFILES,
+            "localField": "fa.faculty_id",
+            "foreignField": "faculty_id",
+            "as": "fac",
+        }},
         {"$unwind": {"path": "$fac", "preserveNullAndEmptyArrays": True}},
-        {"$lookup": {"from": COL_USERS, "localField": "fac.user_id", "foreignField": "userId", "as": "u"}},
+
+        # users: support both userId and user_id in the users collection
+        {
+            "$lookup": {
+                "from": COL_USERS,
+                "let": {"uid": "$fac.user_id"},
+                "pipeline": [
+                    {
+                        "$match": {
+                            "$expr": {
+                                "$or": [
+                                    {"$eq": ["$userId", "$$uid"]},
+                                    {"$eq": ["$user_id", "$$uid"]},
+                                ]
+                            }
+                        }
+                    },
+                    {"$limit": 1},
+                ],
+                "as": "u",
+            }
+        },
         {"$unwind": {"path": "$u", "preserveNullAndEmptyArrays": True}},
 
         # optional text filter
@@ -172,10 +203,16 @@ def _list_pipeline(term_id: Optional[str], status: Optional[str], q: Optional[st
             }
         }] if q else []),
 
-        # DEDUPE: keep only the latest row per section_id
+        # DEDUPE: keep only the latest row per (course, section)
         {"$sort": {"updated_at": -1, "_id": -1}},
-        {"$group": {"_id": "$section_id", "doc": {"$first": "$$ROOT"}}},
-        {"$replaceRoot": {"newRoot": "$doc"}},
+        {"$group": {
+            "_id": {
+                "section_id": "$section_id",
+                "course_id": "$course_id",
+            },
+            "doc": { "$first": "$$ROOT" }
+        }},
+        {"$replaceRoot": { "newRoot": "$doc" }},
 
         # final shape
         {"$project": {
@@ -204,17 +241,75 @@ def _list_pipeline(term_id: Optional[str], status: Optional[str], q: Optional[st
 
 
 async def _find_active_term() -> Optional[Dict[str, Any]]:
-    active = await db[COL_TERMS].find_one(
-        {"$or": [{"is_current": True}, {"is_active": True}, {"active": True}, {"status": "Active"}]},
+    """
+    Return the WORKING / PLANNING term for Class Retention.
+
+    Priority:
+    1) If there is an active (non-archived) pre-enlistment batch in
+       preenlistment_count, use that term_id.
+    2) Otherwise, use the *next* term after the current term
+       (where is_current/status flags it as current/active).
+    3) If there is no "next" term configured, fall back to the current/latest term.
+    """
+
+    # 1) Try to derive from an active pre-enlistment batch
+    pre_doc = await db[COL_PREEN_COUNT].find_one(
+        {"is_archived": {"$ne": True}},
+        {"_id": 0, "term_id": 1},
+    )
+    if pre_doc and pre_doc.get("term_id"):
+        t = await db[COL_TERMS].find_one(
+            {"term_id": pre_doc["term_id"]},
+            {"_id": 0, "term_id": 1, "term_number": 1, "acad_year_start": 1},
+        )
+        if t:
+            return t
+
+    # 2) Fallback: "current" term (any of the usual flags)
+    current = await db[COL_TERMS].find_one(
+        {
+            "$or": [
+                {"status": "active"},
+                {"status": "Active"},
+                {"is_current": True},
+                {"is_active": True},
+                {"active": True},
+            ]
+        },
         {"_id": 0, "term_id": 1, "term_number": 1, "acad_year_start": 1},
     )
-    if active:
-        return active
-    return await db[COL_TERMS].find_one(
-        {}, {"_id": 0, "term_id": 1, "term_number": 1, "acad_year_start": 1},
-        sort=[("acad_year_start", -1), ("term_number", -1)],
-    )
 
+    if not current:
+        # If nothing is flagged, use the latest by AY + term_number
+        last = await db[COL_TERMS].find(
+            {}, {"_id": 0, "term_id": 1, "term_number": 1, "acad_year_start": 1},
+        ).sort([("acad_year_start", -1), ("term_number", -1)]).limit(1).to_list(1)
+        current = last[0] if last else None
+
+    if not current:
+        # No terms at all
+        return None
+
+    # 3) Compute the "next" term after the current term
+    next_terms = await db[COL_TERMS].find(
+        {
+            "$or": [
+                {"acad_year_start": {"$gt": current["acad_year_start"]}},
+                {
+                    "acad_year_start": current["acad_year_start"],
+                    "term_number": {"$gt": current["term_number"]},
+                },
+            ]
+        },
+        {"_id": 0, "term_id": 1, "term_number": 1, "acad_year_start": 1},
+    ).sort([("acad_year_start", 1), ("term_number", 1)]).limit(1).to_list(1)
+
+    if next_terms:
+        # Use the next term as the working/planning term
+        return next_terms[0]
+
+    # If no next term, stick with current (still better than nothing)
+    return current
 
 def _to_int_or_none(v) -> Optional[int]:
     if v is None or v == "":
@@ -256,14 +351,14 @@ async def cr_get(
         if active:
             ay = active.get("acad_year_start", 0)
             tn = active.get("term_number", "")
-            label = f"AY {ay}-{ay+1} · Term {tn}"
+            label = f"Term {tn} · AY {ay}-{ay+1}"
         return {
             "ok": True,
             "statuses": STATUS_OPTIONS,
             "terms": [
                 {
                     "term_id": t["term_id"],
-                    "label": f"AY {t.get('acad_year_start','')}-{(t.get('acad_year_start') or 0)+1} · Term {t.get('term_number','')}",
+                    "label": f"Term {t.get('term_number','')} · AY {t.get('acad_year_start','')}-{(t.get('acad_year_start') or 0)+1}",
                     "term_number": t.get("term_number"),
                     "acad_year_start": t.get("acad_year_start"),
                 } for t in terms
@@ -277,6 +372,11 @@ async def cr_get(
         if not term_id:
             active = await _find_active_term()
             term_id = active.get("term_id") if active else None
+
+        # If we still don't have a working term, do NOT show old rows
+        if not term_id:
+            return {"ok": True, "rows": []}
+
         rows = await db[COL_CLASS_RETENTION].aggregate(
             _list_pipeline(term_id, status, q)
         ).to_list(length=5000)
@@ -356,16 +456,25 @@ async def cr_get(
             },
             {"$unwind": {"path": "$fac", "preserveNullAndEmptyArrays": True}},
 
-            # users (limit 1) via pipeline lookup to avoid fan-out
+            # users (limit 1) via pipeline lookup; support userId and user_id
             {
                 "$lookup": {
                     "from": COL_USERS,
                     "let": {"uid": "$fac.user_id"},
                     "pipeline": [
-                        {"$match": {"$expr": {"$eq": ["$userId", "$$uid"]}}},
+                        {
+                            "$match": {
+                                "$expr": {
+                                    "$or": [
+                                        {"$eq": ["$userId", "$$uid"]},
+                                        {"$eq": ["$user_id", "$$uid"]},
+                                    ]
+                                }
+                            }
+                        },
                         {"$limit": 1},
                     ],
-                    "as": "u"
+                    "as": "u",
                 }
             },
             {"$unwind": {"path": "$u", "preserveNullAndEmptyArrays": True}},

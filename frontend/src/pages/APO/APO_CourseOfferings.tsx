@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import Papa from "papaparse";
 import {
   Edit,
   Trash2,
@@ -26,7 +27,9 @@ import {
   getElectiveOptions,
   searchCourseCatalog,      
   createCatalogCourse, 
-  getEligibleRoomsForOffering,                    
+  getEligibleRoomsForOffering,          
+  importCurriculumCsv,    
+  editCatalogCourse,          
   type ApiConflict,
   type CreateCoursePayload,  
   type CourseCatalogItem           
@@ -75,13 +78,13 @@ function toAbbrevDay(d?: string | null): DayAbbr | "" {
   const s = String(d || "").trim();
   if (!s) return "";
   const key = s.replace(/\./g, "").replace(/\s+/g, "").toUpperCase();
+
   if (["M", "MON", "MONDAY"].includes(key)) return "M";
   if (["T", "TU", "TUE", "TUES", "TUESDAY"].includes(key)) return "T";
   if (["W", "WED", "WEDNESDAY"].includes(key)) return "W";
-  if (["T", "THU", "THUR", "THURS", "THURSDAY"].includes(key)) return "H";
+  if (["H", "TH", "THU", "THUR", "THURS", "THURSDAY"].includes(key)) return "H";
   if (["F", "FRI", "FRIDAY"].includes(key)) return "F";
   if (["S", "SA", "SAT", "SATURDAY"].includes(key)) return "S";
-  // already full name?
   if ((DAYS as readonly string[]).includes(s)) return DAY_FULL_TO_ABBR[s as Day];
   return "";
 }
@@ -108,38 +111,59 @@ const filterRoomsByCap = (options: RoomOption[], cap?: number | null) => {
 
 const cls = (...s: (string | false | undefined)[]) => s.filter(Boolean).join(" ");
 
-// Display: "HH:MM" or "—"
-const fmtTime = (s?: string) => {
-  const t = (s || "").replace(/\D/g, "");
-  if (t.length !== 4) return s || "—";
-  return `${t.slice(0, 2)}:${t.slice(2)}`;
+// Allow user to type anything; coerce to exactly HHMM on save
+const toHHMM = (s?: string | number | null) => {
+  const raw = String(s ?? "").trim();
+  const t = raw.replace(/\D/g, "").slice(0, 4);
+
+  if (t.length === 4) return t;          // H1H2M1M2
+  if (t.length === 3) return `0${t}`;    // HMM -> 0HMM
+  if (t.length === 2) return `${t}00`;   // HH  -> HH00
+  if (t.length === 1) return `0${t}00`;  // H   -> 0H00
+  return "";
 };
 
-// Allow user to type anything; coerce to exactly HHMM on save
-const toHHMM = (s?: string) => {
-  const t = (s || "").replace(/\D/g, "").slice(0, 4);
-  if (t.length === 4) return t;          // H1H2M1M2
-  if (t.length === 3) return `0${t}`;    // H M M -> 0HMM
-  if (t.length === 2) return `${t}00`;   // HH   -> HH00
-  if (t.length === 1) return `0${t}00`;  // H    -> 0H00
-  return "";
+// Display: always normalize to HHMM then show "HH:MM"
+const fmtTime = (s?: string | number | null) => {
+  const hhmm = toHHMM(s);
+  if (!hhmm) return "—";
+  return `${hhmm.slice(0, 2)}:${hhmm.slice(2)}`;
 };
 
 const GE_TIME_SLOTS = [
   { label: "07:30 - 09:00", start: "0730", end: "0900" },
-  { label: "09:15 - 10:45", start: "0915", end: "1045" },
-  { label: "11:00 - 12:30", start: "1100", end: "1230" },
-  { label: "12:45 - 14:15", start: "1245", end: "1415" },
-  { label: "14:30 - 16:00", start: "1430", end: "1600" },
-  { label: "16:15 - 17:45", start: "1615", end: "1745" },
-  { label: "18:00 - 19:30", start: "1800", end: "1930" },
-  { label: "19:45 - 21:00", start: "1945", end: "2100" },
-    // NEW long blocks you requested
   { label: "08:00 - 10:00", start: "0800", end: "1000" },
+
+  { label: "09:00 - 12:00", start: "0900", end: "1200" },
+  { label: "09:15 - 10:45", start: "0915", end: "1045" },
+  { label: "09:15 - 12:30", start: "0915", end: "1230" },
+
   { label: "10:00 - 12:00", start: "1000", end: "1200" },
+  { label: "10:00 - 13:00", start: "1000", end: "1300" },
+
+  { label: "11:00 - 12:30", start: "1100", end: "1230" },
+  { label: "11:00 - 13:00", start: "1100", end: "1300" },
+
+  { label: "12:45 - 14:15", start: "1245", end: "1415" },
+
   { label: "13:00 - 15:00", start: "1300", end: "1500" },
+  { label: "13:00 - 16:00", start: "1300", end: "1600" },
+  { label: "13:15 - 14:15", start: "1315", end: "1415" },
+
+  { label: "14:00 - 16:00", start: "1400", end: "1600" },
+  { label: "14:30 - 16:00", start: "1430", end: "1600" },
+  { label: "14:40 - 16:00", start: "1440", end: "1600" },
+
   { label: "15:30 - 17:30", start: "1530", end: "1730" },
+
+  { label: "16:15 - 17:45", start: "1615", end: "1745" },
+
+  { label: "18:00 - 19:30", start: "1800", end: "1930" },
   { label: "18:00 - 20:00", start: "1800", end: "2000" },
+  { label: "18:00 - 21:00", start: "1800", end: "2100" },
+
+  { label: "19:45 - 21:00", start: "1945", end: "2100" },
+  { label: "19:45 - 21:15", start: "1945", end: "2115" },
 ];
 
 const GE_PLACEHOLDER = "— Select —";
@@ -153,6 +177,138 @@ const geFindByTimes = (start?: string | null, end?: string | null) => {
 const geCurrentLabel = (slot?: { start_time?: string | null; end_time?: string | null }) => {
   const hit = geFindByTimes(slot?.start_time, slot?.end_time);
   return hit ? hit.label : GE_PLACEHOLDER;
+};
+// Format a slot as "HH:MM - HH:MM" for display when it's not one of the standard GE_TIME_SLOTS
+const geCustomLabel = (slot?: { start_time?: string | null; end_time?: string | null }) => {
+  const st = slot?.start_time ? fmtTime(slot.start_time) : "";
+  const en = slot?.end_time ? fmtTime(slot.end_time) : "";
+  if (!st && !en) return "";
+  if (st && en) return `${st} - ${en}`;
+  return st || en || "";
+};
+
+// Parse free-text into start/end HHMM (accepts "07:30 - 09:00", "0730-0900", "07300900", etc.)
+const parseTimeRangeFromText = (
+  text: string
+): { start_time: string; end_time: string } | undefined => {
+  const raw = (text || "").trim();
+  if (!raw) return undefined;
+
+  // Case 1: split by dash
+  const parts = raw.split(/[-–—]/);
+  if (parts.length >= 2) {
+    const s = toHHMM(parts[0]);
+    const e = toHHMM(parts[1]);
+    if (s.length === 4 && e.length === 4) return { start_time: s, end_time: e };
+  }
+
+  // Case 2: just digits → 8-digit "HHMMHHMM"
+  const digits = raw.replace(/\D/g, "");
+  if (digits.length === 8) {
+    const s = digits.slice(0, 4);
+    const e = digits.slice(4, 8);
+    return { start_time: s, end_time: e };
+  }
+
+  // Otherwise, leave it unchanged (we won't override slot times)
+  return undefined;
+};
+
+type TimeBandInputProps = {
+  slot?: { start_time?: string | null; end_time?: string | null };
+  onChange: (update: { start_time?: string; end_time?: string }) => void;
+  className?: string;
+  placeholder?: string;
+};
+
+/**
+ * Searchable + free-text time band input:
+ * - shows a text field
+ * - filters GE_TIME_SLOTS as you type
+ * - can also accept custom ranges not in GE_TIME_SLOTS
+ */
+const TimeBandInput: React.FC<TimeBandInputProps> = ({
+  slot,
+  onChange,
+  className,
+  placeholder = "e.g. 07:30 - 09:00",
+}) => {
+  const [open, setOpen] = useState(false);
+  const [text, setText] = useState<string>("");
+
+  // Sync when slot changes from the outside (e.g., opening a different row)
+  useEffect(() => {
+    const label = geCurrentLabel(slot);
+    if (label !== GE_PLACEHOLDER) {
+      setText(label);
+    } else {
+      setText(geCustomLabel(slot));
+    }
+  }, [slot?.start_time, slot?.end_time]);
+
+  const filtered = useMemo(() => {
+    const q = text.toLowerCase();
+    return GE_TIME_SLOTS.filter((t) => t.label.toLowerCase().includes(q));
+  }, [text]);
+
+  const pick = (label: string) => {
+    const hit = geFindByLabel(label);
+    if (!hit) return;
+    setText(label);
+    onChange({ start_time: hit.start, end_time: hit.end });
+    setOpen(false);
+  };
+
+  const handleBlur = () => {
+    // allow click on dropdown items
+    setTimeout(() => setOpen(false), 120);
+
+    const parsed = parseTimeRangeFromText(text);
+    if (parsed) {
+      onChange(parsed);
+    }
+  };
+
+  return (
+    <div className={cls("relative inline-block min-w-[140px] whitespace-nowrap", className)}>
+      <input
+        className={cls(
+          "w-full rounded-lg border border-gray-300 bg-white px-2.5 py-2 text-sm shadow-sm",
+          "focus:outline-none focus:ring-2 focus:ring-emerald-200 focus:border-emerald-300"
+        )}
+        value={text}
+        placeholder={placeholder}
+        onFocus={() => {
+          setOpen(true);
+          if (!text) {
+            const label = geCurrentLabel(slot);
+            if (label !== GE_PLACEHOLDER) setText(label);
+          }
+        }}
+        onChange={(e) => {
+          setText(e.target.value);
+          setOpen(true);
+        }}
+        onBlur={handleBlur}
+      />
+
+      {open && filtered.length > 0 && (
+        <div className="absolute left-0 right-0 z-20 mt-1 max-h-48 overflow-auto rounded-md border border-slate-200 bg-white shadow-lg">
+          {filtered.map((t) => (
+            <button
+              key={t.label}
+              type="button"
+              onMouseDown={(e) => e.preventDefault()} // prevent input blur
+              onClick={() => pick(t.label)}
+              className="block w-full px-2 py-1 text-left text-sm hover:bg-emerald-50"
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 };
 
 // A slot can only receive a room if it has day + full HHMM times
@@ -240,10 +396,6 @@ const parseBatchNumber = (batchCode?: string) => {
 const SOFT_INPUT =
   "w-full min-w-0 rounded-lg border border-gray-300 bg-white px-2.5 py-2 text-sm shadow-sm " +
   "focus:outline-none focus:ring-2 focus:ring-emerald-200 focus:border-emerald-300";
-
-const SOFT_SELECT =
-  "block w-full min-w-0 max-w-full appearance-none rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm " +
-  "shadow-sm outline-none focus:ring-2 focus:ring-emerald-200 focus:border-emerald-300";
 
 /* ---------------------------------- types ---------------------------------- */
 
@@ -665,7 +817,9 @@ const EligibleRoomSelect: React.FC<{
     batch_id?: string;
   } | null>(null);
   const [showCreateCourseModal, setShowCreateCourseModal] = useState(false);
-
+  const [showEditCourseModal, setShowEditCourseModal] = useState(false); // ← NEW
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [importBusy, setImportBusy] = useState(false);
   // Offerings collapse state (keyed by "ID::PROGRAM")
   const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
 
@@ -1506,6 +1660,7 @@ if (isGE) {
             )}
           </div>
           {/* Curriculum filters */}
+          {/* Curriculum filters */}
           {view === "curriculum" && (
             <>
               <SelectBox
@@ -1525,15 +1680,120 @@ if (isGE) {
                 options={["All ID", ...currBatches.map((b) => b.code)]}
               />
 
-              {/* ADD: global catalog "Add Course" button */}
-              <button
-                className="ml-auto inline-flex items-center gap-2 rounded-md bg-emerald-700 px-4 py-2 text-sm font-medium text-white shadow-sm"
-                onClick={() => setShowCreateCourseModal(true)}
-                title="Create a new course in the global catalog"
-              >
-                <Plus className="h-4 w-4" />
-                Add Course
-              </button>
+              {/* Right-side actions: Import CSV + Add Course + Edit Course */}
+              <div className="ml-auto flex items-center gap-2">
+                <button
+                  type="button"
+                  className="inline-flex items-center gap-2 rounded-md border border-emerald-700 px-4 py-2 text-sm font-medium text-emerald-700 hover:bg-emerald-50 disabled:opacity-50"
+                  disabled={importBusy}
+                  onClick={() => fileInputRef.current?.click()}
+                  title="Import curriculum (IDs / flowcharts) from CSV"
+                >
+                  <Plus className="h-4 w-4" />
+                  Import CSV
+                </button>
+
+                <button
+                  className="inline-flex items-center gap-2 rounded-md bg-emerald-700 px-4 py-2 text-sm font-medium text-white shadow-sm"
+                  onClick={() => setShowCreateCourseModal(true)}
+                  title="Create a new course in the global catalog"
+                >
+                  <Plus className="h-4 w-4" />
+                  Add Course
+                </button>
+
+                {/* NEW: open global Edit Course modal */}
+                <button
+                  className="inline-flex items-center gap-2 rounded-md bg-emerald-600 px-4 py-2 text-sm font-medium text-white shadow-sm"
+                  onClick={() => setShowEditCourseModal(true)}
+                  title="Edit an existing course in the global catalog"
+                >
+                  <Edit className="h-4 w-4" />
+                  Edit Course
+                </button>
+              </div>
+
+              {/* Hidden file input for CSV upload */}
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".csv"
+                className="hidden"
+                onChange={(e) => {
+                  const input = e.target as HTMLInputElement;
+                  const file = input.files?.[0];
+                  if (!file || !user?.userId) return;
+
+                  setImportBusy(true);
+
+                  //Papa.parse<any>(file, {
+                  Papa.parse(file, {
+                    header: true,
+                    skipEmptyLines: true,
+                    //complete: async (result) => {
+                    complete: async (result: any) => {
+                      try {
+                        const rows = (result.data || []) as any[];
+
+                        // ---- NEW: make termId and campusName guaranteed strings ----
+                        const termId = curr?.term_id ?? data?.term_id;
+                        const campusName =
+                          curr?.campus?.campus_name ?? data?.campus?.campus_name;
+
+                        if (!termId || !campusName) {
+                          console.error("Missing term_id or campus_name for CSV import", {
+                            termId,
+                            campusName,
+                          });
+                          alert(
+                            "Cannot import CSV: missing term or campus for this curriculum."
+                          );
+                          return;
+                        }
+
+           const response = await importCurriculumCsv(user.userId, {
+  rows,
+  term_id: termId,
+  campus_name: campusName,
+});
+
+console.log("CSV import response:", response);
+
+if (response.ok) {
+  const imported =
+    response.imported ?? response.curricula?.length ?? 0;
+
+  // NEW: always fall back to an empty array
+  const created = response.created_batches ?? [];
+  const createdText = created.length
+    ? `\nCreated batches: ${created.join(", ")}`
+    : "";
+
+  alert(
+    `CSV import successful.\n` +
+      `Imported ${imported} row(s).` +
+      createdText
+  );
+
+                        }
+                      } catch (err: any) {
+                        console.error("CSV import failed:", err);
+                        alert(err.message || "CSV import failed");
+                      } finally {
+                        setImportBusy(false);
+                        if (fileInputRef.current) fileInputRef.current.value = "";
+                      }
+                    },
+                    //error: (err) => {
+                    error: (err: unknown) => {
+                      console.error("CSV parse error:", err);
+                      alert("Failed to parse CSV file. Please check the format.");
+                      setImportBusy(false);
+                      input.value = "";
+                    },
+                  });
+                }}
+              />
             </>
           )}
         </div>
@@ -1841,46 +2101,46 @@ if (isGE) {
                                             const specificList = (sourceList || []).filter((o) =>
                                               isSpecificElectiveType(o.type_of_course || "")
                                             );
+                                            const placeholderLabel = "— Select specific elective —";
+                                            const specificOptions = specificList.map((opt) => ({
+                                              id: opt.course_id,
+                                              label: `${codeOf(opt.course_code)} • ${opt.course_title}`,
+                                            }));
 
-                                            const currentSpecific = editing?.draft.specific_course_id || (isSpecific ? r.course.course_id : "");
+                                            const currentSpecificId =
+                                              editing?.draft.specific_course_id || (isSpecific ? r.course.course_id : "");
+                                            const currentLabel =
+                                              currentSpecificId
+                                                ? specificOptions.find((o) => o.id === currentSpecificId)?.label || placeholderLabel
+                                                : placeholderLabel;
 
+                                            return (
+                                              <div className="mt-2">
+                                                <label className="text-xs font-medium text-slate-700 mb-1 block">
+                                                  Specific Elective
+                                                </label>
+                                                <SelectBox
+                                                  value={currentLabel}
+                                                  onChange={(label: string) => {
+                                                    const hit = specificOptions.find((o) => o.label === label);
+                                                    const sid = hit?.id || "";
+                                                    setEditing((p) =>
+                                                      p && {
+                                                        ...p,
+                                                        draft: {
+                                                          ...p.draft,
+                                                          for_placeholder_course_id: parentId || undefined,
+                                                          specific_course_id: sid || undefined,
+                                                        },
+                                                      }
+                                                    );
+                                                  }}
+                                                  options={[placeholderLabel, ...specificOptions.map((o) => o.label)]}
+                                                  className="!min-w-0 w-full max-w-full"
+                                                />
+                                              </div>
+                                            );
 
-                                              return (
-                                                <div className="mt-2">
-                                                  <label className="text-xs font-medium text-slate-700 mb-1 block">Specific Elective</label>
-                                                  <div className="relative">
-                                                    <select
-                                                      className={SOFT_SELECT}
-                                                      value={currentSpecific || ""}
-                                                      onChange={(e) => {
-                                                        const sid = e.target.value || "";
-                                                        setEditing((p) =>
-                                                          p && {
-                                                            ...p,
-                                                            draft: {
-                                                              ...p.draft,
-                                                              // keep parent linkage if we know it
-                                                              for_placeholder_course_id: parentId || undefined,
-                                                              specific_course_id: sid || undefined,
-                                                            },
-                                                          }
-                                                        );
-                                                      }}
-                                                    >
-                                                      <option value="">— Select specific elective —</option>
-                                                      {specificList.map((opt) => {
-                                                        const code = codeOf(opt.course_code);
-                                                        return (
-                                                          <option key={opt.course_id} value={opt.course_id}>
-                                                            {code} • {opt.course_title}
-                                                          </option>
-                                                        );
-                                                      })}
-                                                    </select>
-                                                    <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-500" />
-                                                  </div>
-                                                </div>
-                                              );
                                             })()}
                                           </td>
 
@@ -1960,33 +2220,29 @@ if (isGE) {
 
                                           </td>
                                           <td className="px-3 py-2 border border-gray-200 bg-white">
-                                          {ge ? (
-                                            <div className="inline-block min-w-[140px] whitespace-nowrap">
-                                              <SelectBox
-                                              value={geCurrentLabel(editing?.draft.slot1)}
-                                              options={[GE_PLACEHOLDER, ...GE_TIME_SLOTS.map(t => t.label)]}
-                                              onChange={(label: string) => {
-                                                if (label === GE_PLACEHOLDER) {
-                                                  setEditing(p => p && ({
-                                                    ...p,
-                                                    draft: { ...p.draft, slot1: { ...(p.draft.slot1 || {}), start_time: "", end_time: "" } }
-                                                  }));
-                                                  return;
+                                            {ge ? (
+                                              <TimeBandInput
+                                                slot={editing?.draft.slot1}
+                                                onChange={(update) =>
+                                                  setEditing((p) =>
+                                                    p && {
+                                                      ...p,
+                                                      draft: {
+                                                        ...p.draft,
+                                                        slot1: {
+                                                          ...(p.draft.slot1 || {}),
+                                                          ...update, // { start_time, end_time }
+                                                        },
+                                                      },
+                                                    }
+                                                  )
                                                 }
-                                                const hit = geFindByLabel(label);
-                                                setEditing(p => p && ({
-                                                  ...p,
-                                                  draft: { ...p.draft, slot1: { ...(p.draft.slot1 || {}), start_time: hit?.start || "", end_time: hit?.end || "" } }
-                                                }));
-                                              }}
-                                              className="w-auto whitespace-nowrap"
-                                            />
-                                            </div>
-                                          ) : (
-                                            fmtTime(r.slot1?.start_time)
-                                          )}
-
+                                              />
+                                            ) : (
+                                              fmtTime(r.slot1?.start_time)
+                                            )}
                                           </td>
+
                                           <td className="px-3 py-2 border border-gray-200 bg-white">
                                           {ge ? (
                                             <div className="text-sm">{fmtTime(editing?.draft.slot1?.end_time) || "—"}</div>
@@ -2040,32 +2296,27 @@ if (isGE) {
                                             )}
                                           </td>
                                           <td className="px-3 py-2 border border-gray-200 bg-white">
-                                          {ge ? (
-                                            <div className="inline-block min-w-[140px] whitespace-nowrap">
-                                            <SelectBox
-                                              value={geCurrentLabel(editing?.draft.slot2)}
-                                              options={[GE_PLACEHOLDER, ...GE_TIME_SLOTS.map(t => t.label)]}
-                                              onChange={(label: string) => {
-                                                if (label === GE_PLACEHOLDER) {
-                                                  setEditing(p => p && ({
-                                                    ...p,
-                                                    draft: { ...p.draft, slot2: { ...(p.draft.slot2 || {}), start_time: "", end_time: "" } }
-                                                  }));
-                                                  return;
+                                            {ge ? (
+                                              <TimeBandInput
+                                                slot={editing?.draft.slot2}
+                                                onChange={(update) =>
+                                                  setEditing((p) =>
+                                                    p && {
+                                                      ...p,
+                                                      draft: {
+                                                        ...p.draft,
+                                                        slot2: {
+                                                          ...(p.draft.slot2 || {}),
+                                                          ...update, // { start_time, end_time }
+                                                        },
+                                                      },
+                                                    }
+                                                  )
                                                 }
-                                                const hit = geFindByLabel(label);
-                                                setEditing(p => p && ({
-                                                  ...p,
-                                                  draft: { ...p.draft, slot2: { ...(p.draft.slot2 || {}), start_time: hit?.start || "", end_time: hit?.end || "" } }
-                                                }));
-                                              }}
-                                              className="!min-w-0 w-full max-w-full"
-                                            />
-                                            </div>
-                                          ) : (
-                                            fmtTime(r.slot2?.start_time)
-                                          )}
-
+                                              />
+                                            ) : (
+                                              fmtTime(r.slot2?.start_time)
+                                            )}
                                           </td>
                                           <td className="px-3 py-2 border border-gray-200 bg-white">
                                           {ge ? (
@@ -2256,17 +2507,28 @@ if (isGE) {
                                                       </div>
 
                                                       {/* Secondary select only for Elective placeholders */}
-                                                      {rowIsElective && (
-                                                        <div className="mb-2">
-                                                          <label className="text-xs font-medium text-slate-700 mb-1 block">
-                                                            Specific Elective
-                                                          </label>
-                                                          <div className="relative">
-                                                            <select
-                                                              className={SOFT_SELECT}
-                                                              value={addElectiveSpecificId}
-                                                              onChange={(e) => {
-                                                                const sid = e.target.value;
+                                                      {rowIsElective && (() => {
+                                                        const placeholderLabel = "— Select specific elective —";
+                                                        const specificOptions = specificElectives.map((opt) => ({
+                                                          id: opt.course_id,
+                                                          label: `${codeOf(opt.course_code)} • ${opt.course_title}`,
+                                                        }));
+
+                                                        const currentLabel =
+                                                          addElectiveSpecificId
+                                                            ? specificOptions.find((o) => o.id === addElectiveSpecificId)?.label || placeholderLabel
+                                                            : placeholderLabel;
+
+                                                        return (
+                                                          <div className="mb-2">
+                                                            <label className="text-xs font-medium text-slate-700 mb-1 block">
+                                                              Specific Elective
+                                                            </label>
+                                                            <SelectBox
+                                                              value={currentLabel}
+                                                              onChange={(label: string) => {
+                                                                const hit = specificOptions.find((o) => o.label === label);
+                                                                const sid = hit?.id || "";
                                                                 setAddElectiveSpecificId(sid);
                                                                 setAddDraft((p) => ({
                                                                   ...p,
@@ -2275,21 +2537,12 @@ if (isGE) {
                                                                   course_id: sid || "",
                                                                 }));
                                                               }}
-                                                            >
-                                                              <option value="">— Select specific elective —</option>
-                                                              {specificElectives.map((opt) => {
-                                                                const code = codeOf(opt.course_code);
-                                                                return (
-                                                                  <option value={opt.course_id} key={opt.course_id}>
-                                                                    {code} • {opt.course_title}
-                                                                  </option>
-                                                                );
-                                                              })}
-                                                            </select>
-                                                            <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-500" />
+                                                              options={[placeholderLabel, ...specificOptions.map((o) => o.label)]}
+                                                              className="!min-w-0 w-full max-w-full"
+                                                            />
                                                           </div>
-                                                        </div>
-                                                      )}
+                                                        );
+                                                      })()}
                                                     </>
                                                   );
                                                 })()}
@@ -2891,9 +3144,22 @@ if (isGE) {
           }}
         />
       )}
+
+      {/* NEW: Global Edit Course modal (for courses collection) */}
+      {showEditCourseModal && user?.userId && (
+        <GlobalCourseEditModal
+          userId={user.userId}
+          onClose={() => setShowEditCourseModal(false)}
+          onSaved={async () => {
+            await loadCurriculum();      // refresh curriculum/list of courses
+            setShowEditCourseModal(false);
+          }}
+        />
+      )}
+
       {editorState?.open && curr && (
         <ProgramCoursesEditor
-          userId={user?.userId}                 // ← add this
+          userId={user?.userId}
           programId={editorState.program_id!}
           programCode={editorState.program_code!}
           batchId={editorState.batch_id!}
@@ -3084,6 +3350,305 @@ const PlanReviewModal: React.FC<{
           >
             <Check className="inline-block h-4 w-4 mr-1 align-[-2px]" />
             Approve
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+type GlobalCourseEditModalProps = {
+  userId: string;
+  onClose: () => void;
+  onSaved: () => void | Promise<void>;
+};
+
+const GlobalCourseEditModal: React.FC<GlobalCourseEditModalProps> = ({
+  userId,
+  onClose,
+  onSaved,
+}) => {
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState<CourseCatalogItem[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  const [selected, setSelected] = useState<CourseCatalogItem | null>(null);
+  const [codeInputs, setCodeInputs] = useState<string[]>([""]);
+  const [title, setTitle] = useState("");
+  const [unitsText, setUnitsText] = useState("");
+
+  const [saving, setSaving] = useState(false);
+  const requestIdRef = useRef(0);
+
+  // helpers for multi-code input UI
+  const setCodeAt = (index: number, value: string) => {
+    setCodeInputs((prev) => {
+      const next = [...prev];
+      next[index] = value.toUpperCase();
+      return next;
+    });
+  };
+
+  const addCodeRow = () => {
+    setCodeInputs((prev) => [...prev, ""]);
+  };
+
+  const removeCodeRow = (index: number) => {
+    setCodeInputs((prev) => prev.filter((_, i) => i !== index));
+  };
+
+
+  // Debounced search in the global course catalog
+  useEffect(() => {
+    const q = query.trim();
+    if (q.length < 2) {
+      setResults([]);
+      return;
+    }
+
+    const myId = ++requestIdRef.current;
+    const t = setTimeout(async () => {
+      setLoading(true);
+      try {
+        const resp = await searchCourseCatalog(userId, { q, limit: 100 });
+        const arr = Array.isArray((resp as any)?.results) ? (resp as any).results : [];
+        if (myId === requestIdRef.current) {
+          setResults(arr);
+        }
+      } catch {
+        if (myId === requestIdRef.current) {
+          setResults([]);
+        }
+      } finally {
+        if (myId === requestIdRef.current) {
+          setLoading(false);
+        }
+      }
+    }, 300);
+
+    return () => clearTimeout(t);
+  }, [query, userId]);
+
+  const pickCourse = (c: CourseCatalogItem) => {
+    setSelected(c);
+
+    const codesArr = Array.isArray(c.course_code)
+      ? (c.course_code as any[])
+          .map((x) => String(x || ""))
+          .filter(Boolean)
+      : [String(c.course_code || "")].filter(Boolean);
+
+    // Put each code into its own row
+    setCodeInputs(codesArr.length ? codesArr : [""]);
+
+    setTitle(c.course_title || "");
+    setUnitsText(typeof c.units === "number" ? String(c.units) : "");
+  };
+
+  const save = async () => {
+    if (!selected) {
+      alert("Please select a course first.");
+      return;
+    }
+
+    // normalize each input separately; ignore empty rows
+    const codes = codeInputs
+      .map((s) => normCode(s))
+      .filter(Boolean);
+
+    if (!codes.length) {
+      alert("Please enter at least one course code.");
+      return;
+    }
+
+    const t = title.trim();
+    if (!t) {
+      alert("Please enter a course title.");
+      return;
+    }
+
+    const u = unitsText.trim();
+    const units = u === "" ? null : Number(u);
+    if (u !== "" && Number.isNaN(units as number)) {
+      alert("Units must be a number.");
+      return;
+    }
+
+    setSaving(true);
+    try {
+      const res = await editCatalogCourse(userId, {
+        course_id: selected.course_id,
+        course_code: codes,      // will be saved as array in DB
+        course_title: t,
+        units,
+      });
+
+      if ((res as any)?.ok === false) {
+        alert((res as any)?.message || "Failed to update course.");
+      } else {
+        await onSaved();
+      }
+    } catch (e: any) {
+      alert(e?.message || "Failed to update course.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+      <div className="w-full max-w-4xl rounded-xl bg-white shadow-xl border border-gray-200">
+        <div className="flex items-center justify-between border-b px-4 py-3">
+          <div className="font-semibold">Edit Global Course</div>
+          <button className="rounded-md border px-3 py-1.5 text-sm" onClick={onClose}>
+            Close
+          </button>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 p-4">
+          {/* LEFT: search & pick a course */}
+          <div className="rounded-lg border">
+            <div className="px-3 py-2 bg-gray-50 font-semibold text-sm">Search course</div>
+            <div className="p-3">
+              <div className="relative">
+                <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-500" />
+                <input
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  placeholder="Type code or title (min 2 characters)…"
+                  className={cls(SOFT_INPUT, "pl-9")}
+                />
+              </div>
+            </div>
+            <div className="max-h-[50vh] overflow-auto divide-y">
+              {loading && (
+                <div className="p-3 text-sm text-neutral-500">Searching…</div>
+              )}
+              {!loading && query.trim().length >= 2 && results.length === 0 && (
+                <div className="p-3 text-sm text-neutral-500">No courses found.</div>
+              )}
+              {!loading &&
+                results.map((c) => {
+                  const codeText = Array.isArray(c.course_code)
+                    ? String((c.course_code as any[])[0] ?? "")
+                    : String(c.course_code ?? "");
+                  const isActive = selected && selected.course_id === c.course_id;
+
+                  return (
+                    <button
+                      key={c.course_id}
+                      type="button"
+                      onClick={() => pickCourse(c)}
+                      className={cls(
+                        "w-full text-left px-3 py-2 text-sm",
+                        isActive ? "bg-emerald-50" : "bg-white"
+                      )}
+                    >
+                      <div className="font-semibold text-emerald-700">{codeText}</div>
+                      <div className="text-[11px] text-neutral-600 truncate">
+                        {c.course_title}
+                      </div>
+                    </button>
+                  );
+                })}
+            </div>
+          </div>
+
+          {/* RIGHT: edit details */}
+          <div className="rounded-lg border">
+            <div className="px-3 py-2 bg-gray-50 font-semibold text-sm">Details</div>
+            <div className="p-3 space-y-3">
+              {!selected && (
+                <div className="text-sm text-neutral-500">
+                  Select a course on the left to edit its codes, title, and units.
+                </div>
+              )}
+
+              {selected && (
+                <>
+                  <div>
+                    <label className="text-xs font-medium text-slate-700 mb-1 block">
+                      Course Codes (multiple allowed)
+                    </label>
+
+                    {codeInputs.map((code, idx) => (
+                      <div
+                        key={idx}
+                        className="flex items-center gap-2 mb-2"
+                      >
+                        <input
+                          className={cls(SOFT_INPUT, "flex-1")}
+                          value={code}
+                          onChange={(e) => setCodeAt(idx, e.target.value)}
+                          placeholder={idx === 0 ? "e.g. CCPROG1" : "Alternative code"}
+                        />
+                        {codeInputs.length > 1 && (
+                          <button
+                            type="button"
+                            className="rounded-md border px-2 py-1 text-xs text-red-600 hover:bg-red-50"
+                            onClick={() => removeCodeRow(idx)}
+                          >
+                            Remove
+                          </button>
+                        )}
+                      </div>
+                    ))}
+
+                    <button
+                      type="button"
+                      className="mt-1 text-xs font-medium text-emerald-700 hover:underline"
+                      onClick={addCodeRow}
+                    >
+                      + Add another code
+                    </button>
+
+                    <p className="mt-1 text-[11px] text-slate-500">
+                      Each row will be saved as a separate entry in the{" "}
+                      <code>course_code</code> array in the database.
+                    </p>
+                  </div>
+
+                  <div>
+                    <label className="text-xs font-medium text-slate-700 mb-1 block">
+                      Course Title
+                    </label>
+                    <input
+                      className={SOFT_INPUT}
+                      value={title}
+                      onChange={(e) => setTitle(e.target.value)}
+                      placeholder="Course title"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-xs font-medium text-slate-700 mb-1 block">
+                      Units
+                    </label>
+                    <input
+                      type="number"
+                      step="0.5"
+                      className={SOFT_INPUT}
+                      value={unitsText}
+                      onChange={(e) => setUnitsText(e.target.value)}
+                      placeholder="3"
+                    />
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+
+        <div className="flex items-center justify-end gap-2 border-t px-4 py-3">
+          <button className="rounded-md border px-3 py-1.5 text-sm" onClick={onClose}>
+            Cancel
+          </button>
+          <button
+            disabled={saving || !selected}
+            className="rounded-md bg-emerald-700 px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50"
+            onClick={save}
+          >
+            <Check className="inline-block h-4 w-4 mr-1 align-[-2px]" />
+            Save changes
           </button>
         </div>
       </div>

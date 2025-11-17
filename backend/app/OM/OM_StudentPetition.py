@@ -12,22 +12,74 @@ COL_DEPARTMENTS = "departments"
 COL_USERS = "users"
 COL_ROLE_ASSIGN = "role_assignments"
 COL_USER_ROLES = "user_roles"
+COL_PREEN_COUNT = "preenlistment_count" 
 
 
 # --- helpers ---
+# --- helpers ---
 async def _active_term() -> Dict[str, Any]:
-    """Return the active term; fallback to latest AY/term_number."""
-    t = await db[COL_TERMS].find_one(
+    """
+    Return the WORKING / PLANNING term for OM student petitions.
+
+    Priority:
+    1) If there is an active (non-archived) pre-enlistment batch in
+       preenlistment_count, use that term_id.
+    2) Otherwise, use the *next* term after the current term
+       (where is_current = True or status = 'active').
+    3) If there is no "next" term configured, fall back to the current term
+       (or latest AY/term_number if nothing is flagged current/active).
+    """
+
+    # 1) Try to derive from an active pre-enlistment batch
+    pre_doc = await db[COL_PREEN_COUNT].find_one(
+        {"is_archived": {"$ne": True}},
+        {"_id": 0, "term_id": 1},
+    )
+    if pre_doc and pre_doc.get("term_id"):
+        t = await db[COL_TERMS].find_one(
+            {"term_id": pre_doc["term_id"]},
+            {"_id": 0, "term_id": 1, "acad_year_start": 1, "term_number": 1},
+        )
+        if t:
+            return t
+
+    # 2) Fallback: current term (status = active OR is_current = True)
+    current = await db[COL_TERMS].find_one(
         {"$or": [{"status": "active"}, {"is_current": True}]},
         {"_id": 0, "term_id": 1, "acad_year_start": 1, "term_number": 1},
     )
-    if t:
-        return t
-    last = await db[COL_TERMS].find(
-        {}, {"_id": 0, "term_id": 1, "acad_year_start": 1, "term_number": 1}
-    ).sort([("acad_year_start", -1), ("term_number", -1)]).limit(1).to_list(1)
-    return last[0] if last else {}
 
+    if not current:
+        # Same fallback as before: latest term by AY + term_number
+        last = await db[COL_TERMS].find(
+            {}, {"_id": 0, "term_id": 1, "acad_year_start": 1, "term_number": 1}
+        ).sort([("acad_year_start", -1), ("term_number", -1)]).limit(1).to_list(1)
+        current = last[0] if last else None
+
+    if not current:
+        # No terms configured at all
+        return {}
+
+    # 3) Compute the "next" term after the current term
+    next_terms = await db[COL_TERMS].find(
+        {
+            "$or": [
+                {"acad_year_start": {"$gt": current["acad_year_start"]}},
+                {
+                    "acad_year_start": current["acad_year_start"],
+                    "term_number": {"$gt": current["term_number"]},
+                },
+            ]
+        },
+        {"_id": 0, "term_id": 1, "acad_year_start": 1, "term_number": 1},
+    ).sort([("acad_year_start", 1), ("term_number", 1)]).limit(1).to_list(1)
+
+    if next_terms:
+        # Use the next term as the working/planning term
+        return next_terms[0]
+
+    # If no next term, stick with current (still better than returning nothing)
+    return current
 
 def _course_code_expr():
     # Normalize string | array to a single display code

@@ -321,12 +321,30 @@ async def faculty_by_section_first(sec_ids: List[str], term_id: str) -> Dict[str
     return out
 
 @router.get("/roomallocation")
-async def get_room_allocation(userId: str = Query(..., min_length=3)):
-    term_id = await resolve_term_id_with_sections_fallback()
+async def get_room_allocation(
+    userId: str = Query(..., min_length=3),
+    termId: Optional[str] = Query(None),
+):
+    # Prefer the explicit term coming from Pre-Enlistment (via the frontend).
+    # This keeps Room Allocation in sync with the term the APO is currently working on.
+    effective_term_id: Optional[str] = None
+    if termId:
+        t = await db[COL_TERMS].find_one(
+            {"term_id": termId},
+            {"_id": 0, "term_id": 1},
+        )
+        if t:
+            # Always honor a valid termId from the client
+            effective_term_id = termId
+
+    term_id = effective_term_id or await resolve_term_id_with_sections_fallback()
+
     if not term_id:
         return {
             "campus": {"campus_id": "", "campus_name": ""},
             "term_id": "",
+            "term_number": None,
+            "acad_year_start": None,
             "buildings": [],
             "timeBands": TIME_BANDS,
             "rooms": [],
@@ -336,7 +354,16 @@ async def get_room_allocation(userId: str = Query(..., min_length=3)):
             "courses": [],
         }
 
+    # Fetch term meta so FE can render "Term X · AY YYYY-YYYY"
+    term_doc = await db[COL_TERMS].find_one(
+        {"term_id": term_id},
+        {"_id": 0, "term_number": 1, "acad_year_start": 1},
+    )
+    term_number = term_doc.get("term_number") if term_doc else None
+    acad_year_start = term_doc.get("acad_year_start") if term_doc else None
+
     campus_id, college_id = await apo_scope(userId)
+
     if not campus_id:
         raise HTTPException(status_code=400, detail="Unable to resolve APO campus from role_assignments.")
 
@@ -412,8 +439,17 @@ async def get_room_allocation(userId: str = Query(..., min_length=3)):
         }
         for a in assigned_raw
     ]
-    # keep only those whose section is NOT in scope (to avoid duplicates)
-    assigned_out_of_scope = [x for x in assigned_norm if x.get("section_id") not in s_map]
+
+    # sections for the *current planning term* (all campuses/colleges)
+    in_term_sec_ids: Set[str] = set(s_map_all.keys())
+
+    # keep only those whose section belongs to this term but is NOT in APO scope
+    assigned_out_of_scope = [
+        x
+        for x in assigned_norm
+        if x.get("section_id") not in s_map
+        and x.get("section_id") in in_term_sec_ids
+    ]
 
     # union for building the room grid
     section_scheds_for_grid = section_scheds_scoped + assigned_out_of_scope
@@ -559,6 +595,8 @@ async def get_room_allocation(userId: str = Query(..., min_length=3)):
     return {
         "campus": campus,
         "term_id": term_id,
+        "term_number": term_number,
+        "acad_year_start": acad_year_start,
         "buildings": buildings,
         "timeBands": TIME_BANDS,
         "rooms": rooms_out,
@@ -575,9 +613,12 @@ async def post_room_allocation(
     action: Literal["addRoom", "updateRoom", "setAvailability", "assign", "unassign", "removeRoom"] = Query(...),
     payload: Dict[str, Any] = Body(...),
 ):
-    term_id = await resolve_term_id_with_sections_fallback()
+    # Prefer explicit planning term from the frontend (same term as GET /roomallocation)
+    payload_term_id = (payload.get("term_id") or "").strip()
+    term_id = payload_term_id or await resolve_term_id_with_sections_fallback()
     if not term_id:
         raise HTTPException(status_code=400, detail="No active term.")
+
     campus_id, college_id = await apo_scope(userId)
     if not campus_id:
         raise HTTPException(status_code=400, detail="Unable to resolve APO campus from role_assignments.")
@@ -745,19 +786,40 @@ async def post_room_allocation(
         if not sched:
             raise HTTPException(status_code=404, detail="Section has no schedule at this day/time.")
 
-        # prevent double-booking of the room
-        conflict = await db[COL_SCHEDS].find_one(
-            {
-                "section_id": {"$ne": section_id},
-                "day": {"$in": day_aliases(day_full)},
-                "start_time": st,
-                "end_time": et,
-                "room_id": room_id,
-            },
-            {"_id": 1},
-        )
-        if conflict:
-            raise HTTPException(status_code=400, detail="Room already assigned at this day/time.")
+        # prevent double-booking of the room, but only against sections
+        # that belong to the SAME term we are planning for
+        potential_conflicts = [
+            x
+            async for x in db[COL_SCHEDS].find(
+                {
+                    "section_id": {"$ne": section_id},
+                    "day": {"$in": day_aliases(day_full)},
+                    "start_time": st,
+                    "end_time": et,
+                    "room_id": room_id,
+                },
+                {"_id": 0, "section_id": 1},
+            )
+        ]
+
+        if potential_conflicts:
+            other_sec_ids = [
+                c.get("section_id") for c in potential_conflicts if c.get("section_id")
+            ]
+            if other_sec_ids:
+                # any of these sections in the *current planning term*?
+                in_same_term = await db[COL_SECTIONS].find_one(
+                    {
+                        "section_id": {"$in": other_sec_ids},
+                        "term_id": term_id,
+                    },
+                    {"_id": 1},
+                )
+                if in_same_term:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Room already assigned at this day/time.",
+                    )
 
         await db[COL_SCHEDS].update_one(
             {"schedule_id": sched["schedule_id"]}, {"$set": {"room_id": room_id, "updated_at": now()}}

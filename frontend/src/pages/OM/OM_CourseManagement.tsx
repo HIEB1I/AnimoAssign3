@@ -63,7 +63,7 @@ export default function OM_CourseManagement() {
         setClusters(["All Clusters", ...(opt.clusters || [])]);
         const ay = opt.activeTerm?.acad_year_start;
         const tn = opt.activeTerm?.term_number;
-        setTermLabel(ay ? `AY ${ay}-${ay + 1} · Term ${tn ?? "—"}` : "");
+        setTermLabel(ay ? `Term ${tn ?? "—"} · AY ${ay}-${ay + 1}` : "");
       } catch (e: any) {
         setErr(e?.response?.data?.detail || e?.message || "Failed to load options.");
       }
@@ -95,9 +95,9 @@ export default function OM_CourseManagement() {
     <main className="w-full px-8 py-8">
       <header className="mb-6">
         <h1 className="text-2xl font-bold">Course Management</h1>
-        <p className="text-sm text-gray-600">
-          Department offerings, coordinators, and syllabi {termLabel && `(${termLabel})`}
-        </p>
+          <p className="text-sm text-gray-600">
+            Manage courses with their coordinators, teaching composition, and syllabi for {termLabel || ""}
+          </p>
       </header>
 
       {err && <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{err}</div>}

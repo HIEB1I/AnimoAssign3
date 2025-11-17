@@ -147,7 +147,7 @@ export default function App() {
             <Route path="reports-analytics/load-risk" element={<OM_RP_LoadRisk />} />
           </Route>
 
-          {/* Redirects for old/external OM links -> new nested routes */}
+          {/* Redirects for old/external links -> new nested routes */}
           <Route path="/om/faculty-management" element={<Navigate to="/om/home/faculty-management" replace />} />
           <Route path="/om/course-management" element={<Navigate to="/om/home/course-management" replace />} />
           <Route path="/om/faculty-form" element={<Navigate to="/om/home/faculty-form" replace />} />
