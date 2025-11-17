@@ -16,7 +16,6 @@ COL_PREEN_COUNT = "preenlistment_count"
 
 
 # --- helpers ---
-# --- helpers ---
 async def _active_term() -> Dict[str, Any]:
     """
     Return the WORKING / PLANNING term for OM student petitions.
