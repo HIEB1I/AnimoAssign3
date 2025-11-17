@@ -5,6 +5,7 @@ ARG VITE_BASE=/
 ENV VITE_BASE=${VITE_BASE}
 COPY package*.json ./
 RUN npm install && npm ci
+RUN npm install xlsx
 COPY . .
 RUN npm run build
 
