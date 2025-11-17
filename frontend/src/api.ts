@@ -1229,7 +1229,10 @@ export type RoomScheduleCell = {
   day: Day;
   time_band: string;
   allowed?: boolean;
+  // section_ids that pass room_type + capacity checks for this cell
+  eligible_section_ids?: string[];
 };
+
 export type RoomWithSchedule = RoomDoc & { schedule: RoomScheduleCell[] };
 
 export type RoomAllocationResponse = {

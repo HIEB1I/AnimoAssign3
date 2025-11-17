@@ -35,7 +35,10 @@ type RoomCell = {
   time_band: string;          // "HH:MM – HH:MM"
   section_id?: string | null; // assigned section for that cell
   allowed?: boolean;
+  // backend-filtered ids: only sections that pass room_type + capacity checks
+  eligible_section_ids?: string[];
 };
+
 
 type RoomItem = {
   room_id: string;
@@ -287,20 +290,39 @@ function AllocateClassModal({
     return set;
   }, [rooms]);
 
+  // all sections that have a schedule on this day/timeBand
   const matchingSectionIds = useMemo(
-    () => sectionSchedules.filter((s) => s.day === day && s.time_band === timeBand).map((s) => s.section_id),
+    () =>
+      sectionSchedules
+        .filter((s) => s.day === day && s.time_band === timeBand)
+        .map((s) => s.section_id),
     [sectionSchedules, day, timeBand]
   );
 
-  const availableSections = useMemo(
-    () =>
-      sections.filter((sec) => {
-        if (!matchingSectionIds.includes(sec.section_id)) return false;
-        const key = `${sec.section_id}|${day}|${timeBand}`;
-        return !assigned.has(key);
-      }),
-    [sections, matchingSectionIds, assigned, day, timeBand]
-  );
+  // extra filter from the clicked cell's eligible_section_ids (capacity + room_type)
+  const eligibleFromCell = useMemo(() => {
+    const cell = room.schedule.find(
+      (c) => c.day === day && c.time_band === timeBand
+    );
+    return cell?.eligible_section_ids ?? null;
+  }, [room, day, timeBand]);
+
+  const availableSections = useMemo(() => {
+    // base ids: all sections that are scheduled at this day/time
+    let ids = matchingSectionIds;
+
+    // if backend provided a stricter list, intersect with it
+    if (eligibleFromCell && eligibleFromCell.length > 0) {
+      const eligibleSet = new Set(eligibleFromCell);
+      ids = ids.filter((id) => eligibleSet.has(id));
+    }
+
+    return sections.filter((sec) => {
+      if (!ids.includes(sec.section_id)) return false;
+      const key = `${sec.section_id}|${day}|${timeBand}`;
+      return !assigned.has(key);
+    });
+  }, [sections, matchingSectionIds, eligibleFromCell, assigned, day, timeBand]);
 
   const labelToId = useMemo(() => {
     const m: Record<string, string> = {};

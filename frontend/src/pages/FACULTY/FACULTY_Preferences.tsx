@@ -742,9 +742,12 @@ function EditForm({
       return { ...f, [key]: has ? arr.filter((v) => v !== value) : [...arr, value] };
     });
 
+  // Corrected showAE logic: Hide if on teaching break
   const showAE =
+    !isTeachingBreak &&
     ["Laguna Campus", "Either Campus"].includes(form.campus) &&
     !/fully online/i.test(form.delivery || "");
+    
   const prepNote =
     form.prefUnits && !isTeachingBreak
       ? (() => {
@@ -755,9 +758,6 @@ function EditForm({
           return "";
         })()
       : "";
-
-  // deadline date (used as max for return date)
-  const termEndDate = deadlineISO ? new Date(deadlineISO).toISOString().slice(0, 10) : "";
 
   return (
     <div className="w-full">
@@ -987,7 +987,8 @@ function EditForm({
                           onChange={(e) =>
                             setForm({ ...form, breakReturnDate: e.target.value })
                           }
-                          max={termEndDate || undefined}
+                          min={new Date().toISOString().split('T')[0]} // Prevent past dates
+                          // max restriction removed to allow future years
                         />
                         <div className="mt-1 text-[12px] text-neutral-500">
                           Must not be later than the current term.
@@ -1520,7 +1521,7 @@ function EditForm({
           )}
         </div>
 
-        {/* Right column: AE schedule (only when Laguna/Either) */}
+        {/* Right column: AE schedule (only when Laguna/Either and NOT on break) */}
         {step === 2 && showAE && (
           <div className="block">
             <AELine1Schedule />

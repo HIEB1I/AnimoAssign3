@@ -10,6 +10,8 @@
   },
   "dependencies": {
     "axios": "^1.12.2",
+    "jspdf": "^3.0.3",
+    "jspdf-autotable": "^5.0.2",
     "lucide-react": "^0.546.0",
     "papaparse": "^5.5.3",
     "react": "^18.3.1",
@@ -30,5 +32,8 @@
     "tailwindcss": "^4.1.14",
     "typescript": "^5.5.3",
     "vite": "^7.1.10"
+  },
+  "jspdf": {
+    "dompurify": "^3.2.6"
   }
 }

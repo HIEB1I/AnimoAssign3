@@ -22,7 +22,7 @@ import {
   type FMOptions,
   type FacultyUpsertPayload,
   updateChairFacultyEntry,
-  getChairHeader,
+  getChairHeader, // <--- ADDED THIS IMPORT
 } from "../../api";
 
 /* ---- Small shared bits (from ADMIN pattern) ---- */
@@ -322,16 +322,18 @@ type EditFacultyForm = {
 };
 
 export default function CHAIR_FacultyManagement() {
-  type ModalType = null | "schedule" | "history";
-
-  const [userId] = useState(() => {
+  // ---- ADDED: Session and userId derivation ----
+  const session = useMemo(() => {
     try {
-      const u = JSON.parse(localStorage.getItem("animo.user") || "null");
-      return u?.userId || u?.user_id || "";
+      return JSON.parse(localStorage.getItem("animo.user") || "null");
     } catch {
-      return "";
+      return null;
     }
-  });
+  }, []);
+  const userId = session?.userId || "";
+  // ----------------------------------------------
+
+  type ModalType = null | "schedule" | "history";
 
   // filters
   const [department, setDepartment] = useState("All Departments");
@@ -346,9 +348,12 @@ export default function CHAIR_FacultyManagement() {
   const [typeOptions, setTypeOptions] = useState<string[]>(["All Type"]);
 
   // profile header info
+  const [termLabel, setTermLabel] = useState<string>("");
+  
+  // ---- ADDED: profileSubtitle state ----
   //const [profileSubtitle, setProfileSubtitle] = useState<string>("");
   const [, setProfileSubtitle] = useState<string>("");
-  const [termLabel, setTermLabel] = useState<string>("");
+  // ---------------------------------------
 
   // table rows
   const [rows, setRows] = useState<FacultyRow[]>([]);
@@ -574,7 +579,6 @@ export default function CHAIR_FacultyManagement() {
     (async () => {
       try {
         const hdr = await getChairHeader(userId || undefined);
-        //if (hdr?.ok) setProfileSubtitle(hdr.profileSubtitle || "");
         if (hdr?.ok) setProfileSubtitle(hdr.profileSubtitle || "");
       } catch { /* ignore */ }
     })();
