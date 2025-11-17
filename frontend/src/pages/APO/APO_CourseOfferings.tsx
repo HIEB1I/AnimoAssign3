@@ -28,7 +28,8 @@ import {
   searchCourseCatalog,      
   createCatalogCourse, 
   getEligibleRoomsForOffering,          
-  importCurriculumCsv,          
+  importCurriculumCsv,    
+  editCatalogCourse,          
   type ApiConflict,
   type CreateCoursePayload,  
   type CourseCatalogItem           
@@ -816,6 +817,7 @@ const EligibleRoomSelect: React.FC<{
     batch_id?: string;
   } | null>(null);
   const [showCreateCourseModal, setShowCreateCourseModal] = useState(false);
+  const [showEditCourseModal, setShowEditCourseModal] = useState(false); // ← NEW
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [importBusy, setImportBusy] = useState(false);
   // Offerings collapse state (keyed by "ID::PROGRAM")
@@ -1678,7 +1680,7 @@ if (isGE) {
                 options={["All ID", ...currBatches.map((b) => b.code)]}
               />
 
-              {/* Right-side actions: Import CSV + Add Course */}
+              {/* Right-side actions: Import CSV + Add Course + Edit Course */}
               <div className="ml-auto flex items-center gap-2">
                 <button
                   type="button"
@@ -1698,6 +1700,16 @@ if (isGE) {
                 >
                   <Plus className="h-4 w-4" />
                   Add Course
+                </button>
+
+                {/* NEW: open global Edit Course modal */}
+                <button
+                  className="inline-flex items-center gap-2 rounded-md bg-emerald-600 px-4 py-2 text-sm font-medium text-white shadow-sm"
+                  onClick={() => setShowEditCourseModal(true)}
+                  title="Edit an existing course in the global catalog"
+                >
+                  <Edit className="h-4 w-4" />
+                  Edit Course
                 </button>
               </div>
 
@@ -1721,59 +1733,53 @@ if (isGE) {
                       try {
                         const rows = (result.data || []) as any[];
 
-                        const res = await importCurriculumCsv(
-                          user.userId,
-                          rows,
-                          {
-                            termId: curr?.term_id || data?.term_id,
-                            campus: curr?.campus?.campus_name || data?.campus?.campus_name,
-                          }
-                        );
+                        // ---- NEW: make termId and campusName guaranteed strings ----
+                        const termId = curr?.term_id ?? data?.term_id;
+                        const campusName =
+                          curr?.campus?.campus_name ?? data?.campus?.campus_name;
 
-                        console.log("CSV import response:", res);
-
-                        if (res.ok) {
-                          alert(`Imported ${res.imported} row(s).`);
-                          await loadCurriculum(); // refresh curriculum view
-                        } else {
-                          alert("Import did not succeed (ok = false). Check console for full response.");
-                        }
-
-                        if (res.errors?.length) {
-                          const errors = res.errors;
-                          console.error("Row-level CSV errors:", errors);
-
-                          const lines = errors.map((e: any) => {
-                            if (typeof e === "string") return e;
-
-                            // our backend puts the text in `detail`
-                            if (typeof e.detail === "string") return e.detail;
-
-                            // if detail is something else (array/object), stringify it
-                            if (e.detail) return JSON.stringify(e.detail);
-
-                            // fallback
-                            const row = e.row ?? "?";
-                            const msg = e.message || JSON.stringify(e);
-                            return `Row ${row}: ${msg}`;
+                        if (!termId || !campusName) {
+                          console.error("Missing term_id or campus_name for CSV import", {
+                            termId,
+                            campusName,
                           });
-
                           alert(
-                            "Some rows had issues during import:\n\n" +
-                              lines.join("\n")
+                            "Cannot import CSV: missing term or campus for this curriculum."
                           );
+                          return;
                         }
 
+           const response = await importCurriculumCsv(user.userId, {
+  rows,
+  term_id: termId,
+  campus_name: campusName,
+});
+
+console.log("CSV import response:", response);
+
+if (response.ok) {
+  const imported =
+    response.imported ?? response.curricula?.length ?? 0;
+
+  // NEW: always fall back to an empty array
+  const created = response.created_batches ?? [];
+  const createdText = created.length
+    ? `\nCreated batches: ${created.join(", ")}`
+    : "";
+
+  alert(
+    `CSV import successful.\n` +
+      `Imported ${imported} row(s).` +
+      createdText
+  );
+
+                        }
                       } catch (err: any) {
-                        console.error("CSV import failed:", err?.response?.data || err);
-                        alert(
-                          err?.response?.data?.detail ||
-                            err?.message ||
-                            "Failed to import CSV. See console for details."
-                        );
+                        console.error("CSV import failed:", err);
+                        alert(err.message || "CSV import failed");
                       } finally {
                         setImportBusy(false);
-                        input.value = ""; // allow picking the same file again
+                        if (fileInputRef.current) fileInputRef.current.value = "";
                       }
                     },
                     error: (err) => {
@@ -3135,9 +3141,22 @@ if (isGE) {
           }}
         />
       )}
+
+      {/* NEW: Global Edit Course modal (for courses collection) */}
+      {showEditCourseModal && user?.userId && (
+        <GlobalCourseEditModal
+          userId={user.userId}
+          onClose={() => setShowEditCourseModal(false)}
+          onSaved={async () => {
+            await loadCurriculum();      // refresh curriculum/list of courses
+            setShowEditCourseModal(false);
+          }}
+        />
+      )}
+
       {editorState?.open && curr && (
         <ProgramCoursesEditor
-          userId={user?.userId}                 // ← add this
+          userId={user?.userId}
           programId={editorState.program_id!}
           programCode={editorState.program_code!}
           batchId={editorState.batch_id!}
@@ -3328,6 +3347,305 @@ const PlanReviewModal: React.FC<{
           >
             <Check className="inline-block h-4 w-4 mr-1 align-[-2px]" />
             Approve
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+type GlobalCourseEditModalProps = {
+  userId: string;
+  onClose: () => void;
+  onSaved: () => void | Promise<void>;
+};
+
+const GlobalCourseEditModal: React.FC<GlobalCourseEditModalProps> = ({
+  userId,
+  onClose,
+  onSaved,
+}) => {
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState<CourseCatalogItem[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  const [selected, setSelected] = useState<CourseCatalogItem | null>(null);
+  const [codeInputs, setCodeInputs] = useState<string[]>([""]);
+  const [title, setTitle] = useState("");
+  const [unitsText, setUnitsText] = useState("");
+
+  const [saving, setSaving] = useState(false);
+  const requestIdRef = useRef(0);
+
+  // helpers for multi-code input UI
+  const setCodeAt = (index: number, value: string) => {
+    setCodeInputs((prev) => {
+      const next = [...prev];
+      next[index] = value.toUpperCase();
+      return next;
+    });
+  };
+
+  const addCodeRow = () => {
+    setCodeInputs((prev) => [...prev, ""]);
+  };
+
+  const removeCodeRow = (index: number) => {
+    setCodeInputs((prev) => prev.filter((_, i) => i !== index));
+  };
+
+
+  // Debounced search in the global course catalog
+  useEffect(() => {
+    const q = query.trim();
+    if (q.length < 2) {
+      setResults([]);
+      return;
+    }
+
+    const myId = ++requestIdRef.current;
+    const t = setTimeout(async () => {
+      setLoading(true);
+      try {
+        const resp = await searchCourseCatalog(userId, { q, limit: 100 });
+        const arr = Array.isArray((resp as any)?.results) ? (resp as any).results : [];
+        if (myId === requestIdRef.current) {
+          setResults(arr);
+        }
+      } catch {
+        if (myId === requestIdRef.current) {
+          setResults([]);
+        }
+      } finally {
+        if (myId === requestIdRef.current) {
+          setLoading(false);
+        }
+      }
+    }, 300);
+
+    return () => clearTimeout(t);
+  }, [query, userId]);
+
+  const pickCourse = (c: CourseCatalogItem) => {
+    setSelected(c);
+
+    const codesArr = Array.isArray(c.course_code)
+      ? (c.course_code as any[])
+          .map((x) => String(x || ""))
+          .filter(Boolean)
+      : [String(c.course_code || "")].filter(Boolean);
+
+    // Put each code into its own row
+    setCodeInputs(codesArr.length ? codesArr : [""]);
+
+    setTitle(c.course_title || "");
+    setUnitsText(typeof c.units === "number" ? String(c.units) : "");
+  };
+
+  const save = async () => {
+    if (!selected) {
+      alert("Please select a course first.");
+      return;
+    }
+
+    // normalize each input separately; ignore empty rows
+    const codes = codeInputs
+      .map((s) => normCode(s))
+      .filter(Boolean);
+
+    if (!codes.length) {
+      alert("Please enter at least one course code.");
+      return;
+    }
+
+    const t = title.trim();
+    if (!t) {
+      alert("Please enter a course title.");
+      return;
+    }
+
+    const u = unitsText.trim();
+    const units = u === "" ? null : Number(u);
+    if (u !== "" && Number.isNaN(units as number)) {
+      alert("Units must be a number.");
+      return;
+    }
+
+    setSaving(true);
+    try {
+      const res = await editCatalogCourse(userId, {
+        course_id: selected.course_id,
+        course_code: codes,      // will be saved as array in DB
+        course_title: t,
+        units,
+      });
+
+      if ((res as any)?.ok === false) {
+        alert((res as any)?.message || "Failed to update course.");
+      } else {
+        await onSaved();
+      }
+    } catch (e: any) {
+      alert(e?.message || "Failed to update course.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+      <div className="w-full max-w-4xl rounded-xl bg-white shadow-xl border border-gray-200">
+        <div className="flex items-center justify-between border-b px-4 py-3">
+          <div className="font-semibold">Edit Global Course</div>
+          <button className="rounded-md border px-3 py-1.5 text-sm" onClick={onClose}>
+            Close
+          </button>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 p-4">
+          {/* LEFT: search & pick a course */}
+          <div className="rounded-lg border">
+            <div className="px-3 py-2 bg-gray-50 font-semibold text-sm">Search course</div>
+            <div className="p-3">
+              <div className="relative">
+                <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-500" />
+                <input
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  placeholder="Type code or title (min 2 characters)…"
+                  className={cls(SOFT_INPUT, "pl-9")}
+                />
+              </div>
+            </div>
+            <div className="max-h-[50vh] overflow-auto divide-y">
+              {loading && (
+                <div className="p-3 text-sm text-neutral-500">Searching…</div>
+              )}
+              {!loading && query.trim().length >= 2 && results.length === 0 && (
+                <div className="p-3 text-sm text-neutral-500">No courses found.</div>
+              )}
+              {!loading &&
+                results.map((c) => {
+                  const codeText = Array.isArray(c.course_code)
+                    ? String((c.course_code as any[])[0] ?? "")
+                    : String(c.course_code ?? "");
+                  const isActive = selected && selected.course_id === c.course_id;
+
+                  return (
+                    <button
+                      key={c.course_id}
+                      type="button"
+                      onClick={() => pickCourse(c)}
+                      className={cls(
+                        "w-full text-left px-3 py-2 text-sm",
+                        isActive ? "bg-emerald-50" : "bg-white"
+                      )}
+                    >
+                      <div className="font-semibold text-emerald-700">{codeText}</div>
+                      <div className="text-[11px] text-neutral-600 truncate">
+                        {c.course_title}
+                      </div>
+                    </button>
+                  );
+                })}
+            </div>
+          </div>
+
+          {/* RIGHT: edit details */}
+          <div className="rounded-lg border">
+            <div className="px-3 py-2 bg-gray-50 font-semibold text-sm">Details</div>
+            <div className="p-3 space-y-3">
+              {!selected && (
+                <div className="text-sm text-neutral-500">
+                  Select a course on the left to edit its codes, title, and units.
+                </div>
+              )}
+
+              {selected && (
+                <>
+                  <div>
+                    <label className="text-xs font-medium text-slate-700 mb-1 block">
+                      Course Codes (multiple allowed)
+                    </label>
+
+                    {codeInputs.map((code, idx) => (
+                      <div
+                        key={idx}
+                        className="flex items-center gap-2 mb-2"
+                      >
+                        <input
+                          className={cls(SOFT_INPUT, "flex-1")}
+                          value={code}
+                          onChange={(e) => setCodeAt(idx, e.target.value)}
+                          placeholder={idx === 0 ? "e.g. CCPROG1" : "Alternative code"}
+                        />
+                        {codeInputs.length > 1 && (
+                          <button
+                            type="button"
+                            className="rounded-md border px-2 py-1 text-xs text-red-600 hover:bg-red-50"
+                            onClick={() => removeCodeRow(idx)}
+                          >
+                            Remove
+                          </button>
+                        )}
+                      </div>
+                    ))}
+
+                    <button
+                      type="button"
+                      className="mt-1 text-xs font-medium text-emerald-700 hover:underline"
+                      onClick={addCodeRow}
+                    >
+                      + Add another code
+                    </button>
+
+                    <p className="mt-1 text-[11px] text-slate-500">
+                      Each row will be saved as a separate entry in the{" "}
+                      <code>course_code</code> array in the database.
+                    </p>
+                  </div>
+
+                  <div>
+                    <label className="text-xs font-medium text-slate-700 mb-1 block">
+                      Course Title
+                    </label>
+                    <input
+                      className={SOFT_INPUT}
+                      value={title}
+                      onChange={(e) => setTitle(e.target.value)}
+                      placeholder="Course title"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-xs font-medium text-slate-700 mb-1 block">
+                      Units
+                    </label>
+                    <input
+                      type="number"
+                      step="0.5"
+                      className={SOFT_INPUT}
+                      value={unitsText}
+                      onChange={(e) => setUnitsText(e.target.value)}
+                      placeholder="3"
+                    />
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+
+        <div className="flex items-center justify-end gap-2 border-t px-4 py-3">
+          <button className="rounded-md border px-3 py-1.5 text-sm" onClick={onClose}>
+            Cancel
+          </button>
+          <button
+            disabled={saving || !selected}
+            className="rounded-md bg-emerald-700 px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50"
+            onClick={save}
+          >
+            <Check className="inline-block h-4 w-4 mr-1 align-[-2px]" />
+            Save changes
           </button>
         </div>
       </div>

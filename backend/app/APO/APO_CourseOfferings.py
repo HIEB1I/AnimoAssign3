@@ -41,6 +41,42 @@ COL_OVR_AUDIT = "override_audit"
 COL_PLANSTATE = "planning_state"
 
 DEFAULT_CAP = 20
+
+# ---------- helpers for ID generation ----------
+
+async def _next_seq(col_name: str, id_field: str, prefix: str, width: int = 4) -> str:
+    """Generate the next ID like BATCH0001 / CUR0001 without new collections."""
+    last = await db[col_name].find_one(
+        {id_field: {"$regex": f"^{prefix}\\d+$"}},
+        sort=[(id_field, -1)],
+    )
+    if not last:
+        return f"{prefix}{1:0{width}d}"
+
+    m = re.match(rf"^{prefix}(\d+)$", last[id_field])
+    if not m:
+        # fallback if format changed
+        return f"{prefix}{1:0{width}d}"
+
+    n = int(m.group(1)) + 1
+    return f"{prefix}{n:0{width}d}"
+
+
+async def _next_batch_id() -> str:
+    return await _next_seq(COL_BATCHES, "batch_id", "BATCH")
+
+
+async def _next_curriculum_id() -> str:
+    return await _next_seq(COL_CURRICULUM, "curriculum_id", "CUR")
+
+def _norm_course_code(s: str | None) -> str:
+    """Normalize course code: trim, uppercase, collapse spaces."""
+    if not s:
+        return ""
+    s = s.strip().upper()
+    s = re.sub(r"\s+", " ", s)
+    return s
+
 async def _get_planning_term() -> Dict[str, Any]:
     """
     Returns the 'planning' term for offerings/preen planning.
@@ -291,6 +327,93 @@ def _build_full_course_document(data: Dict[str, Any], *, course_id: str) -> Dict
         "updated_at": now(),
     }
     return doc
+async def _create_catalog_course(user_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Create a new course in the catalog, used by the Course Offerings UI.
+
+    This is the extracted logic from the old `if action == "catalog.create"` block
+    in `post_course_offerings`.
+    """
+    if not payload:
+        raise HTTPException(status_code=400, detail="Missing payload.")
+
+    # Required fields
+    course_code = _norm_code((payload.get("course_code") or ""))
+    course_title = (payload.get("course_title") or "").strip()
+    department_id = (payload.get("department_id") or "").strip()
+    program_level_in = payload.get("program_level")  # accepts UG/GS/UGS/GSM or labels
+    if not (course_code and course_title and department_id and program_level_in):
+        raise HTTPException(
+            status_code=422,
+            detail="course_code, course_title, department_id, and program_level are required."
+        )
+
+    # Validate department exists (optional but safer)
+    dep_exists = await db[COL_DEPARTMENTS].find_one({"department_id": department_id}, {"_id": 1})
+    if not dep_exists:
+        raise HTTPException(status_code=422, detail="department_id not found.")
+
+    # Units (optional)
+    units = None
+    if "units" in payload and payload.get("units") not in (None, ""):
+        try:
+            units = float(payload.get("units"))
+        except Exception:
+            raise HTTPException(status_code=422, detail="units must be a number.")
+
+    # Capacity for planning defaults — we use 'max_enrollee' in this codebase
+    max_enrollee = payload.get("max_enrollee", payload.get("capacity"))
+    if max_enrollee in (None, ""):
+        max_enrollee = DEFAULT_CAP
+    try:
+        max_enrollee = int(max_enrollee)
+        if max_enrollee < 0:
+            raise ValueError()
+    except Exception:
+        raise HTTPException(status_code=422, detail="max_enrollee/capacity must be a non-negative integer.")
+
+    # Optional description
+    description = (payload.get("description") or "").strip()
+
+    # Deduplicate by course_code (string or array[0])
+    dup = await db[COL_COURSES].find_one(
+        {"$or": [{"course_code": course_code}, {"course_code.0": course_code}]},
+        {"_id": 1}
+    )
+    if dup:
+        raise HTTPException(status_code=409, detail="Course with the same course_code already exists.")
+
+    # Generate a new course_id (sequential CRS0001... if available)
+    try:
+        course_id = await _next_course_id()
+    except Exception:
+        # Fall back to timestamp style if sequence fails
+        course_id = _id("CRS")
+
+    # Build a full doc with defaults for missing fields
+    doc = _build_full_course_document(
+        {
+            "course_code": course_code,            # string -> will be stored as ["CODE"]
+            "course_title": course_title,
+            "department_id": department_id,
+            "program_level": program_level_in,     # accept label or code; builder normalizes
+            "type_of_course": payload.get("type_of_course"),
+            "units": units,
+            "max_enrollee": max_enrollee,
+            "description": description,
+            # optional inputs if your UI ever sends them:
+            "min_enrollee": payload.get("min_enrollee"),
+            "room_type": payload.get("room_type"),
+            "syllabus": payload.get("syllabus"),
+            "course_coordinator": payload.get("course_coordinator"),
+            "prerequisites": payload.get("prerequisites"),
+            "teaching_team": payload.get("teaching_team"),
+        },
+        course_id=course_id,
+    )
+
+    await db[COL_COURSES].insert_one(doc)
+    return {"ok": True, "course": _clean_mongo_doc(doc)}
 
 # ------------ utils ------------
 def now() -> datetime:
@@ -588,6 +711,198 @@ async def apo_scope(user_id: str) -> Tuple[Optional[str], Optional[str]]:
         campus_id = (u or {}).get("campus_id")
 
     return (campus_id, college_id)
+async def apo_import_curriculum_csv(userId: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Import curriculum rows from CSV.
+
+    Expected payload from frontend:
+    {
+        "rows": [
+          {
+            "Batch": "ID 126",
+            "Program Level": "Undergraduate",
+            "Program": "BSCS-ST",
+            "Term Number": "1",
+            "Academic Year": "2027",
+            "Campus": "Manila",
+            "Course 1": "CCDSALG",
+            "Course 2": "CCPROG2",
+            "Course 3": "ITSTRAG"
+          },
+          ...
+        ],
+        "term_id": "TERM0015",
+        "campus_name": "Manila"
+    }
+    """
+    rows = payload.get("rows") or []
+    term_id = payload.get("term_id")
+    campus_name = payload.get("campus_name")
+
+    if not isinstance(rows, list) or not term_id or not campus_name:
+        raise HTTPException(
+            status_code=400,
+            detail="rows, term_id and campus_name are required for import_curriculum_csv",
+        )
+
+    # Validate term
+    term = await db[COL_TERMS].find_one({"term_id": term_id})
+    if not term:
+        raise HTTPException(status_code=400, detail=f"Unknown term_id {term_id!r}")
+
+    # Resolve campus_name -> campus_id
+    campus = await db["campuses"].find_one(
+        {"$or": [{"campus_name": campus_name}, {"campus_id": campus_name}]}
+    )
+    if not campus:
+        raise HTTPException(status_code=400, detail=f"Unknown campus {campus_name!r}")
+    campus_id = campus["campus_id"]
+
+    created_batches: List[str] = []
+    updated_curricula: List[Dict[str, Any]] = []
+
+    for raw in rows:
+        if not raw:
+            continue
+
+        # ---- CSV columns ----
+        batch_code = (str(raw.get("Batch") or raw.get("batch") or "")).strip()
+        program_level = (str(raw.get("Program Level") or raw.get("ProgramLevel") or "")).strip()
+        program_code = (str(raw.get("Program") or raw.get("Program Code") or "")).strip()
+
+        # not strictly needed for DB, but read them if you want to log/use later
+        term_number_csv = raw.get("Term Number") or raw.get("TermNumber")
+        acad_year_csv = raw.get("Academic Year") or raw.get("AY")
+
+        if not batch_code or not program_code:
+            # skip incomplete row
+            continue
+
+        # 1) Resolve program_id from Program column (e.g., "BSCS-ST")
+        program = await db[COL_PROGRAMS].find_one({"program_code": program_code})
+        if not program:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Program {program_code!r} not found in programs collection",
+            )
+        program_id = program["program_id"]
+
+        # 2) Ensure batch exists (CSV "Batch" = batches.batch_code)
+        batch = await db[COL_BATCHES].find_one(
+            {"batch_code": batch_code, "program_id": program_id}
+        )
+
+        if not batch:
+            # Generate next batch_id, e.g., BATCH0001, BATCH0002, ...
+            last_batch = await db[COL_BATCHES].find(
+                {"batch_id": {"$regex": r"^BATCH[0-9]+$"}}
+            ).sort("batch_id", -1).limit(1).to_list(1)
+            if last_batch:
+                last_num = int(last_batch[0]["batch_id"][5:])
+            else:
+                last_num = 0
+            batch_id = f"BATCH{last_num + 1:04d}"
+
+            batch_doc = {
+                "batch_id": batch_id,
+                "batch_code": batch_code,      # <-- "ID 126"
+                "program_id": program_id,
+                "intake_term_id": term_id,
+                "curriculum_id": None,         # filled after curriculum insert
+                "status": "active",
+                "created_at": datetime.utcnow(),
+                "updated_at": datetime.utcnow(),
+            }
+            await db[COL_BATCHES].insert_one(batch_doc)
+            created_batches.append(batch_id)
+        else:
+            batch_id = batch["batch_id"]
+
+        # 3) Collect course codes from Course 1, Course 2, ...
+        course_codes: List[str] = []
+        for key, value in raw.items():
+            if key.lower().startswith("course"):
+                v = str(value or "").strip()
+                if v:
+                    course_codes.append(v)
+
+        if not course_codes:
+            continue
+
+        # 4) Resolve course_ids using courses.course_code (ARRAY)
+        course_docs = await db[COL_COURSES].find(
+            {"course_code": {"$in": course_codes}}
+        ).to_list(None)
+
+        found_codes = {
+            code for doc in course_docs for code in doc.get("course_code", [])
+        }
+        missing = sorted(set(course_codes) - found_codes)
+        if missing:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Unknown course_code(s) in CSV for program {program_code!r}: "
+                    + ", ".join(missing)
+                ),
+            )
+
+        course_ids = [doc["course_id"] for doc in course_docs]
+
+        # 5) Upsert curriculum (one per batch_id + term_id + campus_id)
+        existing_cur = await db[COL_CURRICULUM].find_one(
+            {"batch_id": batch_id, "term_id": term_id, "campus_id": campus_id}
+        )
+        if existing_cur:
+            curriculum_id = existing_cur["curriculum_id"]
+        else:
+            last_cur = await db[COL_CURRICULUM].find(
+                {"curriculum_id": {"$regex": r"^CUR[0-9]+$"}}
+            ).sort("curriculum_id", -1).limit(1).to_list(1)
+            if last_cur:
+                last_num = int(last_cur[0]["curriculum_id"][3:])
+            else:
+                last_num = 0
+            curriculum_id = f"CUR{last_num + 1:04d}"
+
+        curriculum_doc = {
+            "curriculum_id": curriculum_id,
+            "batch_id": batch_id,
+            "program_id": program_id,
+            "term_id": term_id,
+            "campus_id": campus_id,
+            # *** IMPORTANT: list of course_id strings ***
+            "course_list": course_ids,
+            "created_at": datetime.utcnow(),
+            "updated_at": datetime.utcnow(),
+        }
+
+        await db[COL_CURRICULUM].update_one(
+            {"curriculum_id": curriculum_id},
+            {"$set": curriculum_doc},
+            upsert=True,
+        )
+
+        # 6) Link batch -> curriculum
+        await db[COL_BATCHES].update_one(
+            {"batch_id": batch_id},
+            {"$set": {"curriculum_id": curriculum_id, "updated_at": datetime.utcnow()}},
+        )
+
+        updated_curricula.append(
+            {
+                "batch_id": batch_id,
+                "curriculum_id": curriculum_id,
+                "course_count": len(course_ids),
+            }
+        )
+
+    return {
+        "ok": True,
+        "imported": len(updated_curricula),
+        "created_batches": created_batches,
+        "curricula": updated_curricula,
+    }
 
 async def campus_meta(campus_id: Optional[str]) -> Dict[str, str]:
     if not campus_id:
@@ -1908,8 +2223,11 @@ async def get_course_offerings(
     exclude: Optional[str] = Query(None),
     section_id: Optional[str] = Query(None),
     course_id: Optional[str] = Query(None),
-    slot: Optional[int] = Query(None),               # <-- new (optional)
-    schedule_id: Optional[str] = Query(None),        # <-- new (fixes the error)
+    slot: Optional[int] = Query(None),              
+    schedule_id: Optional[str] = Query(None),      
+    # NEW: used only when action == "catalogSearch"
+    q: Optional[str] = Query(None),
+    limit: int = Query(20),
 ):
 
     # Use PLANNING term (next term after is_current), same as Preenlistment
@@ -2720,9 +3038,10 @@ async def post_course_offerings(
         "addRow", "editRow", "deleteRow", "forward",
         "curriculumAddCourse", "curriculumEditCourse", "curriculumRemoveCourse",
         "approvePlan",
-        "courseCatalog",
-        "catalog.create",
+        "courseCatalog", "search_catalog",
+        "catalog.create", 
         "curriculumImportCsv", "curriculum.importCsv",
+        "import_curriculum_csv"
     ] = Query(...),
     payload: Optional[Dict[str, Any]] = Body(None),
 ):
@@ -2744,7 +3063,7 @@ async def post_course_offerings(
     prefix_default = campus_section_prefix(campus.get("campus_name", "")) or ""
 
     # ---------- NEW: CSV CURRICULUM IMPORT ----------
-    if action in ("curriculumImportCsv", "curriculum.importCsv"):
+    if action in ("curriculumImportCsv", "curriculum.importCsv", "import_curriculum_csv"):
         if payload is None:
             raise HTTPException(status_code=400, detail="Missing payload.")
 
@@ -2793,6 +3112,10 @@ async def post_course_offerings(
         for idx, raw in enumerate(rows, start=1):
             try:
                 row = raw or {}
+
+                # --- NEW: skip rows that are completely empty (common trailing CSV row) ---
+                if not any((str(v).strip() for v in row.values() if v is not None)):
+                    continue
 
                 batch_label        = _get(row, "Batch")
                 program_level_lbl  = _get(row, "Program Level", "Level")
@@ -3012,14 +3335,16 @@ async def post_course_offerings(
             "errors": errors,
         }
     
-    if action == "courseCatalog":
+    if action in ("courseCatalog", "search_catalog"):
         # inputs
         q_raw = (payload or {}).get("q") or ""
         req_limit = int((payload or {}).get("limit", 500))
         limit = max(1, min(req_limit, 1000))  # clamp
 
-        department_id = (payload or {}).get("department_id") or None
-        program_level = (payload or {}).get("program_level") or None  # accepts 'UGS'/'GSM' or 'Undergraduate'/'Graduate Studies'
+        body = payload or {}
+        department_id = body.get("department_id") or body.get("departmentId") or None
+        # accept either program_level or level from the UI
+        program_level = body.get("program_level") or body.get("level") or None  # 'UGS'/'GSM' or 'Undergraduate'/'Graduate'
 
         # base filter
         flt: Dict[str, Any] = {}
@@ -3278,26 +3603,55 @@ async def post_course_offerings(
     if action == "curriculumEditCourse":
         if not payload:
             raise HTTPException(status_code=400, detail="Missing payload.")
+
         pid = (payload.get("program_id") or "").strip()
         bid = (payload.get("batch_id") or "").strip()
-        old_cid = (payload.get("old_course_id") or "").strip()
+        # allow either old_course_id OR course_id from the UI
+        old_cid = (
+            (payload.get("old_course_id") or "")
+            or (payload.get("course_id") or "")
+        ).strip()
         new_cid = (payload.get("new_course_id") or "").strip()
         upd = payload.get("update_course")
-        if not (pid and bid and old_cid):
-            raise HTTPException(status_code=422, detail="program_id, batch_id, old_course_id are required.")
 
-        cur_doc = await db[COL_CURRICULUM].find_one(
-            {"term_id": term_id, "campus_id": campus_id, "program_id": pid, "batch_id": bid}
-        )
-        if not cur_doc:
-            raise HTTPException(status_code=404, detail="Curriculum not found.")
-
+        # ---- CASE 1: EDIT GLOBAL COURSE FIELDS (code/title/units) ----
         if upd:
+            if not old_cid:
+                raise HTTPException(
+                    status_code=422,
+                    detail="old_course_id (or course_id) is required when updating a course."
+                )
+
             f: Dict[str, Any] = {}
+
+            # 1) course_code (CAN BE MULTIPLE)
+            #    Accepts:
+            #      - "CCINF 1"
+            #      - "CCINF 1, CCINF 1L"
+            #      - ["CCINF 1", "CCINF 1L"]
+            if "course_code" in upd:
+                raw_codes = upd.get("course_code")
+
+                if isinstance(raw_codes, str) and "," in raw_codes:
+                    raw_codes = [
+                        part.strip()
+                        for part in raw_codes.split(",")
+                        if str(part).strip()
+                    ]
+
+                codes_list = _as_list(raw_codes)
+                if codes_list:
+                    f["course_code"] = codes_list
+
+            # 2) course_title
             if "course_title" in upd:
                 f["course_title"] = (upd.get("course_title") or "").strip()
+
+            # 3) program_level (optional, still supported)
             if "program_level" in upd and upd.get("program_level"):
                 f["program_level"] = level_code(upd.get("program_level"))
+
+            # 4) units
             if "units" in upd:
                 units_val = upd.get("units")
                 if units_val in (None, ""):
@@ -3306,18 +3660,52 @@ async def post_course_offerings(
                     try:
                         f["units"] = float(units_val)
                     except Exception:
+                        # silently ignore invalid units (same behavior as before)
                         pass
+
             if f:
-                await db[COL_COURSES].update_one({"course_id": old_cid}, {"$set": {**f, "updated_at": now()}})
+                res = await db[COL_COURSES].update_one(
+                    {"course_id": old_cid},
+                    {"$set": {**f, "updated_at": now()}}
+                )
+                if res.matched_count == 0:
+                    raise HTTPException(status_code=404, detail="Course not found.")
+
             return {"ok": True, "course_id": old_cid}
 
+        # ---- CASE 2: SWAP COURSE IN A SPECIFIC CURRICULUM (old_id -> new_id) ----
+        if not (pid and bid and old_cid):
+            raise HTTPException(
+                status_code=422,
+                detail="program_id, batch_id, old_course_id are required when swapping a course in the curriculum."
+            )
+
+        cur_doc = await db[COL_CURRICULUM].find_one(
+            {
+                "term_id": term_id,
+                "campus_id": campus_id,
+                "program_id": pid,
+                "batch_id": bid,
+            }
+        )
+        if not cur_doc:
+            raise HTTPException(status_code=404, detail="Curriculum not found.")
+
         if not new_cid:
-            raise HTTPException(status_code=422, detail="new_course_id or update_course must be provided.")
+            raise HTTPException(
+                status_code=422,
+                detail="new_course_id or update_course must be provided."
+            )
+
         clist = [c for c in ensure_list(cur_doc.get("course_list")) if c != old_cid]
         clist.append(new_cid)
-        await db[COL_CURRICULUM].update_one({"_id": cur_doc["_id"]}, {"$set": {"course_list": clist, "updated_at": now()}})
-        return {"ok": True, "course_id": new_cid}
 
+        await db[COL_CURRICULUM].update_one(
+            {"_id": cur_doc["_id"]},
+            {"$set": {"course_list": clist, "updated_at": now()}}
+        )
+        return {"ok": True, "course_id": new_cid}
+    
     if action == "curriculumRemoveCourse":
         if not payload:
             raise HTTPException(status_code=400, detail="Missing payload.")
