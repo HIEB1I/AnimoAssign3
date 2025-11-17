@@ -339,13 +339,23 @@ async def facultymanagement_handler(
         type_map = {"FT": "Full-Time", "PT": "Part-Time"}
         faculty_types = sorted({type_map.get(c, c) for c in codes if c})
 
-        terms = [t async for t in db[COL_TERMS]
-                 .find({}, {"_id": 0, "acad_year_start": 1})
-                 .sort([("acad_year_start", -1)])]
+        # --- HISTORY LOGIC ---
+        # Get AYs from *all* terms, not just recent ones, for the dropdown
+        terms_pipeline: List[Dict[str, Any]] = [
+            {"$match": {"faculty_id": {"$exists": True}}}, # Look in assignments
+            {"$lookup": {"from": "sections", "localField": "section_id", "foreignField": "section_id", "as": "sec"}},
+            {"$unwind": {"path": "$sec", "preserveNullAndEmptyArrays": True}},
+            {"$lookup": {"from": "terms", "localField": "sec.term_id", "foreignField": "term_id", "as": "t"}},
+            {"$unwind": {"path": "$t", "preserveNullAndEmptyArrays": True}},
+            {"$project": {"_id": 0, "ay": "$t.acad_year_start"}},
+            {"$group": {"_id": "$ay"}},
+        ]
+        vals = [r async for r in db[COL_ASSIGNMENTS].aggregate(terms_pipeline)]
         ay_list = sorted(
-            {t.get("acad_year_start") for t in terms if t.get("acad_year_start")},
+            {int(r["_id"]) for r in vals if isinstance(r.get("_id"), int)},
             reverse=True
         )
+        # --- END HISTORY LOGIC ---
 
         active_term_obj = await _active_term()
 
@@ -353,7 +363,7 @@ async def facultymanagement_handler(
             "ok": True,
             "departments": department_options,
             "facultyTypes": faculty_types,
-            "academicYears": ay_list,
+            "academicYears": ay_list, # Now reflects all years from assignments
             "activeTerm": active_term_obj,
         }
 
@@ -434,7 +444,7 @@ async def facultymanagement_handler(
                             "$cond": [
                                 {"$eq": ["$u.status", True]},
                                 "Active",
-                                "On Leave",
+                                "On Leave", # Default to On Leave if status is not explicitly True
                             ]
                         },
                     ]
@@ -490,8 +500,9 @@ async def facultymanagement_handler(
             active = await _active_term()
             termId = active.get("term_id")
 
+        # We remove "is_archived": False to get all assignments for the term
         pipeline = [
-            {"$match": {"faculty_id": facultyId, "is_archived": False}},
+            {"$match": {"faculty_id": facultyId}},
             {"$lookup": {
                 "from": "sections",
                 "localField": "section_id",
@@ -503,6 +514,9 @@ async def facultymanagement_handler(
 
         if termId:
             pipeline.append({"$match": {"sec.term_id": termId}})
+        else:
+            # If no term specified, just return empty
+            return {"ok": True, "term_id": termId, "teaching_load": []}
 
         pipeline.extend([
             {"$lookup": {"from": "courses", "localField": "sec.course_id", "foreignField": "course_id", "as": "course"}},
@@ -583,8 +597,11 @@ async def facultymanagement_handler(
         dept_fallback_campus = await _dept_fallback_campus_name(department_id)
 
         # Pipeline mirrors FACULTY_History "fetch"
+        # --- START CHANGE ---
+        # Removed "is_archived": False to fetch ALL history
         pipeline = [
-            {"$match": {"faculty_id": facultyId, "is_archived": False}},
+            {"$match": {"faculty_id": facultyId}},
+        # --- END CHANGE ---
             {"$lookup": {"from": "sections", "localField": "section_id", "foreignField": "section_id", "as": "sec"}},
             {"$unwind": {"path": "$sec", "preserveNullAndEmptyArrays": True}},
             {"$lookup": {"from": "courses", "localField": "sec.course_id", "foreignField": "course_id", "as": "course"}},
@@ -723,7 +740,7 @@ async def facultymanagement_handler(
         if existing:
             raise HTTPException(status_code=409, detail="A user with this email already exists.")
 
-        dept_id = "DEPT0001"
+        dept_id = "DEPT0001" # Default or fallback
         if dept_name:
             dept_doc = await db[COL_DEPARTMENTS].find_one(
                 {"$or": [{"department_name": dept_name}, {"dept_name": dept_name}]},

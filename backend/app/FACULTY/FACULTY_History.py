@@ -91,7 +91,7 @@ async def history_handler(
     if action == "options":
         # Distinct AYs derived from sections -> terms
         pipeline: List[Dict[str, Any]] = [
-            {"$match": {"faculty_id": faculty.get("faculty_id"), "is_archived": False}},
+            {"$match": {"faculty_id": faculty.get("faculty_id")}},
             {"$lookup": {"from": "sections", "localField": "section_id", "foreignField": "section_id", "as": "sec"}},
             {"$unwind": {"path": "$sec", "preserveNullAndEmptyArrays": True}},
             {"$lookup": {"from": "terms", "localField": "sec.term_id", "foreignField": "term_id", "as": "t"}},
@@ -121,7 +121,7 @@ async def history_handler(
 
     # ---------- fetch (list) ----------
     if action == "fetch":
-        # Normalize AY filter
+        # Normalize AY filter (parameter is now ignored for fetch, but kept for 'q' logic)
         ay_norm = None
         if ay:
             s = str(ay).upper().replace("AY", "").strip()
@@ -133,7 +133,7 @@ async def history_handler(
 
         # Full join: assignments -> sections -> courses -> terms -> schedules -> rooms -> campuses
         pipeline: List[Dict[str, Any]] = [
-            {"$match": {"faculty_id": faculty.get("faculty_id"), "is_archived": False}},
+            {"$match": {"faculty_id": faculty.get("faculty_id")}},
             {"$lookup": {"from": "sections", "localField": "section_id", "foreignField": "section_id", "as": "sec"}},
             {"$unwind": {"path": "$sec", "preserveNullAndEmptyArrays": True}},
             {"$lookup": {"from": "courses", "localField": "sec.course_id", "foreignField": "course_id", "as": "course"}},
@@ -166,9 +166,15 @@ async def history_handler(
             }},
         ]
 
+        # --- CHANGE ---
+        # We no longer filter by Academic Year on the backend.
+        # The frontend will receive all rows and filter locally.
+        #
         # Server-side filtering by AY if provided
-        if ay_norm is not None:
-            pipeline.append({"$match": {"ay_start": ay_norm}})
+        # if ay_norm is not None:
+        #     pipeline.append({"$match": {"ay_start": ay_norm}})
+        #
+        # --- END CHANGE ---
 
         # Group back per section, collect up to 2 meeting patterns (sorted by day)
         pipeline += [

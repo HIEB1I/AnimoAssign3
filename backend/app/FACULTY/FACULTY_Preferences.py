@@ -523,17 +523,31 @@ async def preferences_root(
       if not fac:
           return {"ok": True, "preferences": []}
 
-      tid = termId or await _active_term_id()
-      q = {"faculty_id": fac["faculty_id"]}
-      if tid:
-          q["term_id"] = tid
+      # --- START CHANGE ---
+      # Original logic filtered by the active term_id, which caused
+      # previous preferences not to show up.
+      # tid = termId or await _active_term_id()
+      # q = {"faculty_id": fac["faculty_id"]}
+      # if tid:
+      #     q["term_id"] = tid
 
+      # New logic:
+      # Always fetch all preferences for the faculty.
+      # We will sort by latest submission, and the frontend (which
+      # already takes preferences[0]) will display the latest one.
+      q = {"faculty_id": fac["faculty_id"]}
+
+      # Find all preferences, sort by latest submission date (descending)
       cursor = db.faculty_preferences.find(q, {"_id": 0}).sort([("submitted_at", -1)])
+      # --- END CHANGE ---
+      
       prefs: List[Dict[str, Any]] = []
       async for p in cursor:
           p = await _enrich_pref(p)
           p = await _expand_kac_names(p)
           prefs.append(p)
+          
+      # The frontend will use prefs[0] as the latest preference to display.
       return {"ok": True, "preferences": prefs}
 
   if action == "submit":
@@ -548,7 +562,8 @@ async def preferences_root(
       term_doc = await _active_term_doc()
       if not term_doc:
           raise HTTPException(status_code=400, detail="Active term not found; cannot submit preferences.")
-      term_id = termId or term_doc.get("term_id")
+      # The `termId` from query is not used here; submission is always for the active/next term.
+      term_id = term_doc.get("term_id")
       if not term_id:
           raise HTTPException(status_code=400, detail="Active term not found; cannot submit preferences.")
 
