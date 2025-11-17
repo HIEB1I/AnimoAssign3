@@ -190,7 +190,7 @@ export default function OM_RP_AvailabilityForecasting() {
   const [error, setError] = useState<string | null>(null);
 
   const [active, setActive] = useState<{ d1: DayCode; d2: DayCode; slot: string } | null>(null);
-  const title = "Faculty Propensity-to-Assign — Top 5 per Faculty (Pre-Survey)";
+  const title = "Faculty Availability Forecasting (Pre-Survey)";
   const subtitle = "Numbers show how many faculty have this paired slot in their top 5 strongest slots.";
   const right = <div className="hidden sm:block text-xs text-zinc-400"></div>;
 
