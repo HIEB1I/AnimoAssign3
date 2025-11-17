@@ -18,53 +18,16 @@ COL_PREEN_COUNT = "preenlistment_count"
 
 async def _active_term() -> Dict[str, Any]:
     """
-    Return the WORKING / PLANNING term for a module.
+    Return the PLANNING term (The term AFTER the currently active term).
 
-    Selection rules (in order):
-
-    (a) Prefer active pre-enlistment batch:
-        - Look up a document in preenlistment_count where is_archived != True.
-        - If found and it has term_id, fetch that term from terms and return
-          { term_id, acad_year_start, term_number }.
-
-    (b) Otherwise, find the “current” term:
-        - Query terms where any of these indicate current:
-            status: "active" or "Active"
-            is_current: True
-            is_active: True
-            active: True
-        - Project only term_id, acad_year_start, term_number.
-
-    (c) If no “current” term matches, fall back to the latest term:
-        - Sort all terms by acad_year_start DESC, term_number DESC and take 1.
-
-        If there are still no terms at all, return {}.
-
-    (d) Compute the planning term (next term):
-        - Given the current term from (b)/(c), search terms where:
-            acad_year_start > current.acad_year_start
-            OR
-            acad_year_start == current.acad_year_start
-            AND term_number > current.term_number
-        - Sort by acad_year_start ASC, term_number ASC and take 1.
-        - If a “next” term exists, return that.
-        - Otherwise, return the current term.
+    Logic:
+    1. Find the "Active/Current" term in the `terms` collection.
+    2. Query for the immediate next term (Next Term Number OR Next Acad Year).
+    3. If a next term exists, return it.
+    4. If no next term exists (end of configured terms), return the current active term.
     """
 
-    # (a) Active pre-enlistment batch → use its term
-    pre_doc = await db[COL_PREEN_COUNT].find_one(
-        {"is_archived": {"$ne": True}},
-        {"_id": 0, "term_id": 1},
-    )
-    if pre_doc and pre_doc.get("term_id"):
-        t = await db[COL_TERMS].find_one(
-            {"term_id": pre_doc["term_id"]},
-            {"_id": 0, "term_id": 1, "acad_year_start": 1, "term_number": 1},
-        )
-        if t:
-            return t
-
-    # (b) “Current” term by flags
+    # (1) Find "Current" term by flags
     current = await db[COL_TERMS].find_one(
         {
             "$or": [
@@ -78,7 +41,7 @@ async def _active_term() -> Dict[str, Any]:
         {"_id": 0, "term_id": 1, "acad_year_start": 1, "term_number": 1},
     )
 
-    # (b.5) Fallback to latest term if no current flagged
+    # Fallback: If no term is flagged active, take the latest one based on date
     if not current:
         last = await db[COL_TERMS].find(
             {},
@@ -88,11 +51,12 @@ async def _active_term() -> Dict[str, Any]:
         ).limit(1).to_list(1)
         current = last[0] if last else None
 
-    # (c) No terms at all → empty dict
+    # If still no terms exist in DB, return empty
     if not current:
         return {}
 
-    # (d) Try to find the "next" term after current
+    # (2) Find the "Next" term (Planning Term)
+    # Strict Logic: Start Year > Current OR (Same Year AND Term > Current)
     next_terms = await db[COL_TERMS].find(
         {
             "$or": [
@@ -105,6 +69,7 @@ async def _active_term() -> Dict[str, Any]:
         },
         {"_id": 0, "term_id": 1, "acad_year_start": 1, "term_number": 1},
     ).sort(
+        # Sort ASC to get the immediate next term
         [("acad_year_start", 1), ("term_number", 1)]
     ).limit(1).to_list(1)
 
@@ -113,7 +78,6 @@ async def _active_term() -> Dict[str, Any]:
 
     # No “next” term configured → stick with current
     return current
-
 
 
 # ---------------- Models (response helpers) ----------------
@@ -173,8 +137,7 @@ async def chair_plantilla_get(
     """
     GET /api/chair/plantilla?action=...
     - header: profile/term labels + defaults
-    - fetch : plantilla rows for current term + user's department (chair scope)
-    - options: left for parity (not used by UI)
+    - fetch : plantilla rows for PLANNING term + user's department
     """
     if action == "header":
         profile_name = " "
@@ -194,13 +157,9 @@ async def chair_plantilla_get(
             if sp.get("position_title"):
                 profile_subtitle = sp["position_title"]
            
-            # --- Append department name beside the role in the subtitle (no hardcoded IDs) ---
             dept_name: Optional[str] = None
-
-            # 1) Prefer an explicit department on the staff profile
             dept_id = sp.get("department_id") or sp.get("dept_id")
 
-            # 2) Otherwise: most recent *active* role assignment that has a department scope
             if not dept_id:
                 ra = await db.role_assignments.find(
                     {
@@ -215,39 +174,31 @@ async def chair_plantilla_get(
                 if ra:
                     dept_id = ra[0].get("department_id") or ra[0].get("dept_id")
 
-            # 2b) Fallback: if this user also has a faculty profile, use its department_id
             if not dept_id:
                 fprof = await db.faculty_profiles.find_one({"user_id": userId}) or {}
                 dept_id = fprof.get("department_id") or fprof.get("dept_id")
 
-            # 3) Resolve department name from departments collection
             if dept_id:
                 d = await db.departments.find_one({"department_id": dept_id}) \
                     or await db.departments.find_one({"dept_id": dept_id}) \
                     or {}
                 dept_name = d.get("dept_name") or d.get("name")
 
-            # 4) If found, show "<role> | <dept_name>" and reuse for table/export labels
             if dept_name:
                 profile_subtitle = f"{profile_subtitle} | {dept_name}"
                 dept_label = dept_name
 
-            # You can enrich dept_label later using role_assignments scope if needed.
-
-        # Use shared working / planning term logic (OM-style)
         active_term = await _active_term()
         if active_term:
             ay = active_term.get("acad_year_start")
             tn = active_term.get("term_number")
             if ay and tn:
-                # Spec: Term {term_number} · AY {start}-{start+1}
                 term_label = f"Term {tn} · AY {ay}-{int(ay) + 1}"
-
 
         return {
             "ok": True,
             "profileName": profile_name,
-            "full_name": profile_name,    # explicit field FE can trust
+            "full_name": profile_name,
             "profileSubtitle": profile_subtitle,
             "term_label": term_label,
             "dept_label": dept_label,
@@ -265,22 +216,15 @@ async def chair_plantilla_get(
         ]}
 
     if action == "fetch":
-        """
-        Build plantilla rows by joining:
-          faculty_assignments -> sections -> courses -> section_schedules -> rooms
-          + faculty_profiles/users/leaves
-        Robust fallbacks are added for dev data where FK links or term IDs may not align.
-        """
-        # current term (may not match sample sections)
+        # Get Planning Term
         term = await _active_term()
         term_id = term.get("term_id") if term else None
 
-        # try current-term sections first
+        # Sections for that term
         sec_match = {"term_id": term_id} if term_id else {}
         section_docs = await db.sections.find(sec_match).to_list(10000)
 
-        # --- Fallbacks for sparse sample data ---
-        # If no sections for current term, use sections referenced by non-archived assignments instead.
+        # Fallback: If no sections, try to guess from assignments
         asg_docs: List[dict] = []
         if not section_docs:
             asg_docs = await db.faculty_assignments.find(
@@ -290,24 +234,22 @@ async def chair_plantilla_get(
             sec_ids = list({a.get("section_id") for a in asg_docs if a.get("section_id")})
             if sec_ids:
                 section_docs = await db.sections.find({"section_id": {"$in": sec_ids}}).to_list(10000)
-        # If we already have sections (current term), pull assignments for those sections.
+        
         if not asg_docs and section_docs:
             asg_docs = await db.faculty_assignments.find(
                 {"section_id": {"$in": [s.get("section_id") for s in section_docs]},
                  "is_archived": {"$in": [False, None]}}
             ).to_list(100000)
 
-        # At this point if either is empty, we will just return empty rows gracefully.
         by_section = {s["section_id"]: s for s in section_docs}
 
-        # map courses (guard missing FK)
+        # Map related data
         course_ids = list({s.get("course_id") for s in section_docs if s.get("course_id")})
         course_docs = []
         if course_ids:
             course_docs = await db.courses.find({"course_id": {"$in": course_ids}}).to_list(10000)
         by_course = {c["course_id"]: c for c in course_docs}
 
-        # schedules per section (aggregate)
         sched_docs = []
         if by_section:
             sched_docs = await db.section_schedules.find(
@@ -317,14 +259,12 @@ async def chair_plantilla_get(
         for sc in sched_docs:
             by_sched.setdefault(sc["section_id"], []).append(sc)
 
-        # rooms
         room_ids = list({s.get("room_id") for s in sched_docs if s.get("room_id")})
         room_docs = []
         if room_ids:
             room_docs = await db.rooms.find({"room_id": {"$in": room_ids}}).to_list(10000)
         by_room = {r["room_id"]: r for r in room_docs}
 
-        # faculty profiles + users for name
         faculty_ids = list({a.get("faculty_id") for a in asg_docs if a.get("faculty_id")})
         fprof_docs = []
         if faculty_ids:
@@ -337,13 +277,11 @@ async def chair_plantilla_get(
             user_docs = await db.users.find({"user_id": {"$in": user_ids}}).to_list(10000)
         by_user = {u["user_id"]: u for u in user_docs}
 
-        # leaves (coarse)
         leave_docs = []
         if faculty_ids:
             leave_docs = await db.leaves.find({"faculty_id": {"$in": faculty_ids}}).to_list(10000)
         on_leave_now = {lv["faculty_id"] for lv in leave_docs if lv.get("is_active")}
 
-        # Build rows
         rows: List[PlantillaRow] = []
 
         for asg in asg_docs:
@@ -355,7 +293,6 @@ async def chair_plantilla_get(
             fprof = by_fprof.get(asg.get("faculty_id") or "")
             user = by_user.get(fprof.get("user_id") if fprof else "")
 
-            # Format "LAST, First" (falls back to em dash if unknown)
             if user:
                 last = str(user.get("last_name") or "").strip().upper()
                 first = str(user.get("first_name") or "").strip()
@@ -363,43 +300,44 @@ async def chair_plantilla_get(
             else:
                 faculty_name = "—"
 
-            # schedules → day/time/room text
             scheds = by_sched.get(sec["section_id"], [])
             day_parts, time_parts, room_parts = [], [], []
+            
             for sc in scheds[:2]:
                 day_parts.append(str(sc.get("day") or ""))
                 time_parts.append(_fmt_time(str(sc.get("start_time") or ""), str(sc.get("end_time") or "")))
                 
-                # --- [NEW] Updated Room Logic ---
+                # --- [UPDATED] Room Logic ---
+                # Goal: Show room_number if assigned.
+                # If room_id is null/invalid, show "TBA" (unless it is explicitly ONLINE).
+                # Do NOT show generic room types like "Classroom".
+
                 room_id = sc.get("room_id")
                 if room_id:
-                    r = by_room.get(room_id) # Get the full room document
+                    r = by_room.get(room_id)
                     if r:
-                        room_type = str(r.get("room_type") or "").strip().lower()
-                        
-                        # Show room_number if it's a physical room type
-                        if room_type in ("classroom", "comlab"):
-                            room_parts.append(r.get("room_number") or str(room_id))
-                        # Otherwise, show the room's name/type (e.g., "Online", "TBA")
-                        elif r.get("room_type"):
-                            room_parts.append(r.get("room_type"))
-                        # Fallback: just show the number if type is missing
-                        else:
-                            room_parts.append(r.get("room_number") or str(room_id))
+                        # Found the room -> show Room Number (fallback to TBA if number missing)
+                        r_num = r.get("room_number")
+                        room_parts.append(str(r_num) if r_num else "TBA")
                     else:
-                        # Dangling room_id, show the ID as a fallback
-                        room_parts.append(str(room_id))
+                        # ID exists but room doc missing -> TBA
+                        room_parts.append("TBA")
                 else:
-                    # No room_id. Use the room_type from the schedule doc (e.g., "ONLINE")
-                    room_parts.append(sc.get("room_type") or "ONLINE")
+                    # No Room ID assigned. 
+                    # If type is "ONLINE", we show "ONLINE".
+                    # Otherwise (Classroom, Comlab, null) -> "TBA".
+                    val = str(sc.get("room_type") or "").strip().upper()
+                    if val == "ONLINE":
+                        room_parts.append("ONLINE")
+                    else:
+                        room_parts.append("TBA")
+
             day_text = " / ".join([p for p in day_parts if p]) or "—"
             time_text = " / ".join([p for p in time_parts if p]) or "—"
             room_text = " / ".join([p for p in room_parts if p]) or "—"
 
-            # students
             student_count = sec.get("enrolled") or None
 
-            # hours/units (simple rule)
             units = course.get("units") if course else None
             if units == 3:
                 lec_hours = 1.5
@@ -408,10 +346,8 @@ async def chair_plantilla_get(
                 lec_hours = None
                 lab_hours = None
 
-            # type of course
             course_type = course.get("type_of_course") if course else "N/A"
 
-            # nature of load & premiums (simple placeholders)
             nature_teaching = float(units) if isinstance(units, (int, float)) else None
             nature_admin = 0.0
             nature_research = 0.0
@@ -423,7 +359,6 @@ async def chair_plantilla_get(
 
             on_leave = "Yes" if asg.get("faculty_id") in on_leave_now else "N/A"
 
-            # determine a course code safely; support array or string or missing course
             if course:
                 if isinstance(course.get("course_code"), list) and course["course_code"]:
                     course_code = str(course["course_code"][0])
@@ -460,18 +395,16 @@ async def chair_plantilla_get(
         rows.sort(key=lambda r: (r.get("faculty_name", ""), r.get("course_code", "")))
         return {"ok": True, "rows": rows}
 
-    # default
     return {"ok": False, "error": f"Unknown action '{action}'"}
 
 
 @router.post("/plantilla")
 async def chair_plantilla_post(
     userId: Optional[str] = Query(None),
-    action: str = Query("approve")  # approve (future: submit, etc.)
+    action: str = Query("approve")
 ) -> Dict[str, Any]:
     """
     POST /api/chair/plantilla?action=approve
-    Marks/records a simple approval in plantilla_reviews (audit trail).
     """
     if action == "approve":
         now = datetime.now(timezone.utc).isoformat()
@@ -479,7 +412,7 @@ async def chair_plantilla_post(
             "review_id": f"RVW-{int(datetime.now().timestamp())}",
             "plantilla_id": "PLT_DEV",
             "reviewer_id": userId or "UNKNOWN",
-            "reviewer_role": "ROLE0002",  # Department Chair
+            "reviewer_role": "ROLE0002",
             "action": "approved",
             "comments": "Approved via UI",
             "review_date": now,
