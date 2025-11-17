@@ -404,7 +404,16 @@ async def get_room_allocation(
 
     # ---- schedules ----
     # 1) Schedules for in-scope sections (these drive the Allocate modal)
-    fields = {"_id": 0, "schedule_id": 1, "section_id": 1, "day": 1, "start_time": 1, "end_time": 1, "room_id": 1}
+    fields = {
+        "_id": 0,
+        "schedule_id": 1,
+        "section_id": 1,
+        "day": 1,
+        "start_time": 1,
+        "end_time": 1,
+        "room_id": 1,
+        "room_type": 1,  # optional: needed when schedules carry their own room_type
+    }
     sched_cur_scoped = db[COL_SCHEDS].find({"section_id": {"$in": sec_ids}}, fields)
     scoped_raw = [s async for s in sched_cur_scoped]
     section_scheds_scoped = [
@@ -415,6 +424,7 @@ async def get_room_allocation(
             "start_time": s.get("start_time", ""),
             "end_time": s.get("end_time", ""),
             "room_id": s.get("room_id"),
+            "room_type": normalize_room_type(s.get("room_type", "")) if s.get("room_type") else "",
             "time_band": band_of(s.get("start_time", ""), s.get("end_time", "")),
         }
         for s in scoped_raw
@@ -526,14 +536,25 @@ async def get_room_allocation(
         ]
         # Quick lookups
         sec_meta = s_map            # from sections_map(); includes enrollment_cap
+
         def _cap(sid: str) -> int:
             try:
                 v = sec_meta.get(sid, {}).get("enrollment_cap")
                 return int(v) if v not in (None, "") else 0
             except Exception:
                 return 0
+
         def _rtype_for_section(sid: str) -> str:
-            # prefer schedule.room_type if you later store it; else derive from course
+            """
+            Determine the required room_type for a section:
+            1) Prefer room_type stored on section_schedules (per-slot requirement).
+            2) Fallback to the course's room_type (from courses collection).
+            """
+            # 1) check any open schedule row for this section
+            for row in scheds_open:
+                if row.get("section_id") == sid and row.get("room_type"):
+                    return normalize_room_type(row.get("room_type") or "")
+            # 2) fallback: derive from course metadata
             cid = sec_meta.get(sid, {}).get("course_id", "")
             return (course_room_type.get(cid, "") or "").strip()
 
@@ -549,12 +570,12 @@ async def get_room_allocation(
             # Room properties
             this_room = next((rr for rr in rooms if rr["room_id"] == rid), None)
             r_cap = int(this_room.get("capacity") or 0) if this_room else 0
-            r_type = (this_room.get("room_type") or "").strip().lower() if this_room else ""
+            r_type = normalize_room_type(this_room.get("room_type", "")) if this_room else ""
 
             for s in scheds_open:
                 if normalize_day(s.get("day")) != day:
                     continue
-                if band_of(s.get("start_time",""), s.get("end_time","")) != band:
+                if band_of(s.get("start_time", ""), s.get("end_time", "")) != band:
                     continue
                 sid = s.get("section_id", "")
                 if not sid:
@@ -562,10 +583,11 @@ async def get_room_allocation(
                 # capacity & type fit
                 if r_cap and _cap(sid) and r_cap < _cap(sid):
                     continue
-                need_type = _rtype_for_section(sid).lower()
+                need_type = _rtype_for_section(sid)
                 if need_type and r_type and (need_type != r_type):
                     continue
                 eligible.append(sid)
+
 
             c = dict(cell)
             c["allowed"] = True
@@ -755,15 +777,25 @@ async def post_room_allocation(
         st, et = parse_band(time_band)
 
         # room must belong to this campus
-        r = await db[COL_ROOMS].find_one({"room_id": room_id, "campus_id": campus_id}, {"_id": 0, "room_id": 1})
+        r = await db[COL_ROOMS].find_one(
+            {"room_id": room_id, "campus_id": campus_id},
+            {"_id": 0, "room_id": 1, "room_type": 1, "capacity": 1},
+        )
         if not r:
             raise HTTPException(status_code=404, detail="Room not found in your campus.")
 
         # section in scoped term
         sec = await db[COL_SECTIONS].find_one(
             {"section_id": section_id, "term_id": term_id},
-            {"_id": 0, "section_id": 1, "section_code": 1, "course_id": 1},
+            {
+                "_id": 0,
+                "section_id": 1,
+                "section_code": 1,
+                "course_id": 1,
+                "enrollment_cap": 1,
+            },
         )
+
         if not sec:
             raise HTTPException(status_code=404, detail="Section not in active term.")
 
@@ -771,20 +803,67 @@ async def post_room_allocation(
         sec_code = (sec.get("section_code") or "").upper()
         if sec_prefix and not sec_code.startswith(sec_prefix):
             raise HTTPException(status_code=403, detail="Section not in your campus scope.")
-        if college_id:
+
+        course = None
+        if sec.get("course_id"):
             course = await db[COL_COURSES].find_one(
-                {"course_id": sec.get("course_id")}, {"_id": 0, "college_id": 1}
+                {"course_id": sec.get("course_id")},
+                {"_id": 0, "college_id": 1, "room_type": 1},
             )
-            if course and course.get("college_id") and course["college_id"] != college_id:
-                raise HTTPException(status_code=403, detail="Section not in your college scope.")
+
+        if college_id and course and course.get("college_id") and course["college_id"] != college_id:
+            raise HTTPException(status_code=403, detail="Section not in your college scope.")
 
         # must have a schedule at that slot
         sched = await db[COL_SCHEDS].find_one(
-            {"section_id": section_id, "day": {"$in": day_aliases(day_full)}, "start_time": st, "end_time": et},
-            {"_id": 0, "schedule_id": 1},
+            {
+                "section_id": section_id,
+                "day": {"$in": day_aliases(day_full)},
+                "start_time": st,
+                "end_time": et,
+            },
+            {"_id": 0, "schedule_id": 1, "room_type": 1},
         )
         if not sched:
             raise HTTPException(status_code=404, detail="Section has no schedule at this day/time.")
+
+        # --- enforce capacity & room_type compatibility ---
+
+        # capacity check: sections.enrollment_cap must fit rooms.capacity
+        room_cap = int(r.get("capacity") or 0)
+        sec_cap_raw = sec.get("enrollment_cap")
+        try:
+            sec_cap = int(sec_cap_raw) if sec_cap_raw not in (None, "") else 0
+        except Exception:
+            sec_cap = 0
+
+        if room_cap and sec_cap and room_cap < sec_cap:
+            raise HTTPException(
+                status_code=400,
+                detail="Section enrollment cap exceeds room capacity.",
+            )
+
+        # room_type check: prefer section_schedules.room_type, fallback to course.room_type
+        room_rt = normalize_room_type(r.get("room_type") or "")
+
+        sched_rt = ""
+        if sched.get("room_type"):
+            sched_rt = normalize_room_type(sched.get("room_type") or "")
+
+        course_rt = ""
+        if course and course.get("room_type"):
+            v = course.get("room_type")
+            if isinstance(v, list) and v:
+                course_rt = normalize_room_type(v[0])
+            elif isinstance(v, str):
+                course_rt = normalize_room_type(v)
+
+        needed_rt = sched_rt or course_rt
+        if needed_rt and room_rt and needed_rt != room_rt:
+            raise HTTPException(
+                status_code=400,
+                detail="Room type is not compatible with the section's required room type.",
+            )
 
         # prevent double-booking of the room, but only against sections
         # that belong to the SAME term we are planning for

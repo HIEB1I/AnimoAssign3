@@ -53,17 +53,18 @@ async def term_in_range(db: AsyncIOMotorDatabase, term_id: str, start_term_id: s
 
 async def ensure_sections_published_or_abort(
     db: AsyncIOMotorDatabase,
-    curr: Dict[str, Any],
-    allowed_status: List[str],
-    allow_fallback: bool
+    term_id: str,
+    allowed_status: List[str],  # kept for compatibility, not used now
+    allow_fallback: bool,
 ):
     total = await db.sections.count_documents({
-        "term_id": curr["term_id"],
-        "is_archived": {"$ne": True},
-        "status": {"$in": allowed_status},
+        "term_id": term_id,
+        "is_archived": {"$ne": True},  # remove this too if you want truly all
     })
     if total == 0 and not allow_fallback:
-        raise RuntimeError("PT Risk halted: no current-term sections are published yet.")
+        raise RuntimeError(
+            f"PT Risk halted: no sections are published yet for term {term_id}."
+        )
 
 async def is_on_approved_leave_now(db: AsyncIOMotorDatabase, faculty_id: str, curr_term: str) -> bool:
     L = await db.leaves.find_one({
@@ -255,37 +256,41 @@ async def build_row(
 # ======================== Public compute function (importable) ========================
 
 async def run_pt_risk(params: Dict[str, Any] | None = None) -> Dict[str, Any]:
-    """
-    Compute PT-Risk report for a department using MongoDB collections.
-    Returns:
-      {
-        "department_id": "...",
-        "term_id": "TERMxxxx",
-        "rows": [ ... per course ... ],
-        "summary": { "total_pt_sections": n, "estimated_pt_hires": n },
-        "generated_at": ISO-UTC,
-        "params": { ... }
-      }
-    """
     db = get_db()
     P = {**DEFAULT_PARAMS, **(params or {})}
 
+    # 1) Get the current term (is_current = true)
     curr = await current_term(db)
     if not curr:
         raise RuntimeError("No current term found (terms.is_current = true).")
     curr_term_id = curr["term_id"]
 
+    # 2) Find the NEXT term after the current term
+    terms = await ordered_terms(db)
+    idx = _index_of_term(terms, curr_term_id)
+    if idx >= len(terms) - 1:
+        # No next term configured
+        raise RuntimeError(
+            "PT Risk halted: current term has no NEXT term configured."
+        )
+
+    next_term = terms[idx + 1]
+    risk_term_id = next_term["term_id"]  # <-- PT risk is for this term
+
+    # 3) Ensure NEXT-term sections exist / are published
     await ensure_sections_published_or_abort(
-        db, curr, allowed_status=P["allowed_section_status"],
-        allow_fallback=P["allow_fallback_without_sections"]
+        db,
+        term_id=risk_term_id,
+        allowed_status=P["allowed_section_status"],
+        allow_fallback=P["allow_fallback_without_sections"],
     )
 
-    # For this model we look at current-term preferences for capacity
-    pref_term_id = curr_term_id
+    # For this model we look at NEXT-term preferences for capacity
+    pref_term_id = risk_term_id
 
     CAP = await build_capacity_map(
         db,
-        curr_term_id=curr_term_id,
+        curr_term_id=risk_term_id,
         pref_term_id=pref_term_id,
         dept_scope=P["DEPT_SCOPE"],
         overload_allowance_units=P["overload_allowance_units"],
@@ -294,17 +299,27 @@ async def run_pt_risk(params: Dict[str, Any] | None = None) -> Dict[str, Any]:
     rows: List[Dict[str, Any]] = []
     async for C in db.courses.find({"department_id": P["DEPT_SCOPE"]}):
         demand = await _demand_sections_sections_first(
-            db, C["course_id"], curr_term_id,
+            db,
+            course_id=C["course_id"],
+            curr_term_id=risk_term_id,  # <-- use NEXT term here
             allowed_status=P["allowed_section_status"],
             units_default=P["units_default_per_section"],
-            allow_fallback=P["allow_fallback_without_sections"]
+            allow_fallback=P["allow_fallback_without_sections"],
         )
+
         result = await allocate_course(
-            db, C["course_id"], demand, CAP,
-            curr_term_id, pref_term_id,
-            P["DEPT_SCOPE"], P["history_terms_for_experience"],
-            P["units_default_per_section"], P["include_only_with_preferences"]
+            db,
+            course_id=C["course_id"],
+            demand_sections=demand,
+            CAP=CAP,
+            curr_term_id=risk_term_id,
+            pref_term_id=pref_term_id,
+            dept_scope=P["DEPT_SCOPE"],
+            hist_window=P["history_terms_for_experience"],
+            units_default=P["units_default_per_section"],
+            include_only_with_prefs=P["include_only_with_preferences"],
         )
+
         if demand > 0:
             rows.append(await build_row(db, C, demand, result, CAP))
 
@@ -313,7 +328,7 @@ async def run_pt_risk(params: Dict[str, Any] | None = None) -> Dict[str, Any]:
 
     return {
         "department_id": P["DEPT_SCOPE"],
-        "term_id": curr_term_id,
+        "term_id": risk_term_id,  # report is for NEXT term
         "rows": rows,
         "summary": summary,
         "generated_at": datetime.utcnow().isoformat() + "Z",
@@ -326,16 +341,15 @@ async def _demand_sections_sections_first(
     db: AsyncIOMotorDatabase,
     course_id: str,
     curr_term_id: str,
-    allowed_status: List[str],
+    allowed_status: List[str],  # still accepted, but unused
     units_default: int,
     allow_fallback: bool,
 ) -> int:
-    # Primary: count current-term sections
+    # Primary: count current-term sections for this course (any status)
     count = await db.sections.count_documents({
         "term_id": curr_term_id,
         "course_id": course_id,
-        "is_archived": {"$ne": True},
-        "status": {"$in": allowed_status},
+        "is_archived": {"$ne": True},  # optional to keep
     })
     if count > 0:
         return int(count)

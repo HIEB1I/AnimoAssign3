@@ -365,10 +365,13 @@ async def fs_create(payload: Dict[str, Any] = Body(...)):
         "begin2": "",
         "end2": "",
         "remarks": "",
-    }
+            }
     await db.faculty_service.insert_one(doc)
+    
+    # FIX: Remove the non-serializable ObjectId before returning
+    doc.pop("_id", None) 
+    
     return {"ok": True, "row": doc}
-
 # ----------------------------- SEND -----------------------------
 # Robust + idempotent: mark as sent and (optionally) log email. Lack of recipient mapping will NOT error.
 

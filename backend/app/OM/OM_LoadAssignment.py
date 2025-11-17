@@ -351,22 +351,36 @@ async def _fetch_rows(user_id: str, term_id: str, db) -> Dict[str, Any]:
         # Display uses the effective mode
         mode_display = effective_mode
 
-        rows_by_sid[sid] = {
+        row = {
             "id": sid,
             # NEW: expose course_id for KAC checks
             "course_id": course_doc.get("course_id") or d.get("course_id") or "",
             "course": d.get("course_code_display") or "",
-            "title": course_doc.get("course_title","") or "",
-            "units": course_doc.get("units","") or "",
-            "section": d.get("section_code","") or "",
+            "title": course_doc.get("course_title", "") or "",
+            "units": course_doc.get("units", "") or "",
+            "section": d.get("section_code", "") or "",
             # NEW: keep both faculty_id and display name so manual edits can persist correctly
             "faculty_id": (d.get("asg") or {}).get("faculty_id") or "",
-            "faculty": d.get("faculty_name_display","") or "",
+            "faculty": d.get("faculty_name_display", "") or "",
             **pair,
-            "capacity": d.get("enrollment_cap","") or "",
+            "capacity": d.get("enrollment_cap", "") or "",
             "mode": mode_display,
             "status": "Pending" if (d.get("asg") or {}).get("faculty_id") else "Unassigned",
         }
+
+        # If there is **no faculty assigned**, wipe schedule + mode so row is truly empty.
+        fid_str = (row.get("faculty_id") or "").strip()
+        if not fid_str:
+            row["faculty"] = ""
+            row["status"] = "Unassigned"
+            for k in (
+                "day1", "begin1", "end1", "room1",
+                "day2", "begin2", "end2", "room2",
+                "mode", "room_type",
+            ):
+                row[k] = ""
+
+        rows_by_sid[sid] = row
 
     rows = list(rows_by_sid.values())
 
@@ -388,17 +402,24 @@ async def _apply_mode_and_rooms_to_rows(rows: list[dict], db):
     if not section_ids:
         return
 
-    # Fetch sections so we can pull existing mode/room info if needed
     sections = await db["sections"].find(
         {"section_id": {"$in": section_ids}},
         {"_id": 0, "section_id": 1, "mode": 1},
     ).to_list(None)
     sections_by_id = {s["section_id"]: s for s in sections}
 
-    # (Optional) fetch courses if you base defaults on course room_type
-    # courses = await db["courses"].find(...)
-
     for row in rows:
+        # If no faculty assigned, keep the row completely “empty”
+        fid = (row.get("faculty_id") or "").strip()
+        if not fid:
+            for k in (
+                "day1", "begin1", "end1", "room1",
+                "day2", "begin2", "end2", "room2",
+                "mode", "room_type",
+            ):
+                row[k] = ""
+            continue
+
         sec_id = row.get("id")
         sec = sections_by_id.get(sec_id) if sec_id else None
 
@@ -412,20 +433,16 @@ async def _apply_mode_and_rooms_to_rows(rows: list[dict], db):
                 # default fallback (adjust if you have a different default)
                 row["mode"] = "HYB"
 
-        # --- ROOM PLACEHOLDERS (row["room1"], row["room2"]) ---
-        # Adjust this part to exactly match what you do on approve.
+        # --- ROOM PLACEHOLDERS ---
         mode = row.get("mode")
 
         if mode == "FOL":
-            # Fully online: both meetings online
             row.setdefault("room1", "Online")
             row.setdefault("room2", "Online")
         elif mode == "HYB":
-            # Hybrid example: day1 classroom, day2 online
             row.setdefault("room1", "Classroom")
             row.setdefault("room2", "Online")
         else:
-            # Assume F2F or similar
             row.setdefault("room1", "Classroom")
             # room2 can stay as-is / optional
 
@@ -433,10 +450,6 @@ async def _apply_mode_and_rooms_to_rows(rows: list[dict], db):
         room1 = (row.get("room1") or "").strip()
         room2 = (row.get("room2") or "").strip()
 
-        # Your rules you asked me to remember:
-        # - If ROOM1 or ROOM2 is "Online" or blank → room_type = "Online".
-        # - If ROOM1 or ROOM2 is "TBA"         → room_type = None.
-        # - If ROOM1/ROOM2 has a valid room or "Classroom" → room_type = "Classroom".
         if room1 == "TBA" or room2 == "TBA":
             row["room_type"] = None
         elif (not room1 and not room2) or room1 == "Online" or room2 == "Online":
@@ -2028,6 +2041,34 @@ async def phase0_load(term_id: str, db, department_id: str | None = None) -> Con
             blocked.add(fid)
 
     # ------------------------------
+    # NEW: Existing faculty assignments for THIS term
+    # ------------------------------
+    asg_rows = await db[COL_ASSIGN].find(
+        {"term_id": term_id, "is_archived": {"$ne": True}},
+        {"_id": 0, "faculty_id": 1, "section_id": 1}
+    ).to_list(None)
+
+    # Build section -> units
+    section_to_units: dict[str, int] = {}
+    for s in sections:
+        sid = s.get("section_id")
+        cid = s.get("course_id")
+        if not sid or not cid:
+            continue
+        units = int((courses.get(cid) or {}).get("units") or 0)
+        section_to_units[sid] = units
+
+    # Sum current assigned units per faculty
+    current_assigned_units = defaultdict(int)
+    for a in asg_rows or []:
+        fid = a.get("faculty_id")
+        sid = a.get("section_id")
+        if not fid or not sid:
+            continue
+        u = section_to_units.get(sid, 0)
+        current_assigned_units[fid] += u
+
+    # ------------------------------
     # 8) Assemble Context
     # ------------------------------
     ctx = ContextA(
@@ -2048,6 +2089,7 @@ async def phase0_load(term_id: str, db, department_id: str | None = None) -> Con
     ctx.leave_blocked = blocked
     ctx.pref_windows_quality = debug_pref_windows  # type: ignore[attr-defined]
     ctx.campus_blocked = campus_blocked
+    ctx.current_assigned_units = current_assigned_units
     print("phase0_load → leave_rows:", len(leave_rows), "blocked:", len(blocked), "has FAC0002:", "FAC0002" in blocked)  # debug
     
     # Build exclusion sets
@@ -2303,18 +2345,22 @@ def _display_name_from_users(u: dict) -> str:
     return f"{ln}, {fn}".strip(", ").strip()
 
 def _faculty_capacities(ctx: ContextA) -> dict[str, int]:
-    """
-    Remaining-unit capacity per faculty:
-    1) previous-term faculty_preferences.preferred_units
-    2) else faculty_profiles.remaining_units
-    3) else DEFAULT_UNITS
-    """
     caps: dict[str, int] = {}
+
+    existing = getattr(ctx, "current_assigned_units", {}) or {}
+
     for f in ctx.faculty:
         fid = f["faculty_id"]
-        pref_units = int((ctx.prefs_by_faculty.get(fid) or {}).get("preferred_units") or 0)
+
+        preferred = int((ctx.prefs_by_faculty.get(fid) or {}).get("preferred_units") or 0)
         prof_units = int(f.get("remaining_units") or 0)
-        caps[fid] = pref_units or prof_units or DEFAULT_UNITS
+        base_cap = preferred or prof_units or DEFAULT_UNITS
+
+        already = int(existing.get(fid, 0))
+        remaining = max(base_cap - already, 0)
+
+        caps[fid] = remaining
+
     return caps
 
 def _enforce_global_caps(ctx: ContextA, assignments: list[dict]) -> tuple[list[dict], dict[str, int]]:

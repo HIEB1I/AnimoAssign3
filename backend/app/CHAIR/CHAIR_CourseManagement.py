@@ -1,3 +1,4 @@
+# backend/app/CHAIR/CHAIR_CourseManagement.py
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -12,7 +13,7 @@ COL_USER_ROLES = "user_roles"
 COL_ROLE_ASSIGN = "role_assignments"
 
 COL_TERMS = "terms"
-COL_PREEN_COUNT = "preenlistment_count"  # NEW: for active pre-enlistment batch
+COL_PREEN_COUNT = "preenlistment_count"
 COL_COURSES = "courses"
 COL_KACS = "kacs"
 COL_FACULTY = "faculty_profiles"
@@ -26,16 +27,8 @@ def _now():
 
 async def _active_term() -> Dict[str, Any]:
     """
-    Return the WORKING / PLANNING term for CHAIR modules (OM-style).
-
-    Selection rules:
-    (a) Prefer active pre-enlistment batch (non-archived) from preenlistment_count.
-    (b) Otherwise, find the 'current' term via status/is_current/is_active/active flags.
-        If none, fall back to latest term by acad_year_start DESC, term_number DESC.
-    (c) If still nothing, return {}.
-    (d) Compute the planning term (next term after current); if none, use current.
+    Return the WORKING / PLANNING term for CHAIR modules.
     """
-
     # (a) Try to derive from an active pre-enlistment batch
     pre_doc = await db[COL_PREEN_COUNT].find_one(
         {"is_archived": {"$ne": True}},
@@ -49,7 +42,7 @@ async def _active_term() -> Dict[str, Any]:
         if t:
             return t
 
-    # (b) Fallback: "current" term (any of the usual flags)
+    # (b) Fallback: "current" term
     current = await db[COL_TERMS].find_one(
         {
             "$or": [
@@ -64,7 +57,6 @@ async def _active_term() -> Dict[str, Any]:
     )
 
     if not current:
-        # If nothing is flagged, use the latest by AY + term_number
         last = await db[COL_TERMS].find(
             {},
             {"_id": 0, "term_id": 1, "acad_year_start": 1, "term_number": 1},
@@ -90,11 +82,10 @@ async def _active_term() -> Dict[str, Any]:
     ).sort([("acad_year_start", 1), ("term_number", 1)]).limit(1).to_list(1)
 
     if next_terms:
-        # Use the next term as the working/planning term
         return next_terms[0]
 
-    # If no next term, stick with current (still better than nothing)
     return current
+
 
 async def _user_scope(userId: Optional[str], userEmail: Optional[str]) -> Dict[str, Any]:
     if not userId and not userEmail:
@@ -156,6 +147,7 @@ async def _user_scope(userId: Optional[str], userEmail: Optional[str]) -> Dict[s
     head = [x async for x in db[COL_USERS].aggregate(pipe)]
     meta = head[0] if head else {}
 
+    # Fallback: check faculty profile if role assignment didn't yield a dept
     if meta and not meta.get("dept_id") and meta.get("user_id"):
         fp = await db[COL_FACULTY].find_one(
             {"user_id": meta["user_id"]},
@@ -189,6 +181,7 @@ async def _find_user_ids_by_names(pairs: List[Dict[str, str]], prefer_dept_id: O
 
         candidates = await db[COL_USERS].find(q, {"_id": 0, "user_id": 1, "email": 1}).to_list(50)
         if not candidates:
+            # fuzzy fallback
             q2 = {
                 "$or": [
                     {"first_name": {"$regex": f"^{fn}\\b", "$options": "i"}},
@@ -254,7 +247,6 @@ async def course_management(
                 subtitle = (subtitle + " | " + meta["dept_name"]).strip(" |")
             return {"ok": True, "profileName": meta.get("full_name", ""), "profileSubtitle": subtitle}
 
-        # options/list/editPeople require a department
         if action in {"options", "list", "editPeople"} and not meta.get("dept_id"):
             raise HTTPException(status_code=400, detail="User department not found.")
 
@@ -267,7 +259,7 @@ async def course_management(
             clusters = [c for c in clusters if c]
             return {"ok": True, "clusters": clusters, "activeTerm": await _active_term()}
 
-        # ----- EDIT PEOPLE -----
+        # ----- EDIT PEOPLE (Manual Override) -----
         if action == "editPeople":
             if not courseId:
                 raise HTTPException(status_code=400, detail="Missing courseId.")
@@ -337,11 +329,12 @@ async def course_management(
 
         # ----- LIST -----
         term = await _active_term()
-        term_id = term.get("term_id", "")
         dept_id = meta["dept_id"]
 
         pipeline: List[Dict[str, Any]] = [
             {"$match": {"department_id": dept_id}},
+
+            # Normalize course_code
             {"$addFields": {
                 "code_list": {
                     "$cond": [
@@ -366,6 +359,8 @@ async def course_management(
                     ]
                 }
             }},
+
+            # Coordinators
             {"$addFields": {
                 "coord_ids": {
                     "$cond": [
@@ -416,76 +411,16 @@ async def course_management(
                     }
                 }
             }},
-            {"$lookup": {
-                "from": COL_SECTIONS,
-                "let": {"cid": "$course_id", "codes": "$code_list"},
-                "pipeline": [
-                    {"$match": {"$expr": {"$and": [
-                        {"$eq": ["$term_id", term_id]},
-                        {"$or": [
-                            {"$eq": ["$course_id", "$$cid"]},
-                            {"$in": ["$course_code", {"$ifNull": ["$$codes", []]}]}
-                        ]}
-                    ]}}},
-                    {"$project": {"_id": 0, "section_id": 1}}
-                ],
-                "as": "_secs"
-            }},
-            {"$addFields": {"_sec_ids": {"$map": {"input": {"$ifNull": ["$_secs", []]}, "as": "s", "in": "$$s.section_id"}}}},
-            {"$lookup": {
-                "from": COL_FACULTY_ASG,
-                "let": {"sids": "$_sec_ids"},
-                "pipeline": [
-                    {"$match": {"$expr": {"$in": ["$section_id", {"$ifNull": ["$$sids", []]}]}}},
-                    {"$project": {"_id": 0, "faculty_id": 1}}
-                ],
-                "as": "_asg"
-            }},
-            {"$addFields": {
-                "_fac_ids_from_sections": {
-                    "$filter": {
-                        "input": {"$map": {"input": {"$ifNull": ["$_asg", []]}, "as": "a", "in": "$$a.faculty_id"}},
-                        "as": "id",
-                        "cond": {"$and": [{"$ne": ["$$id", None]}, {"$ne": ["$$id", ""]}]}
-                    }
-                }
-            }},
-            {"$addFields": {
-                "_fac_ids_all": {"$setUnion": [{"$ifNull": ["$teaching_team", []]}, {"$ifNull": ["$_fac_ids_from_sections", []]}]}
-            }},
-            {"$lookup": {
-                "from": COL_FACULTY,
-                "let": {"fids": "$_fac_ids_all"},
-                "pipeline": [
-                    {"$match": {"$expr": {"$in": ["$faculty_id", {"$ifNull": ["$$fids", []]}]}}},
-                    {"$project": {"_id": 0, "faculty_id": 1, "user_id": 1}}
-                ],
-                "as": "_fp"
-            }},
-            {"$lookup": {
-                "from": COL_USERS,
-                "let": {"uids": {"$map": {"input": {"$ifNull": ["$_fp", []]}, "as": "f", "in": "$$f.user_id"}}},
-                "pipeline": [
-                    {"$match": {"$expr": {"$in": ["$user_id", {"$ifNull": ["$$uids", []]}]}}},
-                    {"$project": {"_id": 0, "first_name": 1, "last_name": 1}}
-                ],
-                "as": "_fu"
-            }},
-            {"$addFields": {
-                "composition": {
-                    "$setUnion": [
-                        {"$map": {
-                            "input": {"$ifNull": ["$_fu", []]},   # <-- fixed: added $
-                            "as": "u",
-                            "in": {"$trim": {"input": {"$concat": [
-                                {"$ifNull": ["$$u.first_name", ""]}, " ",   # <-- fixed: $$u
-                                {"$ifNull": ["$$u.last_name",  ""]}         # <-- fixed: $$u
-                            ]}}}
-                        }},
-                        []
-                    ]
-                }
-            }},
+
+            # -------------------------------------------------------------------------
+            # TEACHING COMPOSITION LOGIC
+            # Union of:
+            # 1. Manually assigned 'teaching_team' (List of FacultyIDs)
+            # 2. Qualified via KAC (Intersection of course KACs & Faculty KACs)
+            # 3. History (Faculty who taught any section of this course)
+            # -------------------------------------------------------------------------
+
+            # 1. Identify KACs for this course
             {"$lookup": {
                 "from": COL_KACS,
                 "let": {"cid": "$course_id", "deptId": dept_id},
@@ -494,11 +429,100 @@ async def course_management(
                         {"$in": ["$$cid", {"$ifNull": ["$course_list", []]}]},
                         {"$eq": ["$department_id", "$$deptId"]}
                     ]}}},
-                    {"$project": {"_id": 0, "kac_name": 1}}
+                    {"$project": {"_id": 0, "kac_id": 1, "kac_name": 1}}
                 ],
-                "as": "_kacs"
+                "as": "_kac_data"
             }},
-            {"$addFields": {"kac_names": {"$map": {"input": {"$ifNull": ["$_kacs", []]}, "as": "k", "in": "$$k.kac_name"}}}},
+            {"$addFields": {
+                "kac_names": {"$map": {"input": "$_kac_data", "as": "k", "in": "$$k.kac_name"}},
+                "kac_ids":   {"$map": {"input": "$_kac_data", "as": "k", "in": "$$k.kac_id"}}
+            }},
+
+            # 2. Find Faculty qualified via KAC
+            {"$lookup": {
+                "from": COL_FACULTY,
+                "let": {"kids": "$kac_ids"},
+                "pipeline": [
+                    {"$match": {"$expr": {"$gt": [
+                        {"$size": {"$setIntersection": [{"$ifNull": ["$qualified_kacs", []]}, "$$kids"]}}, 0
+                    ]}}},
+                    {"$project": {"_id": 0, "faculty_id": 1}}
+                ],
+                "as": "_fac_via_kac"
+            }},
+
+            # 3. Find Faculty via History (Past Assignments for this course, ALL terms)
+            {"$lookup": {
+                "from": COL_SECTIONS,
+                "let": {"cid": "$course_id", "codes": "$code_list"},
+                "pipeline": [
+                    {"$match": {"$expr": {"$or": [
+                        {"$eq": ["$course_id", "$$cid"]},
+                        {"$in": ["$course_code", {"$ifNull": ["$$codes", []]}]}
+                    ]}}},
+                    {"$project": {"_id": 0, "section_id": 1}}
+                ],
+                "as": "_hist_secs"
+            }},
+            {"$lookup": {
+                "from": COL_FACULTY_ASG,
+                "let": {"sids": {"$map": {"input": "$_hist_secs", "as": "s", "in": "$$s.section_id"}}},
+                "pipeline": [
+                    {"$match": {"$expr": {"$in": ["$section_id", "$$sids"]}}},
+                    {"$project": {"_id": 0, "faculty_id": 1}}
+                ],
+                "as": "_fac_via_hist"
+            }},
+
+            # 4. Union unique Faculty IDs (Manual Team + KAC + History)
+            {"$addFields": {
+                "_all_qual_fids": {"$setUnion": [
+                    {"$ifNull": ["$teaching_team", []]},
+                    {"$map": {"input": "$_fac_via_kac", "as": "f", "in": "$$f.faculty_id"}},
+                    {"$map": {"input": "$_fac_via_hist", "as": "f", "in": "$$f.faculty_id"}}
+                ]}
+            }},
+
+            # 5. Resolve Names
+            {"$lookup": {
+                "from": COL_FACULTY,
+                "let": {"fids": "$_all_qual_fids"},
+                "pipeline": [
+                    {"$match": {"$expr": {"$in": ["$faculty_id", "$$fids"]}}},
+                    {"$project": {"_id": 0, "user_id": 1}}
+                ],
+                "as": "_qual_fps"
+            }},
+            {"$lookup": {
+                "from": COL_USERS,
+                "let": {"uids": {"$map": {"input": "$_qual_fps", "as": "fp", "in": "$$fp.user_id"}}},
+                "pipeline": [
+                    {"$match": {"$expr": {"$in": ["$user_id", "$$uids"]}}},
+                    {"$project": {"_id": 0, "first_name": 1, "last_name": 1}},
+                    {"$sort": {"last_name": 1, "first_name": 1}}
+                ],
+                "as": "_qual_users"
+            }},
+
+            # 6. Format Composition
+            {"$addFields": {
+                "composition": {
+                    "$map": {
+                        "input": "$_qual_users",
+                        "as": "u",
+                        "in": {"$trim": {"input": {"$concat": [
+                            {"$ifNull": ["$$u.first_name", ""]}, " ",
+                            {"$ifNull": ["$$u.last_name",  ""]}
+                        ]}}}
+                    }
+                }
+            }},
+
+            # -------------------------------------------------------------------------
+            # END TEACHING COMPOSITION LOGIC
+            # -------------------------------------------------------------------------
+
+            # Kac Label & Syllabus
             {"$addFields": {
                 "kac_label": {
                     "$cond": [

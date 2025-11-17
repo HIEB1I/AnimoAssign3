@@ -52,11 +52,11 @@ export default function OM_RP_LoadRisk() {
   const [departmentId, setDepartmentId] = useState("DEPT0001");
   const [overload, setOverload] = useState(0);
   const [histK, setHistK] = useState(3);
-  /*const [onlyWithPrefs, setOnlyWithPrefs] = useState(false); // kept for future; UI stays hidden
-  const [allowFallback, setAllowFallback] = useState(false); // kept for future; UI stays hidden*/
-  const [onlyWithPrefs] = useState(false); // kept for future; UI stays hidden
-  const [allowFallback] = useState(false); // kept for future; UI stays hidden
-  
+  //const [onlyWithPrefs, setOnlyWithPrefs] = useState(false); // kept for future; UI stays hidden
+  //const [allowFallback, setAllowFallback] = useState(false); // kept for future; UI stays hidden
+  const [onlyWithPrefs] = useState(false);
+  const [allowFallback] = useState(false); 
+
   // data state
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
