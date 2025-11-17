@@ -1972,7 +1972,7 @@ export async function getOmLoadAssignmentProfile(userId: string) {
 export async function submitOmLoadAssignment(
   userId: string,
   payload: { rows: OmLoadRow[] },
-  action: "submit" | "approve" = "submit"
+  action: "submit" | "approve" | "save" = "submit"
 ) {
   const { data } = await axios.post(`${API_BASE}/om/loadassignment`, payload, {
     params: { userId, action },
