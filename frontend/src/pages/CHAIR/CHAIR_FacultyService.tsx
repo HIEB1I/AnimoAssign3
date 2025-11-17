@@ -625,12 +625,12 @@ export default function CHAIR_FacultyService({
         return;
       }
 
+      // ... inside handleCreateAndSend ...
       const snd = await sendFacultyService(crt.row.fs_id);
 
       setRows((prev) => {
-        const byId = new Map(prev.map((r) => [r.fs_id!, r]));
-        byId.set(snd.row.fs_id!, snd.row);
-        return Array.from(byId.values());
+        // Add the new row to the START of the array so it appears at the top
+        return [snd.row, ...prev];
       });
 
       setDraft({ course_code: "", course_title: "", units: null, to_department: "" });

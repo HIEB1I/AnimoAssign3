@@ -568,19 +568,6 @@ function checkGeBlockedSlots(
   return result;
 }
 
-/*
-function toMinutes(t?: string): number | null {
-  if (!t) return null;
-  const s = t.trim();
-  if (!/^\d{3,4}$/.test(s)) return null;
-  const hh = s.length === 3 ? s.slice(0, 1) : s.slice(0, 2);
-  const mm = s.slice(-2);
-  const h = Number(hh);
-  const m = Number(mm);
-  if (Number.isNaN(h) || Number.isNaN(m)) return null;
-  return h * 60 + m;
-}*/
-
 function checkDoubleBookings(rows: Row[]): RowFlagsById {
   const result: RowFlagsById = {};
 
@@ -1159,22 +1146,21 @@ export default function OM_LoadAssignment() {
       try {
         const p = await getOmLoadAssignmentProfile(userId);
 
-        // 1. Determine Base Title
+        // 1. Determine Base Title from DB or Fallback
         let roleTitle = p?.position_title || "";
-        // append " | Department of …" like CHAIR
-        if (roleTitle && p?.dept_name) roleTitle = `${roleTitle} | ${p.dept_name}`;
-        setProfileSubtitle(roleTitle);
-        setProfileName(p?.full_name || "");
 
         // Fallback: If no title in DB, but has OM role in session
         if (!roleTitle && (normRoles.includes("office_manager") || normRoles.includes("role0006"))) {
            roleTitle = "Office Manager";
         }
 
-        // 2. Append Department if available (Formatter logic like CHAIR_Plantilla)
+        // 2. Append Department ONCE if available
         if (roleTitle && p?.dept_name) {
            roleTitle = `${roleTitle} | ${p.dept_name}`;
         }
+
+        setProfileSubtitle(roleTitle);
+        setProfileName(p?.full_name || session?.fullName || "");
 
         setProfileSubtitle(roleTitle);
 
@@ -1464,11 +1450,6 @@ export default function OM_LoadAssignment() {
     return missingCore || missingMeet2;
   };
 
-/*
-  const hasIncompleteRows = useMemo(
-    () => rows.some((r) => isRowIncompleteForApproval(r)),
-    [rows]
-  );*/
 
   type Faculty = {
     faculty_id: string;
@@ -1575,7 +1556,7 @@ export default function OM_LoadAssignment() {
   }, [rows, facultyById, preferredByFaculty]);
 
   // ---- Rule alerts for Tab 2 (violations / warnings) ----
-  type RuleAlert = {
+type RuleAlert = {
     id: string;
     rule: string;
     severity: "error" | "warning";

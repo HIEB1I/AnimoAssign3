@@ -5,25 +5,24 @@ import { ChevronLeft, ChevronDown, ChevronRight } from "lucide-react";
 import { fetchTeachingHistory, listFaculty } from "../../../api";
 
 /** -----------------------------
- * Types
+ * Types (Updated to match FACULTY logic)
  * ----------------------------- */
-type Schedule = {
-  day: string;
-  start_time: string;
-  end_time: string;
-  room?: string;
-  room_type?: string | null;
-};
-
 type TeachingHistoryRow = {
-  term_name?: string;
-  course_code?: string;
-  course_title?: string;
-  section_code?: string;
+  ay: string;
+  term_name: string;
+  course_code: string;
+  course_title: string;
+  section_code: string;
   units?: number;
-  modality?: string;
-  campus_id?: string;
-  schedule: Schedule[];
+  campus?: string;
+  mode?: string;
+  
+  // Flattened Schedule
+  day1?: string;
+  room1?: string;
+  day2?: string;
+  room2?: string;
+  time?: string;
 };
 
 type FacultyLite = { faculty_id: string; name: string };
@@ -31,37 +30,21 @@ type FacultyLite = { faculty_id: string; name: string };
 /** -----------------------------
  * Helpers
  * ----------------------------- */
-function hhmmRange(a?: string, b?: string) {
-  const A = (a || "").trim();
-  const B = (b || "").trim();
-  if (!A && !B) return "";
-  if (A && B) return `${A}–${B}`;
-  return A || B || "";
-}
-
-function flattenSlots(s: Schedule[] = []) {
-  const s1 = s[0];
-  const s2 = s[1];
-  return {
-    day1: s1?.day || "",
-    room1: s1?.room || "",
-    day2: s2?.day || "",
-    room2: s2?.room || "",
-    time: s1 ? hhmmRange(s1.start_time, s1.end_time) : "",
-  };
-}
-
-function groupByTerm(rows: TeachingHistoryRow[]) {
+function groupByTermAndAy(rows: TeachingHistoryRow[]) {
+  // We group by AY first, then Term, or just group by "AY X - Term Y" to keep it simple 
+  // but the UI request implies keeping the existing "Group by Term" visually, 
+  // however, to distinguish AYs, we should key by AY+Term.
   const groups: Record<string, TeachingHistoryRow[]> = {};
   for (const r of rows) {
-    const key = r.term_name || "Term 1";
+    // Key example: "AY 2024-2025 • Term 1"
+    const key = `${r.ay} • ${r.term_name}`;
     if (!groups[key]) groups[key] = [];
     groups[key].push(r);
   }
   return groups;
 }
 
-/** Sort helpers for "LAST, FIRST" (fallback if no comma) */
+/** Sort helpers for "LAST, FIRST" */
 function splitLastFirst(name: string): { last: string; first: string } {
   const raw = String(name || "").trim();
   if (!raw) return { last: "", first: "" };
@@ -82,14 +65,12 @@ function compareLastFirst(a: string, b: string) {
   return byLast !== 0 ? byLast : A.first.localeCompare(B.first);
 }
 
-/** Format display as "Last, First" regardless of input shape */
 function formatLastCommaFirst(name: string) {
   const { last, first } = splitLastFirst(name);
   if (!last && !first) return name || "";
   return first ? `${last}, ${first}` : last;
 }
 
-/** Normalize strings for robust matching */
 function norm(s: string) {
   return String(s || "")
     .toLowerCase()
@@ -99,13 +80,12 @@ function norm(s: string) {
     .trim();
 }
 
-/** Build a search haystack for a name (covers multiple formats) */
 function searchKeys(name: string) {
   const { last, first } = splitLastFirst(name);
   const all = [
-    norm(name),                // raw (maybe already "Last, First")
-    norm(`${last}, ${first}`), // forced Last, First
-    norm(`${first} ${last}`),  // First Last
+    norm(name),
+    norm(`${last}, ${first}`),
+    norm(`${first} ${last}`),
     norm(last),
     norm(first),
   ].filter(Boolean);
@@ -114,14 +94,14 @@ function searchKeys(name: string) {
 
 
 /** -----------------------------
- * Page
+ * Page Component
  * ----------------------------- */
 export default function OM_RP_FacultyTeachingHistory() {
   return (
     <div className="w-full px-8 py-8">
       <h1 className="text-2xl font-bold mb-2">Teaching History of Faculty</h1>
       <p className="text-sm text-gray-600 mb-6">
-        Click a name to expand their teaching history.
+        Click a name to expand their complete teaching history.
       </p>
       <FacultyAccordion />
     </div>
@@ -132,21 +112,16 @@ export default function OM_RP_FacultyTeachingHistory() {
  * Accordion List
  * ----------------------------- */
 function FacultyAccordion() {
-  // directory
   const [allFaculty, setAllFaculty] = useState<FacultyLite[]>([]);
   const [listLoading, setListLoading] = useState(false);
   const [listError, setListError] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
 
-  // open state (multiple allowed)
   const [openIds, setOpenIds] = useState<Set<string>>(new Set());
-
-  // per-faculty cache + loading/error
   const [cache, setCache] = useState<Record<string, TeachingHistoryRow[]>>({});
   const [loadingIds, setLoadingIds] = useState<Set<string>>(new Set());
   const [errors, setErrors] = useState<Record<string, string | null>>({});
 
-  // load faculty list
   useEffect(() => {
     let cancelled = false;
     async function go() {
@@ -154,7 +129,6 @@ function FacultyAccordion() {
       setListError(null);
       try {
         const res = await listFaculty({});
-        // de-duplicate by faculty_id just in case
         const uniq = new Map<string, FacultyLite>();
         (Array.isArray(res?.rows) ? res.rows : []).forEach((r: any) => {
           if (r?.faculty_id) uniq.set(r.faculty_id, { faculty_id: r.faculty_id, name: r.name });
@@ -170,27 +144,21 @@ function FacultyAccordion() {
       }
     }
     go();
-    return () => {
-      cancelled = true;
-    };
+    return () => { cancelled = true; };
   }, []);
 
-  // Filter & sort (only display matching names)
   const filteredSorted = useMemo(() => {
     const q = norm(filter);
     const tokens = q ? q.split(" ") : [];
     const base = tokens.length
       ? allFaculty.filter((f) => {
           const hay = searchKeys(f.name);
-          // require every token to appear in the haystack
           return tokens.every((t) => hay.includes(t));
         })
       : allFaculty;
-
     return [...base].sort((a, b) => compareLastFirst(a.name, b.name));
   }, [allFaculty, filter]);
 
-  // when filter changes, auto-close any open accordions that no longer match
   useEffect(() => {
     const visibleIds = new Set(filteredSorted.map((f) => f.faculty_id));
     setOpenIds((prev) => {
@@ -209,9 +177,9 @@ function FacultyAccordion() {
         setOpenIds(next);
         return;
       }
-      // opening: fetch if not cached
       setOpenIds(next.add(id));
-      if (cache[id]) return; // already cached
+      if (cache[id]) return;
+      
       setErrors((m) => ({ ...m, [id]: null }));
       setLoadingIds((s) => new Set(s).add(id));
       try {
@@ -233,18 +201,15 @@ function FacultyAccordion() {
 
   return (
     <div className="rounded-xl border border-gray-200 bg-white shadow-sm">
-      {/* Top bar */}
+      {/* Controls */}
       <div className="flex flex-wrap items-center gap-3 p-4 border-b border-gray-200">
         <Link
           to="/om/home/reports-analytics"
-          className="inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm shadow-sm hover:bg-gray-50 active:bg-gray-100"
-          aria-label="Back"
-          title="Back"
+          className="inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm shadow-sm hover:bg-gray-50"
         >
           <ChevronLeft className="h-4 w-4" />
           <span>Back</span>
         </Link>
-
         <div className="relative flex-1 min-w-[260px]">
           <input
             value={filter}
@@ -254,11 +219,8 @@ function FacultyAccordion() {
           />
           {!!filter && (
             <button
-              type="button"
-              aria-label="Clear"
               onClick={() => setFilter("")}
               className="absolute right-2 top-1/2 -translate-y-1/2 inline-flex h-5 w-5 items-center justify-center rounded-full text-gray-500 hover:bg-gray-100"
-              title="Clear"
             >
               ×
             </button>
@@ -266,12 +228,9 @@ function FacultyAccordion() {
         </div>
       </div>
 
-      {listError && (
-        <div className="px-4 py-3 text-sm text-red-700 bg-red-50 border-b border-red-200">{listError}</div>
-      )}
+      {listError && <div className="px-4 py-3 text-sm text-red-700 bg-red-50">{listError}</div>}
       {listLoading && <div className="px-4 py-4 text-sm text-gray-500">Loading faculty…</div>}
 
-      {/* Accordion list */}
       <ul className="divide-y">
         {!listLoading && filteredSorted.length === 0 && (
           <li className="p-4 text-sm text-gray-500">No faculty found.</li>
@@ -280,29 +239,24 @@ function FacultyAccordion() {
           const id = f.faculty_id;
           const isOpen = openIds.has(id);
           const isLoading = loadingIds.has(id);
-          const err = errors[id] || null;
+          const err = errors[id];
           const rows = cache[id] || [];
 
           return (
             <li key={id} className="bg-white">
-              {/* Header row */}
               <button
                 onClick={() => toggle(f)}
                 className="w-full flex items-center justify-between gap-3 px-4 py-3 text-left hover:bg-gray-50"
-                aria-expanded={isOpen}
-                aria-controls={`section-${id}`}
               >
                 <span className="inline-flex items-center gap-2">
                   {isOpen ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-                  {/* Display as "Last, First" */}
                   <span className="font-medium text-gray-900">{formatLastCommaFirst(f.name)}</span>
                 </span>
                 <span className="text-xs text-gray-500">{isLoading ? "Loading…" : isOpen ? "Hide" : "Show"}</span>
               </button>
 
-              {/* Dropdown content */}
               {isOpen && (
-                <div id={`section-${id}`} className="px-4 pb-4">
+                <div className="px-4 pb-4">
                   {err && (
                     <div className="mb-3 rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
                       {err}
@@ -326,43 +280,42 @@ function FacultyAccordion() {
 }
 
 /** -----------------------------
- * Teaching history tables (grouped by term)
+ * History Tables (Updated to 9-column logic)
  * ----------------------------- */
 function HistoryTables({ rows }: { rows: TeachingHistoryRow[] }) {
-  const grouped = useMemo(() => groupByTerm(rows || []), [rows]);
+  const grouped = useMemo(() => groupByTermAndAy(rows || []), [rows]);
+  
+  // Keys are "AY X • Term Y". Sort desc (newest AY first).
+  const sortedKeys = Object.keys(grouped).sort().reverse();
 
   return (
     <div className="space-y-6 mt-2">
-      {(Object.keys(grouped).sort() as string[]).map((term) => {
-        const list = grouped[term] || [];
+      {sortedKeys.map((groupKey) => {
+        const list = grouped[groupKey] || [];
         return (
-          <div key={term} className="rounded-xl border border-gray-200 overflow-hidden">
-            <div className="px-4 py-2 text-sm font-semibold text-emerald-700 bg-gray-50 border-b">{term}</div>
+          <div key={groupKey} className="rounded-xl border border-gray-200 overflow-hidden">
+            <div className="px-4 py-2 text-sm font-semibold text-emerald-700 bg-gray-50 border-b">
+              {groupKey}
+            </div>
 
             <div className="overflow-x-auto">
               <table className="min-w-full table-fixed text-sm border-t border-gray-200">
-                {/* 8 evenly spaced columns */}
                 <colgroup>
-                  <col style={{ width: "12.5%" }} />
-                  <col style={{ width: "12.5%" }} />
-                  <col style={{ width: "12.5%" }} />
-                  <col style={{ width: "12.5%" }} />
-                  <col style={{ width: "12.5%" }} />
-                  <col style={{ width: "12.5%" }} />
-                  <col style={{ width: "12.5%" }} />
-                  <col style={{ width: "12.5%" }} />
+                  <col className="w-[12ch]" /> {/* Course Code */}
+                  <col className="w-[28ch]" /> {/* Course Title */}
+                  <col className="w-[8ch]"  /> {/* Section */}
+                  <col className="w-[8ch]"  /> {/* Mode */}
+                  <col className="w-[6ch]"  /> {/* Day 1 */}
+                  <col className="w-[12ch]" /> {/* Room 1 */}
+                  <col className="w-[6ch]"  /> {/* Day 2 */}
+                  <col className="w-[12ch]" /> {/* Room 2 */}
+                  <col className="w-[14ch]" /> {/* Time */}
                 </colgroup>
                 <thead className="bg-gray-50 text-gray-600 text-xs uppercase tracking-wide">
                   <tr>
                     {[
-                      "Course Code",
-                      "Course Title",
-                      "Section",
-                      "Day 1",
-                      "Room 1",
-                      "Day 2",
-                      "Room 2",
-                      "Time",
+                      "Course Code", "Course Title", "Section", "Mode",
+                      "Day 1", "Room 1", "Day 2", "Room 2", "Time"
                     ].map((h) => (
                       <th key={h} className="px-3 py-2 text-center font-medium whitespace-nowrap">
                         {h}
@@ -371,32 +324,22 @@ function HistoryTables({ rows }: { rows: TeachingHistoryRow[] }) {
                   </tr>
                 </thead>
                 <tbody>
-                  {list.length === 0 ? (
-                    <tr>
-                      <td colSpan={8} className="px-4 py-6 text-center text-sm text-gray-500">
-                        No records.
-                      </td>
+                  {list.map((r, i) => (
+                    <tr
+                      key={i}
+                      className={i % 2 === 0 ? "bg-white text-gray-800" : "bg-gray-50 text-gray-800"}
+                    >
+                      <td className="px-3 py-2 text-center">{r.course_code}</td>
+                      <td className="px-3 py-2 text-center whitespace-normal">{r.course_title}</td>
+                      <td className="px-3 py-2 text-center">{r.section_code}</td>
+                      <td className="px-3 py-2 text-center">{r.mode}</td>
+                      <td className="px-3 py-2 text-center">{r.day1 || "-"}</td>
+                      <td className="px-3 py-2 text-center">{r.room1 || "-"}</td>
+                      <td className="px-3 py-2 text-center">{r.day2 || "-"}</td>
+                      <td className="px-3 py-2 text-center">{r.room2 || "-"}</td>
+                      <td className="px-3 py-2 text-center">{r.time}</td>
                     </tr>
-                  ) : (
-                    list.map((r, i) => {
-                      const slots = flattenSlots(r.schedule || []);
-                      return (
-                        <tr
-                          key={`${term}-${r.course_code}-${r.section_code}-${i}`}
-                          className={i % 2 === 0 ? "bg-white text-gray-800" : "bg-gray-50 text-gray-800"}
-                        >
-                          <td className="px-3 py-2 text-center">{r.course_code || ""}</td>
-                          <td className="px-3 py-2 text-center">{r.course_title || ""}</td>
-                          <td className="px-3 py-2 text-center">{r.section_code || ""}</td>
-                          <td className="px-3 py-2 text-center">{slots.day1}</td>
-                          <td className="px-3 py-2 text-center">{slots.room1}</td>
-                          <td className="px-3 py-2 text-center">{slots.day2}</td>
-                          <td className="px-3 py-2 text-center">{slots.room2}</td>
-                          <td className="px-3 py-2 text-center">{slots.time}</td>
-                        </tr>
-                      );
-                    })
-                  )}
+                  ))}
                 </tbody>
               </table>
             </div>
