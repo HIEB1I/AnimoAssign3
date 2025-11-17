@@ -496,6 +496,22 @@ def _term_label(t: dict) -> str:
     ay = t["acad_year_start"]
     return f"AY {ay}-{ay+1} T{t['term_number']}"
 
+def _row_is_locked(r: dict) -> bool:
+    """
+    Treat a row as 'locked' if it already has a concrete manual load:
+      - faculty_id is set
+      - and at least one full day/begin/end slot is filled.
+    These rows will be preserved when running auto-assign.
+    """
+    fid = (r.get("faculty_id") or "").strip()
+    if not fid:
+        return False
+
+    has_slot1 = bool(r.get("day1") and r.get("begin1") and r.get("end1"))
+    has_slot2 = bool(r.get("day2") and r.get("begin2") and r.get("end2"))
+
+    return has_slot1 or has_slot2
+
 router = APIRouter(prefix="/om", tags=["om"])
 
 @router.post("/loadassignment")
@@ -705,6 +721,52 @@ async def get_om_load_assignment_list(user_id: str, db=Depends(get_db)):
     # Get faculty preferences for the active term
     ctx = await phase0_load(active["term_id"], db)
     fac_prefs = ctx.prefs_by_faculty or {}
+    
+    # --- faculty pref windows (day + time) for SCHEDULE_PREF_MISMATCH ---
+    def _parse_hhmm(s: str) -> int | None:
+        """
+        Convert '730' or '07:30' etc to minutes since midnight.
+        Returns None if invalid.
+        """
+        if not s:
+            return None
+        s = s.strip().replace(":", "")
+        if not s.isdigit() or len(s) not in (3, 4):
+            return None
+        if len(s) == 3:
+            hh = int(s[0])
+            mm = int(s[1:])
+        else:
+            hh = int(s[:2])
+            mm = int(s[2:])
+        if not (0 <= hh < 24 and 0 <= mm < 60):
+            return None
+        return hh * 60 + mm
+
+    faculty_pref_windows: dict[str, list[dict]] = {}
+    for fid, pref in fac_prefs.items():
+        days = pref.get("availability_days") or []
+        times = pref.get("preferred_times") or []  # e.g. "730-900"
+        if not days or not times:
+            continue
+
+        windows: list[dict] = []
+        for d in days:
+            d_str = str(d or "").strip().upper()
+            if not d_str:
+                continue
+            for t in times:
+                if not isinstance(t, str) or "-" not in t:
+                    continue
+                left, right = t.replace("–", "-").replace("—", "-").split("-", 1)
+                b = _parse_hhmm(left)
+                e = _parse_hhmm(right)
+                if b is None or e is None or e <= b:
+                    continue
+                windows.append({"day": d_str, "begin": b, "end": e})
+
+        if windows:
+            faculty_pref_windows[fid] = windows
 
     # --- NEW: KAC mappings for frontend flags ---
     # course_to_kacs from phase0_load: course_id -> set(kac_id)
@@ -773,6 +835,7 @@ async def get_om_load_assignment_list(user_id: str, db=Depends(get_db)):
         "courseToKac": course_kac_simple,
         "facultyToKacs": faculty_to_kacs,
         "facultyAllowedModes": faculty_allowed_modes,
+        "facultyPrefWindows": faculty_pref_windows,
     }
 
 @router.post("/load-assignment/run")
@@ -802,6 +865,16 @@ async def run_auto_assignment(
     rows_by_id: dict[str, dict] = {
         str(r.get("id")): r for r in rows if r.get("id")
     }
+
+    # ---------- identify locked/manual sections to preserve ----------
+    locked_section_ids: set[str] = set()
+    for r in rows:
+        sid = r.get("id")
+        if not sid:
+            continue
+        if _row_is_locked(r):
+            locked_section_ids.add(sid)
+    # ----------------------------------------------------------------------
 
     # Prefs (used for alt-window search on duplicates)
     ctx_for_prefs = await phase0_load(active["term_id"], db, department_id=department_id)
@@ -1001,7 +1074,21 @@ async def run_auto_assignment(
     overlay_reasons: dict[str, dict] = {}
     for r in rows:
         sid = r.get("id")
+        if not sid:
+            continue
+
+        # ---------- NEW: preserve locked/manual rows ----------
+        if sid in locked_section_ids:
+            overlay_reasons.setdefault(sid, {}).setdefault(
+                "locked",
+                "Row already has manual faculty + schedule; auto-assign skipped."
+            )
+            # Do NOT touch faculty, days, or times for this row
+            continue
+        # ------------------------------------------------------
+
         a = suggestions.get(sid)
+
 
         if not a:
             # If Phase 7 explicitly failed to find a slot for this section,

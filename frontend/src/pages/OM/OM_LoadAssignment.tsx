@@ -35,7 +35,9 @@ export type RowFlagType =
   | "SCHEDULE_PREF_MISMATCH"
   | "DOUBLE_BOOKED"
   | "MODE_MISMATCH"
-  | "INCOMPLETE_ROW";
+  | "INCOMPLETE_ROW"
+  | "DAY_MISMATCH"
+  | "TIME_MISMATCH";
 
 export interface RowFlag {
   type: RowFlagType;
@@ -313,12 +315,80 @@ function checkKacMismatch(row: Row, ctx: ValidationContext): RowFlag | null {
   return null;
 }
 
-function checkSchedulePrefMismatch(
-  _row: Row,
-  _ctx: ValidationContext
-): RowFlag | null {
-  // TODO: wire this once you expose actual pref windows from backend.
-  // For now, keep it as a no-op so the compiler is happy.
+function checkDayMismatch(row: Row, ctx: ValidationContext): RowFlag | null {
+  const fid = row.faculty_id;
+  if (!fid) return null;
+
+  const prefs = ctx.facultyPrefWindows[fid] || [];
+  if (!prefs.length) return null;
+
+  const allowedDays = new Set(prefs.map((p) => p.day.toUpperCase()));
+
+  const days = [
+    (row.day1 || "").toUpperCase(),
+    (row.day2 || "").toUpperCase(),
+  ].filter(Boolean);
+
+  for (const d of days) {
+    if (!allowedDays.has(d)) {
+      return {
+        type: "DAY_MISMATCH",
+        severity: "warning", // or "error" if you prefer
+        message: `Faculty is not available on ${d}.`,
+      };
+    }
+  }
+
+  return null;
+}
+
+function checkTimeMismatch(row: Row, ctx: ValidationContext): RowFlag | null {
+  const fid = row.faculty_id;
+  if (!fid) return null;
+
+  const prefs = ctx.facultyPrefWindows[fid] || [];
+  if (!prefs.length) return null;
+
+  const toMin = (t?: string): number | null => {
+    if (!t) return null;
+    const s = t.trim();
+    const hh = s.length === 3 ? s.slice(0, 1) : s.slice(0, 2);
+    const mm = s.slice(-2);
+    const h = Number(hh);
+    const m = Number(mm);
+    if (Number.isNaN(h) || Number.isNaN(m)) return null;
+    return h * 60 + m;
+  };
+
+  type Meet = { day: string; b: number; e: number };
+  const meets: Meet[] = [];
+
+  const add = (d?: string, b?: string, e?: string) => {
+    const day = (d || "").toUpperCase();
+    const bb = toMin(b);
+    const ee = toMin(e);
+    if (!day || bb == null || ee == null || ee <= bb) return;
+    meets.push({ day, b: bb, e: ee });
+  };
+
+  add(row.day1, row.begin1, row.end1);
+  add(row.day2, row.begin2, row.end2);
+
+  for (const m of meets) {
+    const sameDayPrefs = prefs.filter((p) => p.day === m.day);
+    if (!sameDayPrefs.length) continue; // day mismatch covered separately
+
+    const ok = sameDayPrefs.some((p) => p.begin <= m.b && p.end >= m.e);
+
+    if (!ok) {
+      return {
+        type: "TIME_MISMATCH",
+        severity: "warning",
+        message: `Time ${m.day} ${row.begin1}-${row.end1} is outside preferred windows.`,
+      };
+    }
+  }
+
   return null;
 }
 
@@ -453,8 +523,11 @@ function validateAllRows(rows: Row[], ctx: ValidationContext): RowFlagsById {
     const kacFlag = checkKacMismatch(row, ctx);
     if (kacFlag) rowFlags.push(kacFlag);
 
-    const schedPrefFlag = checkSchedulePrefMismatch(row, ctx);
-    if (schedPrefFlag) rowFlags.push(schedPrefFlag);
+    const dayFlag = checkDayMismatch(row, ctx);
+    if (dayFlag) rowFlags.push(dayFlag);
+
+    const timeFlag = checkTimeMismatch(row, ctx);
+    if (timeFlag) rowFlags.push(timeFlag);
 
     const modeFlag = checkModeMismatch(row, ctx);
     if (modeFlag) rowFlags.push(modeFlag);
@@ -1086,9 +1159,9 @@ export default function OM_LoadAssignment() {
     setValidationContext({
       courseToKac: (res as any)?.courseToKac || {},
       facultyToKacs: (res as any)?.facultyToKacs || {},
-      facultyPrefWindows: {}, // we'll wire later
+      facultyPrefWindows: (res as any)?.facultyPrefWindows || {},
       facultyAllowedModes: (res as any)?.facultyAllowedModes || {},
-      courseAllowedModes: {}, // optional
+      courseAllowedModes: {},
     });
 
     setRows(Array.isArray(res?.rows) ? res.rows : []);
@@ -1580,6 +1653,48 @@ export default function OM_LoadAssignment() {
         message:
           dbl.message ||
           "Schedule conflict: faculty is assigned to multiple sections at the same day and time.",
+      });
+    });
+
+    // 3e) day to faculty_preferences mismatch (from rowFlags)
+    rows.forEach((r) => {
+      const flags = rowFlags[r.id];
+      if (!flags) return;
+
+      const flag = flags.find((f) => f.type === "DAY_MISMATCH");
+      if (!flag) return;
+
+      const rowIndex = rows.findIndex((x) => x.id === r.id);
+
+      alerts.push({
+        id: `day-${r.id}`,
+        rule: "DAY_MISMATCH",
+        severity: flag.severity,
+        facultyName: r.faculty || undefined,
+        facultyId: r.faculty_id,
+        rowNumber: rowIndex + 1,
+        message: flag.message,
+      });
+    });
+
+    // 3f) time to faculty_preferences mismatch (from rowFlags)
+    rows.forEach((r) => {
+      const flags = rowFlags[r.id];
+      if (!flags) return;
+
+      const flag = flags.find((f) => f.type === "TIME_MISMATCH");
+      if (!flag) return;
+
+      const rowIndex = rows.findIndex((x) => x.id === r.id);
+
+      alerts.push({
+        id: `time-${r.id}`,
+        rule: "TIME_MISMATCH",
+        severity: flag.severity,
+        facultyName: r.faculty || undefined,
+        facultyId: r.faculty_id,
+        rowNumber: rowIndex + 1,
+        message: flag.message,
       });
     });
 
