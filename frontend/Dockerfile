@@ -3,6 +3,7 @@ FROM node:20-alpine AS build
 WORKDIR /app
 ARG VITE_BASE=/
 ENV VITE_BASE=${VITE_BASE}
+RUN npm install xlsx
 RUN npm install
 COPY package*.json ./
 RUN npm ci
