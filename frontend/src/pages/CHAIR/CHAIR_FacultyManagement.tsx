@@ -22,7 +22,6 @@ import {
   type FMOptions,
   type FacultyUpsertPayload,
   updateChairFacultyEntry,
-  getChairHeader,
 } from "../../api";
 
 /* ---- Small shared bits (from ADMIN pattern) ---- */
@@ -324,15 +323,6 @@ type EditFacultyForm = {
 export default function CHAIR_FacultyManagement() {
   type ModalType = null | "schedule" | "history";
 
-  const [userId] = useState(() => {
-    try {
-      const u = JSON.parse(localStorage.getItem("animo.user") || "null");
-      return u?.userId || u?.user_id || "";
-    } catch {
-      return "";
-    }
-  });
-
   // filters
   const [department, setDepartment] = useState("All Departments");
   const [facultyType, setFacultyType] = useState("All Type");
@@ -346,7 +336,6 @@ export default function CHAIR_FacultyManagement() {
   const [typeOptions, setTypeOptions] = useState<string[]>(["All Type"]);
 
   // profile header info
-  const [profileSubtitle, setProfileSubtitle] = useState<string>("");
   const [termLabel, setTermLabel] = useState<string>("");
 
   // table rows
@@ -567,16 +556,6 @@ export default function CHAIR_FacultyManagement() {
       }
     })();
   }, []);
-
-  // Load Header profile
-  useEffect(() => {
-    (async () => {
-      try {
-        const hdr = await getChairHeader(userId || undefined);
-        if (hdr?.ok) setProfileSubtitle(hdr.profileSubtitle || "");
-      } catch { /* ignore */ }
-    })();
-  }, [userId]);
 
   // Debounce search
   useEffect(() => {
