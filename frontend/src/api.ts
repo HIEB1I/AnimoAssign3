@@ -1747,9 +1747,6 @@ export async function startOMFWindow(args: { termId?: string; durationDays?: num
   };
 }
 
-
-
-
 /* =========================================================
    ==============  OM: STUDENT PETITION  ===================
    ========================================================= */
