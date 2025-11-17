@@ -721,7 +721,50 @@ async def get_om_load_assignment_list(user_id: str, db=Depends(get_db)):
     # Get faculty preferences for the active term
     ctx = await phase0_load(active["term_id"], db)
     fac_prefs = ctx.prefs_by_faculty or {}
-    
+
+        # --- NEW: maps for campus and course type_of_course (for GE @ CMPS0002 rule) ---
+    sections = ctx.sections or []
+    courses = ctx.courses or {}
+
+    # section_id -> campus_id
+    section_campus: dict[str, str] = {}
+    # section_id -> course_id
+    section_course: dict[str, str] = {}
+    # course_id -> TYPE_OF_COURSE (e.g. "GE")
+    course_type_of_course: dict[str, str] = {}
+
+    for s in sections:
+        sid = s.get("section_id")
+        if not sid:
+            continue
+        section_campus[sid] = str(s.get("campus_id") or "").strip()
+        cid = s.get("course_id")
+        if cid:
+            section_course[sid] = cid
+
+    for cid, cinfo in (courses or {}).items():
+        toc = str(cinfo.get("type_of_course") or "").strip().upper()
+        if toc:
+            course_type_of_course[cid] = toc
+
+    # --- NEW: program level per course (e.g. 'GS') ---
+    course_program_level: dict[str, str] = {}
+    for cid, cinfo in (ctx.courses or {}).items():
+        lvl = str(cinfo.get("program_level") or "").strip().upper()
+        if lvl:
+            course_program_level[cid] = lvl  # e.g. "GS", "UG", etc.
+
+    # --- NEW: PhD status per faculty (certifications array contains 'Phd') ---
+    faculty_has_phd: dict[str, bool] = {}
+    for f in (ctx.faculty or []):
+        fid = f.get("faculty_id")
+        if not fid:
+            continue
+        certs = [str(x or "").strip().upper() for x in (f.get("certifications") or [])]
+        if "PHD" in certs:
+            faculty_has_phd[fid] = True
+
+
     # --- faculty pref windows (day + time) for SCHEDULE_PREF_MISMATCH ---
     def _parse_hhmm(s: str) -> int | None:
         """
@@ -828,6 +871,49 @@ async def get_om_load_assignment_list(user_id: str, db=Depends(get_db)):
         except:
             continue
 
+        # --- NEW: flatten blocked GE@CMPS0002 windows for frontend tab ---
+    campus_blocked = getattr(ctx, "campus_blocked", {}) or {}
+    blocked_ge_cmps2: list[dict] = []
+
+    # Optional campus lookup if you have it on ctx
+    campus_lookup = {}
+    for c in getattr(ctx, "campuses", []) or []:
+        cid = c.get("campus_id")
+        if cid:
+            campus_lookup[cid] = c.get("campus_name") or c.get("name") or cid
+
+    # Reverse day index
+    idx_to_day = {1: "M", 2: "T", 3: "W", 4: "H", 5: "F", 6: "S"}
+
+    courses = ctx.courses or {}
+    sections = ctx.sections or []
+
+    # Quick maps
+    sec_by_id = {s.get("section_id"): s for s in sections if s.get("section_id")}
+    for campus_id, day_map in campus_blocked.items():
+        if campus_id != "CMPS0002":
+            continue
+        for day_idx, slots in day_map.items():
+            day = idx_to_day.get(day_idx, "")
+            for st_min, en_min, sid, cid, sec_code in slots:
+                cinfo = courses.get(cid) or {}
+                course_code = cinfo.get("course_code") or cinfo.get("course_id") or cid
+                sec = sec_by_id.get(sid) or {}
+                section_code = sec_code or sec.get("section_code") or sec.get("section") or ""
+                blocked_ge_cmps2.append(
+                    {
+                        "campus_id": campus_id,
+                        "campus_name": campus_lookup.get(campus_id, campus_id),
+                        "course_id": cid,
+                        "course_code": course_code,
+                        "section_id": sid,
+                        "section_code": section_code,
+                        "day": day,
+                        "begin": _mm_to_hhmm(st_min),
+                        "end": _mm_to_hhmm(en_min),
+                    }
+                )
+    
     return {
         "term": _term_label(active),
         "rows": rows,
@@ -836,6 +922,12 @@ async def get_om_load_assignment_list(user_id: str, db=Depends(get_db)):
         "facultyToKacs": faculty_to_kacs,
         "facultyAllowedModes": faculty_allowed_modes,
         "facultyPrefWindows": faculty_pref_windows,
+        "courseProgramLevel": course_program_level,  
+        "facultyHasPhd": faculty_has_phd,
+        "sectionCampus": section_campus,
+        "sectionCourse": section_course,
+        "courseTypeOfCourse": course_type_of_course,
+        "blockedGeCmps2": blocked_ge_cmps2,            
     }
 
 @router.post("/load-assignment/run")
@@ -2037,6 +2129,61 @@ async def phase0_load(term_id: str, db, department_id: str | None = None) -> Con
 
     # Replace the pool used by downstream phases (B/6A/6B)
     ctx.faculty = eligible
+
+        # --- NEW: GE @ CMPS0002 windows (for slot pool + frontend tab) ---
+    # Build: campus_blocked[campus_id][day_index] = list[(st_min, en_min, section_id, course_id, section_code)]
+    campus_blocked: dict[str, dict[int, list[tuple[int, int, str, str, str]]]] = {}
+
+    # Day → index helper
+    day_to_idx = {"M": 1, "T": 2, "W": 3, "H": 4, "F": 5, "S": 6}
+
+    sections = ctx.sections or []
+    courses = ctx.courses or {}
+    sched_by_sec = ctx.schedules_by_section or {}
+
+    for sec in sections:
+        sid = sec.get("section_id")
+        if not sid:
+            continue
+        campus_id = str(sec.get("campus_id") or "")
+        if not campus_id:
+            continue
+
+        cid = sec.get("course_id")
+        if not cid:
+            continue
+        cinfo = courses.get(cid) or {}
+
+        # Only GE courses
+        ctype = str(
+            cinfo.get("type_of_course") or cinfo.get("type") or ""
+        ).strip().upper()
+        if ctype != "GE":
+            continue
+
+        # Only campus CMPS0002
+        if campus_id != "CMPS0002":
+            continue
+
+        sec_code = sec.get("section_code") or sec.get("section") or ""
+
+        # Look at all schedules for this section
+        for sch in sched_by_sec.get(sid, []):
+            d = (sch.get("day") or "").strip().upper()
+            if d not in day_to_idx:
+                continue
+            st = _to_min(sch.get("begin_time"))
+            en = _to_min(sch.get("end_time"))
+            if st is None or en is None or en <= st:
+                continue
+
+            idx = day_to_idx[d]
+            campus_blocked.setdefault(campus_id, {}).setdefault(idx, []).append(
+                (st, en, sid, cid, sec_code)
+            )
+
+    # Expose on ctx for later phases + /list route
+    ctx.campus_blocked = campus_blocked
 
     print("[phase0] faculty:", len(all_fids),
         "eligible:", len(eligible),
@@ -3971,6 +4118,16 @@ async def run_milestone_e_phase7(term_id: str, db, department_id: str | None = N
     # 2) optional: improve CMPS0002 concentration (keeps rules; we keep loads balanced)
     assignments = run_pass_campus_concentrate_cmps2(ctx, assignments)
 
+    # --- NEW: use campus_blocked from phase0_load ---
+    campus_blocked = getattr(courses_ctx, "campus_blocked", {}) or {}
+
+    def _section_campus(ctx, section_id: str) -> str:
+        for sec in (ctx.sections or []):
+            if sec.get("section_id") == section_id:
+                return str(sec.get("campus_id") or "")
+        return ""
+
+
     # From here down, we only propose times and don’t change who teaches what.
     # Rebuild context for schedules / types (separate from capacity ctx above).
     courses_ctx = await phase0_load(term_id, db, department_id)
@@ -3981,8 +4138,26 @@ async def run_milestone_e_phase7(term_id: str, db, department_id: str | None = N
 
     campus_blocked = getattr(courses_ctx, "campus_blocked", {}) or {}
 
-        # Inverse map of day_int -> day_code (1->'M', etc.)
+    # Inverse map of day_int -> day_code (1->'M', etc.)
     INV_DAY_MAP = {v: k for k, v in _DAY_MAP.items()}
+
+    # helper: does this (day_idx, interval) hit a blocked GE@CMPS0002 window?
+    def _is_blocked_ge_cmps2_slot(section_id: str, day_idx: int, interval: tuple[int, int]) -> bool:
+        """
+        Returns True if the candidate (section_id, day_idx, [st,en]) overlaps
+        any GE@CMPS0002 blocked window.
+        """
+        campus_id = _section_campus(courses_ctx, section_id)
+        if campus_id != "CMPS0002":
+            return False
+
+        by_day = (campus_blocked.get("CMPS0002") or {}).get(day_idx, [])
+        st, en = interval
+        for bst, ben, _, _, _ in by_day:
+            # overlap if not (new ends before old starts OR new starts after old ends)
+            if not (en <= bst or st >= ben):
+                return True
+        return False
 
     def _all_pref_windows(fp: dict) -> list[tuple[int, int]]:
         """

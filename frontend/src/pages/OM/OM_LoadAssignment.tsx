@@ -37,7 +37,9 @@ export type RowFlagType =
   | "MODE_MISMATCH"
   | "INCOMPLETE_ROW"
   | "DAY_MISMATCH"
-  | "TIME_MISMATCH";
+  | "TIME_MISMATCH"
+  | "GS_NO_PHD"
+  | "GE_BLOCKED_SLOT";
 
 export interface RowFlag {
   type: RowFlagType;
@@ -62,6 +64,15 @@ interface ValidationContext {
 
   // optional: section/course allowed modes if different
   courseAllowedModes?: Record<string, string[]>;
+
+  courseProgramLevel?: Record<string, string>;
+  facultyHasPhd?: Record<string, boolean>;
+
+  sectionCampus?: Record<string, string>;
+  sectionCourse?: Record<string, string>;
+  courseTypeOfCourse?: Record<string, string>;
+
+  campusNames?: Record<string, string>;
 }
 
 /* ---------------- Small inputs ---------------- */
@@ -446,6 +457,118 @@ function checkIncompleteRow(row: Row): RowFlag | null {
   };
 }
 
+function checkGsNoPhd(row: Row, ctx: ValidationContext): RowFlag | null {
+  const cid = row.course;
+  const fid = row.faculty_id;
+  if (!cid || !fid) return null;
+
+  const levelMap = ctx.courseProgramLevel || {};
+  const level = (levelMap[cid] || "").toUpperCase();
+
+  if (level !== "GS") return null; // only care about GS courses
+
+  const phdMap = ctx.facultyHasPhd || {};
+  const hasPhd = !!phdMap[fid];
+
+  if (hasPhd) return null;
+
+  return {
+    type: "GS_NO_PHD",
+    severity: "error",
+    message:
+      "Graduate School (GS) sections must be handled by PhD-certified faculty.",
+  };
+}
+
+function checkGeBlockedSlots(
+  rows: Row[],
+  ctx: ValidationContext
+): RowFlagsById {
+  const result: RowFlagsById = {};
+
+  const sectionCampus = ctx.sectionCampus || {};
+  const sectionCourse = ctx.sectionCourse || {};
+  const courseType = ctx.courseTypeOfCourse || {};
+
+  type BlockOwner = {
+    rowId: string;
+    label: string; // e.g., "CCPROG1 S11"
+  };
+
+  // key = "DAY|BEGIN|END" => owner (GE @ CMPS0002 row)
+  const blocked: Record<string, BlockOwner> = {};
+
+  const makeKey = (
+    day?: string,
+    begin?: string,
+    end?: string
+  ): string | null => {
+    const d = (day || "").trim().toUpperCase();
+    const b = (begin || "").trim();
+    const e = (end || "").trim();
+    if (!d || !b || !e) return null;
+    return `${d}|${b}|${e}`;
+  };
+
+  // 1) First pass: record all GE @ CMPS0002 slots as "blocked"
+  for (const row of rows) {
+    const sid = row.id;
+    if (!sid) continue;
+
+    const campus = (sectionCampus[sid] || "").toUpperCase();
+    if (campus !== "CMPS0002") continue;
+
+    const cid = sectionCourse[sid];
+    const toc = (courseType[cid] || "").toUpperCase();
+    if (toc !== "GE") continue; // only GE courses create blocked slots
+
+    const label = `${row.course || "?"} ${row.section || ""}`.trim();
+
+    const k1 = makeKey(row.day1, row.begin1, row.end1);
+    if (k1) blocked[k1] = { rowId: sid, label };
+
+    const k2 = makeKey(row.day2, row.begin2, row.end2);
+    if (k2) blocked[k2] = { rowId: sid, label };
+  }
+
+  if (Object.keys(blocked).length === 0) return result;
+
+  // 2) Second pass: for ALL CMPS0002 rows, if they use a blocked slot from another section → flag
+  for (const row of rows) {
+    const sid = row.id;
+    if (!sid) continue;
+
+    const campus = (sectionCampus[sid] || "").toUpperCase();
+    if (campus !== "CMPS0002") continue; // only CMPS0002 rows are affected
+
+    const rowFlags: RowFlag[] = [];
+
+    const checkSlot = (day?: string, begin?: string, end?: string) => {
+      const key = makeKey(day, begin, end);
+      if (!key) return;
+
+      const owner = blocked[key];
+      if (!owner) return;
+      if (owner.rowId === sid) return; // it's the same GE section, allowed
+
+      rowFlags.push({
+        type: "GE_BLOCKED_SLOT",
+        severity: "error",
+        message: `This CMPS0002 schedule uses a GE-reserved slot also used by ${owner.label}.`,
+      });
+    };
+
+    checkSlot(row.day1, row.begin1, row.end1);
+    checkSlot(row.day2, row.begin2, row.end2);
+
+    if (rowFlags.length > 0) {
+      result[sid] = (result[sid] || []).concat(rowFlags);
+    }
+  }
+
+  return result;
+}
+
 function toMinutes(t?: string): number | null {
   if (!t) return null;
   const s = t.trim();
@@ -535,6 +658,9 @@ function validateAllRows(rows: Row[], ctx: ValidationContext): RowFlagsById {
     const incompleteFlag = checkIncompleteRow(row);
     if (incompleteFlag) rowFlags.push(incompleteFlag);
 
+    const gsFlag = checkGsNoPhd(row, ctx);
+    if (gsFlag) rowFlags.push(gsFlag);
+
     if (rowFlags.length > 0) {
       flags[row.id] = rowFlags;
     }
@@ -545,6 +671,18 @@ function validateAllRows(rows: Row[], ctx: ValidationContext): RowFlagsById {
   for (const [rowId, conflictFlags] of Object.entries(doubleBookedFlags)) {
     if (!flags[rowId]) flags[rowId] = [];
     flags[rowId].push(...conflictFlags);
+  }
+
+  for (const [rowId, conflictFlags] of Object.entries(doubleBookedFlags)) {
+    if (!flags[rowId]) flags[rowId] = [];
+    flags[rowId].push(...conflictFlags);
+  }
+
+  // 4) cross-row: GE @ CMPS0002 blocked slots
+  const geFlags = checkGeBlockedSlots(rows, ctx);
+  for (const [rowId, geRowFlags] of Object.entries(geFlags)) {
+    if (!flags[rowId]) flags[rowId] = [];
+    flags[rowId].push(...geRowFlags);
   }
 
   return flags;
@@ -1056,6 +1194,11 @@ export default function OM_LoadAssignment() {
       facultyPrefWindows: {},
       facultyAllowedModes: {},
       courseAllowedModes: {},
+      courseProgramLevel: {},
+      facultyHasPhd: {},
+      sectionCampus: {},
+      sectionCourse: {},
+      courseTypeOfCourse: {},
     }
   );
 
@@ -1162,6 +1305,11 @@ export default function OM_LoadAssignment() {
       facultyPrefWindows: (res as any)?.facultyPrefWindows || {},
       facultyAllowedModes: (res as any)?.facultyAllowedModes || {},
       courseAllowedModes: {},
+      courseProgramLevel: (res as any)?.courseProgramLevel || {},
+      facultyHasPhd: (res as any)?.facultyHasPhd || {},
+      sectionCampus: (res as any)?.sectionCampus || {},
+      sectionCourse: (res as any)?.sectionCourse || {},
+      courseTypeOfCourse: (res as any)?.courseTypeOfCourse || {},
     });
 
     setRows(Array.isArray(res?.rows) ? res.rows : []);
@@ -1698,6 +1846,56 @@ export default function OM_LoadAssignment() {
       });
     });
 
+    // 3g) GS sections assigned to non-PhD faculty
+    rows.forEach((r) => {
+      const flags = rowFlags[r.id];
+      if (!flags) return;
+
+      const flag = flags.find((f) => f.type === "GS_NO_PHD");
+      if (!flag) return;
+
+      const rowIndex = rows.findIndex((x) => x.id === r.id);
+
+      alerts.push({
+        id: `gs-${r.id}`,
+        rule: "GS_NO_PHD",
+        severity: flag.severity,
+        facultyName: r.faculty || undefined,
+        facultyId: r.faculty_id,
+        rowNumber: rowIndex >= 0 ? rowIndex + 1 : undefined,
+        message:
+          flag.message ||
+          `GS course ${r.course || "?"} ${
+            r.section || ""
+          } is assigned to a non-PhD faculty member.`,
+      });
+    });
+
+    // 3h) GE @ CMPS0002 blocked slot violations
+    rows.forEach((r) => {
+      const flags = rowFlags[r.id];
+      if (!flags) return;
+
+      const geFlag = flags.find((f) => f.type === "GE_BLOCKED_SLOT");
+      if (!geFlag) return;
+
+      const rowIndex = rows.findIndex((x) => x.id === r.id);
+
+      alerts.push({
+        id: `ge-block-${r.id}`,
+        rule: "GE_BLOCKED_SLOT",
+        severity: geFlag.severity,
+        facultyName: r.faculty || undefined,
+        facultyId: r.faculty_id,
+        rowNumber: rowIndex >= 0 ? rowIndex + 1 : undefined,
+        message:
+          geFlag.message ||
+          `GE slot conflict: ${r.course || "?"} ${
+            r.section || ""
+          } is using a GE-reserved schedule at CMPS0002.`,
+      });
+    });
+
     // 4) Sections where auto-assign had to drop a faculty
     //    (backend marks them as Unassigned + conflictNote)
     rows.forEach((r, idx) => {
@@ -1723,8 +1921,66 @@ export default function OM_LoadAssignment() {
     return alerts;
   }, [rows, rowFlags, validationContext, isRowIncompleteForApproval]);
 
-  // 👇 tiny tab state for the new Summary section
-  const [summaryTab, setSummaryTab] = useState<"units" | "second">("units");
+  type BlockedSectionRow = {
+    rowId: string;
+    course: string; // course_code
+    section: string; // sections.section_code
+    campusId: string;
+    campusName?: string;
+    day1?: string;
+    begin1?: string;
+    end1?: string;
+    day2?: string;
+    begin2?: string;
+    end2?: string;
+  };
+
+  const blockedSections: BlockedSectionRow[] = useMemo(() => {
+    const res: BlockedSectionRow[] = [];
+    const seen = new Set<string>();
+
+    const sectionCampus = validationContext.sectionCampus || {};
+    const sectionCourse = validationContext.sectionCourse || {};
+    const courseType = validationContext.courseTypeOfCourse || {};
+    const campusNames = validationContext.campusNames || {};
+
+    for (const r of rows) {
+      const sid = r.id;
+      if (!sid) continue;
+
+      const campusIdRaw = sectionCampus[sid] || "";
+      const campusId = campusIdRaw.toUpperCase();
+      if (campusId !== "CMPS0002") continue; // only CMPS0002
+
+      const cid = sectionCourse[sid];
+      const toc = (courseType[cid] || "").toUpperCase();
+      if (toc !== "GE") continue; // only GE courses are "blocked"
+
+      const key = sid;
+      if (seen.has(key)) continue;
+      seen.add(key);
+
+      res.push({
+        rowId: sid,
+        course: r.course || cid || "?",
+        section: r.section || "",
+        campusId: campusIdRaw || "",
+        campusName: campusNames[campusIdRaw] || campusIdRaw || "",
+        day1: r.day1,
+        begin1: r.begin1,
+        end1: r.end1,
+        day2: r.day2,
+        begin2: r.begin2,
+        end2: r.end2,
+      });
+    }
+
+    return res;
+  }, [rows, validationContext]);
+
+  const [summaryTab, setSummaryTab] = useState<"units" | "second" | "blocked">(
+    "units"
+  );
 
   return (
     <AppShell
@@ -2251,32 +2507,42 @@ export default function OM_LoadAssignment() {
                     </div>
 
                     {/* Summary internal tabs */}
-                    {/* Summary internal tabs – Chrome style */}
-                    <div className="flex items-end text-xs">
+                    <div className="flex gap-2">
                       <button
-                        type="button"
                         onClick={() => setSummaryTab("units")}
                         className={cls(
-                          "px-4 py-2 border border-b-0 rounded-t-md -mb-px transition text-xs",
+                          "px-3 py-1 text-xs rounded-full border",
                           summaryTab === "units"
-                            ? "bg-white text-gray-900 shadow-sm"
-                            : "bg-gray-100 text-gray-500 hover:text-gray-800"
+                            ? "bg-emerald-600 text-white border-emerald-600"
+                            : "bg-white text-gray-700 border-gray-300"
                         )}
                       >
                         Units vs Prefs
                       </button>
 
                       <button
-                        type="button"
                         onClick={() => setSummaryTab("second")}
                         className={cls(
-                          "px-4 py-2 border border-b-0 rounded-t-md -mb-px transition text-xs ml-1",
+                          "px-3 py-1 text-xs rounded-full border",
                           summaryTab === "second"
-                            ? "bg-white text-gray-900 shadow-sm"
-                            : "bg-gray-100 text-gray-500 hover:text-gray-800"
+                            ? "bg-emerald-600 text-white border-emerald-600"
+                            : "bg-white text-gray-700 border-gray-300"
                         )}
                       >
                         Violation Flags
+                      </button>
+
+                      {/* NEW: Blocked sections tab */}
+                      <button
+                        onClick={() => setSummaryTab("blocked")}
+                        className={cls(
+                          "px-3 py-1 text-xs rounded-full border",
+                          summaryTab === "blocked"
+                            ? "bg-emerald-600 text-white border-emerald-600"
+                            : "bg-white text-gray-700 border-gray-300"
+                        )}
+                      >
+                        Blocked Sections
                       </button>
                     </div>
                   </div>
@@ -2459,6 +2725,82 @@ export default function OM_LoadAssignment() {
                           </table>
                         </div>
                       )}
+                    </div>
+                  )}
+
+                  {summaryTab === "blocked" && (
+                    <div className="px-4 pb-4 border-t">
+                      <div className="mt-3 overflow-x-auto rounded-lg border border-gray-200 bg-white">
+                        <table className="min-w-full divide-y divide-gray-200 text-xs">
+                          <thead className="bg-gray-50">
+                            <tr>
+                              <th className="px-3 py-2 text-left font-semibold text-gray-700">
+                                Course
+                              </th>
+                              <th className="px-3 py-2 text-left font-semibold text-gray-700">
+                                Campus
+                              </th>
+                              <th className="px-3 py-2 text-left font-semibold text-gray-700">
+                                Section
+                              </th>
+                              <th className="px-3 py-2 text-left font-semibold text-gray-700">
+                                Slot 1 (Day / Time)
+                              </th>
+                              <th className="px-3 py-2 text-left font-semibold text-gray-700">
+                                Slot 2 (Day / Time)
+                              </th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-gray-100">
+                            {blockedSections.length === 0 ? (
+                              <tr>
+                                <td
+                                  colSpan={5}
+                                  className="px-3 py-4 text-center text-gray-500"
+                                >
+                                  No blocked GE sections for CMPS0002.
+                                </td>
+                              </tr>
+                            ) : (
+                              blockedSections.map((b) => {
+                                const slot1 =
+                                  b.day1 && b.begin1 && b.end1
+                                    ? `${b.day1} ${toPrettyTime(
+                                        b.begin1
+                                      )}–${toPrettyTime(b.end1)}`
+                                    : "—";
+
+                                const slot2 =
+                                  b.day2 && b.begin2 && b.end2
+                                    ? `${b.day2} ${toPrettyTime(
+                                        b.begin2
+                                      )}–${toPrettyTime(b.end2)}`
+                                    : "—";
+
+                                return (
+                                  <tr key={b.rowId}>
+                                    <td className="px-3 py-2 text-gray-900 font-medium">
+                                      {b.course || "—"}
+                                    </td>
+                                    <td className="px-3 py-2 text-gray-700">
+                                      {b.campusName || b.campusId || "—"}
+                                    </td>
+                                    <td className="px-3 py-2 text-gray-700">
+                                      {b.section || "—"}
+                                    </td>
+                                    <td className="px-3 py-2 text-gray-700">
+                                      {slot1}
+                                    </td>
+                                    <td className="px-3 py-2 text-gray-700">
+                                      {slot2}
+                                    </td>
+                                  </tr>
+                                );
+                              })
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
                     </div>
                   )}
                 </div>
