@@ -568,6 +568,7 @@ function checkGeBlockedSlots(
   return result;
 }
 
+/*
 function toMinutes(t?: string): number | null {
   if (!t) return null;
   const s = t.trim();
@@ -578,7 +579,7 @@ function toMinutes(t?: string): number | null {
   const m = Number(mm);
   if (Number.isNaN(h) || Number.isNaN(m)) return null;
   return h * 60 + m;
-}
+}*/
 
 function checkDoubleBookings(rows: Row[]): RowFlagsById {
   const result: RowFlagsById = {};
@@ -1463,11 +1464,12 @@ export default function OM_LoadAssignment() {
     return missingCore || missingMeet2;
   };
 
-  /** true if there is at least one row that looks edited but incomplete */
+  /*
+true if there is at least one row that looks edited but incomplete
   const hasIncompleteRows = useMemo(
     () => rows.some((r) => isRowIncompleteForApproval(r)),
     [rows]
-  );
+  );*/
 
   type Faculty = {
     faculty_id: string;
