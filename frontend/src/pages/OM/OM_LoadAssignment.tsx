@@ -1880,6 +1880,47 @@ type RuleAlert = {
       });
     });
 
+  // 3i) Faculty with 4+ distinct preps (courses)
+  {
+    const prepsByFaculty: Record<string, Set<string>> = {};
+    const facultyLabel: Record<string, { name: string; id?: string }> = {};
+
+    rows.forEach((r) => {
+      const fid = r.faculty_id;
+      const courseCode = r.course;
+      if (!fid || !courseCode) return;
+
+      if (!prepsByFaculty[fid]) prepsByFaculty[fid] = new Set();
+      prepsByFaculty[fid].add(courseCode);
+
+      if (!facultyLabel[fid]) {
+        facultyLabel[fid] = {
+          name: r.faculty || fid,
+          id: fid,
+        };
+      }
+    });
+
+    Object.entries(prepsByFaculty).forEach(([fid, courseSet]) => {
+      const prepCount = courseSet.size;
+      if (prepCount < 4) return; // only flag 4+ preps
+
+      const labelInfo = facultyLabel[fid] || { name: fid, id: fid };
+      const facultyName = labelInfo.name;
+      const facultyId = labelInfo.id;
+      const courseList = Array.from(courseSet).join(", ");
+
+      alerts.push({
+        id: `max-preps-${fid}`,
+        rule: "MAX_PREPS",
+        severity: "warning", // or "error" if you want it hard-blocking
+        facultyName,
+        facultyId,
+        message: `${facultyName} has ${prepCount} different preps (${courseList}). Recommended maximum is 3.`,
+      });
+    });
+  }
+
     // 4) Sections where auto-assign had to drop a faculty
     //    (backend marks them as Unassigned + conflictNote)
     rows.forEach((r, idx) => {

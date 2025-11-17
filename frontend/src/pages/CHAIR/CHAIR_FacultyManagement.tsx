@@ -557,6 +557,17 @@ export default function CHAIR_FacultyManagement() {
     })();
   }, []);
 
+  // Load Header profile
+  useEffect(() => {
+    (async () => {
+      try {
+        const hdr = await getChairHeader(userId || undefined);
+        //if (hdr?.ok) setProfileSubtitle(hdr.profileSubtitle || "");
+        if (hdr?.ok) setProfileSubtitle(hdr.profileSubtitle || "");
+      } catch { /* ignore */ }
+    })();
+  }, [userId]);
+
   // Debounce search
   useEffect(() => {
     const t = setTimeout(() => setSearch(searchInput.trim()), 300);
