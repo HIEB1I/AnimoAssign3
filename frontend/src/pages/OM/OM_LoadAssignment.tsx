@@ -299,6 +299,7 @@ type Row = {
   status?: "" | "Confirmed" | "Pending" | "Unassigned" | "Conflict";
   conflictNote?: string;
   editable?: boolean;
+  campus_id?: string;
 };
 
 // --- Validation helpers & engine (row-level flags) ---
@@ -1061,6 +1062,142 @@ const RequestChangeModal = ({
     </div>
   );
 
+const NewSectionModal = ({
+  open,
+  onClose,
+  onSave,
+  courseOptions,
+}: {
+  open: boolean;
+  onClose: () => void;
+  onSave: (data: {
+    course: string;
+    section: string;
+    units: string;
+    campus_id: string;
+  }) => void;
+  courseOptions: { code: string; title: string }[];
+}) => {
+  const [course, setCourse] = useState("");
+  const [section, setSection] = useState("");
+  const [units, setUnits] = useState("");
+  const [campusId, setCampusId] = useState("");
+
+  useEffect(() => {
+    if (!open) {
+      setCourse("");
+      setSection("");
+      setUnits("");
+      setCampusId("");
+    }
+  }, [open]);
+
+  if (!open) return null;
+
+  const selectedCourseTitle =
+    courseOptions.find((c) => c.code === course)?.title || "";
+
+  const handleSave = () => {
+    if (!course || !section) {
+      alert("Please fill at least course code and section code.");
+      return;
+    }
+    onSave({
+      course,
+      section,
+      units,
+      campus_id: campusId,
+    });
+  };
+
+  return (
+    <div className="fixed inset-0 z-[130] grid place-items-center bg-black/40 p-4">
+      <div className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-2xl relative">
+        <button
+          aria-label="Close"
+          className="absolute right-3 top-3 rounded-md p-1.5 hover:bg-gray-100"
+          onClick={onClose}
+        >
+          <X className="h-5 w-5 text-gray-500" />
+        </button>
+
+        <h3 className="mb-4 text-lg font-semibold text-emerald-700">
+          Add New Section
+        </h3>
+
+        <div className="space-y-4 text-sm">
+          {/* Course code */}
+          <div>
+            <label className="mb-1 block text-xs font-semibold text-gray-700">
+              Course Code
+            </label>
+            <SelectBox
+              value={course}
+              onChange={setCourse}
+              options={courseOptions.map((c) => c.code)}
+              placeholder="— Select course code —"
+              className="w-full"
+            />
+            <div className="mt-1 text-[11px] text-gray-500 min-h-[16px]">
+              {selectedCourseTitle || "Course title will appear here."}
+            </div>
+          </div>
+
+          {/* Section code */}
+          <div>
+            <label className="mb-1 block text-xs font-semibold text-gray-700">
+              Section Code
+            </label>
+            <TextBox
+              value={section}
+              onChange={setSection}
+              placeholder="e.g. S11"
+            />
+          </div>
+
+          {/* Units */}
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="mb-1 block text-xs font-semibold text-gray-700">
+                Units
+              </label>
+              <TextBox value={units} onChange={setUnits} placeholder="e.g. 3" />
+            </div>
+
+            {/* Campus ID (simple text for now) */}
+            <div>
+              <label className="mb-1 block text-xs font-semibold text-gray-700">
+                Campus ID
+              </label>
+              <TextBox
+                value={campusId}
+                onChange={setCampusId}
+                placeholder="e.g. CMPS0001"
+              />
+            </div>
+          </div>
+        </div>
+
+        <div className="mt-6 flex justify-end gap-2">
+          <button
+            onClick={onClose}
+            className="rounded-lg border border-neutral-300 bg-neutral-100 px-4 py-2 text-sm hover:bg-neutral-200"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={handleSave}
+            className="inline-flex items-center gap-2 rounded-lg bg-emerald-700 px-4 py-2 text-sm font-medium text-white hover:brightness-110"
+          >
+            <Save className="h-4 w-4" />
+            Save New Section
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 /* ---------------- Main ---------------- */
 export default function OM_LoadAssignment() {
   // Session (DB-driven, no hardcodes)
@@ -1079,6 +1216,8 @@ export default function OM_LoadAssignment() {
   const userId = session?.userId || "";
 
   const [isAssigning, setIsAssigning] = useState(false);
+
+  const [showNewSectionModal, setShowNewSectionModal] = useState(false);
 
   const [preferredByFaculty, setPreferredByFaculty] = useState<
     Record<string, number>
@@ -1311,32 +1450,8 @@ export default function OM_LoadAssignment() {
   }, [initialLoaded]);
 
   const addRow = () => {
-    setRows((prev) => [
-      ...prev,
-      {
-        id: `manual-${Date.now()}`,
-        course: "",
-        title: "",
-        units: "",
-        section: "",
-        faculty: "",
-        day1: "",
-        begin1: "",
-        end1: "",
-        room1: "",
-        day2: "",
-        begin2: "",
-        end2: "",
-        room2: "",
-        capacity: "",
-        status: "",
-        editable: true,
-      },
-    ]);
-    setMode("manual");
-    setApproved(false);
-    setHasLocalEdits(true);
-  };
+    setShowNewSectionModal(true);
+  };  
 
   const getEditFlags = (r: Row) => {
     const editAll = !!r.editable;
@@ -2909,6 +3024,50 @@ export default function OM_LoadAssignment() {
         from={reqChange.from}
         onClose={() => setReqChange({ open: false })}
       />
+
+<NewSectionModal
+        open={showNewSectionModal}
+        onClose={() => setShowNewSectionModal(false)}
+        courseOptions={courseOptions}
+        onSave={({ course, section, units, campus_id }) => {
+          // create a new manual row that behaves like other rows,
+          // but with the extra campus_id attached
+          const title =
+            courseOptions.find((c) => c.code === course)?.title || "";
+
+          setRows((prev) => [
+            ...prev,
+            {
+              id: `manual-${Date.now()}`,
+              course,
+              title,
+              units: units ? (Number(units) || "") : "",
+              section,
+              faculty: "",
+              faculty_id: undefined,
+              day1: "",
+              begin1: "",
+              end1: "",
+              room1: "",
+              day2: "",
+              begin2: "",
+              end2: "",
+              room2: "",
+              capacity: "",
+              mode: "",
+              status: "",
+              editable: true,
+              campus_id, 
+            },
+          ]);
+
+          setMode("manual");
+          setApproved(false);
+          setHasLocalEdits(true);
+          setShowNewSectionModal(false);
+        }}
+      />
+
     </AppShell>
   );
 }

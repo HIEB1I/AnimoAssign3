@@ -4828,6 +4828,7 @@ async def _persist_rows_no_auto(term_id: str, rows: list[dict], db):
                 "section_code": (r.get("section") or "").strip(),
                 "units": course_doc.get("units"),
                 "enrollment_cap": r.get("capacity") or None,
+                "campus_id": r.get("campus_id") or None,  # <-- ADD THIS
                 "created_at": now,
                 "updated_at": now,
             }
@@ -4838,11 +4839,53 @@ async def _persist_rows_no_auto(term_id: str, rows: list[dict], db):
                 {"section_id": new_sid, "course_id": cid, "term_id": term_id},
             )
 
+            # Mark this as a newly created section in this SAVE
+            new_sections.add(new_sid)
+
+            # --- NEW: bootstrap faculty_assignment (even if faculty is still blank) ---
+            fid_raw = (r.get("faculty_id") or "").strip()
+            fa_doc = {
+                "section_id": new_sid,
+                "term_id": term_id,
+                "course_id": cid,
+                "faculty_id": fid_raw,                 # "" if none yet
+                "is_archived": False,
+                "status": r.get("status") or "Pending",
+                "created_at": now,
+            }
+            await db[COL_ASSIGN].update_one(
+                {"section_id": new_sid},
+                {"$setOnInsert": fa_doc},
+                upsert=True,
+            )
+
+            # --- NEW: bootstrap 2 empty section_schedules (SCHxxxx-01 / -02) ---
+            for ordn in (1, 2):
+                schedule_id = _sched_id(new_sid, ordn)
+                sched_doc = {
+                    "schedule_id": schedule_id,
+                    "section_id": new_sid,
+                    "term_id": term_id,
+                    "day": "",
+                    "start_time": "",
+                    "end_time": "",
+                    "room_id": "",
+                    "room_type": "",
+                    "created_at": now,
+                    "updated_at": now,
+                }
+                await db[COL_SCHED].update_one(
+                    {"schedule_id": schedule_id},
+                    {"$setOnInsert": sched_doc},
+                    upsert=True,
+                )
+
             # Update local variables + mapping so the rest of this function uses the new id
             sid = new_sid
             r["id"] = new_sid
             r["section_id"] = new_sid
             section_to_course[sid] = cid
+
 
         # --- 0) Keep sections.mode in sync with the row's mode (if present) ---
         row_mode = str(r.get("mode") or "").strip().upper()
@@ -4855,6 +4898,14 @@ async def _persist_rows_no_auto(term_id: str, rows: list[dict], db):
             print(
                 f"[SAVE] sections.update sid={sid!r} mode={row_mode!r} "
                 f"matched={result.matched_count} modified={result.modified_count}"
+            )
+
+        campus_id = (r.get("campus_id") or "").strip()
+        if campus_id:
+            await db[COL_SECTIONS].update_one(
+                {"section_id": sid},
+                {"$set": {"campus_id": campus_id}},
+                upsert=False,
             )
 
         # ---------- 1) faculty_assignments upsert (only if faculty explicitly set) ----------
