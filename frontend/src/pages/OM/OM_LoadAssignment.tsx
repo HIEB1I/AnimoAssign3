@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Outlet, useLocation } from "react-router-dom";
 import AppShell from "../../base/AppShell";
-import { runOmAutoAssign } from "../../api.ts"; 
+import { runOmAutoAssign } from "../../api.ts";
 import { submitOmLoadAssignment } from "../../api.ts";
 
 import {
@@ -203,7 +203,6 @@ function ComboBox({
   placeholder?: string;
   className?: string;
 }) {
-
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState(value ?? "");
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -300,6 +299,7 @@ type Row = {
   status?: "" | "Confirmed" | "Pending" | "Unassigned" | "Conflict";
   conflictNote?: string;
   editable?: boolean;
+  campus_id?: string;
 };
 
 // --- Validation helpers & engine (row-level flags) ---
@@ -692,47 +692,41 @@ const timeRange = (begin?: string, end?: string) => {
 const DAY_OPTIONS = ["M", "T", "W", "H", "F", "S"];
 const MODE_OPTIONS = ["FOL", "HYB", "F2F"];
 const ROOM_OPTIONS = ["Online", "Classroom", "Comlab"];
-
-function buildTimeStartOptions() {
-  const out: string[] = [];
-  let h = 7;
-  let m = 30;
-  while (h < 21) {
-    const hh = String(h).padStart(2, "0");
-    const mm = String(m).padStart(2, "0");
-    out.push(`${hh}${mm}`);
-    m += 105;
-    if (m >= 60) {
-      h += Math.floor(m / 60);
-      m = m % 60;
-    }
-    if (h >= 21) break;
-  }
-  return out;
-}
-function buildTimeEndOptions() {
-  const starts = buildTimeStartOptions();
-  return starts.map((t) => {
-    const h = parseInt(t.slice(0, 2));
-    const m = parseInt(t.slice(2));
-    let endH = h;
-    let endM = m + 90;
-    if (endM >= 60) {
-      endH += Math.floor(endM / 60);
-      endM = endM % 60;
-    }
-    return `${String(endH).padStart(2, "0")}${String(endM).padStart(2, "0")}`;
-  });
-}
-
-const SECOND_TIME_OPTIONS = ["0900", "1230", "1415", "1600", "1745", "1930"];
-
-const TIME_BEGIN_OPTIONS = Array.from(
-  new Set([...buildTimeStartOptions(), ...SECOND_TIME_OPTIONS])
-).sort((a, b) => Number(a) - Number(b));
-const TIME_END_OPTIONS = Array.from(
-  new Set([...buildTimeEndOptions(), ...SECOND_TIME_OPTIONS])
-).sort((a, b) => Number(a) - Number(b));
+const TIME_BEGIN_OPTIONS = [
+  "0730",
+  "0800",
+  "0900",
+  "0915",
+  "1000",
+  "1100",
+  "1245",
+  "1300",
+  "1315",
+  "1400",
+  "1430",
+  "1440",
+  "1530",
+  "1615",
+  "1800",
+  "1945",
+];
+const TIME_END_OPTIONS = [
+  "0900",
+  "1000",
+  "1200",
+  "1045",
+  "1230",
+  "1300",
+  "1500",
+  "1415",
+  "1600",
+  "1730",
+  "1745",
+  "1930",
+  "2000",
+  "2100",
+  "2115",
+];
 
 /* ---------------- Reusable small components ---------------- */
 const StatusChip = ({ r }: { r: Row }) => {
@@ -1068,6 +1062,142 @@ const RequestChangeModal = ({
     </div>
   );
 
+const NewSectionModal = ({
+  open,
+  onClose,
+  onSave,
+  courseOptions,
+}: {
+  open: boolean;
+  onClose: () => void;
+  onSave: (data: {
+    course: string;
+    section: string;
+    units: string;
+    campus_id: string;
+  }) => void;
+  courseOptions: { code: string; title: string }[];
+}) => {
+  const [course, setCourse] = useState("");
+  const [section, setSection] = useState("");
+  const [units, setUnits] = useState("");
+  const [campusId, setCampusId] = useState("");
+
+  useEffect(() => {
+    if (!open) {
+      setCourse("");
+      setSection("");
+      setUnits("");
+      setCampusId("");
+    }
+  }, [open]);
+
+  if (!open) return null;
+
+  const selectedCourseTitle =
+    courseOptions.find((c) => c.code === course)?.title || "";
+
+  const handleSave = () => {
+    if (!course || !section) {
+      alert("Please fill at least course code and section code.");
+      return;
+    }
+    onSave({
+      course,
+      section,
+      units,
+      campus_id: campusId,
+    });
+  };
+
+  return (
+    <div className="fixed inset-0 z-[130] grid place-items-center bg-black/40 p-4">
+      <div className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-2xl relative">
+        <button
+          aria-label="Close"
+          className="absolute right-3 top-3 rounded-md p-1.5 hover:bg-gray-100"
+          onClick={onClose}
+        >
+          <X className="h-5 w-5 text-gray-500" />
+        </button>
+
+        <h3 className="mb-4 text-lg font-semibold text-emerald-700">
+          Add New Section
+        </h3>
+
+        <div className="space-y-4 text-sm">
+          {/* Course code */}
+          <div>
+            <label className="mb-1 block text-xs font-semibold text-gray-700">
+              Course Code
+            </label>
+            <SelectBox
+              value={course}
+              onChange={setCourse}
+              options={courseOptions.map((c) => c.code)}
+              placeholder="— Select course code —"
+              className="w-full"
+            />
+            <div className="mt-1 text-[11px] text-gray-500 min-h-[16px]">
+              {selectedCourseTitle || "Course title will appear here."}
+            </div>
+          </div>
+
+          {/* Section code */}
+          <div>
+            <label className="mb-1 block text-xs font-semibold text-gray-700">
+              Section Code
+            </label>
+            <TextBox
+              value={section}
+              onChange={setSection}
+              placeholder="e.g. S11"
+            />
+          </div>
+
+          {/* Units */}
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="mb-1 block text-xs font-semibold text-gray-700">
+                Units
+              </label>
+              <TextBox value={units} onChange={setUnits} placeholder="e.g. 3" />
+            </div>
+
+            {/* Campus ID (simple text for now) */}
+            <div>
+              <label className="mb-1 block text-xs font-semibold text-gray-700">
+                Campus ID
+              </label>
+              <TextBox
+                value={campusId}
+                onChange={setCampusId}
+                placeholder="e.g. CMPS0001"
+              />
+            </div>
+          </div>
+        </div>
+
+        <div className="mt-6 flex justify-end gap-2">
+          <button
+            onClick={onClose}
+            className="rounded-lg border border-neutral-300 bg-neutral-100 px-4 py-2 text-sm hover:bg-neutral-200"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={handleSave}
+            className="inline-flex items-center gap-2 rounded-lg bg-emerald-700 px-4 py-2 text-sm font-medium text-white hover:brightness-110"
+          >
+            <Save className="h-4 w-4" />
+            Save New Section
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 /* ---------------- Main ---------------- */
 export default function OM_LoadAssignment() {
   // Session (DB-driven, no hardcodes)
@@ -1086,6 +1216,8 @@ export default function OM_LoadAssignment() {
   const userId = session?.userId || "";
 
   const [isAssigning, setIsAssigning] = useState(false);
+
+  const [showNewSectionModal, setShowNewSectionModal] = useState(false);
 
   const [preferredByFaculty, setPreferredByFaculty] = useState<
     Record<string, number>
@@ -1150,13 +1282,17 @@ export default function OM_LoadAssignment() {
         let roleTitle = p?.position_title || "";
 
         // Fallback: If no title in DB, but has OM role in session
-        if (!roleTitle && (normRoles.includes("office_manager") || normRoles.includes("role0006"))) {
-           roleTitle = "Office Manager";
+        if (
+          !roleTitle &&
+          (normRoles.includes("office_manager") ||
+            normRoles.includes("role0006"))
+        ) {
+          roleTitle = "Office Manager";
         }
 
         // 2. Append Department ONCE if available
         if (roleTitle && p?.dept_name) {
-           roleTitle = `${roleTitle} | ${p.dept_name}`;
+          roleTitle = `${roleTitle} | ${p.dept_name}`;
         }
 
         setProfileSubtitle(roleTitle);
@@ -1166,7 +1302,6 @@ export default function OM_LoadAssignment() {
 
         // 3. Name Fallback
         setProfileName(p?.full_name || session?.fullName || "");
-
       } catch {
         /* ignore; non-blocking for UI */
       }
@@ -1315,32 +1450,8 @@ export default function OM_LoadAssignment() {
   }, [initialLoaded]);
 
   const addRow = () => {
-    setRows((prev) => [
-      ...prev,
-      {
-        id: `manual-${Date.now()}`,
-        course: "",
-        title: "",
-        units: "",
-        section: "",
-        faculty: "",
-        day1: "",
-        begin1: "",
-        end1: "",
-        room1: "",
-        day2: "",
-        begin2: "",
-        end2: "",
-        room2: "",
-        capacity: "",
-        status: "",
-        editable: true,
-      },
-    ]);
-    setMode("manual");
-    setApproved(false);
-    setHasLocalEdits(true);
-  };
+    setShowNewSectionModal(true);
+  };  
 
   const getEditFlags = (r: Row) => {
     const editAll = !!r.editable;
@@ -1450,7 +1561,6 @@ export default function OM_LoadAssignment() {
     return missingCore || missingMeet2;
   };
 
-
   type Faculty = {
     faculty_id: string;
     faculty_name_display: string;
@@ -1556,7 +1666,7 @@ export default function OM_LoadAssignment() {
   }, [rows, facultyById, preferredByFaculty]);
 
   // ---- Rule alerts for Tab 2 (violations / warnings) ----
-type RuleAlert = {
+  type RuleAlert = {
     id: string;
     rule: string;
     severity: "error" | "warning";
@@ -1880,46 +1990,46 @@ type RuleAlert = {
       });
     });
 
-  // 3i) Faculty with 4+ distinct preps (courses)
-  {
-    const prepsByFaculty: Record<string, Set<string>> = {};
-    const facultyLabel: Record<string, { name: string; id?: string }> = {};
+    // 3i) Faculty with 4+ distinct preps (courses)
+    {
+      const prepsByFaculty: Record<string, Set<string>> = {};
+      const facultyLabel: Record<string, { name: string; id?: string }> = {};
 
-    rows.forEach((r) => {
-      const fid = r.faculty_id;
-      const courseCode = r.course;
-      if (!fid || !courseCode) return;
+      rows.forEach((r) => {
+        const fid = r.faculty_id;
+        const courseCode = r.course;
+        if (!fid || !courseCode) return;
 
-      if (!prepsByFaculty[fid]) prepsByFaculty[fid] = new Set();
-      prepsByFaculty[fid].add(courseCode);
+        if (!prepsByFaculty[fid]) prepsByFaculty[fid] = new Set();
+        prepsByFaculty[fid].add(courseCode);
 
-      if (!facultyLabel[fid]) {
-        facultyLabel[fid] = {
-          name: r.faculty || fid,
-          id: fid,
-        };
-      }
-    });
-
-    Object.entries(prepsByFaculty).forEach(([fid, courseSet]) => {
-      const prepCount = courseSet.size;
-      if (prepCount < 4) return; // only flag 4+ preps
-
-      const labelInfo = facultyLabel[fid] || { name: fid, id: fid };
-      const facultyName = labelInfo.name;
-      const facultyId = labelInfo.id;
-      const courseList = Array.from(courseSet).join(", ");
-
-      alerts.push({
-        id: `max-preps-${fid}`,
-        rule: "MAX_PREPS",
-        severity: "warning", // or "error" if you want it hard-blocking
-        facultyName,
-        facultyId,
-        message: `${facultyName} has ${prepCount} different preps (${courseList}). Recommended maximum is 3.`,
+        if (!facultyLabel[fid]) {
+          facultyLabel[fid] = {
+            name: r.faculty || fid,
+            id: fid,
+          };
+        }
       });
-    });
-  }
+
+      Object.entries(prepsByFaculty).forEach(([fid, courseSet]) => {
+        const prepCount = courseSet.size;
+        if (prepCount < 4) return; // only flag 4+ preps
+
+        const labelInfo = facultyLabel[fid] || { name: fid, id: fid };
+        const facultyName = labelInfo.name;
+        const facultyId = labelInfo.id;
+        const courseList = Array.from(courseSet).join(", ");
+
+        alerts.push({
+          id: `max-preps-${fid}`,
+          rule: "MAX_PREPS",
+          severity: "warning", // or "error" if you want it hard-blocking
+          facultyName,
+          facultyId,
+          message: `${facultyName} has ${prepCount} different preps (${courseList}). Recommended maximum is 3.`,
+        });
+      });
+    }
 
     // 4) Sections where auto-assign had to drop a faculty
     //    (backend marks them as Unassigned + conflictNote)
@@ -2006,6 +2116,22 @@ type RuleAlert = {
   const [summaryTab, setSummaryTab] = useState<"units" | "second" | "blocked">(
     "units"
   );
+
+  const courseOptions = useMemo(() => {
+    const map: Record<string, string> = {};
+
+    rows.forEach((r) => {
+      const code = (r.course || "").trim();
+      const title = (r.title || "").trim();
+      if (code && title && !map[code]) {
+        map[code] = title;
+      }
+    });
+
+    return Object.entries(map)
+      .map(([code, title]) => ({ code, title }))
+      .sort((a, b) => a.code.localeCompare(b.code));
+  }, [rows]);
 
   return (
     <AppShell
@@ -2231,14 +2357,47 @@ type RuleAlert = {
                             </td>
 
                             <td className="px-4 py-2 align-top">
-                              <div>
-                                <div className="font-semibold text-emerald-700">
-                                  {r.course || "—"}
+                              {getEditFlags(r).course ? (
+                                <div className="flex flex-col gap-1">
+                                  {/* Course code dropdown */}
+                                  <SelectBox
+                                    value={r.course || ""}
+                                    onChange={(code) => {
+                                      setCell(r.id, "course", code);
+                                      const found = courseOptions.find(
+                                        (c) => c.code === code
+                                      );
+                                      setCell(
+                                        r.id,
+                                        "title",
+                                        (found?.title || "") as Row["title"]
+                                      );
+                                    }}
+                                    options={courseOptions.map((c) => c.code)}
+                                    placeholder="— Select course —"
+                                    className="w-[160px]"
+                                  />
+
+                                  {/* Auto-filled course title (read-only text) */}
+                                  <div className="text-gray-600 text-xs max-w-xs truncate">
+                                    {r.title ||
+                                      courseOptions.find(
+                                        (c) => c.code === r.course
+                                      )?.title ||
+                                      "—"}
+                                  </div>
                                 </div>
-                                <div className="text-gray-600 text-sm">
-                                  {r.title || "—"}
+                              ) : (
+                                // Non-editable rows: same as before
+                                <div>
+                                  <div className="font-semibold text-emerald-700">
+                                    {r.course || "—"}
+                                  </div>
+                                  <div className="text-gray-600 text-sm">
+                                    {r.title || "—"}
+                                  </div>
                                 </div>
-                              </div>
+                              )}
                             </td>
 
                             <td className="px-2 py-2 text-center">
@@ -2865,6 +3024,50 @@ type RuleAlert = {
         from={reqChange.from}
         onClose={() => setReqChange({ open: false })}
       />
+
+<NewSectionModal
+        open={showNewSectionModal}
+        onClose={() => setShowNewSectionModal(false)}
+        courseOptions={courseOptions}
+        onSave={({ course, section, units, campus_id }) => {
+          // create a new manual row that behaves like other rows,
+          // but with the extra campus_id attached
+          const title =
+            courseOptions.find((c) => c.code === course)?.title || "";
+
+          setRows((prev) => [
+            ...prev,
+            {
+              id: `manual-${Date.now()}`,
+              course,
+              title,
+              units: units ? (Number(units) || "") : "",
+              section,
+              faculty: "",
+              faculty_id: undefined,
+              day1: "",
+              begin1: "",
+              end1: "",
+              room1: "",
+              day2: "",
+              begin2: "",
+              end2: "",
+              room2: "",
+              capacity: "",
+              mode: "",
+              status: "",
+              editable: true,
+              campus_id, 
+            },
+          ]);
+
+          setMode("manual");
+          setApproved(false);
+          setHasLocalEdits(true);
+          setShowNewSectionModal(false);
+        }}
+      />
+
     </AppShell>
   );
 }
