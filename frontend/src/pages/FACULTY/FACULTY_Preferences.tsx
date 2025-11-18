@@ -328,8 +328,6 @@ function compressDays(days: string[]): string[] {
     .sort((a, b) => order.indexOf(a) - order.indexOf(b));
 }
 
-// NOTE: expandDays does not need changing. 
-// It parses individual letters ("M", "T") correctly because splitting a single char string works the same way.
 function expandDays(groups: string[]): string[] {
   const out: string[] = [];
   groups.forEach((g) => g.split("").forEach((ch) => out.push(LETTER_TO_DAY[ch])));
@@ -415,7 +413,7 @@ function DeadlineBanner({ openISO, deadlineISO, className }: { openISO: string; 
           <div className="font-semibold">Submissions Open In</div>
           <div className="mt-0.5">
             Opens: <span className="font-medium">{openISO ? new Date(openISO).toLocaleString() : "—"}</span>{" "}
-            • <span className="font-bold text-amber-700">{openISO ? openLabel : "TBA"}</span>
+            • <span className="font-bold text-amber-700">{openLabel}</span>
           </div>
           <div className="mt-1 text-[12px] opacity-80">Editing is locked until the window opens.</div>
         </div>
@@ -457,7 +455,7 @@ function DeadlineBanner({ openISO, deadlineISO, className }: { openISO: string; 
         <div className="mt-0.5">
           Deadline:{" "}
           <span className="font-medium">{deadlineISO ? new Date(deadlineISO).toLocaleString() : "—"}</span>{" "}
-          • <span className="font-bold text-amber-700">{deadlineISO ? deadlineLabel : "TBA"}</span>
+          • <span className="font-bold text-amber-700">{deadlineLabel}</span>
         </div>
         <div className="mt-1 text-[12px] opacity-80">Please finalize your preferences before the deadline.</div>
       </div>
@@ -555,6 +553,8 @@ function AELine1Schedule() {
    TYPES & STATE
    =========================== */
 type DeloadRow = { type: string; detail?: string; units: number | null };
+type FutureTerm = { term_id: string; label: string; start_date?: string };
+
 type SavedPrefs = {
   prefUnits: string;
   deloadings: DeloadRow[];
@@ -567,8 +567,10 @@ type SavedPrefs = {
   remarks: string;
   onBreak: boolean;
   breakReason: string;
-  breakReturnDate: string; // YYYY-MM-DD
+  breakReturnTermId: string; // UPDATED: Stores ID of the return term
+  breakReturnDate: string; // Legacy: Keep for display if needed, or for fallback
 };
+
 const initialSaved: SavedPrefs = {
   prefUnits: "",
   deloadings: [],
@@ -581,6 +583,7 @@ const initialSaved: SavedPrefs = {
   remarks: "",
   onBreak: false,
   breakReason: "",
+  breakReturnTermId: "",
   breakReturnDate: "",
 };
 
@@ -597,6 +600,7 @@ function EditForm({
   daysMaster,
   timeSlotsMaster,
   kacDisplayOptions,
+  futureTerms, // UPDATED: prop
 }: {
   initial: SavedPrefs;
   onClose: () => void;
@@ -607,6 +611,7 @@ function EditForm({
   daysMaster: string[];
   timeSlotsMaster: string[];
   kacDisplayOptions: string[];
+  futureTerms: FutureTerm[]; 
 }) {
   // local form & wizard step
   const [form, setForm] = useState<SavedPrefs>(initial);
@@ -616,6 +621,15 @@ function EditForm({
   const isZeroTeachingLoad = form.prefUnits === ZERO_LOAD_LABEL;
 
   const { past: deadlinePassed } = useCountdown(deadlineISO);
+
+  // Helper to map Term ID <-> Term Label for the Dropdown
+  const termLabelOptions = useMemo(() => futureTerms.map(t => t.label), [futureTerms]);
+  
+  // Get currently selected label based on ID
+  const currentTermLabel = useMemo(() => {
+    const found = futureTerms.find(t => t.term_id === form.breakReturnTermId);
+    return found ? found.label : "";
+  }, [form.breakReturnTermId, futureTerms]);
 
   // FT/PT: unit options
   const prefUnitOptions = useMemo(() => {
@@ -648,7 +662,7 @@ function EditForm({
     setForm((f) => ({
       ...f,
       onBreak: isTeachingBreak,
-      ...(isTeachingBreak ? {} : { breakReason: "", breakReturnDate: "" }),
+      ...(isTeachingBreak ? {} : { breakReason: "", breakReturnTermId: "" }),
     }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [form.prefUnits]);
@@ -675,8 +689,9 @@ function EditForm({
     if (isTeachingBreak) {
       if (!form.breakReason.trim())
         return { ok: false, msg: "Reason for taking a break/leave is required." };
-      if (!form.breakReturnDate.trim())
-        return { ok: false, msg: "Date of return is required." };
+      // UPDATED: Check for Term ID
+      if (!form.breakReturnTermId)
+        return { ok: false, msg: "Academic Year and Term of return is required." };
       return { ok: true };
     }
 
@@ -973,20 +988,22 @@ function EditForm({
                         />
                       </div>
 
+                      {/* UPDATED: Term Dropdown Selection */}
                       <div>
-                        <FieldLabel required>Date of return (MM/DD/YYYY)</FieldLabel>
-                        <input
-                          type="date"
-                          className="w-full rounded-2xl border border-neutral-300 px-4 py-3 text-[15px] shadow-sm outline-none"
-                          value={form.breakReturnDate || ""}
-                          onChange={(e) =>
-                            setForm({ ...form, breakReturnDate: e.target.value })
-                          }
-                          min={new Date().toISOString().split('T')[0]} // Prevent past dates
-                          // max restriction removed to allow future years
+                        <FieldLabel required>Academic Year and Term of Return</FieldLabel>
+                        <Dropdown
+                          value={currentTermLabel}
+                          onChange={(label) => {
+                            const found = futureTerms.find(t => t.label === label);
+                            if (found) {
+                                setForm({ ...form, breakReturnTermId: found.term_id });
+                            }
+                          }}
+                          options={termLabelOptions}
+                          placeholder="— Select Academic Year and Term —"
                         />
                         <div className="mt-1 text-[12px] text-neutral-500">
-                          Must not be later than the current term.
+                          Select the term you plan to return to teaching.
                         </div>
                       </div>
                     </div>
@@ -1550,6 +1567,7 @@ export default function FACULTY_Preferences() {
   const [kacOptions, setKacOptions] = useState<Array<{ kac_id: string; kac_code: string; kac_name: string }>>([]);
   const [daysMaster, setDaysMaster] = useState<string[]>([]);
   const [timeSlotsMaster, setTimeSlotsMaster] = useState<string[]>([]);
+  const [futureTerms, setFutureTerms] = useState<FutureTerm[]>([]); // UPDATED: state for future terms
   const [loading, setLoading] = useState(true);
   const [employmentType, setEmploymentType] = useState<"FT" | "PT">("FT"); // default FT; corrected after fetch
 
@@ -1629,6 +1647,7 @@ export default function FACULTY_Preferences() {
       remarks: latest?.notes ?? "",
       onBreak: !!latest?.on_break,
       breakReason: latest?.break_reason ?? "",
+      breakReturnTermId: latest?.break_return_term_id ?? "", // UPDATED
       breakReturnDate: retISO,
     };
   }
@@ -1659,6 +1678,7 @@ export default function FACULTY_Preferences() {
         setTimeSlotsMaster(
           Array.isArray(opts?.time_slots_display) ? opts.time_slots_display : []
         );
+        setFutureTerms(opts?.future_terms || []); // UPDATED: Set future terms from API
 
         const et =
           (
@@ -1743,7 +1763,8 @@ export default function FACULTY_Preferences() {
 
       on_break: onBreak,
       break_reason: onBreak ? v.breakReason : "",
-      break_return_date: onBreak ? dateISOToMDY(v.breakReturnDate) : "",
+      break_return_term_id: onBreak ? v.breakReturnTermId : "", // UPDATED: Send Term ID
+      break_return_date: onBreak ? dateISOToMDY(v.breakReturnDate) : "", // Legacy support, can be empty or calculated
       employment_type: employmentType,
     } as const;
   };
@@ -1791,12 +1812,21 @@ export default function FACULTY_Preferences() {
           daysMaster={daysMaster}
           timeSlotsMaster={timeSlotsMaster}
           kacDisplayOptions={[...kacOptions].map((k) => k.kac_name).sort((a, b) => a.localeCompare(b))}
+          futureTerms={futureTerms} // UPDATED: Pass terms
         />
       </section>
     );
   }
 
   /* -------------------- SAVED VIEW -------------------- */
+  
+  // Helper to display return label in saved view
+  const savedReturnTermLabel = (() => {
+    if (!saved.breakReturnTermId) return "";
+    const found = futureTerms.find(t => t.term_id === saved.breakReturnTermId);
+    return found ? found.label : "";
+  })();
+
   return (
     <section className="mx-auto w-full max-w-screen-2xl px-4">
       <DeadlineBanner openISO={prefsWindow.openISO} deadlineISO={prefsWindow.deadlineISO} />
@@ -1837,6 +1867,21 @@ export default function FACULTY_Preferences() {
               label="Preferred Teaching Units"
               value={<Tag tone="gray">{saved.prefUnits || "—"}</Tag>}
             />
+            
+            {/* UPDATED: Display break details */}
+            {saved.onBreak && (
+              <>
+                <Row
+                  label="Break Reason"
+                  value={<span className="text-neutral-900">{saved.breakReason}</span>}
+                />
+                <Row
+                  label="Return Term"
+                  value={<span className="text-neutral-900">{savedReturnTermLabel || saved.breakReturnTermId || "—"}</span>}
+                />
+              </>
+            )}
+
             <Row
               label="Deloading"
               value={

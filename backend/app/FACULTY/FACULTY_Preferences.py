@@ -47,7 +47,12 @@ class SubmitPayload(BaseModel):
     # harmless extras supported by UI
     on_break: Optional[bool] = None
     break_reason: Optional[str] = None
+    
+    # UPDATED: Expecting a term ID now instead of just a date string
+    break_return_term_id: Optional[str] = None
+    # Legacy field support (optional - ignored in logic below favor of term_id)
     break_return_date: Optional[str] = None
+
     employment_type: Optional[str] = None 
 
 
@@ -61,6 +66,7 @@ async def _active_term_doc() -> dict:
         "_id": 0,
         "term_id": 1,
         "acad_year_start": 1,
+        "acad_year_end": 1,
         "term_number": 1,
         "submission_deadline": 1,
         "start_date": 1,
@@ -332,12 +338,13 @@ async def _enrich_pref(doc: Dict[str, Any]) -> Dict[str, Any]:
       leave_doc = await db[COL_LEAVES].find_one({
           "faculty_id": faculty_id,
           "start_term_id": term_id,
-          # Optionally filter by 'is_active' if that's critical, 
-          # but usually the term match is enough for history
       })
       
       if leave_doc:
           out["break_reason"] = leave_doc.get("reason", "")
+          # UPDATED: Retrieve end_term_id as the return point
+          out["break_return_term_id"] = leave_doc.get("end_term_id", "")
+          # Legacy support: ensure return_date is present if needed by UI
           out["break_return_date"] = leave_doc.get("return_date", "")
   
   mode = out.get("mode") or {}
@@ -435,6 +442,29 @@ async def preferences_root(
       ]
 
       term = await _active_term_doc()
+      
+      # UPDATED: Fetch "Future Terms" to populate the return dropdown
+      future_terms = []
+      if term:
+          # Terms that start after current academic year OR same year but later term
+          ft_cursor = db[COL_TERMS].find({
+              "$or": [
+                  {"acad_year_start": {"$gt": term.get("acad_year_start", 0)}},
+                  {
+                      "acad_year_start": term.get("acad_year_start", 0),
+                      "term_number": {"$gt": term.get("term_number", 0)}
+                  }
+              ]
+          }, {"_id": 0, "term_id": 1, "acad_year_start": 1, "acad_year_end": 1, "term_number": 1, "start_date": 1}).sort([("acad_year_start", 1), ("term_number", 1)]).limit(10)
+          
+          async for ft in ft_cursor:
+              label = f"AY {ft.get('acad_year_start')}-{ft.get('acad_year_end')} Term {ft.get('term_number')}"
+              future_terms.append({
+                  "term_id": ft["term_id"],
+                  "label": label,
+                  "start_date": ft.get("start_date")
+              })
+
       window = await _prefs_window_override_for_term(term)
       prefs_window = {
           "openISO": window.get("openISO") or "",
@@ -448,6 +478,7 @@ async def preferences_root(
           "days_display": days_display,
           "time_slots_display": time_slots_display,
           "prefs_window": prefs_window,
+          "future_terms": future_terms, # Pass to frontend
           "activeTerm": {
               "term_id": (term or {}).get("term_id"),
           },
@@ -463,7 +494,7 @@ async def preferences_root(
       
       prefs: List[Dict[str, Any]] = []
       async for p in cursor:
-          p = await _enrich_pref(p) # This now handles fetching leave details
+          p = await _enrich_pref(p) # Now fetches end_term_id from leaves
           p = await _expand_kac_names(p)
           prefs.append(p)
           
@@ -524,16 +555,25 @@ async def preferences_root(
 
       on_break_flag = bool(payload.get("on_break", False))
       
-      # --- HANDLE LEAVES LOGIC ---
-      # If on_break is true, we save to 'leaves' collection and NOT in 'faculty_preferences' details
-      # We still save a skeleton in faculty_preferences to mark the task as 'finished'.
-      
+      # --- UPDATED LEAVES LOGIC ---
       if on_break_flag:
           break_reason = str(payload.get("break_reason") or "").strip()
-          break_return_date = str(payload.get("break_return_date") or "").strip()
+          break_return_term_id = str(payload.get("break_return_term_id") or "").strip()
           
-          if not break_reason or not break_return_date:
-              raise HTTPException(status_code=400, detail="Break reason and return date are required.")
+          if not break_reason:
+              raise HTTPException(status_code=400, detail="Break reason is required.")
+          if not break_return_term_id:
+              raise HTTPException(status_code=400, detail="Academic Year and Term of return is required.")
+
+          # Fetch the return term doc to get its start date for legacy support
+          return_term_doc = await db[COL_TERMS].find_one({"term_id": break_return_term_id})
+          # Fallback date string if term not found
+          return_date_str = ""
+          if return_term_doc:
+              # Format date as needed, e.g., stringify ISO or MM/DD/YYYY depending on legacy needs
+              # Assuming standard ISO string or datetime for now
+              if return_term_doc.get("start_date"):
+                  return_date_str = str(return_term_doc["start_date"]).split(" ")[0]
 
           # Upsert into leaves
           existing_leave = await db[COL_LEAVES].find_one(
@@ -544,12 +584,12 @@ async def preferences_root(
           leave_doc = {
               "leave_id": leave_id,
               "faculty_id": faculty_id,
-              "approval_status": "APPROVED", # As per sample
-              "is_active": True, # Or False based on your logic, assumed True for new request
+              "approval_status": "APPROVED", 
+              "is_active": True, 
               "start_term_id": term_id,
-              "end_term_id": "", # Populated if we knew the exact term, simplified here
-              "reason": break_reason,        # New field for the reason
-              "return_date": break_return_date, # New field for the date
+              "end_term_id": break_return_term_id, # UPDATED: Save term ID
+              "reason": break_reason,
+              "return_date": return_date_str, # Auto-filled based on term start date
               "created_at": _utcnow(),
               "updated_at": _utcnow()
           }
@@ -561,13 +601,9 @@ async def preferences_root(
           )
           
           # Clear break details from the payload destined for faculty_preferences
-          # to ensure they aren't saved there as per instruction
           payload_break_reason = "" 
           payload_break_return_date = ""
       else:
-          # If NOT on break, we should probably ensure no active leave exists for this term
-          # to avoid contradiction, or just ignore. 
-          # For safety, let's just proceed with standard prefs.
           payload_break_reason = ""
           payload_break_return_date = ""
 
