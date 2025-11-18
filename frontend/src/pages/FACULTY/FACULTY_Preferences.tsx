@@ -316,25 +316,20 @@ const LETTER_TO_DAY: Record<string, string> = {
   F: "Friday",
   S: "Saturday",
 };
+
+// UPDATED FUNCTION: Stores days individually (e.g., ["M", "T"]) instead of grouped (e.g., ["MT"])
 function compressDays(days: string[]): string[] {
   const order = ["M", "T", "W", "H", "F", "S"];
-  const letters = days
+  
+  // Map full name to letter, filter out invalid ones, and sort strictly by day order
+  return days
     .map((d) => DAY_TO_LETTER[d])
+    .filter(Boolean) // Ensure no undefined values
     .sort((a, b) => order.indexOf(a) - order.indexOf(b));
-  const out: string[] = [];
-  let buf: string[] = [];
-  const isAdj = (a: string, b: string) => order.indexOf(b) - order.indexOf(a) === 1;
-  for (let i = 0; i < letters.length; i++) {
-    if (!buf.length) buf.push(letters[i]);
-    else if (isAdj(buf[buf.length - 1], letters[i])) buf.push(letters[i]);
-    else {
-      out.push(buf.join(""));
-      buf = [letters[i]];
-    }
-  }
-  if (buf.length) out.push(buf.join(""));
-  return out;
 }
+
+// NOTE: expandDays does not need changing. 
+// It parses individual letters ("M", "T") correctly because splitting a single char string works the same way.
 function expandDays(groups: string[]): string[] {
   const out: string[] = [];
   groups.forEach((g) => g.split("").forEach((ch) => out.push(LETTER_TO_DAY[ch])));
