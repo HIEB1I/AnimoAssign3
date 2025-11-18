@@ -59,7 +59,7 @@ async def ensure_sections_published_or_abort(
 ):
     total = await db.sections.count_documents({
         "term_id": term_id,
-        "is_archived": {"$ne": True},  # remove this too if you want truly all
+        "is_archived": {"$ne": True},  # safe even if is_archived doesn't exist
     })
     if total == 0 and not allow_fallback:
         raise RuntimeError(
@@ -76,8 +76,17 @@ async def is_on_approved_leave_now(db: AsyncIOMotorDatabase, faculty_id: str, cu
     return await term_in_range(db, curr_term, L["start_term_id"], L["end_term_id"])
 
 async def units_per_section(db: AsyncIOMotorDatabase, course_id: str, units_default: int) -> int:
-    C = await db.courses.find_one({"course_id": course_id}, projection={"units_per_section": 1})
-    return int(C.get("units_per_section") or units_default) if C else int(units_default)
+    """
+    Use courses.units_per_section if present; otherwise fall back to courses.units;
+    if neither is present, use the global default.
+    """
+    C = await db.courses.find_one(
+        {"course_id": course_id},
+        projection={"units_per_section": 1, "units": 1},
+    )
+    if not C:
+        return int(units_default)
+    return int(C.get("units_per_section") or C.get("units") or units_default)
 
 async def preferred_units_for_ft(db: AsyncIOMotorDatabase, faculty_id: str, pref_term_id: str) -> int:
     P = await db.faculty_preferences.find_one(
@@ -157,7 +166,10 @@ async def build_capacity_map(
     overload_allowance_units: int,
 ) -> Dict[str, int]:
     CAP: Dict[str, int] = {}
-    async for fp in db.faculty_profiles.find({"department_id": dept_scope, "employment_type": "FT"}, projection={"faculty_id": 1}):
+    async for fp in db.faculty_profiles.find(
+        {"department_id": dept_scope, "employment_type": "FT"},
+        projection={"faculty_id": 1}
+    ):
         if await is_on_approved_leave_now(db, fp["faculty_id"], curr_term_id):
             continue
         base = await preferred_units_for_ft(db, fp["faculty_id"], pref_term_id)
@@ -242,9 +254,16 @@ async def build_row(
     elif pt_needed > 0:
         risk, confidence = "Medium", "Medium"
 
+    # course_code can be a string or a list (e.g., ["ADANI-1"])
+    raw_code = course.get("course_code", course["course_id"])
+    if isinstance(raw_code, list):
+        course_code = raw_code[0] if raw_code else course["course_id"]
+    else:
+        course_code = raw_code
+
     return {
         "course_id": course["course_id"],
-        "course_code": course.get("course_code", course["course_id"]),
+        "course_code": course_code,
         "demand_sections": int(demand),
         "ft_filled_sections": int(ft_filled_secs),
         "pt_needed_sections": int(pt_needed),
@@ -345,40 +364,58 @@ async def _demand_sections_sections_first(
     units_default: int,
     allow_fallback: bool,
 ) -> int:
+    """
+    Demand estimator:
+
+    1) Primary: count current-term sections for this course (any non-archived).
+    2) If zero and allow_fallback is True: use weighted history of sections and
+       fill rates from previous terms, based only on sections/enrollment_cap.
+    """
     # Primary: count current-term sections for this course (any status)
     count = await db.sections.count_documents({
         "term_id": curr_term_id,
         "course_id": course_id,
-        "is_archived": {"$ne": True},  # optional to keep
+        "is_archived": {"$ne": True},  # safe if field doesn't exist
     })
     if count > 0:
         return int(count)
     if not allow_fallback:
         return 0
 
-    # Fallback A: pre-enlistment → sections
-    PE = await db.pre_enlistment.find_one({"term_id": curr_term_id, "course_id": course_id})
-    if PE and PE.get("seats_requested"):
-        agg = [x async for x in db.sections.aggregate([
-            {"$match": {"course_id": course_id, "seat_cap": {"$gt": 0}}},
-            {"$group": {"_id": None, "avg_cap": {"$avg": "$seat_cap"}}},
-        ])]
-        avg_cap = int(round(agg[0]["avg_cap"])) if agg else 40
-        return int(math.ceil(float(PE["seats_requested"]) / max(1, avg_cap)))
-
-    # Fallback B: weighted history (last 3 terms × fill rate)
+    # Fallback: weighted history (last 3 terms × fill rate)
     weights = [0.6, 0.3, 0.1]
     est = 0.0
     hist_terms = await prev_n_terms(db, curr_term_id, 3)
     for idx, t in enumerate(hist_terms):
         secs = await db.sections.count_documents({"term_id": t, "course_id": course_id})
+        if secs == 0:
+            continue
         agg = [x async for x in db.sections.aggregate([
-            {"$match": {"term_id": t, "course_id": course_id, "seat_cap": {"$gt": 0}}},
-            {"$project": {"fill": {"$divide": ["$enrolled", "$seat_cap"]}}},
-            {"$group": {"$id": None, "avg_fill": {"$avg": "$fill"}}},
+            {
+                "$match": {
+                    "term_id": t,
+                    "course_id": course_id,
+                    "enrollment_cap": {"$gt": 0},
+                }
+            },
+            {
+                "$project": {
+                    "fill": {
+                        "$divide": ["$enrolled", "$enrollment_cap"]
+                    }
+                }
+            },
+            {
+                "$group": {
+                    "_id": None,
+                    "avg_fill": {"$avg": "$fill"}
+                }
+            },
         ])]
         avg_fill = float(agg[0].get("avg_fill", 0.9)) if agg else 0.9
-        est += secs * avg_fill * (weights[idx] if idx < len(weights) else 0.0)
+        weight = weights[idx] if idx < len(weights) else 0.0
+        est += secs * avg_fill * weight
+
     return max(0, round(est))
 
 # ======================== Router endpoint ========================
