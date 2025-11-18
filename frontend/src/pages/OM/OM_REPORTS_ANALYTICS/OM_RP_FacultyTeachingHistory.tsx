@@ -31,12 +31,8 @@ type FacultyLite = { faculty_id: string; name: string };
  * Helpers
  * ----------------------------- */
 function groupByTermAndAy(rows: TeachingHistoryRow[]) {
-  // We group by AY first, then Term, or just group by "AY X - Term Y" to keep it simple 
-  // but the UI request implies keeping the existing "Group by Term" visually, 
-  // however, to distinguish AYs, we should key by AY+Term.
   const groups: Record<string, TeachingHistoryRow[]> = {};
   for (const r of rows) {
-    // Key example: "AY 2024-2025 • Term 1"
     const key = `${r.ay} • ${r.term_name}`;
     if (!groups[key]) groups[key] = [];
     groups[key].push(r);
@@ -280,13 +276,28 @@ function FacultyAccordion() {
 }
 
 /** -----------------------------
- * History Tables (Updated to 9-column logic)
+ * History Tables
  * ----------------------------- */
 function HistoryTables({ rows }: { rows: TeachingHistoryRow[] }) {
+  // Group by unique key
   const grouped = useMemo(() => groupByTermAndAy(rows || []), [rows]);
   
-  // Keys are "AY X • Term Y". Sort desc (newest AY first).
-  const sortedKeys = Object.keys(grouped).sort().reverse();
+  // DERIVE KEYS FROM ROWS to preserve Backend Sort Order (AY Desc -> Term Desc).
+  // The backend sends data sorted. If we just Object.keys(grouped), we lose that guaranteed order.
+  // If we re-sort via string (reverse), we rely on string format.
+  // Best approach: Iterate the original rows, pick unique keys in order.
+  const sortedKeys = useMemo(() => {
+    const seen = new Set<string>();
+    const keys: string[] = [];
+    for (const r of rows) {
+      const k = `${r.ay} • ${r.term_name}`;
+      if (!seen.has(k)) {
+        seen.add(k);
+        keys.push(k);
+      }
+    }
+    return keys;
+  }, [rows]);
 
   return (
     <div className="space-y-6 mt-2">
