@@ -351,7 +351,7 @@ export default function CHAIR_FacultyManagement() {
   const [termLabel, setTermLabel] = useState<string>("");
   
   // ---- ADDED: profileSubtitle state ----
-  //const [profileSubtitle, setProfileSubtitle] = useState<string>("");
+ //const [profileSubtitle, setProfileSubtitle] = useState<string>("");
   const [, setProfileSubtitle] = useState<string>("");
   // ---------------------------------------
 
