@@ -21,12 +21,11 @@ COL_COURSES = "courses"                   # NEW: to fetch course_title/units for
 WEEKDAY_ORDER = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
 
 # ---------- Day / time helpers ----------
-# UPDATED: Added "H" for Thursday to match FACULTY_History
 _DAY_MAP = {
     "M": "Monday", "MON": "Monday",
     "T": "Tuesday", "TU": "Tuesday", "TUE": "Tuesday",
     "W": "Wednesday", "WED": "Wednesday",
-    "TH": "Thursday", "THU": "Thursday", "R": "Thursday", "H": "Thursday",
+    "TH": "Thursday", "THU": "Thursday", "R": "Thursday",
     "F": "Friday", "FRI": "Friday",
     "S": "Saturday", "SAT": "Saturday",
 }
@@ -548,7 +547,7 @@ async def facultymanagement_handler(
                                             "case": {
                                                 "$in": [
                                                     {"$toUpper": "$sched.day"},
-                                                    ["TH", "THU", "R", "H"], # UPDATED: Added "H" here for schedule aggregation
+                                                    ["TH", "THU", "R"],
                                                 ]
                                             },
                                             "then": "Thursday",
@@ -710,11 +709,8 @@ async def facultymanagement_handler(
             }},
         ]
 
-        # UPDATED: Added "H": "Thursday" here to fix History inconsistency
-        DAY_MAP = {
-            "M":"Monday","MON":"Monday","T":"Tuesday","TU":"Tuesday","TUE":"Tuesday","W":"Wednesday","WED":"Wednesday",
-            "TH":"Thursday","THU":"Thursday","R":"Thursday","H": "Thursday", "F":"Friday","FRI":"Friday","S":"Saturday","SAT":"Saturday"
-        }
+        DAY_MAP = {"M":"Monday","MON":"Monday","T":"Tuesday","TU":"Tuesday","TUE":"Tuesday","W":"Wednesday","WED":"Wednesday",
+                "TH":"Thursday","THU":"Thursday","R":"Thursday","F":"Friday","FRI":"Friday","S":"Saturday","SAT":"Saturday"}
         DAY_ORDER = {"Monday":1,"Tuesday":2,"Wednesday":3,"Thursday":4,"Friday":5,"Saturday":6}
 
         def _to_full_day(d):
