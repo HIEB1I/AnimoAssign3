@@ -386,7 +386,7 @@ const ClassBlock = ({ onClick, it }: { onClick?: () => void; it: TLItemForCalend
   >
     <div className="text-[13px] font-extrabold tracking-wide">{it.code}</div>
     <div className="text-[12px]">{it.sec} | {it.room}</div>
-    <div className="text-[12px]">{it.mode}</div>
+    {/* Removed mode display here as requested */}
   </button>
 );
 
@@ -395,13 +395,13 @@ type TeachingLoadEnhancedProps = {
   term: any;
 };
 
-// --- *** NEW: Headers for the new list view *** ---
+// --- *** MODIFIED: Headers for the new list view *** ---
 const LIST_HEADERS = [
   "Course Code",
-  "Course Title",
+  // "Course Title", // Removed
   "Section",
   "Units",
-  "Mode",
+  // "Mode", // Removed
   "Day1 / Day2",
   "Room1 / Room2",
   "Time1 / Time2",
@@ -584,10 +584,10 @@ function TeachingLoadEnhanced({ teachingLoad, term }: TeachingLoadEnhancedProps)
                       )}
                     >
                       <td className="px-4 py-2 text-center">{it.course_code}</td>
-                      <td className="px-4 py-2 text-center">{it.course_title}</td>
+                      {/* <td className="px-4 py-2 text-center">{it.course_title}</td> // Removed */}
                       <td className="px-4 py-2 text-center">{it.section}</td>
                       <td className="px-4 py-2 text-center">{it.units}</td>
-                      <td className="px-4 py-2 text-center">{it.mode}</td>
+                      {/* <td className="px-4 py-2 text-center">{it.mode}</td> // Removed */}
                       <td className="px-4 py-2 text-center">
                         {it.day1 && it.day1 !== "TBA" ? it.day1 : '—'}
                         {it.day2 && it.day2 !== "TBA" && ` / ${it.day2}`}
