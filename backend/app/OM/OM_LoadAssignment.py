@@ -2345,21 +2345,44 @@ def _display_name_from_users(u: dict) -> str:
     return f"{ln}, {fn}".strip(", ").strip()
 
 def _faculty_capacities(ctx: ContextA) -> dict[str, int]:
+    """
+    Per-faculty hard cap in UNITS, based purely on faculty_preferences
+    (preferred_units/load_units) for this term, minus whatever is already
+    assigned in current_assigned_units.
+    """
     caps: dict[str, int] = {}
 
+    # units already committed for this term (from approved / saved rows)
     existing = getattr(ctx, "current_assigned_units", {}) or {}
+    prefs   = getattr(ctx, "prefs_by_faculty", {}) or {}
 
     for f in ctx.faculty:
         fid = f["faculty_id"]
 
-        preferred = int((ctx.prefs_by_faculty.get(fid) or {}).get("preferred_units") or 0)
-        prof_units = int(f.get("remaining_units") or 0)
-        base_cap = preferred or prof_units or DEFAULT_UNITS
+        pdoc = prefs.get(fid) or {}
+        # 1) main source: preferred_units from faculty_preferences
+        # 2) fallback: load_units (if you ever use it)
+        # 3) fallback: DEFAULT_UNITS (e.g. 9 or 12)
+        preferred = int(
+            pdoc.get("preferred_units")
+            or pdoc.get("load_units")
+            or 0
+        )
+
+        base_cap = preferred or DEFAULT_UNITS  # ignore faculty_profiles.remaining_units
 
         already = int(existing.get(fid, 0))
         remaining = max(base_cap - already, 0)
 
         caps[fid] = remaining
+
+    # DEBUG: so you can see exactly what’s happening when caps become 0
+    print("[CAP_ENFORCE_CAPS] preferred_units_by_faculty = {",
+          ", ".join(f"{fid}: { (prefs.get(fid) or {}).get('preferred_units') }"
+                    for fid in caps.keys()),
+          "}")
+    print("[CAP_ENFORCE_CAPS] existing_assigned_units =", existing)
+    print("[CAP_ENFORCE_CAPS] remaining_caps =", caps)
 
     return caps
 
@@ -2788,6 +2811,23 @@ def _sched_id(section_id: str, ordinal: int) -> str:
 
 def _norm_hhmm(s: str | None) -> str:
     return _fmt_time(s)  # reuse your tolerant formatter
+
+def _next_section_seq_from_ctx(ctx) -> int:
+    """
+    Find the largest numeric tail among section_ids like 'SEC0001'
+    and return the next integer to use (e.g. 42 => 'SEC0042').
+    """
+    max_seq = 0
+    for s in getattr(ctx, "sections", []) or []:
+        sid = (s.get("section_id") or "").strip()
+        if not sid.startswith("SEC"):
+            continue
+        tail = sid[3:]
+        if tail.isdigit():
+            n = int(tail)
+            if n > max_seq:
+                max_seq = n
+    return max_seq + 1
 
 # ------------------------------ PHASE 5 ------------------------------
 def _coordinator_for_course(ctx: ContextA, cid: str) -> list[str]:
@@ -4712,6 +4752,12 @@ async def _persist_rows_no_auto(term_id: str, rows: list[dict], db):
     ctx = await phase0_load(term_id, db, department_id=None)
     section_to_course = {s["section_id"]: s["course_id"] for s in ctx.sections}
 
+    # NEW: seed for auto-created section_ids, e.g. SEC0042, SEC0043, ...
+    next_section_seq = _next_section_seq_from_ctx(ctx)
+    print("[SAVE] next_section_seq initial:", next_section_seq)
+
+    new_sections: set[str] = set()
+
     def _course_is_shs(cid: str | None) -> bool:
         if not cid:
             return False
@@ -4740,19 +4786,79 @@ async def _persist_rows_no_auto(term_id: str, rows: list[dict], db):
         cid = section_to_course.get(sid)
         fid = r.get("faculty_id") or None
 
+        # --- NEW: auto-create a real section if this sid is unknown ---
+        if not cid:
+            course_id = (r.get("course_id") or "").strip()
+            course_code = (r.get("course") or "").strip()
+
+            course_doc: dict[str, Any] | None = None
+            if course_id:
+                course_doc = await db[COL_COURSES].find_one(
+                    {"course_id": course_id},
+                    {"_id": 0, "course_id": 1, "units": 1},
+                )
+            elif course_code:
+                course_doc = await db[COL_COURSES].find_one(
+                    {"course_code": course_code},
+                    {"_id": 0, "course_id": 1, "units": 1},
+                )
+
+            if not course_doc:
+                print(
+                    "[SAVE] skip row – cannot auto-create section for row id=",
+                    r.get("id"),
+                    "no matching course for course_id/course_code:",
+                    course_id,
+                    course_code,
+                )
+                # we don't know what course to attach to, skip this row entirely
+                continue
+
+            cid = course_doc["course_id"]
+
+            # Generate a brand new section_id, e.g. SEC0042
+            new_sid = f"SEC{next_section_seq:04d}"
+            next_section_seq += 1
+
+            now = _utcnow()
+            sec_doc = {
+                "section_id": new_sid,
+                "term_id": term_id,
+                "course_id": cid,
+                "section_code": (r.get("section") or "").strip(),
+                "units": course_doc.get("units"),
+                "enrollment_cap": r.get("capacity") or None,
+                "created_at": now,
+                "updated_at": now,
+            }
+
+            await db[COL_SECTIONS].insert_one(sec_doc)
+            print(
+                "[SAVE] created new section:",
+                {"section_id": new_sid, "course_id": cid, "term_id": term_id},
+            )
+
+            # Update local variables + mapping so the rest of this function uses the new id
+            sid = new_sid
+            r["id"] = new_sid
+            r["section_id"] = new_sid
+            section_to_course[sid] = cid
+
         # --- 0) Keep sections.mode in sync with the row's mode (if present) ---
         row_mode = str(r.get("mode") or "").strip().upper()
         if row_mode:
-            await db[COL_SECTIONS].update_one(
+            result = await db[COL_SECTIONS].update_one(
                 {"section_id": sid},
                 {"$set": {"mode": row_mode}},
                 upsert=False,
             )
+            print(
+                f"[SAVE] sections.update sid={sid!r} mode={row_mode!r} "
+                f"matched={result.matched_count} modified={result.modified_count}"
+            )
 
         # ---------- 1) faculty_assignments upsert (only if faculty explicitly set) ----------
         if fid:
-            # If there is already an assignment doc for this section, update it and
-            # KEEP legacy identifiers (assignment_id, load_id) if they exist.
             existing = await db[COL_ASSIGN].find_one(
                 {"section_id": sid},
                 {"_id": 0, "assignment_id": 1, "load_id": 1},
@@ -4770,17 +4876,24 @@ async def _persist_rows_no_auto(term_id: str, rows: list[dict], db):
                 if existing.get("load_id"):
                     set_fields["load_id"] = existing["load_id"]
 
-            await db[COL_ASSIGN].update_one(
+            result = await db[COL_ASSIGN].update_one(
                 {"section_id": sid},
                 {"$set": set_fields},
                 upsert=True,
             )
+            print(
+                f"[SAVE] faculty_assignments.upsert sid={sid!r} fid={fid!r} "
+                f"matched={result.matched_count} upserted_id={result.upserted_id}"
+            )
 
-        # ---------- 2) section_schedules upsert (non-SHS only, based on row times) ----------
+                # ---------- 2) section_schedules upsert / create ----------
         if not cid:
+            # should not happen now, but guard anyway
+            print(f"[SAVE] skip schedules; missing cid for sid={sid!r}")
             continue
         if _course_is_shs(cid):
             # For SHS, keep schedules as-is (soft-locked) even on save draft.
+            print(f"[SAVE] skip schedules for SHS course cid={cid!r} sid={sid!r}")
             continue
 
         # pull proposed times from the row (already normalized in UI/run)
@@ -4794,26 +4907,63 @@ async def _persist_rows_no_auto(term_id: str, rows: list[dict], db):
 
             # duplicate-slot check only if we actually know the faculty
             if fid and _dup(fid, day, begin_hhmm, end_hhmm):
+                print(
+                    f"[SAVE] skip duplicate slot for fid={fid!r} "
+                    f"{day} {begin_hhmm}-{end_hhmm}"
+                )
                 continue
-            
-            schedule_id = _sched_id(sid, ordn)
 
-            # Only update existing schedules; do NOT touch room_id / room_type and do NOT create new docs
-            await db[COL_SCHED].update_one(
-                {"schedule_id": schedule_id},
-                {
-                    "$set": {
-                        # optional: you can also drop schedule_id here since it’s in the filter
-                        "term_id": term_id,
-                        "section_id": sid,
-                        "day": day,
-                        "start_time": _to_compact_hhmm(begin_hhmm),
-                        "end_time": _to_compact_hhmm(end_hhmm),
-                        "updated_at": r.get("updated_at") or _utcnow(),
-                    }
-                },
-                upsert=False,  # <— no more creating section_schedules here
-            )
+            schedule_id = _sched_id(sid, ordn)
+            is_new_section = sid in new_sections
+
+            if is_new_section:
+                # NEW SECTIONS (add-new-line): create schedule docs with default room fields
+                now = _utcnow()
+                result = await db[COL_SCHED].update_one(
+                    {"schedule_id": schedule_id},
+                    {
+                        "$setOnInsert": {
+                            "schedule_id": schedule_id,
+                            "section_id": sid,
+                            "room_id": "",
+                            "room_type": "Lecture",
+                            "created_at": now,
+                        },
+                        "$set": {
+                            "term_id": term_id,
+                            "day": day,
+                            "start_time": _to_compact_hhmm(begin_hhmm),
+                            "end_time": _to_compact_hhmm(end_hhmm),
+                            "updated_at": r.get("updated_at") or now,
+                        },
+                    },
+                    upsert=True,
+                )
+                print(
+                    f"[SAVE] NEW section_schedules.upsert schedule_id={schedule_id!r} "
+                    f"matched={result.matched_count} upserted_id={result.upserted_id}"
+                )
+            else:
+                # EXISTING SECTIONS: only update existing docs, do NOT touch room fields, do NOT create
+                result = await db[COL_SCHED].update_one(
+                    {"schedule_id": schedule_id},
+                    {
+                        "$set": {
+                            "term_id": term_id,
+                            "section_id": sid,
+                            "day": day,
+                            "start_time": _to_compact_hhmm(begin_hhmm),
+                            "end_time": _to_compact_hhmm(end_hhmm),
+                            "updated_at": r.get("updated_at") or _utcnow(),
+                        }
+                    },
+                    upsert=False,
+                )
+                print(
+                    f"[SAVE] EXISTING section_schedules.update schedule_id={schedule_id!r} "
+                    f"matched={result.matched_count} modified={result.modified_count}"
+                )
+
             _add_used(fid, day, begin_hhmm, end_hhmm)
 
 async def _upsert_faculty_load_header(
