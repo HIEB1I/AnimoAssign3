@@ -14,7 +14,6 @@ import { cls } from "../../utilities/cls";
 import {
   ChevronDown,
   Search as SearchIcon,
-  Upload,
   Play,
   RefreshCcw,
   Send,
@@ -727,6 +726,41 @@ const TIME_END_OPTIONS = [
   "2100",
   "2115",
 ];
+
+// --- NEW UTILITY FUNCTION FOR AUTO-FILL ---
+/**
+ * Calculates the standard end time (90 minutes later) for a given start time in "HHMM" format.
+ * Returns the calculated "HHMM" string.
+ * @param startHhmm - Start time string, e.g., "0730"
+ */
+function calculateEndTime(startHhmm: string): string {
+  if (!startHhmm || startHhmm.length < 4) return "";
+
+  try {
+    const startH = parseInt(startHhmm.slice(0, 2), 10);
+    const startM = parseInt(startHhmm.slice(2), 10);
+
+    let endH = startH;
+    let endM = startM + 90; // Standard 90-minute slot
+
+    // Handle minute overflow
+    if (endM >= 60) {
+      endH += Math.floor(endM / 60);
+      endM = endM % 60;
+    }
+
+    // Handle end time past midnight (should not happen based on options, but safe guard)
+    if (endH >= 24) {
+      endH = 23; // Cap at 23:59 if needed, but for 21:15 end we cap at 21:15
+      endM = 15;
+    }
+
+    return `${String(endH).padStart(2, "0")}${String(endM).padStart(2, "0")}`;
+  } catch (e) {
+    console.error("Error calculating end time for", startHhmm, e);
+    return "";
+  }
+}
 
 /* ---------------- Reusable small components ---------------- */
 const StatusChip = ({ r }: { r: Row }) => {
@@ -1552,7 +1586,12 @@ export default function OM_LoadAssignment() {
 
     // REQUIRED core fields
     const missingCore =
-      !r.section || !r.faculty || !r.mode || !r.day1 || !r.begin1 || !r.end1;
+      !r.section ||
+      !r.faculty ||
+      !r.mode ||
+      !r.day1 ||
+      !r.begin1 ||
+      !r.end1;
 
     // For meeting 2: if any of the 4 is filled, require all 4
     const hasAnyMeet2 = !!r.day2 || !!r.begin2 || !!r.end2;
@@ -2218,7 +2257,7 @@ export default function OM_LoadAssignment() {
                     }}
                   >
                     <CheckCheck className="h-4 w-4" />
-                    Approve
+                    Forward
                   </button>
                 </div>
               </div>
@@ -2228,40 +2267,25 @@ export default function OM_LoadAssignment() {
                     Load Recommendations
                   </h2>
 
-                  {!isRunning ? (
-                    <div className="flex items-center gap-2">
-                      <button className="inline-flex items-center gap-2 rounded-md bg-emerald-700 px-3.5 py-2 text-sm font-medium text-white shadow-sm hover:brightness-110">
-                        <Upload className="h-4 w-4" />
-                        Import CSV
-                      </button>
-                      <button
-                        onClick={loadFromServer}
-                        className="inline-flex items-center gap-2 rounded-md border border-emerald-700 text-emerald-800 bg-white px-3.5 py-2 text-sm font-medium hover:bg-emerald-50"
-                      >
-                        <Play className="h-4 w-4" />
-                        Run
-                      </button>
-                    </div>
-                  ) : (
-                    <div className="flex items-center gap-2">
-                      <button
-                        disabled={!anySelected}
-                        onClick={() => setShowSend(true)}
-                        className={cls(
-                          "inline-flex items-center gap-2 rounded-md px-3.5 py-2 text-sm font-medium shadow-sm",
-                          anySelected
-                            ? "bg-blue-600 text-white hover:brightness-110"
-                            : "bg-gray-200 text-gray-500 cursor-not-allowed"
-                        )}
-                        title={
-                          anySelected
-                            ? "Send to selected faculty"
-                            : "Select at least one row"
-                        }
-                      >
-                        <Send className="h-4 w-4" />
-                        To Faculty
-                      </button>
+                  {/* --- MODIFIED SECTION START --- */}
+                  <div className="flex items-center gap-2">
+                    {/* New/Moved Auto-assign button */}
+                    <button
+                      onClick={runAutoAssign}
+                      disabled={isAssigning || hasLocalEdits}
+                      className="inline-flex items-center gap-2 rounded-md bg-emerald-700 px-3.5 py-2 text-sm font-medium text-white shadow-sm hover:brightness-110 disabled:opacity-60"
+                      title={
+                        hasLocalEdits
+                          ? "Auto-assign is disabled while you have manual edits. Save or refresh first."
+                          : "Run auto-assignment algorithm"
+                      }
+                    >
+                      <Play className="h-4 w-4" />
+                      {isAssigning ? "Assigning…" : "Auto-assign"}
+                    </button>
+
+                    {/* Refresh button (always visible if running) */}
+                    {isRunning && (
                       <button
                         onClick={loadFromServer}
                         className="inline-flex items-center gap-2 rounded-md border border-gray-300 bg-white px-3.5 py-2 text-sm font-medium hover:bg-gray-50"
@@ -2269,8 +2293,48 @@ export default function OM_LoadAssignment() {
                         <RefreshCcw className="h-4 w-4" />
                         Refresh
                       </button>
-                    </div>
-                  )}
+                    )}
+
+                    {/* To Faculty button (only visible if running and a row is selected) */}
+                    <button
+                      disabled={!anySelected || !isRunning}
+                      onClick={() => setShowSend(true)}
+                      className={cls(
+                        "inline-flex items-center gap-2 rounded-md px-3.5 py-2 text-sm font-medium shadow-sm",
+                        anySelected && isRunning
+                          ? "bg-blue-600 text-white hover:brightness-110"
+                          : "bg-gray-200 text-gray-500 cursor-not-allowed"
+                      )}
+                      title={
+                        anySelected
+                          ? "Send to selected faculty"
+                          : "Select at least one row"
+                      }
+                    >
+                      <Send className="h-4 w-4" />
+                      To Faculty
+                    </button>
+
+                    {/* Original Import CSV block removed */}
+                    {/* {isRunning ? (...) : (
+                        <div className="flex items-center gap-2">
+                          <button className="inline-flex items-center gap-2 rounded-md bg-emerald-700 px-3.5 py-2 text-sm font-medium text-white shadow-sm hover:brightness-110">
+                            <Upload className="h-4 w-4" />
+                            Import CSV
+                          </button>
+                          <button
+                            onClick={loadFromServer}
+                            className="inline-flex items-center gap-2 rounded-md border border-emerald-700 text-emerald-800 bg-white px-3.5 py-2 text-sm font-medium hover:bg-emerald-50"
+                          >
+                            <Play className="h-4 w-4" />
+                            Run
+                          </button>
+                        </div>
+                      )
+                    } */}
+                  </div>
+                  {/* --- MODIFIED SECTION END --- */}
+
                 </div>
 
                 <div className="overflow-x-auto overflow-y-auto max-h-[58vh] mt-3">
@@ -2458,7 +2522,15 @@ export default function OM_LoadAssignment() {
                               {e.begin1 ? (
                                 <SelectBox
                                   value={r.begin1}
-                                  onChange={(v) => setCell(r.id, "begin1", v)}
+                                  onChange={(v) => {
+                                    setCell(r.id, "begin1", v);
+                                    // *** NEW: Auto-fill End1 on Begin1 change ***
+                                    if (v) {
+                                      const autoEnd = calculateEndTime(v);
+                                      setCell(r.id, "end1", autoEnd);
+                                    }
+                                    // *******************************************
+                                  }}
                                   options={TIME_BEGIN_OPTIONS}
                                   className="w-[70px] text-center"
                                 />
@@ -2512,7 +2584,15 @@ export default function OM_LoadAssignment() {
                               {e.begin2 ? (
                                 <SelectBox
                                   value={r.begin2}
-                                  onChange={(v) => setCell(r.id, "begin2", v)}
+                                  onChange={(v) => {
+                                    setCell(r.id, "begin2", v);
+                                    // *** NEW: Auto-fill End2 on Begin2 change ***
+                                    if (v) {
+                                      const autoEnd = calculateEndTime(v);
+                                      setCell(r.id, "end2", autoEnd);
+                                    }
+                                    // *******************************************
+                                  }}
                                   options={TIME_BEGIN_OPTIONS}
                                   className="w-[70px] text-center"
                                 />
@@ -2634,7 +2714,7 @@ export default function OM_LoadAssignment() {
                             className="px-4 py-10 text-center text-sm text-gray-500"
                           >
                             No data yet. Click{" "}
-                            <span className="font-medium">Run</span> or{" "}
+                            <span className="font-medium">Auto-assign</span> or{" "}
                             <span className="font-medium">Add new line</span> to
                             begin.
                           </td>
@@ -2655,8 +2735,8 @@ export default function OM_LoadAssignment() {
                       Add new line
                     </button>
                   </div>
-                  {/* Right: Auto-assign (Run algorithm) */}
-                  <div className="flex items-center gap-2">
+                  {/* Right: Auto-assign (Run algorithm) - REMOVED from bottom */}
+                  {/* <div className="flex items-center gap-2">
                     <button
                       onClick={runAutoAssign}
                       disabled={isAssigning || hasLocalEdits}
@@ -2670,7 +2750,7 @@ export default function OM_LoadAssignment() {
                       <Play className="h-4 w-4" />
                       {isAssigning ? "Assigning…" : "Auto-assign"}
                     </button>
-                  </div>
+                  </div> */}
                 </div>
               </div>
               {/* ---- Summary section under Load Recommendations ---- */}

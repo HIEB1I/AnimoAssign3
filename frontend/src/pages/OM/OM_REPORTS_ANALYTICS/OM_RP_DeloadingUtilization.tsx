@@ -1,9 +1,18 @@
 // frontend/src/pages/OM/OM_REPORTS_ANALYTICS/OM-RP_DeloadingUtilization.tsx
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { ChevronLeft } from "lucide-react";
+import { ChevronLeft, BarChart2, AlertTriangle, BookOpen } from "lucide-react"; // Added icons
 import SelectBox from "../../../component/SelectBox";
 import { fetchDeloadingsByTerm } from "../../../api";
+
+// --- NEW TYPE DEFINITIONS ---
+type SummaryMetrics = {
+  total_units_deloaded: number;
+  total_faculty_deloaded: number;
+  average_deloading_per_faculty: number;
+  deloading_type_breakdown: { type: string; units: number }[];
+};
+// --- END NEW TYPE DEFINITIONS ---
 
 type Row = {
   faculty_name?: string;
@@ -36,13 +45,64 @@ type Payload = {
   terms?: TermLite[];
   current_index?: number;
   next_term_admin_warnings?: NextTermAdminWarning[];
+  summary_metrics?: SummaryMetrics; // ADDED
 };
+
+// --- MOCK CHART COMPONENT (for demonstration of visualization) ---
+// In a real application, you would integrate a charting library like Recharts or Chart.js here.
+const MockBarChart = ({
+  data,
+  totalUnits,
+}: {
+  data: { type: string; units: number }[];
+  totalUnits: number;
+}) => {
+  if (!data || data.length === 0) {
+    return (
+      <div className="text-center text-sm text-gray-500 py-6">
+        No deloading types recorded for this term.
+      </div>
+    );
+  }
+
+  const maxUnits = Math.max(...data.map((d) => d.units));
+
+  return (
+    <div className="space-y-3">
+      {data
+        .sort((a, b) => b.units - a.units)
+        .map((d) => (
+          <div key={d.type} className="flex flex-col">
+            <div className="flex justify-between items-center mb-1 text-xs font-medium text-gray-700">
+              <span>{d.type}</span>
+              <span>
+                {d.units} units (
+                {totalUnits > 0
+                  ? ((d.units / totalUnits) * 100).toFixed(1)
+                  : 0}
+                %)
+              </span>
+            </div>
+            <div className="w-full bg-gray-200 rounded-full h-2.5">
+              <div
+                className="bg-sky-500 h-2.5 rounded-full"
+                style={{ width: `${(d.units / maxUnits) * 100}%` }}
+              ></div>
+            </div>
+          </div>
+        ))}
+    </div>
+  );
+};
+// --- END MOCK CHART COMPONENT ---
 
 export default function OM_RP_DeloadingUtilization() {
   const [data, setData] = useState<Payload | null>(null);
   const [terms, setTerms] = useState<TermLite[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  // NEW: State for collapsible table
+  const [isTableOpen, setIsTableOpen] = useState(true);
 
   function labelOf(t: TermLite) {
     const ayEnd = t.acad_year_start + 1;
@@ -91,17 +151,21 @@ export default function OM_RP_DeloadingUtilization() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Prepare data for summary/visualization
+  const summary = data?.summary_metrics;
+  const adminWarnings = data?.next_term_admin_warnings;
+
   return (
     <div className="w-full px-8 py-8">
-      {/* Header (match reference styling) */}
-      <h1 className="text-2xl font-bold mb-2">Deloading Utilization</h1>
+      {/* Header */}
+      <h1 className="text-2xl font-bold mb-2">Deloading Utilization Dashboard</h1>
       <p className="text-sm text-gray-600 mb-6">
-        Historical and current deloading usage by faculty, term-paged.
+        Aggregate resource allocation and administrative risk assessment.
       </p>
 
-      {/* Card wrapper (like the reference) */}
+      {/* Card wrapper */}
       <div className="rounded-xl border border-gray-200 bg-white shadow-sm">
-        {/* Top bar: Back + pager/selector (styled like reference filter bar) */}
+        {/* Top bar: Back + pager/selector */}
         <div className="flex flex-wrap items-center gap-3 p-4 border-b border-gray-200">
           <Link
             to="/om/home/reports-analytics"
@@ -128,7 +192,6 @@ export default function OM_RP_DeloadingUtilization() {
               ← Prev
             </button>
 
-            {/* SelectBox styled dropdown (same component used in OM_FacultyManagement) */}
             <div className="min-w-[260px]">
               <SelectBox
                 value={currentLabel}
@@ -159,7 +222,10 @@ export default function OM_RP_DeloadingUtilization() {
           </div>
         )}
         {loading && (
-          <div className="px-4 py-4 text-sm text-gray-500">Loading…</div>
+          <div className="px-4 py-4 text-sm text-gray-500">
+            <BarChart2 className="inline h-4 w-4 mr-2 animate-pulse" />
+            Loading Deloading Analytics…
+          </div>
         )}
 
         {/* Empty state */}
@@ -169,11 +235,12 @@ export default function OM_RP_DeloadingUtilization() {
           </div>
         )}
 
-        {/* Results table */}
-        {!loading && !!data?.rows?.length && (
-          <div className="p-4">
-            <div className="text-sm text-gray-600 mb-3">
-              Viewing{" "}
+        {/* Dashboard Content (visible when data is loaded) */}
+        {!loading && !!data?.rows?.length && summary && (
+          <div className="p-4 space-y-8">
+            {/* Context Header */}
+            <div className="text-md text-gray-700">
+              Analysis for{" "}
               <span className="font-semibold text-gray-900">
                 {data?.term
                   ? `AY ${data.term.acad_year_start}–${
@@ -183,119 +250,205 @@ export default function OM_RP_DeloadingUtilization() {
               </span>
             </div>
 
-            <div className="overflow-x-auto">
-              <table className="min-w-full table-fixed text-sm border-t border-gray-200">
-                <colgroup>
-                  <col style={{ width: "20%" }} />
-                  <col style={{ width: "20%" }} />
-                  <col style={{ width: "12%" }} />
-                  <col style={{ width: "28%" }} />
-                  <col style={{ width: "20%" }} />
-                </colgroup>
-                <thead className="bg-gray-50 text-gray-600 text-xs uppercase tracking-wide">
-                  <tr>
-                    {[
-                      "Faculty Name",
-                      "Deloading Type",
-                      "Units",
-                      "Notes",
-                      "Last Updated",
-                    ].map((h) => (
-                      <th
-                        key={h}
-                        className="px-3 py-2 text-center font-medium whitespace-nowrap"
-                      >
-                        {h}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {data.rows.map((r, i) => (
-                    <tr
-                      key={`${r.faculty_name}-${r.deloading_type}-${i}`}
-                      className={
-                        i % 2 === 0
-                          ? "bg-white text-gray-800"
-                          : "bg-gray-50 text-gray-800"
-                      }
-                    >
-                      <td className="px-3 py-2 text-center">
-                        {r.faculty_name || "—"}
-                      </td>
-                      <td className="px-3 py-2 text-center">
-                        {r.deloading_type || "—"}
-                      </td>
-                      <td className="px-3 py-2 text-center">
-                        {r.units_deloaded ?? "—"}
-                      </td>
-                      <td className="px-3 py-2 text-center">
-                        {r.notes || "—"}
-                      </td>
-                      <td className="px-3 py-2 text-center">
-                        {r.updated_at
-                          ? new Date(r.updated_at).toLocaleString()
-                          : "—"}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            {/* --- 1. GLOBAL SUMMARY CARDS --- */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              {/* Total Units Deloaded */}
+              <div className="flex flex-col items-center justify-center p-6 bg-red-50 border border-red-300 rounded-lg shadow-md">
+                <p className="text-sm font-medium text-red-600 uppercase">
+                  Total Units Deloaded
+                </p>
+                <p className="text-4xl font-extrabold text-red-800 mt-1">
+                  {summary.total_units_deloaded}
+                </p>
+              </div>
 
-            {/* Bottom controls remain removed */}
-          </div>
-        )}
-        {/* ADMIN NEXT-TERM WARNING TABLE */}
-        {!loading &&
-          data?.next_term_admin_warnings &&
-          data.next_term_admin_warnings.length > 0 && (
-            <div className="p-4 mt-6 bg-green-50 border border-green-300 rounded-lg">
-              <h2 className="text-lg font-semibold text-green-800 mb-3">
-                Possible Administrative Deloading Next Term
-              </h2>
+              {/* Total Faculty Deloaded */}
+              <div className="flex flex-col items-center justify-center p-6 bg-sky-50 border border-sky-300 rounded-lg shadow-md">
+                <p className="text-sm font-medium text-sky-600 uppercase">
+                  Total Faculty Deloaded
+                </p>
+                <p className="text-4xl font-extrabold text-sky-800 mt-1">
+                  {summary.total_faculty_deloaded}
+                </p>
+              </div>
 
-              <div className="overflow-x-auto">
-                <table className="min-w-full table-fixed text-sm border-t border-green-300">
-                  <colgroup>
-                    <col style={{ width: "40%" }} />
-                    <col style={{ width: "30%" }} />
-                    <col style={{ width: "30%" }} />
-                  </colgroup>
-
-                  <thead className="bg-green-100 text-green-900 text-xs uppercase tracking-wide">
-                    <tr>
-                      {["Faculty Name", "Deloading Type", "Units"].map((h) => (
-                        <th
-                          key={h}
-                          className="px-3 py-2 text-center font-medium whitespace-nowrap"
-                        >
-                          {h}
-                        </th>
-                      ))}
-                    </tr>
-                  </thead>
-
-                  <tbody>
-                    {data.next_term_admin_warnings.map((r, i) => (
-                      <tr
-                        key={`${r.faculty_id}-${i}`}
-                        className={i % 2 === 0 ? "bg-green-50" : "bg-green-100"}
-                      >
-                        <td className="px-3 py-2 text-center">
-                          {r.faculty_name}
-                        </td>
-                        <td className="px-3 py-2 text-center">
-                          {r.deloading_type}
-                        </td>
-                        <td className="px-3 py-2 text-center">{r.units}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+              {/* Average Deloading Per Faculty */}
+              <div className="flex flex-col items-center justify-center p-6 bg-emerald-50 border border-emerald-300 rounded-lg shadow-md">
+                <p className="text-sm font-medium text-emerald-600 uppercase">
+                  Avg. Deloading Per Faculty
+                </p>
+                <p className="text-4xl font-extrabold text-emerald-800 mt-1">
+                  {summary.average_deloading_per_faculty}
+                </p>
               </div>
             </div>
-          )}
+
+            {/* --- 2. ADMINISTRATIVE RISK ALERT (Moved to top) --- */}
+            {adminWarnings && adminWarnings.length > 0 && (
+              <div className="p-4 bg-orange-100 border border-orange-400 rounded-lg shadow-sm">
+                <div className="flex items-center mb-3">
+                  <AlertTriangle className="h-5 w-5 text-orange-700 mr-2 flex-shrink-0" />
+                  <h2 className="text-lg font-semibold text-orange-800">
+                    Administrative Continuity Risk Warning
+                  </h2>
+                </div>
+                <p className="text-sm text-orange-700 mb-3">
+                  The following faculty received 'Admin'-related deloading in the
+                  **previous** term. Review their load for the current/next term
+                  to ensure administrative continuity and resource allocation.
+                </p>
+
+                <div className="overflow-x-auto">
+                  <table className="min-w-full table-fixed text-sm">
+                    <thead className="bg-orange-200 text-orange-900 text-xs uppercase tracking-wide">
+                      <tr>
+                        {["Faculty Name", "Deloading Type", "Units"].map(
+                          (h) => (
+                            <th
+                              key={h}
+                              className="px-3 py-2 text-center font-medium whitespace-nowrap"
+                            >
+                              {h}
+                            </th>
+                          )
+                        )}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {adminWarnings.map((r, i) => (
+                        <tr
+                          key={`${r.faculty_id}-${i}`}
+                          className={
+                            i % 2 === 0
+                              ? "bg-orange-100"
+                              : "bg-orange-50 border-t border-orange-200"
+                          }
+                        >
+                          <td className="px-3 py-2 text-center">
+                            {r.faculty_name}
+                          </td>
+                          <td className="px-3 py-2 text-center">
+                            {r.deloading_type}
+                          </td>
+                          <td className="px-3 py-2 text-center">{r.units}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
+            {/* --- 3. UTILIZATION BREAKDOWN VISUAL --- */}
+            <div className="p-6 border border-gray-200 rounded-lg shadow-sm">
+              <div className="flex items-center mb-4">
+                <BarChart2 className="h-5 w-5 text-indigo-600 mr-2" />
+                <h2 className="text-xl font-semibold text-gray-800">
+                  Utilization Breakdown by Deloading Type
+                </h2>
+              </div>
+              <p className="text-sm text-gray-600 mb-4">
+                Units allocated by deloading type, showing where institutional
+                resources are primarily used.
+              </p>
+              <MockBarChart
+                data={summary.deloading_type_breakdown}
+                totalUnits={summary.total_units_deloaded}
+              />
+            </div>
+
+            {/* --- 4. RAW DATA TABLE (Collapsible) --- */}
+            <div className="border border-gray-200 rounded-lg">
+              <button
+                className="w-full flex justify-between items-center p-4 bg-gray-50 hover:bg-gray-100 text-left rounded-t-lg"
+                onClick={() => setIsTableOpen(!isTableOpen)}
+                aria-expanded={isTableOpen}
+                aria-controls="deloading-records-table"
+              >
+                <div className="flex items-center">
+                  <BookOpen className="h-5 w-5 text-gray-600 mr-2" />
+                  <h2 className="text-lg font-semibold text-gray-800">
+                    Detailed Deloading Records ({data.rows.length})
+                  </h2>
+                </div>
+                <ChevronLeft
+                  className={`h-5 w-5 text-gray-600 transition-transform ${
+                    isTableOpen ? "-rotate-90" : "rotate-0"
+                  }`}
+                />
+              </button>
+
+              <div
+                id="deloading-records-table"
+                className={`transition-all duration-300 ease-in-out overflow-hidden ${
+                  isTableOpen ? "max-h-[1000px] opacity-100" : "max-h-0 opacity-0"
+                }`}
+              >
+                <div className="p-4">
+                  <div className="overflow-x-auto">
+                    <table className="min-w-full table-fixed text-sm border-t border-gray-200">
+                      <colgroup>
+                        <col style={{ width: "20%" }} />
+                        <col style={{ width: "20%" }} />
+                        <col style={{ width: "12%" }} />
+                        <col style={{ width: "28%" }} />
+                        <col style={{ width: "20%" }} />
+                      </colgroup>
+                      <thead className="bg-gray-100 text-gray-600 text-xs uppercase tracking-wide">
+                        <tr>
+                          {[
+                            "Faculty Name",
+                            "Deloading Type",
+                            "Units",
+                            "Notes",
+                            "Last Updated",
+                          ].map((h) => (
+                            <th
+                              key={h}
+                              className="px-3 py-2 text-center font-medium whitespace-nowrap"
+                            >
+                              {h}
+                            </th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {data.rows.map((r, i) => (
+                          <tr
+                            key={`${r.faculty_name}-${r.deloading_type}-${i}`}
+                            className={
+                              i % 2 === 0
+                                ? "bg-white text-gray-800"
+                                : "bg-gray-50 text-gray-800"
+                            }
+                          >
+                            <td className="px-3 py-2 text-center">
+                              {r.faculty_name || "—"}
+                            </td>
+                            <td className="px-3 py-2 text-center">
+                              {r.deloading_type || "—"}
+                            </td>
+                            <td className="px-3 py-2 text-center">
+                              {r.units_deloaded ?? "—"}
+                            </td>
+                            <td className="px-3 py-2 text-center">
+                              {r.notes || "—"}
+                            </td>
+                            <td className="px-3 py-2 text-center">
+                              {r.updated_at
+                                ? new Date(r.updated_at).toLocaleString()
+                                : "—"}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
