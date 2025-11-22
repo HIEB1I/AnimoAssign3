@@ -87,6 +87,8 @@ async def build_faculty_availability_heatmap(
     Returns a “propensity-to-assign” heatmap keyed by "D|HH:MM-HH:MM".
     {
       term_id, previous_term_for_prefs, history_terms, warnings: [...],
+      total_faculty_considered: n, faculty_with_recent_pref: n, faculty_with_recent_history: n,
+      most_supported_slot_count: n,
       slots: {
         "M|07:30-09:00": {
           count: n,
@@ -100,7 +102,7 @@ async def build_faculty_availability_heatmap(
 
     cur = await _current_term(db)
     if not cur:
-        return {"warnings": ["No current term found."], "slots": {}}
+        return {"warnings": ["No current term found."], "slots": {}, "total_faculty_considered": 0, "faculty_with_recent_pref": 0, "faculty_with_recent_history": 0, "most_supported_slot_count": 0}
     curr_term_id = cur.get("term_id") or cur.get("_id")
     prev_term = curr_term_id  # use current term prefs (T) to forecast T+1
     hist_terms = await _prev_n_terms(db, curr_term_id, 3)
@@ -118,6 +120,16 @@ async def build_faculty_availability_heatmap(
         (d, s): {"count": 0, "list": []} for d in DAY_CODES for s in TIME_SLOTS
     }
 
+    # New Metrics
+    total_faculty_considered: int = 0
+    faculty_with_recent_pref: int = 0
+    faculty_with_recent_history: int = 0
+    
+    # Pre-fetch history section IDs to make the history check efficient
+    sec_ids_hist = []
+    if hist_terms:
+        sec_ids_hist = await db.sections.distinct("section_id", {"term_id": {"$in": hist_terms}})
+
     async for fp in db.faculty_profiles.find({}):
         if dept_id and fp.get("department_id") != dept_id:
             continue
@@ -128,20 +140,6 @@ async def build_faculty_availability_heatmap(
 
         fid = fp["faculty_id"]
 
-        # Candidate if (prev-term pref) OR (has history in last 3 terms)
-        has_prev_pref = await db.faculty_preferences.find_one(
-            {"faculty_id": fid, "term_id": prev_term}, projection={"_id": 1}
-        ) is not None
-        has_history_any = False
-        if hist_terms:
-            sec_ids_hist = await db.sections.distinct("section_id", {"term_id": {"$in": hist_terms}})
-            if sec_ids_hist:
-                has_history_any = await db.faculty_assignments.find_one(
-                    {"faculty_id": fid, "section_id": {"$in": sec_ids_hist}}, projection={"_id": 1}
-                ) is not None
-        if not (has_prev_pref or has_history_any):
-            continue
-
         # Exclude if on approved leave this term
         lv = await db.leaves.find_one({
             "faculty_id": fid, "approval_status": "APPROVED",
@@ -150,13 +148,35 @@ async def build_faculty_availability_heatmap(
         })
         if lv:
             continue
-
+            
         pref_curr = await db.faculty_preferences.find_one(
             {"faculty_id": fid, "term_id": curr_term_id},
             projection={"preferred_units": 1}
         )
         if pref_curr and int(pref_curr.get("preferred_units", 0)) == 0:
             continue
+            
+        # Candidate if (prev-term pref) OR (has history in last 3 terms)
+        has_prev_pref = await db.faculty_preferences.find_one(
+            {"faculty_id": fid, "term_id": prev_term}, projection={"_id": 1}
+        ) is not None
+        
+        has_history_any = False
+        if sec_ids_hist:
+            has_history_any = await db.faculty_assignments.find_one(
+                {"faculty_id": fid, "section_id": {"$in": sec_ids_hist}}, projection={"_id": 1}
+            ) is not None
+            
+        if not (has_prev_pref or has_history_any):
+            continue
+
+        # Increment Quality Metrics (only if considered for scoring)
+        total_faculty_considered += 1
+        if has_prev_pref:
+            faculty_with_recent_pref += 1
+        if has_history_any:
+            faculty_with_recent_history += 1
+
 
         # Display name/email
         u = await db.users.find_one({"user_id": fp.get("user_id")}, {"first_name": 1, "last_name": 1, "email": 1})
@@ -232,20 +252,26 @@ async def build_faculty_availability_heatmap(
             else:                   reason = "Pattern signal"
             scored.append((key, score, reason))
 
+        # Handle preference-only case (no history but previous preference exists)
         if not has_history_detailed and pref_keys:
+            # Only add if the slot wasn't already scored with history (which is unlikely if has_history_detailed is false, but safe)
+            existing_keys = {item[0] for item in scored}
             for key in pref_keys:
-                score = _clamp(0.30 + 0.20, 0.0, 1.0)  # preference-only
-                scored.append((key, score, "Preferred in previous term"))
+                if key not in existing_keys:
+                    score = _clamp(0.30 + 0.20, 0.0, 1.0)  # preference-only
+                    scored.append((key, score, "Preferred in previous term"))
 
         scored.sort(key=lambda x: x[1], reverse=True)
         topN = scored[:TOP_N_PER_FACULTY]
 
         notes = []
         if not pref_curr: notes.append("No current-term preference on record.")
-        notes.append("No leaves recorded for this term.")
+        # Note: 'No leaves recorded for this term.' is implicit for considered faculty
         if has_prev_pref: notes.append("Candidate criterion: previous-term preference.")
         if has_history_any: notes.append("Candidate criterion: has assignment history in last 3 terms.")
-
+        
+        # Determine current faculty's top-N reason
+        
         for (day, label), score, reason in topN:
             if score < threshold:
                 continue
@@ -259,12 +285,21 @@ async def build_faculty_availability_heatmap(
                 "notes": notes,
             })
 
+    # Calculate Most Supported Slot Count
+    most_supported_slot_count = 0
+    for key in grid:
+        most_supported_slot_count = max(most_supported_slot_count, grid[key]["count"])
+
     slots = { f"{d}|{s}": grid[(d, s)] for d in DAY_CODES for s in TIME_SLOTS }
     return {
         "term_id": cur["term_id"],
         "previous_term_for_prefs": prev_term,
         "history_terms": hist_terms,
         "warnings": warnings,
+        "total_faculty_considered": total_faculty_considered,
+        "faculty_with_recent_pref": faculty_with_recent_pref,
+        "faculty_with_recent_history": faculty_with_recent_history,
+        "most_supported_slot_count": most_supported_slot_count,
         "slots": slots,
     }
 

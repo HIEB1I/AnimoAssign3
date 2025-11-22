@@ -236,11 +236,11 @@ async def build_row(
         name = await faculty_display_name(db, a["faculty_id"])
         ft_assignees.extend([name] * int(a["sections"]))
 
-    risk, confidence = "Low", "High"
+    risk, confidence = "Low", "100%"
     if demand > 0 and ft_filled_secs == 0:
-        risk, confidence = "High", "Low"
+        risk, confidence = "High", "30%"
     elif pt_needed > 0:
-        risk, confidence = "Medium", "Medium"
+        risk, confidence = "Medium", "70%"
 
     return {
         "course_id": course["course_id"],
@@ -276,6 +276,13 @@ async def run_pt_risk(params: Dict[str, Any] | None = None) -> Dict[str, Any]:
 
     next_term = terms[idx + 1]
     risk_term_id = next_term["term_id"]  # <-- PT risk is for this term
+    # --- New: Fetching Term Display Details ---
+    term_display_details = {
+        "acad_year_start": next_term.get("acad_year_start", "N/A"),
+        "end_at": next_term.get("end_at", "N/A"),
+        "term_number": next_term.get("term_number", "N/A"),
+    }
+    # -----------------------------------------
 
     # 3) Ensure NEXT-term sections exist / are published
     await ensure_sections_published_or_abort(
@@ -297,6 +304,11 @@ async def run_pt_risk(params: Dict[str, Any] | None = None) -> Dict[str, Any]:
     )
 
     rows: List[Dict[str, Any]] = []
+    # --- New: Fetching Department Display Name ---
+    dept = await db.departments.find_one({"department_id": P["DEPT_SCOPE"]}, projection={"department_name": 1})
+    dept_name = dept.get("department_name", P["DEPT_SCOPE"]) if dept else P["DEPT_SCOPE"]
+    # ---------------------------------------------
+
     async for C in db.courses.find({"department_id": P["DEPT_SCOPE"]}):
         demand = await _demand_sections_sections_first(
             db,
@@ -307,6 +319,7 @@ async def run_pt_risk(params: Dict[str, Any] | None = None) -> Dict[str, Any]:
             allow_fallback=P["allow_fallback_without_sections"],
         )
 
+        # CAP is modified in place inside allocate_course
         result = await allocate_course(
             db,
             course_id=C["course_id"],
@@ -323,12 +336,39 @@ async def run_pt_risk(params: Dict[str, Any] | None = None) -> Dict[str, Any]:
         if demand > 0:
             rows.append(await build_row(db, C, demand, result, CAP))
 
+    # --- New Risk Aggregation Logic ---
     total_pt = sum(r["pt_needed_sections"] for r in rows)
-    summary = {"total_pt_sections": total_pt, "estimated_pt_hires": total_pt}
+    high_risk_count = sum(1 for r in rows if r["risk"] == "High")
+    medium_risk_count = sum(1 for r in rows if r["risk"] == "Medium")
+    
+    total_confidence = 0
+    valid_confidence_count = 0
+    for r in rows:
+        conf_str = r["confidence"].replace('%', '').strip()
+        try:
+            confidence_val = int(conf_str)
+            total_confidence += confidence_val
+            valid_confidence_count += 1
+        except ValueError:
+            # Ignore non-numerical confidence scores
+            pass
+
+    avg_confidence = round(total_confidence / valid_confidence_count) if valid_confidence_count > 0 else 0
+    # ---------------------------------
+
+    summary = {
+        "total_pt_sections": total_pt,
+        "estimated_pt_hires": total_pt,
+        "high_risk_course_count": high_risk_count,
+        "medium_risk_course_count": medium_risk_count,
+        "avg_confidence_score": avg_confidence, # New aggregated metric
+    }
 
     return {
         "department_id": P["DEPT_SCOPE"],
+        "dept_name": dept_name, # NEW
         "term_id": risk_term_id,  # report is for NEXT term
+        **term_display_details, # NEW
         "rows": rows,
         "summary": summary,
         "generated_at": datetime.utcnow().isoformat() + "Z",
