@@ -1127,17 +1127,19 @@ export default function CHAIR_FacultyService({
                         )}
                       </td>
 
-                      {/* Day1 (M/T/W only, auto-pairs Day2) */}
+                      {/* Day1 (The driver for auto-fill Day2) */}
                       <td className={cls(CELL, "text-center")}>
                         {!isClosed ? (
                           <Dropdown
                             value={e.day1 || ""}
                             onChange={(val) => {
                               const d1 = val as DayShort | "";
+                              // *** 1. SET Day1 & AUTO-FILL Day2 ***
                               patchEdit(fsid, {
                                 day1: d1,
                                 day2: d1 ? (DAY2_BY_DAY1[d1 as DayShort] as DayShort) : "",
                               });
+                              // ********************************************
                             }}
                             options={[...DAY1_OPTIONS]}
                             placeholder=""
@@ -1149,19 +1151,21 @@ export default function CHAIR_FacultyService({
                         )}
                       </td>
 
-                      {/* Begin1 */}
+                      {/* Begin1 (The driver for auto-fill End1) */}
                       <td className={cls(CELL, "text-center")}>
                         {!isClosed ? (
                           <Dropdown
                             value={e.begin1 || ""}
                             onChange={(val) => {
                               const v = val;
+                              // *** 2. SET Begin1 & AUTO-FILL End1 ***
                               patchEdit(fsid, {
                                 begin1: v,
                                 end1: v ? END_BY_BEGIN[v as keyof typeof END_BY_BEGIN] : "",
                               });
+                              // ********************************************
                             }}
-                            options={timeBegins}
+                            options={timeBegins} // Options for start times
                             placeholder=""
                             className="max-w-[90px] mx-auto"
                             searchable={false}
@@ -1171,47 +1175,61 @@ export default function CHAIR_FacultyService({
                         )}
                       </td>
 
-                      {/* End1 */}
+                      {/* End1 (Editable Dropdown for manual override) */}
                       <td className={cls(CELL, "text-center")}>
                         {!isClosed ? (
-                          <input
-                            value={e.end1 ? String(e.end1) : ""}
-                            readOnly
-                            className={cls(CONTROL, "text-center bg-neutral-50")}
+                          <Dropdown
+                            value={e.end1 || ""}
+                            onChange={(v) => {
+                              // *** 3. MANUAL OVERRIDE: Save the chosen End1 value ***
+                              patchEdit(fsid, { end1: v });
+                              // ******************************************************
+                            }}
+                            options={timeBegins} 
                             placeholder="—"
+                            className="max-w-[90px] mx-auto"
+                            searchable={false}
                           />
                         ) : (
                           r.end1 || "—"
                         )}
                       </td>
 
-                      {/* Day2 (auto from Day1: MH / TF / WS) */}
+                      {/* Day2 (Now an editable Dropdown for manual override) */}
                       <td className={cls(CELL, "text-center")}>
                         {!isClosed ? (
-                          <input
-                            className={cls(CONTROL, "h-9 text-center bg-neutral-50")}
-                            readOnly
+                          <Dropdown
                             value={e.day2 || ""}
+                            onChange={(v) => {
+                              // *** 4. MANUAL OVERRIDE: Save the chosen Day2 value ***
+                              patchEdit(fsid, { day2: v as DayShort | "" });
+                              // ******************************************************
+                            }}
+                            options={[...DAY1_OPTIONS, "H", "F", "S"]} // All valid days
                             placeholder="—"
+                            className="max-w-[90px] mx-auto"
+                            searchable={false}
                           />
                         ) : (
                           r.day2 || "—"
                         )}
                       </td>
 
-                      {/* Begin2 */}
+                      {/* Begin2 (The driver for auto-fill End2) */}
                       <td className={cls(CELL, "text-center")}>
                         {!isClosed ? (
                           <Dropdown
                             value={e.begin2 || ""}
                             onChange={(val) => {
                               const v = val;
+                              // *** 5. SET Begin2 & AUTO-FILL End2 ***
                               patchEdit(fsid, {
                                 begin2: v,
                                 end2: v ? END_BY_BEGIN[v as keyof typeof END_BY_BEGIN] : "",
                               });
+                              // ********************************************
                             }}
-                            options={timeBegins}
+                            options={timeBegins} // Options for start times
                             placeholder=""
                             className="max-w-[90px] mx-auto"
                             searchable={false}
@@ -1221,14 +1239,20 @@ export default function CHAIR_FacultyService({
                         )}
                       </td>
 
-                      {/* End2 */}
+                      {/* End2 (Editable Dropdown for manual override) */}
                       <td className={cls(CELL, "text-center")}>
                         {!isClosed ? (
-                          <input
-                            value={e.end2 ? String(e.end2) : ""}
-                            readOnly
-                            className={cls(CONTROL, "text-center bg-neutral-50")}
+                          <Dropdown
+                            value={e.end2 || ""}
+                            onChange={(v) => {
+                              // *** 6. MANUAL OVERRIDE: Save the chosen End2 value ***
+                              patchEdit(fsid, { end2: v });
+                              // ******************************************************
+                            }}
+                            options={timeBegins}
                             placeholder="—"
+                            className="max-w-[90px] mx-auto"
+                            searchable={false}
                           />
                         ) : (
                           r.end2 || "—"
