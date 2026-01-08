@@ -137,6 +137,8 @@ from .APO.APO_PreEnlistment import router as preenlistment_router
 from .APO.APO_RoomAllocation import router as roomallocation_router
 from .APO.APO_CourseOfferings import router as courseofferings_router
 from .STUDENT.STUDENT_Petition import router as studentpetition_router
+from .STUDENT.STUDENT_SpecialClass import router as specialclass_router
+from .STUDENT.STUDENT_CourseOfferings import router as courseofferings_router
 
 from .FACULTY.FACULTY_Overview import router as facultyoverview_router
 from .FACULTY.FACULTY_Preferences import router as faculty_prefs_router
@@ -166,6 +168,8 @@ app.include_router(preenlistment_router, prefix="/api")
 app.include_router(roomallocation_router, prefix="/api")
 app.include_router(courseofferings_router, prefix="/api")
 app.include_router(studentpetition_router, prefix="/api")
+app.include_router(specialclass_router, prefix="/api")
+app.include_router(courseofferings_router, prefix="/api")
 app.include_router(om_facultymanagement, prefix="/api")
 app.include_router(om_coursemanagement, prefix="/api")
 app.include_router(om_facultyform, prefix="/api")

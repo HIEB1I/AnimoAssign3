@@ -1415,6 +1415,167 @@ export async function submitStudentPetition(
 }
 
 /* =========================================================
+   ===============  STUDENT: SPECIAL CLASS  =================
+   ========================================================= */
+
+export type SpecialClassOptions = {
+  ok: boolean;
+  departments: string[];
+  courses: { course_code: string; course_title: string; units?: number; dept_name: string }[];
+  programs: { program_id: string; program_code: string }[];
+  reasons: string[];
+  statuses: string[];
+};
+
+export type SpecialClassView = {
+  special_id: string;
+  user_id: string;
+  course_id: string | null;
+
+  course_code: string;
+  course_title: string;
+  department_name?: string;
+
+  student_number?: number | string;
+  units_remaining?: number;
+  graduating_after_term?: boolean;
+
+  course_units?: number;
+
+  reason: string;
+  reason_other?: string;
+
+  status: string;
+  remarks?: string;
+
+  submitted_at: string;
+  acad_year_start?: number | string;
+  term_number?: number;
+  program_code?: string;
+};
+
+export type SpecialClassSubmitPayload = {
+  studentNumber: string;
+  degree: string;
+
+  unitsRemaining: number;
+  graduatingAfterTerm: boolean;
+
+  courseCode: string;
+  units: number;
+
+  reason: string;
+  reasonOther?: string;
+
+  department: string;
+
+  agree: boolean; // must be true
+};
+
+export async function getStudentSpecialClasses(
+  userId: string
+): Promise<{ ok: boolean; applications: SpecialClassView[] }> {
+  const { data } = await axios.post(`${API_BASE}/student/specialclass`, {}, {
+    params: { userId, action: "fetch" },
+  });
+  return data;
+}
+
+export async function getStudentSpecialClassOptions(
+  userId: string
+): Promise<SpecialClassOptions> {
+  const { data } = await axios.post(`${API_BASE}/student/specialclass`, {}, {
+    params: { userId, action: "options" },
+  });
+  return data;
+}
+
+export async function getStudentSpecialClassProfile(userId: string): Promise<{
+  ok: boolean; first_name: string; last_name: string; student_number: string; program_code?: string;
+}> {
+  const { data } = await axios.post(`${API_BASE}/student/specialclass`, {}, {
+    params: { userId, action: "profile" },
+  });
+  return data;
+}
+
+export async function submitStudentSpecialClass(
+  userId: string,
+  payload: SpecialClassSubmitPayload
+): Promise<{ ok: boolean; application: SpecialClassView }> {
+  const { data } = await axios.post(`${API_BASE}/student/specialclass`, payload, {
+    params: { userId, action: "submit" },
+  });
+  return data;
+}
+
+/* =========================================================
+   ============  STUDENT: COURSE OFFERINGS  =================
+   ========================================================= */
+
+export type StudentCourseOfferingsOptions = {
+  ok: boolean;
+  term?: { term_id?: string; acad_year_start?: number | string; term_number?: number | string };
+  courses: { course_id?: string; course_code: string; course_title?: string; units?: number }[];
+  message?: string;
+};
+
+export type CourseOfferingsSearchPayload = {
+  courseCode: string;
+};
+
+export type CourseOfferingSchedule = {
+  day?: string;
+  start_time?: string;
+  end_time?: string;
+  room_number?: string;
+  room_type?: string;
+};
+
+export type CourseOfferingSection = {
+  section_id: string;
+  class_nbr?: number | string;
+  section_code: string;
+  enrollment_cap?: number;
+  enrolled?: number;
+  is_open?: boolean;
+  faculty_name?: string;
+  remarks?: string;
+  schedules: CourseOfferingSchedule[];
+};
+
+export type CourseOfferingsSearchResponse = {
+  ok: boolean;
+  term?: { term_id?: string; acad_year_start?: number | string; term_number?: number | string };
+  course?: { course_code: string; course_title?: string; units?: number };
+  sections: CourseOfferingSection[];
+};
+
+export async function getStudentCourseOfferingsOptions(
+  userId: string
+): Promise<StudentCourseOfferingsOptions> {
+  const { data } = await axios.post(
+    `${API_BASE}/student/course-offerings`,
+    {},
+    { params: { userId, action: "options" } }
+  );
+  return data;
+}
+
+export async function searchStudentCourseOfferings(
+  userId: string,
+  payload: CourseOfferingsSearchPayload
+): Promise<CourseOfferingsSearchResponse> {
+  const { data } = await axios.post(
+    `${API_BASE}/student/course-offerings`,
+    payload,
+    { params: { userId, action: "search" } }
+  );
+  return data;
+}
+
+
+/* =========================================================
    ==============  OM: SHARED HEADER (Topbar)  =============
    ========================================================= */
 export type OmHeader = {
