@@ -4,6 +4,9 @@ import "./App.css";
 // Pages
 import Login from "./pages/Login/Login";
 import AuthCallback from "./pages/Login/AuthCallback";
+import GmailConnect from "./pages/Login/GmailConnect";
+import BlankPage from "./pages/Login/BlankPage";
+
 
 // ---------------- OM ----------------
 import OM_LoadAssignment from "./pages/OM/OM_LoadAssignment";
@@ -113,6 +116,10 @@ export default function App() {
         {/* Public */}
         <Route path="/Login" element={<Login />} />
         <Route path="/auth/callback" element={<AuthCallback />} />
+        <Route path="/blank" element={<BlankPage />} />
+        <Route path="/gmail-connect" element={<GmailConnect />} />
+        <Route path="/blank" element={<BlankPage />} />
+
 
         {/* Protected */}
         <Route element={<RequireAuth />}>

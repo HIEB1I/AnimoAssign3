@@ -220,6 +220,13 @@ const Login: React.FC = () => {
               <div className="mt-10 w-full max-w-md">
                 <div className="h-px w-full bg-white/20" />
                 <div className="mt-4 text-xs text-white/80">College of Computer Studies</div>
+                <button
+                type="button"
+                onClick={() => navigate("/gmail-connect")}
+                className="absolute bottom-4 left-4 px-4 py-2 rounded-lg bg-white/90 text-gray-900 shadow hover:bg-white"
+              >
+                Connect Gmail
+              </button>
               </div>
             </div>
           </div>
@@ -227,6 +234,7 @@ const Login: React.FC = () => {
         </div>
       </div>
     </div>
+    
   );
 };
 
