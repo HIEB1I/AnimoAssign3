@@ -35,8 +35,8 @@ navigate("/om/home", { replace: true });
 navigate("/faculty/overview", { replace: true });
 } else if (roles.includes("student")) {
 navigate("/student/petition", { replace: true });
-} else if (roles.includes("dean")) {
-navigate("/dean/dashboard", { replace: true });
+} else if (roles.includes("department_chair")) {
+navigate("/chair", { replace: true });
 } else {
 navigate("/om/home", { replace: true });
 }

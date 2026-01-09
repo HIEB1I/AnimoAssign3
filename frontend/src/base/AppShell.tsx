@@ -1,4 +1,3 @@
-// src/base/AppShell.tsx
 import { useEffect, useState, type PropsWithChildren } from "react";
 import Sidebar, { type SidebarItem } from "./Sidebar";
 import Topbar, { type TopbarProps } from "./Topbar";

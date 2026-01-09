@@ -32,7 +32,7 @@ DAY_CODE_TO_NAME = {
     # Wednesday
     "W": "Wednesday", "WED": "Wednesday", "WEDNESDAY": "Wednesday",
     # Thursday (include H/R)
-    "TH": "Thursday", "THU": "Thursday", "THUR": "Thursday", "THURS": "Thursday", "THURSDAY": "Thursday",
+    "H": "Thursday", "THU": "Thursday", "THUR": "Thursday", "THURS": "Thursday", "THURSDAY": "Thursday",
     "H": "Thursday", "R": "Thursday",
     # Friday
     "F": "Friday", "FRI": "Friday", "FRIDAY": "Friday",
@@ -41,7 +41,7 @@ DAY_CODE_TO_NAME = {
 }
 
 DAY_NAME_TO_CODE = {
-    "Monday": "M", "Tuesday": "T", "Wednesday": "W", "Thursday": "TH", "Friday": "F", "Saturday": "S"
+    "Monday": "M", "Tuesday": "T", "Wednesday": "W", "Thursday": "H", "Friday": "F", "Saturday": "S"
 }
 
 DAY_ALIASES: Dict[str, List[str]] = {
@@ -80,24 +80,34 @@ def default_open_days_for_campus(campus_name: str) -> List[str]:
 def now() -> datetime:
     return datetime.utcnow()
 
-def fmt_pair(s: str) -> str:
-    s = str(s or "")
-    if len(s) == 3:
-        h, m = s[0], s[1:]
-    else:
-        h, m = s[:-2], s[-2:]
-    return f"{int(h):02d}:{m}"
+def fmt_pair(t) -> str:
+    """
+    Format 'HHMM' -> 'HH:MM'. If t is blank/None/malformed, return ''.
+    """
+    s = "".join(ch for ch in str(t) if ch.isdigit())
+    if len(s) != 4:
+        return ""
+    h, m = s[:2], s[2:]
+    try:
+        return f"{int(h):02d}:{m}"
+    except Exception:
+        return ""
 
-def band_of(start: str, end: str) -> str:
-    return f"{fmt_pair(start)} – {fmt_pair(end)}"
+def band_of(start, end) -> str:
+    """
+    Return 'HH:MM – HH:MM' or '' if either side is missing.
+    """
+    a, b = fmt_pair(start), fmt_pair(end)
+    return f"{a} – {b}" if (a and b) else ""
 
 def parse_band(band: str) -> Tuple[str, str]:
     try:
         a, b = [x.strip() for x in band.split("–")]
         sh, sm = [int(x) for x in a.split(":")]
         eh, em = [int(x) for x in b.split(":")]
-        st = f"{sh}{sm:02d}".lstrip("0") or "0"
-        et = f"{eh}{em:02d}".lstrip("0") or "0"
+        # Always return zero-padded HHMM to match DB ("0730", "0900")
+        st = f"{sh:02d}{sm:02d}"
+        et = f"{eh:02d}{em:02d}"
         return (st, et)
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid time band (use HH:MM – HH:MM).")
@@ -128,12 +138,13 @@ def normalize_room_type(rt: str) -> str:
         return "ComLab"
     return (rt or "").strip()
 
-def campus_section_prefix(campus_name: str) -> Optional[str]:
+def campus_section_prefix(campus_name: str) -> Optional[tuple[str, ...] | str]:
     n = (campus_name or "").lower()
+    if "laguna" in n or "canlubang" in n or "binan" in n or "biñan" in n:
+        # Accept both XX… and XC… section codes for Laguna
+        return ("XX", "XC")
     if "manila" in n or "taft" in n:
         return "S"
-    if "laguna" in n or "canlubang" in n or "binan" in n or "biñan" in n:
-        return "X"
     return None
 
 async def resolve_term_id_with_sections_fallback() -> Optional[str]:
@@ -194,7 +205,7 @@ async def sections_map(term_id: str) -> Dict[str, Dict[str, Any]]:
     out: Dict[str, Dict[str, Any]] = {}
     cursor = db[COL_SECTIONS].find(
         {"term_id": term_id},
-        {"_id": 0, "section_id": 1, "section_code": 1, "course_id": 1},
+        {"_id": 0, "section_id": 1, "section_code": 1, "course_id": 1, "enrollment_cap": 1},
     )
     secs = [s async for s in cursor]
     cids = [s["course_id"] for s in secs if s.get("course_id")]
@@ -218,51 +229,122 @@ async def sections_map(term_id: str) -> Dict[str, Dict[str, Any]]:
             "course_id": cid,
             "course_code": code_map.get(cid, ""),
             "college_id": college_map.get(cid, ""),
+            "enrollment_cap": s.get("enrollment_cap"),
         }
     return out
 
 async def faculty_by_section_first(sec_ids: List[str], term_id: str) -> Dict[str, Dict[str, str]]:
+    """
+    Resolve one faculty per section (first hit).
+    Priority:
+      1) faculty_assignments joined to faculty_loads(term_id), not archived
+      2) Fallback to section_schedules.faculty_id (any row for the section)
+    Names are fetched via faculty_profiles -> users and formatted as 'LAST, FIRST'.
+    """
     if not sec_ids:
         return {}
-    loads_cur = db[COL_FAC_LOADS].find({"term_id": term_id}, {"_id": 0, "load_id": 1})
-    load_ids = [x["load_id"] async for x in loads_cur]
-    if not load_ids:
-        return {}
-    fa_cur = db[COL_FAC_ASSIGN].find(
-        {"section_id": {"$in": sec_ids}, "load_id": {"$in": load_ids}, "is_archived": {"$ne": True}},
-        {"_id": 0, "section_id": 1, "faculty_id": 1},
-    )
-    rows = [x async for x in fa_cur]
-    fac_ids = list({r["faculty_id"] for r in rows if r.get("faculty_id")})
+
+    # -------- Primary: assignments tied to loads in the active term --------
+    load_ids = [x["load_id"] async for x in db[COL_FAC_LOADS].find(
+        {"term_id": term_id}, {"_id": 0, "load_id": 1}
+    )]
+
+    fa_cond: Dict[str, Any] = {
+        "section_id": {"$in": sec_ids},
+        "is_archived": {"$ne": True},
+    }
+    # Only enforce load_id filter if we actually found loads for the term.
+    if load_ids:
+        fa_cond["load_id"] = {"$in": load_ids}
+
+    fa_rows = [x async for x in db[COL_FAC_ASSIGN].find(
+        fa_cond, {"_id": 0, "section_id": 1, "faculty_id": 1}
+    )]
+
+    # -------- Fallback: pull faculty_id directly from section_schedules --------
+    have_sid = {r.get("section_id") for r in fa_rows if r.get("section_id")}
+    missing_secs = [sid for sid in sec_ids if sid not in have_sid]
+
+    if missing_secs:
+        ss_rows = [x async for x in db[COL_SCHEDS].find(
+            {
+                "section_id": {"$in": missing_secs},
+                "faculty_id": {"$exists": True, "$ne": ""},
+            },
+            {"_id": 0, "section_id": 1, "faculty_id": 1}
+        )]
+        # prefer first found faculty per section
+        seen = set()
+        for r in ss_rows:
+            sid = r.get("section_id")
+            if sid and sid not in have_sid and sid not in seen:
+                fa_rows.append({"section_id": sid, "faculty_id": r.get("faculty_id", "")})
+                seen.add(sid)
+
+    # If still nothing, return early
+    fac_ids = list({r.get("faculty_id") for r in fa_rows if r.get("faculty_id")})
     if not fac_ids:
         return {}
-    prof_cur = db[COL_FAC_PROFILES].find(
-        {"faculty_id": {"$in": fac_ids}}, {"_id": 0, "faculty_id": 1, "user_id": 1}
-    )
-    profs = [x async for x in prof_cur]
+
+    # -------- Map faculty_id -> user_id --------
+    profs = [x async for x in db[COL_FAC_PROFILES].find(
+        {"faculty_id": {"$in": fac_ids}},
+        {"_id": 0, "faculty_id": 1, "user_id": 1}
+    )]
     uid_by_fid = {p["faculty_id"]: p.get("user_id", "") for p in profs}
+
+    # -------- Map user_id -> "LAST, FIRST" --------
     uids = [u for u in uid_by_fid.values() if u]
-    user_cur = db[COL_USERS].find(
-        {"user_id": {"$in": uids}}, {"_id": 0, "user_id": 1, "first_name": 1, "last_name": 1}
-    )
-    users = [x async for x in user_cur]
-    name_by_uid = {u["user_id"]: f'{u.get("first_name","")} {u.get("last_name","")}'.strip() for u in users}
+    users = [x async for x in db[COL_USERS].find(
+        {"user_id": {"$in": uids}},
+        {"_id": 0, "user_id": 1, "first_name": 1, "last_name": 1}
+    )]
+    def fmt(u: Dict[str, Any]) -> str:
+        ln = (u.get("last_name") or "").upper()
+        fn = (u.get("first_name") or "").upper()
+        return f"{ln}, {fn}".strip(", ").strip()
+
+    name_by_uid = {u["user_id"]: fmt(u) for u in users}
+
+    # -------- Build per-section map (keep first) --------
     out: Dict[str, Dict[str, str]] = {}
-    for r in rows:
-        sid, fid = r["section_id"], r.get("faculty_id", "")
-        if sid in out:
+    for r in fa_rows:
+        sid, fid = r.get("section_id"), r.get("faculty_id")
+        if not sid or sid in out:
             continue
         uid = uid_by_fid.get(fid, "")
-        out[sid] = {"faculty_id": fid, "user_id": uid, "faculty_name": name_by_uid.get(uid, "")}
+        out[sid] = {
+            "faculty_id": fid or "",
+            "user_id": uid or "",
+            "faculty_name": name_by_uid.get(uid, ""),  # may be "" if user missing
+        }
     return out
 
 @router.get("/roomallocation")
-async def get_room_allocation(userId: str = Query(..., min_length=3)):
-    term_id = await resolve_term_id_with_sections_fallback()
+async def get_room_allocation(
+    userId: str = Query(..., min_length=3),
+    termId: Optional[str] = Query(None),
+):
+    # Prefer the explicit term coming from Pre-Enlistment (via the frontend).
+    # This keeps Room Allocation in sync with the term the APO is currently working on.
+    effective_term_id: Optional[str] = None
+    if termId:
+        t = await db[COL_TERMS].find_one(
+            {"term_id": termId},
+            {"_id": 0, "term_id": 1},
+        )
+        if t:
+            # Always honor a valid termId from the client
+            effective_term_id = termId
+
+    term_id = effective_term_id or await resolve_term_id_with_sections_fallback()
+
     if not term_id:
         return {
             "campus": {"campus_id": "", "campus_name": ""},
             "term_id": "",
+            "term_number": None,
+            "acad_year_start": None,
             "buildings": [],
             "timeBands": TIME_BANDS,
             "rooms": [],
@@ -272,7 +354,16 @@ async def get_room_allocation(userId: str = Query(..., min_length=3)):
             "courses": [],
         }
 
+    # Fetch term meta so FE can render "Term X · AY YYYY-YYYY"
+    term_doc = await db[COL_TERMS].find_one(
+        {"term_id": term_id},
+        {"_id": 0, "term_number": 1, "acad_year_start": 1},
+    )
+    term_number = term_doc.get("term_number") if term_doc else None
+    acad_year_start = term_doc.get("acad_year_start") if term_doc else None
+
     campus_id, college_id = await apo_scope(userId)
+
     if not campus_id:
         raise HTTPException(status_code=400, detail="Unable to resolve APO campus from role_assignments.")
 
@@ -302,16 +393,27 @@ async def get_room_allocation(userId: str = Query(..., min_length=3)):
     # courses (for FE labels)
     course_ids = sorted({v.get("course_id", "") for v in s_map.values() if v.get("course_id")})
     courses = []
+    course_room_type: Dict[str, str] = {}   # ← ensure it exists even if no courses
     if course_ids:
         cc = db[COL_COURSES].find(
             {"course_id": {"$in": course_ids}},
-            {"_id": 0, "course_id": 1, "course_code": 1, "college_id": 1},
+            {"_id": 0, "course_id": 1, "course_code": 1, "college_id": 1, "room_type": 1},
         )
         courses = [x async for x in cc]
+        course_room_type = {c["course_id"]: (c.get("room_type") or "") for c in courses}
 
     # ---- schedules ----
     # 1) Schedules for in-scope sections (these drive the Allocate modal)
-    fields = {"_id": 0, "schedule_id": 1, "section_id": 1, "day": 1, "start_time": 1, "end_time": 1, "room_id": 1}
+    fields = {
+        "_id": 0,
+        "schedule_id": 1,
+        "section_id": 1,
+        "day": 1,
+        "start_time": 1,
+        "end_time": 1,
+        "room_id": 1,
+        "room_type": 1,  # optional: needed when schedules carry their own room_type
+    }
     sched_cur_scoped = db[COL_SCHEDS].find({"section_id": {"$in": sec_ids}}, fields)
     scoped_raw = [s async for s in sched_cur_scoped]
     section_scheds_scoped = [
@@ -322,6 +424,7 @@ async def get_room_allocation(userId: str = Query(..., min_length=3)):
             "start_time": s.get("start_time", ""),
             "end_time": s.get("end_time", ""),
             "room_id": s.get("room_id"),
+            "room_type": normalize_room_type(s.get("room_type", "")) if s.get("room_type") else "",
             "time_band": band_of(s.get("start_time", ""), s.get("end_time", "")),
         }
         for s in scoped_raw
@@ -346,8 +449,17 @@ async def get_room_allocation(userId: str = Query(..., min_length=3)):
         }
         for a in assigned_raw
     ]
-    # keep only those whose section is NOT in scope (to avoid duplicates)
-    assigned_out_of_scope = [x for x in assigned_norm if x.get("section_id") not in s_map]
+
+    # sections for the *current planning term* (all campuses/colleges)
+    in_term_sec_ids: Set[str] = set(s_map_all.keys())
+
+    # keep only those whose section belongs to this term but is NOT in APO scope
+    assigned_out_of_scope = [
+        x
+        for x in assigned_norm
+        if x.get("section_id") not in s_map
+        and x.get("section_id") in in_term_sec_ids
+    ]
 
     # union for building the room grid
     section_scheds_for_grid = section_scheds_scoped + assigned_out_of_scope
@@ -392,30 +504,97 @@ async def get_room_allocation(userId: str = Query(..., min_length=3)):
     default_open_days = default_open_days_for_campus(campus.get("campus_name", ""))
 
     def allowed_cells_for_room(rid: str) -> List[Dict[str, Any]]:
-        allowed_keys = set()
+        # 1) Always include already-assigned cells (scoped + out-of-scope)
+        assigned_keys = {
+            (s["day"], s["time_band"])
+            for s in section_scheds_for_grid
+            if s.get("room_id") == rid
+        }
 
-        # always include already-assigned cells
-        for s in section_scheds_for_grid:
-            if s.get("room_id") == rid:
-                allowed_keys.add((s["day"], s["time_band"]))
+        # 2) Saved availability placeholders (normalized days)
+        avail_for_room = [a for a in availability if a["room_id"] == rid]
+        saved_avail_keys = {(a["day"], a["time_band"]) for a in avail_for_room}
+        saved_days = {a["day"] for a in avail_for_room}
 
-        # explicit availability placeholders
-        for a in availability:
-            if a["room_id"] == rid:
-                allowed_keys.add((a["day"], a["time_band"]))
+        allowed_keys = set(assigned_keys) | saved_avail_keys
 
-        # default campus open days
+        # 3) Day-scoped default overlay:
         for d in default_open_days:
-            for tb in TIME_BANDS:
-                allowed_keys.add((d, tb))
+            if d not in saved_days:
+                for tb in TIME_BANDS:
+                    allowed_keys.add((d, tb))
+
+        # Helper: convert "HH:MM – HH:MM" to ("HHMM","HHMM")
+        def _band_to_times(band: str) -> Tuple[str, str]:
+            st, et = parse_band(band)
+            return (st, et)
+
+        # Build a fast view over in-scope section schedules (not yet room-assigned)
+        scheds_open = [
+            s for s in section_scheds_scoped
+            if not (s.get("room_id") or "").strip()
+        ]
+        # Quick lookups
+        sec_meta = s_map            # from sections_map(); includes enrollment_cap
+
+        def _cap(sid: str) -> int:
+            try:
+                v = sec_meta.get(sid, {}).get("enrollment_cap")
+                return int(v) if v not in (None, "") else 0
+            except Exception:
+                return 0
+
+        def _rtype_for_section(sid: str) -> str:
+            """
+            Determine the required room_type for a section:
+            1) Prefer room_type stored on section_schedules (per-slot requirement).
+            2) Fallback to the course's room_type (from courses collection).
+            """
+            # 1) check any open schedule row for this section
+            for row in scheds_open:
+                if row.get("section_id") == sid and row.get("room_type"):
+                    return normalize_room_type(row.get("room_type") or "")
+            # 2) fallback: derive from course metadata
+            cid = sec_meta.get(sid, {}).get("course_id", "")
+            return (course_room_type.get(cid, "") or "").strip()
 
         out = []
         for k, cell in schedule_by_room[rid].items():
-            if k in allowed_keys:
-                c = dict(cell)
-                c["allowed"] = True
-                out.append(c)
+            if k not in allowed_keys:
+                continue
+            day, band = k
+            st, et = _band_to_times(band)
+
+            # Compute eligible sections for this room cell
+            eligible: List[str] = []
+            # Room properties
+            this_room = next((rr for rr in rooms if rr["room_id"] == rid), None)
+            r_cap = int(this_room.get("capacity") or 0) if this_room else 0
+            r_type = normalize_room_type(this_room.get("room_type", "")) if this_room else ""
+
+            for s in scheds_open:
+                if normalize_day(s.get("day")) != day:
+                    continue
+                if band_of(s.get("start_time", ""), s.get("end_time", "")) != band:
+                    continue
+                sid = s.get("section_id", "")
+                if not sid:
+                    continue
+                # capacity & type fit
+                if r_cap and _cap(sid) and r_cap < _cap(sid):
+                    continue
+                need_type = _rtype_for_section(sid)
+                if need_type and r_type and (need_type != r_type):
+                    continue
+                eligible.append(sid)
+
+
+            c = dict(cell)
+            c["allowed"] = True
+            c["eligible_section_ids"] = eligible
+            out.append(c)
         return out
+
 
     buildings = sorted(list({r.get("building", "") for r in rooms if r.get("building")}))
 
@@ -438,6 +617,8 @@ async def get_room_allocation(userId: str = Query(..., min_length=3)):
     return {
         "campus": campus,
         "term_id": term_id,
+        "term_number": term_number,
+        "acad_year_start": acad_year_start,
         "buildings": buildings,
         "timeBands": TIME_BANDS,
         "rooms": rooms_out,
@@ -454,9 +635,12 @@ async def post_room_allocation(
     action: Literal["addRoom", "updateRoom", "setAvailability", "assign", "unassign", "removeRoom"] = Query(...),
     payload: Dict[str, Any] = Body(...),
 ):
-    term_id = await resolve_term_id_with_sections_fallback()
+    # Prefer explicit planning term from the frontend (same term as GET /roomallocation)
+    payload_term_id = (payload.get("term_id") or "").strip()
+    term_id = payload_term_id or await resolve_term_id_with_sections_fallback()
     if not term_id:
         raise HTTPException(status_code=400, detail="No active term.")
+
     campus_id, college_id = await apo_scope(userId)
     if not campus_id:
         raise HTTPException(status_code=400, detail="Unable to resolve APO campus from role_assignments.")
@@ -486,7 +670,30 @@ async def post_room_allocation(
             "created_at": now(),
             "updated_at": now(),
         }
+
+        # ↓↓↓ STAYS **INSIDE** addRoom ↓↓↓
         await db[COL_ROOMS].insert_one(doc)
+
+        # --- Seed initial availability so defaults are recorded once ---
+        campus_name = campus.get("campus_name", "")
+        seed_days = default_open_days_for_campus(campus_name)
+        seed_docs = []
+        for d in seed_days:
+            day_code = denormalize_day(d)
+            for tb in TIME_BANDS:
+                st, et = parse_band(tb)
+                seed_docs.append({
+                    "schedule_id": f"AVAIL-{rid}-{day_code}-{st}-{et}",
+                    "day": day_code,
+                    "start_time": st,
+                    "end_time": et,
+                    "room_id": rid,
+                    "created_at": now(),
+                    "updated_at": now(),
+                })
+        if seed_docs:
+            await db[COL_SCHEDS].insert_many(seed_docs, ordered=False)
+
         return {"ok": True, "room_id": rid}
 
     if action == "updateRoom":
@@ -570,15 +777,25 @@ async def post_room_allocation(
         st, et = parse_band(time_band)
 
         # room must belong to this campus
-        r = await db[COL_ROOMS].find_one({"room_id": room_id, "campus_id": campus_id}, {"_id": 0, "room_id": 1})
+        r = await db[COL_ROOMS].find_one(
+            {"room_id": room_id, "campus_id": campus_id},
+            {"_id": 0, "room_id": 1, "room_type": 1, "capacity": 1},
+        )
         if not r:
             raise HTTPException(status_code=404, detail="Room not found in your campus.")
 
         # section in scoped term
         sec = await db[COL_SECTIONS].find_one(
             {"section_id": section_id, "term_id": term_id},
-            {"_id": 0, "section_id": 1, "section_code": 1, "course_id": 1},
+            {
+                "_id": 0,
+                "section_id": 1,
+                "section_code": 1,
+                "course_id": 1,
+                "enrollment_cap": 1,
+            },
         )
+
         if not sec:
             raise HTTPException(status_code=404, detail="Section not in active term.")
 
@@ -586,34 +803,102 @@ async def post_room_allocation(
         sec_code = (sec.get("section_code") or "").upper()
         if sec_prefix and not sec_code.startswith(sec_prefix):
             raise HTTPException(status_code=403, detail="Section not in your campus scope.")
-        if college_id:
+
+        course = None
+        if sec.get("course_id"):
             course = await db[COL_COURSES].find_one(
-                {"course_id": sec.get("course_id")}, {"_id": 0, "college_id": 1}
+                {"course_id": sec.get("course_id")},
+                {"_id": 0, "college_id": 1, "room_type": 1},
             )
-            if course and course.get("college_id") and course["college_id"] != college_id:
-                raise HTTPException(status_code=403, detail="Section not in your college scope.")
+
+        if college_id and course and course.get("college_id") and course["college_id"] != college_id:
+            raise HTTPException(status_code=403, detail="Section not in your college scope.")
 
         # must have a schedule at that slot
         sched = await db[COL_SCHEDS].find_one(
-            {"section_id": section_id, "day": {"$in": day_aliases(day_full)}, "start_time": st, "end_time": et},
-            {"_id": 0, "schedule_id": 1},
+            {
+                "section_id": section_id,
+                "day": {"$in": day_aliases(day_full)},
+                "start_time": st,
+                "end_time": et,
+            },
+            {"_id": 0, "schedule_id": 1, "room_type": 1},
         )
         if not sched:
             raise HTTPException(status_code=404, detail="Section has no schedule at this day/time.")
 
-        # prevent double-booking of the room
-        conflict = await db[COL_SCHEDS].find_one(
-            {
-                "section_id": {"$ne": section_id},
-                "day": {"$in": day_aliases(day_full)},
-                "start_time": st,
-                "end_time": et,
-                "room_id": room_id,
-            },
-            {"_id": 1},
-        )
-        if conflict:
-            raise HTTPException(status_code=400, detail="Room already assigned at this day/time.")
+        # --- enforce capacity & room_type compatibility ---
+
+        # capacity check: sections.enrollment_cap must fit rooms.capacity
+        room_cap = int(r.get("capacity") or 0)
+        sec_cap_raw = sec.get("enrollment_cap")
+        try:
+            sec_cap = int(sec_cap_raw) if sec_cap_raw not in (None, "") else 0
+        except Exception:
+            sec_cap = 0
+
+        if room_cap and sec_cap and room_cap < sec_cap:
+            raise HTTPException(
+                status_code=400,
+                detail="Section enrollment cap exceeds room capacity.",
+            )
+
+        # room_type check: prefer section_schedules.room_type, fallback to course.room_type
+        room_rt = normalize_room_type(r.get("room_type") or "")
+
+        sched_rt = ""
+        if sched.get("room_type"):
+            sched_rt = normalize_room_type(sched.get("room_type") or "")
+
+        course_rt = ""
+        if course and course.get("room_type"):
+            v = course.get("room_type")
+            if isinstance(v, list) and v:
+                course_rt = normalize_room_type(v[0])
+            elif isinstance(v, str):
+                course_rt = normalize_room_type(v)
+
+        needed_rt = sched_rt or course_rt
+        if needed_rt and room_rt and needed_rt != room_rt:
+            raise HTTPException(
+                status_code=400,
+                detail="Room type is not compatible with the section's required room type.",
+            )
+
+        # prevent double-booking of the room, but only against sections
+        # that belong to the SAME term we are planning for
+        potential_conflicts = [
+            x
+            async for x in db[COL_SCHEDS].find(
+                {
+                    "section_id": {"$ne": section_id},
+                    "day": {"$in": day_aliases(day_full)},
+                    "start_time": st,
+                    "end_time": et,
+                    "room_id": room_id,
+                },
+                {"_id": 0, "section_id": 1},
+            )
+        ]
+
+        if potential_conflicts:
+            other_sec_ids = [
+                c.get("section_id") for c in potential_conflicts if c.get("section_id")
+            ]
+            if other_sec_ids:
+                # any of these sections in the *current planning term*?
+                in_same_term = await db[COL_SECTIONS].find_one(
+                    {
+                        "section_id": {"$in": other_sec_ids},
+                        "term_id": term_id,
+                    },
+                    {"_id": 1},
+                )
+                if in_same_term:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Room already assigned at this day/time.",
+                    )
 
         await db[COL_SCHEDS].update_one(
             {"schedule_id": sched["schedule_id"]}, {"$set": {"room_id": room_id, "updated_at": now()}}

@@ -20,7 +20,11 @@ import {
   assignRoom,
   unassignRoom,
   addRoom,
+  campusFromRoles,
+  getApoPreenlistmentMeta,   
+  getApoPreenlistment,
 } from "../../api";
+
 
 /* ---------------- Types ---------------- */
 type Day = "Monday" | "Tuesday" | "Wednesday" | "Thursday" | "Friday" | "Saturday";
@@ -31,7 +35,10 @@ type RoomCell = {
   time_band: string;          // "HH:MM – HH:MM"
   section_id?: string | null; // assigned section for that cell
   allowed?: boolean;
+  // backend-filtered ids: only sections that pass room_type + capacity checks
+  eligible_section_ids?: string[];
 };
+
 
 type RoomItem = {
   room_id: string;
@@ -57,6 +64,9 @@ type FacultyInfo = { faculty_id: string; faculty_name: string };
 
 type RoomAllocationResponse = {
   campus: { campus_id: string; campus_name: string };
+  term_id: string;
+  term_number?: number | null;
+  acad_year_start?: number | null;
   buildings: string[];
   timeBands: string[];
   rooms: RoomItem[];
@@ -73,6 +83,81 @@ const chipClass =
 
 const DAYS: Day[] = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 const ROOM_TYPES: RoomType[] = ["Classroom", "ComLab"];
+// --- Keep Room Allocation in sync with Pre-Enlistment planning term ---
+const PREEN_TERM_KEY_PREFIX = "apo.preenTermId.";
+
+async function getPlanningTermForCampus(
+  userId: string,
+  campusKey: string | null
+): Promise<string | null> {
+  // Normalize campus so it matches what the backend expects
+  const campusParam =
+    campusKey === "MANILA" || campusKey === "LAGUNA" ? campusKey : undefined;
+
+  // 1) CANONICAL: ask the same endpoint the Pre-Enlistment "Active" view uses.
+  //    Whatever term that screen is showing (including reactivated archives),
+  //    we follow that here.
+  try {
+    const active = await getApoPreenlistment(userId, undefined, "active", campusParam);
+    if (active?.meta?.term_id) {
+      return active.meta.term_id;
+    }
+  } catch {
+    // ignore and fall through to other fallbacks
+  }
+
+  // 2) Fallback: archivesMeta helper (planningTerm / activeTerm)
+  try {
+    const meta = await getApoPreenlistmentMeta(userId, campusParam);
+
+    // If your backend's planningTerm represents the same thing, you can keep this.
+    // Otherwise, activeTerm will usually be the safer choice.
+    if (meta?.activeTerm?.term_id) return meta.activeTerm.term_id;
+    if (meta?.planningTerm?.term_id) return meta.planningTerm.term_id;
+  } catch {
+    // ignore and fall through to localStorage
+  }
+
+  // 3) Last resort: older localStorage keys (apo.preenTermId.*)
+  try {
+    const keysToTry: string[] = [];
+
+    if (campusKey) {
+      const raw = campusKey;
+      keysToTry.push(raw, raw.toUpperCase(), raw.toLowerCase());
+      const title = raw.charAt(0).toUpperCase() + raw.slice(1).toLowerCase();
+      keysToTry.push(title);
+    }
+
+    // Generic fallbacks for legacy labels
+    keysToTry.push(
+      "MANILA",
+      "LAGUNA",
+      "Manila",
+      "Laguna",
+      "Manila Campus",
+      "Laguna Campus"
+    );
+
+    for (const k of keysToTry) {
+      const v = window.localStorage.getItem(PREEN_TERM_KEY_PREFIX + k);
+      if (v) return v;
+    }
+
+    // scan any key that starts with apo.preenTermId.
+    for (let i = 0; i < window.localStorage.length; i++) {
+      const key = window.localStorage.key(i);
+      if (key && key.startsWith(PREEN_TERM_KEY_PREFIX)) {
+        const v = window.localStorage.getItem(key);
+        if (v) return v;
+      }
+    }
+  } catch {
+    // swallow and fall through
+  }
+
+  return null;
+}
 
 /* ---------------- MultiSelect ---------------- */
 function MultiSelect({
@@ -205,20 +290,39 @@ function AllocateClassModal({
     return set;
   }, [rooms]);
 
+  // all sections that have a schedule on this day/timeBand
   const matchingSectionIds = useMemo(
-    () => sectionSchedules.filter((s) => s.day === day && s.time_band === timeBand).map((s) => s.section_id),
+    () =>
+      sectionSchedules
+        .filter((s) => s.day === day && s.time_band === timeBand)
+        .map((s) => s.section_id),
     [sectionSchedules, day, timeBand]
   );
 
-  const availableSections = useMemo(
-    () =>
-      sections.filter((sec) => {
-        if (!matchingSectionIds.includes(sec.section_id)) return false;
-        const key = `${sec.section_id}|${day}|${timeBand}`;
-        return !assigned.has(key);
-      }),
-    [sections, matchingSectionIds, assigned, day, timeBand]
-  );
+  // extra filter from the clicked cell's eligible_section_ids (capacity + room_type)
+  const eligibleFromCell = useMemo(() => {
+    const cell = room.schedule.find(
+      (c) => c.day === day && c.time_band === timeBand
+    );
+    return cell?.eligible_section_ids ?? null;
+  }, [room, day, timeBand]);
+
+  const availableSections = useMemo(() => {
+    // base ids: all sections that are scheduled at this day/time
+    let ids = matchingSectionIds;
+
+    // if backend provided a stricter list, intersect with it
+    if (eligibleFromCell && eligibleFromCell.length > 0) {
+      const eligibleSet = new Set(eligibleFromCell);
+      ids = ids.filter((id) => eligibleSet.has(id));
+    }
+
+    return sections.filter((sec) => {
+      if (!ids.includes(sec.section_id)) return false;
+      const key = `${sec.section_id}|${day}|${timeBand}`;
+      return !assigned.has(key);
+    });
+  }, [sections, matchingSectionIds, eligibleFromCell, assigned, day, timeBand]);
 
   const labelToId = useMemo(() => {
     const m: Record<string, string> = {};
@@ -536,6 +640,7 @@ function RoomSchedule({
   rooms,
   facultyBySection,
   coursesMap,
+  termId,
 }: {
   room: RoomItem;
   onBack: () => void;
@@ -546,6 +651,7 @@ function RoomSchedule({
   rooms: RoomItem[];
   facultyBySection: Record<string, FacultyInfo>;
   coursesMap: Record<string, string>;
+  termId: string | null;
 }) {
   const [selectedSlot, setSelectedSlot] = useState<{ day: Day; time_band: string } | null>(null);
 
@@ -559,6 +665,10 @@ function RoomSchedule({
 
   const handleAllocate = async (section_id: string) => {
     if (!selectedSlot || !user?.userId) return;
+    if (!termId) {
+      setAllocError("Missing planning term. Please reload the page.");
+      return;
+    }
     try {
       setSaving(true);
       setAllocError(null);
@@ -567,6 +677,7 @@ function RoomSchedule({
         day: selectedSlot.day,
         time_band: selectedSlot.time_band,
         section_id,
+        term_id: termId,
       });
       const updatedCells = room.schedule.map((c) =>
         c.day === selectedSlot.day && c.time_band === selectedSlot.time_band ? { ...c, section_id } : c
@@ -926,8 +1037,11 @@ export default function RoomAllocationScreen() {
   const [facultyBySection, setFacultyBySection] = useState<Record<string, FacultyInfo>>({});
   const [coursesMap, setCoursesMap] = useState<Record<string, string>>({});
   const [campusName, setCampusName] = useState<string>("");
-
+  const [termId, setTermId] = useState<string | null>(null);
+  const [termNumber, setTermNumber] = useState<number | null>(null);
+  const [acadYearStart, setAcadYearStart] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
+
   const [err, setErr] = useState<string | null>(null);
 
   const [editing, setEditing] = useState<RoomItem | null>(null);
@@ -945,11 +1059,35 @@ export default function RoomAllocationScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user]);
 
-  const refresh = async (): Promise<RoomAllocationResponse | null> => {
-    if (!user?.userId) return null;
-    const data = await getApoRoomAllocation(user.userId);
+  const headerLabel = useMemo(() => {
+    if (!termNumber || !acadYearStart) return "";
+    const nextYear = acadYearStart + 1;
+    return `Term ${termNumber} · AY ${acadYearStart}-${nextYear}`;
+  }, [termNumber, acadYearStart]);
+
+const refresh = async (): Promise<RoomAllocationResponse | null> => {
+  if (!user?.userId) return null;
+
+  // Mirror the same planning term used in Pre-Enlistment / Course Offerings
+  const campusCode = campusFromRoles(user?.roles || []);
+  const planningTermId = await getPlanningTermForCampus(
+    user.userId,
+    campusCode
+  );
+
+  const data = await getApoRoomAllocation(
+    user.userId,
+    planningTermId || undefined
+  );
 
     setCampusName(data.campus.campus_name || "");
+    setTermId(data.term_id || null);
+    setTermNumber(
+      typeof data.term_number === "number" ? data.term_number : null
+    );
+    setAcadYearStart(
+      typeof data.acad_year_start === "number" ? data.acad_year_start : null
+    );
     setTimeBands(data.timeBands);
     setBuildings(["All Buildings", ...data.buildings]);
     setRooms(data.rooms);
@@ -1030,7 +1168,10 @@ export default function RoomAllocationScreen() {
 
             <div className="flex flex-wrap items-center gap-3 justify-between">
               <div className="flex flex-wrap items-center gap-3">
-                <h2 className="text-lg font-bold">Room Allocation</h2>
+                <div>
+                  <h2 className="text-lg font-bold">Room Allocation</h2>
+                  <p className="text-sm text-gray-500">{headerLabel}</p>
+                </div>
               </div>
 
               <button
@@ -1065,7 +1206,7 @@ export default function RoomAllocationScreen() {
               onEdit={setEditing}
             />
           </div>
-        ) : (
+      ) : (
           <RoomSchedule
             room={viewing}
             onBack={() => setViewing(null)}
@@ -1079,6 +1220,7 @@ export default function RoomAllocationScreen() {
             rooms={rooms}
             facultyBySection={facultyBySection}
             coursesMap={coursesMap}
+            termId={termId}
           />
         )}
       </main>

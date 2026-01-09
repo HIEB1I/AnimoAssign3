@@ -2,11 +2,16 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Calendar, AlertCircle, Send, UserCircle, LogOut } from "lucide-react";
 import SelectBox from "../../component/SelectBox";
+import Tabs from "../../component/Tabs";
+
 import {
   getStudentPetitions,
   submitStudentPetition,
   getStudentOptions,
   getStudentProfile,
+  type StudentOptions,
+  type PetitionSubmitPayload,
+  type PetitionView
 } from "../../api";
 
 /* ---------------- Inline TopBar (no Inbox/Notifications) ---------------- */
@@ -101,30 +106,7 @@ function TopBarInline({
   );
 }
 
-/* ---------------- Types ---------------- */
-type PetitionView = {
-  petition_id: string;
-  user_id: string;
-  course_id: string | null;
-  course_code: string;
-  course_title: string;
-  reason: string;
-  status: string;
-  submitted_at: string; // ISO from backend
-  acad_year_start?: number | string;
-  term_number?: number;
-  program_code?: string;
-};
-
-type OptionsData = {
-  ok: boolean;
-  departments: string[];
-  courses: { course_code: string; course_title: string; dept_name: string }[];
-  programs: { program_id: string; program_code: string }[];
-  reasons: string[];
-  statuses: string[];
-};
-
+/* ---------------- Local Types ---------------- */
 type ProfileData = {
   ok: boolean;
   first_name: string;
@@ -156,7 +138,7 @@ function StatusCard({ p }: { p: PetitionView }) {
   const ayLabel = (() => {
     const n = Number.parseInt(String(p.acad_year_start ?? ""), 10);
     return Number.isFinite(n) ? `AY ${n}-${n + 1}` : "AY —";
-  })();
+    })();
 
   return (
     <div className="rounded-xl border border-gray-300 bg-white p-4 shadow-sm mb-4">
@@ -179,6 +161,11 @@ function StatusCard({ p }: { p: PetitionView }) {
       <div className="mt-2 text-sm bg-gray-100 rounded-md px-2 py-1">
         <span className="font-medium">Reason:</span> {p.reason}
       </div>
+
+      <div className="mt-2 text-sm text-gray-600">
+        <span className="font-medium">Remarks:</span>{" "}
+        {p.remarks ? p.remarks : <span className="text-gray-400">—</span>}
+      </div>
     </div>
   );
 }
@@ -196,7 +183,7 @@ export default function STUDENT_Petition() {
   const fullName = user?.fullName ?? "Student";
 
   const [profile, setProfile] = useState<ProfileData | null>(null);
-  const [options, setOptions] = useState<OptionsData>({
+  const [options, setOptions] = useState<StudentOptions>({
     ok: false,
     departments: [],
     courses: [],
@@ -265,12 +252,12 @@ export default function STUDENT_Petition() {
     try {
       setSubmitting(true);
       setError("");
-      const res = await submitStudentPetition(userId, form);
+      const res = await submitStudentPetition(userId, form as PetitionSubmitPayload);
       if (res?.ok && res?.petition) {
         setPetitions((prev) => [res.petition as PetitionView, ...prev]);
         setForm((prev) => ({ ...prev, department: "", courseCode: "", reason: "" }));
       } else {
-        throw new Error(res?.message || "Submission failed.");
+        throw new Error("Submission failed.");
       }
     } catch (e: any) {
       setError(e?.response?.data?.detail || e?.message || "Failed to submit petition.");
@@ -282,12 +269,20 @@ export default function STUDENT_Petition() {
   return (
     <div className="min-h-screen w-full bg-white text-slate-900">
       <TopBarInline fullName={fullName} role="Student" />
+      <Tabs
+        mode="nav"
+        items={[
+          { label: "Course Offerings", to: "/student/courseofferings" },
+          { label: "Class Petition", to: "/student/petition" },
+          { label: "Special Class", to: "/student/specialclass" }
+        ]}
+      />
 
       <main className="p-6 max-w-7xl mx-auto">
         <div className="grid xl:grid-cols-2 gap-10">
           {/* LEFT: form */}
           <section>
-            <h2 className="text-xl font-bold mb-1">Section Petition Form</h2>
+            <h2 className="text-xl font-bold mb-1">Class Petition Form</h2>
             <p className="text-sm text-gray-600 mb-4">
               Submit a petition to request additional sections or slots.
             </p>
@@ -394,7 +389,7 @@ export default function STUDENT_Petition() {
                 <button
                   onClick={handleSubmit}
                   disabled={submitting}
-                  className="mt-6 flex items-center justify-center gap-2 rounded-lg bg-[#21804A] px-6 py-2 text-white font-medium hover:bg-[#18693B] disabled:opacity-60"
+                  className="mt-2 flex items-center justify-center gap-2 rounded-lg bg-[#21804A] px-6 py-2 text-white font-medium hover:bg-[#18693B] disabled:opacity-60"
                 >
                   <Send className="h-4 w-4" />
                   {submitting ? "Submitting…" : "Submit Petition"}

@@ -10,10 +10,10 @@ type SidebarProps = { open: boolean; onToggle: () => void; items?: SidebarItem[]
 
 const defaultItems: SidebarItem[] = [
   { to: "/om/load-assignment", label: "Load Assignment", Icon: ListChecks },
-  { to: "/om/faculty-management", label: "Faculty Management", Icon: Users },
+  { to: "/om/faculty-management", label: "Faculty Directory", Icon: Users },
   { to: "/om/course-management", label: "Course Management", Icon: BookOpen },
   { to: "/om/reports-analytics", label: "Reports and Analytics", Icon: BarChart3 },
-  { to: "/om/faculty-form", label: "Faculty Form", Icon: FileText },
+  { to: "/om/faculty-form", label: "Faculty Preferences", Icon: FileText },
   { to: "/om/student-petition", label: "Student Petition", Icon: FilePlus },
   { to: "/om/class-retention", label: "Class Retention", Icon: BookMarked },
 ];
