@@ -1,17 +1,18 @@
 # analytics/app/OM_REPORTS_ANALYTICS/OM_RP_CourseProfile.py
 from typing import Any, Dict, List, Optional
+from collections import defaultdict
+import math
 
 from fastapi import APIRouter, Query
 from fastapi.responses import JSONResponse
 
-from ..db_async import get_db  # reuse the shared Mongo client
+from ..db_async import get_db
 
 router = APIRouter()
 
 async def get_course_profile_for(query: str) -> Dict[str, Any]:
     """
-    Returns Course Profile payload for a given course_id or course_code.
-    (Moved from db_async.py to this module.)
+    Returns Course Profile payload, including new descriptive analytics metrics.
     """
     db = get_db()
     q = (query or "").strip()
@@ -42,6 +43,7 @@ async def get_course_profile_for(query: str) -> Dict[str, Any]:
 
     # -------- Qualified faculty (union of: taught this course ∪ qualified via KAC) --------
     qualified: List[Dict[str, Any]] = []
+    # ... (Keep existing qualified faculty logic) ...
     if kac_ids:
         # A) taught THIS course
         sec_ids = await db.sections.distinct("section_id", {"course_id": course_id})
@@ -63,16 +65,20 @@ async def get_course_profile_for(query: str) -> Dict[str, Any]:
             ).to_list(None)
             prof_by_fid = {fp["faculty_id"]: fp for fp in fps}
 
+            # Gather all relevant user_ids for name lookup
             user_ids = {fp.get("user_id") for fp in fps if fp.get("user_id")} | set(fac_ids)
             users = await db.users.find(
                 {"user_id": {"$in": list(user_ids)}},
                 {"user_id": 1, "first_name": 1, "last_name": 1, "email": 1}
             ).to_list(None)
-            user_by_uid = {u["user_id"]: u for u in users}
+            # Combine lookups into a single map based on uid or fid
+            user_by_id = {u["user_id"]: u for u in users}
 
             for fid in fac_ids:
+                # Prioritize user_id from faculty_profiles if available, otherwise use faculty_id
                 uid = (prof_by_fid.get(fid) or {}).get("user_id") or fid
-                u = user_by_uid.get(uid, {})
+                u = user_by_id.get(uid, user_by_id.get(fid, {})) # check both uid and fid
+                
                 source_bits = []
                 if fid in kac_qualified_ids:
                     source_bits.append("Qualified KAC")
@@ -86,10 +92,13 @@ async def get_course_profile_for(query: str) -> Dict[str, Any]:
                     "email":      u.get("email"),
                     "source":     " & ".join(source_bits) if source_bits else "—",
                 })
+    # -------- End of Qualified faculty --------
 
-    # -------- Past instructors (aggregated) --------
+    # -------- Past instructors (aggregated) AND NEW METRICS CALCULATION --------
     past: List[Dict[str, Any]] = []
-    pipeline = [
+    
+    # Aggregation for past instructors and section history
+    pipeline_past = [
         {"$match": {"course_id": course_id}},
         {"$lookup": {
             "from": "faculty_assignments",
@@ -126,6 +135,7 @@ async def get_course_profile_for(query: str) -> Dict[str, Any]:
             }},
             "count": {"$sum": 1}
         }},
+        # Lookup user info
         {"$lookup": {
             "from": "faculty_profiles",
             "localField": "_id",
@@ -160,31 +170,118 @@ async def get_course_profile_for(query: str) -> Dict[str, Any]:
         {"$sort": { "count": -1, "last_name": 1, "first_name": 1 }},
     ]
 
-    async for row in db.sections.aggregate(pipeline, allowDiskUse=True):
+    # Aggregate to get all past instructor data
+    async for row in db.sections.aggregate(pipeline_past, allowDiskUse=True):
         past.append({
             "faculty_id": row["faculty_id"],
             "first_name": row.get("first_name"),
             "last_name":  row.get("last_name"),
             "email":      row.get("email"),
             "count":      row.get("count", 0),
-            "sections":   [
-                {
-                    "course_code": s.get("course_code") or [],
-                    "section_id": s.get("section_id"),
-                    "section_code": s.get("section_code"),
-                    "term_id": s.get("term_id"),
-                    "acad_year_start": s.get("acad_year_start"),
-                    "term_number": s.get("term_number"),
-                } for s in row.get("sections", [])
-            ]
+            # Only store section counts, not the full list of sections, for the main instructor list
+            # We'll re-run a simpler aggregation for the detailed metrics
+            "sections":   row.get("sections", [])
         })
 
+    # NEW METRICS CALCULATION (Separate, simpler aggregation for course history)
+    pipeline_history = [
+        {"$match": {"course_id": course_id}},
+        {"$lookup": {
+            "from": "terms",
+            "localField": "term_id",
+            "foreignField": "term_id",
+            "as": "term"
+        }},
+        {"$unwind": {"path": "$term", "preserveNullAndEmptyArrays": True}},
+        {"$lookup": {
+            "from": "faculty_assignments",
+            "localField": "section_id",
+            "foreignField": "section_id",
+            "as": "fa"
+        }},
+        {"$unwind": {"path": "$fa", "preserveNullAndEmptyArrays": True}},
+        {"$project": {
+            "_id": 0,
+            "section_id": 1,
+            "acad_year_start": "$term.acad_year_start",
+            "term_number": "$term.term_number",
+            "faculty_id": "$fa.faculty_id",
+        }}
+    ]
+
+    history_data = await db.sections.aggregate(pipeline_history, allowDiskUse=True).to_list(None)
+
+    # Calculate metrics from history_data
+    # FIX: Initialize the set here
+    unique_sections_for_count: set = set()
+    total_sections: int = 0
+    unique_instructors: set = set()
+    academic_years: set = set()
+    ay_section_counts: Dict[int, int] = defaultdict(int)
+    most_recent_ay: Optional[int] = None
+    most_recent_term: Optional[int] = None
+
+    for entry in history_data:
+        # A section only counts once, even if it had multiple instructors
+        if entry.get("section_id"):
+             # Ensure we count each section only once for the total and AY counts
+            if entry.get("section_id") not in unique_sections_for_count:
+                # total_sections += 1 # Not needed if we use len() later
+                unique_sections_for_count.add(entry.get("section_id"))
+                
+                ay = entry.get("acad_year_start")
+                if ay:
+                    academic_years.add(ay)
+                    ay_section_counts[ay] += 1
+        
+            # Track unique instructors
+            fid = entry.get("faculty_id")
+            if fid:
+                unique_instructors.add(fid)
+
+        # Track Most Recent Term Taught
+        ay = entry.get("acad_year_start")
+        term = entry.get("term_number")
+        
+        if ay is not None and term is not None:
+            if most_recent_ay is None or ay > most_recent_ay:
+                most_recent_ay = ay
+                most_recent_term = term
+            elif ay == most_recent_ay and (most_recent_term is None or term > most_recent_term):
+                most_recent_term = term
+                
+    # New Metric: Total Sections Taught
+    # FIX: Use the length of the set for the count
+    total_sections = len(unique_sections_for_count)
+    
+    # New Metric: Number of Unique Instructors
+    num_unique_instructors = len(unique_instructors)
+    
+    # New Metric: Total Academic Years covered
+    num_acad_years = len(academic_years)
+    
+    # New Metric: Average Teaching Frequency
+    avg_teaching_frequency = round(total_sections / num_acad_years, 2) if num_acad_years > 0 else 0.0
+
+    # New Metric: Top 3 Past Instructors
+    # The 'past' list is already sorted by count descending
+    top_3_instructors = past[:3]
+    remaining_instructors_count = len(past) - len(top_3_instructors)
+
+    # Format AY section counts for the Demand Visual (Frontend)
+    ay_demand_visual = [
+        {"ay": ay, "sections": count} 
+        for ay, count in sorted(ay_section_counts.items())
+    ]
+    
     # -------- Preferences for current term --------
+    # ... (Keep existing preferences logic, no changes needed) ...
     preferences: Any = "N/A"
     current = await db.terms.find_one({"is_current": True}, {"term_id": 1})
     prefs_list: List[Dict[str, Any]] = []
 
     if current and kac_ids:
+        # ... (Keep the rest of the preferences pipeline) ...
         pipeline_prefs = [
             {"$match": {
                 "term_id": current["term_id"],
@@ -237,16 +334,30 @@ async def get_course_profile_for(query: str) -> Dict[str, Any]:
     else:
         preferences = "No current term found."
 
+
+    # Final return structure
     return {
         "course_id": course_id,
         "course_code": course_code,
         "title": title,
         "qualified_faculty": qualified,
-        "past_instructors": past,
+        # Only return the aggregate metrics and top 3 instructors
+        "past_instructors_top3": top_3_instructors,
+        "past_instructors_remaining_count": remaining_instructors_count,
+        "history_metrics": {
+            "total_sections": total_sections,
+            "unique_instructors": num_unique_instructors,
+            "avg_teaching_frequency": avg_teaching_frequency,
+            "most_recent_taught": {
+                "acad_year_start": most_recent_ay,
+                "term_number": most_recent_term,
+            },
+            "ay_demand_visual": ay_demand_visual, # for the chart
+        },
         "preferences": preferences,
     }
 
-# HTTP endpoint (same URL your frontend calls)
+
 @router.get("/analytics/course-profile-for")
 async def course_profile_for(query: str = Query(..., description="course_id or course_code")):
     data = await get_course_profile_for(query)

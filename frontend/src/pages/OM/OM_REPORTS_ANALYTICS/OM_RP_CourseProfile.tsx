@@ -1,19 +1,23 @@
 // frontend/src/pages/OM/OM_REPORTS_ANALYTICS/OM_RP_CourseProfile.tsx
 import React, { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { Search as SearchIcon, ChevronLeft, ChevronDown, ChevronRight } from "lucide-react";
+import { Search as SearchIcon, ChevronLeft, BarChart2, Users, Layers, TrendingUp } from "lucide-react";
 import { fetchCourseProfile, type CMCourseRow } from "@/api";
 
 /* -----------------------------
  * Types matching backend payload
+ * (UPDATED for new metrics)
  * ----------------------------- */
-type QualifiedFaculty = {
+
+// Minimal Instructor/Faculty structure (used for Qualified and Top Instructors)
+type InstructorInfo = {
   faculty_id: string;
   first_name?: string;
   last_name?: string;
   email?: string;
 };
 
+// Section details (only needed for PastInstructorsTop3 in the new design, but kept for type)
 type PastTeach = {
   course_code?: string[];
   section_id?: string;
@@ -23,32 +27,38 @@ type PastTeach = {
   term_number?: number;
 };
 
-type PastInstructor = {
-  faculty_id: string;
-  first_name?: string;
-  last_name?: string;
-  email?: string;
+// Past Instructor (now includes the count)
+type PastInstructorCount = InstructorInfo & {
   count?: number;
-  sections: PastTeach[];
+  sections?: PastTeach[];
 };
 
-type SimplePref = { faculty_id: string; name?: string };
-
-type PrefEntry = {
-  faculty_id: string;
-  first_name?: string;
-  last_name?: string;
-  email?: string;
+// New history metrics structure
+type HistoryMetrics = {
+    total_sections: number;
+    unique_instructors: number;
+    avg_teaching_frequency: number;
+    most_recent_taught: {
+        acad_year_start?: number;
+        term_number?: number;
+    };
+    ay_demand_visual: Array<{ ay: number; sections: number }>;
 };
 
+type PrefEntry = InstructorInfo;
+
+// The main course profile payload (UPDATED)
 type CourseProfile = {
   course_id: string;
   course_code?: string[];
   title?: string;
-  qualified_faculty?: QualifiedFaculty[];
-  past_instructors?: PastInstructor[];
-  preferences?: string | SimplePref[] | PrefEntry[];
+  qualified_faculty?: InstructorInfo[];
+  past_instructors_top3?: PastInstructorCount[]; // Top 3 list
+  past_instructors_remaining_count?: number; // Count of the rest
+  history_metrics?: HistoryMetrics; // New aggregate metrics
+  preferences?: string | PrefEntry[];
 };
+
 
 /* -----------------------------
  * Helpers (UI-only)
@@ -57,11 +67,11 @@ function joinCodes(codes?: string[]): string {
   return codes && codes.length ? codes.join(", ") : "";
 }
 function fmtAY(start?: number): string {
-  if (typeof start !== "number") return "AY —";
-  return `AY ${start}-${start + 1}`;
+  if (typeof start !== "number") return "—";
+  return `${start}–${start + 1}`;
 }
 function fmtTerm(n?: number): string {
-  return typeof n === "number" ? `Term ${n}` : "Term —";
+  return typeof n === "number" ? `Term ${n}` : "—";
 }
 function fullName(last?: string, first?: string) {
   const L = (last || "").trim();
@@ -71,6 +81,56 @@ function fullName(last?: string, first?: string) {
   if (!F) return L;
   return `${L}, ${F}`;
 }
+
+// Mock Component for the chart visualization
+// In a real application, this would use a library like Recharts or Victory
+const CourseDemandVisual = ({ data }: { data: Array<{ ay: number; sections: number }> }) => {
+    if (!data || data.length === 0) {
+        return <div className="p-4 text-center text-gray-500">No history data available for demand visualization.</div>;
+    }
+
+    const maxSections = Math.max(...data.map(d => d.sections));
+    const normalizedData = data.map(d => ({
+        ...d,
+        height: (d.sections / maxSections) * 100, // percentage height
+    }));
+
+    return (
+        <div className="p-4 bg-white rounded-lg border border-gray-200 shadow-inner">
+            <h3 className="text-md font-semibold text-gray-800 mb-3 flex items-center gap-2">
+                <BarChart2 className="w-4 h-4 text-emerald-500" />
+                Course Demand by Academic Year
+            </h3>
+            <div className="flex justify-between items-end h-40">
+                {normalizedData.map((d) => (
+                    <div key={d.ay} className="flex flex-col items-center h-full justify-end group px-1">
+                        <div
+                            style={{ height: `${d.height}%`, minHeight: '5px' }}
+                            className="w-4 bg-emerald-400 rounded-t-sm transition-all duration-300 hover:bg-emerald-600 relative"
+                        >
+                            <span className="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-1 text-xs font-bold text-emerald-700 opacity-0 group-hover:opacity-100 transition-opacity">
+                                {d.sections}
+                            </span>
+                        </div>
+                        <span className="mt-1 text-xs text-gray-500 whitespace-nowrap">{fmtAY(d.ay).split('–')[0]}</span>
+                    </div>
+                ))}
+            </div>
+        </div>
+    );
+};
+
+// Reusable Metric Card for the Summary
+const MetricCard = ({ title, value, icon: Icon, colorClass = "text-emerald-500" }: { title: string, value: string | number, icon: React.ElementType, colorClass?: string }) => (
+    <div className="p-4 bg-white rounded-lg border border-gray-200 shadow-sm flex flex-col justify-between">
+        <div className="flex items-center justify-between">
+            <h3 className="text-sm font-medium text-gray-500">{title}</h3>
+            <Icon className={`w-5 h-5 ${colorClass}`} />
+        </div>
+        <p className="mt-1 text-2xl font-bold text-gray-900">{value}</p>
+    </div>
+);
+
 
 /* -----------------------------
  * Main Page
@@ -84,11 +144,11 @@ export default function OM_RP_CourseProfile() {
   const [data, setData] = useState<CourseProfile | null>(null);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const [open, setOpen] = useState(false); // accordion state
 
   // --- Fetch ALL courses on mount (default view) ---
   useEffect(() => {
     let alive = true;
+    // ... (Keep existing fetch logic for course list) ...
     async function run() {
       setListErr(null);
       setListLoading(true);
@@ -157,13 +217,10 @@ export default function OM_RP_CourseProfile() {
   async function loadProfile(q: string) {
     setErr(null);
     setData(null);
-    setOpen(false);
     setLoading(true);
     try {
       const res = await fetchCourseProfile(q);
       setData(res as CourseProfile);
-      // auto-open details once loaded
-      setOpen(true);
     } catch (e: any) {
       setErr(e?.message || "Failed to fetch course profile");
     } finally {
@@ -185,12 +242,14 @@ export default function OM_RP_CourseProfile() {
     return `${code || "—"} - ${title || "—"}`;
   }, [data]);
 
+  const metrics = data?.history_metrics;
+
   return (
     <div className="w-full px-8 py-8">
-      {/* Header (match TeachingHistory aesthetics) */}
-      <h1 className="text-2xl font-bold mb-2">Course Profile</h1>
+      {/* Header */}
+      <h1 className="text-2xl font-bold mb-2">Course Profile Dashboard</h1>
       <p className="text-sm text-gray-600 mb-6">
-        Browse the list of courses below. Click a course to view qualified faculty, past instructors, and current-term preferences.
+        View analytical metrics on course history, demand, and faculty assignment stability.
       </p>
 
       <div className="rounded-xl border border-gray-200 bg-white shadow-sm">
@@ -244,7 +303,7 @@ export default function OM_RP_CourseProfile() {
           </form>
         </div>
 
-        {/* Left: course list (default visible). Right: selected course details */}
+        {/* Left: course list (default visible). Right: selected course details (Now a Dashboard) */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-0">
           {/* Course list */}
           <div className="border-r border-gray-200">
@@ -259,7 +318,7 @@ export default function OM_RP_CourseProfile() {
                 <div className="px-4 py-2 text-xs text-gray-500 border-b">
                   Showing {filtered.length} of {courseList.length} courses
                 </div>
-                <ul className="max-h-[60vh] overflow-auto divide-y" role="list" aria-label="Courses">
+                <ul className="max-h-[70vh] overflow-auto divide-y" role="list" aria-label="Courses">
                   {filtered.map((c) => (
                     <li key={c.course_id} className="bg-white">
                       <button
@@ -280,11 +339,11 @@ export default function OM_RP_CourseProfile() {
             )}
           </div>
 
-          {/* Details panel (spans remaining columns) */}
-          <div className="md:col-span-2">
+          {/* Details panel (Dashboard) */}
+          <div className="md:col-span-2 p-6 space-y-6">
             {/* Status / error rows for profile */}
             {err && (
-              <div className="px-4 py-3 text-sm text-red-700 bg-red-50 border-b border-red-200">
+              <div className="px-4 py-3 text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg">
                 {err}
               </div>
             )}
@@ -294,163 +353,136 @@ export default function OM_RP_CourseProfile() {
 
             {/* Empty state when nothing selected yet */}
             {!loading && !err && !data && (
-              <div className="px-6 py-10 text-center text-sm text-gray-500">
-                Select a course on the left to view its profile.
+              <div className="px-6 py-10 text-center text-sm text-gray-500 border border-gray-200 rounded-lg">
+                Select a course on the left to view its analytical profile.
               </div>
             )}
 
-            {/* Accordion-style detail (default collapsed; auto-opens after load) */}
+            {/* Main Dashboard Content */}
             {!loading && !err && data && (
-              <ul className="divide-y" role="list">
-                <li className="bg-white">
-                  {/* Header row: only "CODE - Title" (click to toggle) */}
-                  <button
-                    onClick={() => setOpen((v) => !v)}
-                    className="w-full flex items-center justify-between gap-3 px-4 py-3 text-left hover:bg-gray-50"
-                    aria-expanded={open}
-                    aria-controls="course-details"
-                  >
-                    <span className="inline-flex items-center gap-2">
-                      {open ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-                      <span className="font-semibold text-emerald-700">{courseHeader}</span>
-                    </span>
-                    <span className="text-xs text-gray-500">{open ? "Hide" : "Show"}</span>
-                  </button>
-
-                  {/* Dropdown content with the original table layout */}
-                  {open && (
-                    <div id="course-details" className="px-4 pb-4">
-                      <div className="overflow-x-auto rounded-xl border border-gray-200">
-                        <table className="min-w-full table-fixed text-sm">
-                          {/* 4 evenly spaced columns */}
-                          <colgroup>
-                            <col style={{ width: "25%" }} />
-                            <col style={{ width: "25%" }} />
-                            <col style={{ width: "25%" }} />
-                            <col style={{ width: "25%" }} />
-                          </colgroup>
-
-                          <tbody className="border-b border-gray-200">
-                            {/* QUALIFIED FACULTY header row */}
-                            <tr className="bg-gray-50">
-                              <td colSpan={4} className="px-4 py-2 text-sm font-semibold text-emerald-700 border-t">
-                                Qualified Faculty
-                              </td>
-                            </tr>
-
-                            {/* QUALIFIED FACULTY rows */}
-                            {(!data.qualified_faculty || data.qualified_faculty.length === 0) && (
-                              <tr>
-                                <td colSpan={4} className="px-4 py-4 text-center text-gray-500">
-                                  None listed.
-                                </td>
-                              </tr>
-                            )}
-                            {data.qualified_faculty?.map((qf, i) => (
-                              <tr key={`${qf.faculty_id}-${i}`} className={i % 2 === 0 ? "bg-white" : "bg-gray-50"}>
-                                <td colSpan={4} className="px-3 py-3">
-                                  <div className="text-center">
-                                    <div className="font-semibold text-emerald-700">
-                                      {fullName(qf.last_name, qf.first_name)}
-                                    </div>
-                                    <div className="text-xs text-gray-600">{qf.email || "—"}</div>
-                                  </div>
-                                </td>
-                              </tr>
-                            ))}
-
-                            {/* PAST INSTRUCTORS header row */}
-                            <tr className="bg-gray-50">
-                              <td colSpan={4} className="px-4 py-2 text-sm font-semibold text-emerald-700 border-t">
-                                Past Instructors
-                              </td>
-                            </tr>
-
-                            {/* Column labels ONLY for Past Instructors */}
-                            <tr className="bg-gray-50 text-gray-600 text-xs uppercase tracking-wide border-y border-gray-200">
-                              {["Name", "Section", "AY", "Term"].map((h) => (
-                                <td key={h} className="px-3 py-2 text-center font-medium whitespace-nowrap">
-                                  {h}
-                                </td>
-                              ))}
-                            </tr>
-
-                            {/* PAST INSTRUCTORS rows */}
-                            {(!data.past_instructors || data.past_instructors.length === 0) && (
-                              <tr>
-                                <td colSpan={4} className="px-4 py-4 text-center text-gray-500">
-                                  None listed.
-                                </td>
-                              </tr>
-                            )}
-                            {data.past_instructors?.flatMap((pi, idx) => {
-                              const rows = (pi.sections || []).length ? pi.sections : [null];
-                              return rows.map((s, i2) => {
-                                const ayText = s ? fmtAY(s.acad_year_start) : "—";
-                                const termText = s ? fmtTerm(s.term_number) : "—";
-                                const section = s ? (s.section_code || s.section_id || "—") : "—";
-                                return (
-                                  <tr
-                                    key={`${pi.faculty_id}-${s?.section_id ?? i2}-${idx}`}
-                                    className={(idx + i2) % 2 === 0 ? "bg-white" : "bg-gray-50"}
-                                  >
-                                    <td className="px-3 py-2 text-center">
-                                      <div className="font-semibold text-emerald-700">
-                                        {fullName(pi.last_name, pi.first_name)}
-                                      </div>
-                                      <div className="text-xs text-gray-600">{pi.email || "—"}</div>
-                                    </td>
-                                    <td className="px-3 py-2 text-center">{section}</td>
-                                    <td className="px-3 py-2 text-center">{ayText}</td>
-                                    <td className="px-3 py-2 text-center">{termText}</td>
-                                  </tr>
-                                );
-                              });
-                            })}
-
-                            {/* PREFERENCES header row */}
-                            <tr className="bg-gray-50">
-                              <td colSpan={4} className="px-4 py-2 text-sm font-semibold text-emerald-700 border-t">
-                                Preferences (Current Term)
-                              </td>
-                            </tr>
-
-                            {/* PREFERENCES rows */}
-                            {typeof data.preferences === "string" ? (
-                              <tr>
-                                <td colSpan={4} className="px-4 py-4 text-sm text-gray-700 text-center">
-                                  {data.preferences}
-                                </td>
-                              </tr>
-                            ) : Array.isArray(data.preferences) ? (
-                              (data.preferences as PrefEntry[]).length === 0 ? (
-                                <tr>
-                                  <td colSpan={4} className="px-4 py-4 text-center text-gray-500">
-                                    N/A
-                                  </td>
-                                </tr>
-                              ) : (
-                                (data.preferences as PrefEntry[]).map((p, i) => (
-                                  <tr key={`${p.faculty_id}-${i}`} className={i % 2 === 0 ? "bg-white" : "bg-gray-50"}>
-                                    <td colSpan={4} className="px-3 py-3">
-                                      <div className="text-center">
-                                        <div className="font-semibold text-emerald-700">
-                                          {fullName(p.last_name, p.first_name)}
-                                        </div>
-                                        <div className="text-xs text-gray-600">{p.email || "—"}</div>
-                                      </div>
-                                    </td>
-                                  </tr>
-                                ))
-                              )
-                            ) : null}
-                          </tbody>
-                        </table>
-                      </div>
+                <div className="space-y-6">
+                    {/* Header: Course Code and Title */}
+                    <div className="bg-emerald-50 p-4 rounded-lg border border-emerald-200">
+                        <h2 className="text-xl font-bold text-emerald-800">{courseHeader}</h2>
+                        <p className="text-sm text-emerald-600">Course History & Assignment Analysis</p>
                     </div>
-                  )}
-                </li>
-              </ul>
+
+                    {/* 1. Global Summary Card (Analytical Metrics) */}
+                    <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                        <MetricCard
+                            title="Total Sections"
+                            value={metrics?.total_sections ?? 0}
+                            icon={Layers}
+                        />
+                        <MetricCard
+                            title="Unique Instructors"
+                            value={metrics?.unique_instructors ?? 0}
+                            icon={Users}
+                            colorClass="text-indigo-500"
+                        />
+                        <MetricCard
+                            title="Avg. Frequency (per AY)"
+                            value={metrics?.avg_teaching_frequency?.toFixed(1) ?? "0.0"}
+                            icon={TrendingUp}
+                            colorClass="text-orange-500"
+                        />
+                         <MetricCard
+                            title="Most Recent Taught"
+                            value={metrics?.most_recent_taught?.acad_year_start ? `${fmtAY(metrics.most_recent_taught.acad_year_start)} ${fmtTerm(metrics.most_recent_taught.term_number)}` : "Never"}
+                            icon={Layers}
+                            colorClass="text-gray-500"
+                        />
+                    </div>
+
+                    {/* 2. Demand Visual (Chart) */}
+                    <CourseDemandVisual data={metrics?.ay_demand_visual ?? []} />
+
+                    {/* 3. Detailed Panels: Qualified, Past Instructors, Preferences */}
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+
+                        {/* Qualified Faculty (Simplified) */}
+                        <div className="bg-white p-4 rounded-lg border border-gray-200 shadow-sm">
+                            <h3 className="text-md font-semibold text-emerald-700 mb-3">
+                                Qualified Faculty ({data.qualified_faculty?.length ?? 0} Total)
+                            </h3>
+                            <div className="flex flex-wrap gap-2 text-sm">
+                                {data.qualified_faculty?.length === 0 ? (
+                                    <p className="text-gray-500">None listed.</p>
+                                ) : (
+                                    data.qualified_faculty?.map((qf, _i) => (
+                                        <span
+                                            key={qf.faculty_id}
+                                            className="px-3 py-1 bg-gray-100 rounded-full text-gray-700 whitespace-nowrap"
+                                            title={qf.email}
+                                        >
+                                            {fullName(qf.last_name, qf.first_name)}
+                                        </span>
+                                    ))
+                                )}
+                            </div>
+                        </div>
+
+                        {/* Preferences (Current Term) */}
+                        <div className="bg-white p-4 rounded-lg border border-gray-200 shadow-sm">
+                            <h3 className="text-md font-semibold text-emerald-700 mb-3">
+                                Preferences (Current Term)
+                            </h3>
+                            {typeof data.preferences === "string" ? (
+                                <p className="text-sm text-gray-700">{data.preferences}</p>
+                            ) : Array.isArray(data.preferences) && data.preferences.length > 0 ? (
+                                <div className="flex flex-wrap gap-2 text-sm">
+                                    {(data.preferences as PrefEntry[]).map((p) => (
+                                        <span
+                                            key={p.faculty_id}
+                                            className="px-3 py-1 bg-emerald-100 rounded-full text-emerald-700 whitespace-nowrap"
+                                            title={p.email}
+                                        >
+                                            {fullName(p.last_name, p.first_name)}
+                                        </span>
+                                    ))}
+                                </div>
+                            ) : (
+                                <p className="text-gray-500 text-sm">N/A</p>
+                            )}
+                        </div>
+                        
+                         {/* Past Instructors (Top 3 Insight) - Spans full width for clarity */}
+                        <div className="md:col-span-2 bg-white p-4 rounded-lg border border-gray-200 shadow-sm">
+                            <h3 className="text-md font-semibold text-emerald-700 mb-3">
+                                Past Instructors Insight
+                            </h3>
+                            {(!data.past_instructors_top3 || data.past_instructors_top3.length === 0) ? (
+                                <p className="text-gray-500">None listed.</p>
+                            ) : (
+                                <>
+                                    <h4 className="font-semibold text-gray-700 mb-2">Top 3 Most Frequent Instructors</h4>
+                                    <ul className="space-y-2">
+                                        {data.past_instructors_top3.map((pi, i) => (
+                                            <li key={pi.faculty_id} className="flex items-center justify-between p-3 bg-gray-50 rounded-md border border-gray-100">
+                                                <div className="flex items-center space-x-3">
+                                                    <span className={`text-xl font-extrabold ${i === 0 ? 'text-yellow-600' : i === 1 ? 'text-slate-500' : 'text-amber-700'}`}>
+                                                        #{i + 1}
+                                                    </span>
+                                                    <div className="font-semibold text-gray-800">
+                                                        {fullName(pi.last_name, pi.first_name)}
+                                                    </div>
+                                                </div>
+                                                <div className="text-sm text-gray-600">
+                                                    Taught <span className="font-bold text-lg text-emerald-600">{pi.count}</span> sections
+                                                </div>
+                                            </li>
+                                        ))}
+                                    </ul>
+                                    {data.past_instructors_remaining_count && data.past_instructors_remaining_count > 0 ? (
+                                        <p className="mt-3 text-sm text-gray-500">
+                                            ...and {data.past_instructors_remaining_count} other instructor(s).
+                                        </p>
+                                    ) : null}
+                                </>
+                            )}
+                        </div>
+                    </div>
+                </div>
             )}
           </div>
         </div>
