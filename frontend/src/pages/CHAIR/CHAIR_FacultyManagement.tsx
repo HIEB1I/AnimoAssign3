@@ -351,7 +351,7 @@ export default function CHAIR_FacultyManagement() {
   const [termLabel, setTermLabel] = useState<string>("");
   
   // ---- ADDED: profileSubtitle state ----
-  const [profileSubtitle, setProfileSubtitle] = useState<string>("");
+  // const [profileSubtitle, setProfileSubtitle] = useState<string>("");
   // ---------------------------------------
 
   // table rows
@@ -573,15 +573,15 @@ export default function CHAIR_FacultyManagement() {
     })();
   }, []);
 
-  // Load Header profile
-  useEffect(() => {
-    (async () => {
-      try {
-        const hdr = await getChairHeader(userId || undefined);
-        if (hdr?.ok) setProfileSubtitle(hdr.profileSubtitle || "");
-      } catch { /* ignore */ }
-    })();
-  }, [userId]);
+  // // Load Header profile
+  // useEffect(() => {
+  //   (async () => {
+  //     try {
+  //       const hdr = await getChairHeader(userId || undefined);
+  //       if (hdr?.ok) setProfileSubtitle(hdr.profileSubtitle || "");
+  //     } catch { /* ignore */ }
+  //   })();
+  // }, [userId]);
 
   // Debounce search
   useEffect(() => {
