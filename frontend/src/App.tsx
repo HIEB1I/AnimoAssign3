@@ -51,7 +51,7 @@ import APO_RoomAllocation from "./pages/APO/APO_RoomAllocation";
 
 // ---------------- CHAIR ----------------
 import CHAIR_Plantilla from "./pages/CHAIR/CHAIR_Plantilla";
-import CHAIR_FacultyManagement from "./pages/CHAIR/CHAIR_FacultyManagement";
+//import CHAIR_FacultyManagement from "./pages/CHAIR/CHAIR_FacultyManagement";
 import CHAIR_CourseManagement from "./pages/CHAIR/CHAIR_CourseManagement";
 import CHAIR_FacultyService from "./pages/CHAIR/CHAIR_FacultyService";
 import CHAIR_StudentPetition from "./pages/CHAIR/CHAIR_StudentPetition";
@@ -190,7 +190,7 @@ export default function App() {
             <Route path="plantilla" element={<div />} />
 
             {/* Children per mapping */}
-            <Route path="faculty-management" element={<CHAIR_FacultyManagement />} />
+            {/* <Route path="faculty-management" element={<CHAIR_FacultyManagement />} /> */}
             <Route path="course-management" element={<CHAIR_CourseManagement />} />
             {/* 🔽 CHANGED: use wrapper that passes chairDepartmentName */}
             <Route path="faculty-service" element={<ChairFacultyServiceRoute />} />
