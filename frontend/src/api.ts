@@ -472,7 +472,10 @@ export async function archiveApoPreenlistment(
 ) {
   const qs = new URLSearchParams({ userId, action: "archive" });
   if (termId) qs.set("termId", termId);
+
+  // campus is still sent for role/scope resolution, but backend archives BOTH campuses
   if (campusName) qs.set("campus", campusName);
+
   const url = join(API_BASE, `apo/preenlistment?${qs.toString()}`);
   const { data } = await axios.post(url);
   return data;

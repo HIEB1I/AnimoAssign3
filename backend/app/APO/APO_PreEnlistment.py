@@ -582,15 +582,30 @@ async def preenlistment_post(
                 detail="Cannot resolve campus; pass campus=MANILA|LAGUNA.",
             )
 
+        # archive BOTH Manila + Laguna rows for the term (not just the caller campus)
+        manila_doc = await _campus_by_name("MANILA")
+        laguna_doc = await _campus_by_name("LAGUNA")
+        both_campus_ids = [
+            cid for cid in [
+                (manila_doc or {}).get("campus_id"),
+                (laguna_doc or {}).get("campus_id"),
+            ]
+            if cid
+        ]
+
+        # Fallback: if campuses not found for some reason, keep old behavior
+        if not both_campus_ids:
+            both_campus_ids = [campus_id_for_filter]
+
         count_q = {
             "term_id": termId,
             "is_archived": False,
-            "campus_id": campus_id_for_filter,
+            "campus_id": {"$in": both_campus_ids},
         }
         stats_q = {
             "term_id": termId,
             "is_archived": False,
-            "campus_id": campus_id_for_filter,
+            "campus_id": {"$in": both_campus_ids},
         }
 
         # 1) Archive all active rows for the planning term (per campus)
