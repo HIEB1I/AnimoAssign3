@@ -25,6 +25,9 @@ services:
       MONGODB_URI: ${BACKEND_MONGODB_URI}
       BACKEND_MONGODB_URI: ${BACKEND_MONGODB_URI}
       BACKEND_ANALYTICS_URL: http://analytics-dev:8000
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET}
+      GOOGLE_REDIRECT_URI: ${GOOGLE_REDIRECT_URI}
     volumes:
       - ../backend:/app       # hot reload code
     command: ["python", "-m", "app"]

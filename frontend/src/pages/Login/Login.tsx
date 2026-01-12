@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { Eye, EyeOff, Mail, CheckCircle2 } from "lucide-react";
 import AA_Logo from "@/assets/Images/AA_Logo.png";
 import { login as apiLogin, type LoginResponse } from "@/api";
+import { useGoogleLogin } from "@react-oauth/google";
 
 const Login: React.FC = () => {
   const [showPw, setShowPw] = React.useState(false);
@@ -48,6 +49,55 @@ const Login: React.FC = () => {
     }
   }
 
+const googleLogin = useGoogleLogin({
+  flow: "auth-code",
+  scope: [
+    "openid",
+    "email",
+    "profile",
+    "https://www.googleapis.com/auth/gmail.send",
+    "https://www.googleapis.com/auth/calendar.events",
+  ].join(" "),
+  onSuccess: async (codeResponse) => {
+    setLoading(true);
+    setError(null);
+
+    try {
+      const res = await fetch("/api/auth/google/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code: codeResponse.code }),
+      });
+
+      if (!res.ok) throw new Error(await res.text());
+
+      const user: LoginResponse = await res.json();
+      const roles = (user.roles || []).map((r) => r.toLowerCase());
+
+      let dest: string | null = null;
+      if (roles.includes("apo")) dest = "/apo/preenlistment";
+      else if (roles.includes("office manager") || roles.includes("gs coordinator"))
+        dest = "/om/load-assignment";
+      else if (roles.includes("department chair") || roles.includes("deparment chair"))
+        dest = "/chair";
+      else if (roles.includes("faculty")) dest = "/faculty/overview";
+      else if (roles.includes("student")) dest = "/student/petition";
+      else if (roles.includes("admin")) dest = "/admin";
+
+      if (!dest) throw new Error("Your account has no valid role configured.");
+
+      localStorage.setItem("animo.user", JSON.stringify(user));
+      navigate(dest, { replace: true });
+    } catch (e: any) {
+      setError(e?.message || "Google login failed.");
+    } finally {
+      setLoading(false);
+    }
+  },
+  onError: () => setError("Google sign-in failed. Please try again."),
+});
+
+
   return (
     <div className="min-h-screen w-full bg-[#f5f6f7] grid place-items-center px-4 py-10">
       <div className="w-full max-w-6xl overflow-hidden rounded-2xl bg-white shadow-[0_10px_30px_rgba(0,0,0,0.12)]">
@@ -63,10 +113,8 @@ const Login: React.FC = () => {
             <div className="mt-7">
               <button
                 type="button"
-                onClick={() => {
-                  setShowForm(true);
-                  setError(null);
-                }}
+                onClick={() => googleLogin()}
+                disabled={loading}
                 className="
                   group inline-flex w-full max-w-xl items-center justify-center gap-3
                   rounded-xl border border-neutral-300 bg-white px-6 py-3

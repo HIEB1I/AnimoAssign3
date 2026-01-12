@@ -156,6 +156,7 @@ from .CHAIR.CHAIR_Inbox import router as chair_inbox_router
 
 from .GMAIL.GMAIL_Send import router as gmail_send_router
 from .GCAL.GCAL import router as gcal_router
+from .AUTH.GOOGLE_Login import router as google_login_router
 
 from .ADMIN.ADMIN import router as admin_router
 from .ADMIN.ADMIN_Inbox import router as admin_inbox_router
@@ -197,3 +198,4 @@ app.include_router(chair_inbox_router, prefix="/api")
 
 app.include_router(gmail_send_router, prefix="/api")
 app.include_router(gcal_router, prefix="/api")
+app.include_router(google_login_router, prefix="/api")
