@@ -6,7 +6,8 @@ import Login from "./pages/Login/Login";
 import AuthCallback from "./pages/Login/AuthCallback";
 import GmailConnect from "./pages/Login/GmailConnect";
 import BlankPage from "./pages/Login/BlankPage";
-
+import CalendarManager from "./pages/Login/CalendarManager";
+import CalendarInvite from "./pages/Login/CalendarInvite";
 
 // ---------------- OM ----------------
 import OM_LoadAssignment from "./pages/OM/OM_LoadAssignment";
@@ -119,7 +120,8 @@ export default function App() {
         <Route path="/blank" element={<BlankPage />} />
         <Route path="/gmail-connect" element={<GmailConnect />} />
         <Route path="/blank" element={<BlankPage />} />
-
+        <Route path="/calendar-manager" element={<CalendarManager />} />
+        <Route path="/calendar-invite" element={<CalendarInvite />} />
 
         {/* Protected */}
         <Route element={<RequireAuth />}>
