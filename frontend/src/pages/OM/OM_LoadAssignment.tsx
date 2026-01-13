@@ -23,7 +23,11 @@ import {
   MessageSquareText,
   Check,
   Trash2,
+  Undo2,
+  Redo2,
   X,
+  Copy,
+  Upload
 } from "lucide-react";
 import { InboxContent as OMInboxContent } from "./OM_Inbox";
 
@@ -75,6 +79,10 @@ interface ValidationContext {
 }
 
 /* ---------------- Small inputs ---------------- */
+
+// 1. Define the Option type to support both formats
+type SelectOption = string | { value: string; label: string };
+
 function SelectBox({
   value,
   onChange,
@@ -84,15 +92,22 @@ function SelectBox({
 }: {
   value: string;
   onChange: (v: string) => void;
-  options: string[];
+  options: SelectOption[]; // Updated to support objects
   placeholder?: string;
   className?: string;
 }) {
   const [open, setOpen] = useState(false);
+
+  // Helper to extract the label from an option (string or object)
+  const getLabel = (opt: SelectOption) => (typeof opt === "string" ? opt : opt.label);
+  // Helper to extract the value from an option
+  const getValue = (opt: SelectOption) => (typeof opt === "string" ? opt : opt.value);
+
+  // 2. Updated hover logic to find index based on value
   const [hover, setHover] = useState<number>(() =>
     Math.max(
       0,
-      options.findIndex((o) => o === value)
+      options.findIndex((o) => getValue(o) === value)
     )
   );
 
@@ -109,6 +124,10 @@ function SelectBox({
     return () => document.removeEventListener("mousedown", close);
   }, [open]);
 
+  // Find the label of the currently selected value for the button display
+const selectedOption = options.find((o) => getValue(o) === value);
+const displayLabel = selectedOption ? getValue(selectedOption) : null;
+
   return (
     <div className={cls("relative min-w-[120px]", className)}>
       <button
@@ -121,39 +140,178 @@ function SelectBox({
           "shadow-sm focus:ring-2 focus:ring-emerald-500/30"
         )}
       >
-        {value || <span className="text-gray-400">{placeholder}</span>}
+        {displayLabel || <span className="text-gray-400">{placeholder}</span>}
         <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-4 w-4 -translate-y-1/2" />
       </button>
 
       {open && (
         <div
           ref={listRef}
-          className="absolute z-20 mt-2 max-h-72 w-full overflow-auto rounded-xl border border-gray-300 bg-white shadow-xl"
+          className="absolute z-20 mt-1 max-h-60 w-full overflow-auto rounded-md border border-gray-200 bg-white py-1 shadow-lg"
         >
-          {options.map((opt, i) => (
-            <button
-              key={opt}
-              onMouseEnter={() => setHover(i)}
-              onClick={() => {
-                onChange(opt);
-                setOpen(false);
-                btnRef.current?.focus();
-              }}
-              className={cls(
-                "block w-full px-4 py-2 text-left text-sm",
-                i === hover && "bg-emerald-50",
-                value === opt && "bg-emerald-100 text-emerald-800 font-medium"
-              )}
-            >
-              {opt}
-            </button>
-          ))}
+          {options.map((opt, i) => {
+            const optValue = getValue(opt);
+            const optLabel = getLabel(opt);
+            const isSelected = optValue === value;
+
+            return (
+              <div
+                key={optValue}
+                onMouseEnter={() => setHover(i)}
+                onClick={() => {
+                  onChange(optValue);
+                  setOpen(false);
+                }}
+                className={cls(
+                  "cursor-pointer px-3 py-1.5 text-[13px]",
+                  isSelected ? "bg-emerald-50 text-emerald-700 font-medium" : 
+                  hover === i ? "bg-emerald-50" : ""
+                )}
+              >
+                {optLabel}
+              </div>
+            );
+          })}
         </div>
       )}
     </div>
   );
 }
 
+
+function normalizeTimeToHHMM(input: string): string {
+  const digits = (input || "").replace(/\D/g, "");
+  if (!digits) return "";
+  const d = digits.length === 3 ? "0" + digits : digits;
+  if (d.length !== 4) return "";
+  const hh = parseInt(d.slice(0, 2), 10);
+  const mm = parseInt(d.slice(2, 4), 10);
+  if (Number.isNaN(hh) || Number.isNaN(mm)) return "";
+  if (hh < 0 || hh > 23) return "";
+  if (mm < 0 || mm > 59) return "";
+  return d;
+}
+
+function TimeBeginInput({
+  value,
+  onChange,
+  options,
+  placeholder = "e.g. 07:30 - 09:00",
+  className = "",
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  options: SelectOption[];
+  placeholder?: string;
+  className?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const [hover, setHover] = useState<number | null>(null);
+  const [text, setText] = useState(value || "");
+
+  const inputRef = useRef<HTMLInputElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+
+  const getValue = (o: SelectOption) => (typeof o === "string" ? o : o.value);
+  const getLabel = (o: SelectOption) => (typeof o === "string" ? o : o.label ?? o.value);
+
+  useEffect(() => {
+    // Keep input in sync when not actively typing
+    if (!open) setText(value || "");
+  }, [value, open]);
+
+  useEffect(() => {
+    const close = (e: MouseEvent) =>
+      open &&
+      !inputRef.current?.contains(e.target as Node) &&
+      !listRef.current?.contains(e.target as Node) &&
+      setOpen(false);
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [open]);
+
+  const filtered = options.filter((o) => {
+    if (!text) return true;
+    const q = text.toLowerCase();
+    const v = getValue(o).toLowerCase();
+    const l = getLabel(o).toLowerCase();
+    return v.includes(q) || l.includes(q);
+  });
+
+  const pick = (optValue: string) => {
+    setText(optValue);
+    onChange(optValue);
+    setOpen(false);
+  };
+
+  const handleBlur = () => {
+    // allow click on dropdown items
+    setTimeout(() => setOpen(false), 120);
+
+    const normalized = normalizeTimeToHHMM(text);
+    if (normalized) {
+      setText(normalized);
+      onChange(normalized);
+    } else {
+      // revert to last valid value
+      setText(value || "");
+    }
+  };
+
+  return (
+    <div className={cls("relative", className)}>
+      <input
+        ref={inputRef}
+        className={cls(
+          "w-full rounded-md border border-gray-300 bg-white",
+          "px-1.5 py-1 text-center text-[13px] leading-tight",
+          "focus:outline-none focus:ring-2 focus:ring-emerald-200 focus:border-emerald-300"
+        )}
+        value={text}
+        placeholder={placeholder}
+        onFocus={() => setOpen(true)}
+        onChange={(e) => {
+          setText(e.target.value);
+          setOpen(true);
+        }}
+        onBlur={handleBlur}
+      />
+
+      {open && (
+        <div
+          ref={listRef}
+          className="absolute z-20 mt-1 max-h-60 w-full overflow-auto rounded-md border border-gray-200 bg-white py-1 shadow-lg"
+        >
+          {filtered.length ? (
+            filtered.map((opt, i) => {
+              const optValue = getValue(opt);
+              const optLabel = getLabel(opt);
+              const isSelected = optValue === value;
+
+              return (
+                <div
+                  key={optValue}
+                  onMouseDown={(e) => e.preventDefault()}
+                  onMouseEnter={() => setHover(i)}
+                  onClick={() => pick(optValue)}
+                  className={cls(
+                    "cursor-pointer px-3 py-1.5 text-[13px]",
+                    isSelected ? "bg-emerald-50 text-emerald-700 font-medium" :
+                    hover === i ? "bg-emerald-50" : ""
+                  )}
+                >
+                  {optLabel}
+                </div>
+              );
+            })
+          ) : (
+            <div className="px-3 py-2 text-[13px] text-gray-400">No matches</div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
 function TextBox({
   value,
   onChange,
@@ -688,43 +846,40 @@ const timeRange = (begin?: string, end?: string) => {
   return b && e ? `${b}–${e}` : b || e || "—";
 };
 
-const DAY_OPTIONS = ["M", "T", "W", "H", "F", "S"];
+const DAY_OPTIONS = [
+  { value: "M", label: "Monday" },
+  { value: "T", label: "Tuesday" },
+  { value: "W", label: "Wednesday" },
+  { value: "H", label: "Thursday" },
+  { value: "F", label: "Friday" },
+  { value: "S", label: "Saturday" },
+];
 const MODE_OPTIONS = ["FOL", "HYB", "F2F"];
 const ROOM_OPTIONS = ["Online", "Classroom", "Comlab"];
 const TIME_BEGIN_OPTIONS = [
-  "0730",
-  "0800",
-  "0900",
-  "0915",
-  "1000",
-  "1100",
-  "1245",
-  "1300",
-  "1315",
-  "1400",
-  "1430",
-  "1440",
-  "1530",
-  "1615",
-  "1800",
-  "1945",
+  // Match APO time-band menu content: show full band label in menu,
+  // but keep stored/selected value as HHMM (shown in-cell via SelectBox displayLabel).
+  { value: "0730", label: "07:30 - 09:00" },
+  { value: "0915", label: "09:15 - 10:45" },
+  { value: "1100", label: "11:00 - 12:30" },
+  { value: "1245", label: "12:45 - 14:15" },
+  { value: "1430", label: "14:30 - 16:00" },
+  { value: "1615", label: "16:15 - 17:45" },
+  { value: "1800", label: "18:00 - 19:30" },
+  { value: "1945", label: "19:45 - 21:00" },
 ];
+
 const TIME_END_OPTIONS = [
-  "0900",
-  "1000",
-  "1200",
-  "1045",
-  "1230",
-  "1300",
-  "1500",
-  "1415",
-  "1600",
-  "1730",
-  "1745",
-  "1930",
-  "2000",
-  "2100",
-  "2115",
+  // Same menu labels as TIME_BEGIN_OPTIONS (full band label),
+  // while the selected value remains HHMM.
+  { value: "0900", label: "07:30 - 09:00" },
+  { value: "1045", label: "09:15 - 10:45" },
+  { value: "1230", label: "11:00 - 12:30" },
+  { value: "1415", label: "12:45 - 14:15" },
+  { value: "1600", label: "14:30 - 16:00" },
+  { value: "1745", label: "16:15 - 17:45" },
+  { value: "1930", label: "18:00 - 19:30" },
+  { value: "2100", label: "19:45 - 21:00" },
 ];
 
 // --- NEW UTILITY FUNCTION FOR AUTO-FILL ---
@@ -846,11 +1001,7 @@ const ApproveModal = ({
         </h3>
         <p className="mx-auto mb-6 max-w-md text-center text-sm text-neutral-600">
           Please confirm that this is the final{" "}
-          <span className="font-semibold">Faculty Load Assignment</span> to be
-          submitted to the{" "}
-          <span className="font-semibold">Office Assistant</span>. Once
-          submitted, this action cannot be undone and the button will be
-          disabled.
+          <span className="font-semibold">Faculty Load Assignment.</span>Once submitted, this action cannot be undone and the button will be disabled.
         </p>
         <div className="flex justify-end gap-2">
           <button
@@ -1234,6 +1385,76 @@ const NewSectionModal = ({
 
 /* ---------------- Main ---------------- */
 export default function OM_LoadAssignment() {
+  const [copiedRowId, setCopiedRowId] = useState<string | null>(null);
+
+  // Import SHS file
+  const shsFileInputRef = useRef<HTMLInputElement>(null);
+  const [shsFile, setShsFile] = useState<File | null>(null);
+
+  const handlePickShsFile = () => {
+    shsFileInputRef.current?.click();
+  };
+
+  const handleShsFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0] || null;
+    if (!file) return;
+    setShsFile(file);
+
+    // NOTE: Hook your actual import/parse logic here.
+    // Keeping this non-blocking so the UI change compiles cleanly.
+    console.log("Selected SHS file:", file);
+
+    // allow selecting the same file again
+    e.target.value = "";
+  };
+
+  const formatRowForClipboard = (row: any) =>
+    [
+      "Course",
+      "Section",
+      "Faculty",
+      "Day 1",
+      "Begin 1",
+      "End 1",
+      "Room 1",
+      "Day 2",
+      "Begin 2",
+      "End 2",
+      "Room 2",
+      "Status",
+    ].join("\t") +
+    "\n" +
+    [
+      row.course,
+      row.section,
+      row.faculty,
+      row.day1,
+      row.begin1,
+      row.end1,
+      row.room1,
+      row.day2,
+      row.begin2,
+      row.end2,
+      row.room2,
+      row.status,
+    ].join("\t");
+
+  const handleCopyRow = async (row: any) => {
+    const text = formatRowForClipboard(row);
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      const textarea = document.createElement("textarea");
+      textarea.value = text;
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand("copy");
+      document.body.removeChild(textarea);
+    }
+    setCopiedRowId(row.id);
+    setTimeout(() => setCopiedRowId(null), 1200);
+  };
+
   // Session (DB-driven, no hardcodes)
   const session: {
     userId?: string;
@@ -1285,6 +1506,7 @@ export default function OM_LoadAssignment() {
       setMode("run");
       setApproved(false);
       setHasLocalEdits(false); // result from algorithm is the new clean baseline
+      resetHistory();
     } catch (e) {
       console.error(e);
       alert(`Auto-assign failed: ${String(e)}`);
@@ -1381,6 +1603,67 @@ export default function OM_LoadAssignment() {
   /** Track if there are unsaved/manual edits in the grid */
   const [hasLocalEdits, setHasLocalEdits] = useState(false);
 
+  /**
+   * Scoped Undo/Redo for Load Recommendations only.
+   * Stores snapshots of `rows` + `hasLocalEdits` so auto-assign/save state stays consistent.
+   */
+  const undoStackRef = useRef<{ rows: Row[]; hasLocalEdits: boolean }[]>([]);
+  const redoStackRef = useRef<{ rows: Row[]; hasLocalEdits: boolean }[]>([]);
+  const HISTORY_LIMIT = 50;
+  const [historyVersion, setHistoryVersion] = useState(0); // forces rerender when stacks change
+  const bumpHistory = () => setHistoryVersion((v) => v + 1);
+
+  const resetHistory = () => {
+    undoStackRef.current = [];
+    redoStackRef.current = [];
+    bumpHistory();
+  };
+
+  const commitRows = (nextRows: Row[], options?: { markDirty?: boolean }) => {
+    // Push current snapshot to undo before applying the change
+    undoStackRef.current.push({ rows, hasLocalEdits });
+    if (undoStackRef.current.length > HISTORY_LIMIT) {
+      undoStackRef.current.shift();
+    }
+    // Any new action clears redo history
+    redoStackRef.current = [];
+
+    setRows(nextRows);
+
+    if (options?.markDirty !== false) {
+      setHasLocalEdits(true);
+    }
+    bumpHistory();
+  };
+
+  const updateRow = (
+  id: string,
+  patch: Partial<Row>,
+  options?: { markDirty?: boolean }
+) => {
+  const next = rows.map((r) => (r.id === id ? { ...r, ...patch } : r));
+  commitRows(next, { markDirty: options?.markDirty !== false });
+};
+
+
+  const handleUndo = () => {
+    if (!undoStackRef.current.length) return;
+    const prev = undoStackRef.current.pop()!;
+    redoStackRef.current.push({ rows, hasLocalEdits });
+    setRows(prev.rows);
+    setHasLocalEdits(prev.hasLocalEdits);
+    bumpHistory();
+  };
+
+  const handleRedo = () => {
+    if (!redoStackRef.current.length) return;
+    const next = redoStackRef.current.pop()!;
+    undoStackRef.current.push({ rows, hasLocalEdits });
+    setRows(next.rows);
+    setHasLocalEdits(next.hasLocalEdits);
+    bumpHistory();
+  };
+
   const [facultyList, setFacultyList] = useState<Faculty[]>([]);
 
   // Load all faculty once on mount
@@ -1422,10 +1705,9 @@ export default function OM_LoadAssignment() {
   const [initialLoaded, setInitialLoaded] = useState(false);
 
   const setCell = <K extends keyof Row>(id: string, key: K, val: Row[K]) => {
-    setHasLocalEdits(true); // mark grid as dirty
-    setRows((prev) =>
-      prev.map((r) => (r.id === id ? { ...r, [key]: val } : r))
-    );
+    const markDirty = key !== ("selected" as K);
+    const next = rows.map((r) => (r.id === id ? { ...r, [key]: val } : r));
+    commitRows(next, { markDirty });
   };
 
   const filtered = rows.filter((r) => {
@@ -1440,14 +1722,20 @@ export default function OM_LoadAssignment() {
 
   const allSelected =
     isRunning && filtered.length > 0 && filtered.every((r) => r.selected);
-  const toggleSelectAll = (checked: boolean) =>
-    setRows((prev) =>
-      prev.map((r) =>
-        filtered.some((fr) => fr.id === r.id) ? { ...r, selected: checked } : r
-      )
+  const toggleSelectAll = (checked: boolean) => {
+    const next = rows.map((r) =>
+      filtered.some((fr) => fr.id === r.id) ? { ...r, selected: checked } : r
     );
+    commitRows(next, { markDirty: false });
+  };
   const selectedRows = rows.filter((r) => r.selected);
   const anySelected = selectedRows.length > 0;
+
+  // Derived: scoped history availability (re-rendered via historyVersion)
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+ const canUndo = isRunning && historyVersion >= 0 && undoStackRef.current.length > 0;
+const canRedo = isRunning && historyVersion >= 0 && redoStackRef.current.length > 0;
+
 
   const loadFromServer = async () => {
     if (!userId) return;
@@ -1475,6 +1763,7 @@ export default function OM_LoadAssignment() {
     setMode("run");
     setApproved(false);
     setHasLocalEdits(false);
+    resetHistory();
   };
 
   useEffect(() => {
@@ -2263,9 +2552,78 @@ export default function OM_LoadAssignment() {
               </div>
               <div className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
                 <div className="flex items-center justify-between px-4 pt-4">
-                  <h2 className="text-lg font-semibold">
-                    Load Recommendations
-                  </h2>
+                  <div className="flex items-center gap-2">
+                    <h2 className="text-lg font-semibold">Load Recommendations</h2>
+
+                    <div className="flex items-center gap-1">
+                      <button
+                        onClick={handleUndo}
+                        disabled={!canUndo || isAssigning}
+                        className={cls(
+                          "inline-flex items-center justify-center rounded-md border border-gray-300 bg-white p-1.5 text-gray-600 shadow-sm",
+                          "hover:bg-gray-50",
+                          (!canUndo || isAssigning) &&
+                            "opacity-50 cursor-not-allowed hover:bg-white"
+                        )}
+                        title={
+                          !canUndo
+                            ? "Nothing to undo"
+                            : "Undo last change in Load Recommendations"
+                        }
+                      >
+                        <Undo2 className="h-4 w-4" />
+                      </button>
+
+                      <button
+                        onClick={handleRedo}
+                        disabled={!canRedo || isAssigning}
+                        className={cls(
+                          "inline-flex items-center justify-center rounded-md border border-gray-300 bg-white p-1.5 text-gray-600 shadow-sm",
+                          "hover:bg-gray-50",
+                          (!canRedo || isAssigning) &&
+                            "opacity-50 cursor-not-allowed hover:bg-white"
+                        )}
+                        title={
+                          !canRedo
+                            ? "Nothing to redo"
+                            : "Redo last undone change in Load Recommendations"
+                        }
+                      >
+                        <Redo2 className="h-4 w-4" />
+                      </button>
+
+                      {/* Import SHS file */}
+                      <button
+                        type="button"
+                        onClick={handlePickShsFile}
+                        disabled={!isRunning || isAssigning}
+                        className={cls(
+                          "inline-flex items-center gap-2 rounded-md border border-gray-300 bg-white px-2.5 py-1.5 text-[13px] text-gray-700 shadow-sm",
+                          "hover:bg-gray-50",
+                          (!isRunning || isAssigning) &&
+                            "opacity-50 cursor-not-allowed hover:bg-white"
+                        )}
+                        title={
+                          !isRunning
+                            ? "Run Auto-assign or load data first"
+                            : shsFile
+                            ? `Selected: ${shsFile.name}`
+                            : "Import SHS file"
+                        }
+                      >
+                        <Upload className="h-4 w-4" />
+                        Import SHS file
+                      </button>
+
+                      <input
+                        ref={shsFileInputRef}
+                        type="file"
+                        accept=".csv,.xlsx,.xls"
+                        className="hidden"
+                        onChange={handleShsFileChange}
+                      />
+                    </div>
+                  </div>
 
                   {/* --- MODIFIED SECTION START --- */}
                   <div className="flex items-center gap-2">
@@ -2295,26 +2653,6 @@ export default function OM_LoadAssignment() {
                       </button>
                     )}
 
-                    {/* To Faculty button (only visible if running and a row is selected) */}
-                    <button
-                      disabled={!anySelected || !isRunning}
-                      onClick={() => setShowSend(true)}
-                      className={cls(
-                        "inline-flex items-center gap-2 rounded-md px-3.5 py-2 text-sm font-medium shadow-sm",
-                        anySelected && isRunning
-                          ? "bg-blue-600 text-white hover:brightness-110"
-                          : "bg-gray-200 text-gray-500 cursor-not-allowed"
-                      )}
-                      title={
-                        anySelected
-                          ? "Send to selected faculty"
-                          : "Select at least one row"
-                      }
-                    >
-                      <Send className="h-4 w-4" />
-                      To Faculty
-                    </button>
-
                     {/* Original Import CSV block removed */}
                     {/* {isRunning ? (...) : (
                         <div className="flex items-center gap-2">
@@ -2337,8 +2675,9 @@ export default function OM_LoadAssignment() {
 
                 </div>
 
-                <div className="overflow-x-auto overflow-y-auto max-h-[58vh] mt-3">
-                  <table className="min-w-full text-sm table-fixed">
+                {/* Match APO_CourseOfferings table styling (sticky header, bordered cells, emerald header text) */}
+                <div className="mt-3 max-h-[58vh] overflow-x-auto overflow-y-auto rounded-xl border border-gray-300 bg-white shadow-sm">
+                  <table className="min-w-full text-sm table-fixed border-collapse">
                     <colgroup>
                       <col className="w-[46px]" />
                       <col className="w-[160px]" />
@@ -2347,11 +2686,11 @@ export default function OM_LoadAssignment() {
                       <col className="w-[80px]" />
                       <col className="w-[18%]" />
                       <col className="w-[72px]" />
-                      <col className="w-[96px]" />
+                      <col className="w-[140px]" />
                       <col className="w-[96px]" />
                       <col className="w-[96px]" />
                       <col className="w-[72px]" />
-                      <col className="w-[96px]" />
+                      <col className="w-[140px]" />
                       <col className="w-[96px]" />
                       <col className="w-[96px]" />
                       <col className="w-[80px]" />
@@ -2359,9 +2698,9 @@ export default function OM_LoadAssignment() {
                       <col className="w-[110px]" />
                     </colgroup>
 
-                    <thead className="bg-gray-50 border-y text-gray-700">
-                      <tr className="whitespace-nowrap">
-                        <th className="px-3 py-2 text-center">
+                    <thead className="bg-gray-50 text-emerald-800 sticky top-0 z-10">
+                      <tr className="whitespace-nowrap text-[13px] font-semibold">
+                        <th className="px-3 py-2 text-center border border-gray-300">
                           {isRunning && (
                             <input
                               type="checkbox"
@@ -2374,33 +2713,33 @@ export default function OM_LoadAssignment() {
                             />
                           )}
                         </th>
-                        <th className="text-left px-4 py-2">Course & Title</th>
-                        <th className="text-center px-2 py-2">Units</th>
-                        <th className="text-center px-2 py-2">Section</th>
-                        <th className="text-left px-4 py-2">Faculty</th>
-                        <th className="text-center px-2 py-2">Day 1</th>
-                        <th className="text-center px-2 py-2">Begin 1</th>
-                        <th className="text-center px-2 py-2">End 1</th>
-                        <th className="text-center px-2 py-2">Room 1</th>
-                        <th className="text-center px-2 py-2">Day 2</th>
-                        <th className="text-center px-2 py-2">Begin 2</th>
-                        <th className="text-center px-2 py-2">End 2</th>
-                        <th className="text-center px-2 py-2">Room 2</th>
-                        <th className="text-center px-2 py-2">Capacity</th>
-                        <th className="text-center px-2 py-2">Mode</th>
-                        <th className="text-center px-2 py-2">Status</th>
-                        <th className="text-center px-2 py-2">Actions</th>
+                        <th className="px-3 py-2 text-left border border-gray-300">Course & Title</th>
+                        <th className="px-3 py-2 text-center border border-gray-300">Units</th>
+                        <th className="px-3 py-2 text-center border border-gray-300">Section</th>
+                        <th className="px-3 py-2 text-left border border-gray-300">Faculty</th>
+                        <th className="px-3 py-2 text-center border border-gray-300">Day 1</th>
+                        <th className="px-3 py-2 text-center border border-gray-300">Begin 1</th>
+                        <th className="px-3 py-2 text-center border border-gray-300">End 1</th>
+                        <th className="px-3 py-2 text-center border border-gray-300">Room 1</th>
+                        <th className="px-3 py-2 text-center border border-gray-300">Day 2</th>
+                        <th className="px-3 py-2 text-center border border-gray-300">Begin 2</th>
+                        <th className="px-3 py-2 text-center border border-gray-300">End 2</th>
+                        <th className="px-3 py-2 text-center border border-gray-300">Room 2</th>
+                        <th className="px-3 py-2 text-center border border-gray-300">Capacity</th>
+                        <th className="px-3 py-2 text-center border border-gray-300">Mode</th>
+                        <th className="px-3 py-2 text-center border border-gray-300">Status</th>
+                        <th className="px-3 py-2 text-center border border-gray-300">Actions</th>
                       </tr>
                     </thead>
 
-                    <tbody className="divide-y">
+                    <tbody>
                       {filtered.map((r, idx) => {
                         const e = getEditFlags(r);
                         const unread = r.status === "Pending";
                         return (
                           <tr
                             key={r.id}
-                            className="hover:bg-gray-50 whitespace-nowrap"
+                            className="hover:bg-gray-50 whitespace-nowrap [&>td]:border [&>td]:border-gray-200"
                           >
                             <td className="px-3 py-2 text-center">
                               {isRunning && (
@@ -2427,14 +2766,16 @@ export default function OM_LoadAssignment() {
                                   <SelectBox
                                     value={r.course || ""}
                                     onChange={(code) => {
-                                      setCell(r.id, "course", code);
                                       const found = courseOptions.find(
                                         (c) => c.code === code
                                       );
-                                      setCell(
+                                      updateRow(
                                         r.id,
-                                        "title",
-                                        (found?.title || "") as Row["title"]
+                                        {
+                                          course: code,
+                                          title: (found?.title || "") as any,
+                                        },
+                                        { markDirty: true }
                                       );
                                     }}
                                     options={courseOptions.map((c) => c.code)}
@@ -2491,9 +2832,12 @@ export default function OM_LoadAssignment() {
                                 <ComboBox
                                   value={r.faculty ?? ""}
                                   onChange={(v) => {
-                                    setCell(r.id, "faculty", v);
                                     const fid = facultyNameToId[v] || "";
-                                    setCell(r.id, "faculty_id", fid as any);
+                                    updateRow(
+                                      r.id,
+                                      { faculty: v, faculty_id: fid as any },
+                                      { markDirty: true }
+                                    );
                                   }}
                                   options={facultyOptions}
                                   className="w-[200px] md:w-[240px] lg:w-[280px]"
@@ -2511,8 +2855,8 @@ export default function OM_LoadAssignment() {
                                   value={r.day1}
                                   onChange={(v) => setCell(r.id, "day1", v)}
                                   options={DAY_OPTIONS}
-                                  className="w-[70px] text-center"
                                 />
+
                               ) : (
                                 <span>{r.day1 || "—"}</span>
                               )}
@@ -2520,19 +2864,17 @@ export default function OM_LoadAssignment() {
 
                             <td className="px-2 py-2 text-center">
                               {e.begin1 ? (
-                                <SelectBox
+                                <TimeBeginInput
                                   value={r.begin1}
                                   onChange={(v) => {
-                                    setCell(r.id, "begin1", v);
-                                    // *** NEW: Auto-fill End1 on Begin1 change ***
-                                    if (v) {
-                                      const autoEnd = calculateEndTime(v);
-                                      setCell(r.id, "end1", autoEnd);
-                                    }
-                                    // *******************************************
+                                    const patch: Partial<Row> = { begin1: v };
+                                    if (v) patch.end1 = calculateEndTime(v);
+                                    updateRow(r.id, patch, { markDirty: true });
                                   }}
+
                                   options={TIME_BEGIN_OPTIONS}
-                                  className="w-[70px] text-center"
+                                  className="w-[120px] text-center"
+
                                 />
                               ) : (
                                 <span>{r.begin1 || "—"}</span>
@@ -2573,8 +2915,9 @@ export default function OM_LoadAssignment() {
                                   value={r.day2}
                                   onChange={(v) => setCell(r.id, "day2", v)}
                                   options={DAY_OPTIONS}
-                                  className="w-[70px] text-center"
                                 />
+
+
                               ) : (
                                 <span>{r.day2 || "—"}</span>
                               )}
@@ -2582,19 +2925,18 @@ export default function OM_LoadAssignment() {
 
                             <td className="px-2 py-2 text-center">
                               {e.begin2 ? (
-                                <SelectBox
+                                <TimeBeginInput
                                   value={r.begin2}
                                   onChange={(v) => {
-                                    setCell(r.id, "begin2", v);
-                                    // *** NEW: Auto-fill End2 on Begin2 change ***
+                                    const patch: Partial<Row> = { begin2: v };
                                     if (v) {
-                                      const autoEnd = calculateEndTime(v);
-                                      setCell(r.id, "end2", autoEnd);
+                                      patch.end2 = calculateEndTime(v);
                                     }
-                                    // *******************************************
+                                    updateRow(r.id, patch, { markDirty: true });
                                   }}
                                   options={TIME_BEGIN_OPTIONS}
-                                  className="w-[70px] text-center"
+                                  className="w-[120px] text-center"
+
                                 />
                               ) : (
                                 <span>{r.begin2 || "—"}</span>
@@ -2687,13 +3029,27 @@ export default function OM_LoadAssignment() {
                                     />
                                   </button>
 
+                                  <button
+                                    type="button"
+                                    onClick={() => handleCopyRow(r)}
+                                    title={copiedRowId === r.id ? "Copied!" : "Copy row"}
+                                    className="flex h-7 w-7 items-center justify-center rounded-full border-2 border-gray-300 text-gray-600 hover:bg-gray-50"
+                                  >
+                                    {copiedRowId === r.id ? (
+                                      <Check className="h-4 w-4 text-emerald-600" strokeWidth={2.5} />
+                                    ) : (
+                                      <Copy className="h-4 w-4" />
+                                    )}
+                                  </button>
+
+
                                   {String(r.id).startsWith("manual-") && (
                                     <button
                                       className="flex h-7 w-7 items-center justify-center rounded-full border-2 border-red-600 text-red-600 hover:bg-red-50"
                                       title="Remove this line"
                                       onClick={() =>
-                                        setRows((prev) =>
-                                          prev.filter((row) => row.id !== r.id)
+                                        commitRows(
+                                          rows.filter((row) => row.id !== r.id)
                                         )
                                       }
                                     >
@@ -2725,7 +3081,7 @@ export default function OM_LoadAssignment() {
                 </div>
 
                 <div className="border-t px-4 py-3">
-                  <div className="flex justify-start">
+                  <div className="flex items-center justify-between gap-3">
                     <button
                       onClick={addRow}
                       className="inline-flex items-center gap-2 rounded-lg border border-gray-400 px-3 py-1.5 text-sm text-gray-800 hover:bg-gray-100"
@@ -2733,6 +3089,26 @@ export default function OM_LoadAssignment() {
                     >
                       <Plus className="h-4 w-4" />
                       Add new line
+                    </button>
+
+                    {/* To Faculty button (bottom-right, aligned with Add new line) */}
+                    <button
+                      disabled={!anySelected || !isRunning}
+                      onClick={() => setShowSend(true)}
+                      className={cls(
+                        "inline-flex items-center gap-2 rounded-lg px-3 py-1.5 text-sm font-medium shadow-sm",
+                        anySelected && isRunning
+                          ? "bg-blue-600 text-white hover:brightness-110"
+                          : "bg-gray-200 text-gray-500 cursor-not-allowed"
+                      )}
+                      title={
+                        anySelected
+                          ? "Send to selected faculty"
+                          : "Select at least one row"
+                      }
+                    >
+                      <Send className="h-4 w-4" />
+                      To Faculty
                     </button>
                   </div>
                   {/* Right: Auto-assign (Run algorithm) - REMOVED from bottom */}
@@ -3115,8 +3491,8 @@ export default function OM_LoadAssignment() {
           const title =
             courseOptions.find((c) => c.code === course)?.title || "";
 
-          setRows((prev) => [
-            ...prev,
+          commitRows([
+            ...rows,
             {
               id: `manual-${Date.now()}`,
               course,
@@ -3143,7 +3519,6 @@ export default function OM_LoadAssignment() {
 
           setMode("manual");
           setApproved(false);
-          setHasLocalEdits(true);
           setShowNewSectionModal(false);
         }}
       />
