@@ -1953,6 +1953,119 @@ export async function updateOMSPCourse(course_id: string, payload: { status?: st
   });
   return data as { ok: boolean; matched: number; modified: number };
 }
+/* =========================================================
+   ==============  OM: SPECIAL CLASS  ======================
+   ========================================================= */
+
+export type OMSCFaultyOpt = {
+  faculty_id: string;
+  faculty_name: string;
+  department_id?: string;
+};
+
+export type DayCode = "M" | "T" | "W" | "H" | "F" | "S";
+
+export type OMSCSchedulePreset = {
+  schedule_id: string; // section_id-based (stable)
+  section_id: string;
+  section_code?: string;
+
+  label: string; // e.g. "M 0730-0900; W 0900-1200"
+  faculty_id?: string | null;
+  faculty_name?: string;
+
+  day1: DayCode | "" ;
+  begin1: string; // HHMM or ""
+  end1: string;   // HHMM or ""
+  day2: DayCode | "" ;
+  begin2: string; // HHMM or ""
+  end2: string;   // HHMM or ""
+};
+
+export type OMSpecialClassRow = {
+  special_id: string;
+  term_id: string;
+  user_id: string;
+
+  student_name?: string;
+  student_number?: number | string;
+
+  course_id: string;
+  course_code?: string;
+  course_title?: string;
+  course_department?: string;
+
+  program_id?: string;
+  program_code?: string;
+
+  reason?: string;
+  reason_other?: string;
+
+  status?: string;
+  remarks?: string;
+
+  faculty_id?: string | null;
+  faculty_name?: string;
+
+  section_id?: string | null;
+
+  // APO-style schedule fields
+  day1?: DayCode | "";
+  begin1?: string;
+  end1?: string;
+  day2?: DayCode | "";
+  begin2?: string;
+  end2?: string;
+
+  submitted_at?: string;
+};
+
+export type OMSpecialClassOptions = {
+  ok: boolean;
+  statuses: string[];
+  activeTerm?: { term_id: string; term_number: number; acad_year_start: number } | null;
+  facultyOptions?: OMSCFaultyOpt[];
+};
+
+// ---------- OM: Special Class endpoints ----------
+export async function getOMSC_Options(): Promise<OMSpecialClassOptions> {
+  const { data } = await api.get(`/om/specialclass`, {
+    params: { action: "options" },
+  });
+  return data as OMSpecialClassOptions;
+}
+
+export async function listOMSC(params: {
+  termId?: string;
+  status?: string;
+  q?: string;
+}): Promise<{ ok: boolean; rows: OMSpecialClassRow[]; term_id?: string }> {
+  const { data } = await api.post(`/om/specialclass`, null, {
+    params: { action: "list", ...params },
+  });
+  return data as { ok: boolean; rows: OMSpecialClassRow[]; term_id?: string };
+}
+
+export async function getOMSC_SchedulePresets(
+  course_id: string,
+  term_id?: string
+): Promise<{ ok: boolean; presets: OMSCSchedulePreset[] }> {
+  const { data } = await api.get(`/om/specialclass`, {
+    params: { action: "schedulePresets", course_id, term_id },
+  });
+  return data as { ok: boolean; presets: OMSCSchedulePreset[] };
+}
+
+export async function updateOMSC(
+  special_id: string,
+  payload: Partial<OMSpecialClassRow>
+): Promise<{ ok: boolean; matched: number; modified: number }> {
+  const { data } = await api.post(`/om/specialclass`, payload, {
+    params: { action: "update", specialId: special_id },
+  });
+  return data as { ok: boolean; matched: number; modified: number };
+}
+
 
 /* =========================================================
    ==============  OM: CLASS RETENTION  ====================
