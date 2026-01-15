@@ -110,9 +110,10 @@ function dayLabel(d?: string) {
 
 function fmtTime(t?: string) {
   if (!t) return "—";
-  const raw = String(t).trim();
+  const raw = String(t).trim().replace(":", "");
   const n = raw.padStart(4, "0");
-  return `${n.slice(0, 2)}:${n.slice(2)}`;
+  if (!/^\d{4}$/.test(n)) return "—";
+  return `${n.slice(0, 2)}${n.slice(2)}`; // show like 0730
 }
 
 function termHeader(term?: { acad_year_start?: number | string; term_number?: number | string }) {
@@ -277,14 +278,14 @@ export default function STUDENT_CourseOfferings() {
                   </div>
                 ) : result.sections.length === 0 ? (
                   <div className="text-sm text-gray-500">
-                    No sections found for <span className="font-semibold">{result.course?.course_code}</span>.
+                    No sections found for{" "}
+                    <span className="font-semibold">{result.course?.course_code}</span>.
                   </div>
                 ) : (
                   <div className="overflow-x-auto rounded-lg border border-gray-200">
                     <table className="min-w-full text-sm">
                       <thead className="bg-gray-50">
                         <tr className="text-left text-gray-700">
-                          <th className="px-3 py-2 border-b">Class Nbr</th>
                           <th className="px-3 py-2 border-b">Section</th>
                           <th className="px-3 py-2 border-b">Day/s & Time</th>
                           <th className="px-3 py-2 border-b">Room</th>
@@ -301,10 +302,6 @@ export default function STUDENT_CourseOfferings() {
                           const rowBg = idx % 2 === 0 ? "bg-white" : "bg-gray-50";
                           return (
                             <tr key={s.section_id} className={`${rowBg} hover:bg-emerald-50/40`}>
-                              <td className="px-3 py-2 border-b tabular-nums">
-                                {s.class_nbr ?? <span className="text-gray-400">—</span>}
-                              </td>
-
                               <td className="px-3 py-2 border-b">
                                 <div className="flex items-center gap-2">
                                   <span className="font-semibold">{s.section_code}</span>
@@ -327,9 +324,6 @@ export default function STUDENT_CourseOfferings() {
                                       <div key={i} className="leading-tight">
                                         <span className="font-medium">{dayLabel(sc.day)}</span>{" "}
                                         {fmtTime(sc.start_time)} - {fmtTime(sc.end_time)}
-                                        <span className="text-gray-500">
-                                          {sc.room_type ? ` · ${sc.room_type}` : ""}
-                                        </span>
                                       </div>
                                     ))}
                                   </div>
@@ -343,7 +337,11 @@ export default function STUDENT_CourseOfferings() {
                                   <div className="space-y-1">
                                     {s.schedules.map((sc, i) => (
                                       <div key={i}>
-                                        {sc.room_number ? sc.room_number : <span className="text-gray-400">—</span>}
+                                        {sc.room_number ? (
+                                          sc.room_number
+                                        ) : (
+                                          <span className="text-gray-400">—</span>
+                                        )}
                                       </div>
                                     ))}
                                   </div>
@@ -352,15 +350,21 @@ export default function STUDENT_CourseOfferings() {
                                 )}
                               </td>
 
-                              <td className="px-3 py-2 border-b tabular-nums">{s.enrollment_cap ?? 0}</td>
+                              <td className="px-3 py-2 border-b tabular-nums">
+                                {s.enrollment_cap ?? 0}
+                              </td>
                               <td className="px-3 py-2 border-b tabular-nums">{s.enrolled ?? 0}</td>
 
                               <td className="px-3 py-2 border-b">
-                                {s.faculty_name ? s.faculty_name : <span className="text-gray-400">—</span>}
+                                {s.faculty_name?.trim() ? (
+                                  s.faculty_name
+                                ) : (
+                                  <span className="text-gray-400">UNASSIGNED</span>
+                                )}
                               </td>
 
                               <td className="px-3 py-2 border-b">
-                                {s.remarks ? s.remarks : <span className="text-gray-400">—</span>}
+                                {s.remarks?.trim() ? s.remarks : <span className="text-gray-400">—</span>}
                               </td>
                             </tr>
                           );

@@ -57,6 +57,7 @@ import CHAIR_CourseManagement from "./pages/CHAIR/CHAIR_CourseManagement";
 import CHAIR_FacultyService from "./pages/CHAIR/CHAIR_FacultyService";
 import CHAIR_StudentPetition from "./pages/CHAIR/CHAIR_StudentPetition";
 import CHAIR_ClassRetention from "./pages/CHAIR/CHAIR_ClassRetention";
+import CHAIR_SpecialClass from "./pages/CHAIR/CHAIR_SpecialClass";
 import CHAIR_Inbox from "./pages/CHAIR/CHAIR_Inbox";
 
 const base = (import.meta.env.BASE_URL || "/").replace(/\/$/, "");
@@ -199,6 +200,7 @@ export default function App() {
             <Route path="faculty-service" element={<ChairFacultyServiceRoute />} />
             <Route path="student-petitions" element={<CHAIR_StudentPetition />} />
             <Route path="class-retention" element={<CHAIR_ClassRetention />} />
+            <Route path="special-class" element={<CHAIR_SpecialClass />} />
           </Route>
           <Route path="/chair/inbox" element={<CHAIR_Inbox />} />
 

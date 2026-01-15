@@ -219,7 +219,6 @@ function SearchableCourseCode({
           onChange={(e) => {
             const next = e.target.value.toUpperCase();
             setQ(next);
-            // allow typing without forcing a selection
             onChange(next.trim());
           }}
           onKeyDown={(e) => {
@@ -234,9 +233,7 @@ function SearchableCourseCode({
             }
           }}
           placeholder={placeholder || "-- Select / Type Course Code --"}
-          className={`w-full bg-transparent outline-none ${
-            disabled ? "cursor-not-allowed" : ""
-          }`}
+          className={`w-full bg-transparent outline-none ${disabled ? "cursor-not-allowed" : ""}`}
         />
 
         <svg
@@ -275,7 +272,8 @@ function SearchableCourseCode({
             )}
           </div>
           <div className="border-t border-gray-200 px-3 py-2 text-xs text-gray-500">
-            Tip: Type to search, press <span className="font-semibold">Enter</span> to use what you typed.
+            Tip: Type to search, press <span className="font-semibold">Enter</span> to use what you
+            typed.
           </div>
         </div>
       )}
@@ -283,59 +281,221 @@ function SearchableCourseCode({
   );
 }
 
-/* ---------------- Status Card (matches Petition styling) ---------------- */
-function StatusCard({ a }: { a: SpecialClassView }) {
+/* ---------------- Small helpers ---------------- */
+function formatDateShort(dt?: string) {
+  if (!dt) return "—";
+  const d = new Date(dt);
+  if (Number.isNaN(d.getTime())) return String(dt);
+  return d.toLocaleDateString();
+}
+
+/**
+ * Returns a compact "Day/s" + "Time" display without duplicating the same time below the table.
+ * - If both slots share the same time range: Day/s = "M, H", Time = "0730 - 0900"
+ * - If times differ: Day/s = "M / H", Time = "0730 - 0900; 1000 - 1200"
+ */
+function compactDaysAndTime(a: StudentSpecialClassView) {
+  const d1 = String(a.day1 || "").trim();
+  const d2 = String(a.day2 || "").trim();
+  const r1 = a.begin1 && a.end1 ? `${a.begin1}-${a.end1}` : "";
+  const r2 = a.begin2 && a.end2 ? `${a.begin2}-${a.end2}` : "";
+
+  const has1 = Boolean(d1 && r1);
+  const has2 = Boolean(d2 && r2);
+
+  if (!has1 && !has2) {
+    const st = String(a.schedule_text || "").trim();
+    if (!st) return { daysLabel: "—", timeLabel: "—" };
+    // Try to split "M 07:30-09:00; F 07:30-09:00" but keep it compact if unknown
+    return { daysLabel: "—", timeLabel: st };
+  }
+
+  if (has1 && has2 && r1 === r2) {
+    return {
+      daysLabel: [d1, d2].filter(Boolean).join( "/"),
+      timeLabel: `${a.begin1} - ${a.end1}`,
+    };
+  }
+
+  // Different times or only one slot
+  const daysParts: string[] = [];
+  const timeParts: string[] = [];
+
+  if (has1) {
+    daysParts.push(d1);
+    timeParts.push(`${a.begin1} - ${a.end1}`);
+  }
+  if (has2) {
+    daysParts.push(d2);
+    timeParts.push(`${a.begin2} - ${a.end2}`);
+  }
+
+  return {
+    daysLabel: daysParts.join(" / ") || "—",
+    timeLabel: timeParts.join("; ") || "—",
+  };
+}
+
+/* ---------------- Extend view type for schedule details (optional fields) ---------------- */
+type StudentSpecialClassView = SpecialClassView & {
+  section_code?: string;
+  faculty_name?: string;
+
+  // schedule (from section schedules OR custom)
+  day1?: string;
+  begin1?: string;
+  end1?: string;
+  day2?: string;
+  begin2?: string;
+  end2?: string;
+  schedule_text?: string;
+
+  // offering info (if backend provides)
+  room?: string;
+  enrollment_cap?: number;
+  enrolled?: number;
+};
+
+/* ---------------- Status Card (clean, non-redundant) ---------------- */
+function StatusCard({ a }: { a: StudentSpecialClassView }) {
+  const statusRaw = String(a.status || "").trim();
+
   const pill =
-    a.status?.toLowerCase().includes("approved")
+    statusRaw.toLowerCase().includes("approved")
       ? "bg-emerald-50 text-emerald-700 border border-emerald-200"
-      : a.status?.toLowerCase().includes("disapproved") ||
-        a.status?.toLowerCase().includes("rejected")
+      : statusRaw.toLowerCase().includes("disapproved") ||
+        statusRaw.toLowerCase().includes("rejected")
       ? "bg-red-50 text-red-700 border border-red-200"
+      : statusRaw.toLowerCase().includes("forwarded")
+      ? "bg-amber-50 text-amber-700 border border-amber-200"
       : "bg-gray-100 text-gray-600 border border-gray-200";
 
   const ayLabel = (() => {
-    const n = Number.parseInt(String(a.acad_year_start ?? ""), 10);
+    const n = Number.parseInt(String((a as any).acad_year_start ?? ""), 10);
     return Number.isFinite(n) ? `AY ${n}-${n + 1}` : "AY —";
   })();
 
+  // compact schedule labels
+  const { daysLabel, timeLabel } = compactDaysAndTime(a);
+
+  // table values (no TS errors; all optional)
+  const course = String(a.course_code || "").trim() || "—";
+  const section = String(a.section_code || "").trim() || "—";
+  const room = String(a.room || "").trim() || "—";
+  const cap =
+    typeof a.enrollment_cap === "number"
+      ? a.enrollment_cap
+      : typeof (a as any).enrl_cap === "number"
+      ? (a as any).enrl_cap
+      : "—";
+  const enrolled =
+    typeof a.enrolled === "number"
+      ? a.enrolled
+      : typeof (a as any).enrolled === "number"
+      ? (a as any).enrolled
+      : "—";
+
+  // ✅ Remarks column must show APPLICATION remarks (no duplicate "application remarks")
+  const remarksCell = String(a.remarks || "").trim() || "—";
+
+  const faculty = String(a.faculty_name || "").trim() || "UNASSIGNED";
+
   return (
-    <div className="rounded-xl border border-gray-300 bg-white p-4 shadow-sm mb-4">
-      <div className="flex items-center justify-between mb-1">
-        <div>
-          <h3 className="font-semibold text-emerald-700">{a.course_code}</h3>
-          <div className="text-sm text-gray-600">{a.course_title || " "}</div>
-          <div className="text-xs text-gray-500 mt-1">
-            {ayLabel} · Term {a.term_number ?? "—"}
+    <div className="rounded-2xl border border-gray-200 bg-white shadow-sm overflow-hidden mb-5">
+      {/* Header */}
+      <div className="px-5 pt-4 pb-3">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <div className="text-[15px] font-bold text-emerald-700 leading-tight">
+              {course || "—"}
+            </div>
+            <div className="text-sm text-gray-700">{a.course_title || " "}</div>
+            <div className="mt-2 flex items-center gap-2 text-xs text-gray-500">
+              <Calendar className="h-4 w-4" />
+              <span>Submitted: {formatDateShort(a.submitted_at)}</span>
+              <span className="mx-1">•</span>
+              <span>
+                {ayLabel} · Term {(a as any).term_number ?? "—"}
+              </span>
+            </div>
           </div>
+
+          <span className={`shrink-0 px-3 py-1 text-xs rounded-full font-medium ${pill}`}>
+            {statusRaw || "—"}
+          </span>
         </div>
-        <span className={`px-3 py-1 text-xs rounded-full font-medium ${pill}`}>{a.status}</span>
       </div>
 
-      <div className="mt-3 flex items-center gap-2 text-sm text-gray-500">
-        <Calendar className="h-4 w-4" />
-        Submitted: {new Date(a.submitted_at).toLocaleDateString()}
-      </div>
+      <div className="h-px bg-gray-200" />
 
-      <div className="mt-2 text-sm text-gray-600">
-        <span className="font-medium">Department:</span>{" "}
-        {a.department_name ? a.department_name : <span className="text-gray-400">—</span>}
-      </div>
+      {/* Compact Schedule Table (aligned grid, no redundant time below) */}
+      <div className="px-5 py-4">
+        <div className="overflow-x-auto rounded-xl border border-emerald-200">
+          <table className="w-full table-fixed border-collapse">
+            <thead>
+              <tr className="bg-emerald-50 text-emerald-900">
+                <th className="border border-emerald-200 px-3 py-2 text-xs font-semibold text-left w-[120px]">
+                  Course
+                </th>
+                <th className="border border-emerald-200 px-3 py-2 text-xs font-semibold text-left w-[90px]">
+                  Section
+                </th>
+                <th className="border border-emerald-200 px-3 py-2 text-xs font-semibold text-left w-[90px]">
+                  Day/s
+                </th>
+                <th className="border border-emerald-200 px-3 py-2 text-xs font-semibold text-left w-[140px]">
+                  Time
+                </th>
+                <th className="border border-emerald-200 px-3 py-2 text-xs font-semibold text-left w-[120px]">
+                  Room
+                </th>
+                <th className="border border-emerald-200 px-3 py-2 text-xs font-semibold text-left w-[90px]">
+                  Enrl Cap
+                </th>
+                <th className="border border-emerald-200 px-3 py-2 text-xs font-semibold text-left w-[90px]">
+                  Enrolled
+                </th>
+                <th className="border border-emerald-200 px-3 py-2 text-xs font-semibold text-left w-[180px]">
+                  Remarks
+                </th>
+              </tr>
+            </thead>
 
-      <div className="mt-2 text-sm text-gray-600">
-        <span className="font-medium">Units Remaining:</span>{" "}
-        <span className="tabular-nums">{a.units_remaining ?? 0}</span>
-        {" · "}
-        <span className="font-medium">Graduating:</span> {a.graduating_after_term ? "Yes" : "No"}
-      </div>
+            <tbody>
+              <tr className="bg-white">
+                <td className="border border-emerald-200 px-3 py-2 text-sm text-gray-900">
+                  {course}
+                </td>
+                <td className="border border-emerald-200 px-3 py-2 text-sm text-gray-900">
+                  {section}
+                </td>
+                <td className="border border-emerald-200 px-3 py-2 text-sm text-gray-900">
+                  {daysLabel}
+                </td>
+                <td className="border border-emerald-200 px-3 py-2 text-sm text-gray-900">
+                  {timeLabel}
+                </td>
+                <td className="border border-emerald-200 px-3 py-2 text-sm text-gray-900">
+                  {room}
+                </td>
+                <td className="border border-emerald-200 px-3 py-2 text-sm text-gray-900">
+                  {cap as any}
+                </td>
+                <td className="border border-emerald-200 px-3 py-2 text-sm text-gray-900">
+                  {enrolled as any}
+                </td>
+                <td className="border border-emerald-200 px-3 py-2 text-sm text-gray-900">
+                  {remarksCell}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
 
-      <div className="mt-2 text-sm bg-gray-100 rounded-md px-2 py-1">
-        <span className="font-medium">Reason:</span>{" "}
-        {a.reason === "Other" ? a.reason_other || "Other" : a.reason}
-      </div>
-
-      <div className="mt-2 text-sm text-gray-600">
-        <span className="font-medium">Remarks:</span>{" "}
-        {a.remarks ? a.remarks : <span className="text-gray-400">—</span>}
+        {/* Faculty (single line only, not cluttered) */}
+        <div className="mt-3 text-sm text-gray-800">
+          <span className="font-semibold">Faculty:</span> {faculty}
+        </div>
       </div>
     </div>
   );
@@ -363,7 +523,7 @@ export default function STUDENT_SpecialClass() {
     statuses: [],
   });
 
-  const [applications, setApplications] = useState<SpecialClassView[]>([]);
+  const [applications, setApplications] = useState<StudentSpecialClassView[]>([]);
 
   const [form, setForm] = useState<FormData>({
     studentNumber: "",
@@ -396,7 +556,7 @@ export default function STUDENT_SpecialClass() {
         ]);
 
         setOptions(opt);
-        setApplications((apps?.applications || []) as SpecialClassView[]);
+        setApplications(((apps?.applications || []) as StudentSpecialClassView[]) ?? []);
 
         if (prof && prof.ok) {
           setProfile(prof);
@@ -418,11 +578,11 @@ export default function STUDENT_SpecialClass() {
   const courseMap = useMemo(() => {
     const m = new Map<string, { title: string; dept: string; units: number }>();
     for (const c of options.courses) {
-      const code = String(c.course_code || "").trim().toUpperCase();
+      const code = String((c as any).course_code || "").trim().toUpperCase();
       if (!code) continue;
       m.set(code, {
-        title: c.course_title || "",
-        dept: c.dept_name || "",
+        title: (c as any).course_title || "",
+        dept: (c as any).dept_name || "",
         units: Number((c as any).units ?? 0),
       });
     }
@@ -430,8 +590,9 @@ export default function STUDENT_SpecialClass() {
   }, [options.courses]);
 
   const courseCodeOptions = useMemo(() => {
-    // for dropdown list
-    return options.courses.map((c) => String(c.course_code || "").trim().toUpperCase()).filter(Boolean);
+    return options.courses
+      .map((c: any) => String(c.course_code || "").trim().toUpperCase())
+      .filter(Boolean);
   }, [options.courses]);
 
   // Section completion rules (as requested: disabling next sections)
@@ -463,8 +624,7 @@ export default function STUDENT_SpecialClass() {
       ...prev,
       courseCode: cleaned,
       courseTitle: hit?.title || "",
-      department:
-        hit?.dept && options.departments.includes(hit.dept) ? hit.dept : prev.department,
+      department: hit?.dept && options.departments.includes(hit.dept) ? hit.dept : prev.department,
     }));
   };
 
@@ -480,13 +640,11 @@ export default function STUDENT_SpecialClass() {
       if (form.courseTitle) setForm((p) => ({ ...p, courseTitle: "" }));
       return;
     }
-    // only update if different to avoid loops
     if (form.courseTitle !== hit.title || (hit.dept && form.department !== hit.dept)) {
       setForm((prev) => ({
         ...prev,
         courseTitle: hit.title || "",
-        department:
-          hit.dept && options.departments.includes(hit.dept) ? hit.dept : prev.department,
+        department: hit.dept && options.departments.includes(hit.dept) ? hit.dept : prev.department,
       }));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -522,7 +680,7 @@ export default function STUDENT_SpecialClass() {
       const res = await submitStudentSpecialClass(userId, payload);
 
       if (res?.ok && res?.application) {
-        setApplications((prev) => [res.application as SpecialClassView, ...prev]);
+        setApplications((prev) => [res.application as StudentSpecialClassView, ...prev]);
 
         setForm((prev) => ({
           ...prev,
@@ -555,7 +713,7 @@ export default function STUDENT_SpecialClass() {
         items={[
           { label: "Course Offerings", to: "/student/courseofferings" },
           { label: "Class Petition", to: "/student/petition" },
-          { label: "Special Class", to: "/student/specialclass" }
+          { label: "Special Class", to: "/student/specialclass" },
         ]}
       />
 
@@ -678,9 +836,7 @@ export default function STUDENT_SpecialClass() {
                       </label>
                       <SelectBox
                         value={form.graduatingAfterTerm}
-                        onChange={(v) =>
-                          setForm((prev) => ({ ...prev, graduatingAfterTerm: v as any }))
-                        }
+                        onChange={(v) => setForm((prev) => ({ ...prev, graduatingAfterTerm: v as any }))}
                         options={["Yes", "No"]}
                         placeholder="-- Select --"
                         disabled={!section1Ok}
@@ -703,7 +859,6 @@ export default function STUDENT_SpecialClass() {
                         Course Code
                       </label>
 
-                      {/* ✅ Dropdown + Typable search */}
                       <SearchableCourseCode
                         value={form.courseCode}
                         onChange={(v) => handleCoursePick(v)}
@@ -783,9 +938,7 @@ export default function STUDENT_SpecialClass() {
                       </label>
                       <input
                         value={form.reasonOther}
-                        onChange={(e) =>
-                          setForm((prev) => ({ ...prev, reasonOther: e.target.value }))
-                        }
+                        onChange={(e) => setForm((prev) => ({ ...prev, reasonOther: e.target.value }))}
                         disabled={!section2Ok}
                         placeholder="Type your reason…"
                         className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm disabled:bg-gray-100"
@@ -805,10 +958,7 @@ export default function STUDENT_SpecialClass() {
                         The course must belong to this college; otherwise file through the offering
                         college’s form.
                       </li>
-                      <li>
-                        The application will be forwarded to the Associate Dean and Academic
-                        Department for approval.
-                      </li>
+                      <li>The application will be forwarded to the Associate Dean and Academic Department for approval.</li>
                       <li>
                         The application is deemed final upon inclusion in the official enrollment
                         record; student can no longer withdraw.
@@ -847,9 +997,7 @@ export default function STUDENT_SpecialClass() {
           {/* RIGHT: status list */}
           <section className="xl:border-l xl:pl-8 border-gray-200">
             <h2 className="text-xl font-bold mb-1">Application Status</h2>
-            <p className="text-sm text-gray-600 mb-4">
-              Track your submitted special class applications.
-            </p>
+            <p className="text-sm text-gray-600 mb-4">Track your submitted special class applications.</p>
 
             {applications.length === 0 ? (
               <div className="text-sm text-gray-500">No applications submitted yet.</div>

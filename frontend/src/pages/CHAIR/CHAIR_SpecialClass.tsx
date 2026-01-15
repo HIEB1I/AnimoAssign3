@@ -194,7 +194,7 @@ function DetailRow({ label, value }: { label: string; value: any }) {
   );
 }
 
-export default function OM_SpecialClass() {
+export default function CHAIR_SpecialClass() {
   const [status, setStatus] = useState("All Status");
   const [searchInput, setSearchInput] = useState("");
   const [q, setQ] = useState("");

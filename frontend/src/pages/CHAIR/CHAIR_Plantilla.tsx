@@ -12,9 +12,29 @@ import {
   CheckCheck,
   Check,
   FileSpreadsheet,
+  ClipboardList, 
+  Star
 } from "lucide-react";
 // Removed jsPDF + autoTable imports since we now export to Excel
 import { setActiveRole, userHasRole } from "@/api";
+
+function ClipboardStarIcon({
+  size = 18,
+  className = "",
+}: {
+  size?: string | number;
+  className?: string;
+}) {
+  const nSize = typeof size === "number" ? size : Number(size) || 18;
+  const starSize = Math.max(10, Math.round(nSize * 0.55));
+
+  return (
+    <span className={cls("relative inline-flex items-center justify-center", className)}>
+      <ClipboardList size={size} className="opacity-95" />
+      <Star size={starSize} className="absolute -right-1 -bottom-1" fill="currentColor" />
+    </span>
+  );
+}
 
 /* ---------------- Sidebar ---------------- */
 const ITEMS: SidebarItem[] = [
@@ -23,7 +43,9 @@ const ITEMS: SidebarItem[] = [
   { label: "Course Management", to: "/chair/course-management", Icon: BookOpen },
   { label: "Faculty Service", to: "/chair/faculty-service", Icon: FileText },
   { label: "Student Petition", to: "/chair/student-petitions", Icon: FilePlus },
+  { label: "Special Class", to: "/chair/special-class", Icon: ClipboardStarIcon },
   { label: "Class Retention", to: "/chair/class-retention", Icon: BookMarked },
+
 ];
 
 /* ---------------- Utilities ---------------- */

@@ -25,7 +25,6 @@ type SidebarIcon = ComponentType<{ size?: string | number; className?: string }>
 export type SidebarItem = { to: string; label: string; Icon: SidebarIcon };
 type SidebarProps = { open: boolean; onToggle: () => void; items?: SidebarItem[] };
 
-/** ✅ Clipboard + Star composite icon */
 function ClipboardStarIcon({
   size = 18,
   className = "",
@@ -51,11 +50,7 @@ const defaultItems: SidebarItem[] = [
   { to: "/om/reports-analytics", label: "Reports and Analytics", Icon: BarChart3 },
   { to: "/om/faculty-form", label: "Faculty Preferences", Icon: FileText },
   { to: "/om/student-petition", label: "Student Petition", Icon: FilePlus },
-
-  // ✅ "clipboard with star" for Special Class
   { to: "/om/special-class", label: "Special Class", Icon: ClipboardStarIcon },
-
-  // keep as-is
   { to: "/om/class-retention", label: "Class Retention", Icon: BookMarked },
 ];
 
