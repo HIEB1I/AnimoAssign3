@@ -16,38 +16,43 @@ const Login: React.FC = () => {
 
   const navigate = useNavigate();
 
-  async function onSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    setLoading(true);
-    setError(null);
+function finishLogin(user: LoginResponse) {
+  const roles = (user.roles || []).map((r) => (r || "").toLowerCase());
 
-    try {
-      const user: LoginResponse = await apiLogin(email.trim());
-      const roles = (user.roles || []).map((r) => r.toLowerCase());
+  let dest: string | null = null;
+  if (roles.includes("apo")) dest = "/apo/preenlistment";
+  else if (roles.includes("office manager") || roles.includes("gs coordinator"))
+    dest = "/om/load-assignment";
+  else if (roles.includes("department chair") || roles.includes("deparment chair"))
+    dest = "/chair";
+  else if (roles.includes("faculty")) dest = "/faculty/overview";
+  else if (roles.includes("student")) dest = "/student/petition";
+  else if (roles.includes("admin")) dest = "/admin";
+  else if (roles.includes("dean")) dest = null;
 
-      let dest: string | null = null;
-      if (roles.includes("apo")) dest = "/apo/preenlistment";
-      else if (roles.includes("office manager") || roles.includes("gs coordinator"))
-        dest = "/om/load-assignment";
-      else if (roles.includes("department chair") || roles.includes("deparment chair"))
-        dest = "/chair";
-      else if (roles.includes("faculty")) dest = "/faculty/overview";
-      else if (roles.includes("student")) dest = "/student/petition";
-      else if (roles.includes("admin")) dest = "/admin";
-      else if (roles.includes("dean")) dest = null;
-
-      if (dest) {
-        localStorage.setItem("animo.user", JSON.stringify(user));
-        navigate(dest, { replace: true });
-      } else {
-        setError("Your account has no valid role configured. Please contact the administrator.");
-      }
-    } catch (err: any) {
-      setError(err?.message || "Login failed");
-    } finally {
-      setLoading(false);
-    }
+  if (!dest) {
+    setError("Your account has no valid role configured. Please contact the administrator.");
+    return;
   }
+
+  localStorage.setItem("animo.user", JSON.stringify(user));
+  navigate(dest, { replace: true });
+}
+
+async function onSubmit(e: React.FormEvent) {
+  e.preventDefault();
+  setLoading(true);
+  setError(null);
+
+  try {
+    const user: LoginResponse = await apiLogin(email.trim());
+    finishLogin(user);
+  } catch (err: any) {
+    setError(err?.message || "Login failed");
+  } finally {
+    setLoading(false);
+  }
+}
 
 const googleLogin = useGoogleLogin({
   flow: "auth-code",
@@ -72,22 +77,7 @@ const googleLogin = useGoogleLogin({
       if (!res.ok) throw new Error(await res.text());
 
       const user: LoginResponse = await res.json();
-      const roles = (user.roles || []).map((r) => r.toLowerCase());
-
-      let dest: string | null = null;
-      if (roles.includes("apo")) dest = "/apo/preenlistment";
-      else if (roles.includes("office manager") || roles.includes("gs coordinator"))
-        dest = "/om/load-assignment";
-      else if (roles.includes("department chair") || roles.includes("deparment chair"))
-        dest = "/chair";
-      else if (roles.includes("faculty")) dest = "/faculty/overview";
-      else if (roles.includes("student")) dest = "/student/petition";
-      else if (roles.includes("admin")) dest = "/admin";
-
-      if (!dest) throw new Error("Your account has no valid role configured.");
-
-      localStorage.setItem("animo.user", JSON.stringify(user));
-      navigate(dest, { replace: true });
+      finishLogin(user);
     } catch (e: any) {
       setError(e?.message || "Google login failed.");
     } finally {

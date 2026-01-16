@@ -146,7 +146,7 @@ export default function FAC_Overview() {
               <>
                 <StatCards summary={data.summary} />
                 <div className="my-6" />
-                <TeachingLoadEnhanced teachingLoad={data.teaching_load} term={data.term} />
+                <TeachingLoadEnhanced teachingLoad={data.teaching_load} term={data.term} userId={userId} />
               </>
             )}
             {tab === "History" && <HistoryMain />}
@@ -393,6 +393,7 @@ const ClassBlock = ({ onClick, it }: { onClick?: () => void; it: TLItemForCalend
 type TeachingLoadEnhancedProps = {
   teachingLoad: TLItem[]; // <-- Use the new type
   term: any;
+  userId: string;
 };
 
 // --- *** MODIFIED: Headers for the new list view *** ---
@@ -408,10 +409,12 @@ const LIST_HEADERS = [
   "Syllabus",
 ];
 
-function TeachingLoadEnhanced({ teachingLoad, term }: TeachingLoadEnhancedProps) {
+function TeachingLoadEnhanced({ teachingLoad, term, userId }: TeachingLoadEnhancedProps) {
   const [view, setView] = useState<"Calendar" | "List">("Calendar");
   const [modal, setModal] = useState<{ day: DayLong; item: TLItemForCalendar } | null>(null);
   const [isAccepted, setIsAccepted] = useState(false);
+  const [accepting, setAccepting] = useState(false);
+  const [acceptError, setAcceptError] = useState<string | null>(null);
 
   // --- *** MODIFIED: Remove TLData, pass teachingLoad to placeItems *** ---
   const placed = useMemo(() => placeItems(teachingLoad || []), [teachingLoad]);
@@ -461,12 +464,67 @@ function TeachingLoadEnhanced({ teachingLoad, term }: TeachingLoadEnhancedProps)
 
           <button
             type="button"
-            onClick={() => {
-              console.log("ACCEPT_SCHEDULE");
-              setIsAccepted(true);
-              // You would also call an API endpoint here
+            onClick={async () => {
+              if (isAccepted || accepting) return;
+              setAcceptError(null);
+              setAccepting(true);
+
+              try {
+                if (!userId) throw new Error("Missing user id. Please log in again.");
+
+                const items = teachingLoad.flatMap((it) => {
+                const base = {
+                  code: it.course_code,     //  match backend
+                  title: it.course_title,   // match backend
+                  section: it.section,      //  match backend
+                  mode: it.mode,            //  match backend
+                };
+
+                const out: any[] = [];
+
+                const d1 = (it.day1 || "").trim();
+                const t1 = (it.time1 || "").trim();
+                if (d1 && t1 && d1.toUpperCase() !== "TBA" && t1.toUpperCase() !== "TBA") {
+                  out.push({
+                    ...base,
+                    day: d1,
+                    time: t1,
+                    room: (it.room1 || "").trim() || "Online",
+                  });
+                }
+
+                const d2 = (it.day2 || "").trim();
+                const t2 = (it.time2 || "").trim();
+                if (d2 && t2 && d2.toUpperCase() !== "TBA" && t2.toUpperCase() !== "TBA") {
+                  out.push({
+                    ...base,
+                    day: d2,
+                    time: t2,
+                    room: (it.room2 || "").trim() || "Online",
+                  });
+                }
+
+                return out;
+              });
+
+
+                const res = await fetch("/api/gcal/teaching-load/accept", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ userId, items, weeks: 10 }),
+                });
+
+                if (!res.ok) throw new Error(await res.text());
+
+                setIsAccepted(true);
+              } catch (e: any) {
+                setAcceptError(e?.message || "Failed to add classes to Google Calendar.");
+                setIsAccepted(false);
+              } finally {
+                setAccepting(false);
+              }
             }}
-            disabled={isAccepted}
+            disabled={isAccepted || accepting}
             className={cls(
               "inline-flex h-9 items-center justify-center rounded-lg px-4 text-sm font-medium shadow",
               "focus:outline-none focus:ring-2 focus:ring-emerald-600/40",
@@ -475,8 +533,11 @@ function TeachingLoadEnhanced({ teachingLoad, term }: TeachingLoadEnhancedProps)
                 : "bg-blue-700 text-white hover:bg-blue-800 active:translate-y-[0.5px]"
             )}
           >
-            {isAccepted ? "Accepted" : "Accept"}
+            {isAccepted ? "Accepted" : accepting ? "Adding…" : "Accept"}
           </button>
+          {acceptError && (
+            <div className="mt-2 text-xs text-red-600">{acceptError}</div>
+          )}
         </div>
       </div>
 
@@ -787,6 +848,8 @@ function ChangeRequestModal({
   onClose: () => void;
   context: { day: DayLong; item: TLItemForCalendar } | null; // <-- MODIFIED
 }) {
+  const DEFAULT_TO = "john_fredrick_tario@dlsu.edu.ph";
+
   const TIME_SLOTS = [
     "07:30 – 09:00",
     "09:15 – 10:45",
@@ -795,7 +858,7 @@ function ChangeRequestModal({
     "14:30 – 16:00",
     "16:15 – 17:45",
     "18:00 – 19:30",
-    "19:45 – 21:00"
+    "19:45 – 21:00",
   ];
 
   const [choices, setChoices] = useState<ChangeKind[]>([]);
@@ -804,6 +867,27 @@ function ChangeRequestModal({
   const [remarks, setRemarks] = useState("");
   const [otherText, setOtherText] = useState("");
 
+  const [sending, setSending] = useState(false);
+  const [sendError, setSendError] = useState<string | null>(null);
+  const [sentOk, setSentOk] = useState(false);
+
+  // Logged-in user info (from localStorage)
+  const raw = useMemo(() => {
+    try {
+      return JSON.parse(localStorage.getItem("animo.user") || "{}");
+    } catch {
+      return {};
+    }
+  }, []);
+
+  const userId = raw.userId || raw.user_id || raw.id;
+  const userEmail: string = (raw.email || raw.gmail || "").toString().trim().toLowerCase();
+  const userFullName: string = (raw.fullName || raw.full_name || raw.name || "").toString().trim();
+
+  const nameParts = userFullName.split(/\s+/).filter(Boolean);
+  const firstName = (raw.firstName || raw.first_name || nameParts[0] || "").toString().trim();
+  const lastName = (raw.lastName || raw.last_name || nameParts[nameParts.length - 1] || "").toString().trim();
+
   useEffect(() => {
     if (!open) {
       setChoices([]);
@@ -811,6 +895,9 @@ function ChangeRequestModal({
       setSelDay("");
       setRemarks("");
       setOtherText("");
+      setSending(false);
+      setSendError(null);
+      setSentOk(false);
     }
   }, [open]);
 
@@ -829,14 +916,93 @@ function ChangeRequestModal({
   const currentDay = context.day;
   const currentStartMin = toMinutes(extractStartHM(context.item.time));
 
-  const filteredTimeSlots = TIME_SLOTS.filter(
-    (band) => toMinutes(extractStartHM(band)) !== currentStartMin
-  );
+  const filteredTimeSlots = TIME_SLOTS.filter((band) => toMinutes(extractStartHM(band)) !== currentStartMin);
   const filteredDays = ALL_DAYS.filter((d) => d !== currentDay);
 
   const mustTime = choices.includes("Change class time");
   const mustDay = choices.includes("Change class day");
-  const disabled = choices.length === 0 || (mustTime && !selTime) || (mustDay && !selDay);
+  const mustOther = choices.includes("Other");
+
+  const disabled =
+    sending ||
+    choices.length === 0 ||
+    (mustTime && !selTime) ||
+    (mustDay && !selDay) ||
+    (mustOther && !otherText.trim());
+
+  const changeSummary = (() => {
+    const picked = ["Change class time", "Change class day", "Other"] as ChangeKind[];
+    const list = picked.filter((p) => choices.includes(p));
+    return list.length ? list.join(", ") : "";
+  })();
+
+  // Subject part only (backend adds [AnimoAssign])
+  const subjectPart = `${lastName} ${firstName}`.trim() + (changeSummary ? ` ${changeSummary}` : "");
+
+  const emailBody = (() => {
+    const lines: string[] = [];
+
+    lines.push("Faculty Change Request");
+    lines.push("-");
+    lines.push(`From: ${lastName}, ${firstName}${userEmail ? ` <${userEmail}>` : ""}`.trim());
+    lines.push(`Course: ${context.item.code} ${context.item.sec}`);
+    lines.push(`Current schedule: ${context.day} • ${context.item.time}`);
+    if (context.item.room) lines.push(`Room: ${context.item.room}`);
+
+    lines.push("");
+    lines.push("Requested change(s):");
+    if (mustTime) lines.push(`- New time: ${selTime}`);
+    if (mustDay) lines.push(`- New day: ${selDay}`);
+    if (mustOther) lines.push(`- Other: ${otherText.trim()}`);
+
+    if (remarks.trim()) {
+      lines.push("");
+      lines.push("Remarks:");
+      lines.push(remarks.trim());
+    }
+
+    lines.push("");
+    lines.push("(Sent via AnimoAssign)");
+
+    return lines.join("\n");
+  })();
+
+  const sendEmail = async () => {
+    setSendError(null);
+    setSentOk(false);
+
+    if (!userId) {
+      setSendError("Missing userId (animo.user) — please log in again.");
+      return;
+    }
+
+    setSending(true);
+    try {
+      const res = await fetch("/api/gmail/send/by-user", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          userId,
+          to: DEFAULT_TO,
+          subject: subjectPart,
+          body: emailBody,
+        }),
+      });
+
+      if (!res.ok) {
+        const txt = await res.text();
+        throw new Error(txt || `Failed to send email (${res.status}).`);
+      }
+
+      setSentOk(true);
+      // optional: close modal after a short success state
+      onClose();
+    } catch (e: any) {
+      setSendError(e?.message || "Failed to send email.");
+    } finally {
+      setSending(false);
+    }
+  };
 
   return (
     <div className="fixed inset-0 z-80 grid place-items-center bg-black/30 p-3">
@@ -845,7 +1011,6 @@ function ChangeRequestModal({
           <div>
             <h3 className="text-xl font-semibold text-emerald-700">Request for Change</h3>
             <p className="text-sm text-neutral-500">
-              {/* --- MODIFIED: Use calendar item data --- */}
               {context.item.code} {context.item.sec} • {context.day} • {context.item.time}
             </p>
           </div>
@@ -855,11 +1020,21 @@ function ChangeRequestModal({
         </div>
 
         <div className="space-y-3">
+          <div className="rounded-xl border border-neutral-200 bg-neutral-50 p-3">
+            <div className="text-xs font-semibold text-neutral-700">Email will be sent to</div>
+            <div className="text-sm text-neutral-900">{DEFAULT_TO}</div>
+            <div className="mt-2 text-xs font-semibold text-neutral-700">Subject</div>
+            <div className="text-sm text-neutral-900">
+              <span className="font-semibold">[AnimoAssign]</span> {subjectPart || "(no subject)"}
+            </div>
+          </div>
+
           <label className="block text-sm font-medium text-neutral-700">Change</label>
           <div className="flex flex-wrap gap-2">
             {(["Change class time", "Change class day", "Other"] as ChangeKind[]).map((opt) => (
               <button
                 key={opt}
+                type="button"
                 onClick={() => toggle(opt)}
                 className={cls(
                   "rounded-lg border px-3 py-2 text-sm",
@@ -892,7 +1067,7 @@ function ChangeRequestModal({
             </div>
           )}
 
-          {choices.includes("Other") && (
+          {mustOther && (
             <div className="mt-2">
               <label className="mb-1 block text-sm font-medium text-neutral-700">Specify change</label>
               <input
@@ -917,22 +1092,23 @@ function ChangeRequestModal({
               />
             </div>
           )}
+
+          {sendError && <div className="text-sm text-red-600">{sendError}</div>}
+          {sentOk && <div className="text-sm text-emerald-700">Email sent.</div>}
         </div>
 
         <div className="mt-6 flex items-center justify-end gap-2.5">
           <button
+            type="button"
             onClick={onClose}
             className="inline-flex h-9 items-center justify-center rounded-xl border border-neutral-200 bg-neutral-100 px-4 text-sm text-slate-900 shadow-sm hover:bg-neutral-200/70 active:translate-y-[0.5px]"
           >
             Cancel
           </button>
           <button
+            type="button"
             disabled={disabled}
-            onClick={() => {
-              // Hook into your backend here if needed
-              console.log("SUBMIT_CHANGE_REQUEST", { choices, selTime, selDay, remarks, otherText, context });
-              onClose();
-            }}
+            onClick={sendEmail}
             className={cls(
               "inline-flex h-9 items-center gap-2 rounded-xl px-4 text-sm text-white shadow",
               "bg-[#1F7A49] hover:brightness-[1.06] active:translate-y-[0.5px] focus:outline-none focus:ring-2 focus:ring-emerald-600/40",
@@ -941,7 +1117,7 @@ function ChangeRequestModal({
             aria-disabled={disabled}
           >
             <SendIcon className="h-4 w-4" strokeWidth={2.2} />
-            Send
+            {sending ? "Sending…" : "Send"}
           </button>
         </div>
       </div>
