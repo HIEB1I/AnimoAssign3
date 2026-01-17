@@ -52,8 +52,8 @@ export type TopbarProps = {
 export default function Topbar({
   open,
   onToggleSidebar,
-  profileName = "Jamaecha Dacanay",
-  profileSubtitle = "Office Manager | Department of Software Technology",
+  profileName = "",
+  profileSubtitle = "",
   inboxPath,
 }: TopbarProps) {
   const [menuOpen, setMenuOpen] = useState(false);
