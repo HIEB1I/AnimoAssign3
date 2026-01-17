@@ -1455,18 +1455,15 @@ export default function OM_LoadAssignment() {
     setTimeout(() => setCopiedRowId(null), 1200);
   };
 
-  // Session (DB-driven, no hardcodes)
-  const session: {
-    userId?: string;
-    fullName?: string;
-    roles?: string[];
-  } | null = (() => {
+  // Session (same pattern as APO: localStorage["animo.user"])
+  const session = useMemo(() => {
     try {
-      return JSON.parse(localStorage.getItem("animo.user") || "null");
+      const raw = localStorage.getItem("animo.user");
+      return raw ? (JSON.parse(raw) as { userId?: string; fullName?: string; roles?: string[] }) : null;
     } catch {
       return null;
     }
-  })();
+  }, []);
 
   const userId = session?.userId || "";
 
@@ -1515,15 +1512,37 @@ export default function OM_LoadAssignment() {
     }
   }
 
-  const normRoles = (session?.roles || []).map((r) =>
-    String(r).toLowerCase().replace(/\s+/g, "_")
-  );
 
-  // TopBar profile from DB (fallback to session)
-  const [profileName, setProfileName] = useState<string>(
-    session?.fullName || ""
+  const prettifyRole = (raw: string) => {
+    const s = String(raw || "").trim();
+    if (!s) return "";
+    // normalize underscores/spaces then Title Case
+    return s
+      .replace(/[_\-]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .split(" ")
+      .map((w) => (w ? w[0].toUpperCase() + w.slice(1).toLowerCase() : w))
+      .join(" ");
+  };
+
+  const computedRoleTitleFromRoles = (roles?: string[]) => {
+    const norm = (roles || [])
+      .map((r) => String(r || "").trim().toLowerCase())
+      .filter(Boolean);
+
+    if (norm.includes("office manager")) return "Office Manager";
+    if (norm.includes("gs coordinator")) return "GS Coordinator";
+
+    const first = norm[0];
+    return first ? prettifyRole(first) : "User";
+  };
+
+  // TopBar profile (session first, optionally enriched by OM profile API)
+  const [profileName, setProfileName] = useState<string>(session?.fullName || "");
+  const [profileSubtitle, setProfileSubtitle] = useState<string>(
+    computedRoleTitleFromRoles(session?.roles)
   );
-  const [profileSubtitle, setProfileSubtitle] = useState<string>("");
 
   // Term label from backend (no hardcoding)
   const [term, setTerm] = useState<string>("");
@@ -1531,35 +1550,40 @@ export default function OM_LoadAssignment() {
   useEffect(() => {
     (async () => {
       if (!userId) return;
+
+      const baseName = session?.fullName || "";
+      const baseRole = computedRoleTitleFromRoles(session?.roles);
+
       try {
         const p = await getOmLoadAssignmentProfile(userId);
 
-        // 1. Determine Base Title from DB or Fallback
-        let roleTitle = p?.position_title || "";
+        const displayName = (p?.full_name || baseName || "").trim();
+        const roleTitle = (p?.position_title || baseRole || "").trim();
+        const dept = String(
+  p?.dept_name ??
+  (session as any)?.dept_name ??
+  (session as any)?.dept_label ??
+  (session as any)?.deptName ??
+  (session as any)?.department?.dept_name ??
+  ""
+).trim();
 
-        // Fallback: If no title in DB, but has OM role in session
-        if (
-          !roleTitle &&
-          (normRoles.includes("office_manager") ||
-            normRoles.includes("role0006"))
-        ) {
-          roleTitle = "Office Manager";
+
+        let subtitle = roleTitle;
+        if (dept) {
+          const subLower = subtitle.toLowerCase();
+          const deptLower = dept.toLowerCase();
+          // append dept exactly once
+          if (!subtitle) subtitle = dept;
+          else if (!subLower.includes(deptLower)) subtitle = `${subtitle} | ${dept}`;
         }
 
-        // 2. Append Department ONCE if available
-        if (roleTitle && p?.dept_name) {
-          roleTitle = `${roleTitle} | ${p.dept_name}`;
-        }
-
-        setProfileSubtitle(roleTitle);
-        setProfileName(p?.full_name || session?.fullName || "");
-
-        setProfileSubtitle(roleTitle);
-
-        // 3. Name Fallback
-        setProfileName(p?.full_name || session?.fullName || "");
+        setProfileName(displayName);
+        setProfileSubtitle(subtitle);
       } catch {
-        /* ignore; non-blocking for UI */
+        // If OM profile API fails, still show session-based values
+        setProfileName(baseName);
+        setProfileSubtitle(baseRole);
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -3021,7 +3045,7 @@ const canRedo = isRunning && historyVersion >= 0 && redoStackRef.current.length 
 
                                   <button
                                     className="flex h-7 w-7 items-center justify-center rounded-full border-2 border-emerald-700 text-emerald-700 hover:bg-emerald-50"
-                                    title="Approve row"
+                                    title="Approve"
                                   >
                                     <Check
                                       className="h-4 w-4"
@@ -3032,7 +3056,7 @@ const canRedo = isRunning && historyVersion >= 0 && redoStackRef.current.length 
                                   <button
                                     type="button"
                                     onClick={() => handleCopyRow(r)}
-                                    title={copiedRowId === r.id ? "Copied!" : "Copy row"}
+                                    title={copiedRowId === r.id ? "Copied!" : "Copy"}
                                     className="flex h-7 w-7 items-center justify-center rounded-full border-2 border-gray-300 text-gray-600 hover:bg-gray-50"
                                   >
                                     {copiedRowId === r.id ? (

@@ -551,42 +551,74 @@ async def loadassignment_handler(
         full_name = " ".join([p for p in [(u.get("first_name") or "").strip(),
                                         (u.get("last_name") or "").strip()] if p])
 
-        # --- NEW: resolve department via role_assignments -> departments ---
-        # Grab the most recent active role assignment for this user
-        ra = await db["role_assignments"].find(
-            {
-                "user_id": userId,
-                # treat null/absent as active; you can tighten this if you track current term
-                "$or": [{"is_active": True}, {"is_active": {"$exists": False}}],
-            },
+        # --- Resolve department via role_assignments -> departments (robust parsing) ---
+        # NOTE: Some datasets don't have is_active/updated_at/created_at. We therefore:
+        #  - do NOT filter by is_active
+        #  - sort by whichever recency keys exist
+        #  - parse scope defensively (case-insensitive type, id keys may vary)
+        ra_docs = await db["role_assignments"].find(
+            {"user_id": userId},
             {
                 "_id": 0,
                 "role_id": 1,
                 "scope": 1,
                 "updated_at": 1,
                 "created_at": 1,
+                "role_assignment_id": 1,
                 "until_term_id": 1,
             },
-        ).sort([("updated_at", -1), ("created_at", -1)]).to_list(5)
+        ).sort(
+            [("updated_at", -1), ("created_at", -1), ("role_assignment_id", -1)]
+        ).to_list(10)
 
-        dept_id = None
-        role_id = None
-        for row in ra or []:
-            role_id = role_id or row.get("role_id")
-            scopes = row.get("scope") or []
-            # find the first department scope
-            dep_scope = next((s for s in scopes if (s.get("type") == "department" and s.get("id"))), None)
-            if dep_scope:
-                dept_id = dep_scope["id"]
+        def _norm_scope_list(scope_val: Any) -> list[dict]:
+            if not scope_val:
+                return []
+            if isinstance(scope_val, dict):
+                return [scope_val]
+            if isinstance(scope_val, list):
+                return [s for s in scope_val if isinstance(s, dict)]
+            return []
+
+        dept_id: Optional[str] = None
+        role_id: Optional[str] = None
+
+        for row in ra_docs or []:
+            if not role_id:
+                role_id = row.get("role_id")
+
+            scopes = _norm_scope_list(row.get("scope"))
+            for s in scopes:
+                stype = str(s.get("type") or "").strip().lower()
+                if stype != "department":
+                    continue
+                # id key can vary across seeders
+                cand = s.get("id") or s.get("department_id") or s.get("dept_id")
+                if cand:
+                    dept_id = str(cand).strip()
+                    break
+            if dept_id:
                 break
 
         dept_name = ""
         if dept_id:
+            # departments collection key can vary; try common variants.
             d = await db["departments"].find_one(
-                {"department_id": dept_id},
+                {
+                    "$or": [
+                        {"department_id": dept_id},
+                        {"dept_id": dept_id},
+                        {"id": dept_id},
+                    ]
+                },
                 {"_id": 0, "dept_name": 1, "department_name": 1, "name": 1, "dept_code": 1},
             ) or {}
-            dept_name = (d.get("dept_name") or d.get("department_name") or d.get("name") or "").strip()
+            dept_name = (
+                d.get("dept_name")
+                or d.get("department_name")
+                or d.get("name")
+                or ""
+            ).strip()
 
         # Optional: normalize role display (example for ROLE0006)
         position_title = staff.get("position_title") or ""
