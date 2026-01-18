@@ -217,7 +217,6 @@ async def _active_term() -> Dict[str, Any]:
 
 
 async def _get_allowed_statuses() -> List[str]:
-    # Ignore DB-config statuses for this module and force the exact set
     return OM_ALLOWED_STATUSES
 
 
@@ -301,7 +300,15 @@ async def _build_faculty_options() -> List[Dict[str, Any]]:
     uids = [p.get("user_id") for p in profs if p.get("user_id")]
     users = await db[COL_USERS].find(
         {"$or": [{"user_id": {"$in": uids}}, {"userId": {"$in": uids}}]},
-        {"_id": 0, "user_id": 1, "userId": 1, "first_name": 1, "last_name": 1, "firstName": 1, "lastName": 1},
+        {
+            "_id": 0,
+            "user_id": 1,
+            "userId": 1,
+            "first_name": 1,
+            "last_name": 1,
+            "firstName": 1,
+            "lastName": 1,
+        },
     ).to_list(10000)
 
     umap: Dict[str, Dict[str, Any]] = {}
@@ -320,7 +327,13 @@ async def _build_faculty_options() -> List[Dict[str, Any]]:
             u.get("first_name") or u.get("firstName") or "",
             u.get("last_name") or u.get("lastName") or "",
         )
-        out.append({"faculty_id": fid, "faculty_name": nm, "department_id": p.get("department_id")})
+        out.append(
+            {
+                "faculty_id": fid,
+                "faculty_name": nm,
+                "department_id": p.get("department_id"),
+            }
+        )
 
     out.sort(key=lambda x: x.get("faculty_name") or "")
     return out
@@ -466,43 +479,32 @@ async def _shape_row(r: Dict[str, Any], maps: Dict[str, Any]) -> Dict[str, Any]:
         "special_id": r.get("special_id"),
         "term_id": r.get("term_id"),
         "user_id": uid,
-
         "student_name": student_name,
         "student_number": r.get("student_number", ""),
-
         "course_id": cid,
         "course_code": course_code,
         "course_title": c.get("course_title") or "",
         "course_department": d.get("department_name") or d.get("dept_name") or "",
-
         "program_id": pid,
         "program_code": p.get("program_code") or "",
-
         "reason": r.get("reason") or "",
         "reason_other": r.get("reason_other") or "",
-
         "status": status,
         "remarks": r.get("remarks") or "",
-
         "faculty_id": faculty_id,
         "faculty_name": faculty_name,
-
         "section_id": sid,
         "section_code": section_code,
-
         "day1": df.get("day1") or "",
         "begin1": df.get("begin1") or "",
         "end1": df.get("end1") or "",
         "day2": df.get("day2") or "",
         "begin2": df.get("begin2") or "",
         "end2": df.get("end2") or "",
-
         "submitted_at": r.get("submitted_at"),
         "updated_at": r.get("updated_at"),
-
         "department_id": did,
         "department_name": d.get("department_name") or d.get("dept_name") or "",
-
         "course_units": course_units,
         "units_remaining": r.get("units_remaining", ""),
         "graduating_after_term": bool(r.get("graduating_after_term", False)),
@@ -648,16 +650,16 @@ def _fill_rect(c, x, y, w, h, fill_color):
 def _draw_checkbox(c, x, y, size=10, checked=False):
     _draw_rect(c, x, y, size, size, stroke=1, fill=0)
     if checked:
-        c.setFont("Helvetica-Bold", size)
-        c.drawCentredString(x + size / 2, y + size * 0.15, "X")
-        c.setFont("Helvetica", 10)
+        pad = max(1.5, size * 0.22)
+        c.setLineWidth(1.4)
+        c.line(x + pad, y + pad, x + size - pad, y + size - pad)
+        c.line(x + pad, y + size - pad, x + size - pad, y + pad)
+        c.setLineWidth(1)
 
 
 def _render_one_application(c, r: Dict[str, Any], active_term: Dict[str, Any]):
     BLACK = colors.black
     WHITE = colors.white
-    LIGHT_FILL = colors.HexColor("#EFEFEF")
-    LIGHT_BLUE = colors.HexColor("#EEF2FA")
 
     margin = 24
     x0 = margin
@@ -713,11 +715,6 @@ def _render_one_application(c, r: Dict[str, Any], active_term: Dict[str, Any]):
     right_label_w = right_w * 0.48
     c.line(right_x + right_label_w, top - bar_h, right_x + right_label_w, top - block_h)
 
-    for ri in range(4):
-        y_cell = top - bar_h - (ri + 1) * row_h
-        _fill_rect(c, x0 + left_label_w, y_cell, left_w - left_label_w, row_h, LIGHT_FILL)
-        _fill_rect(c, right_x + right_label_w, y_cell, right_w - right_label_w, row_h, LIGHT_FILL)
-
     c.setFont("Helvetica-Bold", 10)
     left_labels = ["LAST NAME", "FIRST NAME", "MIDDLE NAME", "UNITS REMAINING INCLUDING CURRENT TERM:"]
     right_labels = ["ID NUMBER", "COLLEGE", "COURSE", "GRADUATING AFTER THIS\nTERM?"]
@@ -748,13 +745,21 @@ def _render_one_application(c, r: Dict[str, Any], active_term: Dict[str, Any]):
     grad_yes = bool(r.get("graduating_after_term", False))
     grad_row_y = top - bar_h - 4 * row_h
     box_area_x = right_x + right_label_w + 8
-    box_area_y = grad_row_y + row_h * 0.22
+
     cb = 11
-    _draw_checkbox(c, box_area_x, box_area_y + cb + 6, size=cb, checked=grad_yes)
-    _draw_checkbox(c, box_area_x, box_area_y, size=cb, checked=(not grad_yes))
+    gap = 2
+    total_h = (cb * 2) + gap
+    box_area_y = grad_row_y + max(0, (row_h - total_h) / 2)
+
+    y_no = box_area_y
+    y_yes = box_area_y + cb + gap
+
+    _draw_checkbox(c, box_area_x, y_yes, size=cb, checked=grad_yes)
+    _draw_checkbox(c, box_area_x, y_no, size=cb, checked=(not grad_yes))
+
     c.setFont("Helvetica-Bold", 10)
-    c.drawString(box_area_x + cb + 6, box_area_y + cb + 7, "YES")
-    c.drawString(box_area_x + cb + 6, box_area_y + 1, "NO")
+    c.drawString(box_area_x + cb + 6, y_yes + 1, "YES")
+    c.drawString(box_area_x + cb + 6, y_no + 1, "NO")
 
     # ---- Special class applied for ----
     sc_top = top - block_h - 10
@@ -782,7 +787,6 @@ def _render_one_application(c, r: Dict[str, Any], active_term: Dict[str, Any]):
 
     val_h = 36
     y_val = sc_tbl_top - hdr_h - val_h
-    _fill_rect(c, x0, y_val, W, val_h, colors.HexColor("#EDEDED"))
     _draw_rect(c, x0, y_val, W, val_h, stroke=1, fill=0)
     c.line(x0 + col1, y_val, x0 + col1, y_val + val_h)
     c.line(x0 + col1 + col2, y_val, x0 + col1 + col2, y_val + val_h)
@@ -854,7 +858,7 @@ def _render_one_application(c, r: Dict[str, Any], active_term: Dict[str, Any]):
     tc_top = reason_top - reason_h - 10
     tc_h = 100
     _draw_rect(c, x0, tc_top - tc_h, W, tc_h, stroke=1, fill=0)
-    _fill_rect(c, x0, tc_top - 22, W, 22, colors.HexColor("#CFCFCF"))
+    _draw_rect(c, x0, tc_top - 22, W, 22, stroke=1, fill=0)
     c.setFont("Helvetica-Bold", 11)
     c.drawCentredString(x0 + W / 2, tc_top - 16, "TERMS AND CONDITIONS")
 
@@ -887,15 +891,18 @@ def _render_one_application(c, r: Dict[str, Any], active_term: Dict[str, Any]):
     c.setFont("Helvetica-BoldOblique", 9)
     c.drawCentredString(x0 + W / 2, sig_y - 12, "STUDENT'S SIGNATURE OVER PRINTED NAME / DATE")
 
-    # ===================== APPROVAL (FIXED) =====================
-    # Key fixes:
-    # 1) Restore 1/2/3 boxes + FACULTY block.
-    # 2) Draw "FOR APO USE ONLY" bar FIRST.
-    # 3) Draw box "2" LAST (on top) so it is never "cut" by the bar.
-    # 4) Use ONE split_y only (no duplicate recompute).
+    # ---- Footer reserved space (avoid clipping) ----
+    footer_h = 22
+    footer_top_y = y0 + footer_h
+    min_bottom = footer_top_y + 6
 
+    # ===================== APPROVAL (MATCH REFERENCE) =====================
     ap_top = sig_y - 22
-    ap_h = 150
+    ap_h_target = 140
+    ap_h = ap_h_target
+    if (ap_top - ap_h) < min_bottom:
+        ap_h = max(112, ap_top - min_bottom)
+
     _draw_rect(c, x0, ap_top - ap_h, W, ap_h, stroke=1, fill=0)
 
     header_h = 28
@@ -911,120 +918,146 @@ def _render_one_application(c, r: Dict[str, Any], active_term: Dict[str, Any]):
     body_bottom = ap_top - ap_h
     body_h = body_top - body_bottom
 
-    # columns (match your earlier clean template layout)
     left_w2 = W * 0.46
-    mid_w2 = W * 0.30
-    right_w2 = W - left_w2 - mid_w2
+    div_x = x0 + left_w2
 
-    x_left = x0
-    x_mid = x0 + left_w2
-    x_right = x0 + left_w2 + mid_w2
+    right_x0 = div_x
+    right_x1 = x0 + W
+    right_w2 = right_x1 - right_x0
 
-    # column borders
-    c.line(x_mid, body_bottom, x_mid, body_top)
-    c.line(x_right, body_bottom, x_right, body_top)
+    # right strip (ONLY for the top area where "3" lives)
+    strip_w = max(52.0, right_w2 * 0.18)
+    sub_div_x = right_x1 - strip_w
 
-    # split line for LEFT column only (between Associate Dean and Department)
-    split_y = body_top - (body_h * 0.55)
-    c.line(x_left, split_y, x_left + left_w2, split_y)
+    # main vertical divider across full approval body
+    c.line(div_x, body_bottom, div_x, body_top)
 
-    # fills
-    _fill_rect(c, x_left, split_y, left_w2, body_top - split_y, LIGHT_BLUE)
+    # horizontal divider across full width
+    split_y = body_bottom + body_h * 0.55
+    c.line(x0, split_y, x0 + W, split_y)
 
-    # LEFT: Associate Dean label
-    c.setFont("Helvetica-Bold", 10)
-    c.drawString(x_left + 10, body_top - 16, "ASSOCIATE DEAN")
-
-    # LEFT-bottom text
-    c.setFont("Helvetica-Bold", 9)
-    c.drawString(x_left + 10, split_y - 18, "(DEPARTMENT) I am appointing (faculty)")
-    c.drawString(x_left + 10, split_y - 40, "MR/MS/DR")
-    c.line(x_left + 80, split_y - 40, x_left + left_w2 - 12, split_y - 40)
-
-    # LEFT-bottom signature strip
-    _fill_rect(c, x_left + 10, body_bottom + 18, left_w2 - 20, 22, colors.HexColor("#EDEDED"))
-    c.setFont("Helvetica-BoldOblique", 9)
-    c.drawCentredString(x_left + left_w2 / 2, body_bottom + 6, "SIGNATURE OF CHAIR / COORDINATOR / DATE")
-
-    # MID: Box "1" + label
-    nb = 20
-    _draw_rect(c, x_mid, body_top - nb, nb, nb, stroke=1, fill=0)
-    c.setFont("Helvetica-Bold", 10)
-    c.drawCentredString(x_mid + nb / 2, body_top - 14, "1")
-    c.drawString(x_mid + nb + 8, body_top - 16, "(FACULTY)")
-
-    # MID: faculty name box (under the label)
-    fac_box_y = body_top - 44
-    fac_box_h = 18
-    _fill_rect(c, x_mid + 12, fac_box_y, mid_w2 - 24, fac_box_h, colors.HexColor("#DCDCDC"))
-    _draw_rect(c, x_mid + 12, fac_box_y, mid_w2 - 24, fac_box_h, stroke=1, fill=0)
-
-    fac_name = (r.get("faculty_name") or "UNASSIGNED").strip()
-    if fac_name.upper() == "UNASSIGNED":
-        fac_name = ""
-    _fit_and_draw_text(
-        c,
-        fac_name,
-        x_mid + 16,
-        fac_box_y + 2,
-        mid_w2 - 32,
-        fac_box_h - 4,
-        font="Helvetica-Bold",
-        max_size=9,
-        min_size=7,
-        valign="middle",
-    )
-
-    # MID: signature/date line
-    sig2_y = body_top - 76
-    c.line(x_mid + 40, sig2_y, x_mid + mid_w2 - 40, sig2_y)
-    c.setFont("Helvetica-Bold", 9)
-    c.drawCentredString(x_mid + mid_w2 / 2, sig2_y - 14, "SIGNATURE / DATE")
-
-    # RIGHT: Box "3"
-    _draw_rect(c, x_right + right_w2 - nb, body_top - nb, nb, nb, stroke=1, fill=0)
-    c.setFont("Helvetica-Bold", 10)
-    c.drawCentredString(x_right + right_w2 - nb / 2, body_top - 14, "3")
-
-    # RIGHT+MID bottom: FOR APO USE ONLY bar
-    apo_bar_h = 20
-    bar_top = split_y  # bar top aligns with split line
-    bar_bottom = bar_top - apo_bar_h
-
-    _fill_rect(c, x_mid, bar_bottom, mid_w2 + right_w2, apo_bar_h, BLACK)
+    # bottom-right: black bar "FOR APO USE ONLY" + white space below (no extra column)
+    apo_bar_h = 22
+    _fill_rect(c, right_x0, split_y - apo_bar_h, right_w2, apo_bar_h, BLACK)
     c.setFillColor(WHITE)
     c.setFont("Helvetica-Bold", 10)
-    c.drawCentredString(x_mid + (mid_w2 + right_w2) / 2, bar_bottom + 6, "FOR APO USE ONLY")
+    c.drawCentredString(right_x0 + right_w2 / 2, split_y - apo_bar_h + 7, "FOR APO USE ONLY")
     c.setFillColor(BLACK)
 
-    # APO use area fill below bar
-    _fill_rect(
-        c,
-        x_mid,
-        body_bottom,
-        mid_w2 + right_w2,
-        bar_bottom - body_bottom,
-        colors.HexColor("#EDEDED"),
-    )
-
-    # IMPORTANT: draw box "2" LAST (on top), so the bar never cuts it
-    box2_size = nb
-    box2_x = x_mid - (box2_size / 2)
-    box2_y = split_y - (box2_size / 2)
-    _fill_rect(c, box2_x, box2_y, box2_size, box2_size, colors.white)
-    _draw_rect(c, box2_x, box2_y, box2_size, box2_size, stroke=1, fill=0)
+    # LEFT: Associate Dean
     c.setFont("Helvetica-Bold", 10)
-    c.drawCentredString(x_mid, box2_y + 6, "2")
+    c.drawString(x0 + 8, body_top - 16, "ASSOCIATE DEAN")
 
-    # Footer black bar
-    footer_h = 16
+    # LEFT-bottom
+    c.setFont("Helvetica-Bold", 9)
+    c.drawString(x0 + 8, split_y - 12, "(DEPARTMENT) I am appointing (faculty)")
+    c.drawString(x0 + 8, split_y - 24, "MR/MS/DR")
+    c.line(x0 + 62, split_y - 26, div_x - 12, split_y - 26)
+
+    # faculty name after MR/MS/DR
+    fac_name = (r.get("faculty_name") or "").strip()
+    if fac_name.upper() == "UNASSIGNED":
+        fac_name = ""
+    if fac_name:
+        name_x = x0 + 62 + 2
+        name_w = (div_x - 12) - name_x
+        name_y = (split_y - 26) + 2
+        _fit_and_draw_text(
+            c,
+            fac_name,
+            name_x,
+            name_y,
+            name_w,
+            14,
+            font="Helvetica-Bold",
+            max_size=9,
+            min_size=7,
+            align="left",
+            valign="middle",
+        )
+
+    # Chair signature line + label
+    chair_line_y = body_bottom + 24
+    c.line(x0 + 40, chair_line_y, div_x - 40, chair_line_y)
+    c.setFont("Helvetica-BoldOblique", 9)
+    c.drawCentredString(x0 + left_w2 / 2, chair_line_y - 12, "SIGNATURE OF CHAIR / COORDINATOR / DATE")
+
+    # number boxes
+    nb = 18
+
+    # Box 1 (ASSOCIATE DEAN) - inside LEFT cell near the divider
+    box1_x = div_x - nb - 2
+    box1_y = body_top - nb - 2
+    _draw_rect(c, box1_x, box1_y, nb, nb, stroke=1, fill=0)
+    c.setFont("Helvetica-Bold", 10)
+    c.drawCentredString(box1_x + nb / 2, box1_y + 5, "1")
+
+
+    # Faculty signature line (top area; line only)
+    fx = div_x + nb + 18
+    if fx < div_x + 28:
+        fx = div_x + 28
+    fx2 = right_x1 - 16
+    total_w = max(120.0, fx2 - fx)
+
+    fac_box_h = 16
+    fac_box_y = body_top - 52
+    if fac_box_y < (split_y + 12):
+        fac_box_y = split_y + 12
+    max_fac_y = (body_top - 18) - fac_box_h
+    if fac_box_y > max_fac_y:
+        fac_box_y = max_fac_y
+
+    sig_box_x = fx
+    sig_box_y = fac_box_y
+    sig_box_w = total_w
+    sig_box_h = fac_box_h
+
+    sig_line_y = sig_box_y + sig_box_h
+    sig_pad = 12
+    c.line(sig_box_x + sig_pad, sig_line_y, sig_box_x + sig_box_w - sig_pad, sig_line_y)
+    c.setFont("Helvetica-BoldOblique", 9)
+    c.drawCentredString(sig_box_x + sig_box_w / 2, sig_line_y - 14, "SIGNATURE / DATE")
+
+    # Box 3 (FACULTY) - inside RIGHT cell near the divider
+    box3_x = div_x + 2
+    box3_y = body_top - nb - 2
+    _draw_rect(c, box3_x, box3_y, nb, nb, stroke=1, fill=0)
+    c.setFont("Helvetica-Bold", 10)
+    c.drawCentredString(box3_x + nb / 2, box3_y + 5, "3")
+    c.setFont("Helvetica-Bold", 10)
+    c.drawString(box3_x + nb + 8, body_top - 16, "(FACULTY)")
+
+
+    # Box 2 (centered exactly at divider intersection)
+    box2_x = div_x - nb
+    box2_y = split_y - nb / 2
+    _fill_rect(c, box2_x, box2_y, nb, nb, WHITE)
+    _draw_rect(c, box2_x, box2_y, nb, nb, stroke=1, fill=0)
+    c.setFont("Helvetica-Bold", 10)
+    c.drawCentredString(box2_x + nb / 2, box2_y + 5, "2")
+
+    # ---- Footer black bar (disclaimer) ----
     _fill_rect(c, x0, y0, W, footer_h, BLACK)
     c.setFillColor(WHITE)
-    c.setFont("Helvetica", 8)
-    c.drawString(
-        x0 + 8,
-        y0 + 5,
-        "ALL RIGHTS RESERVED. Parts of this material may be reproduced provided (1) the material is not altered; (2) the use is non-commercial; (3) De La Salle University is acknowledged as source; and (4) DLSU is notified through academic.services@dlsu.edu.ph.",
+    footer_text = (
+        "ALL RIGHTS RESERVED. Parts of this material may be reproduced provided (1) the material is not altered; "
+        "(2) the use is non-commercial; (3) De La Salle University is acknowledged as source; and (4) DLSU is notified "
+        "through academic.services@dlsu.edu.ph."
+    )
+    _fit_and_draw_text(
+        c,
+        footer_text,
+        x0 + 6,
+        y0 + 3,
+        W - 12,
+        footer_h - 6,
+        font="Helvetica",
+        max_size=6,
+        min_size=5,
+        leading_ratio=1.10,
+        align="left",
+        valign="middle",
     )
     c.setFillColor(BLACK)
 
@@ -1112,11 +1145,11 @@ async def om_specialclass_post(
         if q and q.strip():
             s = q.strip().lower()
             shaped = [
-                r for r in shaped
-                if (r.get("student_name") or "").lower().find(s) >= 0
-                or (r.get("course_code") or "").lower().find(s) >= 0
-                or (r.get("course_title") or "").lower().find(s) >= 0
-                or (r.get("section_code") or "").lower().find(s) >= 0
+                rr for rr in shaped
+                if (rr.get("student_name") or "").lower().find(s) >= 0
+                or (rr.get("course_code") or "").lower().find(s) >= 0
+                or (rr.get("course_title") or "").lower().find(s) >= 0
+                or (rr.get("section_code") or "").lower().find(s) >= 0
             ]
 
         return {"ok": True, "rows": shaped, "term_id": current_term_id}
