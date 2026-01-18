@@ -1,7 +1,17 @@
 // src/base/Topbar.tsx
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Bell, PanelLeft, PanelRight, UserCircle, LogOut, Inbox } from "lucide-react";
+import {
+  Bell,
+  PanelLeft,
+  PanelRight,
+  UserCircle,
+  LogOut,
+  Inbox,
+  ArrowLeftRight,
+} from "lucide-react";
+
+import { setActiveRole, userHasRole } from "@/api";
 
 // helpers for notifications
 type Notification = { id: number; title: string; details: string; time: Date; seen?: boolean };
@@ -59,6 +69,32 @@ export default function Topbar({
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
   const navigate = useNavigate();
+
+  // ----------------------
+  // Role switch (Chair <-> Faculty) placed inside "My Account"
+  // ----------------------
+  const pathname =
+    typeof window !== "undefined" && window.location?.pathname ? window.location.pathname : "";
+  const onChair = pathname.startsWith("/chair");
+  const onFaculty = pathname.startsWith("/faculty");
+
+  const canSwitchToFaculty = userHasRole("faculty");
+  const canSwitchToChair = userHasRole("chair");
+
+  const showSwitchItem = (onChair && canSwitchToFaculty) || (onFaculty && canSwitchToChair);
+  const switchLabel = onChair ? "Switch to Faculty View" : "Back to Chair View";
+
+  const handleSwitchView = () => {
+    setMenuOpen(false);
+    if (onChair) {
+      setActiveRole("faculty");
+      navigate("/faculty/overview");
+      return;
+    }
+    // default: go back to chair
+    setActiveRole("chair");
+    navigate("/chair/plantilla");
+  };
 
   // notifications dropdown state
   const [notifOpen, setNotifOpen] = useState(false);
@@ -198,8 +234,22 @@ export default function Topbar({
                   My Account
                 </div>
                 <div className="mx-4 h-px bg-neutral-200" />
+
+                {showSwitchItem && (
+                  <button
+                    onClick={handleSwitchView}
+                    className="flex w-full items-center gap-2 px-4 py-3 text-left text-[15px] text-gray-800 hover:bg-gray-50"
+                  >
+                    <ArrowLeftRight className="h-4 w-4" />
+                    <span>{switchLabel}</span>
+                  </button>
+                )}
+
                 <button
-                  onClick={logout}
+                  onClick={() => {
+                    setMenuOpen(false);
+                    logout();
+                  }}
                   className="flex w-full items-center gap-2 px-4 py-3 text-left text-[15px] text-gray-800 hover:bg-gray-50"
                 >
                   <LogOut className="h-4 w-4" />

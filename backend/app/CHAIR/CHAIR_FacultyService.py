@@ -323,6 +323,10 @@ async def fs_create(payload: Dict[str, Any] = Body(...)):
 
     if to_department not in DEPTS:
         raise HTTPException(status_code=400, detail="to_department must be one of the predefined departments.")
+    if from_department not in DEPTS:
+        raise HTTPException(status_code=400, detail="from_department must be one of the predefined departments.")
+    if to_department == from_department:
+        raise HTTPException(status_code=400, detail="to_department cannot be the same as from_department.")
     if not course_code:
         raise HTTPException(status_code=400, detail="course_code is required.")
 
@@ -335,15 +339,7 @@ async def fs_create(payload: Dict[str, Any] = Body(...)):
             if units is None:
                 units = c.get("units", None)
 
-    # basic sanity on from_department (fallback to course owner dept if not provided)
-    if not from_department:
-        c = await _course_by_code(course_code)
-        if c and c.get("department_id"):
-            dept = await db.departments.find_one({"department_id": c["department_id"]}, {"_id": 0, "dept_name": 1})
-            if dept and dept.get("dept_name"):
-                from_department = dept["dept_name"]
-    if not from_department:
-        raise HTTPException(status_code=400, detail="from_department is required.")
+    # from_department is now required from payload and validated above
 
     fs_id = f"FS{uuid4().hex[:10].upper()}"
     now = _now_iso()
@@ -471,10 +467,14 @@ async def fs_reject(fs_id: str, payload: Dict[str, Any] = Body(default={})):
         {"$set": {"status": "rejected", "remarks": remarks, "updated_at": _now_iso()}}
     )
     # optional log stub (requester could be notified if mapped to an email)
+    from_dept = row.get("from_department", "")
+    rec = RECIPIENT.get(from_dept)
+    to_name, to_email = (rec[0], rec[1]) if rec else (from_dept, "")
+
     await db.email_logs.insert_one({
         "email_id": f"EM{uuid4().hex[:8].upper()}",
-        "to_name": row.get("from_department", ""),
-        "to_email": "",
+        "to_name": to_name,
+        "to_email": to_email,
         "subject": f"Faculty Service Request Rejected: {row.get('course_code','')}",
         "body": f"Request {fs_id} has been rejected.\nRemarks: {remarks}",
         "created_at": _now_iso(),
