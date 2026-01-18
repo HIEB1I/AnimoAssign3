@@ -1,7 +1,8 @@
 // frontend/src/pages/OM/OM_Inbox.tsx
 import { useEffect, useMemo, useState } from "react";
 import { Search, Plus } from "lucide-react";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
+
 
 const cls = (...s: (string | false | undefined)[]) => s.filter(Boolean).join(" ");
 const timeAgo = (d: Date) => {
@@ -38,17 +39,27 @@ function OMInboxMain() {
   const [mails, setMails] = useState<Mail[]>([]);
   const [selected, setSelected] = useState<Mail | null>(null);
   const navigate = useNavigate();
-  
-  const handleBack = () => {
-  // Case 1: standalone route -> use browser history
+  const location = useLocation();
+
+const handleBack = () => {
+  const from = (location.state as any)?.from as string | undefined;
+
+  // If opened from another OM page (Topbar button), go back there.
+  if (from && typeof from === "string" && from.startsWith("/om/")) {
+    navigate(from);
+    return;
+  }
+
+  // Otherwise, try browser history.
   if (window.history.length > 1) {
     navigate(-1);
     return;
   }
-  // Case 2: in-tab inside OM pages -> close the inbox tab and ensure we land on Load Assignment
-  window.dispatchEvent(new Event("om:closeInbox"));
-  navigate("/om/load-assignment");
-  };
+
+  // Fallback.
+  navigate("/om/home/load-assignment");
+};
+
 
   useEffect(() => {
     const user = JSON.parse(localStorage.getItem("animo.user") || "{}");
