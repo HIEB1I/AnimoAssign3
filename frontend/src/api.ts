@@ -2308,13 +2308,41 @@ type Faculty = {
   faculty_name_display: string;
 };
 
+export type DeloadingRow = {
+  deloading_type?: string;
+  units_deloaded?: number;
+  notes?: string;
+  term_id?: string;
+  updated_at?: string | Date;
+};
+
+export async function getOmFacultyWithDeloadings(term_id?: string) {
+  const base = (typeof API_BASE !== "undefined" ? API_BASE : "").replace(/\/+$/, "");
+  const qs = new URLSearchParams();
+  if (term_id) qs.set("term_id", term_id);
+  const url = `${base}/om/load-assignment/faculty-with-deloadings${qs.toString() ? `?${qs.toString()}` : ""}`;
+  const r = await fetch(url, { method: "GET" });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json() as Promise<{ ok: boolean; term_id: string | null; faculty: { faculty_id: string; faculty_name_display: string }[] }>;
+}
+
+export async function getOmFacultyDeloadings(params: { faculty_id: string; term_id?: string }) {
+  const base = (typeof API_BASE !== "undefined" ? API_BASE : "").replace(/\/+$/, "");
+  const qs = new URLSearchParams({ faculty_id: params.faculty_id });
+  if (params.term_id) qs.set("term_id", params.term_id);
+  const url = `${base}/om/load-assignment/faculty-deloadings?${qs.toString()}`;
+  const r = await fetch(url, { method: "GET" });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json() as Promise<{ ok: boolean; term_id: string | null; faculty_id: string; rows: DeloadingRow[] }>;
+}
+
 /** List all sections for the current term (no algorithm) */
 export async function getOmLoadAssignmentList(user_id: string) {
   const base = (typeof API_BASE !== "undefined" ? API_BASE : "").replace(/\/+$/, "");
   const url = `${base}/om/load-assignment/list?user_id=${encodeURIComponent(user_id)}`;
   const r = await fetch(url, { method: "GET" });
   if (!r.ok) throw new Error(await r.text());
-  return r.json() as Promise<{ term: string; rows: OmLoadRow[] }>;
+  return r.json() as Promise<{ term: string; term_id?: string; rows: OmLoadRow[] }>;
 }
 
 /** Auto-assign algorithm run (fill faculty/day/time/room) */
