@@ -380,12 +380,12 @@ export default function OM_RP_LoadRisk() {
                     <tr>
                       {[
                         "Course",
-                        "Demand (secs)",
-                        "FT Filled (secs)",
+                        "Demand (sections)",
+                        "FT Filled (sections)",
                         "FT Assignees",
                         "PT Needed",
                         "Risk",
-                        "Conf.",
+                        "Confidence Level",
                       ].map((h) => (
                         <th key={h} className="px-4 py-2.5 text-center font-semibold whitespace-nowrap border-b">
                           {h}

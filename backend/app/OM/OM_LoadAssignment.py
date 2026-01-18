@@ -34,6 +34,8 @@ COL_CAMPUSES = "campuses"
 COL_LEAVES = "leaves"
 COL_PREFERENCES = "faculty_preferences"
 COL_FACULTY_LOADS = "faculty_loads"
+COL_DELOADINGS = "deloadings"
+COL_DELOADING_TYPES = "deloading_types"
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -82,6 +84,63 @@ async def _active_term() -> Dict[str, Any]:
     ).sort([("acad_year_start", 1), ("term_number", 1)]).to_list(1)
 
     return (nxt[0] if nxt else {})
+
+async def _get_faculty_deloading_summary(db, term_id: str):
+    rows = []
+
+    deloadings = await db["deloadings"].find(
+        {"term_id": term_id}
+    ).to_list(None)
+
+    faculty_cache = {}
+    type_cache = {}
+
+    for d in deloadings:
+        faculty_id = d.get("faculty_id")
+        units = d.get("units_deloaded")
+        type_id = d.get("type_id") or d.get("deloadingtype_id")
+
+        if not faculty_id or not units:
+            continue
+
+        # ---- faculty name lookup (cached) ----
+        if faculty_id not in faculty_cache:
+            faculty = await db["faculty_profiles"].find_one(
+                {"faculty_id": faculty_id}
+            )
+            user = None
+            if faculty:
+                user = await db["users"].find_one(
+                    {"user_id": faculty.get("user_id")}
+                )
+
+            faculty_cache[faculty_id] = (
+                f"{(user or {}).get('first_name','')} {(user or {}).get('last_name','')}".strip()
+                if user else None
+            )
+
+        faculty_name = faculty_cache.get(faculty_id)
+        if not faculty_name:
+            continue
+
+        # ---- deloading type lookup (cached) ----
+        if type_id not in type_cache:
+            dt = await db["deloading_types"].find_one({
+                "$or": [
+                    {"type_id": type_id},
+                    {"deloadingtype_id": type_id},
+                ]
+            })
+            type_cache[type_id] = (dt or {}).get("type")
+
+        rows.append({
+            "faculty_id": faculty_id,
+            "faculty_name": faculty_name,
+            "deloading_type": type_cache.get(type_id),
+            "units_deloaded": units,
+        })
+
+    return rows
 
 def _fmt_time(hhmm: Optional[Any]) -> str:
     """
@@ -712,6 +771,10 @@ async def om_get_all_faculty(db = Depends(get_db)):
 async def get_om_load_assignment_list(user_id: str, db=Depends(get_db)):
     active = await _active_term()
 
+    faculty_deloading_summary = await _get_faculty_deloading_summary(
+        db, active["term_id"]
+    )
+
     # Fetch table rows
     base = await _fetch_rows(user_id, term_id=active["term_id"], db=db)
     rows = base["rows"]
@@ -912,6 +975,7 @@ async def get_om_load_assignment_list(user_id: str, db=Depends(get_db)):
                     }
                 )
     
+    
     return {
         "term": _term_label(active),
         "rows": rows,
@@ -925,7 +989,8 @@ async def get_om_load_assignment_list(user_id: str, db=Depends(get_db)):
         "sectionCampus": section_campus,
         "sectionCourse": section_course,
         "courseTypeOfCourse": course_type_of_course,
-        "blockedGeCmps2": blocked_ge_cmps2,            
+        "blockedGeCmps2": blocked_ge_cmps2,    
+        "faculty_deloading_summary": faculty_deloading_summary,        
     }
 
 @router.post("/load-assignment/run")

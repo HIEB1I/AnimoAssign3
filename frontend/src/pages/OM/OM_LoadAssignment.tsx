@@ -27,7 +27,7 @@ import {
   Redo2,
   X,
   Copy,
-  Upload
+  Upload,
 } from "lucide-react";
 import { InboxContent as OMInboxContent } from "./OM_Inbox";
 
@@ -99,9 +99,11 @@ function SelectBox({
   const [open, setOpen] = useState(false);
 
   // Helper to extract the label from an option (string or object)
-  const getLabel = (opt: SelectOption) => (typeof opt === "string" ? opt : opt.label);
+  const getLabel = (opt: SelectOption) =>
+    typeof opt === "string" ? opt : opt.label;
   // Helper to extract the value from an option
-  const getValue = (opt: SelectOption) => (typeof opt === "string" ? opt : opt.value);
+  const getValue = (opt: SelectOption) =>
+    typeof opt === "string" ? opt : opt.value;
 
   // 2. Updated hover logic to find index based on value
   const [hover, setHover] = useState<number>(() =>
@@ -125,8 +127,8 @@ function SelectBox({
   }, [open]);
 
   // Find the label of the currently selected value for the button display
-const selectedOption = options.find((o) => getValue(o) === value);
-const displayLabel = selectedOption ? getValue(selectedOption) : null;
+  const selectedOption = options.find((o) => getValue(o) === value);
+  const displayLabel = selectedOption ? getValue(selectedOption) : null;
 
   return (
     <div className={cls("relative min-w-[120px]", className)}>
@@ -164,8 +166,11 @@ const displayLabel = selectedOption ? getValue(selectedOption) : null;
                 }}
                 className={cls(
                   "cursor-pointer px-3 py-1.5 text-[13px]",
-                  isSelected ? "bg-emerald-50 text-emerald-700 font-medium" : 
-                  hover === i ? "bg-emerald-50" : ""
+                  isSelected
+                    ? "bg-emerald-50 text-emerald-700 font-medium"
+                    : hover === i
+                    ? "bg-emerald-50"
+                    : ""
                 )}
               >
                 {optLabel}
@@ -177,7 +182,6 @@ const displayLabel = selectedOption ? getValue(selectedOption) : null;
     </div>
   );
 }
-
 
 function normalizeTimeToHHMM(input: string): string {
   const digits = (input || "").replace(/\D/g, "");
@@ -213,7 +217,8 @@ function TimeBeginInput({
   const listRef = useRef<HTMLDivElement>(null);
 
   const getValue = (o: SelectOption) => (typeof o === "string" ? o : o.value);
-  const getLabel = (o: SelectOption) => (typeof o === "string" ? o : o.label ?? o.value);
+  const getLabel = (o: SelectOption) =>
+    typeof o === "string" ? o : o.label ?? o.value;
 
   useEffect(() => {
     // Keep input in sync when not actively typing
@@ -296,8 +301,11 @@ function TimeBeginInput({
                   onClick={() => pick(optValue)}
                   className={cls(
                     "cursor-pointer px-3 py-1.5 text-[13px]",
-                    isSelected ? "bg-emerald-50 text-emerald-700 font-medium" :
-                    hover === i ? "bg-emerald-50" : ""
+                    isSelected
+                      ? "bg-emerald-50 text-emerald-700 font-medium"
+                      : hover === i
+                      ? "bg-emerald-50"
+                      : ""
                   )}
                 >
                   {optLabel}
@@ -305,7 +313,9 @@ function TimeBeginInput({
               );
             })
           ) : (
-            <div className="px-3 py-2 text-[13px] text-gray-400">No matches</div>
+            <div className="px-3 py-2 text-[13px] text-gray-400">
+              No matches
+            </div>
           )}
         </div>
       )}
@@ -1001,7 +1011,9 @@ const ApproveModal = ({
         </h3>
         <p className="mx-auto mb-6 max-w-md text-center text-sm text-neutral-600">
           Please confirm that this is the final{" "}
-          <span className="font-semibold">Faculty Load Assignment.</span>Once submitted, this action cannot be undone and the button will be disabled.
+          <span className="font-semibold">Faculty Load Assignment.</span>Once
+          submitted, this action cannot be undone and the button will be
+          disabled.
         </p>
         <div className="flex justify-end gap-2">
           <button
@@ -1594,6 +1606,17 @@ export default function OM_LoadAssignment() {
   const isRun = mode === "run";
   const hasReco = isRunning && rows.length > 0;
   const [showApprove, setShowApprove] = useState(false);
+  type FacultyDeloadingRow = {
+    faculty_id: string;
+    faculty_name: string;
+    deloading_type?: string;
+    units_deloaded?: number;
+  };
+  
+  const [facultyDeloadings, setFacultyDeloadings] = useState<FacultyDeloadingRow[]>(
+    []
+  );  
+
   const [approved, setApproved] = useState(false);
   const [showSend, setShowSend] = useState(false);
   const [reqChange, setReqChange] = useState<{ open: boolean; from?: string }>({
@@ -1637,14 +1660,13 @@ export default function OM_LoadAssignment() {
   };
 
   const updateRow = (
-  id: string,
-  patch: Partial<Row>,
-  options?: { markDirty?: boolean }
-) => {
-  const next = rows.map((r) => (r.id === id ? { ...r, ...patch } : r));
-  commitRows(next, { markDirty: options?.markDirty !== false });
-};
-
+    id: string,
+    patch: Partial<Row>,
+    options?: { markDirty?: boolean }
+  ) => {
+    const next = rows.map((r) => (r.id === id ? { ...r, ...patch } : r));
+    commitRows(next, { markDirty: options?.markDirty !== false });
+  };
 
   const handleUndo = () => {
     if (!undoStackRef.current.length) return;
@@ -1733,9 +1755,10 @@ export default function OM_LoadAssignment() {
 
   // Derived: scoped history availability (re-rendered via historyVersion)
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
- const canUndo = isRunning && historyVersion >= 0 && undoStackRef.current.length > 0;
-const canRedo = isRunning && historyVersion >= 0 && redoStackRef.current.length > 0;
-
+  const canUndo =
+    isRunning && historyVersion >= 0 && undoStackRef.current.length > 0;
+  const canRedo =
+    isRunning && historyVersion >= 0 && redoStackRef.current.length > 0;
 
   const loadFromServer = async () => {
     if (!userId) return;
@@ -1758,6 +1781,18 @@ const canRedo = isRunning && historyVersion >= 0 && redoStackRef.current.length 
       courseTypeOfCourse: (res as any)?.courseTypeOfCourse || {},
     });
 
+    setBlockedGeCmps2(
+      Array.isArray((res as any)?.blockedGeCmps2)
+        ? (res as any).blockedGeCmps2
+        : []
+    );
+
+    setFacultyDeloadings(
+      Array.isArray((res as any)?.faculty_deloading_summary)
+        ? (res as any).faculty_deloading_summary
+        : []
+    );    
+
     setRows(Array.isArray(res?.rows) ? res.rows : []);
     setTerm(typeof res?.term === "string" ? res.term : "");
     setMode("run");
@@ -1774,7 +1809,7 @@ const canRedo = isRunning && historyVersion >= 0 && redoStackRef.current.length 
 
   const addRow = () => {
     setShowNewSectionModal(true);
-  };  
+  };
 
   const getEditFlags = (r: Row) => {
     const editAll = !!r.editable;
@@ -1875,12 +1910,7 @@ const canRedo = isRunning && historyVersion >= 0 && redoStackRef.current.length 
 
     // REQUIRED core fields
     const missingCore =
-      !r.section ||
-      !r.faculty ||
-      !r.mode ||
-      !r.day1 ||
-      !r.begin1 ||
-      !r.end1;
+      !r.section || !r.faculty || !r.mode || !r.day1 || !r.begin1 || !r.end1;
 
     // For meeting 2: if any of the 4 is filled, require all 4
     const hasAnyMeet2 = !!r.day2 || !!r.begin2 || !!r.end2;
@@ -2384,66 +2414,63 @@ const canRedo = isRunning && historyVersion >= 0 && redoStackRef.current.length 
     return alerts;
   }, [rows, rowFlags, validationContext, isRowIncompleteForApproval]);
 
+  type BlockedGeCmps2Item = {
+    campus_id: string;
+    campus_name?: string;
+    course_id: string;
+    course_code?: string;
+    section_id: string;
+    section_code?: string;
+    day: string;
+    begin: string;
+    end: string;
+  };
+
+  const [blockedGeCmps2, setBlockedGeCmps2] = useState<BlockedGeCmps2Item[]>(
+    []
+  );
+
   type BlockedSectionRow = {
-    rowId: string;
-    course: string; // course_code
-    section: string; // sections.section_code
+    rowId: string; // section_id
+    course: string;
+    section: string;
     campusId: string;
     campusName?: string;
-    day1?: string;
-    begin1?: string;
-    end1?: string;
-    day2?: string;
-    begin2?: string;
-    end2?: string;
   };
 
   const blockedSections: BlockedSectionRow[] = useMemo(() => {
-    const res: BlockedSectionRow[] = [];
-    const seen = new Set<string>();
+    const bySection: Record<string, BlockedSectionRow> = {};
 
-    const sectionCampus = validationContext.sectionCampus || {};
-    const sectionCourse = validationContext.sectionCourse || {};
-    const courseType = validationContext.courseTypeOfCourse || {};
-    const campusNames = validationContext.campusNames || {};
+    (blockedGeCmps2 || []).forEach(
+      (b) => {
+        const sid = b.section_id;
+        if (!sid) return;
 
-    for (const r of rows) {
-      const sid = r.id;
-      if (!sid) continue;
+        if (!bySection[sid]) {
+          bySection[sid] = {
+            rowId: sid,
+            course: b.course_code || b.course_id || "—",
+            section: b.section_code || sid,
+            campusId: b.campus_id || "",
+            campusName: b.campus_name || b.campus_id || "",
+          };
+        }
+        return Object.values(bySection).filter(
+          (x) => (x.campusId || "").toUpperCase() === "CMPS0002"
+        );
+      },
+      [blockedGeCmps2]
+    );
 
-      const campusIdRaw = sectionCampus[sid] || "";
-      const campusId = campusIdRaw.toUpperCase();
-      if (campusId !== "CMPS0002") continue; // only CMPS0002
+    // keep only CMPS0002 in this tab (optional)
+    return Object.values(bySection).filter(
+      (x) => (x.campusId || "").toUpperCase() === "CMPS0002"
+    );
+  }, [blockedGeCmps2]);
 
-      const cid = sectionCourse[sid];
-      const toc = (courseType[cid] || "").toUpperCase();
-      if (toc !== "GE") continue; // only GE courses are "blocked"
-
-      const key = sid;
-      if (seen.has(key)) continue;
-      seen.add(key);
-
-      res.push({
-        rowId: sid,
-        course: r.course || cid || "?",
-        section: r.section || "",
-        campusId: campusIdRaw || "",
-        campusName: campusNames[campusIdRaw] || campusIdRaw || "",
-        day1: r.day1,
-        begin1: r.begin1,
-        end1: r.end1,
-        day2: r.day2,
-        begin2: r.begin2,
-        end2: r.end2,
-      });
-    }
-
-    return res;
-  }, [rows, validationContext]);
-
-  const [summaryTab, setSummaryTab] = useState<"units" | "second" | "blocked">(
-    "units"
-  );
+  const [summaryTab, setSummaryTab] = useState<
+    "units" | "second" | "blocked" | "deloadings"
+  >("units");
 
   const courseOptions = useMemo(() => {
     const map: Record<string, string> = {};
@@ -2553,7 +2580,9 @@ const canRedo = isRunning && historyVersion >= 0 && redoStackRef.current.length 
               <div className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
                 <div className="flex items-center justify-between px-4 pt-4">
                   <div className="flex items-center gap-2">
-                    <h2 className="text-lg font-semibold">Load Recommendations</h2>
+                    <h2 className="text-lg font-semibold">
+                      Load Recommendations
+                    </h2>
 
                     <div className="flex items-center gap-1">
                       <button
@@ -2672,7 +2701,6 @@ const canRedo = isRunning && historyVersion >= 0 && redoStackRef.current.length 
                     } */}
                   </div>
                   {/* --- MODIFIED SECTION END --- */}
-
                 </div>
 
                 {/* Match APO_CourseOfferings table styling (sticky header, bordered cells, emerald header text) */}
@@ -2713,22 +2741,54 @@ const canRedo = isRunning && historyVersion >= 0 && redoStackRef.current.length 
                             />
                           )}
                         </th>
-                        <th className="px-3 py-2 text-left border border-gray-300">Course & Title</th>
-                        <th className="px-3 py-2 text-center border border-gray-300">Units</th>
-                        <th className="px-3 py-2 text-center border border-gray-300">Section</th>
-                        <th className="px-3 py-2 text-left border border-gray-300">Faculty</th>
-                        <th className="px-3 py-2 text-center border border-gray-300">Day 1</th>
-                        <th className="px-3 py-2 text-center border border-gray-300">Begin 1</th>
-                        <th className="px-3 py-2 text-center border border-gray-300">End 1</th>
-                        <th className="px-3 py-2 text-center border border-gray-300">Room 1</th>
-                        <th className="px-3 py-2 text-center border border-gray-300">Day 2</th>
-                        <th className="px-3 py-2 text-center border border-gray-300">Begin 2</th>
-                        <th className="px-3 py-2 text-center border border-gray-300">End 2</th>
-                        <th className="px-3 py-2 text-center border border-gray-300">Room 2</th>
-                        <th className="px-3 py-2 text-center border border-gray-300">Capacity</th>
-                        <th className="px-3 py-2 text-center border border-gray-300">Mode</th>
-                        <th className="px-3 py-2 text-center border border-gray-300">Status</th>
-                        <th className="px-3 py-2 text-center border border-gray-300">Actions</th>
+                        <th className="px-3 py-2 text-left border border-gray-300">
+                          Course & Title
+                        </th>
+                        <th className="px-3 py-2 text-center border border-gray-300">
+                          Units
+                        </th>
+                        <th className="px-3 py-2 text-center border border-gray-300">
+                          Section
+                        </th>
+                        <th className="px-3 py-2 text-left border border-gray-300">
+                          Faculty
+                        </th>
+                        <th className="px-3 py-2 text-center border border-gray-300">
+                          Day 1
+                        </th>
+                        <th className="px-3 py-2 text-center border border-gray-300">
+                          Begin 1
+                        </th>
+                        <th className="px-3 py-2 text-center border border-gray-300">
+                          End 1
+                        </th>
+                        <th className="px-3 py-2 text-center border border-gray-300">
+                          Room 1
+                        </th>
+                        <th className="px-3 py-2 text-center border border-gray-300">
+                          Day 2
+                        </th>
+                        <th className="px-3 py-2 text-center border border-gray-300">
+                          Begin 2
+                        </th>
+                        <th className="px-3 py-2 text-center border border-gray-300">
+                          End 2
+                        </th>
+                        <th className="px-3 py-2 text-center border border-gray-300">
+                          Room 2
+                        </th>
+                        <th className="px-3 py-2 text-center border border-gray-300">
+                          Capacity
+                        </th>
+                        <th className="px-3 py-2 text-center border border-gray-300">
+                          Mode
+                        </th>
+                        <th className="px-3 py-2 text-center border border-gray-300">
+                          Status
+                        </th>
+                        <th className="px-3 py-2 text-center border border-gray-300">
+                          Actions
+                        </th>
                       </tr>
                     </thead>
 
@@ -2856,7 +2916,6 @@ const canRedo = isRunning && historyVersion >= 0 && redoStackRef.current.length 
                                   onChange={(v) => setCell(r.id, "day1", v)}
                                   options={DAY_OPTIONS}
                                 />
-
                               ) : (
                                 <span>{r.day1 || "—"}</span>
                               )}
@@ -2871,10 +2930,8 @@ const canRedo = isRunning && historyVersion >= 0 && redoStackRef.current.length 
                                     if (v) patch.end1 = calculateEndTime(v);
                                     updateRow(r.id, patch, { markDirty: true });
                                   }}
-
                                   options={TIME_BEGIN_OPTIONS}
                                   className="w-[120px] text-center"
-
                                 />
                               ) : (
                                 <span>{r.begin1 || "—"}</span>
@@ -2916,8 +2973,6 @@ const canRedo = isRunning && historyVersion >= 0 && redoStackRef.current.length 
                                   onChange={(v) => setCell(r.id, "day2", v)}
                                   options={DAY_OPTIONS}
                                 />
-
-
                               ) : (
                                 <span>{r.day2 || "—"}</span>
                               )}
@@ -2936,7 +2991,6 @@ const canRedo = isRunning && historyVersion >= 0 && redoStackRef.current.length 
                                   }}
                                   options={TIME_BEGIN_OPTIONS}
                                   className="w-[120px] text-center"
-
                                 />
                               ) : (
                                 <span>{r.begin2 || "—"}</span>
@@ -3032,16 +3086,22 @@ const canRedo = isRunning && historyVersion >= 0 && redoStackRef.current.length 
                                   <button
                                     type="button"
                                     onClick={() => handleCopyRow(r)}
-                                    title={copiedRowId === r.id ? "Copied!" : "Copy row"}
+                                    title={
+                                      copiedRowId === r.id
+                                        ? "Copied!"
+                                        : "Copy row"
+                                    }
                                     className="flex h-7 w-7 items-center justify-center rounded-full border-2 border-gray-300 text-gray-600 hover:bg-gray-50"
                                   >
                                     {copiedRowId === r.id ? (
-                                      <Check className="h-4 w-4 text-emerald-600" strokeWidth={2.5} />
+                                      <Check
+                                        className="h-4 w-4 text-emerald-600"
+                                        strokeWidth={2.5}
+                                      />
                                     ) : (
                                       <Copy className="h-4 w-4" />
                                     )}
                                   </button>
-
 
                                   {String(r.id).startsWith("manual-") && (
                                     <button
@@ -3183,6 +3243,18 @@ const canRedo = isRunning && historyVersion >= 0 && redoStackRef.current.length 
                         )}
                       >
                         Blocked Sections
+                      </button>
+
+                      <button
+                        onClick={() => setSummaryTab("deloadings")}
+                        className={cls(
+                          "px-3 py-1 text-xs rounded-full border",
+                          summaryTab === "deloadings"
+                            ? "bg-emerald-600 text-white border-emerald-600"
+                            : "bg-white text-gray-700 border-gray-300"
+                        )}
+                      >
+                        Faculty Deloadings
                       </button>
                     </div>
                   </div>
@@ -3403,19 +3475,12 @@ const canRedo = isRunning && historyVersion >= 0 && redoStackRef.current.length 
                               </tr>
                             ) : (
                               blockedSections.map((b) => {
-                                const slot1 =
-                                  b.day1 && b.begin1 && b.end1
-                                    ? `${b.day1} ${toPrettyTime(
-                                        b.begin1
-                                      )}–${toPrettyTime(b.end1)}`
-                                    : "—";
+                                const slots = blockedGeCmps2
+                                  .filter((x) => x.section_id === b.rowId)
+                                  .map((x) => `${x.day} ${x.begin}–${x.end}`);
 
-                                const slot2 =
-                                  b.day2 && b.begin2 && b.end2
-                                    ? `${b.day2} ${toPrettyTime(
-                                        b.begin2
-                                      )}–${toPrettyTime(b.end2)}`
-                                    : "—";
+                                const slot1 = slots[0] ?? "—";
+                                const slot2 = slots[1] ?? "—";
 
                                 return (
                                   <tr key={b.rowId}>
@@ -3437,6 +3502,54 @@ const canRedo = isRunning && historyVersion >= 0 && redoStackRef.current.length 
                                   </tr>
                                 );
                               })
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
+                  {summaryTab === "deloadings" && (
+                    <div className="px-4 pb-4 border-t">
+                      <div className="mt-3 overflow-x-auto rounded-lg border border-gray-200 bg-white">
+                        <table className="min-w-full divide-y divide-gray-200 text-xs">
+                          <thead className="bg-gray-50">
+                            <tr>
+                              <th className="px-3 py-2 text-left font-semibold text-gray-700">
+                                Faculty
+                              </th>
+                              <th className="px-3 py-2 text-left font-semibold text-gray-700">
+                                Deloading Type
+                              </th>
+                              <th className="px-3 py-2 text-right font-semibold text-gray-700">
+                                Units
+                              </th>
+                            </tr>
+                          </thead>
+
+                          <tbody className="divide-y divide-gray-100">
+                            {facultyDeloadings.length === 0 ? (
+                              <tr>
+                                <td
+                                  colSpan={3}
+                                  className="px-3 py-4 text-center text-gray-500"
+                                >
+                                  No faculty deloadings for this term.
+                                </td>
+                              </tr>
+                            ) : (
+                              facultyDeloadings.map((d, i) => (
+                                <tr key={`${d.faculty_id}-${i}`}>
+                                  <td className="px-3 py-2 text-gray-900 font-medium">
+                                    {d.faculty_name}
+                                  </td>
+                                  <td className="px-3 py-2 text-gray-700">
+                                    {d.deloading_type || "—"}
+                                  </td>
+                                  <td className="px-3 py-2 text-right text-gray-700">
+                                    {d.units_deloaded}
+                                  </td>
+                                </tr>
+                              ))
                             )}
                           </tbody>
                         </table>
@@ -3481,7 +3594,7 @@ const canRedo = isRunning && historyVersion >= 0 && redoStackRef.current.length 
         onClose={() => setReqChange({ open: false })}
       />
 
-<NewSectionModal
+      <NewSectionModal
         open={showNewSectionModal}
         onClose={() => setShowNewSectionModal(false)}
         courseOptions={courseOptions}
@@ -3497,7 +3610,7 @@ const canRedo = isRunning && historyVersion >= 0 && redoStackRef.current.length 
               id: `manual-${Date.now()}`,
               course,
               title,
-              units: units ? (Number(units) || "") : "",
+              units: units ? Number(units) || "" : "",
               section,
               faculty: "",
               faculty_id: undefined,
@@ -3513,7 +3626,7 @@ const canRedo = isRunning && historyVersion >= 0 && redoStackRef.current.length 
               mode: "",
               status: "",
               editable: true,
-              campus_id, 
+              campus_id,
             },
           ]);
 
@@ -3522,7 +3635,6 @@ const canRedo = isRunning && historyVersion >= 0 && redoStackRef.current.length 
           setShowNewSectionModal(false);
         }}
       />
-
     </AppShell>
   );
 }
