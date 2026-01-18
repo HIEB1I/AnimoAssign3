@@ -2006,6 +2006,10 @@ export type OMSCSchedulePreset = {
   day2: DayCode | "";
   begin2: string;
   end2: string;
+
+  schedule_id1?: string | null;
+  schedule_id2?: string | null;
+  assignment_id?: string | null;
 };
 
 export type OMSpecialClassRow = {
@@ -2045,6 +2049,10 @@ export type OMSpecialClassRow = {
   end2?: string;
 
   submitted_at?: string;
+  schedule_id1?: string | null;
+  schedule_id2?: string | null;
+  assignment_id?: string | null;
+
 };
 
 export type OMSpecialClassDetail = OMSpecialClassRow & {

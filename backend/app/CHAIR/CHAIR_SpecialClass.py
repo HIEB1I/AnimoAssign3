@@ -34,7 +34,9 @@ COL_SECTIONS = "sections"
 COL_SECTION_SCHEDULES = "section_schedules"
 COL_FAC_ASSIGN = "faculty_assignments"
 COL_FAC_PROFILES = "faculty_profiles"
+COL_FAC_LOADS = "faculty_loads"  
 COL_PREEN_COUNT = "preenlistment_count"
+
 
 OM_ALLOWED_STATUSES = ["Forwarded To Department", "Approved", "Rejected"]
 
@@ -217,7 +219,6 @@ async def _active_term() -> Dict[str, Any]:
 
 
 async def _get_allowed_statuses() -> List[str]:
-    # Ignore DB-config statuses for this module and force the exact set
     return OM_ALLOWED_STATUSES
 
 
@@ -261,6 +262,220 @@ async def _latest_faculty_assignment_for_section(section_id: str) -> Dict[str, O
         "assignment_id": r.get("assignment_id") or None,
     }
 
+async def _schedule_ids_for_section(section_id: str) -> Tuple[Optional[str], Optional[str]]:
+    rows = (
+        await db[COL_SECTION_SCHEDULES]
+        .find({"section_id": section_id}, {"_id": 0, "schedule_id": 1})
+        .sort("schedule_id", ASCENDING)
+        .to_list(50)
+    )
+    ids = [r.get("schedule_id") for r in rows if r.get("schedule_id")]
+    sid1 = ids[0] if len(ids) >= 1 else None
+    sid2 = ids[1] if len(ids) >= 2 else None
+    return sid1, sid2
+
+
+async def _section_schedule_two_from_schedule_ids(
+    schedule_id1: Optional[str],
+    schedule_id2: Optional[str],
+) -> Dict[str, str]:
+    ids = [x for x in [schedule_id1, schedule_id2] if x]
+    if not ids:
+        return {"day1": "", "begin1": "", "end1": "", "day2": "", "begin2": "", "end2": ""}
+
+    rows = await db[COL_SECTION_SCHEDULES].find(
+        {"schedule_id": {"$in": ids}},
+        {"_id": 0, "schedule_id": 1, "day": 1, "start_time": 1, "end_time": 1},
+    ).to_list(10)
+
+    # keep stable order by schedule_id
+    rows.sort(key=lambda r: (r.get("schedule_id") or ""))
+
+    entries: List[Tuple[str, str, str]] = []
+    for r in rows:
+        d = _normalize_day(r.get("day"))
+        if d not in ALLOWED_DAYS:
+            continue
+        st = _to_hhmm(r.get("start_time"))
+        et = _to_hhmm(r.get("end_time"))
+        if not (_is_valid_hhmm(st) and _is_valid_hhmm(et)):
+            continue
+        if _mins(et) <= _mins(st):
+            continue
+        entries.append((d, st, et))
+
+    out = {"day1": "", "begin1": "", "end1": "", "day2": "", "begin2": "", "end2": ""}
+    if len(entries) >= 1:
+        out["day1"], out["begin1"], out["end1"] = entries[0]
+    if len(entries) >= 2:
+        out["day2"], out["begin2"], out["end2"] = entries[1]
+    return out
+
+
+async def _next_seq_id(coll: str, id_field: str, prefix: str, width: int) -> str:
+    # expects ids like SEC0001 / SCH0001-01 is NOT used here (only base ids like SEC/ASG)
+    regex = f"^{prefix}[0-9]{{{width}}}$"
+    last = (
+        await db[coll]
+        .find({id_field: {"$regex": regex}}, {"_id": 0, id_field: 1})
+        .sort(id_field, -1)
+        .limit(1)
+        .to_list(1)
+    )
+    if not last:
+        n = 1
+    else:
+        s = str(last[0].get(id_field) or "")
+        try:
+            n = int(s.replace(prefix, "")) + 1
+        except Exception:
+            n = 1
+    return f"{prefix}{n:0{width}d}"
+
+
+async def _maybe_load_id_for_faculty(term_id: str, faculty_id: str) -> str:
+    # best-effort: get dept_id from faculty_profiles then find faculty_loads for that dept+term
+    prof = await db[COL_FAC_PROFILES].find_one(
+        {"faculty_id": faculty_id},
+        {"_id": 0, "department_id": 1},
+    )
+    dept_id = (prof or {}).get("department_id")
+    if not dept_id:
+        return ""
+
+    load = await db[COL_FAC_LOADS].find_one(
+        {"term_id": term_id, "department_id": dept_id},
+        {"_id": 0, "load_id": 1},
+    )
+    return (load or {}).get("load_id") or ""
+
+
+async def _create_custom_section_bundle(
+    *,
+    term_id: str,
+    course_id: str,
+    section_code: str,
+    sched: Dict[str, str],
+    faculty_id: str,
+) -> Dict[str, Optional[str]]:
+    """
+    Creates:
+      - sections (SECxxxx)
+      - section_schedules (SCHxxxx-01/02)
+      - faculty_assignments (ASGxxxx)
+    Returns ids to store on special_class:
+      section_id, schedule_id1, schedule_id2, assignment_id
+    """
+    section_code = (section_code or "").strip().upper()
+    if not section_code:
+        raise HTTPException(status_code=400, detail="section_code is required for custom schedule.")
+
+    # must have at least one valid schedule entry
+    if not (sched.get("day1") and sched.get("begin1") and sched.get("end1")) and not (
+        sched.get("day2") and sched.get("begin2") and sched.get("end2")
+    ):
+        raise HTTPException(status_code=400, detail="At least one schedule entry is required for custom schedule.")
+
+    faculty_id = (faculty_id or "").strip()
+    if not faculty_id:
+        raise HTTPException(status_code=400, detail="faculty_id is required for custom schedule.")
+
+    now = datetime.utcnow()
+
+    # --- create section ---
+    section_id = await _next_seq_id(COL_SECTIONS, "section_id", "SEC", 4)
+    sec_doc = {
+        "section_id": section_id,
+        "section_code": section_code,
+        "term_id": term_id,
+        "course_id": course_id,
+        "enrollment_cap": 45,
+        "enrolled": 0,
+        "batch_number": 0,
+        "status": "active",
+        "remarks": "SPECIAL CLASS",
+        "created_at": now,
+        "updated_at": now,
+    }
+    await db[COL_SECTIONS].insert_one(sec_doc)
+
+    # --- create schedules ---
+    # SEC0007 -> SCH0007-01 / SCH0007-02
+    try:
+        sec_num = int(section_id.replace("SEC", ""))
+    except Exception:
+        sec_num = 0
+    sch_base = f"SCH{sec_num:04d}"
+
+    def _hhmm_to_db(hhmm: str) -> str:
+        # store like sample: "730" not "0730"
+        s = _to_hhmm(hhmm)
+        if not s:
+            return ""
+        try:
+            return str(int(s))
+        except Exception:
+            return s
+
+    schedule_id1: Optional[str] = None
+    schedule_id2: Optional[str] = None
+    sched_docs: List[Dict[str, Any]] = []
+
+    if sched.get("day1") and sched.get("begin1") and sched.get("end1"):
+        schedule_id1 = f"{sch_base}-01"
+        sched_docs.append(
+            {
+                "schedule_id": schedule_id1,
+                "section_id": section_id,
+                "day": sched["day1"],
+                "start_time": _hhmm_to_db(sched["begin1"]),
+                "end_time": _hhmm_to_db(sched["end1"]),
+                "room_id": None,
+                "room_type": "Online",
+                "created_at": now,
+                "updated_at": now,
+            }
+        )
+
+    if sched.get("day2") and sched.get("begin2") and sched.get("end2"):
+        schedule_id2 = f"{sch_base}-02"
+        sched_docs.append(
+            {
+                "schedule_id": schedule_id2,
+                "section_id": section_id,
+                "day": sched["day2"],
+                "start_time": _hhmm_to_db(sched["begin2"]),
+                "end_time": _hhmm_to_db(sched["end2"]),
+                "room_id": None,
+                "room_type": "Online",
+                "created_at": now,
+                "updated_at": now,
+            }
+        )
+
+    if sched_docs:
+        await db[COL_SECTION_SCHEDULES].insert_many(sched_docs)
+
+    # --- create faculty assignment ---
+    assignment_id = await _next_seq_id(COL_FAC_ASSIGN, "assignment_id", "ASG", 4)
+    load_id = await _maybe_load_id_for_faculty(term_id, faculty_id)
+
+    asg_doc = {
+        "assignment_id": assignment_id,
+        "load_id": load_id,
+        "section_id": section_id,
+        "faculty_id": faculty_id,
+        "created_at": now,
+        "is_archived": False,
+    }
+    await db[COL_FAC_ASSIGN].insert_one(asg_doc)
+
+    return {
+        "section_id": section_id,
+        "schedule_id1": schedule_id1,
+        "schedule_id2": schedule_id2,
+        "assignment_id": assignment_id,
+    }
 
 async def _section_schedule_two(section_id: str) -> Dict[str, str]:
     rows = await db[COL_SECTION_SCHEDULES].find(
@@ -301,7 +516,15 @@ async def _build_faculty_options() -> List[Dict[str, Any]]:
     uids = [p.get("user_id") for p in profs if p.get("user_id")]
     users = await db[COL_USERS].find(
         {"$or": [{"user_id": {"$in": uids}}, {"userId": {"$in": uids}}]},
-        {"_id": 0, "user_id": 1, "userId": 1, "first_name": 1, "last_name": 1, "firstName": 1, "lastName": 1},
+        {
+            "_id": 0,
+            "user_id": 1,
+            "userId": 1,
+            "first_name": 1,
+            "last_name": 1,
+            "firstName": 1,
+            "lastName": 1,
+        },
     ).to_list(10000)
 
     umap: Dict[str, Dict[str, Any]] = {}
@@ -320,7 +543,13 @@ async def _build_faculty_options() -> List[Dict[str, Any]]:
             u.get("first_name") or u.get("firstName") or "",
             u.get("last_name") or u.get("lastName") or "",
         )
-        out.append({"faculty_id": fid, "faculty_name": nm, "department_id": p.get("department_id")})
+        out.append(
+            {
+                "faculty_id": fid,
+                "faculty_name": nm,
+                "department_id": p.get("department_id"),
+            }
+        )
 
     out.sort(key=lambda x: x.get("faculty_name") or "")
     return out
@@ -344,17 +573,27 @@ async def _schedule_presets(term_id: str, course_id: str) -> List[Dict[str, Any]
         fac_id = fac.get("faculty_id")
         fac_name = await _faculty_name_from_id(fac_id)
 
+        sid1, sid2 = await _schedule_ids_for_section(sid)
         out.append(
             {
+                # keep schedule_id as selection key (frontend expects a single string)
                 "schedule_id": sid,
                 "section_id": sid,
                 "section_code": s.get("section_code") or "",
                 "label": label,
                 "faculty_id": fac_id,
                 "faculty_name": fac_name,
+
+                # ids to store on special_class (no day/begin fields stored there)
+                "schedule_id1": sid1,
+                "schedule_id2": sid2,
+                "assignment_id": fac.get("assignment_id"),
+
+                # still return display fields for UI
                 **df,
             }
         )
+
 
     out.sort(key=lambda x: (x.get("label") or "", x.get("section_code") or ""))
     return out
@@ -435,11 +674,18 @@ async def _shape_row(r: Dict[str, Any], maps: Dict[str, Any]) -> Dict[str, Any]:
     if course_units in (None, "", 0):
         course_units = c.get("units", "") or ""
 
-    section_code = (s.get("section_code") or "").strip() if sid else (r.get("section_code") or "").strip()
+    section_code = (s.get("section_code") or "").strip() if sid else ""
 
-    if sid:
+    # schedule is derived by IDs (schedule_id1/2) if present, else by section_id
+    schedule_id1 = (r.get("schedule_id1") or "").strip() or None
+    schedule_id2 = (r.get("schedule_id2") or "").strip() or None
+
+    if schedule_id1 or schedule_id2:
+        df = await _section_schedule_two_from_schedule_ids(schedule_id1, schedule_id2)
+    elif sid:
         df = await _section_schedule_two(sid)
     else:
+        # backward-compat only (old rows)
         df = {
             "day1": _normalize_day(r.get("day1")),
             "begin1": _to_hhmm(r.get("begin1")),
@@ -449,60 +695,59 @@ async def _shape_row(r: Dict[str, Any], maps: Dict[str, Any]) -> Dict[str, Any]:
             "end2": _to_hhmm(r.get("end2")),
         }
 
+    # faculty derived by assignment_id first; fallback to latest assignment for section
+    assignment_id = (r.get("assignment_id") or r.get("faculty_assignment_id") or "").strip() or None
+
     faculty_id: Optional[str] = None
     faculty_name = "UNASSIGNED"
+
     if status_norm == "SUBMITTED":
         faculty_id = None
         faculty_name = "UNASSIGNED"
     else:
-        if sid:
+        if assignment_id:
+            asg = await db[COL_FAC_ASSIGN].find_one(
+                {"assignment_id": assignment_id, "is_archived": {"$ne": True}},
+                {"_id": 0, "faculty_id": 1},
+            )
+            faculty_id = (asg or {}).get("faculty_id") or None
+        elif sid:
             fa = await _latest_faculty_assignment_for_section(sid)
             faculty_id = fa.get("faculty_id")
-        else:
-            faculty_id = (r.get("faculty_id") or r.get("facultyId") or "").strip() or None
+
         faculty_name = await _faculty_name_from_id(faculty_id)
+
 
     return {
         "special_id": r.get("special_id"),
         "term_id": r.get("term_id"),
         "user_id": uid,
-
         "student_name": student_name,
         "student_number": r.get("student_number", ""),
-
         "course_id": cid,
         "course_code": course_code,
         "course_title": c.get("course_title") or "",
         "course_department": d.get("department_name") or d.get("dept_name") or "",
-
         "program_id": pid,
         "program_code": p.get("program_code") or "",
-
         "reason": r.get("reason") or "",
         "reason_other": r.get("reason_other") or "",
-
         "status": status,
         "remarks": r.get("remarks") or "",
-
         "faculty_id": faculty_id,
         "faculty_name": faculty_name,
-
         "section_id": sid,
         "section_code": section_code,
-
         "day1": df.get("day1") or "",
         "begin1": df.get("begin1") or "",
         "end1": df.get("end1") or "",
         "day2": df.get("day2") or "",
         "begin2": df.get("begin2") or "",
         "end2": df.get("end2") or "",
-
         "submitted_at": r.get("submitted_at"),
         "updated_at": r.get("updated_at"),
-
         "department_id": did,
         "department_name": d.get("department_name") or d.get("dept_name") or "",
-
         "course_units": course_units,
         "units_remaining": r.get("units_remaining", ""),
         "graduating_after_term": bool(r.get("graduating_after_term", False)),
@@ -648,16 +893,16 @@ def _fill_rect(c, x, y, w, h, fill_color):
 def _draw_checkbox(c, x, y, size=10, checked=False):
     _draw_rect(c, x, y, size, size, stroke=1, fill=0)
     if checked:
-        c.setFont("Helvetica-Bold", size)
-        c.drawCentredString(x + size / 2, y + size * 0.15, "X")
-        c.setFont("Helvetica", 10)
+        pad = max(1.5, size * 0.22)
+        c.setLineWidth(1.4)
+        c.line(x + pad, y + pad, x + size - pad, y + size - pad)
+        c.line(x + pad, y + size - pad, x + size - pad, y + pad)
+        c.setLineWidth(1)
 
 
 def _render_one_application(c, r: Dict[str, Any], active_term: Dict[str, Any]):
     BLACK = colors.black
     WHITE = colors.white
-    LIGHT_FILL = colors.HexColor("#EFEFEF")
-    LIGHT_BLUE = colors.HexColor("#EEF2FA")
 
     margin = 24
     x0 = margin
@@ -713,11 +958,6 @@ def _render_one_application(c, r: Dict[str, Any], active_term: Dict[str, Any]):
     right_label_w = right_w * 0.48
     c.line(right_x + right_label_w, top - bar_h, right_x + right_label_w, top - block_h)
 
-    for ri in range(4):
-        y_cell = top - bar_h - (ri + 1) * row_h
-        _fill_rect(c, x0 + left_label_w, y_cell, left_w - left_label_w, row_h, LIGHT_FILL)
-        _fill_rect(c, right_x + right_label_w, y_cell, right_w - right_label_w, row_h, LIGHT_FILL)
-
     c.setFont("Helvetica-Bold", 10)
     left_labels = ["LAST NAME", "FIRST NAME", "MIDDLE NAME", "UNITS REMAINING INCLUDING CURRENT TERM:"]
     right_labels = ["ID NUMBER", "COLLEGE", "COURSE", "GRADUATING AFTER THIS\nTERM?"]
@@ -748,13 +988,21 @@ def _render_one_application(c, r: Dict[str, Any], active_term: Dict[str, Any]):
     grad_yes = bool(r.get("graduating_after_term", False))
     grad_row_y = top - bar_h - 4 * row_h
     box_area_x = right_x + right_label_w + 8
-    box_area_y = grad_row_y + row_h * 0.22
+
     cb = 11
-    _draw_checkbox(c, box_area_x, box_area_y + cb + 6, size=cb, checked=grad_yes)
-    _draw_checkbox(c, box_area_x, box_area_y, size=cb, checked=(not grad_yes))
+    gap = 2
+    total_h = (cb * 2) + gap
+    box_area_y = grad_row_y + max(0, (row_h - total_h) / 2)
+
+    y_no = box_area_y
+    y_yes = box_area_y + cb + gap
+
+    _draw_checkbox(c, box_area_x, y_yes, size=cb, checked=grad_yes)
+    _draw_checkbox(c, box_area_x, y_no, size=cb, checked=(not grad_yes))
+
     c.setFont("Helvetica-Bold", 10)
-    c.drawString(box_area_x + cb + 6, box_area_y + cb + 7, "YES")
-    c.drawString(box_area_x + cb + 6, box_area_y + 1, "NO")
+    c.drawString(box_area_x + cb + 6, y_yes + 1, "YES")
+    c.drawString(box_area_x + cb + 6, y_no + 1, "NO")
 
     # ---- Special class applied for ----
     sc_top = top - block_h - 10
@@ -782,7 +1030,6 @@ def _render_one_application(c, r: Dict[str, Any], active_term: Dict[str, Any]):
 
     val_h = 36
     y_val = sc_tbl_top - hdr_h - val_h
-    _fill_rect(c, x0, y_val, W, val_h, colors.HexColor("#EDEDED"))
     _draw_rect(c, x0, y_val, W, val_h, stroke=1, fill=0)
     c.line(x0 + col1, y_val, x0 + col1, y_val + val_h)
     c.line(x0 + col1 + col2, y_val, x0 + col1 + col2, y_val + val_h)
@@ -854,7 +1101,7 @@ def _render_one_application(c, r: Dict[str, Any], active_term: Dict[str, Any]):
     tc_top = reason_top - reason_h - 10
     tc_h = 100
     _draw_rect(c, x0, tc_top - tc_h, W, tc_h, stroke=1, fill=0)
-    _fill_rect(c, x0, tc_top - 22, W, 22, colors.HexColor("#CFCFCF"))
+    _draw_rect(c, x0, tc_top - 22, W, 22, stroke=1, fill=0)
     c.setFont("Helvetica-Bold", 11)
     c.drawCentredString(x0 + W / 2, tc_top - 16, "TERMS AND CONDITIONS")
 
@@ -887,15 +1134,18 @@ def _render_one_application(c, r: Dict[str, Any], active_term: Dict[str, Any]):
     c.setFont("Helvetica-BoldOblique", 9)
     c.drawCentredString(x0 + W / 2, sig_y - 12, "STUDENT'S SIGNATURE OVER PRINTED NAME / DATE")
 
-    # ===================== APPROVAL (FIXED) =====================
-    # Key fixes:
-    # 1) Restore 1/2/3 boxes + FACULTY block.
-    # 2) Draw "FOR APO USE ONLY" bar FIRST.
-    # 3) Draw box "2" LAST (on top) so it is never "cut" by the bar.
-    # 4) Use ONE split_y only (no duplicate recompute).
+    # ---- Footer reserved space (avoid clipping) ----
+    footer_h = 22
+    footer_top_y = y0 + footer_h
+    min_bottom = footer_top_y + 6
 
+    # ===================== APPROVAL (MATCH REFERENCE) =====================
     ap_top = sig_y - 22
-    ap_h = 150
+    ap_h_target = 140
+    ap_h = ap_h_target
+    if (ap_top - ap_h) < min_bottom:
+        ap_h = max(112, ap_top - min_bottom)
+
     _draw_rect(c, x0, ap_top - ap_h, W, ap_h, stroke=1, fill=0)
 
     header_h = 28
@@ -911,120 +1161,146 @@ def _render_one_application(c, r: Dict[str, Any], active_term: Dict[str, Any]):
     body_bottom = ap_top - ap_h
     body_h = body_top - body_bottom
 
-    # columns (match your earlier clean template layout)
     left_w2 = W * 0.46
-    mid_w2 = W * 0.30
-    right_w2 = W - left_w2 - mid_w2
+    div_x = x0 + left_w2
 
-    x_left = x0
-    x_mid = x0 + left_w2
-    x_right = x0 + left_w2 + mid_w2
+    right_x0 = div_x
+    right_x1 = x0 + W
+    right_w2 = right_x1 - right_x0
 
-    # column borders
-    c.line(x_mid, body_bottom, x_mid, body_top)
-    c.line(x_right, body_bottom, x_right, body_top)
+    # right strip (ONLY for the top area where "3" lives)
+    strip_w = max(52.0, right_w2 * 0.18)
+    sub_div_x = right_x1 - strip_w
 
-    # split line for LEFT column only (between Associate Dean and Department)
-    split_y = body_top - (body_h * 0.55)
-    c.line(x_left, split_y, x_left + left_w2, split_y)
+    # main vertical divider across full approval body
+    c.line(div_x, body_bottom, div_x, body_top)
 
-    # fills
-    _fill_rect(c, x_left, split_y, left_w2, body_top - split_y, LIGHT_BLUE)
+    # horizontal divider across full width
+    split_y = body_bottom + body_h * 0.55
+    c.line(x0, split_y, x0 + W, split_y)
 
-    # LEFT: Associate Dean label
-    c.setFont("Helvetica-Bold", 10)
-    c.drawString(x_left + 10, body_top - 16, "ASSOCIATE DEAN")
-
-    # LEFT-bottom text
-    c.setFont("Helvetica-Bold", 9)
-    c.drawString(x_left + 10, split_y - 18, "(DEPARTMENT) I am appointing (faculty)")
-    c.drawString(x_left + 10, split_y - 40, "MR/MS/DR")
-    c.line(x_left + 80, split_y - 40, x_left + left_w2 - 12, split_y - 40)
-
-    # LEFT-bottom signature strip
-    _fill_rect(c, x_left + 10, body_bottom + 18, left_w2 - 20, 22, colors.HexColor("#EDEDED"))
-    c.setFont("Helvetica-BoldOblique", 9)
-    c.drawCentredString(x_left + left_w2 / 2, body_bottom + 6, "SIGNATURE OF CHAIR / COORDINATOR / DATE")
-
-    # MID: Box "1" + label
-    nb = 20
-    _draw_rect(c, x_mid, body_top - nb, nb, nb, stroke=1, fill=0)
-    c.setFont("Helvetica-Bold", 10)
-    c.drawCentredString(x_mid + nb / 2, body_top - 14, "1")
-    c.drawString(x_mid + nb + 8, body_top - 16, "(FACULTY)")
-
-    # MID: faculty name box (under the label)
-    fac_box_y = body_top - 44
-    fac_box_h = 18
-    _fill_rect(c, x_mid + 12, fac_box_y, mid_w2 - 24, fac_box_h, colors.HexColor("#DCDCDC"))
-    _draw_rect(c, x_mid + 12, fac_box_y, mid_w2 - 24, fac_box_h, stroke=1, fill=0)
-
-    fac_name = (r.get("faculty_name") or "UNASSIGNED").strip()
-    if fac_name.upper() == "UNASSIGNED":
-        fac_name = ""
-    _fit_and_draw_text(
-        c,
-        fac_name,
-        x_mid + 16,
-        fac_box_y + 2,
-        mid_w2 - 32,
-        fac_box_h - 4,
-        font="Helvetica-Bold",
-        max_size=9,
-        min_size=7,
-        valign="middle",
-    )
-
-    # MID: signature/date line
-    sig2_y = body_top - 76
-    c.line(x_mid + 40, sig2_y, x_mid + mid_w2 - 40, sig2_y)
-    c.setFont("Helvetica-Bold", 9)
-    c.drawCentredString(x_mid + mid_w2 / 2, sig2_y - 14, "SIGNATURE / DATE")
-
-    # RIGHT: Box "3"
-    _draw_rect(c, x_right + right_w2 - nb, body_top - nb, nb, nb, stroke=1, fill=0)
-    c.setFont("Helvetica-Bold", 10)
-    c.drawCentredString(x_right + right_w2 - nb / 2, body_top - 14, "3")
-
-    # RIGHT+MID bottom: FOR APO USE ONLY bar
-    apo_bar_h = 20
-    bar_top = split_y  # bar top aligns with split line
-    bar_bottom = bar_top - apo_bar_h
-
-    _fill_rect(c, x_mid, bar_bottom, mid_w2 + right_w2, apo_bar_h, BLACK)
+    # bottom-right: black bar "FOR APO USE ONLY" + white space below (no extra column)
+    apo_bar_h = 22
+    _fill_rect(c, right_x0, split_y - apo_bar_h, right_w2, apo_bar_h, BLACK)
     c.setFillColor(WHITE)
     c.setFont("Helvetica-Bold", 10)
-    c.drawCentredString(x_mid + (mid_w2 + right_w2) / 2, bar_bottom + 6, "FOR APO USE ONLY")
+    c.drawCentredString(right_x0 + right_w2 / 2, split_y - apo_bar_h + 7, "FOR APO USE ONLY")
     c.setFillColor(BLACK)
 
-    # APO use area fill below bar
-    _fill_rect(
-        c,
-        x_mid,
-        body_bottom,
-        mid_w2 + right_w2,
-        bar_bottom - body_bottom,
-        colors.HexColor("#EDEDED"),
-    )
-
-    # IMPORTANT: draw box "2" LAST (on top), so the bar never cuts it
-    box2_size = nb
-    box2_x = x_mid - (box2_size / 2)
-    box2_y = split_y - (box2_size / 2)
-    _fill_rect(c, box2_x, box2_y, box2_size, box2_size, colors.white)
-    _draw_rect(c, box2_x, box2_y, box2_size, box2_size, stroke=1, fill=0)
+    # LEFT: Associate Dean
     c.setFont("Helvetica-Bold", 10)
-    c.drawCentredString(x_mid, box2_y + 6, "2")
+    c.drawString(x0 + 8, body_top - 16, "ASSOCIATE DEAN")
 
-    # Footer black bar
-    footer_h = 16
+    # LEFT-bottom
+    c.setFont("Helvetica-Bold", 9)
+    c.drawString(x0 + 8, split_y - 12, "(DEPARTMENT) I am appointing (faculty)")
+    c.drawString(x0 + 8, split_y - 24, "MR/MS/DR")
+    c.line(x0 + 62, split_y - 26, div_x - 12, split_y - 26)
+
+    # faculty name after MR/MS/DR
+    fac_name = (r.get("faculty_name") or "").strip()
+    if fac_name.upper() == "UNASSIGNED":
+        fac_name = ""
+    if fac_name:
+        name_x = x0 + 62 + 2
+        name_w = (div_x - 12) - name_x
+        name_y = (split_y - 26) + 2
+        _fit_and_draw_text(
+            c,
+            fac_name,
+            name_x,
+            name_y,
+            name_w,
+            14,
+            font="Helvetica-Bold",
+            max_size=9,
+            min_size=7,
+            align="left",
+            valign="middle",
+        )
+
+    # Chair signature line + label
+    chair_line_y = body_bottom + 24
+    c.line(x0 + 40, chair_line_y, div_x - 40, chair_line_y)
+    c.setFont("Helvetica-BoldOblique", 9)
+    c.drawCentredString(x0 + left_w2 / 2, chair_line_y - 12, "SIGNATURE OF CHAIR / COORDINATOR / DATE")
+
+    # number boxes
+    nb = 18
+
+    # Box 1 (ASSOCIATE DEAN) - inside LEFT cell near the divider
+    box1_x = div_x - nb - 2
+    box1_y = body_top - nb - 2
+    _draw_rect(c, box1_x, box1_y, nb, nb, stroke=1, fill=0)
+    c.setFont("Helvetica-Bold", 10)
+    c.drawCentredString(box1_x + nb / 2, box1_y + 5, "1")
+
+
+    # Faculty signature line (top area; line only)
+    fx = div_x + nb + 18
+    if fx < div_x + 28:
+        fx = div_x + 28
+    fx2 = right_x1 - 16
+    total_w = max(120.0, fx2 - fx)
+
+    fac_box_h = 16
+    fac_box_y = body_top - 52
+    if fac_box_y < (split_y + 12):
+        fac_box_y = split_y + 12
+    max_fac_y = (body_top - 18) - fac_box_h
+    if fac_box_y > max_fac_y:
+        fac_box_y = max_fac_y
+
+    sig_box_x = fx
+    sig_box_y = fac_box_y
+    sig_box_w = total_w
+    sig_box_h = fac_box_h
+
+    sig_line_y = sig_box_y + sig_box_h
+    sig_pad = 12
+    c.line(sig_box_x + sig_pad, sig_line_y, sig_box_x + sig_box_w - sig_pad, sig_line_y)
+    c.setFont("Helvetica-BoldOblique", 9)
+    c.drawCentredString(sig_box_x + sig_box_w / 2, sig_line_y - 14, "SIGNATURE / DATE")
+
+    # Box 3 (FACULTY) - inside RIGHT cell near the divider
+    box3_x = div_x + 2
+    box3_y = body_top - nb - 2
+    _draw_rect(c, box3_x, box3_y, nb, nb, stroke=1, fill=0)
+    c.setFont("Helvetica-Bold", 10)
+    c.drawCentredString(box3_x + nb / 2, box3_y + 5, "3")
+    c.setFont("Helvetica-Bold", 10)
+    c.drawString(box3_x + nb + 8, body_top - 16, "(FACULTY)")
+
+
+    # Box 2 (centered exactly at divider intersection)
+    box2_x = div_x - nb
+    box2_y = split_y - nb / 2
+    _fill_rect(c, box2_x, box2_y, nb, nb, WHITE)
+    _draw_rect(c, box2_x, box2_y, nb, nb, stroke=1, fill=0)
+    c.setFont("Helvetica-Bold", 10)
+    c.drawCentredString(box2_x + nb / 2, box2_y + 5, "2")
+
+    # ---- Footer black bar (disclaimer) ----
     _fill_rect(c, x0, y0, W, footer_h, BLACK)
     c.setFillColor(WHITE)
-    c.setFont("Helvetica", 8)
-    c.drawString(
-        x0 + 8,
-        y0 + 5,
-        "ALL RIGHTS RESERVED. Parts of this material may be reproduced provided (1) the material is not altered; (2) the use is non-commercial; (3) De La Salle University is acknowledged as source; and (4) DLSU is notified through academic.services@dlsu.edu.ph.",
+    footer_text = (
+        "ALL RIGHTS RESERVED. Parts of this material may be reproduced provided (1) the material is not altered; "
+        "(2) the use is non-commercial; (3) De La Salle University is acknowledged as source; and (4) DLSU is notified "
+        "through academic.services@dlsu.edu.ph."
+    )
+    _fit_and_draw_text(
+        c,
+        footer_text,
+        x0 + 6,
+        y0 + 3,
+        W - 12,
+        footer_h - 6,
+        font="Helvetica",
+        max_size=6,
+        min_size=5,
+        leading_ratio=1.10,
+        align="left",
+        valign="middle",
     )
     c.setFillColor(BLACK)
 
@@ -1112,11 +1388,11 @@ async def om_specialclass_post(
         if q and q.strip():
             s = q.strip().lower()
             shaped = [
-                r for r in shaped
-                if (r.get("student_name") or "").lower().find(s) >= 0
-                or (r.get("course_code") or "").lower().find(s) >= 0
-                or (r.get("course_title") or "").lower().find(s) >= 0
-                or (r.get("section_code") or "").lower().find(s) >= 0
+                rr for rr in shaped
+                if (rr.get("student_name") or "").lower().find(s) >= 0
+                or (rr.get("course_code") or "").lower().find(s) >= 0
+                or (rr.get("course_title") or "").lower().find(s) >= 0
+                or (rr.get("section_code") or "").lower().find(s) >= 0
             ]
 
         return {"ok": True, "rows": shaped, "term_id": current_term_id}
@@ -1137,54 +1413,114 @@ async def om_specialclass_post(
         if payload is None:
             raise HTTPException(status_code=400, detail="payload is required.")
 
-        updates: Dict[str, Any] = {}
+        updates_set: Dict[str, Any] = {}
+        updates_unset: Dict[str, Any] = {}
 
+        # ---- always-allowed simple fields ----
         if "status" in payload:
             allowed = set(await _get_allowed_statuses())
             st = (payload.get("status") or "").strip()
             if st and allowed and st not in allowed:
                 raise HTTPException(status_code=400, detail="Invalid status value.")
-            updates["status"] = st
+            updates_set["status"] = st
 
         if "remarks" in payload:
-            updates["remarks"] = payload.get("remarks") or ""
+            updates_set["remarks"] = payload.get("remarks") or ""
 
-        if "section_id" in payload:
-            sid = (payload.get("section_id") or "").strip()
-            updates["section_id"] = sid if sid else None
+        # ---- load base doc (needed for course_id when creating custom section) ----
+        base_doc = await db[COL_SPECIAL].find_one(
+            {"term_id": current_term_id, "special_id": specialId},
+            {"_id": 0, "course_id": 1, "courseId": 1},
+        )
+        if not base_doc:
+            raise HTTPException(status_code=404, detail="Application not found.")
 
-            if sid:
-                updates["section_code"] = ""
-                updates["day1"] = ""
-                updates["begin1"] = ""
-                updates["end1"] = ""
-                updates["day2"] = ""
-                updates["begin2"] = ""
-                updates["end2"] = ""
-                updates["schedule_entries"] = []
-                updates["schedule_text"] = ""
-                updates["faculty_id"] = None
-                updates["faculty_name"] = ""
-                fa = await _latest_faculty_assignment_for_section(sid)
-                updates["faculty_assignment_id"] = fa.get("assignment_id")
-            else:
-                updates["faculty_assignment_id"] = None
+        course_id_base = (base_doc.get("course_id") or base_doc.get("courseId") or "").strip()
+        if not course_id_base:
+            raise HTTPException(status_code=400, detail="Missing course_id on special_class record.")
 
-        if "section_code" in payload:
-            sid_now = updates.get("section_id")
-            updates["section_code"] = "" if sid_now else (payload.get("section_code") or "").strip()
+        # ---- schedule binding rules ----
+        # [1] If section_id is provided (existing section): store ONLY ids from that section
+        # [2] If section_id is null/empty AND custom schedule provided: create docs in 3 tables and store ONLY ids
 
-        if "faculty_id" in payload:
-            sid_now = updates.get("section_id")
-            if not sid_now:
-                fid = (payload.get("faculty_id") or "").strip()
-                updates["faculty_id"] = fid if fid else None
-                updates["faculty_name"] = ""
+        req_section_id_raw = payload.get("section_id") if ("section_id" in payload) else None
+        req_section_id = (str(req_section_id_raw).strip() if req_section_id_raw is not None else "")
 
-        has_any_day_fields = any(k in payload for k in ["day1", "begin1", "end1", "day2", "begin2", "end2"])
-        sid_now = updates.get("section_id")
-        if has_any_day_fields and not sid_now:
-            updates.update(_validate_day_fields(payload))
+        is_custom_request = (
+            ("section_id" in payload and not req_section_id) and any(
+                (payload.get(k) not in (None, "", [], {}))
+                for k in ["section_code", "faculty_id", "day1", "begin1", "end1", "day2", "begin2", "end2"]
+            )
+        )
+
+        # always remove any legacy stored schedule/faculty fields from special_class
+        updates_unset.update(
+            {
+                "day1": "",
+                "begin1": "",
+                "end1": "",
+                "day2": "",
+                "begin2": "",
+                "end2": "",
+                "schedule_entries": "",
+                "schedule_text": "",
+                "faculty_id": "",
+                "faculty_name": "",
+                "section_code": "",
+                "faculty_assignment_id": "",  # old field name (cleanup)
+            }
+        )
+
+        if "section_id" in payload and req_section_id:
+            # ✅ EXISTING SECTION path
+            sid = req_section_id
+
+            # store only IDs
+            sid1, sid2 = await _schedule_ids_for_section(sid)
+            fa = await _latest_faculty_assignment_for_section(sid)
+
+            updates_set["section_id"] = sid
+            updates_set["schedule_id1"] = sid1
+            updates_set["schedule_id2"] = sid2
+            updates_set["assignment_id"] = fa.get("assignment_id")
+
+        elif is_custom_request:
+            # ✅ CUSTOM path: create docs in sections / section_schedules / faculty_assignments
+            section_code = (payload.get("section_code") or "").strip()
+            fid = (payload.get("faculty_id") or "").strip()
+            sched_valid = _validate_day_fields(payload)
+
+            created = await _create_custom_section_bundle(
+                term_id=current_term_id,
+                course_id=course_id_base,
+                section_code=section_code,
+                sched=sched_valid,
+                faculty_id=fid,
+            )
+
+            updates_set["section_id"] = created.get("section_id")
+            updates_set["schedule_id1"] = created.get("schedule_id1")
+            updates_set["schedule_id2"] = created.get("schedule_id2")
+            updates_set["assignment_id"] = created.get("assignment_id")
+
+        elif "section_id" in payload and not req_section_id:
+            # clearing schedule selection with NO custom data
+            updates_set["section_id"] = None
+            updates_set["schedule_id1"] = None
+            updates_set["schedule_id2"] = None
+            updates_set["assignment_id"] = None
+
+        if not updates_set and not updates_unset:
+            return {"ok": False, "message": "Nothing to update."}
+
+        updates_set["updated_at"] = datetime.utcnow()
+
+        res = await db[COL_SPECIAL].update_one(
+            {"term_id": current_term_id, "special_id": specialId},
+            {"$set": updates_set, "$unset": updates_unset},
+        )
+        return {"ok": True, "matched": res.matched_count, "modified": res.modified_count}
+
 
         if not updates:
             return {"ok": False, "message": "Nothing to update."}

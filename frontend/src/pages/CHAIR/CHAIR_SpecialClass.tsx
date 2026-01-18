@@ -132,13 +132,14 @@ function ComboSelect({
           placeholder={placeholder}
           disabled={disabled}
           className={cls("w-full outline-none bg-transparent", disabled && "cursor-not-allowed")}
+          style={{ minWidth: '190px' }}  // Apply minWidth directly here
         />
         <ChevronDown className="h-4 w-4 text-gray-500 shrink-0" />
       </div>
 
       {open && !disabled && (
-        <div className="absolute z-50 mt-1 w-full overflow-hidden rounded-lg border border-gray-200 bg-white shadow-lg">
-          <div className="max-h-56 overflow-auto">
+        <div className="absolute z-50 mt-1 w-full max-h-[calc(100vh-300px)] overflow-y-auto rounded-lg border border-gray-200 bg-white shadow-lg">
+          <div className="overflow-auto max-h-[300px]">
             {filtered.length === 0 ? (
               <div className="px-3 py-2 text-sm text-gray-500">No matches</div>
             ) : (
@@ -558,8 +559,9 @@ export default function CHAIR_SpecialClass() {
 
       </div>
 
-      <div className="border border-gray-200 bg-gray-50 shadow-sm overflow-x-auto rounded-xl">
-        <table className="w-full text-sm">
+      <div className="table-wrapper w-full overflow-hidden">
+        <div className="border border-gray-200 bg-gray-50 shadow-sm overflow-auto rounded-xl">
+          <table className="w-full text-sm table-auto">
           <thead className="bg-gray-50 border-b text-gray-700">
             <tr>
               <th className="text-left px-3 py-2 whitespace-nowrap w-10">
@@ -636,10 +638,11 @@ export default function CHAIR_SpecialClass() {
                           <input
                             value={(draft.section_code || "") as string}
                             onChange={(e) => setDraft((d) => ({ ...d, section_code: e.target.value }))}
-                            placeholder="e.g. SS1A / SS1B"
+                            placeholder=" "
                             className={cls(
                               "w-full rounded-lg border border-gray-300 px-3 py-2 text-sm shadow-sm",
-                              "focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500 outline-none transition"
+                              "focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500 outline-none transition",
+                              "min-w-[60px]" // Adjusting the width for better display
                             )}
                           />
                         ) : (
@@ -654,26 +657,29 @@ export default function CHAIR_SpecialClass() {
 
                     <td className="px-4 py-3">
                       {editing ? (
-                        <ComboSelect
-                          value={facultyInput?.trim() ? facultyInput : "UNASSIGNED"}
-                          onChange={(v) => {
-                            if (!isCustom) return;
+                      <ComboSelect
+                        value={facultyInput?.trim() ? facultyInput : ""} // Allow faculty to remain empty while editing
+                        onChange={(v) => {
+                          if (!isCustom) return;
 
-                            const t = (v || "").trim();
-                            if (t.toUpperCase() === "UNASSIGNED") {
-                              setFacultyInput("");
-                              setDraft((d) => ({ ...d, faculty_id: null }));
-                              return;
-                            }
+                          const t = (v || "").trim();
 
-                            setFacultyInput(t);
-                            const fid = facultyNameToIdUpper[t.toUpperCase()] || "";
-                            setDraft((d) => ({ ...d, faculty_id: fid ? fid : null }));
-                          }}
-                          options={["UNASSIGNED", ...facultyNames.filter((n) => n !== "UNASSIGNED")]}
-                          placeholder="UNASSIGNED"
-                          disabled={!isCustom}
-                        />
+                          // If the input is blank or "UNASSIGNED", clear faculty and don't set faculty_id
+                          if (t === "" || t.toUpperCase() === "UNASSIGNED") {
+                            setFacultyInput("");  // Allow faculty to remain blank
+                            setDraft((d) => ({ ...d, faculty_id: null })); // Set faculty_id to null if blank
+                            return;
+                          }
+
+                          setFacultyInput(t); // Set faculty input to the value entered
+                          const fid = facultyNameToIdUpper[t.toUpperCase()] || "";
+                          setDraft((d) => ({ ...d, faculty_id: fid ? fid : null })); // Set faculty_id if valid
+                        }}
+                        options={["", "UNASSIGNED", ...facultyNames.filter((n) => n !== "UNASSIGNED")]} // Add an empty option for faculty
+                        placeholder="Select Faculty"
+                        disabled={!isCustom}
+                      />
+
                       ) : (
                         <div className="font-medium">{r.faculty_name || "UNASSIGNED"}</div>
                       )}
@@ -685,7 +691,7 @@ export default function CHAIR_SpecialClass() {
                       )}
                     </td>
 
-                    {/* ✅ Schedule columns */}
+                    {/* Schedule columns */}
                     {editing ? (
                       <>
                         {/* Day1/Begin1/End1 editor occupies 3 columns */}
@@ -727,7 +733,7 @@ export default function CHAIR_SpecialClass() {
                                   Custom Schedule (max 2 entries). Begin uses preset time slots and auto-fills End.
                                 </div>
 
-                                <div className="grid grid-cols-[minmax(110px,140px)_minmax(180px,1fr)_minmax(90px,120px)] gap-2 items-center mb-2 min-w-0">
+                                <div className="grid grid-cols-[minmax(180px,5px)_minmax(100px,1fr)_minmax(90px,120px)] gap-2 items-center mb-2 min-w-0">  {/* Adjusting grid layout for spacing */}
                                   <SelectBox
                                     value={draft.day1 ? DAY_LABELS[draft.day1 as DayCode] : "Monday"}
                                     onChange={(lbl) =>
@@ -763,7 +769,7 @@ export default function CHAIR_SpecialClass() {
                                   />
                                 </div>
 
-                                <div className="grid grid-cols-[minmax(110px,140px)_minmax(180px,1fr)_minmax(90px,120px)] gap-2 items-center">
+                                <div className="grid grid-cols-[minmax(180px,5px)_minmax(100px,1fr)_minmax(90px,120px)] gap-2 items-center">
                                   <SelectBox
                                     value={draft.day2 ? DAY_LABELS[draft.day2 as DayCode] : "Monday"}
                                     onChange={(lbl) =>
@@ -807,7 +813,7 @@ export default function CHAIR_SpecialClass() {
                           </div>
                         </td>
 
-                        {/* ✅ Day2/Begin2/End2 columns show the actual values (NOT duplicated editor UI) */}
+                        {/* Day2/Begin2/End2 columns show the actual values (NOT duplicated editor UI) */}
                         <td className="px-3 py-3 whitespace-nowrap w-fit">{draft.day2 || "—"}</td>
                         <td className="px-3 py-3 whitespace-nowrap w-fit">{prettyHHMM(draft.begin2 || "") || "—"}</td>
                         <td className="px-3 py-3 whitespace-nowrap w-fit">{prettyHHMM(draft.end2 || "") || "—"}</td>
@@ -844,7 +850,7 @@ export default function CHAIR_SpecialClass() {
                           onChange={(e) => setDraft((d) => ({ ...d, remarks: e.target.value }))}
                           rows={3}
                           className={cls(
-                            "w-full rounded-lg border border-gray-300 px-3 py-2 text-sm shadow-sm resize-none",
+                            "w-full min-w-[180px] rounded-lg border border-gray-300 px-3 py-2 text-sm shadow-sm resize-none", // Increased width
                             "focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500 outline-none transition"
                           )}
                         />
@@ -891,7 +897,8 @@ export default function CHAIR_SpecialClass() {
               })
             )}
           </tbody>
-        </table>
+          </table>
+        </div>
       </div>
 
       {/* View Application Modal */}
@@ -970,9 +977,8 @@ export default function CHAIR_SpecialClass() {
                     </div>
                     <div className="px-4">
                       <DetailRow label="Section" value={viewData.section_code || "—"} />
-                      <DetailRow label="Schedule Text" value={viewData.schedule_text || scheduleTextFromRow(viewData)} />
                       <DetailRow
-                        label="Slot 1"
+                        label="Schedule 1"
                         value={
                           viewData.day1 && viewData.begin1 && viewData.end1
                             ? `${viewData.day1} ${prettyHHMM(viewData.begin1)}–${prettyHHMM(viewData.end1)}`
@@ -980,7 +986,7 @@ export default function CHAIR_SpecialClass() {
                         }
                       />
                       <DetailRow
-                        label="Slot 2"
+                        label="Schedule 2"
                         value={
                           viewData.day2 && viewData.begin2 && viewData.end2
                             ? `${viewData.day2} ${prettyHHMM(viewData.begin2)}–${prettyHHMM(viewData.end2)}`

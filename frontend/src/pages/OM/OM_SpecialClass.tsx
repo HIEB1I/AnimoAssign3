@@ -977,9 +977,8 @@ export default function OM_SpecialClass() {
                     </div>
                     <div className="px-4">
                       <DetailRow label="Section" value={viewData.section_code || "—"} />
-                      <DetailRow label="Schedule Text" value={viewData.schedule_text || scheduleTextFromRow(viewData)} />
                       <DetailRow
-                        label="Slot 1"
+                        label="Schedule 1"
                         value={
                           viewData.day1 && viewData.begin1 && viewData.end1
                             ? `${viewData.day1} ${prettyHHMM(viewData.begin1)}–${prettyHHMM(viewData.end1)}`
@@ -987,7 +986,7 @@ export default function OM_SpecialClass() {
                         }
                       />
                       <DetailRow
-                        label="Slot 2"
+                        label="Schedule 2"
                         value={
                           viewData.day2 && viewData.begin2 && viewData.end2
                             ? `${viewData.day2} ${prettyHHMM(viewData.begin2)}–${prettyHHMM(viewData.end2)}`

@@ -34,7 +34,9 @@ COL_SECTIONS = "sections"
 COL_SECTION_SCHEDULES = "section_schedules"
 COL_FAC_ASSIGN = "faculty_assignments"
 COL_FAC_PROFILES = "faculty_profiles"
+COL_FAC_LOADS = "faculty_loads"  
 COL_PREEN_COUNT = "preenlistment_count"
+
 
 OM_ALLOWED_STATUSES = ["Forwarded To Department", "Approved", "Rejected"]
 
@@ -260,6 +262,220 @@ async def _latest_faculty_assignment_for_section(section_id: str) -> Dict[str, O
         "assignment_id": r.get("assignment_id") or None,
     }
 
+async def _schedule_ids_for_section(section_id: str) -> Tuple[Optional[str], Optional[str]]:
+    rows = (
+        await db[COL_SECTION_SCHEDULES]
+        .find({"section_id": section_id}, {"_id": 0, "schedule_id": 1})
+        .sort("schedule_id", ASCENDING)
+        .to_list(50)
+    )
+    ids = [r.get("schedule_id") for r in rows if r.get("schedule_id")]
+    sid1 = ids[0] if len(ids) >= 1 else None
+    sid2 = ids[1] if len(ids) >= 2 else None
+    return sid1, sid2
+
+
+async def _section_schedule_two_from_schedule_ids(
+    schedule_id1: Optional[str],
+    schedule_id2: Optional[str],
+) -> Dict[str, str]:
+    ids = [x for x in [schedule_id1, schedule_id2] if x]
+    if not ids:
+        return {"day1": "", "begin1": "", "end1": "", "day2": "", "begin2": "", "end2": ""}
+
+    rows = await db[COL_SECTION_SCHEDULES].find(
+        {"schedule_id": {"$in": ids}},
+        {"_id": 0, "schedule_id": 1, "day": 1, "start_time": 1, "end_time": 1},
+    ).to_list(10)
+
+    # keep stable order by schedule_id
+    rows.sort(key=lambda r: (r.get("schedule_id") or ""))
+
+    entries: List[Tuple[str, str, str]] = []
+    for r in rows:
+        d = _normalize_day(r.get("day"))
+        if d not in ALLOWED_DAYS:
+            continue
+        st = _to_hhmm(r.get("start_time"))
+        et = _to_hhmm(r.get("end_time"))
+        if not (_is_valid_hhmm(st) and _is_valid_hhmm(et)):
+            continue
+        if _mins(et) <= _mins(st):
+            continue
+        entries.append((d, st, et))
+
+    out = {"day1": "", "begin1": "", "end1": "", "day2": "", "begin2": "", "end2": ""}
+    if len(entries) >= 1:
+        out["day1"], out["begin1"], out["end1"] = entries[0]
+    if len(entries) >= 2:
+        out["day2"], out["begin2"], out["end2"] = entries[1]
+    return out
+
+
+async def _next_seq_id(coll: str, id_field: str, prefix: str, width: int) -> str:
+    # expects ids like SEC0001 / SCH0001-01 is NOT used here (only base ids like SEC/ASG)
+    regex = f"^{prefix}[0-9]{{{width}}}$"
+    last = (
+        await db[coll]
+        .find({id_field: {"$regex": regex}}, {"_id": 0, id_field: 1})
+        .sort(id_field, -1)
+        .limit(1)
+        .to_list(1)
+    )
+    if not last:
+        n = 1
+    else:
+        s = str(last[0].get(id_field) or "")
+        try:
+            n = int(s.replace(prefix, "")) + 1
+        except Exception:
+            n = 1
+    return f"{prefix}{n:0{width}d}"
+
+
+async def _maybe_load_id_for_faculty(term_id: str, faculty_id: str) -> str:
+    # best-effort: get dept_id from faculty_profiles then find faculty_loads for that dept+term
+    prof = await db[COL_FAC_PROFILES].find_one(
+        {"faculty_id": faculty_id},
+        {"_id": 0, "department_id": 1},
+    )
+    dept_id = (prof or {}).get("department_id")
+    if not dept_id:
+        return ""
+
+    load = await db[COL_FAC_LOADS].find_one(
+        {"term_id": term_id, "department_id": dept_id},
+        {"_id": 0, "load_id": 1},
+    )
+    return (load or {}).get("load_id") or ""
+
+
+async def _create_custom_section_bundle(
+    *,
+    term_id: str,
+    course_id: str,
+    section_code: str,
+    sched: Dict[str, str],
+    faculty_id: str,
+) -> Dict[str, Optional[str]]:
+    """
+    Creates:
+      - sections (SECxxxx)
+      - section_schedules (SCHxxxx-01/02)
+      - faculty_assignments (ASGxxxx)
+    Returns ids to store on special_class:
+      section_id, schedule_id1, schedule_id2, assignment_id
+    """
+    section_code = (section_code or "").strip().upper()
+    if not section_code:
+        raise HTTPException(status_code=400, detail="section_code is required for custom schedule.")
+
+    # must have at least one valid schedule entry
+    if not (sched.get("day1") and sched.get("begin1") and sched.get("end1")) and not (
+        sched.get("day2") and sched.get("begin2") and sched.get("end2")
+    ):
+        raise HTTPException(status_code=400, detail="At least one schedule entry is required for custom schedule.")
+
+    faculty_id = (faculty_id or "").strip()
+    if not faculty_id:
+        raise HTTPException(status_code=400, detail="faculty_id is required for custom schedule.")
+
+    now = datetime.utcnow()
+
+    # --- create section ---
+    section_id = await _next_seq_id(COL_SECTIONS, "section_id", "SEC", 4)
+    sec_doc = {
+        "section_id": section_id,
+        "section_code": section_code,
+        "term_id": term_id,
+        "course_id": course_id,
+        "enrollment_cap": 45,
+        "enrolled": 0,
+        "batch_number": 0,
+        "status": "active",
+        "remarks": "SPECIAL CLASS",
+        "created_at": now,
+        "updated_at": now,
+    }
+    await db[COL_SECTIONS].insert_one(sec_doc)
+
+    # --- create schedules ---
+    # SEC0007 -> SCH0007-01 / SCH0007-02
+    try:
+        sec_num = int(section_id.replace("SEC", ""))
+    except Exception:
+        sec_num = 0
+    sch_base = f"SCH{sec_num:04d}"
+
+    def _hhmm_to_db(hhmm: str) -> str:
+        # store like sample: "730" not "0730"
+        s = _to_hhmm(hhmm)
+        if not s:
+            return ""
+        try:
+            return str(int(s))
+        except Exception:
+            return s
+
+    schedule_id1: Optional[str] = None
+    schedule_id2: Optional[str] = None
+    sched_docs: List[Dict[str, Any]] = []
+
+    if sched.get("day1") and sched.get("begin1") and sched.get("end1"):
+        schedule_id1 = f"{sch_base}-01"
+        sched_docs.append(
+            {
+                "schedule_id": schedule_id1,
+                "section_id": section_id,
+                "day": sched["day1"],
+                "start_time": _hhmm_to_db(sched["begin1"]),
+                "end_time": _hhmm_to_db(sched["end1"]),
+                "room_id": None,
+                "room_type": "Online",
+                "created_at": now,
+                "updated_at": now,
+            }
+        )
+
+    if sched.get("day2") and sched.get("begin2") and sched.get("end2"):
+        schedule_id2 = f"{sch_base}-02"
+        sched_docs.append(
+            {
+                "schedule_id": schedule_id2,
+                "section_id": section_id,
+                "day": sched["day2"],
+                "start_time": _hhmm_to_db(sched["begin2"]),
+                "end_time": _hhmm_to_db(sched["end2"]),
+                "room_id": None,
+                "room_type": "Online",
+                "created_at": now,
+                "updated_at": now,
+            }
+        )
+
+    if sched_docs:
+        await db[COL_SECTION_SCHEDULES].insert_many(sched_docs)
+
+    # --- create faculty assignment ---
+    assignment_id = await _next_seq_id(COL_FAC_ASSIGN, "assignment_id", "ASG", 4)
+    load_id = await _maybe_load_id_for_faculty(term_id, faculty_id)
+
+    asg_doc = {
+        "assignment_id": assignment_id,
+        "load_id": load_id,
+        "section_id": section_id,
+        "faculty_id": faculty_id,
+        "created_at": now,
+        "is_archived": False,
+    }
+    await db[COL_FAC_ASSIGN].insert_one(asg_doc)
+
+    return {
+        "section_id": section_id,
+        "schedule_id1": schedule_id1,
+        "schedule_id2": schedule_id2,
+        "assignment_id": assignment_id,
+    }
 
 async def _section_schedule_two(section_id: str) -> Dict[str, str]:
     rows = await db[COL_SECTION_SCHEDULES].find(
@@ -357,17 +573,27 @@ async def _schedule_presets(term_id: str, course_id: str) -> List[Dict[str, Any]
         fac_id = fac.get("faculty_id")
         fac_name = await _faculty_name_from_id(fac_id)
 
+        sid1, sid2 = await _schedule_ids_for_section(sid)
         out.append(
             {
+                # keep schedule_id as selection key (frontend expects a single string)
                 "schedule_id": sid,
                 "section_id": sid,
                 "section_code": s.get("section_code") or "",
                 "label": label,
                 "faculty_id": fac_id,
                 "faculty_name": fac_name,
+
+                # ids to store on special_class (no day/begin fields stored there)
+                "schedule_id1": sid1,
+                "schedule_id2": sid2,
+                "assignment_id": fac.get("assignment_id"),
+
+                # still return display fields for UI
                 **df,
             }
         )
+
 
     out.sort(key=lambda x: (x.get("label") or "", x.get("section_code") or ""))
     return out
@@ -448,11 +674,18 @@ async def _shape_row(r: Dict[str, Any], maps: Dict[str, Any]) -> Dict[str, Any]:
     if course_units in (None, "", 0):
         course_units = c.get("units", "") or ""
 
-    section_code = (s.get("section_code") or "").strip() if sid else (r.get("section_code") or "").strip()
+    section_code = (s.get("section_code") or "").strip() if sid else ""
 
-    if sid:
+    # schedule is derived by IDs (schedule_id1/2) if present, else by section_id
+    schedule_id1 = (r.get("schedule_id1") or "").strip() or None
+    schedule_id2 = (r.get("schedule_id2") or "").strip() or None
+
+    if schedule_id1 or schedule_id2:
+        df = await _section_schedule_two_from_schedule_ids(schedule_id1, schedule_id2)
+    elif sid:
         df = await _section_schedule_two(sid)
     else:
+        # backward-compat only (old rows)
         df = {
             "day1": _normalize_day(r.get("day1")),
             "begin1": _to_hhmm(r.get("begin1")),
@@ -462,18 +695,28 @@ async def _shape_row(r: Dict[str, Any], maps: Dict[str, Any]) -> Dict[str, Any]:
             "end2": _to_hhmm(r.get("end2")),
         }
 
+    # faculty derived by assignment_id first; fallback to latest assignment for section
+    assignment_id = (r.get("assignment_id") or r.get("faculty_assignment_id") or "").strip() or None
+
     faculty_id: Optional[str] = None
     faculty_name = "UNASSIGNED"
+
     if status_norm == "SUBMITTED":
         faculty_id = None
         faculty_name = "UNASSIGNED"
     else:
-        if sid:
+        if assignment_id:
+            asg = await db[COL_FAC_ASSIGN].find_one(
+                {"assignment_id": assignment_id, "is_archived": {"$ne": True}},
+                {"_id": 0, "faculty_id": 1},
+            )
+            faculty_id = (asg or {}).get("faculty_id") or None
+        elif sid:
             fa = await _latest_faculty_assignment_for_section(sid)
             faculty_id = fa.get("faculty_id")
-        else:
-            faculty_id = (r.get("faculty_id") or r.get("facultyId") or "").strip() or None
+
         faculty_name = await _faculty_name_from_id(faculty_id)
+
 
     return {
         "special_id": r.get("special_id"),
@@ -1170,54 +1413,114 @@ async def om_specialclass_post(
         if payload is None:
             raise HTTPException(status_code=400, detail="payload is required.")
 
-        updates: Dict[str, Any] = {}
+        updates_set: Dict[str, Any] = {}
+        updates_unset: Dict[str, Any] = {}
 
+        # ---- always-allowed simple fields ----
         if "status" in payload:
             allowed = set(await _get_allowed_statuses())
             st = (payload.get("status") or "").strip()
             if st and allowed and st not in allowed:
                 raise HTTPException(status_code=400, detail="Invalid status value.")
-            updates["status"] = st
+            updates_set["status"] = st
 
         if "remarks" in payload:
-            updates["remarks"] = payload.get("remarks") or ""
+            updates_set["remarks"] = payload.get("remarks") or ""
 
-        if "section_id" in payload:
-            sid = (payload.get("section_id") or "").strip()
-            updates["section_id"] = sid if sid else None
+        # ---- load base doc (needed for course_id when creating custom section) ----
+        base_doc = await db[COL_SPECIAL].find_one(
+            {"term_id": current_term_id, "special_id": specialId},
+            {"_id": 0, "course_id": 1, "courseId": 1},
+        )
+        if not base_doc:
+            raise HTTPException(status_code=404, detail="Application not found.")
 
-            if sid:
-                updates["section_code"] = ""
-                updates["day1"] = ""
-                updates["begin1"] = ""
-                updates["end1"] = ""
-                updates["day2"] = ""
-                updates["begin2"] = ""
-                updates["end2"] = ""
-                updates["schedule_entries"] = []
-                updates["schedule_text"] = ""
-                updates["faculty_id"] = None
-                updates["faculty_name"] = ""
-                fa = await _latest_faculty_assignment_for_section(sid)
-                updates["faculty_assignment_id"] = fa.get("assignment_id")
-            else:
-                updates["faculty_assignment_id"] = None
+        course_id_base = (base_doc.get("course_id") or base_doc.get("courseId") or "").strip()
+        if not course_id_base:
+            raise HTTPException(status_code=400, detail="Missing course_id on special_class record.")
 
-        if "section_code" in payload:
-            sid_now = updates.get("section_id")
-            updates["section_code"] = "" if sid_now else (payload.get("section_code") or "").strip()
+        # ---- schedule binding rules ----
+        # [1] If section_id is provided (existing section): store ONLY ids from that section
+        # [2] If section_id is null/empty AND custom schedule provided: create docs in 3 tables and store ONLY ids
 
-        if "faculty_id" in payload:
-            sid_now = updates.get("section_id")
-            if not sid_now:
-                fid = (payload.get("faculty_id") or "").strip()
-                updates["faculty_id"] = fid if fid else None
-                updates["faculty_name"] = ""
+        req_section_id_raw = payload.get("section_id") if ("section_id" in payload) else None
+        req_section_id = (str(req_section_id_raw).strip() if req_section_id_raw is not None else "")
 
-        has_any_day_fields = any(k in payload for k in ["day1", "begin1", "end1", "day2", "begin2", "end2"])
-        sid_now = updates.get("section_id")
-        if has_any_day_fields and not sid_now:
-            updates.update(_validate_day_fields(payload))
+        is_custom_request = (
+            ("section_id" in payload and not req_section_id) and any(
+                (payload.get(k) not in (None, "", [], {}))
+                for k in ["section_code", "faculty_id", "day1", "begin1", "end1", "day2", "begin2", "end2"]
+            )
+        )
+
+        # always remove any legacy stored schedule/faculty fields from special_class
+        updates_unset.update(
+            {
+                "day1": "",
+                "begin1": "",
+                "end1": "",
+                "day2": "",
+                "begin2": "",
+                "end2": "",
+                "schedule_entries": "",
+                "schedule_text": "",
+                "faculty_id": "",
+                "faculty_name": "",
+                "section_code": "",
+                "faculty_assignment_id": "",  # old field name (cleanup)
+            }
+        )
+
+        if "section_id" in payload and req_section_id:
+            # ✅ EXISTING SECTION path
+            sid = req_section_id
+
+            # store only IDs
+            sid1, sid2 = await _schedule_ids_for_section(sid)
+            fa = await _latest_faculty_assignment_for_section(sid)
+
+            updates_set["section_id"] = sid
+            updates_set["schedule_id1"] = sid1
+            updates_set["schedule_id2"] = sid2
+            updates_set["assignment_id"] = fa.get("assignment_id")
+
+        elif is_custom_request:
+            # ✅ CUSTOM path: create docs in sections / section_schedules / faculty_assignments
+            section_code = (payload.get("section_code") or "").strip()
+            fid = (payload.get("faculty_id") or "").strip()
+            sched_valid = _validate_day_fields(payload)
+
+            created = await _create_custom_section_bundle(
+                term_id=current_term_id,
+                course_id=course_id_base,
+                section_code=section_code,
+                sched=sched_valid,
+                faculty_id=fid,
+            )
+
+            updates_set["section_id"] = created.get("section_id")
+            updates_set["schedule_id1"] = created.get("schedule_id1")
+            updates_set["schedule_id2"] = created.get("schedule_id2")
+            updates_set["assignment_id"] = created.get("assignment_id")
+
+        elif "section_id" in payload and not req_section_id:
+            # clearing schedule selection with NO custom data
+            updates_set["section_id"] = None
+            updates_set["schedule_id1"] = None
+            updates_set["schedule_id2"] = None
+            updates_set["assignment_id"] = None
+
+        if not updates_set and not updates_unset:
+            return {"ok": False, "message": "Nothing to update."}
+
+        updates_set["updated_at"] = datetime.utcnow()
+
+        res = await db[COL_SPECIAL].update_one(
+            {"term_id": current_term_id, "special_id": specialId},
+            {"$set": updates_set, "$unset": updates_unset},
+        )
+        return {"ok": True, "matched": res.matched_count, "modified": res.modified_count}
+
 
         if not updates:
             return {"ok": False, "message": "Nothing to update."}

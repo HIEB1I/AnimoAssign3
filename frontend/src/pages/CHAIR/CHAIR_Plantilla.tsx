@@ -2,7 +2,25 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
 import AppShell from "@/base/AppShell";
 import type { SidebarItem } from "@/base/Sidebar";
-import { Users, BookOpen, FileText, FilePlus, BookMarked, ListChecks, FileSpreadsheet } from "lucide-react";
+import { Users, BookOpen, FileText, FilePlus, BookMarked, ListChecks, FileSpreadsheet, ClipboardList, Star } from "lucide-react";
+
+function ClipboardStarIcon({
+  size = 18,
+  className = "",
+}: {
+  size?: string | number;
+  className?: string;
+}) {
+  const nSize = typeof size === "number" ? size : Number(size) || 18;
+  const starSize = Math.max(10, Math.round(nSize * 0.55));
+
+  return (
+    <span className={cls("relative inline-flex items-center justify-center", className)}>
+      <ClipboardList size={size} className="opacity-95" />
+      <Star size={starSize} className="absolute -right-1 -bottom-1" fill="currentColor" />
+    </span>
+  );
+}
 
 /* ---------------- Sidebar ---------------- */
 const ITEMS: SidebarItem[] = [
@@ -11,7 +29,7 @@ const ITEMS: SidebarItem[] = [
   { label: "Course Management", to: "/chair/course-management", Icon: BookOpen },
   { label: "Faculty Service", to: "/chair/faculty-service", Icon: FileText },
   { label: "Student Petition", to: "/chair/student-petitions", Icon: FilePlus },
-  //{ label: "Special Class", to: "/chair/special-class", Icon: ClipboardStarIcon },
+  { label: "Special Class", to: "/chair/special-class", Icon: ClipboardStarIcon },
   { label: "Class Retention", to: "/chair/class-retention", Icon: BookMarked },
 
 ];
