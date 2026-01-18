@@ -740,6 +740,85 @@ async def om_get_all_faculty(db = Depends(get_db)):
     docs = await db[COL_FACULTY].aggregate(pipeline).to_list(None)
     return {"ok": True, "faculty": docs}
 
+@router.get("/load-assignment/faculty-with-deloadings")
+async def om_faculty_with_deloadings(
+    term_id: Optional[str] = Query(None, description="Term ID; defaults to OM active/upcoming term"),
+    db = Depends(get_db),
+):
+    """Return a compact list of faculty who have at least one deloading in the given term."""
+    if not term_id:
+        active = await _active_term()
+        term_id = (active or {}).get("term_id")
+    if not term_id:
+        return {"ok": True, "term_id": None, "faculty": []}
+
+    fac_ids = await db["deloadings"].distinct("faculty_id", {"term_id": term_id})
+    fac_ids = [fid for fid in (fac_ids or []) if fid]
+    if not fac_ids:
+        return {"ok": True, "term_id": term_id, "faculty": []}
+
+    pipeline = [
+        {"$match": {"faculty_id": {"$in": fac_ids}, "is_archived": {"$ne": True}}},
+        {
+            "$lookup": {
+                "from": "users",
+                "localField": "user_id",
+                "foreignField": "user_id",
+                "as": "user",
+            }
+        },
+        {"$unwind": "$user"},
+        {
+            "$set": {
+                "faculty_name_display": {
+                    "$concat": ["$user.last_name", ", ", "$user.first_name"]
+                }
+            }
+        },
+        {"$project": {"_id": 0, "faculty_id": 1, "faculty_name_display": 1}},
+        {"$sort": {"faculty_name_display": 1}},
+    ]
+    docs = await db[COL_FACULTY].aggregate(pipeline).to_list(None)
+    return {"ok": True, "term_id": term_id, "faculty": docs}
+
+
+@router.get("/load-assignment/faculty-deloadings")
+async def om_faculty_deloadings(
+    faculty_id: str = Query(..., description="Faculty ID"),
+    term_id: Optional[str] = Query(None, description="Term ID; defaults to OM active/upcoming term"),
+    db = Depends(get_db),
+):
+    """Return deloadings for a selected faculty scoped to a term (OM context)."""
+    if not term_id:
+        active = await _active_term()
+        term_id = (active or {}).get("term_id")
+    if not term_id:
+        return {"ok": True, "term_id": None, "faculty_id": faculty_id, "rows": []}
+
+    rows: List[Dict[str, Any]] = []
+    deloadings = await db["deloadings"].find({"term_id": term_id, "faculty_id": faculty_id}).to_list(None)
+    for d in deloadings:
+        dt = await db["deloading_types"].find_one(
+            {
+                "$or": [
+                    {"type_id": d.get("type_id")},
+                    {"deloadingtype_id": d.get("type_id")},
+                ]
+            }
+        )
+        rows.append(
+            {
+                "deloading_type": (dt or {}).get("type"),
+                "units_deloaded": d.get("units_deloaded"),
+                "notes": (d.get("notes") or d.get("deloading_notes") or "").strip() or None,
+                "term_id": term_id,
+                "updated_at": d.get("updated_at"),
+            }
+        )
+
+    rows.sort(key=lambda x: -(x["updated_at"].timestamp() if x.get("updated_at") else 0))
+    return {"ok": True, "term_id": term_id, "faculty_id": faculty_id, "rows": rows}
+
 @router.get("/load-assignment/list")
 async def get_om_load_assignment_list(user_id: str, db=Depends(get_db)):
     active = await _active_term()
@@ -946,6 +1025,7 @@ async def get_om_load_assignment_list(user_id: str, db=Depends(get_db)):
     
     return {
         "term": _term_label(active),
+        "term_id": active.get("term_id"),
         "rows": rows,
         "preferred_units_by_faculty": preferred_units_by_faculty,
         "courseToKac": course_kac_simple,

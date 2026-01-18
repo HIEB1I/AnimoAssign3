@@ -126,13 +126,11 @@ export default function App() {
           <Route path="/om/pred2" element={<OM_pred2 />} />
           <Route path="/om/loadreco" element={<OM_LoadReco />} />
 
-          <Route path="/om/inbox" element={<OM_Inbox />} />
-
-          {/* OM shell with children (ONE declaration only) */}
-          <Route path="/om/home" element={<OM_LoadAssignment />}>
-            {/* Index & canonical load-assignment (shell decides what to show) */}
-            <Route index element={<></>} />
-            <Route path="load-assignment" element={<></>} />
+{/* OM shell with children (ONE declaration only) */}
+<Route path="/om/home" element={<OM_LoadAssignment />}>
+  <Route index element={<></>} />
+  <Route path="load-assignment" element={<></>} />
+  <Route path="inbox" element={<OM_Inbox />} />
 
             <Route path="faculty-management" element={<OM_FacultyManagement />} />
             <Route path="course-management" element={<OM_CourseManagement />} />
@@ -141,16 +139,18 @@ export default function App() {
              <Route path="special-class" element={<OM_SpecialClass />} />
             <Route path="class-retention" element={<OM_ClassRetention />} />
 
-            {/* Reports & Analytics landing */}
-            <Route path="reports-analytics" element={<OM_ReportsAnalytics />} />
+  <Route path="reports-analytics" element={<OM_ReportsAnalytics />} />
+  <Route path="reports-analytics/teaching-history" element={<OM_RP_FacultyTeachingHistory />} />
+  <Route path="reports-analytics/course-history" element={<OM_RP_CourseHistory />} />
+  <Route path="reports-analytics/deloading-utilization" element={<OM_RP_DeloadingUtilization />} />
+  <Route path="reports-analytics/availability-forecast" element={<OM_RP_AvailabilityForecasting />} />
+  <Route path="reports-analytics/load-risk" element={<OM_RP_LoadRisk />} />
+</Route>
 
-            {/* Child detail pages (inherit shell via Outlet) */}
-            <Route path="reports-analytics/teaching-history" element={<OM_RP_FacultyTeachingHistory />} />
-            <Route path="reports-analytics/course-history" element={<OM_RP_CourseHistory />} />
-            <Route path="reports-analytics/deloading-utilization" element={<OM_RP_DeloadingUtilization />} />
-            <Route path="reports-analytics/availability-forecast" element={<OM_RP_AvailabilityForecasting />} />
-            <Route path="reports-analytics/load-risk" element={<OM_RP_LoadRisk />} />
-          </Route>
+{/* ✅ Redirect old inbox URL to nested inbox */}
+<Route path="/om/inbox" element={<Navigate to="/om/home/inbox" replace />} />
+
+
 
           {/* Redirects for old/external links -> new nested routes */}
           <Route path="/om/faculty-management" element={<Navigate to="/om/home/faculty-management" replace />} />
@@ -194,15 +194,16 @@ export default function App() {
             <Route path="plantilla" element={<div />} />
 
             {/* Children per mapping */}
+            <Route path="inbox" element={<CHAIR_Inbox />} /> {/* ✅ ADD THIS */}
             <Route path="faculty-management" element={<CHAIR_FacultyManagement />} />
             <Route path="course-management" element={<CHAIR_CourseManagement />} />
-            {/* 🔽 CHANGED: use wrapper that passes chairDepartmentName */}
+            {/* use wrapper that passes chairDepartmentName */}
             <Route path="faculty-service" element={<ChairFacultyServiceRoute />} />
             <Route path="student-petitions" element={<CHAIR_StudentPetition />} />
             <Route path="class-retention" element={<CHAIR_ClassRetention />} />
             <Route path="special-class" element={<CHAIR_SpecialClass />} />
           </Route>
-          <Route path="/chair/inbox" element={<CHAIR_Inbox />} />
+
 
           {/* Authenticated wildcard: unknown paths for logged-in users go OM home */}
           <Route path="*" element={<Navigate to="/om/home" replace />} />

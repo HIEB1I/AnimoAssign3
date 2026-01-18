@@ -8,6 +8,9 @@ import {
   getOmLoadAssignmentList,
   getOmLoadAssignmentProfile,
   getAllFaculty,
+  getOmFacultyWithDeloadings,
+  getOmFacultyDeloadings,
+  type DeloadingRow,
 } from "../../api";
 
 import { cls } from "../../utilities/cls";
@@ -1546,6 +1549,7 @@ export default function OM_LoadAssignment() {
 
   // Term label from backend (no hardcoding)
   const [term, setTerm] = useState<string>("");
+  const [termId, setTermId] = useState<string>("");
 
   useEffect(() => {
     (async () => {
@@ -1689,6 +1693,14 @@ export default function OM_LoadAssignment() {
   };
 
   const [facultyList, setFacultyList] = useState<Faculty[]>([]);
+  // Faculty Deloading (per-faculty)
+  const [deloadFacultyQuery, setDeloadFacultyQuery] = useState<string>("");
+  const [deloadSelectedFaculty, setDeloadSelectedFaculty] = useState<Faculty | null>(null);
+  const [deloadRows, setDeloadRows] = useState<DeloadingRow[]>([]);
+  const [deloadLoading, setDeloadLoading] = useState(false);
+  const [deloadError, setDeloadError] = useState<string>("");
+  const [facultyWithDeloadings, setFacultyWithDeloadings] = useState<Faculty[]>([]);
+  const [deloadDropdownOpen, setDeloadDropdownOpen] = useState(false);
 
   // Load all faculty once on mount
   useEffect(() => {
@@ -1784,6 +1796,7 @@ const canRedo = isRunning && historyVersion >= 0 && redoStackRef.current.length 
 
     setRows(Array.isArray(res?.rows) ? res.rows : []);
     setTerm(typeof res?.term === "string" ? res.term : "");
+    setTermId(typeof (res as any)?.term_id === "string" ? (res as any).term_id : "");
     setMode("run");
     setApproved(false);
     setHasLocalEdits(false);
@@ -1953,6 +1966,43 @@ const canRedo = isRunning && historyVersion >= 0 && redoStackRef.current.length 
       ),
     [rowFlags]
   );
+
+  const deloadMatches = useMemo(() => {
+  const q = deloadFacultyQuery.trim().toLowerCase();
+  if (!q) return [] as Faculty[];
+  return (facultyList ?? [])
+    .filter((f) => (f.faculty_name_display || "").toLowerCase().includes(q))
+    .slice(0, 12);
+}, [deloadFacultyQuery, facultyList]);
+
+const loadFacultyDeloadings = async (fid: string) => {
+  if (!fid) return;
+  try {
+    setDeloadLoading(true);
+    setDeloadError("");
+    const res = await getOmFacultyDeloadings({ faculty_id: fid, term_id: termId || undefined });
+    setDeloadRows(Array.isArray(res?.rows) ? res.rows : []);
+  } catch (e: any) {
+    setDeloadError(e?.message || "Failed to load deloadings.");
+    setDeloadRows([]);
+  } finally {
+    setDeloadLoading(false);
+  }
+};
+
+useEffect(() => {
+  if (!termId) return;
+  (async () => {
+    try {
+      const r = await getOmFacultyWithDeloadings(termId);
+      setFacultyWithDeloadings(Array.isArray(r?.faculty) ? r.faculty : []);
+    } catch (e) {
+      console.error("Failed to load facultyWithDeloadings", e);
+      setFacultyWithDeloadings([]);
+    }
+  })();
+}, [termId]);
+
 
   type FacultySummaryRow = {
     facultyId: string;
@@ -3153,6 +3203,189 @@ const canRedo = isRunning && historyVersion >= 0 && redoStackRef.current.length 
                   </div> */}
                 </div>
               </div>
+              {/* ---- Faculty Deloading (per-faculty) ---- */}
+              <div className="mt-6 rounded-xl border border-gray-200 bg-white shadow-sm">
+                <div className="flex flex-wrap items-start justify-between gap-4 px-4 pt-4 pb-2">
+                  <div>
+                    <h2 className="text-lg font-semibold">Faculty Deloading</h2>
+                    <p className="text-xs text-gray-500">
+                      View deloading records per faculty for{" "}
+                      <span className="font-semibold">{term || "this term"}</span>.
+                    </p>
+                  </div>
+
+                  <div className="w-full sm:w-[420px]">
+                    <label className="block text-xs font-medium text-gray-700 mb-1">
+                      Search faculty
+                    </label>
+                    <div className="relative">
+                      <div className="flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-3 py-2 shadow-sm">
+                        <SearchIcon className="h-4 w-4 text-gray-500" />
+                        <input
+                          value={deloadFacultyQuery}
+                          onChange={(e) => {
+                            setDeloadFacultyQuery(e.target.value);
+                            setDeloadDropdownOpen(true);
+                          }}
+                          onFocus={() => setDeloadDropdownOpen(true)}
+                          onBlur={() => window.setTimeout(() => setDeloadDropdownOpen(false), 120)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") {
+                              const best = deloadMatches[0];
+                              if (best) {
+                                setDeloadSelectedFaculty(best);
+                                setDeloadFacultyQuery(best.faculty_name_display);
+                                setDeloadDropdownOpen(false);
+                                loadFacultyDeloadings(best.faculty_id);
+                              }
+                            }
+                            if (e.key === "Escape") setDeloadDropdownOpen(false);
+                          }}
+                          placeholder="Type a name (e.g., Dela Cruz)"
+                          className="w-full bg-transparent text-sm outline-none placeholder:text-gray-400"
+                        />
+                        {deloadFacultyQuery.trim() && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setDeloadFacultyQuery("");
+                              setDeloadSelectedFaculty(null);
+                              setDeloadRows([]);
+                              setDeloadError("");
+                            }}
+                            className="rounded-md p-1 text-gray-500 hover:bg-gray-100"
+                            title="Clear"
+                          >
+                            <X className="h-4 w-4" />
+                          </button>
+                        )}
+                      </div>
+
+                      {deloadDropdownOpen && deloadFacultyQuery.trim() && deloadMatches.length > 0 && (
+                        <div className="absolute z-20 mt-1 w-full overflow-hidden rounded-lg border border-gray-200 bg-white shadow-lg">
+                          <ul className="max-h-60 overflow-auto py-1">
+                            {deloadMatches.map((f) => (
+                              <li key={f.faculty_id}>
+                                <button
+                                  type="button"
+                                  className="w-full px-3 py-2 text-left text-sm hover:bg-gray-50"
+                                  onMouseDown={(e) => e.preventDefault()}
+                                  onClick={() => {
+                                    setDeloadSelectedFaculty(f);
+                                    setDeloadFacultyQuery(f.faculty_name_display);
+                                    setDeloadDropdownOpen(false);
+                                    loadFacultyDeloadings(f.faculty_id);
+                                  }}
+                                >
+                                  {f.faculty_name_display}
+                                </button>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Faculty with current deloadings (quick awareness) */}
+                <div className="px-4 pb-3">
+                  <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2">
+                    <div className="text-xs font-medium text-gray-700">
+                      Faculty with current deloadings
+                      <span className="ml-2 text-[11px] font-normal text-gray-500">
+                        ({facultyWithDeloadings.length})
+                      </span>
+                    </div>
+                    {facultyWithDeloadings.length === 0 ? (
+                      <div className="mt-1 text-xs text-gray-500">None found for this term.</div>
+                    ) : (
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        {facultyWithDeloadings.map((f) => (
+                          <button
+                            key={f.faculty_id}
+                            type="button"
+                            className={cls(
+                              "rounded-full border px-2.5 py-1 text-xs shadow-sm",
+                              deloadSelectedFaculty?.faculty_id === f.faculty_id
+                                ? "border-emerald-300 bg-emerald-50 text-emerald-900"
+                                : "border-gray-200 bg-white text-gray-700 hover:bg-gray-100"
+                            )}
+                            onClick={() => {
+                              setDeloadSelectedFaculty(f);
+                              setDeloadFacultyQuery(f.faculty_name_display);
+                              loadFacultyDeloadings(f.faculty_id);
+                            }}
+                          >
+                            {f.faculty_name_display}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {deloadError && (
+                  <div className="mx-4 mb-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                    {deloadError}
+                  </div>
+                )}
+
+                <div className="border-t px-4 pb-4 pt-4 overflow-x-auto w-full">
+                  {!deloadSelectedFaculty ? (
+                    <div className="py-6 text-center text-sm text-gray-500">
+                      Select a faculty to view their deloadings.
+                    </div>
+                  ) : deloadLoading ? (
+                    <div className="py-6 text-center text-sm text-gray-500">Loading…</div>
+                  ) : deloadRows.length === 0 ? (
+                    <div className="py-6 text-center text-sm text-gray-500">
+                      No deloadings recorded for{" "}
+                      <span className="font-semibold">{deloadSelectedFaculty.faculty_name_display}</span>.
+                    </div>
+                  ) : (
+                    <table className="w-full text-sm table-fixed">
+                      <colgroup>
+                        <col style={{ width: "28%" }} />
+                        <col style={{ width: "12%" }} />
+                        <col style={{ width: "40%" }} />
+                        <col style={{ width: "20%" }} />
+                      </colgroup>
+                      <thead className="bg-gray-50 border-y text-gray-700">
+                        <tr>
+                          {["Deloading Type", "Units", "Notes", "Last Updated"].map((h) => (
+                            <th
+                              key={h}
+                              className="px-3 py-2 text-center text-xs font-semibold uppercase tracking-wide"
+                            >
+                              {h}
+                            </th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {deloadRows.map((r, i) => (
+                          <tr
+                            key={`${r.deloading_type || "row"}-${i}`}
+                            className={cls(
+                              i % 2 === 0 ? "bg-white" : "bg-gray-50",
+                              "text-gray-800 hover:bg-amber-50/40"
+                            )}
+                          >
+                            <td className="px-3 py-2 text-center">{r.deloading_type || "—"}</td>
+                            <td className="px-3 py-2 text-center">{r.units_deloaded ?? "—"}</td>
+                            <td className="px-3 py-2 text-center">{r.notes || "—"}</td>
+                            <td className="px-3 py-2 text-center">
+                              {r.updated_at ? new Date(r.updated_at).toLocaleString() : "—"}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+                </div>
+              </div>
+
               {/* ---- Summary section under Load Recommendations ---- */}
               {rows.length > 0 && (
                 <div className="mt-6 rounded-xl border border-gray-200 bg-white shadow-sm">
