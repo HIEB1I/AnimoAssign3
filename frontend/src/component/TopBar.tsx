@@ -1,3 +1,4 @@
+// frontend/src/component/TopBar.tsx
 import { useState, useRef, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { UserCircle, LogOut, Inbox, Bell } from "lucide-react";
@@ -18,6 +19,12 @@ interface TopBarProps {
    * Use "admin:openInbox" on the Admin page.
    */
   inboxEvent?: string;
+
+  /** OPTIONAL:
+   * If provided, clicking Inbox will navigate to this route (recommended).
+   * Example: "/apo/inbox", "/faculty/inbox"
+   */
+  inboxPath?: string;
 }
 
 /**
@@ -25,7 +32,7 @@ interface TopBarProps {
  * - Dynamic gradient bar and account dropdown
  * - Notifications dropdown with live "time ago"
  * - Optional department + notifications
- * - Inbox button dispatches a role-specific CustomEvent
+ * - Inbox button: navigate to inboxPath if provided; otherwise dispatches inboxEvent
  */
 export default function TopBar({
   fullName,
@@ -33,6 +40,7 @@ export default function TopBar({
   department,
   notifications: incomingNotifs = [],
   inboxEvent = "faculty:openInbox",
+  inboxPath,
 }: TopBarProps) {
   const navigate = useNavigate();
 
@@ -106,9 +114,9 @@ export default function TopBar({
 
   // Notification logic
   const hasUnseen = notifications.some((n) => !n.seen);
-  const sortedNotifs = [...notifications].sort(
-    (a, b) => (a.time as Date).getTime() - (b.time as Date).getTime()
-  ).reverse();
+  const sortedNotifs = [...notifications]
+    .sort((a, b) => (a.time as Date).getTime() - (b.time as Date).getTime())
+    .reverse();
 
   const toggleNotif = () => {
     setNotifOpen((v) => !v);
@@ -117,8 +125,14 @@ export default function TopBar({
     }
   };
 
-  // Open Inbox inside Overview (no route/navigation)
-  const openInboxInline = () => {
+  // Inbox click:
+  // - If inboxPath provided -> navigate
+  // - Else -> dispatch existing custom event (backward compatible)
+  const handleInboxClick = () => {
+    if (inboxPath) {
+      navigate(inboxPath);
+      return;
+    }
     window.dispatchEvent(new Event(inboxEvent));
   };
 
@@ -136,9 +150,7 @@ export default function TopBar({
                 <UserCircle className="h-6 w-6" />
               </span>
               <span className="leading-tight text-left">
-                <div className="text-[17px] font-semibold">
-                  {fullName || "(No name on file)"}
-                </div>
+                <div className="text-[17px] font-semibold">{fullName || "(No name on file)"}</div>
 
                 <div className="text-[12px] opacity-90">
                   {role}
@@ -167,7 +179,7 @@ export default function TopBar({
           {/* --- Right icons --- */}
           <div className="flex items-center gap-2">
             <button
-              onClick={openInboxInline}
+              onClick={handleInboxClick}
               className="rounded-md p-2 hover:bg-white/15"
               title="Inbox"
               aria-label="Open Inbox"
@@ -198,23 +210,14 @@ export default function TopBar({
                   <div className="max-h-96 overflow-y-auto">
                     {sortedNotifs.length ? (
                       sortedNotifs.map((n) => (
-                        <div
-                          key={n.id}
-                          className="border-b border-neutral-100 px-4 py-3 last:border-0"
-                        >
-                          <div className="font-semibold text-slate-900">
-                            {n.title}
-                          </div>
+                        <div key={n.id} className="border-b border-neutral-100 px-4 py-3 last:border-0">
+                          <div className="font-semibold text-slate-900">{n.title}</div>
                           <div className="text-sm text-gray-600">{n.details}</div>
-                          <div className="mt-1 text-xs text-gray-400">
-                            {timeAgo(n.time as Date)}
-                          </div>
+                          <div className="mt-1 text-xs text-gray-400">{timeAgo(n.time as Date)}</div>
                         </div>
                       ))
                     ) : (
-                      <div className="px-4 py-6 text-center text-sm text-gray-500">
-                        No notifications
-                      </div>
+                      <div className="px-4 py-6 text-center text-sm text-gray-500">No notifications</div>
                     )}
                   </div>
                 </div>

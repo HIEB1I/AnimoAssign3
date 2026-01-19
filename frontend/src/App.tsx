@@ -64,6 +64,7 @@ import CHAIR_FacultyService from "./pages/CHAIR/CHAIR_FacultyService";
 import CHAIR_StudentPetition from "./pages/CHAIR/CHAIR_StudentPetition";
 import CHAIR_ClassRetention from "./pages/CHAIR/CHAIR_ClassRetention";
 import CHAIR_Inbox from "./pages/CHAIR/CHAIR_Inbox";
+import APO_Inbox from "./pages/APO/APO_Inbox";
 
 const base = (import.meta.env.BASE_URL || "/").replace(/\/$/, "");
 
@@ -191,13 +192,14 @@ export default function App() {
           <Route path="/apo/preenlistment" element={<APO_PreEnlistment />} />
           <Route path="/apo/courseofferings" element={<APO_CourseOfferings />} />
           <Route path="/apo/roomallocation" element={<APO_RoomAllocation />} />
+          <Route path="/apo/inbox" element={<APO_Inbox />} />
 
           {/* Faculty */}
           <Route path="/faculty/overview" element={<FACULTY_Overview />} />
           <Route path="/faculty/history" element={<FACULTY_History />} />
           <Route path="/faculty/preferences" element={<FACULTY_Preferences />} />
           <Route path="/faculty/deloadings" element={<FACULTY_Deloadings />} />
-          <Route path="/inbox" element={<FACULTY_Inbox />} />
+          <Route path="/faculty/inbox" element={<FACULTY_Inbox />} />
 
           {/* Admin */}
           <Route path="/admin" element={<ADMIN />} />

@@ -1,4 +1,5 @@
 # backend/app/main.py
+import socketio as socketio_pkg
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
@@ -10,6 +11,9 @@ from .MESSAGING.store import ensure_messaging_indexes
 
 from .config import get_settings
 
+# NEW (Phase 9)
+from .MESSAGING.store import ensure_messaging_indexes
+from .REALTIME.sio_server import sio
 # --------------------------------------------------------------------
 # Settings & App
 # --------------------------------------------------------------------
@@ -78,7 +82,11 @@ async def _ensure_faculty_overview_indexes() -> None:
     await db.departments.create_index("dept_code")
     await db.audit_logs.create_index([("timestamp", -1)])
 
-
+# NEW (Phase 9): messaging + unread indexes (pymongo store.py; run in threadpool)
+@app.on_event("startup")
+async def _ensure_messaging_indexes() -> None:
+    await run_in_threadpool(ensure_messaging_indexes)
+    
 __all__ = ["app", "db"]
 
 # --------------------------------------------------------------------
@@ -203,3 +211,5 @@ app.include_router(chair_inbox_router, prefix="/api")
 app.include_router(gmail_send_router, prefix="/api")
 app.include_router(gcal_router, prefix="/api")
 app.include_router(google_login_router, prefix="/api")
+
+app = socketio_pkg.ASGIApp(sio, other_asgi_app=app)
