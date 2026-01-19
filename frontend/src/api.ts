@@ -2620,6 +2620,72 @@ export async function runOmAutoAssign(params: {
   return r.json() as Promise<{ term: string; rows: OmLoadRow[] }>;
 }
 
+/** Send OM proposed schedules to faculty (all rows per faculty) */
+export async function sendOmLoadAssignmentsToFaculty(
+  user_id: string,
+  payload: { term_id?: string; rows: any[] }
+) {
+  const base = (typeof API_BASE !== "undefined" ? API_BASE : "").replace(/\/+$/, "");
+  const url = `${base}/om/load-assignment/to-faculty`;
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ user_id, ...payload }),
+  });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json() as Promise<{ ok: boolean; term_id: string; sent_faculty: number }>;
+}
+
+export async function getOmLoadAssignmentRfc(
+  user_id: string,
+  params: { term_id?: string; faculty_id: string }
+) {
+  const base = (typeof API_BASE !== "undefined" ? API_BASE : "").replace(/\/+$/, "");
+  const qs = new URLSearchParams({ user_id, faculty_id: params.faculty_id });
+  if (params.term_id) qs.set("term_id", params.term_id);
+  const url = `${base}/om/load-assignment/rfc?${qs.toString()}`;
+  const r = await fetch(url, { method: "GET" });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json() as Promise<{ ok: boolean; rfc: any | null }>;
+}
+
+export async function respondOmLoadAssignmentRfc(
+  user_id: string,
+  payload: {
+    term_id: string;
+    faculty_id: string;
+    action: "reply" | "approve" | "reject";
+    message?: string;
+  }
+) {
+  const base = (typeof API_BASE !== "undefined" ? API_BASE : "").replace(/\/+$/, "");
+  const url = `${base}/om/load-assignment/rfc/respond?user_id=${encodeURIComponent(user_id)}`;
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json() as Promise<{ ok: boolean; status?: string }>;
+}
+
+/** When OM clicks the check button per course: notify faculty that subject is final */
+export async function finalizeOmLoadAssignmentCourse(
+  user_id: string,
+  payload: { term_id?: string; faculty_id: string; course_code: string; section: string }
+) {
+  const base = (typeof API_BASE !== "undefined" ? API_BASE : "").replace(/\/+$/, "");
+  const url = `${base}/om/load-assignment/finalize-course?user_id=${encodeURIComponent(user_id)}`;
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json() as Promise<{ ok: boolean }>;
+}
+
+
 export async function getAllFaculty() {
   const base = (typeof API_BASE !== "undefined" ? API_BASE : "").replace(/\/+$/, "");
   const url = `${base}/om/load-assignment/faculty-all`;

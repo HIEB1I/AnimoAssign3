@@ -225,6 +225,36 @@ const DAY_ORDER: DayLong[] = [
   "TBA", // <-- NEW
 ];
 
+// Accept both long-day labels and short codes coming from DB/API.
+const DAY_ALIASES: Record<string, DayLong> = {
+  M: "Monday",
+  MON: "Monday",
+  T: "Tuesday",
+  TU: "Tuesday",
+  TUE: "Tuesday",
+  W: "Wednesday",
+  WED: "Wednesday",
+  TH: "Thursday",
+  THU: "Thursday",
+  H: "Thursday",
+  R: "Thursday",
+  F: "Friday",
+  FRI: "Friday",
+  S: "Saturday",
+  SAT: "Saturday",
+  TBA: "TBA",
+};
+
+function normalizeDay(raw?: string): DayLong | null {
+  const s = (raw || "").trim();
+  if (!s) return null;
+  const u = s.toUpperCase();
+  if (DAY_ALIASES[u]) return DAY_ALIASES[u];
+  // Already in long format? (case-insensitive)
+  const t = s.charAt(0).toUpperCase() + s.slice(1).toLowerCase();
+  return DAY_ORDER.includes(t as DayLong) ? (t as DayLong) : null;
+}
+
 // --- *** NEW: This type matches the backend (Python) output *** ---
 type TLItem = {
   course_code: string;
@@ -305,7 +335,8 @@ function placeItems(teachingLoad: TLItem[]): Placed[] {
   (teachingLoad || []).forEach((it) => {
     // Helper function to place a single schedule item
     const place = (day: string | undefined, time: string | undefined, room: string | undefined) => {
-      if (!day || day === "TBA" || !time || time === "TBA" || !DAY_ORDER.includes(day as DayLong)) {
+      const dayLong = normalizeDay(day);
+      if (!dayLong || dayLong === "TBA" || !time || time === "TBA") {
         return; // Don't place on calendar
       }
       const rawStart = String(time || "").split("–")[0].trim();
@@ -333,7 +364,7 @@ function placeItems(teachingLoad: TLItem[]): Placed[] {
       }
 
       out.push({
-        day: day as DayLong,
+        day: dayLong,
         row: rowIdx,
         data: {
           code: it.course_code,
@@ -475,7 +506,7 @@ function TeachingLoadEnhanced({ teachingLoad, term }: TeachingLoadEnhancedProps)
                 : "bg-blue-700 text-white hover:bg-blue-800 active:translate-y-[0.5px]"
             )}
           >
-            {isAccepted ? "Accepted" : "Accept"}
+            {isAccepted ? "Accepted" : "Accept Schedule"}
           </button>
         </div>
       </div>
@@ -894,7 +925,9 @@ function ChangeRequestModal({
 
           {choices.includes("Other") && (
             <div className="mt-2">
-              <label className="mb-1 block text-sm font-medium text-neutral-700">Specify change</label>
+              <label className="mb-1 block text-sm font-medium text-neutral-700">
+                Specify change <span className="text-red-500">*</span>
+              </label>
               <input
                 type="text"
                 className="w-full rounded-lg border border-neutral-300 p-2 text-sm"
@@ -907,7 +940,9 @@ function ChangeRequestModal({
 
           {!!choices.length && (
             <div className="mt-2">
-              <label className="mb-1 block text-sm font-medium text-neutral-700">Remarks</label>
+              <label className="mb-1 block text-sm font-medium text-neutral-700">
+                Remarks <span className="text-red-500">*</span>
+              </label>
               <textarea
                 rows={4}
                 className="w-full resize-y rounded-lg border border-neutral-300 p-2 text-sm"

@@ -1045,7 +1045,9 @@ const SendModal = ({
 
   return (
     <div className="fixed inset-0 z-[120] grid place-items-center bg-black/40 p-4">
-      <div className="w-full max-w-5xl rounded-2xl bg-white p-6 shadow-2xl">
+      <div className="w-full max-w-5xl rounded-2xl bg-white shadow-2xl max-h-[85vh] flex flex-col">
+        {/* Scrollable content (keeps footer buttons visible) */}
+        <div className="p-6 pb-4 overflow-y-auto flex-1">
         <div className="mb-1">
           <h3 className="text-[22px] font-extrabold text-emerald-700">
             Teaching Load Assignments for Term 1, AY 2025 - 2026
@@ -1131,7 +1133,7 @@ const SendModal = ({
                           —
                         </td>
                         <td className="px-4 py-3 align-middle text-gray-800">
-                          —
+                          {r.mode || "—"}
                         </td>
                         <td className="px-4 py-3 align-middle">
                           {r.day1 || "—"}
@@ -1161,7 +1163,9 @@ const SendModal = ({
           </div>
         </div>
 
-        <div className="mt-6 flex items-center justify-end gap-2">
+        </div>
+
+        <div className="px-6 py-4 border-t border-neutral-200 flex items-center justify-end gap-2 bg-white">
           <button
             onClick={onClose}
             className="rounded-lg border border-neutral-300 bg-neutral-100 px-4 py-2 text-sm hover:bg-neutral-200"
