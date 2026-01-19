@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Outlet, useLocation } from "react-router-dom";
 import AppShell from "../../base/AppShell";
 import { runOmAutoAssign } from "../../api.ts";
-import { submitOmLoadAssignment } from "../../api.ts";
+import { submitOmLoadAssignment, notifyChairLoadRecommendation } from "../../api.ts";
 
 import {
   getOmLoadAssignmentList,
@@ -3711,19 +3711,28 @@ useEffect(() => {
         open={showApprove}
         onClose={() => setShowApprove(false)}
         onApprove={() => {
-          (async () => {
-            try {
-              if (userId) {
-                await submitOmLoadAssignment(userId, { rows }, "approve"); // <-- key change
-              }
-              // pull fresh data so you see persisted faculty + any created schedules
-              await loadFromServer();
-              setApproved(true);
-            } finally {
-              setShowApprove(false);
+        (async () => {
+          try {
+            if (userId) {
+              const res = await submitOmLoadAssignment(userId, { rows }, "approve");
+
+              // Create the chair notification (forward vs update is decided by backend;
+              // but if approve returns kind/reco_id, we pass it through for correctness)
+              await notifyChairLoadRecommendation(userId, {
+                kind: (res as any)?.kind,
+                reco_id: (res as any)?.reco_id,
+              });
             }
-          })();
-        }}
+
+            // pull fresh data so you see persisted faculty + any created schedules
+            await loadFromServer();
+            setApproved(true);
+          } finally {
+            setShowApprove(false);
+          }
+        })();
+      }}
+
       />
 
       <SendModal

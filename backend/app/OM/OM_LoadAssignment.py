@@ -15,6 +15,9 @@ from collections import defaultdict
 
 from ..main import db
 
+# In-app bell notifications (same pattern as Faculty Service)
+from ..Notifications import create_notification
+
 import re 
 
 def get_db():
@@ -34,6 +37,230 @@ COL_CAMPUSES = "campuses"
 COL_LEAVES = "leaves"
 COL_PREFERENCES = "faculty_preferences"
 COL_FACULTY_LOADS = "faculty_loads"
+
+COL_ROLE_ASSIGN = "role_assignments"
+
+
+async def _dept_name_by_id(dept_id: str, db) -> str:
+    """Best-effort department name lookup used for notification copy."""
+    if not dept_id:
+        return ""
+    d = await db[COL_DEPTS].find_one(
+        {
+            "$or": [
+                {"department_id": dept_id},
+                {"dept_id": dept_id},
+                {"id": dept_id},
+            ]
+        },
+        {"_id": 0, "dept_name": 1, "department_name": 1, "name": 1, "dept_code": 1},
+    ) or {}
+    return (d.get("dept_name") or d.get("department_name") or d.get("name") or "").strip()
+
+
+async def _chair_user_ids_for_department_id(department_id: str, db) -> List[str]:
+    """
+    Resolve chair user_id(s) for a department.
+
+    Priority:
+      1) staff_profiles where position_title contains "chair" (case-insensitive)
+         - match by department_id/dept_id
+         - fallback match by dept_name/department_name if ids not present
+      2) role_assignments for that department (active-ish)
+      3) role-based resolution (user_roles role_type contains "chair") joined via role_assignments
+      4) SAFE FALLBACK: notify ANY chair in the system (staff_profiles chair OR role_assignments chair-role),
+         so notifications are not silently dropped.
+    """
+    if not department_id:
+        return []
+
+    dept_name = await _dept_name_by_id(department_id, db)
+
+    ids: List[str] = []
+
+    # 1) staff_profiles by department_id/dept_id
+    try:
+        cur = db[COL_STAFF].find(
+            {
+                "$or": [{"department_id": department_id}, {"dept_id": department_id}],
+                "position_title": {"$regex": "chair", "$options": "i"},
+            },
+            {"_id": 0, "user_id": 1},
+        )
+        async for d in cur:
+            if d.get("user_id"):
+                ids.append(d["user_id"])
+    except Exception:
+        pass
+
+    # 1b) staff_profiles by dept name (fallback)
+    if not ids and dept_name:
+        try:
+            cur_name = db[COL_STAFF].find(
+                {
+                    "$or": [
+                        {"dept_name": dept_name},
+                        {"department_name": dept_name},
+                        {"department": dept_name},
+                        {"dept": dept_name},
+                    ],
+                    "position_title": {"$regex": "chair", "$options": "i"},
+                },
+                {"_id": 0, "user_id": 1},
+            )
+            async for d in cur_name:
+                if d.get("user_id"):
+                    ids.append(d["user_id"])
+        except Exception:
+            pass
+
+    # 2) role_assignments fallback (dept-scoped)
+    if not ids:
+        try:
+            cur2 = db[COL_ROLE_ASSIGN].find(
+                {
+                    "$or": [{"department_id": department_id}, {"dept_id": department_id}],
+                    "is_active": {"$in": [True, None]},
+                },
+                {"_id": 0, "user_id": 1},
+            )
+            async for d in cur2:
+                if d.get("user_id"):
+                    ids.append(d["user_id"])
+        except Exception:
+            pass
+
+    # 3) role-based resolution: user_roles(role_type contains chair) -> role_assignments(role_id in ...)
+    if not ids:
+        try:
+            chair_roles = await db["user_roles"].find(
+                {"role_type": {"$regex": "chair", "$options": "i"}},
+                {"_id": 0, "role_id": 1},
+            ).to_list(100)
+            chair_role_ids = [r.get("role_id") for r in chair_roles if r.get("role_id")]
+
+            if chair_role_ids:
+                cur3 = db[COL_ROLE_ASSIGN].find(
+                    {
+                        "role_id": {"$in": chair_role_ids},
+                        "$or": [{"department_id": department_id}, {"dept_id": department_id}],
+                        "is_active": {"$in": [True, None]},
+                    },
+                    {"_id": 0, "user_id": 1},
+                )
+                async for d in cur3:
+                    if d.get("user_id"):
+                        ids.append(d["user_id"])
+        except Exception:
+            pass
+
+    # 3b) optional: department doc may store chair email -> resolve to users.user_id
+    if not ids:
+        try:
+            dept_doc = await db[COL_DEPTS].find_one(
+                {"$or": [{"department_id": department_id}, {"dept_id": department_id}]},
+                {"_id": 0, "chair_email": 1, "chairEmail": 1, "email_chair": 1},
+            ) or {}
+            chair_email = (dept_doc.get("chair_email") or dept_doc.get("chairEmail") or dept_doc.get("email_chair") or "").strip()
+            if chair_email:
+                u = await db[COL_USERS].find_one(
+                    {"email": {"$regex": f"^{re.escape(chair_email)}$", "$options": "i"}},
+                    {"_id": 0, "user_id": 1},
+                )
+                if u and u.get("user_id"):
+                    ids.append(u["user_id"])
+        except Exception:
+            pass
+
+    # 4) SAFE FALLBACK: notify ANY chair (system-wide) so we never silently drop notifs
+    if not ids:
+        # 4a) any staff_profile chair
+        try:
+            cur_any = db[COL_STAFF].find(
+                {"position_title": {"$regex": "chair", "$options": "i"}},
+                {"_id": 0, "user_id": 1},
+            ).limit(25)
+            async for d in cur_any:
+                if d.get("user_id"):
+                    ids.append(d["user_id"])
+        except Exception:
+            pass
+
+    if not ids:
+        # 4b) any role_assignment tied to a chair role_id
+        try:
+            chair_roles = await db["user_roles"].find(
+                {"role_type": {"$regex": "chair", "$options": "i"}},
+                {"_id": 0, "role_id": 1},
+            ).to_list(100)
+            chair_role_ids = [r.get("role_id") for r in chair_roles if r.get("role_id")]
+            if chair_role_ids:
+                cur_any2 = db[COL_ROLE_ASSIGN].find(
+                    {
+                        "role_id": {"$in": chair_role_ids},
+                        "is_active": {"$in": [True, None]},
+                    },
+                    {"_id": 0, "user_id": 1},
+                ).limit(25)
+                async for d in cur_any2:
+                    if d.get("user_id"):
+                        ids.append(d["user_id"])
+        except Exception:
+            pass
+
+    # unique
+    seen = set()
+    out: List[str] = []
+    for x in ids:
+        if x and x not in seen:
+            seen.add(x)
+            out.append(x)
+    return out
+
+async def _infer_department_id_from_rows(rows: List[Dict[str, Any]], db) -> Optional[str]:
+    """Best-effort department_id inference for OM forward/update.
+
+    Tries, in order:
+      1) row.department_id / row.dept_id fields (various key spellings)
+      2) lookup sections by section_id then take the most common department_id/dept_id
+    """
+    if not rows:
+        return None
+
+    # 1) direct hints in payload rows
+    for r in rows:
+        for k in ("department_id", "dept_id", "departmentId", "deptId"):
+            v = r.get(k)
+            if v:
+                return str(v).strip()
+
+    # 2) infer via section_id -> sections.department_id
+    sec_ids: List[str] = []
+    for r in rows:
+        sid = r.get("section_id") or r.get("sectionId") or r.get("sec_id") or r.get("secId")
+        if sid:
+            sec_ids.append(str(sid).strip())
+
+    if not sec_ids:
+        return None
+
+    # Fetch matching sections
+    docs = await db[COL_SECTIONS].find({"section_id": {"$in": list(set(sec_ids))}}, {"_id": 0, "department_id": 1, "dept_id": 1}).to_list(None)
+    if not docs:
+        return None
+
+    counts: Dict[str, int] = {}
+    for d in docs:
+        did = d.get("department_id") or d.get("dept_id")
+        if did:
+            did = str(did).strip()
+            counts[did] = counts.get(did, 0) + 1
+
+    if not counts:
+        return None
+
+    # return most common
+    return max(counts.items(), key=lambda kv: kv[1])[0]
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -680,6 +907,16 @@ async def loadassignment_handler(
 
         rows = payload["rows"]
 
+        # Determine whether this is the first forward (new header) or a re-forward/update.
+        # Keep your existing header behavior, but resolve recipients robustly for notifications.
+        dept_id_header = "DEPT0001"  # existing behavior
+        dept_id_notif = await _infer_department_id_from_rows(rows, db) or dept_id_header
+
+        existing_header = await db[COL_FACULTY_LOADS].find_one(
+            {"term_id": active.get("term_id"), "department_id": dept_id_header},
+            {"_id": 1, "load_id": 1},
+        )
+
         # 1) persist the final assignments/schedules
         await _approve_and_persist(active["term_id"], rows, db)
 
@@ -687,18 +924,126 @@ async def loadassignment_handler(
         await _upsert_faculty_load_header(
             active,
             db,
-            department_id="DEPT0001",  # per your spec
+            department_id=dept_id_header,  # existing behavior
             user_id=userId,            # query param from the route
         )
+
+        # 3) notify the department chair(s) so their CHAIR Plantilla alerts updates
+        try:
+            recipients = await _chair_user_ids_for_department_id(dept_id_notif, db)
+            dept_name = await _dept_name_by_id(dept_id_notif, db)
+
+            is_update = bool(existing_header)
+            title = "Load Recommendation Updated" if is_update else "Load Recommendation Forwarded"
+            details = (
+                f"OM {'updated' if is_update else 'forwarded'} the load recommendation"
+                f" for {dept_name or dept_id_notif} ({_term_label(active)})."
+            )
+            meta = {
+                "route": "/chair/plantilla",
+                "kind": "om_load_updated" if is_update else "om_load_forwarded",
+                "term_id": active.get("term_id"),
+                "department_id": dept_id_notif,
+                "load_id": (existing_header or {}).get("load_id"),
+            }
+
+            for uid in recipients:
+                await create_notification(
+                    user_id=uid,
+                    title=title,
+                    details=details,
+                    meta=meta,
+                )
+        except Exception:
+            # Never break approval due to notification failure
+            pass
+
+        # fetch header again to get reco_id after upsert
+        header_after = await db[COL_FACULTY_LOADS].find_one(
+            {"term_id": active.get("term_id"), "department_id": dept_id_header},
+            {"_id": 0, "load_id": 1},
+        ) or {}
+
+        kind = "om_load_updated" if bool(existing_header) else "om_load_forwarded"
+        reco_id = header_after.get("load_id") or (existing_header or {}).get("load_id")
 
         return {
             "ok": True,
             "approved": len(rows),
             "term": _term_label(active),
+            "kind": kind,
+            "reco_id": reco_id,
         }
 
 
+
     raise HTTPException(status_code=400, detail="Invalid action parameter.")
+
+@router.post("/loadassignment/notify-chair")
+async def om_notify_chair_load_forwarded(
+    userId: str = Query(..., min_length=3),
+    payload: Dict[str, Any] = Body(...),
+):
+    active = await _active_term()
+    if not active:
+        raise HTTPException(409, "No upcoming term found (is_current anchor missing?)")
+
+    # Best-effort dept resolution
+    dept_id_header = "DEPT0001"  # keep your existing header behavior
+    dept_id_notif = (
+        (payload.get("department_id") or payload.get("dept_id") or "").strip()
+        or await _infer_department_id_from_rows(payload.get("rows") or [], db)
+        or dept_id_header
+    )
+
+    # reco_id (prefer payload; else pull from faculty_loads header)
+    header = await db[COL_FACULTY_LOADS].find_one(
+        {"term_id": active.get("term_id"), "department_id": dept_id_header},
+        {"_id": 0, "load_id": 1},
+    ) or {}
+    reco_id = (payload.get("reco_id") or payload.get("recoId") or header.get("load_id"))
+
+    # kind (prefer payload; else infer: if any prior notif exists for this reco_id => updated)
+    kind = (payload.get("kind") or "").strip()
+    if kind not in ("om_load_forwarded", "om_load_updated"):
+        inferred = "om_load_forwarded"
+        if reco_id:
+            prior = await db["notifications"].find_one(
+                {"meta.reco_id": reco_id, "meta.kind": "om_load_forwarded"},
+                {"_id": 0, "notif_id": 1},
+            )
+            if prior:
+                inferred = "om_load_updated"
+        kind = inferred
+
+    recipients = await _chair_user_ids_for_department_id(dept_id_notif, db)
+    dept_name = await _dept_name_by_id(dept_id_notif, db)
+
+    title = "Load Recommendation Updated" if kind == "om_load_updated" else "Load Recommendation Forwarded"
+    details = (
+        f"OM {'updated' if kind == 'om_load_updated' else 'forwarded'} the load recommendation "
+        f"for {dept_name or dept_id_notif} ({_term_label(active)})."
+    )
+    meta = {
+        "route": "/chair/plantilla",
+        "kind": kind,
+        "reco_id": reco_id,                 # REQUIRED by your spec
+        "term_id": active.get("term_id"),
+        "department_id": dept_id_notif,
+    }
+
+    created = 0
+    for uid in recipients:
+        await create_notification(user_id=uid, title=title, details=details, meta=meta)
+        created += 1
+
+    return {
+        "ok": True,
+        "created": created,
+        "recipients": recipients,
+        "kind": kind,
+        "reco_id": reco_id,
+    }
 
 @router.get("/load-assignment/faculty-all")
 async def om_get_all_faculty(db = Depends(get_db)):

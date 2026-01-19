@@ -2542,6 +2542,28 @@ export async function submitOmLoadAssignment(
   };
 }
 
+export async function notifyChairLoadRecommendation(
+  userId: string,
+  payload: {
+    department_id?: string;
+    reco_id?: string;
+    kind?: "om_load_forwarded" | "om_load_updated";
+    // optional: rows?: OmLoadRow[]; // if you want backend to infer dept_id
+  } = {}
+) {
+  const { data } = await axios.post(`${API_BASE}/om/loadassignment/notify-chair`, payload, {
+    params: { userId },
+  });
+  return data as {
+    ok: boolean;
+    created: number;
+    recipients: string[];
+    kind: "om_load_forwarded" | "om_load_updated";
+    reco_id?: string;
+  };
+}
+
+
 type Faculty = {
   faculty_id: string;
   faculty_name_display: string;
