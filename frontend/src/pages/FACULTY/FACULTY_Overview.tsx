@@ -16,6 +16,12 @@ import {
   setActiveRole,
   userIsChair,
 } from "../../api";
+
+import {
+  getFacultyLoadAssignmentRfc,
+  sendFacultyLoadAssignmentRfcMessage,
+  acceptFacultyLoadAssignment,
+} from "../../api.ts";
 import { useNavigate } from "react-router-dom";
 
 
@@ -492,10 +498,16 @@ function TeachingLoadEnhanced({ teachingLoad, term }: TeachingLoadEnhancedProps)
 
           <button
             type="button"
-            onClick={() => {
-              console.log("ACCEPT_SCHEDULE");
-              setIsAccepted(true);
-              // You would also call an API endpoint here
+            onClick={async () => {
+              try {
+                const raw = JSON.parse(localStorage.getItem("animo.user") || "{}");
+                const userId = raw.userId || raw.user_id || raw.id || "";
+                await acceptFacultyLoadAssignment(userId, { term_id: (term as any)?.term_id || (term as any)?._id || (term as any)?.id });
+                setIsAccepted(true);
+                window.location.reload();
+              } catch (e) {
+                console.error(e);
+              }
             }}
             disabled={isAccepted}
             className={cls(
@@ -698,7 +710,7 @@ function TeachingLoadEnhanced({ teachingLoad, term }: TeachingLoadEnhancedProps)
         </div>
       )}
 
-      <ChangeRequestModal open={!!modal} onClose={() => setModal(null)} context={modal} />
+      <ChangeRequestModal open={!!modal} onClose={() => setModal(null)} context={modal} term={term} />
     </section>
   );
 }
@@ -813,10 +825,12 @@ function ChangeRequestModal({
   open,
   onClose,
   context,
+  term, 
 }: {
   open: boolean;
   onClose: () => void;
   context: { day: DayLong; item: TLItemForCalendar } | null; // <-- MODIFIED
+  term: any
 }) {
   const TIME_SLOTS = [
     "07:30 – 09:00",
@@ -867,7 +881,8 @@ function ChangeRequestModal({
 
   const mustTime = choices.includes("Change class time");
   const mustDay = choices.includes("Change class day");
-  const disabled = choices.length === 0 || (mustTime && !selTime) || (mustDay && !selDay);
+  const isFinalized = Boolean((context?.item as any)?.finalized);
+  const disabled = isFinalized || choices.length === 0 || (mustTime && !selTime) || (mustDay && !selDay);
 
   return (
     <div className="fixed inset-0 z-80 grid place-items-center bg-black/30 p-3">
@@ -886,6 +901,15 @@ function ChangeRequestModal({
         </div>
 
         <div className="space-y-3">
+
+          {isFinalized && (
+            <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+              This course has already been finalized by the Office Manager. RFC is disabled for this course.
+            </div>
+          )}
+
+          <RfcThreadView term={term} />
+
           <label className="block text-sm font-medium text-neutral-700">Change</label>
           <div className="flex flex-wrap gap-2">
             {(["Change class time", "Change class day", "Other"] as ChangeKind[]).map((opt) => (
@@ -963,10 +987,27 @@ function ChangeRequestModal({
           </button>
           <button
             disabled={disabled}
-            onClick={() => {
+            onClick={async () => {
               // Hook into your backend here if needed
-              console.log("SUBMIT_CHANGE_REQUEST", { choices, selTime, selDay, remarks, otherText, context });
-              onClose();
+              try {
+                const raw = JSON.parse(localStorage.getItem("animo.user") || "{}");
+                const userId = raw.userId || raw.user_id || raw.id || "";
+                const parts: string[] = [];
+                if (choices.includes("Change class time") && selTime) parts.push(`Change time to ${selTime}`);
+                if (choices.includes("Change class day") && selDay) parts.push(`Change day to ${selDay}`);
+                if (choices.includes("Other") && otherText.trim()) parts.push(otherText.trim());
+                const changeSummary = parts.join("; ");
+                const msg = `${context.item.code} ${context.item.sec} • ${context.day} • ${context.item.time}\n${changeSummary}\n\nRemarks: ${remarks.trim()}`;
+                await sendFacultyLoadAssignmentRfcMessage(userId, {
+                  term_id: (term as any)?.term_id || (term as any)?._id || (term as any)?.id,
+                  message: msg,
+                });
+                window.location.reload();
+              } catch (e) {
+                console.error(e);
+              } finally {
+                onClose();
+              }
             }}
             className={cls(
               "inline-flex h-9 items-center gap-2 rounded-xl px-4 text-sm text-white shadow",
@@ -983,3 +1024,90 @@ function ChangeRequestModal({
     </div>
   );
 }
+
+function RfcThreadView({ term }: { term: any }) {
+  const [thread, setThread] = useState<any | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        setLoading(true);
+        const raw = JSON.parse(localStorage.getItem("animo.user") || "{}");
+        const userId = raw.userId || raw.user_id || raw.id || "";
+        const resp = await getFacultyLoadAssignmentRfc(userId, {
+          term_id: term?.term_id || term?._id || term?.id,
+        });
+        if (!alive) return;
+        setThread(resp?.rfc || null);
+      } catch (e) {
+        console.error(e);
+      } finally {
+        if (alive) setLoading(false);
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [term?.term_id, term?._id, term?.id]);
+
+  if (loading && !thread) {
+    return (
+      <div className="rounded-xl border border-neutral-200 bg-neutral-50 p-3 text-sm text-neutral-600">
+        Loading RFC thread…
+      </div>
+    );
+  }
+
+  const msgs = thread?.messages || thread?.thread || [];
+  if (!thread || !Array.isArray(msgs) || msgs.length === 0) {
+    return (
+      <div className="rounded-xl border border-neutral-200 bg-neutral-50 p-3 text-sm text-neutral-600">
+        No RFC thread yet. You may send a request below.
+      </div>
+    );
+  }
+
+  const status = String(thread.status || "").toUpperCase();
+  const locked = Boolean(thread.locked) || ["ACCEPTED", "APPROVED", "REJECTED"].includes(status);
+
+  return (
+    <div className="rounded-xl border border-neutral-200 bg-white p-3">
+      <div className="mb-2 flex items-center justify-between">
+        <div className="text-sm font-semibold text-neutral-800">RFC Conversation</div>
+        <div
+          className={cls(
+            "rounded-full px-2 py-0.5 text-xs font-medium",
+            locked ? "bg-neutral-200 text-neutral-700" : status === "NEEDS_OM" ? "bg-yellow-100 text-yellow-800" : "bg-emerald-100 text-emerald-800"
+          )}
+        >
+          {locked ? status || "LOCKED" : status || "OPEN"}
+        </div>
+      </div>
+
+      <div className="max-h-56 space-y-2 overflow-y-auto rounded-lg bg-neutral-50 p-2">
+        {msgs.map((m: any, i: number) => {
+          const role = String(m.sender_role || "").toLowerCase();
+          const isMe = role === "faculty";
+          const ts = m.created_at ? new Date(m.created_at) : null;
+          const time = ts && !isNaN(ts.getTime()) ? ts.toLocaleString() : "";
+          return (
+            <div key={i} className={cls("flex", isMe ? "justify-end" : "justify-start")}>
+              <div
+                className={cls(
+                  "max-w-[85%] rounded-xl px-3 py-2 text-sm shadow-sm",
+                  isMe ? "bg-emerald-700 text-white" : "bg-white text-neutral-800 border border-neutral-200"
+                )}
+              >
+                <div className="whitespace-pre-wrap">{m.message}</div>
+                {!!time && <div className={cls("mt-1 text-[11px]", isMe ? "text-emerald-100" : "text-neutral-500")}>{time}</div>}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+

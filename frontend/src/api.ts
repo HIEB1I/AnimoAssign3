@@ -2360,6 +2360,44 @@ export async function getFacultyOverview(userId: string) {
   return getFacultyOverviewList(userId);
 }
 
+// ===== Load Assignment RFC workflow (Faculty) =====
+export async function getFacultyLoadAssignmentRfc(userId: string, params: { term_id?: string }) {
+  const base = (typeof API_BASE !== "undefined" ? API_BASE : "").replace(/\/+$/, "");
+  const qs = new URLSearchParams({ userId });
+  if (params.term_id) qs.set("term_id", params.term_id);
+  const url = `${base}/faculty/load-assignment/rfc?${qs.toString()}`;
+  const r = await fetch(url, { method: "GET" });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json() as Promise<{ ok: boolean; rfc: any | null }>;
+}
+
+export async function sendFacultyLoadAssignmentRfcMessage(
+  userId: string,
+  payload: { term_id?: string; message: string }
+) {
+  const base = (typeof API_BASE !== "undefined" ? API_BASE : "").replace(/\/+$/, "");
+  const url = `${base}/faculty/load-assignment/rfc/message?userId=${encodeURIComponent(userId)}`;
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json() as Promise<{ ok: boolean; rfc_id?: string; status?: string }>;
+}
+
+export async function acceptFacultyLoadAssignment(userId: string, payload: { term_id?: string }) {
+  const base = (typeof API_BASE !== "undefined" ? API_BASE : "").replace(/\/+$/, "");
+  const url = `${base}/faculty/load-assignment/accept?userId=${encodeURIComponent(userId)}`;
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json() as Promise<{ ok: boolean; status?: string }>;
+}
+
 /* =========================================================
    ===============  FACULTY: HISTORY  ======================
    ========================================================= */
@@ -2659,11 +2697,11 @@ export async function respondOmLoadAssignmentRfc(
   }
 ) {
   const base = (typeof API_BASE !== "undefined" ? API_BASE : "").replace(/\/+$/, "");
-  const url = `${base}/om/load-assignment/rfc/respond?user_id=${encodeURIComponent(user_id)}`;
+  const url = `${base}/om/load-assignment/rfc/respond`;
   const r = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+    body: JSON.stringify({ user_id, ...payload }),
   });
   if (!r.ok) throw new Error(await r.text());
   return r.json() as Promise<{ ok: boolean; status?: string }>;
@@ -2675,12 +2713,13 @@ export async function finalizeOmLoadAssignmentCourse(
   payload: { term_id?: string; faculty_id: string; course_code: string; section: string }
 ) {
   const base = (typeof API_BASE !== "undefined" ? API_BASE : "").replace(/\/+$/, "");
-  const url = `${base}/om/load-assignment/finalize-course?user_id=${encodeURIComponent(user_id)}`;
+  const url = `${base}/om/load-assignment/finalize-course`;
   const r = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+    body: JSON.stringify({ user_id, ...payload }),
   });
+
   if (!r.ok) throw new Error(await r.text());
   return r.json() as Promise<{ ok: boolean }>;
 }

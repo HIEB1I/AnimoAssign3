@@ -42,6 +42,84 @@ COL_FACULTY_LOADS = "faculty_loads"
 COL_LOAD_PROPOSALS = "faculty_load_proposals"
 COL_LOAD_RFC = "faculty_rfc"
 
+
+# RFC state machine
+RFC_TERMINAL = {"ACCEPTED", "APPROVED", "REJECTED"}
+RFC_OPEN = {"OPEN", "NEEDS_OM", "NEEDS_FACULTY", "open"}
+
+def _iso(dt):
+    try:
+        return dt.isoformat()
+    except Exception:
+        return str(dt)
+
+def _normalize_rfc_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
+    """Backwards-compatible normalization for RFC docs.
+
+    Legacy shape:
+      {status: 'open'|'closed', thread: [{from, message, created_at}], decision, locked}
+
+    New shape:
+      {status: 'NEEDS_OM'|'NEEDS_FACULTY'|'ACCEPTED'|'APPROVED'|'REJECTED',
+       messages: [{sender_role, sender_user_id, message, created_at}]}.
+    """
+    if not doc:
+        return doc
+
+    # Ensure rfc_id exists
+    if not doc.get('rfc_id'):
+        # stable-ish id: RFC + last 8 of Mongo _id when present
+        mid = str(doc.get('_id') or '')
+        suffix = (mid[-8:] if mid else '')
+        doc['rfc_id'] = f"RFC{suffix}" if suffix else f"RFC{__import__('uuid').uuid4().hex[:10].upper()}"
+
+    # Normalize messages
+    msgs = []
+    if isinstance(doc.get('messages'), list):
+        for m in doc['messages']:
+            if not isinstance(m, dict):
+                continue
+            msgs.append({
+                'sender_role': m.get('sender_role') or m.get('from') or 'faculty',
+                'sender_user_id': m.get('sender_user_id') or m.get('user_id') or '',
+                'message': m.get('message') or m.get('text') or '',
+                'created_at': m.get('created_at') or m.get('createdAt') or None,
+            })
+    elif isinstance(doc.get('thread'), list):
+        for m in doc['thread']:
+            if not isinstance(m, dict):
+                continue
+            role = (m.get('from') or m.get('sender_role') or '').lower() or 'faculty'
+            msgs.append({
+                'sender_role': role,
+                'sender_user_id': '',
+                'message': m.get('message') or m.get('text') or '',
+                'created_at': m.get('created_at') or m.get('createdAt') or None,
+            })
+
+    doc['messages'] = msgs
+
+    # Normalize status
+    st = (doc.get('status') or '').upper()
+    if st in RFC_TERMINAL or st in ("NEEDS_OM", "NEEDS_FACULTY", "OPEN"):
+        doc['status'] = st
+    elif st == 'CLOSED':
+        dec = (doc.get('decision') or '').lower()
+        doc['status'] = 'APPROVED' if dec == 'approve' else ('REJECTED' if dec == 'reject' else 'APPROVED')
+    elif st == 'OPEN':
+        # infer whose turn
+        last_role = (msgs[-1].get('sender_role') if msgs else 'faculty')
+        last_role = (last_role or '').lower()
+        doc['status'] = 'NEEDS_OM' if last_role == 'faculty' else 'NEEDS_FACULTY'
+    else:
+        doc['status'] = 'NEEDS_OM'
+
+    # locked flag
+    if doc['status'] in RFC_TERMINAL:
+        doc['locked'] = True
+
+    return doc
+
 COL_ROLE_ASSIGN = "role_assignments"
 
 
@@ -1142,7 +1220,9 @@ async def om_faculty_deloadings(
         active = await _active_term()
         term_id = (active or {}).get("term_id")
     if not term_id:
-        return {"ok": True, "term_id": None, "faculty_id": faculty_id, "rows": []}
+        return {"ok": True, "term_id": None, "faculty_id": faculty_id,
+                "rfc_id": None
+, "rows": []}
 
     rows: List[Dict[str, Any]] = []
     deloadings = await db["deloadings"].find({"term_id": term_id, "faculty_id": faculty_id}).to_list(None)
@@ -1166,7 +1246,9 @@ async def om_faculty_deloadings(
         )
 
     rows.sort(key=lambda x: -(x["updated_at"].timestamp() if x.get("updated_at") else 0))
-    return {"ok": True, "term_id": term_id, "faculty_id": faculty_id, "rows": rows}
+    return {"ok": True, "term_id": term_id, "faculty_id": faculty_id,
+                "rfc_id": None
+, "rows": rows}
 
 @router.get("/load-assignment/list")
 async def get_om_load_assignment_list(user_id: str, db=Depends(get_db)):
@@ -1175,6 +1257,43 @@ async def get_om_load_assignment_list(user_id: str, db=Depends(get_db)):
     # Fetch table rows
     base = await _fetch_rows(user_id, term_id=active["term_id"], db=db)
     rows = base["rows"]
+
+    # Overlay: finalized/locked flags from proposals so the OM UI can disable actions
+    # (e.g., after per-course finalize or after RFC reject auto-locks the whole schedule).
+    try:
+        proposals = await db[COL_LOAD_PROPOSALS].find(
+            {"term_id": active["term_id"]},
+            {"_id": 0, "faculty_id": 1, "rows": 1, "locked": 1},
+        ).to_list(None)
+
+        finalized_keys: set[tuple[str, str, str]] = set()
+        for p in proposals or []:
+            fid = str(p.get("faculty_id") or "").strip()
+            if not fid:
+                continue
+            locked_all = bool(p.get("locked"))
+            for rr in (p.get("rows") or []):
+                if not isinstance(rr, dict):
+                    continue
+                course = str(rr.get("course") or rr.get("course_code") or "").strip()
+                section = str(rr.get("section") or "").strip()
+                if not course or not section:
+                    continue
+                if locked_all or bool(rr.get("finalized")):
+                    finalized_keys.add((fid, course, section))
+
+        if finalized_keys and isinstance(rows, list):
+            for r in rows:
+                if not isinstance(r, dict):
+                    continue
+                fid = str(r.get("faculty_id") or "").strip()
+                course = str(r.get("course") or "").strip()
+                section = str(r.get("section") or "").strip()
+                if fid and course and section and (fid, course, section) in finalized_keys:
+                    r["finalized"] = True
+    except Exception:
+        # Best-effort only; do not fail list load if proposals schema differs.
+        pass
 
     # Get faculty preferences for the active term
     ctx = await phase0_load(active["term_id"], db)
@@ -1375,7 +1494,7 @@ async def get_om_load_assignment_list(user_id: str, db=Depends(get_db)):
     # --- NEW: pending RFC indicator per faculty (for red dot in Actions) ---
     open_rfc_faculty_ids = set()
     try:
-        cur = db[COL_LOAD_RFC].find({"term_id": active.get("term_id"), "status": "open"}, {"_id": 0, "faculty_id": 1})
+        cur = db[COL_LOAD_RFC].find({"term_id": active.get("term_id"), "status": {"$in": ["NEEDS_OM", "open"]}}, {"_id": 0, "faculty_id": 1})
         async for d in cur:
             fid = d.get("faculty_id")
             if fid:
@@ -1494,6 +1613,7 @@ async def om_get_rfc(
     term_id: Optional[str] = Query(None),
     db=Depends(get_db),
 ):
+    """Return the RFC thread for a given faculty+term (any status)."""
     if not term_id:
         active = await _active_term()
         term_id = (active or {}).get("term_id")
@@ -1502,59 +1622,110 @@ async def om_get_rfc(
         return {"ok": True, "rfc": None}
 
     rfc = await db[COL_LOAD_RFC].find_one(
-        {"faculty_id": faculty_id, "term_id": term_id, "status": "open"},
+        {"faculty_id": faculty_id, "term_id": term_id},
         {"_id": 0},
     )
-    return {"ok": True, "rfc": rfc}
+
+    if not rfc:
+        return {"ok": True, "rfc": None}
+
+    return {"ok": True, "rfc": _normalize_rfc_doc(rfc)}
 
 
 @router.post("/load-assignment/rfc/respond")
-async def om_rfc_respond(payload: Dict[str, Any] = Body(...), db=Depends(get_db)):
-    """OM responds to a faculty RFC.
-
-    action: reply | approve | reject
-    - reply keeps RFC open
-    - approve/reject closes and locks RFC
-    """
-    user_id = payload.get("user_id") or payload.get("userId")
-    faculty_id = payload.get("faculty_id")
-    term_id = payload.get("term_id")
-    action = payload.get("action")
+async def respond_load_assignment_rfc(
+    payload: Dict[str, Any] = Body(...),
+    db=Depends(get_db),
+):
+    """OM responds on an RFC thread: reply | approve | reject."""
+    # IMPORTANT: user_id must be accepted from JSON body (frontend may not send query params)
+    user_id = (payload.get("user_id") or payload.get("userId") or "").strip()
+    term_id = (payload.get("term_id") or "").strip()
+    faculty_id = (payload.get("faculty_id") or "").strip()
+    action = (payload.get("action") or "").strip().lower()
     message = (payload.get("message") or "").strip()
 
-    if not user_id or not faculty_id:
-        raise HTTPException(status_code=400, detail="user_id and faculty_id are required")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="user_id is required")
+    if not term_id or not faculty_id:
+        raise HTTPException(status_code=400, detail="term_id and faculty_id are required")
+    if action not in {"reply", "approve", "reject"}:
+        raise HTTPException(status_code=400, detail="Invalid action")
+    if action == "reply" and not message:
+        raise HTTPException(status_code=400, detail="message is required for reply")
 
-    if not term_id:
-        active = await _active_term()
-        term_id = (active or {}).get("term_id")
-
-    if not term_id:
-        raise HTTPException(status_code=409, detail="No active/upcoming term found")
-
-    if action not in ("reply", "approve", "reject"):
-        raise HTTPException(status_code=400, detail="action must be reply|approve|reject")
-
-    rfc = await db[COL_LOAD_RFC].find_one(
-        {"faculty_id": faculty_id, "term_id": term_id, "status": "open"},
-        {"_id": 0},
-    )
+    rfc = await db[COL_LOAD_RFC].find_one({"faculty_id": faculty_id, "term_id": term_id}, {"_id": 0})
     if not rfc:
-        raise HTTPException(status_code=404, detail="No open RFC found")
+        raise HTTPException(status_code=404, detail="No RFC found")
+
+    rfc = _normalize_rfc_doc(rfc)
+    if rfc.get("status") in RFC_TERMINAL:
+        raise HTTPException(status_code=409, detail="RFC is already locked")
 
     now = datetime.now(timezone.utc)
-    thread = rfc.get("thread") or []
+    msgs = list(rfc.get("messages") or [])
+
     if message:
-        thread.append({"from": "om", "message": message, "created_at": now.isoformat()})
+        msgs.append({
+            "sender_role": "om",
+            "sender_user_id": user_id,
+            "message": message,
+            "created_at": now.isoformat(),
+        })
 
-    update: Dict[str, Any] = {"thread": thread, "updated_at": now}
+    new_status = rfc.get("status")
+    locked = False
+    extra: Dict[str, Any] = {}
 
-    if action in ("approve", "reject"):
-        update.update({"status": "closed", "decision": action, "locked": True, "closed_at": now})
+    if action == "reply":
+        new_status = "NEEDS_FACULTY"
+        locked = False
+    elif action == "approve":
+        new_status = "APPROVED"
+        locked = True
+        extra["closed_at"] = now
+    else:
+        new_status = "REJECTED"
+        locked = True
+        extra["closed_at"] = now
+
+        # If OM rejects the RFC, automatically approve/lock the proposed schedule
+        # so the faculty can no longer RFC for the same courses.
+        try:
+            await db[COL_LOAD_PROPOSALS].update_one(
+                {"faculty_id": faculty_id, "term_id": term_id},
+                {
+                    "$set": {
+                        "rows.$[].finalized": True,
+                        "locked": True,
+                        "updated_at": now,
+                    },
+                    "$setOnInsert": {"created_at": now},
+                },
+                upsert=True,
+            )
+        except Exception:
+            # Best-effort only: do not block the RFC response if proposal is missing/has different schema
+            pass
+
+    rfc_id = rfc.get("rfc_id")
 
     await db[COL_LOAD_RFC].update_one(
-        {"faculty_id": faculty_id, "term_id": term_id, "status": "open"},
-        {"$set": update},
+        {"faculty_id": faculty_id, "term_id": term_id},
+        {
+            "$set": {
+                "rfc_id": rfc_id,
+                "faculty_id": faculty_id,
+                "term_id": term_id,
+                "status": new_status,
+                "locked": locked,
+                "messages": msgs,
+                "updated_at": now,
+                **extra,
+            },
+            "$setOnInsert": {"created_at": now},
+        },
+        upsert=True,
     )
 
     # notify faculty
@@ -1563,15 +1734,15 @@ async def om_rfc_respond(payload: Dict[str, Any] = Body(...), db=Depends(get_db)
 
     if fac_user_id:
         if action == "reply":
-            title = "Load Assignment: OM replied to your RFC"
-            details = message or "The Office Manager replied to your Request for Change."
+            title = "Load Assignment: OM replied to your Request for Change"
+            details = message
             kind = "load_rfc_reply"
         elif action == "approve":
-            title = "Load Assignment: RFC approved"
+            title = "Load Assignment: OM approved your request"
             details = message or "Your Request for Change was approved."
             kind = "load_rfc_approved"
         else:
-            title = "Load Assignment: RFC rejected"
+            title = "Load Assignment: OM rejected your request"
             details = message or "Your Request for Change was rejected."
             kind = "load_rfc_rejected"
 
@@ -1584,16 +1755,17 @@ async def om_rfc_respond(payload: Dict[str, Any] = Body(...), db=Depends(get_db)
                 "kind": kind,
                 "term_id": term_id,
                 "faculty_id": faculty_id,
+                "rfc_id": rfc_id,
             },
         )
 
-    return {"ok": True, "action": action}
+    return {"ok": True, "status": new_status}
 
 
 @router.post("/load-assignment/finalize-course")
 async def om_finalize_course(payload: Dict[str, Any] = Body(...), db=Depends(get_db)):
     """Notify a faculty that a course is added to their final schedule."""
-    user_id = payload.get("user_id") or payload.get("userId")
+    user_id = (payload.get("user_id") or payload.get("userId") or "").strip()
     faculty_id = payload.get("faculty_id")
     course_code = payload.get("course_code") or payload.get("course")
     section = payload.get("section")
@@ -1628,12 +1800,22 @@ async def om_finalize_course(payload: Dict[str, Any] = Body(...), db=Depends(get
     try:
         await db[COL_LOAD_PROPOSALS].update_one(
             {"faculty_id": faculty_id, "term_id": term_id},
-            {"$addToSet": {"finalized": {"course_code": course_code, "section": section}}},
+            {
+                "$addToSet": {"finalized": {"course_code": course_code, "section": section}},
+                "$set": {"updated_at": datetime.now(timezone.utc)},
+                "$setOnInsert": {"created_at": datetime.now(timezone.utc)},
+            },
+            upsert=True,
+        )
+        await db[COL_LOAD_PROPOSALS].update_one(
+            {"faculty_id": faculty_id, "term_id": term_id},
+            {"$set": {"rows.$[r].finalized": True}},
+            array_filters=[{"r.course": course_code, "r.section": section}],
         )
     except Exception:
         pass
 
-    return {"ok": True}
+    return {"ok": True, "course_code": course_code, "section": section}
 
 @router.post("/load-assignment/run")
 async def run_auto_assignment(
@@ -2362,7 +2544,7 @@ async def run_auto_assignment(
     # --- NEW: pending RFC indicator per faculty (for red dot in Actions) ---
     open_rfc_faculty_ids = set()
     try:
-        cur = db[COL_LOAD_RFC].find({"term_id": active.get("term_id"), "status": "open"}, {"_id": 0, "faculty_id": 1})
+        cur = db[COL_LOAD_RFC].find({"term_id": active.get("term_id"), "status": {"$in": ["NEEDS_OM", "open"]}}, {"_id": 0, "faculty_id": 1})
         async for d in cur:
             fid = d.get("faculty_id")
             if fid:
