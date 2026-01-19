@@ -5,6 +5,8 @@ from typing import Any, Dict, Optional
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
+from fastapi.concurrency import run_in_threadpool
+from .MESSAGING.store import ensure_messaging_indexes
 
 from .config import get_settings
 
@@ -27,6 +29,8 @@ db = client.get_default_database()
 
 @app.on_event("startup")
 async def _ensure_faculty_overview_indexes() -> None:
+    
+    await run_in_threadpool(ensure_messaging_indexes)
     # lookups / filters
     await db.faculty_profiles.create_index("user_id")
     await db.faculty_assignments.create_index([("faculty_id", 1), ("is_archived", 1)])

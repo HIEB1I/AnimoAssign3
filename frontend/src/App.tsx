@@ -1,5 +1,8 @@
 import { BrowserRouter, Route, Routes, Navigate, Outlet } from "react-router-dom";
 import "./App.css";
+import { getSocket } from "@/realtime/socket";
+import { useEffect } from "react";
+
 
 // Pages
 import Login from "./pages/Login/Login";
@@ -72,8 +75,16 @@ function RequireAuth() {
   } catch {
     ok = false;
   }
+
+  useEffect(() => {
+    if (!ok) return;
+    // connect once (singleton)
+    getSocket();
+  }, [ok]);
+
   return ok ? <Outlet /> : <Navigate to="/Login" replace />;
 }
+
 
 /**
  * Small wrapper for the CHAIR Faculty Service route.

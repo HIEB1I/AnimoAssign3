@@ -1,6 +1,8 @@
 // frontend/src/pages/FACULTY/FAC_Inbox.tsx
 import { useEffect, useMemo, useState } from "react";
 import { Search, Plus } from "lucide-react";
+import { getSessionUserId } from "@/lib/session";
+
 
 const cls = (...s: (string | false | undefined)[]) => s.filter(Boolean).join(" ");
 const timeAgo = (d: Date) => {
@@ -38,8 +40,7 @@ function InboxMain() {
   const [selected, setSelected] = useState<Mail | null>(null);
 
   useEffect(() => {
-    const user = JSON.parse(localStorage.getItem("animo.user") || "{}");
-    const userId: string | undefined = user.userId || user.user_id || user.id;
+    const userId = getSessionUserId();
     if (!userId) return;
 
     fetch(`/api/faculty/inbox?userId=${encodeURIComponent(userId)}`)

@@ -103,14 +103,15 @@ export default function Topbar({
     navigate("/login");
   };
 
-  // Where the Inbox button should navigate if no explicit inboxPath is passed
-  const inferredInboxPath =
-    typeof window !== "undefined" && window.location.pathname.startsWith("/chair")
-      ? "/chair/inbox"
-      : profileSubtitle?.toLowerCase().includes("office manager")
-      ? "/om/inbox"
-      : "/faculty/inbox";
+  const pathname = typeof window !== "undefined" ? window.location.pathname : "";
 
+  // Where the Inbox button should navigate if no explicit inboxPath is passed
+ const inferredInboxPath =
+  pathname.startsWith("/admin") ? "/admin/inbox"
+  : pathname.startsWith("/chair") ? "/chair/inbox"
+  : pathname.startsWith("/om") ? "/om/inbox"
+  : "/inbox"; // faculty inbox route in your App.tsx
+  
   return (
     <header className="sticky top-0 z-10 bg-white shadow-sm">
       <div className="flex h-14 w-full items-center justify-between px-3 sm:px-5 text-gray-800 border-b border-black">

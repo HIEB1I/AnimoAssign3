@@ -11,7 +11,7 @@ services:
     command: ["--bind_ip_all"]
     volumes:
       - mongo_data_dev:/data/db
-      - ./db/seed/init-dev.js:/docker-entrypoint-initdb.d/01-init-dev.js:ro
+      - ./db/dev-seed/init-dev.js:/docker-entrypoint-initdb.d/01-init-dev.js:ro
     ports:
       - "27019:27017"         # Compass will use this
     restart: unless-stopped

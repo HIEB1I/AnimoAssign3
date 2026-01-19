@@ -1,9 +1,12 @@
 // frontend/src/pages/OM/OM_Inbox.tsx
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Search, Plus } from "lucide-react";
 import { useNavigate } from "react-router-dom";
+import { getSocket } from "@/realtime/socket";
+import { emitAck } from "@/realtime/ack";
 
 const cls = (...s: (string | false | undefined)[]) => s.filter(Boolean).join(" ");
+
 const timeAgo = (d: Date) => {
   const s = Math.floor((Date.now() - d.getTime()) / 1000);
   if (s < 60) return `${s}s ago`;
@@ -14,9 +17,11 @@ const timeAgo = (d: Date) => {
   const dd = Math.floor(h / 24);
   return `${dd} day${dd > 1 ? "s" : ""} ago`;
 };
+
 const initials = (name: string) =>
   name
     .split(" ")
+    .filter(Boolean)
     .map((n) => n[0])
     .slice(0, 2)
     .join("")
@@ -24,53 +29,331 @@ const initials = (name: string) =>
 
 type Mail = {
   id: number;
+  conversationId: string;
   from: string;
   email: string;
   subject: string;
   preview: string;
   body: string;
   receivedAt: Date;
+  unread: number;
+  peerUserId?: string;
 };
 
 function OMInboxMain() {
+  // Thread search (left list)
   const [query, setQuery] = useState("");
+
   const [mode, setMode] = useState<"default" | "compose" | "read">("default");
   const [mails, setMails] = useState<Mail[]>([]);
   const [selected, setSelected] = useState<Mail | null>(null);
+
+  // Compose (Phase 5)
+  const [composeTo, setComposeTo] = useState("");
+  const [composeBody, setComposeBody] = useState("");
+  const [searchResults, setSearchResults] = useState<any[]>([]);
+  const [pickedUser, setPickedUser] = useState<any | null>(null);
+
+  // Reply (Phase 4)
+  const [replyText, setReplyText] = useState("");
+
+  // Dedupe (Phase 4/6)
+  const seenMessageIdsRef = useRef<Set<string>>(new Set());
+
+  // Phase 6 refs (avoid stale state inside socket callbacks)
+  const modeRef = useRef(mode);
+  useEffect(() => {
+    modeRef.current = mode;
+  }, [mode]);
+
+  const selectedConvIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    selectedConvIdRef.current = selected?.conversationId ?? null;
+  }, [selected]);
+
+  const joinedConversationIdsRef = useRef<Set<string>>(new Set());
+
   const navigate = useNavigate();
-  
+
   const handleBack = () => {
-  // Case 1: standalone route -> use browser history
-  if (window.history.length > 1) {
-    navigate(-1);
-    return;
-  }
-  // Case 2: in-tab inside OM pages -> close the inbox tab and ensure we land on Load Assignment
-  window.dispatchEvent(new Event("om:closeInbox"));
-  navigate("/om/load-assignment");
+    if (window.history.length > 1) {
+      navigate(-1);
+      return;
+    }
+    window.dispatchEvent(new Event("om:closeInbox"));
+    navigate("/om/load-assignment");
   };
 
-  useEffect(() => {
-    const user = JSON.parse(localStorage.getItem("animo.user") || "{}");
-    const userId: string | undefined = user.userId || user.user_id || user.id;
-    if (!userId) return;
+  const loadConversations = async () => {
+    const s = getSocket();
+    if (!s) return;
 
-    fetch(`/api/om/inbox?userId=${encodeURIComponent(userId)}`)
-      .then((res) => res.json())
-      .then((data) => {
-        if (!data?.ok) return;
-        const mapped: Mail[] = (data.inbox || []).map((it: any, idx: number) => ({
-          id: Number(it.id ?? idx + 1),
-          from: String(it.from ?? it.senderName ?? "Unknown Sender"),
-          email: String(it.email ?? it.senderEmail ?? "unknown@example.com"),
-          subject: String(it.subject ?? "(No subject)"),
-          preview: String(it.preview ?? it.body ?? "").slice(0, 120),
-          body: String(it.body ?? it.preview ?? ""),
-          receivedAt: new Date(it.receivedAt ?? it.received_at ?? it.date ?? Date.now()),
-        }));
-        setMails(mapped);
-      })
-      .catch((err) => console.error("OM Inbox fetch error", err));
+    const resp = await emitAck<any>(s, "conversation_list", { limit: 50 });
+    if (!resp?.ok) {
+      console.error("conversation_list failed", resp);
+      return;
+    }
+
+    const convs = resp.conversations || [];
+    const mapped: Mail[] = convs.map((c: any, idx: number) => {
+      const peer = c.peer || {};
+      const lm = c.lastMessage || {};
+      const ts = lm.createdAt || c.updatedAt || Date.now();
+
+      const from = String(peer.fullName || peer.userId || "User");
+      const email = String(peer.email || "");
+      const preview = String(lm.preview || "");
+
+      return {
+        id: idx + 1,
+        conversationId: String(c.conversationId),
+        from,
+        email,
+        subject: from,
+        preview,
+        body: "",
+        receivedAt: new Date(ts),
+        unread: 0,
+        peerUserId: peer.userId ? String(peer.userId) : undefined,
+      };
+    });
+
+    setMails(mapped);
+  };
+
+  // Join only once per conversationId
+  const joinIfNeeded = async (conversationId: string) => {
+    const cid = String(conversationId || "");
+    if (!cid) return false;
+    if (joinedConversationIdsRef.current.has(cid)) return true;
+
+    const s = getSocket();
+    if (!s) return false;
+
+    const joinResp = await emitAck<any>(s, "conversation_join", { conversationId: cid });
+    if (!joinResp?.ok) {
+      console.error("conversation_join failed", joinResp);
+      return false;
+    }
+
+    joinedConversationIdsRef.current.add(cid);
+    return true;
+  };
+
+  // Optional Phase 6 fallback: get details if convo arrives but not in list yet
+  // (Requires backend socket event "conversation_get". If not implemented, it simply does nothing.)
+  const hydrateConversation = async (conversationId: string) => {
+    const s = getSocket();
+    if (!s) return;
+
+    const resp = await emitAck<any>(s, "conversation_get", { conversationId });
+    if (!resp?.ok) return;
+
+    const c = resp.conversation || {};
+    const peer = c.peer || {};
+    const lm = c.lastMessage || {};
+    const ts = lm.createdAt || c.updatedAt || Date.now();
+
+    setMails((prev) => {
+      const cid = String(c.conversationId || conversationId);
+      const exists = prev.some((x) => String(x.conversationId) === cid);
+
+      const base: Partial<Mail> = {
+        conversationId: cid,
+        from: String(peer.fullName || peer.userId || "User"),
+        email: String(peer.email || ""),
+        subject: String(peer.fullName || peer.userId || "Chat"),
+        preview: String(lm.preview || ""),
+        receivedAt: new Date(ts),
+        peerUserId: peer.userId ? String(peer.userId) : undefined,
+      };
+
+      let next = exists
+        ? prev.map((x) => (String(x.conversationId) === cid ? { ...x, ...base } : x))
+        : [
+            {
+              id: Date.now(),
+              conversationId: cid,
+              from: String(peer.fullName || peer.userId || "User"),
+              email: String(peer.email || ""),
+              subject: String(peer.fullName || peer.userId || "Chat"),
+              preview: String(lm.preview || ""),
+              body: "",
+              receivedAt: new Date(ts),
+              unread: 0,
+              peerUserId: peer.userId ? String(peer.userId) : undefined,
+            },
+            ...prev,
+          ];
+
+      next = [...next].sort((a, b) => b.receivedAt.getTime() - a.receivedAt.getTime());
+      return next;
+    });
+  };
+
+  // Phase 6: Insert-if-missing + unread + dedupe + always move-to-top
+  const handleIncomingMessage = (m: any) => {
+    const mid = String(m?.messageId || "");
+    if (mid) {
+      if (seenMessageIdsRef.current.has(mid)) return;
+      seenMessageIdsRef.current.add(mid);
+    }
+
+    const convId = String(m?.conversationId || "");
+    const body = String(m?.body || "");
+    const createdAt = m?.createdAt ? new Date(m.createdAt) : new Date();
+
+    const isReadingThis =
+      modeRef.current === "read" && String(selectedConvIdRef.current || "") === convId;
+
+    // Update/insert conversation in list
+    setMails((prev) => {
+      const preview = body.length > 80 ? body.slice(0, 80).trimEnd() + "…" : body;
+      const idx = prev.findIndex((x) => String(x.conversationId) === convId);
+
+      let next = [...prev];
+
+      if (idx === -1) {
+        // Insert placeholder now, then hydrate (if available)
+        next.unshift({
+          id: Date.now(),
+          conversationId: convId,
+          from: "User",
+          email: "",
+          subject: "Chat",
+          preview,
+          body: "",
+          receivedAt: createdAt,
+          unread: isReadingThis ? 0 : 1,
+        });
+
+        void hydrateConversation(convId);
+      } else {
+        const cur = next[idx];
+        next[idx] = {
+          ...cur,
+          preview,
+          receivedAt: createdAt,
+          unread: isReadingThis ? 0 : (cur.unread || 0) + 1,
+        };
+      }
+
+      next.sort((a, b) => b.receivedAt.getTime() - a.receivedAt.getTime());
+      return next;
+    });
+
+    // Append to open thread if selected
+    setSelected((prev) => {
+      if (!prev) return prev;
+      if (String(prev.conversationId) !== convId) return prev;
+
+      const name = m?.senderName || m?.senderId || "User";
+      const line = `${name}: ${body}`;
+      const nextBody = prev.body ? `${prev.body}\n\n${line}` : line;
+      return { ...prev, body: nextBody, receivedAt: createdAt };
+    });
+  };
+
+  // Phase 3: load conversation list once
+  useEffect(() => {
+    let cancelled = false;
+
+    (async () => {
+      if (cancelled) return;
+      await loadConversations();
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Phase 6: reconnect safety (reload + rejoin current conversation)
+  useEffect(() => {
+    const s = getSocket();
+    if (!s) return;
+
+    const onConnect = async () => {
+      await loadConversations();
+      const cid = selectedConvIdRef.current;
+      if (cid) await joinIfNeeded(cid);
+    };
+
+    s.on("connect", onConnect);
+    return () => {
+      s.off("connect", onConnect);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Live socket events
+  useEffect(() => {
+    const s = getSocket();
+    if (!s) return;
+
+    const onMessageNew = (m: any) => handleIncomingMessage(m);
+
+    const onConversationUpdated = (u: any) => {
+      const cid = String(u?.conversationId || "");
+      if (!cid) return;
+
+      setMails((prev) => {
+        const lm = u?.lastMessage || {};
+        const newTime = lm?.createdAt ? new Date(lm.createdAt) : null;
+
+        const idx = prev.findIndex((x) => String(x.conversationId) === cid);
+
+        // If convo not in list yet, insert placeholder then hydrate
+        if (idx === -1) {
+          const preview = String(lm.preview || "");
+          const receivedAt = newTime || new Date();
+          const isReadingThis =
+            modeRef.current === "read" && String(selectedConvIdRef.current || "") === cid;
+
+          const next = [
+            {
+              id: Date.now(),
+              conversationId: cid,
+              from: "User",
+              email: "",
+              subject: "Chat",
+              preview,
+              body: "",
+              receivedAt,
+              unread: isReadingThis ? 0 : 1,
+            },
+            ...prev,
+          ].sort((a, b) => b.receivedAt.getTime() - a.receivedAt.getTime());
+
+          void hydrateConversation(cid);
+          return next;
+        }
+
+        const updated = prev
+          .map((x) =>
+            String(x.conversationId) === cid
+              ? {
+                  ...x,
+                  preview: String(lm.preview || x.preview),
+                  receivedAt: newTime || x.receivedAt,
+                }
+              : x
+          )
+          .sort((a, b) => b.receivedAt.getTime() - a.receivedAt.getTime());
+
+        return updated;
+      });
+    };
+
+    s.on("message_new", onMessageNew);
+    s.on("conversation_updated", onConversationUpdated);
+
+    return () => {
+      s.off("message_new", onMessageNew);
+      s.off("conversation_updated", onConversationUpdated);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const filtered = useMemo(() => {
@@ -80,20 +363,163 @@ function OMInboxMain() {
       .sort((a, b) => b.receivedAt.getTime() - a.receivedAt.getTime());
   }, [query, mails]);
 
-  const openCompose = () => setMode("compose");
-  const openRead = (m: Mail) => {
+  const openCompose = () => {
+    setMode("compose");
+    setSelected(null);
+    setReplyText("");
+
+    setComposeTo("");
+    setComposeBody("");
+    setSearchResults([]);
+    setPickedUser(null);
+  };
+
+  const openRead = async (m: Mail) => {
     setSelected(m);
     setMode("read");
+    setReplyText("");
+
+    // reset unread
+    setMails((prev) =>
+      prev.map((x) => (String(x.conversationId) === String(m.conversationId) ? { ...x, unread: 0 } : x))
+    );
+
+    const ok = await joinIfNeeded(m.conversationId);
+    if (!ok) return;
+
+    const s = getSocket();
+    if (!s) return;
+
+    const resp = await emitAck<any>(s, "message_list", { conversationId: m.conversationId, limit: 50 });
+    if (!resp?.ok) {
+      console.error("message_list failed", resp);
+      return;
+    }
+
+    const msgs = resp.messages || [];
+    for (const x of msgs) {
+      const mid = String(x?.messageId || "");
+      if (mid) seenMessageIdsRef.current.add(mid);
+    }
+
+    const transcript = msgs.map((x: any) => `${x.senderName || x.senderId}: ${x.body}`).join("\n\n");
+    setSelected({ ...m, body: transcript });
   };
+
   const backToDefault = () => {
     setMode("default");
     setSelected(null);
+    setReplyText("");
+  };
+
+  const sendReply = async () => {
+    const body = replyText.trim();
+    if (!selected?.conversationId || !body) return;
+
+    const s = getSocket();
+    if (!s) return;
+
+    const resp = await emitAck<any>(s, "message_send", { conversationId: selected.conversationId, body });
+    if (!resp?.ok) {
+      console.error("message_send failed", resp);
+      return;
+    }
+
+    setReplyText("");
+
+    // If ACK includes message, render immediately (dedupe protects double render)
+    if (resp?.message) handleIncomingMessage(resp.message);
+  };
+
+  // User search (debounced) — only while composing
+  useEffect(() => {
+    if (mode !== "compose") return;
+
+    const s = getSocket();
+    if (!s) return;
+
+    const q = composeTo.trim();
+    if (q.length < 2) {
+      setSearchResults([]);
+      return;
+    }
+
+    const t = setTimeout(async () => {
+      const resp = await emitAck<any>(s, "user_search", { q, limit: 10 });
+      if (!resp?.ok) {
+        console.error("user_search failed", resp);
+        setSearchResults([]);
+        return;
+      }
+      setSearchResults(resp.users || []);
+    }, 300);
+
+    return () => clearTimeout(t);
+  }, [composeTo, mode]);
+
+  const pickRecipient = (u: any) => {
+    setPickedUser(u);
+    setComposeTo(u.fullName || u.email || u.userId);
+    setSearchResults([]);
+  };
+
+  const sendCompose = async () => {
+    const body = composeBody.trim();
+    if (!pickedUser?.userId || !body) return;
+
+    const s = getSocket();
+    if (!s) return;
+
+    // open/create conversation
+    const openResp = await emitAck<any>(s, "conversation_open", { targetUserId: pickedUser.userId });
+    if (!openResp?.ok) {
+      console.error("conversation_open failed", openResp);
+      return;
+    }
+
+    const conversationId = String(openResp.conversationId);
+
+    const ok = await joinIfNeeded(conversationId);
+    if (!ok) return;
+
+    // send first message
+    const sendResp = await emitAck<any>(s, "message_send", { conversationId, body });
+    if (!sendResp?.ok) {
+      console.error("message_send failed", sendResp);
+      return;
+    }
+
+    // refresh list so the new convo appears (safe)
+    await loadConversations();
+
+    const newMail: Mail = {
+      id: Date.now(),
+      conversationId,
+      from: pickedUser.fullName || pickedUser.userId || "User",
+      email: pickedUser.email || "",
+      subject: pickedUser.fullName || "Chat",
+      preview: body.length > 80 ? body.slice(0, 80).trimEnd() + "…" : body,
+      body: "",
+      receivedAt: new Date(),
+      unread: 0,
+      peerUserId: String(pickedUser.userId),
+    };
+
+    // If ACK includes message, render instantly
+    if (sendResp?.message) handleIncomingMessage(sendResp.message);
+
+    await openRead(newMail);
+
+    // reset compose
+    setComposeBody("");
+    setPickedUser(null);
+    setSearchResults([]);
   };
 
   return (
     <section className="mx-auto w-full max-w-screen-2xl px-4">
       <div className="rounded-xl border border-gray-200 bg-white p-5">
-        {/* Header to match in-tab look */}
+        {/* Header */}
         <div className="mb-4 flex items-center justify-between">
           <div>
             <h3 className="text-lg font-bold text-gray-900">Inbox</h3>
@@ -105,19 +531,20 @@ function OMInboxMain() {
           >
             Back
           </button>
-
         </div>
 
-        {/* Actions / Search */}
-        <div className="mb-4 flex items-center gap-3">
-          <div className="relative flex-1 rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm shadow-sm">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-500" />
-            <input
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search messages..."
-              className="w-full bg-transparent outline-none pl-7"
-            />
+        {/* Actions / Search (thread search) */}
+        <div className="mb-4 flex items-start gap-3">
+          <div className="relative flex-1">
+            <div className="relative rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm shadow-sm">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-500" />
+              <input
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                className="w-full bg-transparent outline-none pl-7"
+                placeholder="Search messages..."
+              />
+            </div>
           </div>
 
           <button
@@ -130,7 +557,7 @@ function OMInboxMain() {
                 : "bg-emerald-700 text-white hover:bg-emerald-700"
             )}
           >
-            <Plus className="h-4 w-4" /> Compose Email
+            <Plus className="h-4 w-4" /> Compose
           </button>
         </div>
 
@@ -142,11 +569,13 @@ function OMInboxMain() {
             <div className="space-y-3">
               {filtered.map((m) => (
                 <button
-                  key={m.id}
+                  key={m.conversationId}
                   onClick={() => openRead(m)}
                   className={cls(
                     "w-full rounded-xl border bg-white p-4 text-left shadow-sm hover:shadow",
-                    selected?.id === m.id ? "border-emerald-400 ring-1 ring-emerald-200" : "border-gray-200"
+                    selected?.conversationId === m.conversationId
+                      ? "border-emerald-400 ring-1 ring-emerald-200"
+                      : "border-gray-200"
                   )}
                 >
                   <div className="flex items-start gap-3">
@@ -156,14 +585,24 @@ function OMInboxMain() {
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center justify-between">
                         <div className="text-sm font-semibold">{m.from}</div>
-                        <div className="text-[11px] text-gray-400">{timeAgo(m.receivedAt)}</div>
+
+                        <div className="flex items-center gap-2">
+                          {m.unread > 0 && (
+                            <span className="min-w-[22px] rounded-full bg-emerald-700 px-2 py-0.5 text-center text-[11px] font-semibold text-white">
+                              {m.unread}
+                            </span>
+                          )}
+                          <div className="text-[11px] text-gray-400">{timeAgo(m.receivedAt)}</div>
+                        </div>
                       </div>
+
                       <div className="text-sm">{m.subject}</div>
                       <div className="mt-1 line-clamp-1 text-xs text-gray-500">{m.preview}</div>
                     </div>
                   </div>
                 </button>
               ))}
+
               {filtered.length === 0 && (
                 <div className="rounded-xl border border-dashed border-gray-300 p-6 text-center text-sm text-gray-500">
                   No messages found.
@@ -185,28 +624,48 @@ function OMInboxMain() {
                 </div>
               </div>
             )}
+
             {mode === "compose" && (
               <div className="space-y-4">
-                <div>
+                <div className="relative">
                   <label className="mb-1 block text-sm font-medium">To:</label>
                   <input
+                    value={composeTo}
+                    onChange={(e) => {
+                      setComposeTo(e.target.value);
+                      setPickedUser(null);
+                    }}
                     className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-emerald-500/30"
-                    placeholder="recipient@dlsu.edu.ph"
+                    placeholder="Search user by name/email..."
                   />
+
+                  {searchResults.length > 0 && !pickedUser && (
+                    <div className="absolute z-10 mt-2 w-full rounded-lg border border-gray-200 bg-white p-2 shadow">
+                      {searchResults.map((u: any) => (
+                        <button
+                          key={u.userId}
+                          type="button"
+                          onClick={() => pickRecipient(u)}
+                          className="w-full rounded-md px-3 py-2 text-left text-sm hover:bg-gray-50"
+                        >
+                          <div className="font-medium">{u.fullName}</div>
+                          <div className="text-xs text-gray-500">{u.email || u.userId}</div>
+                        </button>
+                      ))}
+                    </div>
+                  )}
                 </div>
+
                 <div>
-                  <label className="mb-1 block text-sm font-medium">Subject:</label>
-                  <input
-                    className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-emerald-500/30"
-                    placeholder="Subject"
-                  />
-                </div>
-                <div>
+                  <label className="mb-1 block text-sm font-medium">Message:</label>
                   <textarea
+                    value={composeBody}
+                    onChange={(e) => setComposeBody(e.target.value)}
                     className="h-64 w-full resize-none rounded-lg border border-gray-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-emerald-500/30"
                     placeholder="Type your message..."
                   />
                 </div>
+
                 <div className="flex justify-end gap-2">
                   <button
                     onClick={backToDefault}
@@ -214,7 +673,16 @@ function OMInboxMain() {
                   >
                     Cancel
                   </button>
-                  <button className="rounded-lg bg-emerald-700 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700">
+                  <button
+                    onClick={sendCompose}
+                    disabled={!pickedUser || !composeBody.trim()}
+                    className={cls(
+                      "rounded-lg px-4 py-2 text-sm font-medium text-white",
+                      pickedUser && composeBody.trim()
+                        ? "bg-emerald-700 hover:bg-emerald-700"
+                        : "bg-gray-300 cursor-not-allowed"
+                    )}
+                  >
                     Send
                   </button>
                 </div>
@@ -240,12 +708,14 @@ function OMInboxMain() {
                 </div>
 
                 <div className="whitespace-pre-wrap rounded-lg border border-gray-200 bg-gray-50 p-4 text-sm text-gray-800">
-                  {selected.body}
+                  {selected.body || "(no messages)"}
                 </div>
 
                 <div className="space-y-2">
                   <div className="text-sm font-semibold">Reply</div>
                   <textarea
+                    value={replyText}
+                    onChange={(e) => setReplyText(e.target.value)}
                     className="h-40 w-full resize-none rounded-lg border border-gray-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-emerald-500/30"
                     placeholder={`Reply to ${selected.from}...`}
                   />
@@ -256,7 +726,16 @@ function OMInboxMain() {
                     >
                       Cancel
                     </button>
-                    <button className="rounded-lg bg-emerald-700 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700">
+                    <button
+                      onClick={sendReply}
+                      disabled={!replyText.trim()}
+                      className={cls(
+                        "rounded-lg px-4 py-2 text-sm font-medium text-white",
+                        replyText.trim()
+                          ? "bg-emerald-700 hover:bg-emerald-700"
+                          : "bg-gray-300 cursor-not-allowed"
+                      )}
+                    >
                       Reply
                     </button>
                   </div>

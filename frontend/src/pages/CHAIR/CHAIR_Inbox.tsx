@@ -2,6 +2,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { Search, Plus } from "lucide-react";
 import { useNavigate } from "react-router-dom";
+import { getSessionUserId } from "@/lib/session";
+
 
 const cls = (...s: (string | false | undefined)[]) => s.filter(Boolean).join(" ");
 const timeAgo = (d: Date) => {
@@ -46,8 +48,7 @@ export default function CHAIR_Inbox() {
   };
 
   useEffect(() => {
-    const user = JSON.parse(localStorage.getItem("animo.user") || "{}");
-    const userId: string | undefined = user.userId || user.user_id || user.id;
+    const userId = getSessionUserId();
     if (!userId) return;
 
     fetch(`/api/chair/inbox?userId=${encodeURIComponent(userId)}`)
