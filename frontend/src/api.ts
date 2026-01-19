@@ -2798,6 +2798,37 @@ export async function rejectFacultyService(fs_id: string, payload?: { remarks?: 
 
 
 
+
+
+/* =========================================================
+   ===============  NOTIFICATIONS (Topbar bell)  ============
+   ========================================================= */
+export type AppNotification = {
+  notif_id: string;
+  user_id: string;
+  title: string;
+  details: string;
+  created_at: string; // ISO
+  seen: boolean;
+  seen_at?: string | null;
+  meta?: { route?: string; fs_id?: string; kind?: string };
+};
+
+export async function listNotifications(userId: string, limit = 25) {
+  const sp = new URLSearchParams();
+  sp.set("userId", userId);
+  sp.set("limit", String(limit));
+  const { data } = await api.get(`/notifications?${sp.toString()}`);
+  return data as { ok: boolean; rows: AppNotification[] };
+}
+
+export async function markNotificationsSeen(
+  userId: string,
+  opts: { all?: boolean; ids?: string[] }
+) {
+  const { data } = await api.post(`/notifications/mark-seen`, { userId, ...opts });
+  return data as { ok: boolean };
+}
 export async function chairClassRetention(userId: string) {
   const { data } = await api.post(`/chair/class-retention`, {}, {
     params: { userId, action: "fetch" },
