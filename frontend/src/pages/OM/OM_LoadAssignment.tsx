@@ -1606,17 +1606,6 @@ export default function OM_LoadAssignment() {
   const isRun = mode === "run";
   const hasReco = isRunning && rows.length > 0;
   const [showApprove, setShowApprove] = useState(false);
-  type FacultyDeloadingRow = {
-    faculty_id: string;
-    faculty_name: string;
-    deloading_type?: string;
-    units_deloaded?: number;
-  };
-  
-  const [facultyDeloadings, setFacultyDeloadings] = useState<FacultyDeloadingRow[]>(
-    []
-  );  
-
   const [approved, setApproved] = useState(false);
   const [showSend, setShowSend] = useState(false);
   const [reqChange, setReqChange] = useState<{ open: boolean; from?: string }>({
@@ -1786,12 +1775,6 @@ export default function OM_LoadAssignment() {
         ? (res as any).blockedGeCmps2
         : []
     );
-
-    setFacultyDeloadings(
-      Array.isArray((res as any)?.faculty_deloading_summary)
-        ? (res as any).faculty_deloading_summary
-        : []
-    );    
 
     setRows(Array.isArray(res?.rows) ? res.rows : []);
     setTerm(typeof res?.term === "string" ? res.term : "");
@@ -2469,7 +2452,7 @@ export default function OM_LoadAssignment() {
   }, [blockedGeCmps2]);
 
   const [summaryTab, setSummaryTab] = useState<
-    "units" | "second" | "blocked" | "deloadings"
+    "units" | "second" | "blocked"
   >("units");
 
   const courseOptions = useMemo(() => {
@@ -3244,18 +3227,6 @@ export default function OM_LoadAssignment() {
                       >
                         Blocked Sections
                       </button>
-
-                      <button
-                        onClick={() => setSummaryTab("deloadings")}
-                        className={cls(
-                          "px-3 py-1 text-xs rounded-full border",
-                          summaryTab === "deloadings"
-                            ? "bg-emerald-600 text-white border-emerald-600"
-                            : "bg-white text-gray-700 border-gray-300"
-                        )}
-                      >
-                        Faculty Deloadings
-                      </button>
                     </div>
                   </div>
 
@@ -3502,54 +3473,6 @@ export default function OM_LoadAssignment() {
                                   </tr>
                                 );
                               })
-                            )}
-                          </tbody>
-                        </table>
-                      </div>
-                    </div>
-                  )}
-                  {summaryTab === "deloadings" && (
-                    <div className="px-4 pb-4 border-t">
-                      <div className="mt-3 overflow-x-auto rounded-lg border border-gray-200 bg-white">
-                        <table className="min-w-full divide-y divide-gray-200 text-xs">
-                          <thead className="bg-gray-50">
-                            <tr>
-                              <th className="px-3 py-2 text-left font-semibold text-gray-700">
-                                Faculty
-                              </th>
-                              <th className="px-3 py-2 text-left font-semibold text-gray-700">
-                                Deloading Type
-                              </th>
-                              <th className="px-3 py-2 text-right font-semibold text-gray-700">
-                                Units
-                              </th>
-                            </tr>
-                          </thead>
-
-                          <tbody className="divide-y divide-gray-100">
-                            {facultyDeloadings.length === 0 ? (
-                              <tr>
-                                <td
-                                  colSpan={3}
-                                  className="px-3 py-4 text-center text-gray-500"
-                                >
-                                  No faculty deloadings for this term.
-                                </td>
-                              </tr>
-                            ) : (
-                              facultyDeloadings.map((d, i) => (
-                                <tr key={`${d.faculty_id}-${i}`}>
-                                  <td className="px-3 py-2 text-gray-900 font-medium">
-                                    {d.faculty_name}
-                                  </td>
-                                  <td className="px-3 py-2 text-gray-700">
-                                    {d.deloading_type || "—"}
-                                  </td>
-                                  <td className="px-3 py-2 text-right text-gray-700">
-                                    {d.units_deloaded}
-                                  </td>
-                                </tr>
-                              ))
                             )}
                           </tbody>
                         </table>
