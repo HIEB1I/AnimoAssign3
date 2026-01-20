@@ -15,6 +15,9 @@ from collections import defaultdict
 
 from ..main import db
 
+# In-app bell notifications (same pattern as Faculty Service)
+from ..Notifications import create_notification
+
 import re 
 
 def get_db():
@@ -34,6 +37,312 @@ COL_CAMPUSES = "campuses"
 COL_LEAVES = "leaves"
 COL_PREFERENCES = "faculty_preferences"
 COL_FACULTY_LOADS = "faculty_loads"
+
+# OM <-> Faculty proposal + RFC collections
+COL_LOAD_PROPOSALS = "faculty_load_proposals"
+COL_LOAD_RFC = "faculty_rfc"
+
+
+# RFC state machine
+RFC_TERMINAL = {"ACCEPTED", "APPROVED", "REJECTED"}
+RFC_OPEN = {"OPEN", "NEEDS_OM", "NEEDS_FACULTY", "open"}
+
+def _iso(dt):
+    try:
+        return dt.isoformat()
+    except Exception:
+        return str(dt)
+
+def _normalize_rfc_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
+    """Backwards-compatible normalization for RFC docs.
+
+    Legacy shape:
+      {status: 'open'|'closed', thread: [{from, message, created_at}], decision, locked}
+
+    New shape:
+      {status: 'NEEDS_OM'|'NEEDS_FACULTY'|'ACCEPTED'|'APPROVED'|'REJECTED',
+       messages: [{sender_role, sender_user_id, message, created_at}]}.
+    """
+    if not doc:
+        return doc
+
+    # Ensure rfc_id exists
+    if not doc.get('rfc_id'):
+        # stable-ish id: RFC + last 8 of Mongo _id when present
+        mid = str(doc.get('_id') or '')
+        suffix = (mid[-8:] if mid else '')
+        doc['rfc_id'] = f"RFC{suffix}" if suffix else f"RFC{__import__('uuid').uuid4().hex[:10].upper()}"
+
+    # Normalize messages
+    msgs = []
+    if isinstance(doc.get('messages'), list):
+        for m in doc['messages']:
+            if not isinstance(m, dict):
+                continue
+            msgs.append({
+                'sender_role': m.get('sender_role') or m.get('from') or 'faculty',
+                'sender_user_id': m.get('sender_user_id') or m.get('user_id') or '',
+                'message': m.get('message') or m.get('text') or '',
+                'created_at': m.get('created_at') or m.get('createdAt') or None,
+            })
+    elif isinstance(doc.get('thread'), list):
+        for m in doc['thread']:
+            if not isinstance(m, dict):
+                continue
+            role = (m.get('from') or m.get('sender_role') or '').lower() or 'faculty'
+            msgs.append({
+                'sender_role': role,
+                'sender_user_id': '',
+                'message': m.get('message') or m.get('text') or '',
+                'created_at': m.get('created_at') or m.get('createdAt') or None,
+            })
+
+    doc['messages'] = msgs
+
+    # Normalize status
+    st = (doc.get('status') or '').upper()
+    if st in RFC_TERMINAL or st in ("NEEDS_OM", "NEEDS_FACULTY", "OPEN"):
+        doc['status'] = st
+    elif st == 'CLOSED':
+        dec = (doc.get('decision') or '').lower()
+        doc['status'] = 'APPROVED' if dec == 'approve' else ('REJECTED' if dec == 'reject' else 'APPROVED')
+    elif st == 'OPEN':
+        # infer whose turn
+        last_role = (msgs[-1].get('sender_role') if msgs else 'faculty')
+        last_role = (last_role or '').lower()
+        doc['status'] = 'NEEDS_OM' if last_role == 'faculty' else 'NEEDS_FACULTY'
+    else:
+        doc['status'] = 'NEEDS_OM'
+
+    # locked flag
+    if doc['status'] in RFC_TERMINAL:
+        doc['locked'] = True
+
+    return doc
+
+COL_ROLE_ASSIGN = "role_assignments"
+
+
+async def _dept_name_by_id(dept_id: str, db) -> str:
+    """Best-effort department name lookup used for notification copy."""
+    if not dept_id:
+        return ""
+    d = await db[COL_DEPTS].find_one(
+        {
+            "$or": [
+                {"department_id": dept_id},
+                {"dept_id": dept_id},
+                {"id": dept_id},
+            ]
+        },
+        {"_id": 0, "dept_name": 1, "department_name": 1, "name": 1, "dept_code": 1},
+    ) or {}
+    return (d.get("dept_name") or d.get("department_name") or d.get("name") or "").strip()
+
+
+async def _chair_user_ids_for_department_id(department_id: str, db) -> List[str]:
+    """
+    Resolve chair user_id(s) for a department.
+
+    Priority:
+      1) staff_profiles where position_title contains "chair" (case-insensitive)
+         - match by department_id/dept_id
+         - fallback match by dept_name/department_name if ids not present
+      2) role_assignments for that department (active-ish)
+      3) role-based resolution (user_roles role_type contains "chair") joined via role_assignments
+      4) SAFE FALLBACK: notify ANY chair in the system (staff_profiles chair OR role_assignments chair-role),
+         so notifications are not silently dropped.
+    """
+    if not department_id:
+        return []
+
+    dept_name = await _dept_name_by_id(department_id, db)
+
+    ids: List[str] = []
+
+    # 1) staff_profiles by department_id/dept_id
+    try:
+        cur = db[COL_STAFF].find(
+            {
+                "$or": [{"department_id": department_id}, {"dept_id": department_id}],
+                "position_title": {"$regex": "chair", "$options": "i"},
+            },
+            {"_id": 0, "user_id": 1},
+        )
+        async for d in cur:
+            if d.get("user_id"):
+                ids.append(d["user_id"])
+    except Exception:
+        pass
+
+    # 1b) staff_profiles by dept name (fallback)
+    if not ids and dept_name:
+        try:
+            cur_name = db[COL_STAFF].find(
+                {
+                    "$or": [
+                        {"dept_name": dept_name},
+                        {"department_name": dept_name},
+                        {"department": dept_name},
+                        {"dept": dept_name},
+                    ],
+                    "position_title": {"$regex": "chair", "$options": "i"},
+                },
+                {"_id": 0, "user_id": 1},
+            )
+            async for d in cur_name:
+                if d.get("user_id"):
+                    ids.append(d["user_id"])
+        except Exception:
+            pass
+
+    # 2) role_assignments fallback (dept-scoped)
+    if not ids:
+        try:
+            cur2 = db[COL_ROLE_ASSIGN].find(
+                {
+                    "$or": [{"department_id": department_id}, {"dept_id": department_id}],
+                    "is_active": {"$in": [True, None]},
+                },
+                {"_id": 0, "user_id": 1},
+            )
+            async for d in cur2:
+                if d.get("user_id"):
+                    ids.append(d["user_id"])
+        except Exception:
+            pass
+
+    # 3) role-based resolution: user_roles(role_type contains chair) -> role_assignments(role_id in ...)
+    if not ids:
+        try:
+            chair_roles = await db["user_roles"].find(
+                {"role_type": {"$regex": "chair", "$options": "i"}},
+                {"_id": 0, "role_id": 1},
+            ).to_list(100)
+            chair_role_ids = [r.get("role_id") for r in chair_roles if r.get("role_id")]
+
+            if chair_role_ids:
+                cur3 = db[COL_ROLE_ASSIGN].find(
+                    {
+                        "role_id": {"$in": chair_role_ids},
+                        "$or": [{"department_id": department_id}, {"dept_id": department_id}],
+                        "is_active": {"$in": [True, None]},
+                    },
+                    {"_id": 0, "user_id": 1},
+                )
+                async for d in cur3:
+                    if d.get("user_id"):
+                        ids.append(d["user_id"])
+        except Exception:
+            pass
+
+    # 3b) optional: department doc may store chair email -> resolve to users.user_id
+    if not ids:
+        try:
+            dept_doc = await db[COL_DEPTS].find_one(
+                {"$or": [{"department_id": department_id}, {"dept_id": department_id}]},
+                {"_id": 0, "chair_email": 1, "chairEmail": 1, "email_chair": 1},
+            ) or {}
+            chair_email = (dept_doc.get("chair_email") or dept_doc.get("chairEmail") or dept_doc.get("email_chair") or "").strip()
+            if chair_email:
+                u = await db[COL_USERS].find_one(
+                    {"email": {"$regex": f"^{re.escape(chair_email)}$", "$options": "i"}},
+                    {"_id": 0, "user_id": 1},
+                )
+                if u and u.get("user_id"):
+                    ids.append(u["user_id"])
+        except Exception:
+            pass
+
+    # 4) SAFE FALLBACK: notify ANY chair (system-wide) so we never silently drop notifs
+    if not ids:
+        # 4a) any staff_profile chair
+        try:
+            cur_any = db[COL_STAFF].find(
+                {"position_title": {"$regex": "chair", "$options": "i"}},
+                {"_id": 0, "user_id": 1},
+            ).limit(25)
+            async for d in cur_any:
+                if d.get("user_id"):
+                    ids.append(d["user_id"])
+        except Exception:
+            pass
+
+    if not ids:
+        # 4b) any role_assignment tied to a chair role_id
+        try:
+            chair_roles = await db["user_roles"].find(
+                {"role_type": {"$regex": "chair", "$options": "i"}},
+                {"_id": 0, "role_id": 1},
+            ).to_list(100)
+            chair_role_ids = [r.get("role_id") for r in chair_roles if r.get("role_id")]
+            if chair_role_ids:
+                cur_any2 = db[COL_ROLE_ASSIGN].find(
+                    {
+                        "role_id": {"$in": chair_role_ids},
+                        "is_active": {"$in": [True, None]},
+                    },
+                    {"_id": 0, "user_id": 1},
+                ).limit(25)
+                async for d in cur_any2:
+                    if d.get("user_id"):
+                        ids.append(d["user_id"])
+        except Exception:
+            pass
+
+    # unique
+    seen = set()
+    out: List[str] = []
+    for x in ids:
+        if x and x not in seen:
+            seen.add(x)
+            out.append(x)
+    return out
+
+async def _infer_department_id_from_rows(rows: List[Dict[str, Any]], db) -> Optional[str]:
+    """Best-effort department_id inference for OM forward/update.
+
+    Tries, in order:
+      1) row.department_id / row.dept_id fields (various key spellings)
+      2) lookup sections by section_id then take the most common department_id/dept_id
+    """
+    if not rows:
+        return None
+
+    # 1) direct hints in payload rows
+    for r in rows:
+        for k in ("department_id", "dept_id", "departmentId", "deptId"):
+            v = r.get(k)
+            if v:
+                return str(v).strip()
+
+    # 2) infer via section_id -> sections.department_id
+    sec_ids: List[str] = []
+    for r in rows:
+        sid = r.get("section_id") or r.get("sectionId") or r.get("sec_id") or r.get("secId")
+        if sid:
+            sec_ids.append(str(sid).strip())
+
+    if not sec_ids:
+        return None
+
+    # Fetch matching sections
+    docs = await db[COL_SECTIONS].find({"section_id": {"$in": list(set(sec_ids))}}, {"_id": 0, "department_id": 1, "dept_id": 1}).to_list(None)
+    if not docs:
+        return None
+
+    counts: Dict[str, int] = {}
+    for d in docs:
+        did = d.get("department_id") or d.get("dept_id")
+        if did:
+            did = str(did).strip()
+            counts[did] = counts.get(did, 0) + 1
+
+    if not counts:
+        return None
+
+    # return most common
+    return max(counts.items(), key=lambda kv: kv[1])[0]
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -551,42 +860,74 @@ async def loadassignment_handler(
         full_name = " ".join([p for p in [(u.get("first_name") or "").strip(),
                                         (u.get("last_name") or "").strip()] if p])
 
-        # --- NEW: resolve department via role_assignments -> departments ---
-        # Grab the most recent active role assignment for this user
-        ra = await db["role_assignments"].find(
-            {
-                "user_id": userId,
-                # treat null/absent as active; you can tighten this if you track current term
-                "$or": [{"is_active": True}, {"is_active": {"$exists": False}}],
-            },
+        # --- Resolve department via role_assignments -> departments (robust parsing) ---
+        # NOTE: Some datasets don't have is_active/updated_at/created_at. We therefore:
+        #  - do NOT filter by is_active
+        #  - sort by whichever recency keys exist
+        #  - parse scope defensively (case-insensitive type, id keys may vary)
+        ra_docs = await db["role_assignments"].find(
+            {"user_id": userId},
             {
                 "_id": 0,
                 "role_id": 1,
                 "scope": 1,
                 "updated_at": 1,
                 "created_at": 1,
+                "role_assignment_id": 1,
                 "until_term_id": 1,
             },
-        ).sort([("updated_at", -1), ("created_at", -1)]).to_list(5)
+        ).sort(
+            [("updated_at", -1), ("created_at", -1), ("role_assignment_id", -1)]
+        ).to_list(10)
 
-        dept_id = None
-        role_id = None
-        for row in ra or []:
-            role_id = role_id or row.get("role_id")
-            scopes = row.get("scope") or []
-            # find the first department scope
-            dep_scope = next((s for s in scopes if (s.get("type") == "department" and s.get("id"))), None)
-            if dep_scope:
-                dept_id = dep_scope["id"]
+        def _norm_scope_list(scope_val: Any) -> list[dict]:
+            if not scope_val:
+                return []
+            if isinstance(scope_val, dict):
+                return [scope_val]
+            if isinstance(scope_val, list):
+                return [s for s in scope_val if isinstance(s, dict)]
+            return []
+
+        dept_id: Optional[str] = None
+        role_id: Optional[str] = None
+
+        for row in ra_docs or []:
+            if not role_id:
+                role_id = row.get("role_id")
+
+            scopes = _norm_scope_list(row.get("scope"))
+            for s in scopes:
+                stype = str(s.get("type") or "").strip().lower()
+                if stype != "department":
+                    continue
+                # id key can vary across seeders
+                cand = s.get("id") or s.get("department_id") or s.get("dept_id")
+                if cand:
+                    dept_id = str(cand).strip()
+                    break
+            if dept_id:
                 break
 
         dept_name = ""
         if dept_id:
+            # departments collection key can vary; try common variants.
             d = await db["departments"].find_one(
-                {"department_id": dept_id},
+                {
+                    "$or": [
+                        {"department_id": dept_id},
+                        {"dept_id": dept_id},
+                        {"id": dept_id},
+                    ]
+                },
                 {"_id": 0, "dept_name": 1, "department_name": 1, "name": 1, "dept_code": 1},
             ) or {}
-            dept_name = (d.get("dept_name") or d.get("department_name") or d.get("name") or "").strip()
+            dept_name = (
+                d.get("dept_name")
+                or d.get("department_name")
+                or d.get("name")
+                or ""
+            ).strip()
 
         # Optional: normalize role display (example for ROLE0006)
         position_title = staff.get("position_title") or ""
@@ -648,6 +989,16 @@ async def loadassignment_handler(
 
         rows = payload["rows"]
 
+        # Determine whether this is the first forward (new header) or a re-forward/update.
+        # Keep your existing header behavior, but resolve recipients robustly for notifications.
+        dept_id_header = "DEPT0001"  # existing behavior
+        dept_id_notif = await _infer_department_id_from_rows(rows, db) or dept_id_header
+
+        existing_header = await db[COL_FACULTY_LOADS].find_one(
+            {"term_id": active.get("term_id"), "department_id": dept_id_header},
+            {"_id": 1, "load_id": 1},
+        )
+
         # 1) persist the final assignments/schedules
         await _approve_and_persist(active["term_id"], rows, db)
 
@@ -655,18 +1006,126 @@ async def loadassignment_handler(
         await _upsert_faculty_load_header(
             active,
             db,
-            department_id="DEPT0001",  # per your spec
+            department_id=dept_id_header,  # existing behavior
             user_id=userId,            # query param from the route
         )
+
+        # 3) notify the department chair(s) so their CHAIR Plantilla alerts updates
+        try:
+            recipients = await _chair_user_ids_for_department_id(dept_id_notif, db)
+            dept_name = await _dept_name_by_id(dept_id_notif, db)
+
+            is_update = bool(existing_header)
+            title = "Load Recommendation Updated" if is_update else "Load Recommendation Forwarded"
+            details = (
+                f"OM {'updated' if is_update else 'forwarded'} the load recommendation"
+                f" for {dept_name or dept_id_notif} ({_term_label(active)})."
+            )
+            meta = {
+                "route": "/chair/plantilla",
+                "kind": "om_load_updated" if is_update else "om_load_forwarded",
+                "term_id": active.get("term_id"),
+                "department_id": dept_id_notif,
+                "load_id": (existing_header or {}).get("load_id"),
+            }
+
+            for uid in recipients:
+                await create_notification(
+                    user_id=uid,
+                    title=title,
+                    details=details,
+                    meta=meta,
+                )
+        except Exception:
+            # Never break approval due to notification failure
+            pass
+
+        # fetch header again to get reco_id after upsert
+        header_after = await db[COL_FACULTY_LOADS].find_one(
+            {"term_id": active.get("term_id"), "department_id": dept_id_header},
+            {"_id": 0, "load_id": 1},
+        ) or {}
+
+        kind = "om_load_updated" if bool(existing_header) else "om_load_forwarded"
+        reco_id = header_after.get("load_id") or (existing_header or {}).get("load_id")
 
         return {
             "ok": True,
             "approved": len(rows),
             "term": _term_label(active),
+            "kind": kind,
+            "reco_id": reco_id,
         }
 
 
+
     raise HTTPException(status_code=400, detail="Invalid action parameter.")
+
+@router.post("/loadassignment/notify-chair")
+async def om_notify_chair_load_forwarded(
+    userId: str = Query(..., min_length=3),
+    payload: Dict[str, Any] = Body(...),
+):
+    active = await _active_term()
+    if not active:
+        raise HTTPException(409, "No upcoming term found (is_current anchor missing?)")
+
+    # Best-effort dept resolution
+    dept_id_header = "DEPT0001"  # keep your existing header behavior
+    dept_id_notif = (
+        (payload.get("department_id") or payload.get("dept_id") or "").strip()
+        or await _infer_department_id_from_rows(payload.get("rows") or [], db)
+        or dept_id_header
+    )
+
+    # reco_id (prefer payload; else pull from faculty_loads header)
+    header = await db[COL_FACULTY_LOADS].find_one(
+        {"term_id": active.get("term_id"), "department_id": dept_id_header},
+        {"_id": 0, "load_id": 1},
+    ) or {}
+    reco_id = (payload.get("reco_id") or payload.get("recoId") or header.get("load_id"))
+
+    # kind (prefer payload; else infer: if any prior notif exists for this reco_id => updated)
+    kind = (payload.get("kind") or "").strip()
+    if kind not in ("om_load_forwarded", "om_load_updated"):
+        inferred = "om_load_forwarded"
+        if reco_id:
+            prior = await db["notifications"].find_one(
+                {"meta.reco_id": reco_id, "meta.kind": "om_load_forwarded"},
+                {"_id": 0, "notif_id": 1},
+            )
+            if prior:
+                inferred = "om_load_updated"
+        kind = inferred
+
+    recipients = await _chair_user_ids_for_department_id(dept_id_notif, db)
+    dept_name = await _dept_name_by_id(dept_id_notif, db)
+
+    title = "Load Recommendation Updated" if kind == "om_load_updated" else "Load Recommendation Forwarded"
+    details = (
+        f"OM {'updated' if kind == 'om_load_updated' else 'forwarded'} the load recommendation "
+        f"for {dept_name or dept_id_notif} ({_term_label(active)})."
+    )
+    meta = {
+        "route": "/chair/plantilla",
+        "kind": kind,
+        "reco_id": reco_id,                 # REQUIRED by your spec
+        "term_id": active.get("term_id"),
+        "department_id": dept_id_notif,
+    }
+
+    created = 0
+    for uid in recipients:
+        await create_notification(user_id=uid, title=title, details=details, meta=meta)
+        created += 1
+
+    return {
+        "ok": True,
+        "created": created,
+        "recipients": recipients,
+        "kind": kind,
+        "reco_id": reco_id,
+    }
 
 @router.get("/load-assignment/faculty-all")
 async def om_get_all_faculty(db = Depends(get_db)):
@@ -708,6 +1167,89 @@ async def om_get_all_faculty(db = Depends(get_db)):
     docs = await db[COL_FACULTY].aggregate(pipeline).to_list(None)
     return {"ok": True, "faculty": docs}
 
+@router.get("/load-assignment/faculty-with-deloadings")
+async def om_faculty_with_deloadings(
+    term_id: Optional[str] = Query(None, description="Term ID; defaults to OM active/upcoming term"),
+    db = Depends(get_db),
+):
+    """Return a compact list of faculty who have at least one deloading in the given term."""
+    if not term_id:
+        active = await _active_term()
+        term_id = (active or {}).get("term_id")
+    if not term_id:
+        return {"ok": True, "term_id": None, "faculty": []}
+
+    fac_ids = await db["deloadings"].distinct("faculty_id", {"term_id": term_id})
+    fac_ids = [fid for fid in (fac_ids or []) if fid]
+    if not fac_ids:
+        return {"ok": True, "term_id": term_id, "faculty": []}
+
+    pipeline = [
+        {"$match": {"faculty_id": {"$in": fac_ids}, "is_archived": {"$ne": True}}},
+        {
+            "$lookup": {
+                "from": "users",
+                "localField": "user_id",
+                "foreignField": "user_id",
+                "as": "user",
+            }
+        },
+        {"$unwind": "$user"},
+        {
+            "$set": {
+                "faculty_name_display": {
+                    "$concat": ["$user.last_name", ", ", "$user.first_name"]
+                }
+            }
+        },
+        {"$project": {"_id": 0, "faculty_id": 1, "faculty_name_display": 1}},
+        {"$sort": {"faculty_name_display": 1}},
+    ]
+    docs = await db[COL_FACULTY].aggregate(pipeline).to_list(None)
+    return {"ok": True, "term_id": term_id, "faculty": docs}
+
+
+@router.get("/load-assignment/faculty-deloadings")
+async def om_faculty_deloadings(
+    faculty_id: str = Query(..., description="Faculty ID"),
+    term_id: Optional[str] = Query(None, description="Term ID; defaults to OM active/upcoming term"),
+    db = Depends(get_db),
+):
+    """Return deloadings for a selected faculty scoped to a term (OM context)."""
+    if not term_id:
+        active = await _active_term()
+        term_id = (active or {}).get("term_id")
+    if not term_id:
+        return {"ok": True, "term_id": None, "faculty_id": faculty_id,
+                "rfc_id": None
+, "rows": []}
+
+    rows: List[Dict[str, Any]] = []
+    deloadings = await db["deloadings"].find({"term_id": term_id, "faculty_id": faculty_id}).to_list(None)
+    for d in deloadings:
+        dt = await db["deloading_types"].find_one(
+            {
+                "$or": [
+                    {"type_id": d.get("type_id")},
+                    {"deloadingtype_id": d.get("type_id")},
+                ]
+            }
+        )
+        rows.append(
+            {
+                "deloading_type": (dt or {}).get("type"),
+                "units_deloaded": d.get("units_deloaded"),
+                "notes": (d.get("notes") or d.get("deloading_notes") or "").strip() or None,
+                "term_id": term_id,
+                "updated_at": d.get("updated_at"),
+            }
+        )
+
+    rows.sort(key=lambda x: -(x["updated_at"].timestamp() if x.get("updated_at") else 0))
+    return {"ok": True, "term_id": term_id, "faculty_id": faculty_id,
+                "rfc_id": None
+, "rows": rows}
+
 @router.get("/load-assignment/list")
 async def get_om_load_assignment_list(user_id: str, db=Depends(get_db)):
     active = await _active_term()
@@ -715,6 +1257,43 @@ async def get_om_load_assignment_list(user_id: str, db=Depends(get_db)):
     # Fetch table rows
     base = await _fetch_rows(user_id, term_id=active["term_id"], db=db)
     rows = base["rows"]
+
+    # Overlay: finalized/locked flags from proposals so the OM UI can disable actions
+    # (e.g., after per-course finalize or after RFC reject auto-locks the whole schedule).
+    try:
+        proposals = await db[COL_LOAD_PROPOSALS].find(
+            {"term_id": active["term_id"]},
+            {"_id": 0, "faculty_id": 1, "rows": 1, "locked": 1},
+        ).to_list(None)
+
+        finalized_keys: set[tuple[str, str, str]] = set()
+        for p in proposals or []:
+            fid = str(p.get("faculty_id") or "").strip()
+            if not fid:
+                continue
+            locked_all = bool(p.get("locked"))
+            for rr in (p.get("rows") or []):
+                if not isinstance(rr, dict):
+                    continue
+                course = str(rr.get("course") or rr.get("course_code") or "").strip()
+                section = str(rr.get("section") or "").strip()
+                if not course or not section:
+                    continue
+                if locked_all or bool(rr.get("finalized")):
+                    finalized_keys.add((fid, course, section))
+
+        if finalized_keys and isinstance(rows, list):
+            for r in rows:
+                if not isinstance(r, dict):
+                    continue
+                fid = str(r.get("faculty_id") or "").strip()
+                course = str(r.get("course") or "").strip()
+                section = str(r.get("section") or "").strip()
+                if fid and course and section and (fid, course, section) in finalized_keys:
+                    r["finalized"] = True
+    except Exception:
+        # Best-effort only; do not fail list load if proposals schema differs.
+        pass
 
     # Get faculty preferences for the active term
     ctx = await phase0_load(active["term_id"], db)
@@ -912,9 +1491,24 @@ async def get_om_load_assignment_list(user_id: str, db=Depends(get_db)):
                     }
                 )
     
-    
+    # --- NEW: pending RFC indicator per faculty (for red dot in Actions) ---
+    open_rfc_faculty_ids = set()
+    try:
+        cur = db[COL_LOAD_RFC].find({"term_id": active.get("term_id"), "status": {"$in": ["NEEDS_OM", "open"]}}, {"_id": 0, "faculty_id": 1})
+        async for d in cur:
+            fid = d.get("faculty_id")
+            if fid:
+                open_rfc_faculty_ids.add(str(fid))
+    except Exception:
+        open_rfc_faculty_ids = set()
+
+    for r in rows:
+        fid = r.get("faculty_id")
+        r["pending_rfc"] = bool(fid and str(fid) in open_rfc_faculty_ids)
+
     return {
         "term": _term_label(active),
+        "term_id": active.get("term_id"),
         "rows": rows,
         "preferred_units_by_faculty": preferred_units_by_faculty,
         "courseToKac": course_kac_simple,
@@ -927,6 +1521,300 @@ async def get_om_load_assignment_list(user_id: str, db=Depends(get_db)):
         "sectionCourse": section_course,
         "courseTypeOfCourse": course_type_of_course,
     }
+
+
+
+@router.post("/load-assignment/to-faculty")
+async def om_send_to_faculty(payload: Dict[str, Any] = Body(...), db=Depends(get_db)):
+    """Send OM proposed schedule(s) to faculty.
+
+    Payload:
+      - user_id: OM user id
+      - term_id: optional; defaults to OM active term
+      - rows: array of OM load rows (frontend already ensures "all rows per selected faculty")
+
+    Behavior:
+      - groups rows by faculty_id
+      - upserts into faculty_load_proposals
+      - creates notification for each faculty
+    """
+    user_id = payload.get("user_id") or payload.get("userId")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="user_id is required")
+
+    term_id = payload.get("term_id")
+    if not term_id:
+        active = await _active_term()
+        term_id = (active or {}).get("term_id")
+
+    if not term_id:
+        raise HTTPException(status_code=409, detail="No active/upcoming term found")
+
+    rows = payload.get("rows") or []
+    if not isinstance(rows, list) or not rows:
+        raise HTTPException(status_code=400, detail="rows[] is required")
+
+    # group by faculty_id
+    by_fid: Dict[str, List[Dict[str, Any]]] = {}
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        fid = (r.get("faculty_id") or "").strip()
+        if not fid:
+            continue
+        by_fid.setdefault(fid, []).append(r)
+
+    if not by_fid:
+        raise HTTPException(status_code=400, detail="No rows with faculty_id")
+
+    sent = 0
+    for fid, fac_rows in by_fid.items():
+        fac = await db[COL_FACULTY].find_one({"faculty_id": fid}, {"_id": 0, "user_id": 1}) or {}
+        fac_user_id = (fac.get("user_id") or "").strip()
+
+        doc = {
+            "faculty_id": fid,
+            "term_id": term_id,
+            "status": "proposed",
+            "om_user_id": user_id,
+            "rows": fac_rows,
+            "updated_at": datetime.now(timezone.utc),
+        }
+
+        await db[COL_LOAD_PROPOSALS].update_one(
+            {"faculty_id": fid, "term_id": term_id},
+            {"$set": doc, "$setOnInsert": {"created_at": datetime.now(timezone.utc)}},
+            upsert=True,
+        )
+
+        if fac_user_id:
+            # Notify faculty that a proposed schedule is available
+            await create_notification(
+                user_id=fac_user_id,
+                title="Load Assignment: Proposed schedule available",
+                details="The Office Manager sent a proposed schedule for you. You can accept it or request changes (RFC).",
+                meta={
+                    "route": "/faculty/overview",
+                    "kind": "load_proposed",
+                    "term_id": term_id,
+                    "faculty_id": fid,
+                },
+            )
+
+        sent += 1
+
+    return {"ok": True, "term_id": term_id, "sent_faculty": sent}
+
+
+@router.get("/load-assignment/rfc")
+async def om_get_rfc(
+    faculty_id: str = Query(...),
+    term_id: Optional[str] = Query(None),
+    db=Depends(get_db),
+):
+    """Return the RFC thread for a given faculty+term (any status)."""
+    if not term_id:
+        active = await _active_term()
+        term_id = (active or {}).get("term_id")
+
+    if not term_id:
+        return {"ok": True, "rfc": None}
+
+    rfc = await db[COL_LOAD_RFC].find_one(
+        {"faculty_id": faculty_id, "term_id": term_id},
+        {"_id": 0},
+    )
+
+    if not rfc:
+        return {"ok": True, "rfc": None}
+
+    return {"ok": True, "rfc": _normalize_rfc_doc(rfc)}
+
+
+@router.post("/load-assignment/rfc/respond")
+async def respond_load_assignment_rfc(
+    payload: Dict[str, Any] = Body(...),
+    db=Depends(get_db),
+):
+    """OM responds on an RFC thread: reply | approve | reject."""
+    # IMPORTANT: user_id must be accepted from JSON body (frontend may not send query params)
+    user_id = (payload.get("user_id") or payload.get("userId") or "").strip()
+    term_id = (payload.get("term_id") or "").strip()
+    faculty_id = (payload.get("faculty_id") or "").strip()
+    action = (payload.get("action") or "").strip().lower()
+    message = (payload.get("message") or "").strip()
+
+    if not user_id:
+        raise HTTPException(status_code=400, detail="user_id is required")
+    if not term_id or not faculty_id:
+        raise HTTPException(status_code=400, detail="term_id and faculty_id are required")
+    if action not in {"reply", "approve", "reject"}:
+        raise HTTPException(status_code=400, detail="Invalid action")
+    if action == "reply" and not message:
+        raise HTTPException(status_code=400, detail="message is required for reply")
+
+    rfc = await db[COL_LOAD_RFC].find_one({"faculty_id": faculty_id, "term_id": term_id}, {"_id": 0})
+    if not rfc:
+        raise HTTPException(status_code=404, detail="No RFC found")
+
+    rfc = _normalize_rfc_doc(rfc)
+    if rfc.get("status") in RFC_TERMINAL:
+        raise HTTPException(status_code=409, detail="RFC is already locked")
+
+    now = datetime.now(timezone.utc)
+    msgs = list(rfc.get("messages") or [])
+
+    if message:
+        msgs.append({
+            "sender_role": "om",
+            "sender_user_id": user_id,
+            "message": message,
+            "created_at": now.isoformat(),
+        })
+
+    new_status = rfc.get("status")
+    locked = False
+    extra: Dict[str, Any] = {}
+
+    if action == "reply":
+        new_status = "NEEDS_FACULTY"
+        locked = False
+    elif action == "approve":
+        new_status = "APPROVED"
+        locked = True
+        extra["closed_at"] = now
+    else:
+        new_status = "REJECTED"
+        locked = True
+        extra["closed_at"] = now
+
+        # If OM rejects the RFC, automatically approve/lock the proposed schedule
+        # so the faculty can no longer RFC for the same courses.
+        try:
+            await db[COL_LOAD_PROPOSALS].update_one(
+                {"faculty_id": faculty_id, "term_id": term_id},
+                {
+                    "$set": {
+                        "rows.$[].finalized": True,
+                        "locked": True,
+                        "updated_at": now,
+                    },
+                    "$setOnInsert": {"created_at": now},
+                },
+                upsert=True,
+            )
+        except Exception:
+            # Best-effort only: do not block the RFC response if proposal is missing/has different schema
+            pass
+
+    rfc_id = rfc.get("rfc_id")
+
+    await db[COL_LOAD_RFC].update_one(
+        {"faculty_id": faculty_id, "term_id": term_id},
+        {
+            "$set": {
+                "rfc_id": rfc_id,
+                "faculty_id": faculty_id,
+                "term_id": term_id,
+                "status": new_status,
+                "locked": locked,
+                "messages": msgs,
+                "updated_at": now,
+                **extra,
+            },
+            "$setOnInsert": {"created_at": now},
+        },
+        upsert=True,
+    )
+
+    # notify faculty
+    fac = await db[COL_FACULTY].find_one({"faculty_id": faculty_id}, {"_id": 0, "user_id": 1}) or {}
+    fac_user_id = (fac.get("user_id") or "").strip()
+
+    if fac_user_id:
+        if action == "reply":
+            title = "Load Assignment: OM replied to your Request for Change"
+            details = message
+            kind = "load_rfc_reply"
+        elif action == "approve":
+            title = "Load Assignment: OM approved your request"
+            details = message or "Your Request for Change was approved."
+            kind = "load_rfc_approved"
+        else:
+            title = "Load Assignment: OM rejected your request"
+            details = message or "Your Request for Change was rejected."
+            kind = "load_rfc_rejected"
+
+        await create_notification(
+            user_id=fac_user_id,
+            title=title,
+            details=details,
+            meta={
+                "route": "/faculty/overview",
+                "kind": kind,
+                "term_id": term_id,
+                "faculty_id": faculty_id,
+                "rfc_id": rfc_id,
+            },
+        )
+
+    return {"ok": True, "status": new_status}
+
+
+@router.post("/load-assignment/finalize-course")
+async def om_finalize_course(payload: Dict[str, Any] = Body(...), db=Depends(get_db)):
+    """Notify a faculty that a course is added to their final schedule."""
+    user_id = (payload.get("user_id") or payload.get("userId") or "").strip()
+    faculty_id = payload.get("faculty_id")
+    course_code = payload.get("course_code") or payload.get("course")
+    section = payload.get("section")
+    term_id = payload.get("term_id")
+
+    if not user_id or not faculty_id or not course_code or not section:
+        raise HTTPException(status_code=400, detail="user_id, faculty_id, course_code and section are required")
+
+    if not term_id:
+        active = await _active_term()
+        term_id = (active or {}).get("term_id")
+
+    fac = await db[COL_FACULTY].find_one({"faculty_id": faculty_id}, {"_id": 0, "user_id": 1}) or {}
+    fac_user_id = (fac.get("user_id") or "").strip()
+
+    if fac_user_id:
+        await create_notification(
+            user_id=fac_user_id,
+            title="Load Assignment: Added to final schedule",
+            details=f"{course_code} – {section} has been added to your final schedule.",
+            meta={
+                "route": "/faculty/overview",
+                "kind": "load_course_finalized",
+                "term_id": term_id,
+                "faculty_id": faculty_id,
+                "course_code": course_code,
+                "section": section,
+            },
+        )
+
+    # Best-effort: mark finalized in proposal doc
+    try:
+        await db[COL_LOAD_PROPOSALS].update_one(
+            {"faculty_id": faculty_id, "term_id": term_id},
+            {
+                "$addToSet": {"finalized": {"course_code": course_code, "section": section}},
+                "$set": {"updated_at": datetime.now(timezone.utc)},
+                "$setOnInsert": {"created_at": datetime.now(timezone.utc)},
+            },
+            upsert=True,
+        )
+        await db[COL_LOAD_PROPOSALS].update_one(
+            {"faculty_id": faculty_id, "term_id": term_id},
+            {"$set": {"rows.$[r].finalized": True}},
+            array_filters=[{"r.course": course_code, "r.section": section}],
+        )
+    except Exception:
+        pass
+
+    return {"ok": True, "course_code": course_code, "section": section}
 
 @router.post("/load-assignment/run")
 async def run_auto_assignment(
@@ -1651,6 +2539,21 @@ async def run_auto_assignment(
 
     # Run the conservative SHS refill pass (after conflicts)
     _shs_refill_after_conflicts()
+
+    # --- NEW: pending RFC indicator per faculty (for red dot in Actions) ---
+    open_rfc_faculty_ids = set()
+    try:
+        cur = db[COL_LOAD_RFC].find({"term_id": active.get("term_id"), "status": {"$in": ["NEEDS_OM", "open"]}}, {"_id": 0, "faculty_id": 1})
+        async for d in cur:
+            fid = d.get("faculty_id")
+            if fid:
+                open_rfc_faculty_ids.add(str(fid))
+    except Exception:
+        open_rfc_faculty_ids = set()
+
+    for r in rows:
+        fid = r.get("faculty_id")
+        r["pending_rfc"] = bool(fid and str(fid) in open_rfc_faculty_ids)
 
     return {
         "term": _term_label(active),

@@ -1,7 +1,8 @@
 // frontend/src/pages/CHAIR/CHAIR_Inbox.tsx
 import { useEffect, useMemo, useState } from "react";
 import { Search, Plus } from "lucide-react";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
+
 
 const cls = (...s: (string | false | undefined)[]) => s.filter(Boolean).join(" ");
 const timeAgo = (d: Date) => {
@@ -33,17 +34,27 @@ export default function CHAIR_Inbox() {
   const [mails, setMails] = useState<Mail[]>([]);
   const [selected, setSelected] = useState<Mail | null>(null);
   const navigate = useNavigate();
+  const location = useLocation();
 
   const handleBack = () => {
-    // Case 1: standalone route -> use browser history
-    if (window.history.length > 1) {
-      navigate(-1);
-      return;
-    }
-    // Case 2: in-tab inside CHAIR pages -> close the inbox tab and ensure we land on Plantilla
-    window.dispatchEvent(new Event("om:closeInbox")); // reuse existing event wiring
-    navigate("/chair/plantilla");
-  };
+  const from = (location.state as any)?.from as string | undefined;
+
+  // If opened from another Chair page (Topbar button), go back there.
+  if (from && typeof from === "string" && from.startsWith("/chair/")) {
+    navigate(from);
+    return;
+  }
+
+  // Otherwise, try browser history.
+  if (window.history.length > 1) {
+    navigate(-1);
+    return;
+  }
+
+  // Fallback.
+  navigate("/chair/plantilla");
+};
+
 
   useEffect(() => {
     const user = JSON.parse(localStorage.getItem("animo.user") || "{}");

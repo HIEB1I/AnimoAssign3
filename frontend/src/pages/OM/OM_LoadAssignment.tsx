@@ -2,12 +2,22 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Outlet, useLocation } from "react-router-dom";
 import AppShell from "../../base/AppShell";
 import { runOmAutoAssign } from "../../api.ts";
-import { submitOmLoadAssignment } from "../../api.ts";
+import {
+  submitOmLoadAssignment,
+  notifyChairLoadRecommendation,
+  sendOmLoadAssignmentsToFaculty,
+  getOmLoadAssignmentRfc,
+  respondOmLoadAssignmentRfc,
+  finalizeOmLoadAssignmentCourse,
+} from "../../api.ts";
 
 import {
   getOmLoadAssignmentList,
   getOmLoadAssignmentProfile,
   getAllFaculty,
+  getOmFacultyWithDeloadings,
+  getOmFacultyDeloadings,
+  type DeloadingRow
 } from "../../api";
 
 import { cls } from "../../utilities/cls";
@@ -464,9 +474,12 @@ type Row = {
   capacity: number | "";
   mode?: string;
   status?: "" | "Confirmed" | "Pending" | "Unassigned" | "Conflict";
+  pending_rfc?: boolean;
   conflictNote?: string;
   editable?: boolean;
   campus_id?: string;
+  /** When OM has already finalized this course for the faculty */
+  finalized?: boolean;
 };
 
 // --- Validation helpers & engine (row-level flags) ---
@@ -1037,11 +1050,16 @@ const SendModal = ({
   open,
   onClose,
   rows,
+  termLabel,
+  onSend,
 }: {
   open: boolean;
   onClose: () => void;
   rows: Row[];
+  termLabel?: string;
+  onSend: (rows: Row[]) => Promise<void>;
 }) => {
+  const [sending, setSending] = useState(false);
   if (!open) return null;
   const byFaculty = Object.entries(
     rows.reduce<Record<string, Row[]>>((acc, r) => {
@@ -1057,7 +1075,7 @@ const SendModal = ({
       <div className="w-full max-w-5xl rounded-2xl bg-white p-6 shadow-2xl">
         <div className="mb-1">
           <h3 className="text-[22px] font-extrabold text-emerald-700">
-            Teaching Load Assignments for Term 1, AY 2025 - 2026
+            Teaching Load Assignments for {termLabel || "Current Term"}
           </h3>
           <div className="mt-0.5 text-[11px] text-gray-600">
             To:{" "}
@@ -1072,7 +1090,7 @@ const SendModal = ({
           to you:
         </p>
 
-        <div className="mt-4">
+        <div className="mt-4 max-h-[60vh] overflow-auto pr-1">
           <div className="rounded-xl border border-gray-200 overflow-hidden">
             <table className="w-full table-fixed text-[13px]">
               <colgroup>
@@ -1136,12 +1154,8 @@ const SendModal = ({
                         <td className="px-4 py-3 align-middle">
                           {r.units !== "" ? String(r.units) : "—"}
                         </td>
-                        <td className="px-4 py-3 align-middle text-gray-800">
-                          —
-                        </td>
-                        <td className="px-4 py-3 align-middle text-gray-800">
-                          —
-                        </td>
+                        <td className="px-4 py-3 align-middle text-gray-800">{(r as any).campus || r.campus_id || "—"}</td>
+                        <td className="px-4 py-3 align-middle text-gray-800">{r.mode || (r as any).room_type || "—"}</td>
                         <td className="px-4 py-3 align-middle">
                           {r.day1 || "—"}
                         </td>
@@ -1178,11 +1192,25 @@ const SendModal = ({
             Cancel
           </button>
           <button
-            onClick={onClose}
-            className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:brightness-110"
+            disabled={sending || rows.length === 0}
+            onClick={async () => {
+              setSending(true);
+              try {
+                await onSend(rows);
+                onClose();
+              } catch (e: any) {
+                alert(e?.message || "Failed to send to faculty.");
+              } finally {
+                setSending(false);
+              }
+            }}
+            className={cls(
+              "inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:brightness-110",
+              (sending || rows.length === 0) && "opacity-60 cursor-not-allowed"
+            )}
           >
-            <Send className="h-4 w-4" />
-            Send
+            <Send className={cls("h-4 w-4", sending && "animate-spin")} />
+            {sending ? "Sending…" : "Send"}
           </button>
         </div>
       </div>
@@ -1190,16 +1218,117 @@ const SendModal = ({
   );
 };
 
+
+
 const RequestChangeModal = ({
   open,
   from,
   onClose,
+  userId,
+  termId,
+  rows,
+  onAfterUpdate,
 }: {
   open: boolean;
   from?: string;
   onClose: () => void;
-}) =>
-  !open ? null : (
+  userId: string;
+  termId: string;
+  rows: Row[];
+  onAfterUpdate: () => Promise<void> | void;
+}) => {
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [messages, setMessages] = useState<Array<any>>([]);
+  const [status, setStatus] = useState<string | null>(null);
+  const [reply, setReply] = useState("");
+
+  const facultyRow = rows.find((r) => (r.faculty || "") === (from || ""));
+  const facultyId = facultyRow?.faculty_id;
+
+  const isTerminal = !!status && ["ACCEPTED", "APPROVED", "REJECTED"].includes(status);
+  const needsOm = status === "NEEDS_OM" || status === "OPEN" || status === "open";
+
+  useEffect(() => {
+    if (!open) {
+      setLoading(false);
+      setError(null);
+      setMessages([]);
+      setStatus(null);
+      setReply("");
+      return;
+    }
+
+    (async () => {
+      try {
+        setLoading(true);
+        setError(null);
+        setMessages([]);
+        setStatus(null);
+
+        if (!facultyId) {
+          setError("No faculty id found for this RFC.");
+          return;
+        }
+
+        const res = await getOmLoadAssignmentRfc(userId, {
+          term_id: termId,
+          faculty_id: facultyId,
+        });
+
+        if (!res?.ok || !res?.rfc) {
+          setStatus(null);
+          setMessages([]);
+          return;
+        }
+
+        const rfc = res.rfc;
+        setStatus(rfc.status || null);
+        setMessages(rfc.messages || rfc.thread || []);
+      } catch (e: any) {
+        setError(e?.message || "Failed to load RFC.");
+      } finally {
+        setLoading(false);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
+  if (!open) return null;
+
+  const respond = async (decision: "reply" | "approve" | "reject") => {
+    if (!userId || !termId || !facultyId) {
+      alert("Missing context.");
+      return;
+    }
+    if (isTerminal) {
+      alert("RFC is already locked.");
+      return;
+    }
+    if (decision === "reply" && !reply.trim()) {
+      alert("Please type a reply message.");
+      return;
+    }
+
+    setLoading(true);
+    try {
+      await respondOmLoadAssignmentRfc(userId, {
+        term_id: termId,
+        faculty_id: facultyId,
+        action: decision,
+        message: reply.trim() || undefined,
+      });
+
+      await onAfterUpdate();
+      onClose();
+    } catch (e: any) {
+      alert(e?.message || "Failed to send response.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
     <div className="fixed inset-0 z-[120] grid place-items-center bg-black/40 p-4">
       <div className="w-full max-w-2xl rounded-2xl bg-white p-6 shadow-2xl relative">
         <button
@@ -1210,47 +1339,83 @@ const RequestChangeModal = ({
           <X className="h-5 w-5 text-gray-500" />
         </button>
 
-        <h3 className="text-lg font-semibold text-emerald-700 mb-4">
-          Request for Change
-        </h3>
-        <div className="text-sm text-gray-600 mb-4">
+        <h3 className="text-lg font-semibold text-emerald-700 mb-2">Request for Change</h3>
+        <div className="text-sm text-gray-600 mb-1">
           From: <span className="font-semibold">{from}</span>
         </div>
+        <div className="text-[12px] text-gray-600 mb-4">
+          Status:{" "}
+          <span className={cls("font-semibold", isTerminal ? "text-gray-700" : needsOm ? "text-red-600" : "text-blue-600")}>
+            {status || "(none)"}
+          </span>
+        </div>
 
-        <div className="grid gap-2 text-sm mb-4">
-          <div>
-            <div className="font-semibold text-gray-900">Change</div>
-            <div className="text-gray-700">Change Class Time</div>
+        {loading && <div className="mb-4 text-sm text-gray-600">Loading…</div>}
+        {error && <div className="mb-4 text-sm text-red-600">{error}</div>}
+
+        {!loading && !error && !status && (
+          <div className="mb-4 rounded-lg border border-gray-200 bg-gray-50 p-3 text-sm text-gray-700">
+            No RFC thread found for this faculty in this term.
           </div>
-          <div>
-            <div className="font-semibold text-gray-900">Time</div>
-            <div className="text-gray-700">11:00AM - 12:30PM</div>
-          </div>
-          <div>
-            <div className="font-semibold text-gray-900">Other remarks</div>
-            <div className="text-gray-700">
-              Other commitments to that timeframe.
+        )}
+
+        <div className="mb-4 max-h-60 overflow-auto rounded-lg border border-gray-200 bg-gray-50 p-3">
+          {messages.length ? (
+            <div className="space-y-2">
+              {messages.map((m: any, idx: number) => {
+                const who = (m.sender_role || m.from || "").toString().toUpperCase();
+                const ts = m.created_at ? new Date(m.created_at).toLocaleString() : "";
+                return (
+                  <div key={idx} className="text-sm">
+                    <div className="text-[11px] text-gray-500">{who} {ts ? `• ${ts}` : ""}</div>
+                    <div className="whitespace-pre-wrap text-gray-800">{m.message || m.text || ""}</div>
+                  </div>
+                );
+              })}
             </div>
-          </div>
+          ) : (
+            <div className="text-sm text-gray-600">No messages yet.</div>
+          )}
         </div>
 
         <label className="block text-sm font-medium mb-1">Reply</label>
         <textarea
           className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30 mb-6"
           rows={4}
-          placeholder="Type your reply..."
+          placeholder={isTerminal ? "This RFC is locked." : "Type your reply…"}
+          value={reply}
+          disabled={loading || !status || isTerminal}
+          onChange={(e) => setReply(e.target.value)}
         />
 
         <div className="flex justify-end gap-2">
-          <button className="px-4 py-2 rounded-lg bg-red-600 text-white text-sm">
+          <button
+            disabled={loading || !status || isTerminal}
+            className={cls(
+              "px-4 py-2 rounded-lg bg-red-600 text-white text-sm",
+              (loading || !status || isTerminal) && "opacity-60 cursor-not-allowed"
+            )}
+            onClick={() => respond("reject")}
+          >
             Reject
           </button>
-          <button className="px-4 py-2 rounded-lg bg-emerald-700 text-white text-sm">
+          <button
+            disabled={loading || !status || isTerminal}
+            className={cls(
+              "px-4 py-2 rounded-lg bg-emerald-700 text-white text-sm",
+              (loading || !status || isTerminal) && "opacity-60 cursor-not-allowed"
+            )}
+            onClick={() => respond("approve")}
+          >
             Approve
           </button>
           <button
-            className="px-4 py-2 rounded-lg bg-blue-600 text-white text-sm"
-            onClick={onClose}
+            disabled={loading || !status || isTerminal}
+            className={cls(
+              "px-4 py-2 rounded-lg bg-blue-600 text-white text-sm",
+              (loading || !status || isTerminal) && "opacity-60 cursor-not-allowed"
+            )}
+            onClick={() => respond("reply")}
           >
             Reply
           </button>
@@ -1258,6 +1423,7 @@ const RequestChangeModal = ({
       </div>
     </div>
   );
+};
 
 const NewSectionModal = ({
   open,
@@ -1399,6 +1565,21 @@ const NewSectionModal = ({
 export default function OM_LoadAssignment() {
   const [copiedRowId, setCopiedRowId] = useState<string | null>(null);
 
+  // Lightweight in-app toast (used for "Notified faculty…" success messages)
+  const [uiToast, setUiToast] = useState<{ open: boolean; message: string; kind: "success" | "error" }>({
+    open: false,
+    message: "",
+    kind: "success",
+  });
+  const toastTimerRef = useRef<number | null>(null);
+  const showToast = (message: string, kind: "success" | "error" = "success") => {
+    if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
+    setUiToast({ open: true, message, kind });
+    toastTimerRef.current = window.setTimeout(() => {
+      setUiToast((prev) => ({ ...prev, open: false }));
+    }, 3500);
+  };
+
   // Import SHS file
   const shsFileInputRef = useRef<HTMLInputElement>(null);
   const [shsFile, setShsFile] = useState<File | null>(null);
@@ -1467,20 +1648,17 @@ export default function OM_LoadAssignment() {
     setTimeout(() => setCopiedRowId(null), 1200);
   };
 
-  // Session (DB-driven, no hardcodes)
-  const session: {
-    userId?: string;
-    fullName?: string;
-    roles?: string[];
-  } | null = (() => {
+  // Session (same pattern as APO: localStorage["animo.user"])
+  const session = useMemo(() => {
     try {
-      return JSON.parse(localStorage.getItem("animo.user") || "null");
+      const raw = localStorage.getItem("animo.user");
+      return raw ? (JSON.parse(raw) as any) : null;
     } catch {
       return null;
     }
-  })();
+  }, []);
 
-  const userId = session?.userId || "";
+  const userId = (session as any)?.userId || (session as any)?.user_id || (session as any)?.id || "";
 
   const [isAssigning, setIsAssigning] = useState(false);
 
@@ -1527,51 +1705,79 @@ export default function OM_LoadAssignment() {
     }
   }
 
-  const normRoles = (session?.roles || []).map((r) =>
-    String(r).toLowerCase().replace(/\s+/g, "_")
-  );
 
-  // TopBar profile from DB (fallback to session)
-  const [profileName, setProfileName] = useState<string>(
-    session?.fullName || ""
+  const prettifyRole = (raw: string) => {
+    const s = String(raw || "").trim();
+    if (!s) return "";
+    // normalize underscores/spaces then Title Case
+    return s
+      .replace(/[_\-]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .split(" ")
+      .map((w) => (w ? w[0].toUpperCase() + w.slice(1).toLowerCase() : w))
+      .join(" ");
+  };
+
+  const computedRoleTitleFromRoles = (roles?: string[]) => {
+    const norm = (roles || [])
+      .map((r) => String(r || "").trim().toLowerCase())
+      .filter(Boolean);
+
+    if (norm.includes("office manager")) return "Office Manager";
+    if (norm.includes("gs coordinator")) return "GS Coordinator";
+
+    const first = norm[0];
+    return first ? prettifyRole(first) : "User";
+  };
+
+  // TopBar profile (session first, optionally enriched by OM profile API)
+  const [profileName, setProfileName] = useState<string>(session?.fullName || "");
+  const [profileSubtitle, setProfileSubtitle] = useState<string>(
+    computedRoleTitleFromRoles(session?.roles)
   );
-  const [profileSubtitle, setProfileSubtitle] = useState<string>("");
 
   // Term label from backend (no hardcoding)
   const [term, setTerm] = useState<string>("");
+  const [termId, setTermId] = useState<string>("");
 
   useEffect(() => {
     (async () => {
       if (!userId) return;
+
+      const baseName = session?.fullName || "";
+      const baseRole = computedRoleTitleFromRoles(session?.roles);
+
       try {
         const p = await getOmLoadAssignmentProfile(userId);
 
-        // 1. Determine Base Title from DB or Fallback
-        let roleTitle = p?.position_title || "";
+        const displayName = (p?.full_name || baseName || "").trim();
+        const roleTitle = (p?.position_title || baseRole || "").trim();
+        const dept = String(
+  p?.dept_name ??
+  (session as any)?.dept_name ??
+  (session as any)?.dept_label ??
+  (session as any)?.deptName ??
+  (session as any)?.department?.dept_name ??
+  ""
+).trim();
 
-        // Fallback: If no title in DB, but has OM role in session
-        if (
-          !roleTitle &&
-          (normRoles.includes("office_manager") ||
-            normRoles.includes("role0006"))
-        ) {
-          roleTitle = "Office Manager";
+
+        let subtitle = roleTitle;
+        if (dept) {
+          const subLower = subtitle.toLowerCase();
+          const deptLower = dept.toLowerCase();
+          // append dept exactly once
+          if (!subtitle) subtitle = dept;
+          else if (!subLower.includes(deptLower)) subtitle = `${subtitle} | ${dept}`;
         }
 
-        // 2. Append Department ONCE if available
-        if (roleTitle && p?.dept_name) {
-          roleTitle = `${roleTitle} | ${p.dept_name}`;
-        }
-
-        setProfileSubtitle(roleTitle);
-        setProfileName(p?.full_name || session?.fullName || "");
-
-        setProfileSubtitle(roleTitle);
-
-        // 3. Name Fallback
-        setProfileName(p?.full_name || session?.fullName || "");
+        setProfileName(displayName);
+        setProfileSubtitle(subtitle);
       } catch {
-        /* ignore; non-blocking for UI */
+        // If OM profile API fails, still show session-based values
+        setProfileName(baseName);
+        setProfileSubtitle(baseRole);
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1608,6 +1814,7 @@ export default function OM_LoadAssignment() {
   const [showApprove, setShowApprove] = useState(false);
   const [approved, setApproved] = useState(false);
   const [showSend, setShowSend] = useState(false);
+  const [sendRowsPreview, setSendRowsPreview] = useState<Row[]>([]);
   const [reqChange, setReqChange] = useState<{ open: boolean; from?: string }>({
     open: false,
   });
@@ -1676,6 +1883,14 @@ export default function OM_LoadAssignment() {
   };
 
   const [facultyList, setFacultyList] = useState<Faculty[]>([]);
+  // Faculty Deloading (per-faculty)
+  const [deloadFacultyQuery, setDeloadFacultyQuery] = useState<string>("");
+  const [deloadSelectedFaculty, setDeloadSelectedFaculty] = useState<Faculty | null>(null);
+  const [deloadRows, setDeloadRows] = useState<DeloadingRow[]>([]);
+  const [deloadLoading, setDeloadLoading] = useState(false);
+  const [deloadError, setDeloadError] = useState<string>("");
+  const [facultyWithDeloadings, setFacultyWithDeloadings] = useState<Faculty[]>([]);
+  const [deloadDropdownOpen, setDeloadDropdownOpen] = useState(false);
 
   // Load all faculty once on mount
   useEffect(() => {
@@ -1742,6 +1957,42 @@ export default function OM_LoadAssignment() {
   const selectedRows = rows.filter((r) => r.selected);
   const anySelected = selectedRows.length > 0;
 
+  const buildSendRowsForPreview = (): Row[] => {
+    if (!rows.length) return [];
+    if (!selectedRows.length) return [];
+
+    const all = rows.every((r) => r.selected);
+
+    const key = (r: Row) => String((r.faculty_id || r.faculty || "")).trim();
+    const selectedKeys = new Set(selectedRows.map(key).filter(Boolean));
+
+    if (all) {
+      // Send all rows that are assigned to a faculty
+      return rows.filter((r) => !!key(r));
+    }
+
+    // If any row is selected for a faculty, send ALL rows for that faculty (not per subject)
+    return rows.filter((r) => selectedKeys.has(key(r)));
+  };
+
+  const handleSendToFaculty = async (rowsToSend: Row[]) => {
+    if (!userId) throw new Error("Missing userId");
+    if (!rowsToSend?.length) throw new Error("No rows to send");
+
+    const term_id = termId || undefined;
+
+    await sendOmLoadAssignmentsToFaculty(userId, {
+      term_id,
+      rows: rowsToSend,
+    });
+
+    // After sending: clear selections and refresh
+    setShowSend(false);
+    setSendRowsPreview([]);
+    await loadFromServer();
+  };
+
+
   // Derived: scoped history availability (re-rendered via historyVersion)
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const canUndo =
@@ -1778,6 +2029,7 @@ export default function OM_LoadAssignment() {
 
     setRows(Array.isArray(res?.rows) ? res.rows : []);
     setTerm(typeof res?.term === "string" ? res.term : "");
+    setTermId(typeof (res as any)?.term_id === "string" ? (res as any).term_id : "");
     setMode("run");
     setApproved(false);
     setHasLocalEdits(false);
@@ -1942,6 +2194,43 @@ export default function OM_LoadAssignment() {
       ),
     [rowFlags]
   );
+
+  const deloadMatches = useMemo(() => {
+  const q = deloadFacultyQuery.trim().toLowerCase();
+  if (!q) return [] as Faculty[];
+  return (facultyList ?? [])
+    .filter((f) => (f.faculty_name_display || "").toLowerCase().includes(q))
+    .slice(0, 12);
+}, [deloadFacultyQuery, facultyList]);
+
+const loadFacultyDeloadings = async (fid: string) => {
+  if (!fid) return;
+  try {
+    setDeloadLoading(true);
+    setDeloadError("");
+    const res = await getOmFacultyDeloadings({ faculty_id: fid, term_id: termId || undefined });
+    setDeloadRows(Array.isArray(res?.rows) ? res.rows : []);
+  } catch (e: any) {
+    setDeloadError(e?.message || "Failed to load deloadings.");
+    setDeloadRows([]);
+  } finally {
+    setDeloadLoading(false);
+  }
+};
+
+useEffect(() => {
+  if (!termId) return;
+  (async () => {
+    try {
+      const r = await getOmFacultyWithDeloadings(termId);
+      setFacultyWithDeloadings(Array.isArray(r?.faculty) ? r.faculty : []);
+    } catch (e) {
+      console.error("Failed to load facultyWithDeloadings", e);
+      setFacultyWithDeloadings([]);
+    }
+  })();
+}, [termId]);
+
 
   type FacultySummaryRow = {
     facultyId: string;
@@ -2778,7 +3067,7 @@ export default function OM_LoadAssignment() {
                     <tbody>
                       {filtered.map((r, idx) => {
                         const e = getEditFlags(r);
-                        const unread = r.status === "Pending";
+                        const unread = !!(r as any).pending_rfc;
                         return (
                           <tr
                             key={r.id}
@@ -3041,14 +3330,19 @@ export default function OM_LoadAssignment() {
                               {isRunning && (
                                 <div className="relative flex items-center justify-center gap-3 text-emerald-700">
                                   <button
-                                    className="relative hover:brightness-110"
+                                    disabled={!!r.finalized}
+                                    className={cls(
+                                      "relative hover:brightness-110",
+                                      !!r.finalized && "opacity-40 cursor-not-allowed hover:brightness-100"
+                                    )}
                                     title="Message"
-                                    onClick={() =>
+                                    onClick={() => {
+                                      if (r.finalized) return;
                                       setReqChange({
                                         open: true,
                                         from: r.faculty || "Faculty",
-                                      })
-                                    }
+                                      });
+                                    }}
                                   >
                                     <MessageSquareText className="h-5 w-5" />
                                     {unread && (
@@ -3057,8 +3351,35 @@ export default function OM_LoadAssignment() {
                                   </button>
 
                                   <button
-                                    className="flex h-7 w-7 items-center justify-center rounded-full border-2 border-emerald-700 text-emerald-700 hover:bg-emerald-50"
-                                    title="Approve row"
+                                    disabled={!!r.finalized}
+                                    className={cls(
+                                      "flex h-7 w-7 items-center justify-center rounded-full border-2 border-emerald-700 text-emerald-700 hover:bg-emerald-50",
+                                      !!r.finalized && "opacity-40 cursor-not-allowed hover:bg-transparent"
+                                    )}
+                                    title="Approve"
+                                  onClick={async () => {
+                                      if (!userId) return;
+                                      if (!r.faculty_id) {
+                                        alert('This row has no assigned faculty yet.');
+                                        return;
+                                      }
+                                      try {
+                                        await finalizeOmLoadAssignmentCourse(userId, {
+                                          term_id: termId || undefined,
+                                          faculty_id: r.faculty_id,
+                                          course_code: r.course,
+                                          section: r.section,
+                                        });
+                                        // lock actions for this row immediately (backend persists too)
+                                        setCell(r.id, "finalized", true as any);
+                                        showToast(
+                                          `Notified ${r.faculty || "faculty"} that ${r.course} – ${r.section} was added to their final schedule.`,
+                                          "success"
+                                        );
+                                      } catch (e: any) {
+                                        showToast(e?.message || "Failed to notify faculty.", "error");
+                                      }
+                                    }}
                                   >
                                     <Check
                                       className="h-4 w-4"
@@ -3069,11 +3390,7 @@ export default function OM_LoadAssignment() {
                                   <button
                                     type="button"
                                     onClick={() => handleCopyRow(r)}
-                                    title={
-                                      copiedRowId === r.id
-                                        ? "Copied!"
-                                        : "Copy row"
-                                    }
+                                    title={copiedRowId === r.id ? "Copied!" : "Copy"}
                                     className="flex h-7 w-7 items-center justify-center rounded-full border-2 border-gray-300 text-gray-600 hover:bg-gray-50"
                                   >
                                     {copiedRowId === r.id ? (
@@ -3137,7 +3454,15 @@ export default function OM_LoadAssignment() {
                     {/* To Faculty button (bottom-right, aligned with Add new line) */}
                     <button
                       disabled={!anySelected || !isRunning}
-                      onClick={() => setShowSend(true)}
+                      onClick={() => {
+                        const preview = buildSendRowsForPreview();
+                        if (!preview.length) {
+                          alert("Select at least one row with an assigned faculty.");
+                          return;
+                        }
+                        setSendRowsPreview(preview);
+                        setShowSend(true);
+                      }}
                       className={cls(
                         "inline-flex items-center gap-2 rounded-lg px-3 py-1.5 text-sm font-medium shadow-sm",
                         anySelected && isRunning
@@ -3172,6 +3497,189 @@ export default function OM_LoadAssignment() {
                   </div> */}
                 </div>
               </div>
+              {/* ---- Faculty Deloading (per-faculty) ---- */}
+              <div className="mt-6 rounded-xl border border-gray-200 bg-white shadow-sm">
+                <div className="flex flex-wrap items-start justify-between gap-4 px-4 pt-4 pb-2">
+                  <div>
+                    <h2 className="text-lg font-semibold">Faculty Deloading</h2>
+                    <p className="text-xs text-gray-500">
+                      View deloading records per faculty for{" "}
+                      <span className="font-semibold">{term || "this term"}</span>.
+                    </p>
+                  </div>
+
+                  <div className="w-full sm:w-[420px]">
+                    <label className="block text-xs font-medium text-gray-700 mb-1">
+                      Search faculty
+                    </label>
+                    <div className="relative">
+                      <div className="flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-3 py-2 shadow-sm">
+                        <SearchIcon className="h-4 w-4 text-gray-500" />
+                        <input
+                          value={deloadFacultyQuery}
+                          onChange={(e) => {
+                            setDeloadFacultyQuery(e.target.value);
+                            setDeloadDropdownOpen(true);
+                          }}
+                          onFocus={() => setDeloadDropdownOpen(true)}
+                          onBlur={() => window.setTimeout(() => setDeloadDropdownOpen(false), 120)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") {
+                              const best = deloadMatches[0];
+                              if (best) {
+                                setDeloadSelectedFaculty(best);
+                                setDeloadFacultyQuery(best.faculty_name_display);
+                                setDeloadDropdownOpen(false);
+                                loadFacultyDeloadings(best.faculty_id);
+                              }
+                            }
+                            if (e.key === "Escape") setDeloadDropdownOpen(false);
+                          }}
+                          placeholder="Type a name (e.g., Dela Cruz)"
+                          className="w-full bg-transparent text-sm outline-none placeholder:text-gray-400"
+                        />
+                        {deloadFacultyQuery.trim() && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setDeloadFacultyQuery("");
+                              setDeloadSelectedFaculty(null);
+                              setDeloadRows([]);
+                              setDeloadError("");
+                            }}
+                            className="rounded-md p-1 text-gray-500 hover:bg-gray-100"
+                            title="Clear"
+                          >
+                            <X className="h-4 w-4" />
+                          </button>
+                        )}
+                      </div>
+
+                      {deloadDropdownOpen && deloadFacultyQuery.trim() && deloadMatches.length > 0 && (
+                        <div className="absolute z-20 mt-1 w-full overflow-hidden rounded-lg border border-gray-200 bg-white shadow-lg">
+                          <ul className="max-h-60 overflow-auto py-1">
+                            {deloadMatches.map((f) => (
+                              <li key={f.faculty_id}>
+                                <button
+                                  type="button"
+                                  className="w-full px-3 py-2 text-left text-sm hover:bg-gray-50"
+                                  onMouseDown={(e) => e.preventDefault()}
+                                  onClick={() => {
+                                    setDeloadSelectedFaculty(f);
+                                    setDeloadFacultyQuery(f.faculty_name_display);
+                                    setDeloadDropdownOpen(false);
+                                    loadFacultyDeloadings(f.faculty_id);
+                                  }}
+                                >
+                                  {f.faculty_name_display}
+                                </button>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Faculty with current deloadings (quick awareness) */}
+                <div className="px-4 pb-3">
+                  <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2">
+                    <div className="text-xs font-medium text-gray-700">
+                      Faculty with current deloadings
+                      <span className="ml-2 text-[11px] font-normal text-gray-500">
+                        ({facultyWithDeloadings.length})
+                      </span>
+                    </div>
+                    {facultyWithDeloadings.length === 0 ? (
+                      <div className="mt-1 text-xs text-gray-500">None found for this term.</div>
+                    ) : (
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        {facultyWithDeloadings.map((f) => (
+                          <button
+                            key={f.faculty_id}
+                            type="button"
+                            className={cls(
+                              "rounded-full border px-2.5 py-1 text-xs shadow-sm",
+                              deloadSelectedFaculty?.faculty_id === f.faculty_id
+                                ? "border-emerald-300 bg-emerald-50 text-emerald-900"
+                                : "border-gray-200 bg-white text-gray-700 hover:bg-gray-100"
+                            )}
+                            onClick={() => {
+                              setDeloadSelectedFaculty(f);
+                              setDeloadFacultyQuery(f.faculty_name_display);
+                              loadFacultyDeloadings(f.faculty_id);
+                            }}
+                          >
+                            {f.faculty_name_display}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {deloadError && (
+                  <div className="mx-4 mb-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                    {deloadError}
+                  </div>
+                )}
+
+                <div className="border-t px-4 pb-4 pt-4 overflow-x-auto w-full">
+                  {!deloadSelectedFaculty ? (
+                    <div className="py-6 text-center text-sm text-gray-500">
+                      Select a faculty to view their deloadings.
+                    </div>
+                  ) : deloadLoading ? (
+                    <div className="py-6 text-center text-sm text-gray-500">Loading…</div>
+                  ) : deloadRows.length === 0 ? (
+                    <div className="py-6 text-center text-sm text-gray-500">
+                      No deloadings recorded for{" "}
+                      <span className="font-semibold">{deloadSelectedFaculty.faculty_name_display}</span>.
+                    </div>
+                  ) : (
+                    <table className="w-full text-sm table-fixed">
+                      <colgroup>
+                        <col style={{ width: "28%" }} />
+                        <col style={{ width: "12%" }} />
+                        <col style={{ width: "40%" }} />
+                        <col style={{ width: "20%" }} />
+                      </colgroup>
+                      <thead className="bg-gray-50 border-y text-gray-700">
+                        <tr>
+                          {["Deloading Type", "Units", "Notes", "Last Updated"].map((h) => (
+                            <th
+                              key={h}
+                              className="px-3 py-2 text-center text-xs font-semibold uppercase tracking-wide"
+                            >
+                              {h}
+                            </th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {deloadRows.map((r, i) => (
+                          <tr
+                            key={`${r.deloading_type || "row"}-${i}`}
+                            className={cls(
+                              i % 2 === 0 ? "bg-white" : "bg-gray-50",
+                              "text-gray-800 hover:bg-amber-50/40"
+                            )}
+                          >
+                            <td className="px-3 py-2 text-center">{r.deloading_type || "—"}</td>
+                            <td className="px-3 py-2 text-center">{r.units_deloaded ?? "—"}</td>
+                            <td className="px-3 py-2 text-center">{r.notes || "—"}</td>
+                            <td className="px-3 py-2 text-center">
+                              {r.updated_at ? new Date(r.updated_at).toLocaleString() : "—"}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+                </div>
+              </div>
+
               {/* ---- Summary section under Load Recommendations ---- */}
               {rows.length > 0 && (
                 <div className="mt-6 rounded-xl border border-gray-200 bg-white shadow-sm">
@@ -3490,31 +3998,46 @@ export default function OM_LoadAssignment() {
         open={showApprove}
         onClose={() => setShowApprove(false)}
         onApprove={() => {
-          (async () => {
-            try {
-              if (userId) {
-                await submitOmLoadAssignment(userId, { rows }, "approve"); // <-- key change
-              }
-              // pull fresh data so you see persisted faculty + any created schedules
-              await loadFromServer();
-              setApproved(true);
-            } finally {
-              setShowApprove(false);
+        (async () => {
+          try {
+            if (userId) {
+              const res = await submitOmLoadAssignment(userId, { rows }, "approve");
+
+              // Create the chair notification (forward vs update is decided by backend;
+              // but if approve returns kind/reco_id, we pass it through for correctness)
+              await notifyChairLoadRecommendation(userId, {
+                kind: (res as any)?.kind,
+                reco_id: (res as any)?.reco_id,
+              });
             }
-          })();
-        }}
+
+            // pull fresh data so you see persisted faculty + any created schedules
+            await loadFromServer();
+            setApproved(true);
+          } finally {
+            setShowApprove(false);
+          }
+        })();
+      }}
+
       />
 
       <SendModal
         open={showSend}
         onClose={() => setShowSend(false)}
-        rows={selectedRows}
+        rows={sendRowsPreview}
+        termLabel={term}
+        onSend={handleSendToFaculty}
       />
 
       <RequestChangeModal
         open={reqChange.open}
         from={reqChange.from}
         onClose={() => setReqChange({ open: false })}
+        userId={userId || ""}
+        termId={termId || ""}
+        rows={rows}
+        onAfterUpdate={loadFromServer}
       />
 
       <NewSectionModal
@@ -3558,6 +4081,33 @@ export default function OM_LoadAssignment() {
           setShowNewSectionModal(false);
         }}
       />
+
+      {/* Global toast */}
+      {uiToast.open && (
+        <div className="fixed bottom-6 right-6 z-[250]">
+          <div
+            className={cls(
+              "max-w-md rounded-xl border p-4 shadow-lg",
+              uiToast.kind === "success"
+                ? "border-emerald-200 bg-emerald-50 text-emerald-900"
+                : "border-red-200 bg-red-50 text-red-900"
+            )}
+          >
+            <div className="flex items-start gap-3">
+              <div className="text-sm font-medium leading-snug">{uiToast.message}</div>
+              <button
+                type="button"
+                className="ml-auto rounded-md p-1 hover:bg-black/5"
+                aria-label="Close"
+                onClick={() => setUiToast((prev) => ({ ...prev, open: false }))}
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
     </AppShell>
   );
 }
