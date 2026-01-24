@@ -5,66 +5,12 @@ import { useEffect } from "react";
 
 
 // Pages
-import Login from "./pages/Login/Login";
-import AuthCallback from "./pages/Login/AuthCallback";
+
 import GmailConnect from "./pages/Login/GmailConnect";
 import BlankPage from "./pages/Login/BlankPage";
 import CalendarManager from "./pages/Login/CalendarManager";
 import CalendarInvite from "./pages/Login/CalendarInvite";
 
-// ---------------- OM ----------------
-import OM_LoadAssignment from "./pages/OM/OM_LoadAssignment";
-import OM_ReportsAnalytics from "./pages/OM/OM_ReportsAnalytics";
-import OM_FacultyManagement from "./pages/OM/OM_FacultyManagement";
-import OM_CourseManagement from "./pages/OM/OM_CourseManagement";
-import OM_FacultyForm from "./pages/OM/OM_FacultyForm";
-import OM_StudentPetition from "./pages/OM/OM_StudentPetition";
-import OM_ClassRetention from "./pages/OM/OM_ClassRetention";
-import OM_Inbox from "./pages/OM/OM_Inbox";
-import OM_desc from "./pages/OM/OM_desc";
-import OM_desc2 from "./pages/OM/OM_desc2";
-import OM_desc3 from "./pages/OM/OM_desc3";
-import OM_pred1 from "./pages/OM/OM_pred1";
-import OM_pred2 from "./pages/OM/OM_pred2";
-import OM_LoadReco from "./pages/OM/OM_LoadReco";
-
-// ----- Reports & Analytics sub-pages -----
-import OM_RP_FacultyTeachingHistory from "@/pages/OM/OM_REPORTS_ANALYTICS/OM_RP_FacultyTeachingHistory";
-import OM_RP_CourseHistory from "@/pages/OM/OM_REPORTS_ANALYTICS/OM_RP_CourseProfile";
-import OM_RP_DeloadingUtilization from "@/pages/OM/OM_REPORTS_ANALYTICS/OM_RP_DeloadingUtilization";
-import OM_RP_AvailabilityForecasting from "@/pages/OM/OM_REPORTS_ANALYTICS/OM_RP_AvailabilityForecasting";
-import OM_RP_LoadRisk from "@/pages/OM/OM_REPORTS_ANALYTICS/OM_RP_LoadRisk";
-
-// ---------------- Student ----------------
-import STUDENT_Petition from "./pages/STUDENT/STUDENT_Petition";
-import STUDENT_SpecialClass from "./pages/STUDENT/STUDENT_SpecialClass";
-import STUDENT_CourseOfferings from "./pages/STUDENT/STUDENT_CourseOfferings";
-
-// ---------------- Faculty ----------------
-import FACULTY_Overview from "./pages/FACULTY/FACULTY_Overview";
-import FACULTY_Inbox from "./pages/FACULTY/FACULTY_Inbox";
-import FACULTY_History from "./pages/FACULTY/FACULTY_History";
-import FACULTY_Preferences from "./pages/FACULTY/FACULTY_Preferences";
-import FACULTY_Deloadings from "./pages/FACULTY/FACULTY_Deloadings";
-
-// ---------------- Admin ----------------
-import ADMIN from "./pages/ADMIN/ADMIN";
-import ADMIN_Inbox from "./pages/ADMIN/ADMIN_Inbox";
-
-// ---------------- APO ----------------
-import APO_PreEnlistment from "./pages/APO/APO_PreEnlistment";
-import APO_CourseOfferings from "./pages/APO/APO_CourseOfferings";
-import APO_RoomAllocation from "./pages/APO/APO_RoomAllocation";
-
-// ---------------- CHAIR ----------------
-import CHAIR_Plantilla from "./pages/CHAIR/CHAIR_Plantilla";
-import CHAIR_FacultyManagement from "./pages/CHAIR/CHAIR_FacultyManagement";
-import CHAIR_CourseManagement from "./pages/CHAIR/CHAIR_CourseManagement";
-import CHAIR_FacultyService from "./pages/CHAIR/CHAIR_FacultyService";
-import CHAIR_StudentPetition from "./pages/CHAIR/CHAIR_StudentPetition";
-import CHAIR_ClassRetention from "./pages/CHAIR/CHAIR_ClassRetention";
-import CHAIR_Inbox from "./pages/CHAIR/CHAIR_Inbox";
-import APO_Inbox from "./pages/APO/APO_Inbox";
 
 // Pages
 import Login from "./pages/Login/Login";
@@ -114,6 +60,7 @@ import ADMIN_Inbox from "./pages/ADMIN/ADMIN_Inbox";
 import APO_PreEnlistment from "./pages/APO/APO_PreEnlistment";
 import APO_CourseOfferings from "./pages/APO/APO_CourseOfferings";
 import APO_RoomAllocation from "./pages/APO/APO_RoomAllocation";
+import APO_Inbox from "./pages/APO/APO_Inbox";
 
 // ---------------- CHAIR ----------------
 import CHAIR_Plantilla from "./pages/CHAIR/CHAIR_Plantilla";
@@ -217,6 +164,7 @@ export default function App() {
             <Route path="faculty-form" element={<OM_FacultyForm />} />
             <Route path="student-petition" element={<OM_StudentPetition />} />
             <Route path="class-retention" element={<OM_ClassRetention />} />
+            <Route path="special-class" element={<OM_SpecialClass />} />
 
             {/* Reports & Analytics landing */}
             <Route path="reports-analytics" element={<OM_ReportsAnalytics />} />

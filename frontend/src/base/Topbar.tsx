@@ -2,10 +2,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 
-
-// helpers for notifications
-type Notification = { id: number; title: string; details: string; time: Date; seen?: boolean };
-
+import { useMemo } from "react";
 import {
   Bell,
   PanelLeft,
@@ -87,7 +84,7 @@ export default function Topbar({
   const menuBtnRef = useRef<HTMLButtonElement>(null);
   const [menuPos, setMenuPos] = useState<{ top: number; right: number } | null>(null);
   const navigate = useNavigate();
-  const location = useLocation();
+  //const location = useLocation();
 
   const computeMenuPos = () => {
     const btn = menuBtnRef.current;

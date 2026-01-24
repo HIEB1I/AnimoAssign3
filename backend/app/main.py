@@ -106,9 +106,6 @@ app.add_middleware(
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
-
-def _service_result(name: str, ok: bool, detail: str, latency_ms: Optional[float]) -> Dict[str, Any]:
-
 def _service_result(name: str, ok: bool, detail: str, latency_ms: Optional[float]) -> Dict[str, Any]:
     out: Dict[str, Any] = {"service": name, "ok": ok, "detail": detail}
     if latency_ms is not None:
