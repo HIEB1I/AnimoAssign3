@@ -46,11 +46,25 @@ export default function TopBar({
 
   const [menuOpen, setMenuOpen] = useState(false);
   const [notifOpen, setNotifOpen] = useState(false);
+  const toDateSafe = (v: any): Date | null => {
+    const d = v instanceof Date ? v : new Date(v);
+    return Number.isFinite(d.getTime()) ? d : null;
+  };
+
+  const pickNotifTime = (n: any): Date | null => {
+    return (
+      toDateSafe(n?.time) ||
+      toDateSafe(n?.created_at) ||
+      toDateSafe(n?.createdAt) ||
+      toDateSafe(n?.created)
+    );
+  };
+
   const [notifications, setNotifications] = useState(
     incomingNotifs.length
       ? incomingNotifs.map((n) => ({
           ...n,
-          time: n.time instanceof Date ? n.time : new Date(n.time),
+          time: pickNotifTime(n) || new Date(),
         }))
       : [
           {
@@ -62,6 +76,19 @@ export default function TopBar({
           },
         ]
   );
+
+  // Keep state in sync when new notifications come in
+  useEffect(() => {
+    if (!incomingNotifs) return;
+    setNotifications(
+      incomingNotifs.length
+        ? incomingNotifs.map((n) => ({
+            ...n,
+            time: pickNotifTime(n) || new Date(),
+          }))
+        : []
+    );
+  }, [incomingNotifs]);
 
   const notifRef = useRef<HTMLDivElement | null>(null);
   const wrapperRef = useRef<HTMLDivElement | null>(null);
@@ -102,7 +129,9 @@ export default function TopBar({
 
   // “x minutes ago” helper
   const timeAgo = (d: Date) => {
+    if (!d || !Number.isFinite(d.getTime())) return "";
     const s = Math.floor((Date.now() - d.getTime()) / 1000);
+    if (!Number.isFinite(s) || s < 0) return "";
     if (s < 60) return `${s}s ago`;
     const m = Math.floor(s / 60);
     if (m < 60) return `${m} minute${m > 1 ? "s" : ""} ago`;
@@ -115,7 +144,11 @@ export default function TopBar({
   // Notification logic
   const hasUnseen = notifications.some((n) => !n.seen);
   const sortedNotifs = [...notifications]
-    .sort((a, b) => (a.time as Date).getTime() - (b.time as Date).getTime())
+    .sort((a, b) => {
+      const ta = (a.time as Date)?.getTime?.() ?? 0;
+      const tb = (b.time as Date)?.getTime?.() ?? 0;
+      return ta - tb;
+    })
     .reverse();
 
   const toggleNotif = () => {
@@ -150,7 +183,9 @@ export default function TopBar({
                 <UserCircle className="h-6 w-6" />
               </span>
               <span className="leading-tight text-left">
-                <div className="text-[17px] font-semibold">{fullName || "(No name on file)"}</div>
+                <div className="text-[17px] font-semibold">
+                  {fullName || "(No name on file)"}
+                </div>
 
                 <div className="text-[12px] opacity-90">
                   {role}
@@ -210,14 +245,23 @@ export default function TopBar({
                   <div className="max-h-96 overflow-y-auto">
                     {sortedNotifs.length ? (
                       sortedNotifs.map((n) => (
-                        <div key={n.id} className="border-b border-neutral-100 px-4 py-3 last:border-0">
-                          <div className="font-semibold text-slate-900">{n.title}</div>
+                        <div
+                          key={n.id}
+                          className="border-b border-neutral-100 px-4 py-3 last:border-0"
+                        >
+                          <div className="font-semibold text-slate-900">
+                            {n.title}
+                          </div>
                           <div className="text-sm text-gray-600">{n.details}</div>
-                          <div className="mt-1 text-xs text-gray-400">{timeAgo(n.time as Date)}</div>
+                          <div className="mt-1 text-xs text-gray-400">
+                            {timeAgo(n.time as Date)}
+                          </div>
                         </div>
                       ))
                     ) : (
-                      <div className="px-4 py-6 text-center text-sm text-gray-500">No notifications</div>
+                      <div className="px-4 py-6 text-center text-sm text-gray-500">
+                        No notifications
+                      </div>
                     )}
                   </div>
                 </div>

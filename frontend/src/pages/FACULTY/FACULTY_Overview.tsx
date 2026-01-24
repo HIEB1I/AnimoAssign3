@@ -16,6 +16,12 @@ import {
   setActiveRole,
   userIsChair,
 } from "../../api";
+
+import {
+  getFacultyLoadAssignmentRfc,
+  sendFacultyLoadAssignmentRfcMessage,
+  acceptFacultyLoadAssignment,
+} from "../../api.ts";
 import { useNavigate } from "react-router-dom";
 
 
@@ -146,7 +152,7 @@ export default function FAC_Overview() {
               <>
                 <StatCards summary={data.summary} />
                 <div className="my-6" />
-                <TeachingLoadEnhanced teachingLoad={data.teaching_load} term={data.term} userId={userId} />
+                <TeachingLoadEnhanced teachingLoad={data.teaching_load} term={data.term} />
               </>
             )}
             {tab === "History" && <HistoryMain />}
@@ -224,6 +230,36 @@ const DAY_ORDER: DayLong[] = [
   "Saturday",
   "TBA", // <-- NEW
 ];
+
+// Accept both long-day labels and short codes coming from DB/API.
+const DAY_ALIASES: Record<string, DayLong> = {
+  M: "Monday",
+  MON: "Monday",
+  T: "Tuesday",
+  TU: "Tuesday",
+  TUE: "Tuesday",
+  W: "Wednesday",
+  WED: "Wednesday",
+  TH: "Thursday",
+  THU: "Thursday",
+  H: "Thursday",
+  R: "Thursday",
+  F: "Friday",
+  FRI: "Friday",
+  S: "Saturday",
+  SAT: "Saturday",
+  TBA: "TBA",
+};
+
+function normalizeDay(raw?: string): DayLong | null {
+  const s = (raw || "").trim();
+  if (!s) return null;
+  const u = s.toUpperCase();
+  if (DAY_ALIASES[u]) return DAY_ALIASES[u];
+  // Already in long format? (case-insensitive)
+  const t = s.charAt(0).toUpperCase() + s.slice(1).toLowerCase();
+  return DAY_ORDER.includes(t as DayLong) ? (t as DayLong) : null;
+}
 
 // --- *** NEW: This type matches the backend (Python) output *** ---
 type TLItem = {
@@ -305,7 +341,8 @@ function placeItems(teachingLoad: TLItem[]): Placed[] {
   (teachingLoad || []).forEach((it) => {
     // Helper function to place a single schedule item
     const place = (day: string | undefined, time: string | undefined, room: string | undefined) => {
-      if (!day || day === "TBA" || !time || time === "TBA" || !DAY_ORDER.includes(day as DayLong)) {
+      const dayLong = normalizeDay(day);
+      if (!dayLong || dayLong === "TBA" || !time || time === "TBA") {
         return; // Don't place on calendar
       }
       const rawStart = String(time || "").split("–")[0].trim();
@@ -333,7 +370,7 @@ function placeItems(teachingLoad: TLItem[]): Placed[] {
       }
 
       out.push({
-        day: day as DayLong,
+        day: dayLong,
         row: rowIdx,
         data: {
           code: it.course_code,
@@ -393,7 +430,6 @@ const ClassBlock = ({ onClick, it }: { onClick?: () => void; it: TLItemForCalend
 type TeachingLoadEnhancedProps = {
   teachingLoad: TLItem[]; // <-- Use the new type
   term: any;
-  userId: string;
 };
 
 // --- *** MODIFIED: Headers for the new list view *** ---
@@ -409,12 +445,10 @@ const LIST_HEADERS = [
   "Syllabus",
 ];
 
-function TeachingLoadEnhanced({ teachingLoad, term, userId }: TeachingLoadEnhancedProps) {
+function TeachingLoadEnhanced({ teachingLoad, term }: TeachingLoadEnhancedProps) {
   const [view, setView] = useState<"Calendar" | "List">("Calendar");
   const [modal, setModal] = useState<{ day: DayLong; item: TLItemForCalendar } | null>(null);
   const [isAccepted, setIsAccepted] = useState(false);
-  const [accepting, setAccepting] = useState(false);
-  const [acceptError, setAcceptError] = useState<string | null>(null);
 
   // --- *** MODIFIED: Remove TLData, pass teachingLoad to placeItems *** ---
   const placed = useMemo(() => placeItems(teachingLoad || []), [teachingLoad]);
@@ -465,66 +499,17 @@ function TeachingLoadEnhanced({ teachingLoad, term, userId }: TeachingLoadEnhanc
           <button
             type="button"
             onClick={async () => {
-              if (isAccepted || accepting) return;
-              setAcceptError(null);
-              setAccepting(true);
-
               try {
-                if (!userId) throw new Error("Missing user id. Please log in again.");
-
-                const items = teachingLoad.flatMap((it) => {
-                const base = {
-                  code: it.course_code,     //  match backend
-                  title: it.course_title,   // match backend
-                  section: it.section,      //  match backend
-                  mode: it.mode,            //  match backend
-                };
-
-                const out: any[] = [];
-
-                const d1 = (it.day1 || "").trim();
-                const t1 = (it.time1 || "").trim();
-                if (d1 && t1 && d1.toUpperCase() !== "TBA" && t1.toUpperCase() !== "TBA") {
-                  out.push({
-                    ...base,
-                    day: d1,
-                    time: t1,
-                    room: (it.room1 || "").trim() || "Online",
-                  });
-                }
-
-                const d2 = (it.day2 || "").trim();
-                const t2 = (it.time2 || "").trim();
-                if (d2 && t2 && d2.toUpperCase() !== "TBA" && t2.toUpperCase() !== "TBA") {
-                  out.push({
-                    ...base,
-                    day: d2,
-                    time: t2,
-                    room: (it.room2 || "").trim() || "Online",
-                  });
-                }
-
-                return out;
-              });
-
-
-                const res = await fetch("/api/gcal/teaching-load/accept", {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({ userId, items, weeks: 10 }),
-                });
-
-                if (!res.ok) throw new Error(await res.text());
-
+                const raw = JSON.parse(localStorage.getItem("animo.user") || "{}");
+                const userId = raw.userId || raw.user_id || raw.id || "";
+                await acceptFacultyLoadAssignment(userId, { term_id: (term as any)?.term_id || (term as any)?._id || (term as any)?.id });
                 setIsAccepted(true);
-              } catch (e: any) {
-                setAcceptError(e?.message || "Failed to add classes to Google Calendar.");
-                setIsAccepted(false);
-              } finally {
-                setAccepting(false);
+                window.location.reload();
+              } catch (e) {
+                console.error(e);
               }
             }}
-            disabled={isAccepted || accepting}
+            disabled={isAccepted}
             className={cls(
               "inline-flex h-9 items-center justify-center rounded-lg px-4 text-sm font-medium shadow",
               "focus:outline-none focus:ring-2 focus:ring-emerald-600/40",
@@ -533,11 +518,8 @@ function TeachingLoadEnhanced({ teachingLoad, term, userId }: TeachingLoadEnhanc
                 : "bg-blue-700 text-white hover:bg-blue-800 active:translate-y-[0.5px]"
             )}
           >
-            {isAccepted ? "Accepted" : accepting ? "Adding…" : "Accept"}
+            {isAccepted ? "Accepted" : "Accept Schedule"}
           </button>
-          {acceptError && (
-            <div className="mt-2 text-xs text-red-600">{acceptError}</div>
-          )}
         </div>
       </div>
 
@@ -728,7 +710,7 @@ function TeachingLoadEnhanced({ teachingLoad, term, userId }: TeachingLoadEnhanc
         </div>
       )}
 
-      <ChangeRequestModal open={!!modal} onClose={() => setModal(null)} context={modal} />
+      <ChangeRequestModal open={!!modal} onClose={() => setModal(null)} context={modal} term={term} />
     </section>
   );
 }
@@ -843,13 +825,13 @@ function ChangeRequestModal({
   open,
   onClose,
   context,
+  term, 
 }: {
   open: boolean;
   onClose: () => void;
   context: { day: DayLong; item: TLItemForCalendar } | null; // <-- MODIFIED
+  term: any
 }) {
-  const DEFAULT_TO = "john_fredrick_tario@dlsu.edu.ph";
-
   const TIME_SLOTS = [
     "07:30 – 09:00",
     "09:15 – 10:45",
@@ -858,7 +840,7 @@ function ChangeRequestModal({
     "14:30 – 16:00",
     "16:15 – 17:45",
     "18:00 – 19:30",
-    "19:45 – 21:00",
+    "19:45 – 21:00"
   ];
 
   const [choices, setChoices] = useState<ChangeKind[]>([]);
@@ -867,27 +849,6 @@ function ChangeRequestModal({
   const [remarks, setRemarks] = useState("");
   const [otherText, setOtherText] = useState("");
 
-  const [sending, setSending] = useState(false);
-  const [sendError, setSendError] = useState<string | null>(null);
-  const [sentOk, setSentOk] = useState(false);
-
-  // Logged-in user info (from localStorage)
-  const raw = useMemo(() => {
-    try {
-      return JSON.parse(localStorage.getItem("animo.user") || "{}");
-    } catch {
-      return {};
-    }
-  }, []);
-
-  const userId = raw.userId || raw.user_id || raw.id;
-  const userEmail: string = (raw.email || raw.gmail || "").toString().trim().toLowerCase();
-  const userFullName: string = (raw.fullName || raw.full_name || raw.name || "").toString().trim();
-
-  const nameParts = userFullName.split(/\s+/).filter(Boolean);
-  const firstName = (raw.firstName || raw.first_name || nameParts[0] || "").toString().trim();
-  const lastName = (raw.lastName || raw.last_name || nameParts[nameParts.length - 1] || "").toString().trim();
-
   useEffect(() => {
     if (!open) {
       setChoices([]);
@@ -895,9 +856,6 @@ function ChangeRequestModal({
       setSelDay("");
       setRemarks("");
       setOtherText("");
-      setSending(false);
-      setSendError(null);
-      setSentOk(false);
     }
   }, [open]);
 
@@ -916,93 +874,15 @@ function ChangeRequestModal({
   const currentDay = context.day;
   const currentStartMin = toMinutes(extractStartHM(context.item.time));
 
-  const filteredTimeSlots = TIME_SLOTS.filter((band) => toMinutes(extractStartHM(band)) !== currentStartMin);
+  const filteredTimeSlots = TIME_SLOTS.filter(
+    (band) => toMinutes(extractStartHM(band)) !== currentStartMin
+  );
   const filteredDays = ALL_DAYS.filter((d) => d !== currentDay);
 
   const mustTime = choices.includes("Change class time");
   const mustDay = choices.includes("Change class day");
-  const mustOther = choices.includes("Other");
-
-  const disabled =
-    sending ||
-    choices.length === 0 ||
-    (mustTime && !selTime) ||
-    (mustDay && !selDay) ||
-    (mustOther && !otherText.trim());
-
-  const changeSummary = (() => {
-    const picked = ["Change class time", "Change class day", "Other"] as ChangeKind[];
-    const list = picked.filter((p) => choices.includes(p));
-    return list.length ? list.join(", ") : "";
-  })();
-
-  // Subject part only (backend adds [AnimoAssign])
-  const subjectPart = `${lastName} ${firstName}`.trim() + (changeSummary ? ` ${changeSummary}` : "");
-
-  const emailBody = (() => {
-    const lines: string[] = [];
-
-    lines.push("Faculty Change Request");
-    lines.push("-");
-    lines.push(`From: ${lastName}, ${firstName}${userEmail ? ` <${userEmail}>` : ""}`.trim());
-    lines.push(`Course: ${context.item.code} ${context.item.sec}`);
-    lines.push(`Current schedule: ${context.day} • ${context.item.time}`);
-    if (context.item.room) lines.push(`Room: ${context.item.room}`);
-
-    lines.push("");
-    lines.push("Requested change(s):");
-    if (mustTime) lines.push(`- New time: ${selTime}`);
-    if (mustDay) lines.push(`- New day: ${selDay}`);
-    if (mustOther) lines.push(`- Other: ${otherText.trim()}`);
-
-    if (remarks.trim()) {
-      lines.push("");
-      lines.push("Remarks:");
-      lines.push(remarks.trim());
-    }
-
-    lines.push("");
-    lines.push("(Sent via AnimoAssign)");
-
-    return lines.join("\n");
-  })();
-
-  const sendEmail = async () => {
-    setSendError(null);
-    setSentOk(false);
-
-    if (!userId) {
-      setSendError("Missing userId (animo.user) — please log in again.");
-      return;
-    }
-
-    setSending(true);
-    try {
-      const res = await fetch("/api/gmail/send/by-user", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          userId,
-          to: DEFAULT_TO,
-          subject: subjectPart,
-          body: emailBody,
-        }),
-      });
-
-      if (!res.ok) {
-        const txt = await res.text();
-        throw new Error(txt || `Failed to send email (${res.status}).`);
-      }
-
-      setSentOk(true);
-      // optional: close modal after a short success state
-      onClose();
-    } catch (e: any) {
-      setSendError(e?.message || "Failed to send email.");
-    } finally {
-      setSending(false);
-    }
-  };
+  const isFinalized = Boolean((context?.item as any)?.finalized);
+  const disabled = isFinalized || choices.length === 0 || (mustTime && !selTime) || (mustDay && !selDay);
 
   return (
     <div className="fixed inset-0 z-80 grid place-items-center bg-black/30 p-3">
@@ -1011,6 +891,7 @@ function ChangeRequestModal({
           <div>
             <h3 className="text-xl font-semibold text-emerald-700">Request for Change</h3>
             <p className="text-sm text-neutral-500">
+              {/* --- MODIFIED: Use calendar item data --- */}
               {context.item.code} {context.item.sec} • {context.day} • {context.item.time}
             </p>
           </div>
@@ -1020,21 +901,20 @@ function ChangeRequestModal({
         </div>
 
         <div className="space-y-3">
-          <div className="rounded-xl border border-neutral-200 bg-neutral-50 p-3">
-            <div className="text-xs font-semibold text-neutral-700">Email will be sent to</div>
-            <div className="text-sm text-neutral-900">{DEFAULT_TO}</div>
-            <div className="mt-2 text-xs font-semibold text-neutral-700">Subject</div>
-            <div className="text-sm text-neutral-900">
-              <span className="font-semibold">[AnimoAssign]</span> {subjectPart || "(no subject)"}
+
+          {isFinalized && (
+            <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+              This course has already been finalized by the Office Manager. RFC is disabled for this course.
             </div>
-          </div>
+          )}
+
+          <RfcThreadView term={term} />
 
           <label className="block text-sm font-medium text-neutral-700">Change</label>
           <div className="flex flex-wrap gap-2">
             {(["Change class time", "Change class day", "Other"] as ChangeKind[]).map((opt) => (
               <button
                 key={opt}
-                type="button"
                 onClick={() => toggle(opt)}
                 className={cls(
                   "rounded-lg border px-3 py-2 text-sm",
@@ -1067,9 +947,11 @@ function ChangeRequestModal({
             </div>
           )}
 
-          {mustOther && (
+          {choices.includes("Other") && (
             <div className="mt-2">
-              <label className="mb-1 block text-sm font-medium text-neutral-700">Specify change</label>
+              <label className="mb-1 block text-sm font-medium text-neutral-700">
+                Specify change <span className="text-red-500">*</span>
+              </label>
               <input
                 type="text"
                 className="w-full rounded-lg border border-neutral-300 p-2 text-sm"
@@ -1082,7 +964,9 @@ function ChangeRequestModal({
 
           {!!choices.length && (
             <div className="mt-2">
-              <label className="mb-1 block text-sm font-medium text-neutral-700">Remarks</label>
+              <label className="mb-1 block text-sm font-medium text-neutral-700">
+                Remarks <span className="text-red-500">*</span>
+              </label>
               <textarea
                 rows={4}
                 className="w-full resize-y rounded-lg border border-neutral-300 p-2 text-sm"
@@ -1092,23 +976,39 @@ function ChangeRequestModal({
               />
             </div>
           )}
-
-          {sendError && <div className="text-sm text-red-600">{sendError}</div>}
-          {sentOk && <div className="text-sm text-emerald-700">Email sent.</div>}
         </div>
 
         <div className="mt-6 flex items-center justify-end gap-2.5">
           <button
-            type="button"
             onClick={onClose}
             className="inline-flex h-9 items-center justify-center rounded-xl border border-neutral-200 bg-neutral-100 px-4 text-sm text-slate-900 shadow-sm hover:bg-neutral-200/70 active:translate-y-[0.5px]"
           >
             Cancel
           </button>
           <button
-            type="button"
             disabled={disabled}
-            onClick={sendEmail}
+            onClick={async () => {
+              // Hook into your backend here if needed
+              try {
+                const raw = JSON.parse(localStorage.getItem("animo.user") || "{}");
+                const userId = raw.userId || raw.user_id || raw.id || "";
+                const parts: string[] = [];
+                if (choices.includes("Change class time") && selTime) parts.push(`Change time to ${selTime}`);
+                if (choices.includes("Change class day") && selDay) parts.push(`Change day to ${selDay}`);
+                if (choices.includes("Other") && otherText.trim()) parts.push(otherText.trim());
+                const changeSummary = parts.join("; ");
+                const msg = `${context.item.code} ${context.item.sec} • ${context.day} • ${context.item.time}\n${changeSummary}\n\nRemarks: ${remarks.trim()}`;
+                await sendFacultyLoadAssignmentRfcMessage(userId, {
+                  term_id: (term as any)?.term_id || (term as any)?._id || (term as any)?.id,
+                  message: msg,
+                });
+                window.location.reload();
+              } catch (e) {
+                console.error(e);
+              } finally {
+                onClose();
+              }
+            }}
             className={cls(
               "inline-flex h-9 items-center gap-2 rounded-xl px-4 text-sm text-white shadow",
               "bg-[#1F7A49] hover:brightness-[1.06] active:translate-y-[0.5px] focus:outline-none focus:ring-2 focus:ring-emerald-600/40",
@@ -1117,10 +1017,97 @@ function ChangeRequestModal({
             aria-disabled={disabled}
           >
             <SendIcon className="h-4 w-4" strokeWidth={2.2} />
-            {sending ? "Sending…" : "Send"}
+            Send
           </button>
         </div>
       </div>
     </div>
   );
 }
+
+function RfcThreadView({ term }: { term: any }) {
+  const [thread, setThread] = useState<any | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        setLoading(true);
+        const raw = JSON.parse(localStorage.getItem("animo.user") || "{}");
+        const userId = raw.userId || raw.user_id || raw.id || "";
+        const resp = await getFacultyLoadAssignmentRfc(userId, {
+          term_id: term?.term_id || term?._id || term?.id,
+        });
+        if (!alive) return;
+        setThread(resp?.rfc || null);
+      } catch (e) {
+        console.error(e);
+      } finally {
+        if (alive) setLoading(false);
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [term?.term_id, term?._id, term?.id]);
+
+  if (loading && !thread) {
+    return (
+      <div className="rounded-xl border border-neutral-200 bg-neutral-50 p-3 text-sm text-neutral-600">
+        Loading RFC thread…
+      </div>
+    );
+  }
+
+  const msgs = thread?.messages || thread?.thread || [];
+  if (!thread || !Array.isArray(msgs) || msgs.length === 0) {
+    return (
+      <div className="rounded-xl border border-neutral-200 bg-neutral-50 p-3 text-sm text-neutral-600">
+        No RFC thread yet. You may send a request below.
+      </div>
+    );
+  }
+
+  const status = String(thread.status || "").toUpperCase();
+  const locked = Boolean(thread.locked) || ["ACCEPTED", "APPROVED", "REJECTED"].includes(status);
+
+  return (
+    <div className="rounded-xl border border-neutral-200 bg-white p-3">
+      <div className="mb-2 flex items-center justify-between">
+        <div className="text-sm font-semibold text-neutral-800">RFC Conversation</div>
+        <div
+          className={cls(
+            "rounded-full px-2 py-0.5 text-xs font-medium",
+            locked ? "bg-neutral-200 text-neutral-700" : status === "NEEDS_OM" ? "bg-yellow-100 text-yellow-800" : "bg-emerald-100 text-emerald-800"
+          )}
+        >
+          {locked ? status || "LOCKED" : status || "OPEN"}
+        </div>
+      </div>
+
+      <div className="max-h-56 space-y-2 overflow-y-auto rounded-lg bg-neutral-50 p-2">
+        {msgs.map((m: any, i: number) => {
+          const role = String(m.sender_role || "").toLowerCase();
+          const isMe = role === "faculty";
+          const ts = m.created_at ? new Date(m.created_at) : null;
+          const time = ts && !isNaN(ts.getTime()) ? ts.toLocaleString() : "";
+          return (
+            <div key={i} className={cls("flex", isMe ? "justify-end" : "justify-start")}>
+              <div
+                className={cls(
+                  "max-w-[85%] rounded-xl px-3 py-2 text-sm shadow-sm",
+                  isMe ? "bg-emerald-700 text-white" : "bg-white text-neutral-800 border border-neutral-200"
+                )}
+              >
+                <div className="whitespace-pre-wrap">{m.message}</div>
+                {!!time && <div className={cls("mt-1 text-[11px]", isMe ? "text-emerald-100" : "text-neutral-500")}>{time}</div>}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+

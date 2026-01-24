@@ -108,6 +108,8 @@ def _utcnow() -> datetime:
 
 
 def _service_result(name: str, ok: bool, detail: str, latency_ms: Optional[float]) -> Dict[str, Any]:
+
+def _service_result(name: str, ok: bool, detail: str, latency_ms: Optional[float]) -> Dict[str, Any]:
     out: Dict[str, Any] = {"service": name, "ok": ok, "detail": detail}
     if latency_ms is not None:
         out["latencyMs"] = round(latency_ms, 2)
@@ -119,6 +121,8 @@ def _service_result(name: str, ok: bool, detail: str, latency_ms: Optional[float
 # --------------------------------------------------------------------
 @app.get("/health", tags=["system"])
 async def health():
+    return {"status": "ok", "service": getattr(settings, "service_name", "backend")}
+
     return {"status": "ok", "service": getattr(settings, "service_name", "backend")}
 
 

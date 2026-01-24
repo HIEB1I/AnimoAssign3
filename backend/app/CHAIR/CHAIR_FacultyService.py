@@ -14,6 +14,7 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Body, HTTPException, Query
 from ..main import db
+from ..Notifications import create_notification
 
 router = APIRouter(prefix="/chair/faculty-service", tags=["chair", "faculty-service"])
 
@@ -163,11 +164,110 @@ def _normalize_code(code: Any) -> str:
 
 
 async def _find_department(query: str) -> Optional[Dict[str, Any]]:
-    """Find a department by name/code/id."""
-    return await db.departments.find_one(
-        {"$or": [{"dept_name": query}, {"dept_code": query}, {"department_id": query}]},
-        {"_id": 0, "department_id": 1, "dept_name": 1}
+    """Find a department by name/code/id.
+
+    IMPORTANT: be tolerant of case differences and leading/trailing spaces.
+    """
+    q = (query or "").strip()
+    if not q:
+        return None
+
+    # 1) Exact match (fast)
+    doc = await db.departments.find_one(
+        {"$or": [{"dept_name": q}, {"dept_code": q}, {"department_id": q}]},
+        {"_id": 0, "department_id": 1, "dept_name": 1, "dept_code": 1},
     )
+    if doc:
+        return doc
+
+    # 2) Case-insensitive exact match for name/code
+    doc = await db.departments.find_one(
+        {
+            "$or": [
+                {"dept_name": {"$regex": f"^{q}$", "$options": "i"}},
+                {"dept_code": {"$regex": f"^{q}$", "$options": "i"}},
+            ]
+        },
+        {"_id": 0, "department_id": 1, "dept_name": 1, "dept_code": 1},
+    )
+    return doc
+
+async def _chair_user_ids_for_dept(dept_name: Optional[str]) -> List[str]:
+    """Resolve chair user_id(s) for a given department name/code/id.
+
+    Priority:
+      1) staff_profiles where department matches and position_title contains 'chair'
+      2) role_assignments filtered by department and active
+
+    Returns a de-duplicated list. If nothing matches, returns [].
+    """
+    if not dept_name:
+        return []
+
+    dept = await _find_department(dept_name)
+    dep_id = (dept or {}).get('department_id')
+    if not dep_id:
+        return []
+
+    ids: List[str] = []
+
+    # 1) staff_profiles (preferred)
+    try:
+        cur = db.staff_profiles.find(
+            {
+                '$or': [{'department_id': dep_id}, {'dept_id': dep_id}],
+                'position_title': {'$regex': 'chair', '$options': 'i'},
+            },
+            {'_id': 0, 'user_id': 1},
+        )
+        async for d in cur:
+            if d.get('user_id'):
+                ids.append(d['user_id'])
+    except Exception:
+        # collection may not exist in some environments
+        pass
+
+    # 2) role_assignments fallback
+    if not ids:
+        try:
+            cur2 = db.role_assignments.find(
+                {
+                    '$or': [{'department_id': dep_id}, {'dept_id': dep_id}],
+                    'is_active': {'$in': [True, None]},
+                },
+                {'_id': 0, 'user_id': 1},
+            )
+            async for d in cur2:
+                if d.get('user_id'):
+                    ids.append(d['user_id'])
+        except Exception:
+            pass
+
+    # 3) Fallback: use RECIPIENT directory email -> users.user_id
+    # This is the most reliable in your current app because RECIPIENT has known chair emails.
+    if not ids:
+        try:
+            rec = RECIPIENT.get(dept_name or "")
+            if rec:
+                _, email = rec
+                u = await db.users.find_one(
+                    {"email": {"$regex": f"^{email}$", "$options": "i"}},
+                    {"_id": 0, "user_id": 1},
+                )
+                if u and u.get("user_id"):
+                    ids.append(u["user_id"])
+        except Exception:
+            pass
+
+    # De-dupe
+    out: List[str] = []
+    seen = set()
+    for uid in ids:
+        if uid not in seen:
+            seen.add(uid)
+            out.append(uid)
+    return out
+
 
 async def _course_by_code(code: str) -> Optional[Dict[str, Any]]:
     if not code:
@@ -323,6 +423,10 @@ async def fs_create(payload: Dict[str, Any] = Body(...)):
 
     if to_department not in DEPTS:
         raise HTTPException(status_code=400, detail="to_department must be one of the predefined departments.")
+    if from_department not in DEPTS:
+        raise HTTPException(status_code=400, detail="from_department must be one of the predefined departments.")
+    if to_department == from_department:
+        raise HTTPException(status_code=400, detail="to_department cannot be the same as from_department.")
     if not course_code:
         raise HTTPException(status_code=400, detail="course_code is required.")
 
@@ -335,15 +439,7 @@ async def fs_create(payload: Dict[str, Any] = Body(...)):
             if units is None:
                 units = c.get("units", None)
 
-    # basic sanity on from_department (fallback to course owner dept if not provided)
-    if not from_department:
-        c = await _course_by_code(course_code)
-        if c and c.get("department_id"):
-            dept = await db.departments.find_one({"department_id": c["department_id"]}, {"_id": 0, "dept_name": 1})
-            if dept and dept.get("dept_name"):
-                from_department = dept["dept_name"]
-    if not from_department:
-        raise HTTPException(status_code=400, detail="from_department is required.")
+    # from_department is now required from payload and validated above
 
     fs_id = f"FS{uuid4().hex[:10].upper()}"
     now = _now_iso()
@@ -386,6 +482,21 @@ async def fs_send(fs_id: str):
     )
 
     to_dept = row.get("to_department")
+
+    # In-app notification to receiving department chair user(s)
+    try:
+        recipients = await _chair_user_ids_for_dept(to_dept or "")
+        for uid in recipients:
+            await create_notification(
+                user_id=uid,
+                title="Faculty Service: New request received",
+                details=f"{row.get('from_department','')} sent a request for {row.get('course_code','')} – {row.get('course_title','')}.",
+                meta={"route": "/chair/faculty-service", "fs_id": fs_id, "kind": "faculty_service_received"},
+            )
+    except Exception:
+        # notifications should not block the request flow
+        pass
+
     rec = RECIPIENT.get(to_dept or "")
     if rec:
         name, email = rec
@@ -454,6 +565,19 @@ async def fs_respond(fs_id: str, payload: Dict[str, Any] = Body(...)):
         "updated_at": _now_iso(),
     }
     await db.faculty_service.update_one({"fs_id": fs_id}, {"$set": update})
+
+    # In-app notification back to the requesting department chair user(s)
+    try:
+        recipients = await _chair_user_ids_for_dept(row.get('from_department') or "")
+        for uid in recipients:
+            await create_notification(
+                user_id=uid,
+                title="Faculty Service: Request responded",
+                details=f"{row.get('to_department','')} responded to {row.get('course_code','')} – {row.get('course_title','')}.",
+                meta={"route": "/chair/faculty-service", "fs_id": fs_id, "kind": "faculty_service_responded"},
+            )
+    except Exception:
+        pass
     doc = await db.faculty_service.find_one({"fs_id": fs_id}, {"_id": 0})
     return {"ok": True, "row": doc}
 
@@ -470,11 +594,28 @@ async def fs_reject(fs_id: str, payload: Dict[str, Any] = Body(default={})):
         {"fs_id": fs_id},
         {"$set": {"status": "rejected", "remarks": remarks, "updated_at": _now_iso()}}
     )
+
+    # In-app notification back to the requesting department chair user(s)
+    try:
+        recipients = await _chair_user_ids_for_dept(row.get('from_department') or "")
+        for uid in recipients:
+            await create_notification(
+                user_id=uid,
+                title="Faculty Service: Request rejected",
+                details=f"{row.get('to_department','')} rejected {row.get('course_code','')} – {row.get('course_title','')}. Remarks: {remarks or '—'}",
+                meta={"route": "/chair/faculty-service", "fs_id": fs_id, "kind": "faculty_service_rejected"},
+            )
+    except Exception:
+        pass
     # optional log stub (requester could be notified if mapped to an email)
+    from_dept = row.get("from_department", "")
+    rec = RECIPIENT.get(from_dept)
+    to_name, to_email = (rec[0], rec[1]) if rec else (from_dept, "")
+
     await db.email_logs.insert_one({
         "email_id": f"EM{uuid4().hex[:8].upper()}",
-        "to_name": row.get("from_department", ""),
-        "to_email": "",
+        "to_name": to_name,
+        "to_email": to_email,
         "subject": f"Faculty Service Request Rejected: {row.get('course_code','')}",
         "body": f"Request {fs_id} has been rejected.\nRemarks: {remarks}",
         "created_at": _now_iso(),

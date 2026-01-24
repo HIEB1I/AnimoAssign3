@@ -535,9 +535,9 @@ const handleImportStats = (event: React.ChangeEvent<HTMLInputElement>) => {
       ? `Term ${activeMeta.term_number ?? ""} ${activeMeta.ay_label}`
       : "current term";
 
-    if (!confirm(`Archive ${label}? This will snapshot active rows for your campus and may advance the term.`)) {
-      return;
-    }
+  if (!confirm(`Archive ${label}? This will snapshot active rows for BOTH Manila and Laguna and may advance the term.`)) {
+    return;
+  }
 
     try {
       setArchiving(true);
@@ -657,9 +657,7 @@ const handleImportStats = (event: React.ChangeEvent<HTMLInputElement>) => {
 
   return (
     <div className="min-h-screen w-full bg-gray-50 text-slate-900">
-      <TopBar fullName={fullName}
-      role={campusLabel ? `${roleName} | ${campusLabel}` : roleName}
-      inboxPath="/apo/inbox"/>
+      <TopBar fullName={fullName} role={campusLabel ? `${roleName} | ${campusLabel}` : roleName} />
       <Tabs
         mode="nav"
         items={[
