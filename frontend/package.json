@@ -36,5 +36,10 @@
   },
   "jspdf": {
     "dompurify": "^3.2.6"
+  },
+  "optionalDependencies": {
+    "@rollup/rollup-linux-x64-gnu": "*"
   }
-}
+  }
+
+
