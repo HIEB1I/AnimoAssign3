@@ -10,6 +10,9 @@ import {
   Plus,
   ChevronDown,
   AlertTriangle,
+  Copy,
+  Undo2,
+  Redo2,
 } from "lucide-react";
 import TopBar from "../../component/TopBar";
 import Tabs from "../../component/Tabs";
@@ -594,7 +597,7 @@ type ConflictState = {
   reason: string;
 };
 
-type ViewMode = "offerings" | "curriculum";
+type ViewMode = "offerings" | "curriculum" | "specialclass";
 
 /* ----------------------- SECTION CODE RULES (NEW) ----------------------- */
 
@@ -705,17 +708,17 @@ const RoomSelectBox: React.FC<{
   }, [opts, value, tbaId]);
 
   return (
-    <div className={cls("relative z-[1000] w-full", className)}>
-      <SelectBox
-        value={currentLabel}
-        onChange={(label: string) => {
-          const match = opts.find(o => o.label === label);
-          onChange(match?.id ?? tbaId ?? null);
-        }}
-        options={opts.map(o => o.label)}
-        disabled={!!disabled}
-        className="!min-w-[140px] w-full max-w-none"
-      />
+    <div className={cls("relative z-20 w-full min-w-0 max-w-full overflow-hidden", className)}>
+    <SelectBox
+      value={currentLabel}
+      onChange={(label: string) => {
+        const match = opts.find(o => o.label === label);
+        onChange(match?.id ?? tbaId ?? null);
+      }}
+      options={opts.map(o => o.label)}
+      disabled={!!disabled}
+      className="!min-w-0 w-full max-w-full"
+    />
     </div>
   );
 };
@@ -924,7 +927,7 @@ const loadOfferings = async () => {
   };
 
   useEffect(() => {
-    if (view === "offerings") loadOfferings();
+    if (view === "offerings" || view === "specialclass") loadOfferings();
     else loadCurriculum();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view]);
@@ -1103,6 +1106,86 @@ useEffect(() => {
 
   const [editing, setEditing] = useState<{ row: OfferingRow; draft: EditDraft } | null>(null);
 
+/* ------------------------- Undo / Redo (Edit Draft) ------------------------- */
+// History applies to the current editing.draft only (safe: does not touch saved server data)
+const [editUndo, setEditUndo] = useState<EditDraft[]>([]);
+const [editRedo, setEditRedo] = useState<EditDraft[]>([]);
+const editHistoryLock = useRef(false);
+const lastDraftSigRef = useRef<string>("");
+
+const undoEditDraft = () => {
+  if (!editing) return;
+
+  setEditUndo((u) => {
+    if (!u.length) return u;
+
+    const prev = u[u.length - 1];
+    const cur = editing.draft;
+
+    editHistoryLock.current = true;
+    setEditRedo((r) => [...r, cur]);
+    setEditing((p) => (p ? { ...p, draft: prev } : p));
+
+    return u.slice(0, -1);
+  });
+};
+
+const redoEditDraft = () => {
+  if (!editing) return;
+
+  setEditRedo((r) => {
+    if (!r.length) return r;
+
+    const next = r[r.length - 1];
+    const cur = editing.draft;
+
+    editHistoryLock.current = true;
+    setEditUndo((u) => [...u, cur]);
+    setEditing((p) => (p ? { ...p, draft: next } : p));
+
+    return r.slice(0, -1);
+  });
+};
+
+// Track every edit-draft change and push snapshots into undo stack
+useEffect(() => {
+  if (!editing) {
+    setEditUndo([]);
+    setEditRedo([]);
+    lastDraftSigRef.current = "";
+    return;
+  }
+
+  const sig = JSON.stringify(editing.draft ?? {});
+
+  // If this change came from undo/redo, don’t record a new history entry
+  if (editHistoryLock.current) {
+    editHistoryLock.current = false;
+    lastDraftSigRef.current = sig;
+    return;
+  }
+
+  // First time entering edit mode (or switching rows)
+  if (!lastDraftSigRef.current) {
+    lastDraftSigRef.current = sig;
+    return;
+  }
+
+  // No real change
+  if (sig === lastDraftSigRef.current) return;
+
+  // Push previous draft snapshot into undo, clear redo
+  try {
+    const prev = JSON.parse(lastDraftSigRef.current) as EditDraft;
+    setEditUndo((u) => [...u, prev]);
+    setEditRedo([]);
+  } catch {
+    // ignore malformed snapshot
+  }
+
+  lastDraftSigRef.current = sig;
+}, [editing?.row?.section?.section_id, editing?.draft]);
+
   const startEdit = (row: OfferingRow) => {
     if (blockedByImport) return; // only block when import not done
     if (!row.section.section_id) return;
@@ -1127,24 +1210,21 @@ useEffect(() => {
 
     const expectedDefault = defaultSectionCode(row, data?.campus?.campus_name || "");
     const initialSection = row.section.section_code || expectedDefault || "";
-
-  setEditing({
-    row,
-    draft: {
-      section_id: row.section.section_id,
-      section_code: initialSection,
-      enrollment_cap: row.section.enrollment_cap ?? "",
-      remarks: row.section.remarks ?? "",
-      faculty_name: row.faculty?.faculty_name || "UNASSIGNED",
-      slot1: row.slot1
-        ? {
-            day: toFullDay(row.slot1.day) as Day | "",
-            start_time: toHHMM(row.slot1.start_time),
-            end_time: toHHMM(row.slot1.end_time),
-            ...(row.slot1.room_id ? { room_id: row.slot1.room_id } : {}),
-          }
-        : undefined,
-
+  // Build initial draft ONCE so we can seed Undo correctly
+  const initialDraft: EditDraft = {
+    section_id: row.section.section_id,
+    section_code: initialSection,
+    enrollment_cap: row.section.enrollment_cap ?? "",
+    remarks: row.section.remarks ?? "",
+    faculty_name: row.faculty?.faculty_name || "UNASSIGNED",
+    slot1: row.slot1
+      ? {
+          day: toFullDay(row.slot1.day) as Day | "",
+          start_time: toHHMM(row.slot1.start_time),
+          end_time: toHHMM(row.slot1.end_time),
+          ...(row.slot1.room_id ? { room_id: row.slot1.room_id } : {}),
+        }
+      : undefined,
     slot2: row.slot2
       ? {
           day: toFullDay(row.slot2.day) as Day | "",
@@ -1153,10 +1233,16 @@ useEffect(() => {
           ...(row.slot2.room_id ? { room_id: row.slot2.room_id } : {}),
         }
       : undefined,
-      for_placeholder_course_id: electiveParentId,
-      specific_course_id: currentSpecificId,
-    },
-  });
+    for_placeholder_course_id: electiveParentId,
+    specific_course_id: currentSpecificId,
+  };
+
+  // Reset undo/redo + seed the "current snapshot" immediately
+  setEditUndo([]);
+  setEditRedo([]);
+  lastDraftSigRef.current = JSON.stringify(initialDraft);
+
+  setEditing({ row, draft: initialDraft });
 };
 
   const handleConflict = (action: ActionKind, apiConflict: ApiConflict, original: any) => {
@@ -1427,6 +1513,80 @@ if (isGE) {
     }
   };
 
+  const copyRow = async (r: OfferingRow) => {
+    // Build a single, consistent copy string (row-scoped: uses the 'r' passed in)
+    const programNo =
+      (r.program?.program_code || "—") + "-" + (typeof r.block_index === "number" ? r.block_index : 1);
+
+    const batchIdLabel = normCode(r.batch?.batch_code || "—");
+    const courseCode = String(r.course?.course_code || "—");
+    const courseTitle = String(r.course?.course_title || "—");
+
+    const sectionCode = (r.section?.section_code || "—").toString();
+    const facultyName = (r.faculty?.faculty_name || "UNASSIGNED").toString();
+
+    const slotText = (slot?: OfferingRow["slot1"]) => {
+      if (!slot) return "—";
+      const day = toAbbrevDay(slot.day) || "—";
+      const st = fmtTime(slot.start_time);
+      const en = fmtTime(slot.end_time);
+      const room = slot.room_number || slot.room_id || "—";
+      return `${day} ${st}-${en} @ ${room}`;
+    };
+
+    const capacity =
+      r.section?.enrollment_cap === null || r.section?.enrollment_cap === undefined
+        ? "—"
+        : String(r.section.enrollment_cap);
+
+    const remarks = (r.section?.remarks || "—").toString();
+
+    const text =
+      `Program No: ${programNo}\n` +
+      `Batch: ${batchIdLabel}\n` +
+      `Course: ${courseCode} — ${courseTitle}\n` +
+      `Section: ${sectionCode}\n` +
+      `Faculty: ${facultyName}\n` +
+      `Schedule 1: ${slotText(r.slot1)}\n` +
+      `Schedule 2: ${slotText(r.slot2)}\n` +
+      `Capacity: ${capacity}\n` +
+      `Remarks: ${remarks}`;
+
+    // Clipboard write with safe fallback
+    try {
+      if (navigator?.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        const ta = document.createElement("textarea");
+        ta.value = text;
+        ta.setAttribute("readonly", "");
+        ta.style.position = "fixed";
+        ta.style.left = "-9999px";
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand("copy");
+        document.body.removeChild(ta);
+      }
+      alert("Copied!");
+    } catch {
+      // last resort fallback attempt
+      try {
+        const ta = document.createElement("textarea");
+        ta.value = text;
+        ta.setAttribute("readonly", "");
+        ta.style.position = "fixed";
+        ta.style.left = "-9999px";
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand("copy");
+        document.body.removeChild(ta);
+        alert("Copied!");
+      } catch (e: any) {
+        alert(e?.message || "Failed to copy.");
+      }
+    }
+  };
+
   const doDelete = async (row: OfferingRow) => {
     if (blockedByImport) return;
     if (!user?.userId || !row.section.section_id) return;
@@ -1440,7 +1600,7 @@ if (isGE) {
     }
     await loadOfferings();
   };
-
+  
   /* --------------------------- curriculum structures -------------------------- */
 
   const currPrograms = useMemo(() => {
@@ -1575,7 +1735,17 @@ if (isGE) {
     await loadCurriculum();
   };
   // treat either inline edit row or inline add row as "edit UI"
+    // treat either inline edit row or inline add row as "edit UI"
   const inEditUI = !!editing || addAnchorKey !== null;
+
+  // NEW: give the table container extra bottom space while editing/adding
+  const [editPad, setEditPad] = useState(0);
+
+  useEffect(() => {
+    // When any dropdown-heavy UI is open, add space so menus won't be cut off
+    if (inEditUI) setEditPad(260);     // adjust if you want more/less space
+    else setEditPad(0);
+  }, [inEditUI]);
 
   /* ----------------------------------- UI ----------------------------------- */
 
@@ -1595,24 +1765,33 @@ if (isGE) {
       <div className="px-6 pt-4 w-full">
         <div className="flex items-center justify-start">
           <div className="inline-flex overflow-hidden rounded-lg border border-emerald-700">
-            <button
-              onClick={() => setView("offerings")}
-              className={cls(
-                "px-3 py-1.5 text-sm font-medium",
-                view === "offerings" ? "bg-emerald-700 text-white" : "bg-white text-emerald-700"
-              )}
-            >
-              Course Offerings
-            </button>
-            <button
-              onClick={() => setView("curriculum")}
-              className={cls(
-                "px-3 py-1.5 text-sm font-medium border-l border-emerald-700",
-                view === "curriculum" ? "bg-emerald-700 text-white" : "bg-white text-emerald-700"
-              )}
-            >
-              List of Courses
-            </button>
+          <button
+            onClick={() => setView("offerings")}
+            className={cls(
+              "px-3 py-1.5 text-sm font-medium",
+              view === "offerings" ? "bg-emerald-700 text-white" : "bg-white text-emerald-700"
+            )}
+          >
+            Course Offerings
+          </button>
+          <button
+            onClick={() => setView("curriculum")}
+            className={cls(
+              "px-3 py-1.5 text-sm font-medium border-l border-emerald-700",
+              view === "curriculum" ? "bg-emerald-700 text-white" : "bg-white text-emerald-700"
+            )}
+          >
+            List of Courses
+          </button>
+          <button
+            onClick={() => setView("specialclass")}
+            className={cls(
+              "px-3 py-1.5 text-sm font-medium border-l border-emerald-700",
+              view === "specialclass" ? "bg-emerald-700 text-white" : "bg-white text-emerald-700"
+            )}
+          >
+            Special Class
+          </button>
           </div>
         </div>
       </div>
@@ -1620,6 +1799,39 @@ if (isGE) {
       <main className="p-6 w-full">
         {/* toolbar */}
         <div className="flex flex-wrap items-center gap-3 rounded-xl border border-gray-200 bg-white p-4 shadow-sm mb-6">
+          {/* Undo / Redo (edit draft only) */}
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              title="Undo (edit draft)"
+              onClick={undoEditDraft}
+              disabled={!editing || editUndo.length === 0}
+              className={cls(
+                "inline-flex h-9 w-9 items-center justify-center rounded-md border",
+                (!editing || editUndo.length === 0)
+                  ? "opacity-40 cursor-not-allowed"
+                  : "hover:bg-gray-50"
+              )}
+            >
+              <Undo2 className="h-4 w-4 text-emerald-700" />
+            </button>
+
+            <button
+              type="button"
+              title="Redo (edit draft)"
+              onClick={redoEditDraft}
+              disabled={!editing || editRedo.length === 0}
+              className={cls(
+                "inline-flex h-9 w-9 items-center justify-center rounded-md border",
+                (!editing || editRedo.length === 0)
+                  ? "opacity-40 cursor-not-allowed"
+                  : "hover:bg-gray-50"
+              )}
+            >
+              <Redo2 className="h-4 w-4 text-emerald-700" />
+            </button>
+          </div>
+
           <div className="relative min-w-[220px] flex-1">
             <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-500" />
             <input
@@ -1845,7 +2057,7 @@ if (response.ok) {
               ) : (
                 Object.entries(groups).map(([idLabel, byProgram]) => (
                   <div   key={idLabel}
-  className="rounded-xl border border-gray-300 bg-white shadow-sm overflow-visible mb-6">
+                    className="rounded-xl border border-gray-300 bg-white shadow-sm overflow-hidden mb-6">
                     <div className="bg-[#21804A] text-white px-4 py-3 text-center font-semibold">{idLabel}</div>
                     {Object.entries(byProgram).map(([progLabel, list]) => {
                       const key = `${idLabel}::${progLabel}`;
@@ -1867,7 +2079,10 @@ if (response.ok) {
 
                           {!isCollapsed && (
                             <div className="p-0">
-                              <div className="overflow-x-auto" style={{ overflowY: "visible" }}>
+                            <div
+                                className="overflow-x-auto relative"
+                                style={{ overflowY: "visible", paddingBottom: editPad }}
+                              >
                                 <table className={`w-full text-sm border-collapse ${inEditUI ? "table-auto" : "table-fixed"}`}>
                                   <colgroup>
                                     <col style={{ width: 96 }} />   {/* Program No. */}
@@ -1884,7 +2099,7 @@ if (response.ok) {
                                     <col style={{ width: 120 }} />  {/* Room 2 */}
                                     <col style={{ width: 80 }} />   {/* Capacity */}
                                     <col style={{ width: 150 }} />  {/* Remarks */}
-                                    <col style={{ width: 100 }} />  {/* Actions */}
+                                    <col style={{ width: 120 }} />  {/* Actions */}
                                   </colgroup>
                                   <thead className="bg-gray-50 text-emerald-800 sticky top-0 z-10">
                                     <tr className="text-[13px] font-semibold">
@@ -1995,61 +2210,68 @@ if (response.ok) {
                                           <td className="px-3 py-2 border border-gray-300">{r.slot2?.room_number || r.slot2?.room_id || "—"}</td>
                                           <td className="px-3 py-2 border border-gray-300">{r.section.enrollment_cap ?? "—"}</td>
                                           <td className="px-3 py-2 border border-gray-300">{r.section.remarks || "—"}</td>
-                                          <td className="px-3 py-2 border border-gray-300">
-                                            <div className="flex flex-wrap gap-2">
-                                              {canEditDelete && (
-                                                <>
-                                                  <button
-                                                    className="text-emerald-700 hover:text-emerald-900"
-                                                    title="Edit"
-                                                    onClick={() => startEdit(r)}
-                                                  >
-                                                    <Edit className="h-4 w-4" />
-                                                  </button>
-                                                  <button
-                                                    className="text-red-500 hover:text-red-700"
-                                                    title="Delete"
-                                                    onClick={() => doDelete(r)}
-                                                  >
-                                                    <Trash2 className="h-4 w-4" />
-                                                  </button>
-                                                </>
-                                              )}
-                                              <button
-                                                className="text-emerald-700 hover:text-emerald-900"
-                                                title="Add row (create section)"
-                                                onClick={() => {
-                                                  setAddAnchorKey(rowKey);
-                                                  setAddElectiveSpecificId("");
-                                                  const elective = isElectivePlaceholderType(
-                                                    r.course.type_of_course || "",
-                                                    r.course.course_code,
-                                                    r.course.course_title
-                                                  );
-                                                  setAddCourseCode(elective ? r.course.course_code : "— Select a course —");
+                                        <td className="px-3 py-2 border border-gray-300">
+                                          <div className="flex flex-wrap gap-2">
+                                            <button
+                                              className="text-emerald-700 hover:text-emerald-900"
+                                              title="Copy"
+                                              onClick={() => copyRow(r)}
+                                            >
+                                              <Copy className="h-4 w-4" />
+                                            </button>
 
-                                                  // remember the row we’re acting on (so we can REPLACE it)
-                                                  setAddAnchorSectionId(elective ? (r.section.section_id || null) : null);
+                                            {canEditDelete && (
+                                              <>
+                                                <button
+                                                  className="text-emerald-700 hover:text-emerald-900"
+                                                  title="Edit"
+                                                  onClick={() => startEdit(r)}
+                                                >
+                                                  <Edit className="h-4 w-4" />
+                                                </button>
+                                                <button
+                                                  className="text-red-500 hover:text-red-700"
+                                                  title="Delete"
+                                                  onClick={() => doDelete(r)}
+                                                >
+                                                  <Trash2 className="h-4 w-4" />
+                                                </button>
+                                              </>
+                                            )}
+                                            <button
+                                              className="text-emerald-700 hover:text-emerald-900"
+                                              title="Add row (create section)"
+                                              onClick={() => {
+                                                setAddAnchorKey(rowKey);
+                                                setAddElectiveSpecificId("");
+                                                const elective = isElectivePlaceholderType(
+                                                  r.course.type_of_course || "",
+                                                  r.course.course_code,
+                                                  r.course.course_title
+                                                );
+                                                setAddCourseCode(elective ? r.course.course_code : "— Select a course —");
 
-                                                  setAddDraft({
-                                                    batch_id: r.batch.batch_id,
-                                                    program_id: r.program.program_id,
-                                                    course_id: elective ? r.course.course_id : "",
-                                                    for_placeholder_course_id: elective ? r.course.course_id : undefined,
-                                                    specific_course_id: undefined,
-                                                    enrollment_cap: r.section.enrollment_cap ?? 20,
-                                                    remarks: "",
-                                                    slot1: { room_id: "" },
-                                                    slot2: { room_id: "" },
-                                                    // optional section_code left blank (backend auto). We show hint below.
-                                                  });
-                                                }}
+                                                // remember the row we’re acting on (so we can REPLACE it)
+                                                setAddAnchorSectionId(elective ? (r.section.section_id || null) : null);
 
-                                              >
-                                                <Plus className="h-4 w-4" />
-                                              </button>
-                                            </div>
-                                          </td>
+                                                setAddDraft({
+                                                  batch_id: r.batch.batch_id,
+                                                  program_id: r.program.program_id,
+                                                  course_id: elective ? r.course.course_id : "",
+                                                  for_placeholder_course_id: elective ? r.course.course_id : undefined,
+                                                  specific_course_id: undefined,
+                                                  enrollment_cap: r.section.enrollment_cap ?? 20,
+                                                  remarks: "",
+                                                  slot1: { room_id: "" },
+                                                  slot2: { room_id: "" },
+                                                  // optional section_code left blank (backend auto). We show hint below.
+                                                });
+                                              }}
+                                            >
+                                              <Plus className="h-4 w-4" />
+                                            </button>
+                                          </div>
+                                        </td>
                                         </tr>
                                       );
 
@@ -2250,8 +2472,9 @@ if (response.ok) {
                                             fmtTime(r.slot1?.end_time)
                                           )}
                                           </td>
-                                          <td className="px-3 py-2 border border-gray-200 bg-white relative overflow-visible">
-                                            <EligibleRoomSelect
+                                          <td className="px-3 py-2 border border-gray-200 bg-white relative overflow-hidden">
+                                            <div className="w-full max-w-[120px] overflow-hidden">
+                                              <EligibleRoomSelect
                                               userId={user?.userId}
                                               campusId={data?.campus?.campus_id || ""}
                                               spec={{
@@ -2272,6 +2495,7 @@ if (response.ok) {
                                                 }))
                                               }
                                             />
+                                            </div>
                                           </td>
 
                                           {/* Slot 2 */}
@@ -2325,8 +2549,9 @@ if (response.ok) {
                                             fmtTime(r.slot2?.end_time)
                                           )}
                                           </td>
-                                          <td className="px-3 py-2 border border-gray-200 bg-white relative overflow-visible">
-                                            <EligibleRoomSelect
+                                          <td className="px-3 py-2 border border-gray-200 bg-white relative overflow-hidden">
+                                            <div className="w-full max-w-[120px] overflow-hidden">
+                                              <EligibleRoomSelect
                                               userId={user?.userId}
                                               campusId={data?.campus?.campus_id || ""}
                                               spec={{
@@ -2347,6 +2572,7 @@ if (response.ok) {
                                                 }))
                                               }
                                             />
+                                            </div>
                                           </td>
 
                                           {/* Capacity */}

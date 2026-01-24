@@ -472,7 +472,10 @@ export async function archiveApoPreenlistment(
 ) {
   const qs = new URLSearchParams({ userId, action: "archive" });
   if (termId) qs.set("termId", termId);
+
+  // campus is still sent for role/scope resolution, but backend archives BOTH campuses
   if (campusName) qs.set("campus", campusName);
+
   const url = join(API_BASE, `apo/preenlistment?${qs.toString()}`);
   const { data } = await axios.post(url);
   return data;
@@ -1418,6 +1421,7 @@ export async function submitStudentPetition(
    ===============  STUDENT: SPECIAL CLASS  =================
    ========================================================= */
 
+
 export type SpecialClassOptions = {
   ok: boolean;
   departments: string[];
@@ -1436,10 +1440,10 @@ export type SpecialClassView = {
   course_title: string;
   department_name?: string;
 
+  // submission info (kept minimal; not shown in status card to avoid clutter)
   student_number?: number | string;
   units_remaining?: number;
   graduating_after_term?: boolean;
-
   course_units?: number;
 
   reason: string;
@@ -1447,11 +1451,33 @@ export type SpecialClassView = {
 
   status: string;
   remarks?: string;
-
   submitted_at: string;
+
   acad_year_start?: number | string;
   term_number?: number;
   program_code?: string;
+
+  // ✅ schedule table fields
+  section_id?: string | null;
+  section_code?: string;
+
+  faculty_name?: string;
+
+  day1?: string;
+  begin1?: string;
+  end1?: string;
+  room1?: string;
+
+  day2?: string;
+  begin2?: string;
+  end2?: string;
+  room2?: string;
+
+  enrollment_cap?: number;
+  enrolled?: number;
+  section_remarks?: string;
+
+  schedule_summary?: string;
 };
 
 export type SpecialClassSubmitPayload = {
@@ -1469,33 +1495,37 @@ export type SpecialClassSubmitPayload = {
 
   department: string;
 
-  agree: boolean; // must be true
+  agree: boolean;
 };
 
 export async function getStudentSpecialClasses(
   userId: string
 ): Promise<{ ok: boolean; applications: SpecialClassView[] }> {
-  const { data } = await axios.post(`${API_BASE}/student/specialclass`, {}, {
-    params: { userId, action: "fetch" },
-  });
+  const { data } = await axios.post(
+    `${API_BASE}/student/specialclass`,
+    {},
+    { params: { userId, action: "fetch" } }
+  );
   return data;
 }
 
-export async function getStudentSpecialClassOptions(
+export async function getStudentSpecialClassOptions(userId: string): Promise<SpecialClassOptions> {
+  const { data } = await axios.post(
+    `${API_BASE}/student/specialclass`,
+    {},
+    { params: { userId, action: "options" } }
+  );
+  return data;
+}
+
+export async function getStudentSpecialClassProfile(
   userId: string
-): Promise<SpecialClassOptions> {
-  const { data } = await axios.post(`${API_BASE}/student/specialclass`, {}, {
-    params: { userId, action: "options" },
-  });
-  return data;
-}
-
-export async function getStudentSpecialClassProfile(userId: string): Promise<{
-  ok: boolean; first_name: string; last_name: string; student_number: string; program_code?: string;
-}> {
-  const { data } = await axios.post(`${API_BASE}/student/specialclass`, {}, {
-    params: { userId, action: "profile" },
-  });
+): Promise<{ ok: boolean; first_name: string; last_name: string; student_number: string; program_code?: string }> {
+  const { data } = await axios.post(
+    `${API_BASE}/student/specialclass`,
+    {},
+    { params: { userId, action: "profile" } }
+  );
   return data;
 }
 
@@ -1509,9 +1539,9 @@ export async function submitStudentSpecialClass(
   return data;
 }
 
-/* =========================================================
-   ============  STUDENT: COURSE OFFERINGS  =================
-   ========================================================= */
+// =========================================================
+// ============  STUDENT: COURSE OFFERINGS  =================
+// =========================================================
 
 export type StudentCourseOfferingsOptions = {
   ok: boolean;
@@ -1534,12 +1564,11 @@ export type CourseOfferingSchedule = {
 
 export type CourseOfferingSection = {
   section_id: string;
-  class_nbr?: number | string;
   section_code: string;
   enrollment_cap?: number;
   enrolled?: number;
   is_open?: boolean;
-  faculty_name?: string;
+  faculty_name?: string; // ✅ MUST BE faculty_name
   remarks?: string;
   schedules: CourseOfferingSchedule[];
 };
@@ -1573,7 +1602,6 @@ export async function searchStudentCourseOfferings(
   );
   return data;
 }
-
 
 /* =========================================================
    ==============  OM: SHARED HEADER (Topbar)  =============
@@ -1952,6 +1980,220 @@ export async function updateOMSPCourse(course_id: string, payload: { status?: st
 }
 
 /* =========================================================
+   ==============  OM: SPECIAL CLASS  ======================
+   ========================================================= */
+
+export type OMSCFaultyOpt = {
+  faculty_id: string;
+  faculty_name: string;
+  department_id?: string;
+};
+
+export type DayCode = "M" | "T" | "W" | "H" | "F" | "S";
+
+export type OMSCSchedulePreset = {
+  schedule_id: string; // section_id-based (stable)
+  section_id: string;
+  section_code?: string;
+
+  label: string; // e.g. "M 0730-0900; W 0900-1200"
+  faculty_id?: string | null;
+  faculty_name?: string;
+
+  day1: DayCode | "";
+  begin1: string;
+  end1: string;
+  day2: DayCode | "";
+  begin2: string;
+  end2: string;
+
+  schedule_id1?: string | null;
+  schedule_id2?: string | null;
+  assignment_id?: string | null;
+};
+
+export type OMSpecialClassRow = {
+  special_id: string;
+  term_id: string;
+  user_id: string;
+
+  student_name?: string;
+  student_number?: number | string;
+
+  course_id: string;
+  course_code?: string;
+  course_title?: string;
+  course_department?: string;
+
+  program_id?: string;
+  program_code?: string;
+
+  reason?: string;
+  reason_other?: string;
+
+  status?: string;
+  remarks?: string;
+
+  faculty_id?: string | null;
+  faculty_name?: string;
+
+  section_id?: string | null;
+
+  section_code?: string;
+
+  day1?: DayCode | "";
+  begin1?: string;
+  end1?: string;
+  day2?: DayCode | "";
+  begin2?: string;
+  end2?: string;
+
+  submitted_at?: string;
+  schedule_id1?: string | null;
+  schedule_id2?: string | null;
+  assignment_id?: string | null;
+
+};
+
+export type OMSpecialClassDetail = OMSpecialClassRow & {
+  department_id?: string;
+  department_name?: string;
+
+  course_units?: number | string;
+  units_remaining?: number | string;
+  graduating_after_term?: boolean;
+
+  schedule_text?: string;
+  schedule_entries?: Array<{ day: string; start_time: string; end_time: string }>;
+
+  updated_at?: string;
+};
+
+export type OMSpecialClassOptions = {
+  ok: boolean;
+  statuses: string[];
+  activeTerm?: { term_id: string; term_number: number; acad_year_start: number } | null;
+  facultyOptions?: OMSCFaultyOpt[];
+};
+
+// ---------- OM: Special Class endpoints ----------
+export async function getOMSC_Options(): Promise<OMSpecialClassOptions> {
+  const { data } = await api.get(`/om/specialclass`, {
+    params: { action: "options" },
+  });
+  return data as OMSpecialClassOptions;
+}
+
+export async function listOMSC(params: {
+  termId?: string;
+  status?: string;
+  q?: string;
+}): Promise<{ ok: boolean; rows: OMSpecialClassRow[]; term_id?: string }> {
+  const { data } = await api.post(`/om/specialclass`, null, {
+    params: { action: "list", ...params },
+  });
+  return data as { ok: boolean; rows: OMSpecialClassRow[]; term_id?: string };
+}
+
+export async function getOMSC_SchedulePresets(
+  course_id: string,
+  term_id?: string
+): Promise<{ ok: boolean; presets: OMSCSchedulePreset[] }> {
+  const { data } = await api.get(`/om/specialclass`, {
+    params: { action: "schedulePresets", course_id, term_id },
+  });
+  return data as { ok: boolean; presets: OMSCSchedulePreset[] };
+}
+
+export async function updateOMSC(
+  special_id: string,
+  payload: Partial<OMSpecialClassRow>
+): Promise<{ ok: boolean; matched: number; modified: number }> {
+  const { data } = await api.post(`/om/specialclass`, payload, {
+    params: { action: "update", specialId: special_id },
+  });
+  return data as { ok: boolean; matched: number; modified: number };
+}
+
+export async function getOMSC_Detail(
+  special_id: string,
+  termId?: string
+): Promise<{ ok: boolean; row: OMSpecialClassDetail }> {
+  const { data } = await api.post(`/om/specialclass`, null, {
+    params: { action: "detail", specialId: special_id, ...(termId ? { termId } : {}) },
+  });
+  return data as { ok: boolean; row: OMSpecialClassDetail };
+}
+
+/** If backend returns JSON error while we requested binary, decode it nicely */
+async function tryDecodePdfError(err: any): Promise<string | null> {
+  try {
+    const ab: ArrayBuffer | undefined = err?.response?.data;
+    if (!ab || !(ab instanceof ArrayBuffer)) return null;
+    const text = new TextDecoder().decode(new Uint8Array(ab));
+    // maybe JSON: {"detail":"..."}
+    const j = JSON.parse(text);
+    return j?.detail ? String(j.detail) : text;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * ✅ Export Special Class PDF
+ * Backend: POST /om/specialclass?action=exportPdf
+ *
+ * Supports:
+ * - Query params: { termId?, status?, q?, specialId? } for filtered/single export
+ * - Body payload: { special_ids: string[] } for exporting selected rows
+ *
+ * Returns: PDF Blob
+ */
+export async function exportOMSC_Pdf(args: {
+  termId?: string;
+  status?: string;
+  q?: string;
+  specialId?: string;
+  special_ids?: string[];
+}): Promise<Blob> {
+  const { special_ids, ...queryParams } = args || {};
+
+  try {
+    const res = await api.post(
+      `/om/specialclass`,
+      special_ids && special_ids.length > 0 ? { special_ids } : null,
+      {
+        params: { action: "exportPdf", ...queryParams },
+        responseType: "arraybuffer", // ✅ important for readable errors
+        headers: { Accept: "application/pdf" },
+      }
+    );
+
+    return new Blob([res.data], { type: "application/pdf" });
+  } catch (err: any) {
+    const decoded = await tryDecodePdfError(err);
+    if (decoded) {
+      // attach a nicer message
+      err.message = decoded;
+    }
+    throw err;
+  }
+}
+
+/** ✅ Helper: trigger browser download */
+export function downloadBlob(blob: Blob, filename: string) {
+  const url = window.URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  window.URL.revokeObjectURL(url);
+}
+
+
+/* =========================================================
    ==============  OM: CLASS RETENTION  ====================
    ========================================================= */
 
@@ -2116,6 +2358,44 @@ export async function getFacultyOverviewOptions(userId: string) {
 // (Deprecated alias; safe to remove later)
 export async function getFacultyOverview(userId: string) {
   return getFacultyOverviewList(userId);
+}
+
+// ===== Load Assignment RFC workflow (Faculty) =====
+export async function getFacultyLoadAssignmentRfc(userId: string, params: { term_id?: string }) {
+  const base = (typeof API_BASE !== "undefined" ? API_BASE : "").replace(/\/+$/, "");
+  const qs = new URLSearchParams({ userId });
+  if (params.term_id) qs.set("term_id", params.term_id);
+  const url = `${base}/faculty/load-assignment/rfc?${qs.toString()}`;
+  const r = await fetch(url, { method: "GET" });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json() as Promise<{ ok: boolean; rfc: any | null }>;
+}
+
+export async function sendFacultyLoadAssignmentRfcMessage(
+  userId: string,
+  payload: { term_id?: string; message: string }
+) {
+  const base = (typeof API_BASE !== "undefined" ? API_BASE : "").replace(/\/+$/, "");
+  const url = `${base}/faculty/load-assignment/rfc/message?userId=${encodeURIComponent(userId)}`;
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json() as Promise<{ ok: boolean; rfc_id?: string; status?: string }>;
+}
+
+export async function acceptFacultyLoadAssignment(userId: string, payload: { term_id?: string }) {
+  const base = (typeof API_BASE !== "undefined" ? API_BASE : "").replace(/\/+$/, "");
+  const url = `${base}/faculty/load-assignment/accept?userId=${encodeURIComponent(userId)}`;
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json() as Promise<{ ok: boolean; status?: string }>;
 }
 
 /* =========================================================
@@ -2300,10 +2580,60 @@ export async function submitOmLoadAssignment(
   };
 }
 
+export async function notifyChairLoadRecommendation(
+  userId: string,
+  payload: {
+    department_id?: string;
+    reco_id?: string;
+    kind?: "om_load_forwarded" | "om_load_updated";
+    // optional: rows?: OmLoadRow[]; // if you want backend to infer dept_id
+  } = {}
+) {
+  const { data } = await axios.post(`${API_BASE}/om/loadassignment/notify-chair`, payload, {
+    params: { userId },
+  });
+  return data as {
+    ok: boolean;
+    created: number;
+    recipients: string[];
+    kind: "om_load_forwarded" | "om_load_updated";
+    reco_id?: string;
+  };
+}
+
+
 type Faculty = {
   faculty_id: string;
   faculty_name_display: string;
 };
+
+export type DeloadingRow = {
+  deloading_type?: string;
+  units_deloaded?: number;
+  notes?: string;
+  term_id?: string;
+  updated_at?: string | Date;
+};
+
+export async function getOmFacultyWithDeloadings(term_id?: string) {
+  const base = (typeof API_BASE !== "undefined" ? API_BASE : "").replace(/\/+$/, "");
+  const qs = new URLSearchParams();
+  if (term_id) qs.set("term_id", term_id);
+  const url = `${base}/om/load-assignment/faculty-with-deloadings${qs.toString() ? `?${qs.toString()}` : ""}`;
+  const r = await fetch(url, { method: "GET" });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json() as Promise<{ ok: boolean; term_id: string | null; faculty: { faculty_id: string; faculty_name_display: string }[] }>;
+}
+
+export async function getOmFacultyDeloadings(params: { faculty_id: string; term_id?: string }) {
+  const base = (typeof API_BASE !== "undefined" ? API_BASE : "").replace(/\/+$/, "");
+  const qs = new URLSearchParams({ faculty_id: params.faculty_id });
+  if (params.term_id) qs.set("term_id", params.term_id);
+  const url = `${base}/om/load-assignment/faculty-deloadings?${qs.toString()}`;
+  const r = await fetch(url, { method: "GET" });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json() as Promise<{ ok: boolean; term_id: string | null; faculty_id: string; rows: DeloadingRow[] }>;
+}
 
 /** List all sections for the current term (no algorithm) */
 export async function getOmLoadAssignmentList(user_id: string) {
@@ -2311,7 +2641,7 @@ export async function getOmLoadAssignmentList(user_id: string) {
   const url = `${base}/om/load-assignment/list?user_id=${encodeURIComponent(user_id)}`;
   const r = await fetch(url, { method: "GET" });
   if (!r.ok) throw new Error(await r.text());
-  return r.json() as Promise<{ term: string; rows: OmLoadRow[] }>;
+  return r.json() as Promise<{ term: string; term_id?: string; rows: OmLoadRow[] }>;
 }
 
 /** Auto-assign algorithm run (fill faculty/day/time/room) */
@@ -2327,6 +2657,73 @@ export async function runOmAutoAssign(params: {
   if (!r.ok) throw new Error(await r.text());
   return r.json() as Promise<{ term: string; rows: OmLoadRow[] }>;
 }
+
+/** Send OM proposed schedules to faculty (all rows per faculty) */
+export async function sendOmLoadAssignmentsToFaculty(
+  user_id: string,
+  payload: { term_id?: string; rows: any[] }
+) {
+  const base = (typeof API_BASE !== "undefined" ? API_BASE : "").replace(/\/+$/, "");
+  const url = `${base}/om/load-assignment/to-faculty`;
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ user_id, ...payload }),
+  });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json() as Promise<{ ok: boolean; term_id: string; sent_faculty: number }>;
+}
+
+export async function getOmLoadAssignmentRfc(
+  user_id: string,
+  params: { term_id?: string; faculty_id: string }
+) {
+  const base = (typeof API_BASE !== "undefined" ? API_BASE : "").replace(/\/+$/, "");
+  const qs = new URLSearchParams({ user_id, faculty_id: params.faculty_id });
+  if (params.term_id) qs.set("term_id", params.term_id);
+  const url = `${base}/om/load-assignment/rfc?${qs.toString()}`;
+  const r = await fetch(url, { method: "GET" });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json() as Promise<{ ok: boolean; rfc: any | null }>;
+}
+
+export async function respondOmLoadAssignmentRfc(
+  user_id: string,
+  payload: {
+    term_id: string;
+    faculty_id: string;
+    action: "reply" | "approve" | "reject";
+    message?: string;
+  }
+) {
+  const base = (typeof API_BASE !== "undefined" ? API_BASE : "").replace(/\/+$/, "");
+  const url = `${base}/om/load-assignment/rfc/respond`;
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ user_id, ...payload }),
+  });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json() as Promise<{ ok: boolean; status?: string }>;
+}
+
+/** When OM clicks the check button per course: notify faculty that subject is final */
+export async function finalizeOmLoadAssignmentCourse(
+  user_id: string,
+  payload: { term_id?: string; faculty_id: string; course_code: string; section: string }
+) {
+  const base = (typeof API_BASE !== "undefined" ? API_BASE : "").replace(/\/+$/, "");
+  const url = `${base}/om/load-assignment/finalize-course`;
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ user_id, ...payload }),
+  });
+
+  if (!r.ok) throw new Error(await r.text());
+  return r.json() as Promise<{ ok: boolean }>;
+}
+
 
 export async function getAllFaculty() {
   const base = (typeof API_BASE !== "undefined" ? API_BASE : "").replace(/\/+$/, "");
@@ -2528,6 +2925,37 @@ export async function rejectFacultyService(fs_id: string, payload?: { remarks?: 
 
 
 
+
+
+/* =========================================================
+   ===============  NOTIFICATIONS (Topbar bell)  ============
+   ========================================================= */
+export type AppNotification = {
+  notif_id: string;
+  user_id: string;
+  title: string;
+  details: string;
+  created_at: string; // ISO
+  seen: boolean;
+  seen_at?: string | null;
+  meta?: { route?: string; fs_id?: string; kind?: string };
+};
+
+export async function listNotifications(userId: string, limit = 25) {
+  const sp = new URLSearchParams();
+  sp.set("userId", userId);
+  sp.set("limit", String(limit));
+  const { data } = await api.get(`/notifications?${sp.toString()}`);
+  return data as { ok: boolean; rows: AppNotification[] };
+}
+
+export async function markNotificationsSeen(
+  userId: string,
+  opts: { all?: boolean; ids?: string[] }
+) {
+  const { data } = await api.post(`/notifications/mark-seen`, { userId, ...opts });
+  return data as { ok: boolean };
+}
 export async function chairClassRetention(userId: string) {
   const { data } = await api.post(`/chair/class-retention`, {}, {
     params: { userId, action: "fetch" },

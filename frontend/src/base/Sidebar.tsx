@@ -1,12 +1,47 @@
 // src/base/Sidebar.tsx
 import { NavLink } from "react-router-dom";
-import { ListChecks, Users, BookOpen, BarChart3, FileText, FilePlus, BookMarked, type LucideIcon } from "lucide-react";
+import type { ComponentType } from "react";
+import {
+  ListChecks,
+  Users,
+  BookOpen,
+  BarChart3,
+  FileText,
+  FilePlus,
+  BookMarked,
+  ClipboardList,
+  Star,
+} from "lucide-react";
 import { cls } from "../utilities/cls";
 import AA_Logo from "../assets/Images/AA_Logo.png";
 import loginBg from "../assets/Images/login_bg.png";
 
-export type SidebarItem = { to: string; label: string; Icon: LucideIcon };
+/**
+ * ✅ Must match Lucide's signature:
+ * Lucide icons accept size?: string | number
+ */
+type SidebarIcon = ComponentType<{ size?: string | number; className?: string }>;
+
+export type SidebarItem = { to: string; label: string; Icon: SidebarIcon };
 type SidebarProps = { open: boolean; onToggle: () => void; items?: SidebarItem[] };
+
+function ClipboardStarIcon({
+  size = 18,
+  className = "",
+}: {
+  size?: string | number;
+  className?: string;
+}) {
+  const nSize = typeof size === "number" ? size : Number(size) || 18;
+  const starSize = Math.max(10, Math.round(nSize * 0.55));
+
+  return (
+    <span className={cls("relative inline-flex items-center justify-center", className)}>
+      <ClipboardList size={size} className="opacity-95" />
+      <Star size={starSize} className="absolute -right-1 -bottom-1" fill="currentColor" />
+    </span>
+  );
+}
 
 const defaultItems: SidebarItem[] = [
   { to: "/om/load-assignment", label: "Load Assignment", Icon: ListChecks },
@@ -15,6 +50,7 @@ const defaultItems: SidebarItem[] = [
   { to: "/om/reports-analytics", label: "Reports and Analytics", Icon: BarChart3 },
   { to: "/om/faculty-form", label: "Faculty Preferences", Icon: FileText },
   { to: "/om/student-petition", label: "Student Petition", Icon: FilePlus },
+  { to: "/om/special-class", label: "Special Class", Icon: ClipboardStarIcon },
   { to: "/om/class-retention", label: "Class Retention", Icon: BookMarked },
 ];
 

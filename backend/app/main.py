@@ -74,6 +74,12 @@ async def _ensure_faculty_overview_indexes() -> None:
     await db.departments.create_index("dept_code")
     await db.audit_logs.create_index([("timestamp", -1)])
 
+    # ------------------------------------------------------
+    # NOTIFICATIONS – in-app bell notifications
+    # ------------------------------------------------------
+    await db.notifications.create_index([('user_id', 1), ('seen', 1), ('created_at', -1)])
+    await db.notifications.create_index('notif_id', unique=True)
+
 
 __all__ = ["app", "db"]
 
@@ -127,6 +133,7 @@ from .OM.OM_FacultyManagement import router as om_facultymanagement
 from .OM.OM_CourseManagement import router as om_coursemanagement
 from .OM.OM_FacultyForm import router as om_facultyform
 from .OM.OM_StudentPetition import router as om_studentpetition
+from .OM.OM_SpecialClass import router as om_specialclass
 from .OM.OM_ClassRetention import router as om_classretention
 
 from .OM.OM_Inbox import router as om_inbox_router
@@ -152,13 +159,18 @@ from .CHAIR.CHAIR_CourseManagement import router as chair_coursemanagement_route
 from .CHAIR.CHAIR_FacultyService import router as chair_faculty_service_router
 from .CHAIR.CHAIR_ClassRetention import router as chair_classretention_router
 from .CHAIR.CHAIR_StudentPetition import router as chair_studentpetition_router
+from .CHAIR.CHAIR_SpecialClass import router as chair_specialclass_router
 from .CHAIR.CHAIR_Inbox import router as chair_inbox_router
 
 
 from .ADMIN.ADMIN import router as admin_router
 from .ADMIN.ADMIN_Inbox import router as admin_inbox_router
 
+from .Notifications import router as notifications_router
+
 app.include_router(login_router, prefix="/api")
+
+app.include_router(notifications_router, prefix="/api")
 
 app.include_router(om_inbox_router, prefix="/api")
 app.include_router(om_loadassignment_router, prefix="/api")
@@ -174,6 +186,7 @@ app.include_router(om_facultymanagement, prefix="/api")
 app.include_router(om_coursemanagement, prefix="/api")
 app.include_router(om_facultyform, prefix="/api")
 app.include_router(om_studentpetition, prefix="/api")
+app.include_router(om_specialclass, prefix="/api")
 app.include_router(om_classretention, prefix="/api")
 
 app.include_router(facultyoverview_router, prefix="/api")
@@ -191,4 +204,5 @@ app.include_router(chair_coursemanagement_router, prefix="/api")
 app.include_router(chair_faculty_service_router, prefix="/api")
 app.include_router(chair_classretention_router, prefix="/api")
 app.include_router(chair_studentpetition_router, prefix="/api")
+app.include_router(chair_specialclass_router, prefix="/api")
 app.include_router(chair_inbox_router, prefix="/api")

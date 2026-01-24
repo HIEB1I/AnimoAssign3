@@ -400,26 +400,3 @@ async def chair_plantilla_get(
 
     return {"ok": False, "error": f"Unknown action '{action}'"}
 
-
-@router.post("/plantilla")
-async def chair_plantilla_post(
-    userId: Optional[str] = Query(None),
-    action: str = Query("approve")
-) -> Dict[str, Any]:
-    """
-    POST /api/chair/plantilla?action=approve
-    """
-    if action == "approve":
-        now = datetime.now(timezone.utc).isoformat()
-        await db.plantilla_reviews.insert_one({
-            "review_id": f"RVW-{int(datetime.now().timestamp())}",
-            "plantilla_id": "PLT_DEV",
-            "reviewer_id": userId or "UNKNOWN",
-            "reviewer_role": "ROLE0002",
-            "action": "approved",
-            "comments": "Approved via UI",
-            "review_date": now,
-        })
-        return {"ok": True}
-
-    return {"ok": False, "error": f"Unknown action '{action}'"}

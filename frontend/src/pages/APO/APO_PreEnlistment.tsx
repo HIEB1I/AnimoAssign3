@@ -535,9 +535,9 @@ const handleImportStats = (event: React.ChangeEvent<HTMLInputElement>) => {
       ? `Term ${activeMeta.term_number ?? ""} ${activeMeta.ay_label}`
       : "current term";
 
-    if (!confirm(`Archive ${label}? This will snapshot active rows for your campus and may advance the term.`)) {
-      return;
-    }
+  if (!confirm(`Archive ${label}? This will snapshot active rows for BOTH Manila and Laguna and may advance the term.`)) {
+    return;
+  }
 
     try {
       setArchiving(true);
