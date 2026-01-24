@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Calendar, AlertCircle, Send, UserCircle, LogOut } from "lucide-react";
 import SelectBox from "../../component/SelectBox";
+import Tabs from "../../component/Tabs";
+
 import {
   getStudentPetitions,
   submitStudentPetition,
@@ -267,12 +269,20 @@ export default function STUDENT_Petition() {
   return (
     <div className="min-h-screen w-full bg-white text-slate-900">
       <TopBarInline fullName={fullName} role="Student" />
+      <Tabs
+        mode="nav"
+        items={[
+          { label: "Course Offerings", to: "/student/courseofferings" },
+          { label: "Class Petition", to: "/student/petition" },
+          { label: "Special Class", to: "/student/specialclass" }
+        ]}
+      />
 
       <main className="p-6 max-w-7xl mx-auto">
         <div className="grid xl:grid-cols-2 gap-10">
           {/* LEFT: form */}
           <section>
-            <h2 className="text-xl font-bold mb-1">Section Petition Form</h2>
+            <h2 className="text-xl font-bold mb-1">Class Petition Form</h2>
             <p className="text-sm text-gray-600 mb-4">
               Submit a petition to request additional sections or slots.
             </p>

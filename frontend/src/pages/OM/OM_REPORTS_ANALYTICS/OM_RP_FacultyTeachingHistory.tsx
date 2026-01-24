@@ -173,7 +173,8 @@ function FacultyAccordion() {
         setOpenIds(next);
         return;
       }
-      setOpenIds(next.add(id));
+      next.add(id);
+      setOpenIds(next); // Set open first to show loading immediately
       if (cache[id]) return;
       
       setErrors((m) => ({ ...m, [id]: null }));
@@ -276,16 +277,92 @@ function FacultyAccordion() {
 }
 
 /** -----------------------------
- * History Tables
+ * UNITS HISTORY CHART COMPONENT (Minor Fix/Enhancement)
+ * * Retains as a core part of the analytics view.
+ * ----------------------------- */
+type UnitsByTerm = { key: string; units: number };
+
+function UnitsHistoryChart({ data, avgLoad }: { data: UnitsByTerm[], avgLoad: number }) {
+  if (!data || data.length === 0) return null;
+
+  let maxUnits = data.reduce((max, d) => Math.max(max, d.units), 0) * 1.1; // Add padding
+  if (avgLoad > maxUnits) maxUnits = avgLoad * 1.1;
+  const scaleFactor = maxUnits > 0 ? 100 / maxUnits : 0;
+  
+  return (
+    // Replaced generic div with a styled card for visual impact
+    <div className="p-5 rounded-xl border border-gray-200 bg-white shadow-lg">
+      <h3 className="text-xl font-bold text-gray-800 mb-4 flex items-center gap-2">
+        📊 Teaching Load Trend (Units per Term)
+      </h3>
+      
+      {/* Legend for context - Simplified */}
+      <p className="text-xs text-gray-600 mb-4 border-b pb-3">
+          <span className="text-emerald-500 font-semibold">Standard Load</span> | 
+          <span className="text-red-500 ml-3 font-semibold">High Load (&gt; Avg + 20%)</span> |
+          <span className="text-amber-500 ml-3 font-semibold">Low Load (&lt; Avg - 20%)</span> |
+          <span className="text-indigo-700 ml-3 font-semibold">Reference Line: Average Load ({avgLoad.toFixed(1)} Units)</span>
+      </p>
+
+      <div className="flex flex-col space-y-4 text-sm"> {/* Increased spacing and font size */}
+        {data.map((d) => {
+          const percentage = d.units * scaleFactor;
+          const avgLinePosition = avgLoad * scaleFactor;
+          
+          // Define thresholds for High/Low load (e.g., 20% deviation from average)
+          const isHigh = avgLoad > 0 && d.units > avgLoad * 1.2;
+          const isLow = avgLoad > 0 && d.units < avgLoad * 0.8;
+          const barColor = isHigh ? 'bg-red-500' : isLow ? 'bg-amber-500' : 'bg-emerald-500';
+          
+          return (
+            <div key={d.key} className="flex items-center">
+              <span className="w-44 text-gray-700 font-medium whitespace-nowrap">{d.key}</span> {/* Wider label */}
+              
+              {/* Bar Container */}
+              <div className="flex items-center w-full ml-6 relative h-6"> {/* Increased height */}
+                
+                {/* Horizontal Bar */}
+                <div 
+                  className={`rounded h-full ${barColor} transition-all duration-300`} // Added transition
+                  style={{ width: `${percentage}%` }}
+                  title={`${d.key}: ${d.units} Units`}
+                />
+                
+                {/* Visual indicator for average load baseline - Changed color for contrast */}
+                {avgLoad > 0 && (
+                  <div 
+                    className="absolute h-full w-[3px] bg-indigo-700 -translate-y-1/2 top-1/2 rounded-full" // Thicker line
+                    style={{ left: `${avgLinePosition}%` }}
+                    title={`Historical Average Load: ${avgLoad.toFixed(1)} units`}
+                  />
+                )}
+                
+                {/* Label - Placed outside the bar for clarity if bar is small */}
+                <span className="ml-3 font-extrabold text-gray-800">
+                  {d.units}
+                  {(isHigh || isLow) && (
+                      <span className={`ml-2 text-xs font-semibold ${isHigh ? 'text-red-500' : 'text-amber-500'}`}>
+                          ({isHigh ? 'High' : 'Low'})
+                      </span>
+                  )}
+                </span>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/** -----------------------------
+ * History Tables (REVISED for Clarity and Descriptive Analytics)
  * ----------------------------- */
 function HistoryTables({ rows }: { rows: TeachingHistoryRow[] }) {
-  // Group by unique key
+  // ... (Existing useMemo for grouped, sortedKeys, globalSummary, and unitsByTerm remain the same) ...
   const grouped = useMemo(() => groupByTermAndAy(rows || []), [rows]);
   
   // DERIVE KEYS FROM ROWS to preserve Backend Sort Order (AY Desc -> Term Desc).
-  // The backend sends data sorted. If we just Object.keys(grouped), we lose that guaranteed order.
-  // If we re-sort via string (reverse), we rely on string format.
-  // Best approach: Iterate the original rows, pick unique keys in order.
   const sortedKeys = useMemo(() => {
     const seen = new Set<string>();
     const keys: string[] = [];
@@ -298,37 +375,166 @@ function HistoryTables({ rows }: { rows: TeachingHistoryRow[] }) {
     }
     return keys;
   }, [rows]);
+  
+  // Global summary logic
+  const globalSummary = useMemo(() => {
+    const totalUnitsOverall = rows.reduce((sum, r) => sum + (r.units || 0), 0);
+    const totalCoursesOverall = rows.length;
+    const uniqueCoursesOverall = Array.from(new Set(rows.map(r => r.course_code))).length;
+    const acadYearsCovered = Array.from(new Set(rows.map(r => r.ay))).length;
+    const termCount = sortedKeys.length;
+
+    // Derived Analytics Metrics
+    const courseRepeatRate = 
+        totalCoursesOverall > 0 
+            ? (totalCoursesOverall - uniqueCoursesOverall) / totalCoursesOverall 
+            : 0;
+
+    const avgCoursesPerAy = 
+        acadYearsCovered > 0 
+            ? totalCoursesOverall / acadYearsCovered 
+            : 0;
+
+    const avgUnitsPerTerm = termCount > 0 ? totalUnitsOverall / termCount : 0; // Essential for chart baseline
+
+    // Logistics
+    const campusCounts: Record<string, number> = {};
+    const modeCounts: Record<string, number> = {};
+    rows.forEach(r => {
+        const c = r.campus || "Online/N/A";
+        campusCounts[c] = (campusCounts[c] || 0) + 1;
+        const m = r.mode || "N/A";
+        modeCounts[m] = (modeCounts[m] || 0) + 1;
+    });
+    const primaryCampus = Object.entries(campusCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || 'N/A';
+    const primaryMode = Object.entries(modeCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || 'N/A';
+
+
+    return {
+        totalUnitsOverall, totalCoursesOverall, uniqueCoursesOverall, acadYearsCovered, 
+        primaryCampus, primaryMode,
+        courseRepeatRate, avgCoursesPerAy, avgUnitsPerTerm, termCount
+    };
+  }, [rows, sortedKeys]);
+  
+  // Units by Term logic
+  const unitsByTerm = useMemo(() => {
+    return sortedKeys.map(k => {
+      const list = grouped[k] || [];
+      const totalUnits = list.reduce((sum, r) => sum + (r.units || 0), 0);
+      return { key: k, units: totalUnits };
+    });
+  }, [rows, sortedKeys, grouped]);
+
 
   return (
-    <div className="space-y-6 mt-2">
+    <div className="space-y-8 mt-2">
+      
+      {/* 1. Global Performance Overview - Highlight the most insightful metrics */}
+      <div className="p-6 rounded-xl border-4 border-emerald-100 bg-emerald-50 shadow-xl">
+          <h3 className="text-xl font-extrabold text-emerald-800 mb-4 flex items-center gap-2">
+            ⭐ Overall Faculty Profile: {globalSummary.acadYearsCovered} AYs Covered
+          </h3>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-6 text-sm">
+              <div className="space-y-1 p-3 bg-white rounded-lg border">
+                  <div className="text-gray-500 font-medium">Average Unit Load per Term</div>
+                  <div className="text-3xl font-extrabold text-emerald-600">{globalSummary.avgUnitsPerTerm.toFixed(1)}</div>
+                  <div className="text-gray-600">Units (Across {globalSummary.termCount} Terms)</div>
+              </div>
+              <div className="space-y-1 p-3 bg-white rounded-lg border">
+                  <div className="text-gray-500 font-medium">Course Repetition Rate</div>
+                  <div className="text-3xl font-extrabold text-indigo-600">{(globalSummary.courseRepeatRate * 100).toFixed(0)}%</div>
+                  <div className="text-gray-600">{globalSummary.uniqueCoursesOverall} unique courses out of {globalSummary.totalCoursesOverall} total.</div>
+              </div>
+              <div className="space-y-1 p-3 bg-white rounded-lg border">
+                  <div className="text-gray-500 font-medium">Avg Courses per Academic Year</div>
+                  <div className="text-3xl font-extrabold text-amber-600">{globalSummary.avgCoursesPerAy.toFixed(1)}</div>
+                  <div className="text-gray-600">Courses taught.</div>
+              </div>
+              <div className="space-y-1 p-3 bg-white rounded-lg border">
+                  <div className="text-gray-500 font-medium">Primary Logistics</div>
+                  <div className="text-xl font-bold text-gray-800">{globalSummary.primaryMode}</div>
+                  <div className="text-gray-600">@ {globalSummary.primaryCampus}</div>
+              </div>
+          </div>
+      </div>
+      
+      {/* 2. Visual Overview of Load */}
+      <UnitsHistoryChart data={unitsByTerm} avgLoad={globalSummary.avgUnitsPerTerm} />
+      
+      {/* 3. Detailed Term History - Streamlined for focus */}
+      <h3 className="text-xl font-bold text-gray-800 border-b pb-2 flex items-center gap-2">
+        📅 Term-by-Term Course Details
+      </h3>
+
       {sortedKeys.map((groupKey) => {
         const list = grouped[groupKey] || [];
-        return (
-          <div key={groupKey} className="rounded-xl border border-gray-200 overflow-hidden">
-            <div className="px-4 py-2 text-sm font-semibold text-emerald-700 bg-gray-50 border-b">
-              {groupKey}
-            </div>
+        
+        // Per-Term Summary Metrics Calculation
+        const totalUnits = list.reduce((sum, r) => sum + (r.units || 0), 0);
+        const numCourses = list.length;
+        const avgUnitsPerCourse = numCourses > 0 ? (totalUnits / numCourses).toFixed(1) : 0;
+        const uniqueCampuses = Array.from(new Set(list.map(r => r.campus || "N/A")));
+        const uniqueModes = Array.from(new Set(list.map(r => r.mode || "Online")));
+        
+        // Term Load Anomaly Check
+        const avgLoad = globalSummary.avgUnitsPerTerm;
+        const isHighLoad = totalUnits > avgLoad * 1.2;
+        const isLowLoad = totalUnits < avgLoad * 0.8;
+        const loadColor = isHighLoad ? 'text-red-600 bg-red-50' : isLowLoad ? 'text-amber-600 bg-amber-50' : 'text-emerald-700 bg-gray-50';
+        const loadStatus = isHighLoad ? 'HIGH LOAD' : isLowLoad ? 'LOW LOAD' : 'STANDARD LOAD';
 
+
+        return (
+          <div key={groupKey} className="rounded-xl border border-gray-200 overflow-hidden shadow-sm">
+            {/* Header: Term + Load Status */}
+            <div className={`px-4 py-3 text-lg font-bold ${loadColor} border-b`}>
+              {groupKey} <span className="text-sm font-semibold ml-2">({loadStatus})</span>
+            </div>
+            
+            {/* Term Summary: Focus on Load and Logistics */}
+            <div className="p-4 bg-white border-b border-gray-100 grid grid-cols-2 md:grid-cols-4 gap-4 text-xs">
+                {/* Course Load Metrics */}
+                <div className="space-y-0.5">
+                    <div className="text-gray-500 font-medium">Total Courses</div>
+                    <div className="text-xl font-bold text-gray-800">{numCourses}</div>
+                </div>
+                <div className="space-y-0.5">
+                    <div className="text-gray-500 font-medium">Term Units (Avg Course Unit)</div>
+                    <div className="text-xl font-bold text-gray-800">{totalUnits} ({avgUnitsPerCourse})</div>
+                </div>
+                {/* Logistics Metrics */}
+                <div className="space-y-0.5">
+                    <div className="text-gray-500 font-medium">Delivery Modes</div>
+                    <div className="text-sm font-bold text-gray-800 mt-1">{uniqueModes.join(", ")}</div>
+                </div>
+                <div className="space-y-0.5">
+                    <div className="text-gray-500 font-medium">Campuses</div>
+                    <div className="text-sm font-bold text-gray-800 mt-1">{uniqueCampuses.join(", ")}</div>
+                </div>
+            </div>
+            
+            {/* Detailed Course Table */}
             <div className="overflow-x-auto">
               <table className="min-w-full table-fixed text-sm border-t border-gray-200">
                 <colgroup>
-                  <col className="w-[12ch]" /> {/* Course Code */}
-                  <col className="w-[28ch]" /> {/* Course Title */}
-                  <col className="w-[8ch]"  /> {/* Section */}
-                  <col className="w-[8ch]"  /> {/* Mode */}
-                  <col className="w-[6ch]"  /> {/* Day 1 */}
-                  <col className="w-[12ch]" /> {/* Room 1 */}
-                  <col className="w-[6ch]"  /> {/* Day 2 */}
-                  <col className="w-[12ch]" /> {/* Room 2 */}
-                  <col className="w-[14ch]" /> {/* Time */}
+                  <col className="w-[12%]" /> {/* Course Code */}
+                  <col className="w-[8%]"  /> {/* Units */}
+                  <col className="w-[10%]"  /> {/* Section */}
+                  <col className="w-[30%]" /> {/* Primary Schedule (Day 1/Time/Room 1) */}
+                  <col className="w-[20%]" /> {/* Secondary Schedule (Day 2/Room 2) */}
+                  <col className="w-[10%]" /> {/* Mode */}
+                  <col className="w-[10%]" /> {/* Campus */}
                 </colgroup>
-                <thead className="bg-gray-50 text-gray-600 text-xs uppercase tracking-wide">
+                <thead className="bg-gray-100 text-gray-700 text-xs uppercase tracking-wide">
                   <tr>
                     {[
-                      "Course Code", "Course Title", "Section", "Mode",
-                      "Day 1", "Room 1", "Day 2", "Room 2", "Time"
+                      "Course Code", "Units", "Section", 
+                      "Primary Schedule", 
+                      "Secondary Schedule",
+                      "Mode", "Campus"
                     ].map((h) => (
-                      <th key={h} className="px-3 py-2 text-center font-medium whitespace-nowrap">
+                      <th key={h} className="px-3 py-2 text-center font-semibold whitespace-nowrap">
                         {h}
                       </th>
                     ))}
@@ -338,17 +544,22 @@ function HistoryTables({ rows }: { rows: TeachingHistoryRow[] }) {
                   {list.map((r, i) => (
                     <tr
                       key={i}
-                      className={i % 2 === 0 ? "bg-white text-gray-800" : "bg-gray-50 text-gray-800"}
+                      className={i % 2 === 0 ? "bg-white text-gray-800 hover:bg-gray-50" : "bg-gray-50 text-gray-800 hover:bg-gray-100"}
+                      title={r.course_title} // Use title for Course Title
                     >
-                      <td className="px-3 py-2 text-center">{r.course_code}</td>
-                      <td className="px-3 py-2 text-center whitespace-normal">{r.course_title}</td>
+                      <td className="px-3 py-2 text-center font-medium">{r.course_code}</td>
+                      <td className="px-3 py-2 text-center font-semibold">{r.units || "-"}</td>
                       <td className="px-3 py-2 text-center">{r.section_code}</td>
-                      <td className="px-3 py-2 text-center">{r.mode}</td>
-                      <td className="px-3 py-2 text-center">{r.day1 || "-"}</td>
-                      <td className="px-3 py-2 text-center">{r.room1 || "-"}</td>
-                      <td className="px-3 py-2 text-center">{r.day2 || "-"}</td>
-                      <td className="px-3 py-2 text-center">{r.room2 || "-"}</td>
-                      <td className="px-3 py-2 text-center">{r.time}</td>
+                      {/* Combined Primary Schedule */}
+                      <td className="px-3 py-2 text-center whitespace-normal">
+                          <span className="font-bold">{r.time || "-"}</span> on {r.day1 || "-"} in {r.room1 || "-"}
+                      </td>
+                       {/* Combined Secondary Schedule */}
+                      <td className="px-3 py-2 text-center whitespace-normal text-gray-600">
+                          {r.day2 || "-"} / {r.room2 || "-"}
+                      </td>
+                      <td className="px-3 py-2 text-center text-sm">{r.mode || "N/A"}</td>
+                      <td className="px-3 py-2 text-center text-sm">{r.campus || "N/A"}</td>
                     </tr>
                   ))}
                 </tbody>

@@ -1,6 +1,6 @@
 // frontend/src/pages/CHAIR/CHAIR_FacultyService.tsx
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { Send, ChevronDown, X } from "lucide-react";
+import { Send, ChevronDown, X, CheckCircle2, AlertCircle, Info } from "lucide-react";
 import {
   getFSOptions,
   listFacultyService,
@@ -16,22 +16,115 @@ import {
 
 /* ---------------- tiny utils ---------------- */
 const cls = (...s: (string | false | undefined)[]) => s.filter(Boolean).join(" ");
-const toast = (msg: string) => alert(msg);
 const norm = (s?: string) => (s || "").trim().replace(/\s+/g, " ").toLowerCase();
 const eqDept = (a?: string, b?: string) => norm(a) === norm(b);
+
+/* ---------------- Toasts (in-file, no external libs) ---------------- */
+type ToastType = "success" | "error" | "info";
+type ToastInput = { type: ToastType; title?: string; message: string };
+type ToastItem = {
+  id: string;
+  type: ToastType;
+  title?: string;
+  message: string;
+  open: boolean;
+};
+
+function ToastViewport({
+  items,
+  onClose,
+}: {
+  items: ToastItem[];
+  onClose: (id: string) => void;
+}) {
+  const iconFor = (t: ToastType) => {
+    if (t === "success") return <CheckCircle2 className="h-5 w-5 text-emerald-700" />;
+    if (t === "error") return <AlertCircle className="h-5 w-5 text-red-700" />;
+    return <Info className="h-5 w-5 text-amber-700" />;
+  };
+
+  const accentFor = (t: ToastType) => {
+    if (t === "success") return "bg-emerald-600";
+    if (t === "error") return "bg-red-600";
+    return "bg-amber-500";
+  };
+
+  const ringFor = (t: ToastType) => {
+    if (t === "success") return "ring-emerald-700/10";
+    if (t === "error") return "ring-red-700/10";
+    return "ring-amber-700/10";
+  };
+
+  if (!items.length) return null;
+
+  return (
+    <div
+      className={cls(
+        "fixed z-[9999] right-4 top-4",
+        "w-[360px] max-w-[calc(100vw-2rem)]",
+        "space-y-3"
+      )}
+      role="region"
+      aria-label="Notifications"
+    >
+      {items.map((t) => (
+        <div
+          key={t.id}
+          className={cls(
+            "relative overflow-hidden rounded-xl border border-neutral-200 bg-white",
+            "shadow-[0_10px_30px_rgba(0,0,0,0.12)] ring-1",
+            ringFor(t.type),
+            "transition-all duration-200 ease-out",
+            t.open ? "opacity-100 translate-y-0" : "opacity-0 -translate-y-2"
+          )}
+        >
+          <div className={cls("absolute left-0 top-0 h-full w-1.5", accentFor(t.type))} />
+
+          <div className="flex gap-3 px-4 py-3">
+            <div className="mt-0.5">{iconFor(t.type)}</div>
+            <div className="min-w-0 flex-1">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  {t.title && <div className="text-[13px] font-semibold text-neutral-900">{t.title}</div>}
+                  <div className="text-[13px] text-neutral-700 leading-snug break-words">{t.message}</div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => onClose(t.id)}
+                  className="shrink-0 rounded-md p-1 hover:bg-neutral-100"
+                  aria-label="Dismiss"
+                  title="Dismiss"
+                >
+                  <X className="h-4 w-4 text-neutral-500" />
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
 
 /** unify control heights */
 const CONTROL =
   "h-10 w-full rounded-md border border-gray-300 px-3 text-[13px] shadow-sm focus:ring-2 focus:ring-emerald-500/30";
 
-/** shared table look */
-const SHARED_TABLE = "w-full table-fixed border-collapse text-[13px]";
-const CELL = "px-4 py-2 align-middle";
-const TH = "px-4 py-2 font-medium text-xs text-gray-600 tracking-wide text-center";
+/* ---------------- Plantilla table design system (source of truth) ---------------- */
+const PLANTILLA_TABLE_WRAP =
+  "rounded-xl border border-gray-300 bg-white shadow-sm overflow-x-auto overflow-y-auto";
 
-/** tighter cells just for REQUESTER tables */
-const CELL_TIGHT = "px-3 py-1.5 align-middle";
-const TH_TIGHT = "px-3 py-1.5 font-medium text-xs text-gray-600 tracking-wide text-center";
+const PLANTILLA_TABLE =
+  "min-w-full w-full text-sm table-fixed border-collapse leading-snug [&_td]:align-top [&_td]:whitespace-normal [&_td]:break-words";
+
+const PLANTILLA_THEAD = "bg-gray-50 text-emerald-800 sticky top-0 z-10 text-xs";
+const PLANTILLA_HEAD_TR = "whitespace-nowrap text-[13px] font-semibold";
+
+const PLANTILLA_TH = "px-3 py-2 text-center border border-gray-300";
+const PLANTILLA_TD = "px-3 py-2 text-center";
+const PLANTILLA_ROW = "hover:bg-gray-50 [&>td]:border [&>td]:border-gray-200";
+const PLANTILLA_SECTION_TITLE =
+  "px-5 py-3 text-sm font-semibold text-white text-center bg-emerald-700";
 
 /* ---------------- Dropdown (portal-less, fixed-positioned) ---------------- */
 function Dropdown({
@@ -174,11 +267,7 @@ function Dropdown({
           // NON-SEARCHABLE MODE: plain button shows selected value
           <button
             type="button"
-            className={cls(
-              CONTROL,
-              "pr-8 text-left",
-              !value && "text-neutral-400"
-            )}
+            className={cls(CONTROL, "pr-8 text-left", !value && "text-neutral-400")}
             onClick={() => {
               if (open) setOpen(false);
               else openFresh();
@@ -208,9 +297,7 @@ function Dropdown({
         )}
 
         {/* Chevron icon (purely visual) */}
-        <ChevronDown
-          className="pointer-events-none absolute right-1.5 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-500"
-        />
+        <ChevronDown className="pointer-events-none absolute right-1.5 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-500" />
       </div>
 
       {open && menuRect && (
@@ -220,8 +307,7 @@ function Dropdown({
             position: "fixed",
             left: menuRect.left,
             top: menuRect.place === "down" ? menuRect.top : undefined,
-            bottom:
-              menuRect.place === "up" ? window.innerHeight - menuRect.top : undefined,
+            bottom: menuRect.place === "up" ? window.innerHeight - menuRect.top : undefined,
             width: menuRect.width,
             maxHeight: "60vh",
           }}
@@ -243,9 +329,7 @@ function Dropdown({
               {opt}
             </button>
           ))}
-          {shown.length === 0 && (
-            <div className="px-3 py-2 text-[13px] text-neutral-500">No results</div>
-          )}
+          {shown.length === 0 && <div className="px-3 py-2 text-[13px] text-neutral-500">No results</div>}
         </div>
       )}
     </div>
@@ -253,16 +337,7 @@ function Dropdown({
 }
 
 /* ---------------- Spec constants ---------------- */
-const BEGIN_OPTIONS = [
-  "07:30",
-  "09:15",
-  "11:00",
-  "12:45",
-  "14:30",
-  "16:15",
-  "18:00",
-  "19:45",
-] as const;
+const BEGIN_OPTIONS = ["07:30", "09:15", "11:00", "12:45", "14:30", "16:15", "18:00", "19:45"] as const;
 const END_BY_BEGIN: Record<(typeof BEGIN_OPTIONS)[number], string> = {
   "07:30": "09:00",
   "09:15": "10:45",
@@ -290,7 +365,6 @@ const COLS_14 = [
   "30ch", // Remarks
   "22ch", // Action
 ];
-
 
 // Use only M/T/W for the first day, and auto-pair Day2
 const DAY1_OPTIONS: DayShort[] = ["M", "T", "W"];
@@ -350,8 +424,6 @@ function ColGroupAccepted() {
   );
 }
 
-
-
 type FSCreate = {
   course_code: string;
   course_title: string;
@@ -363,12 +435,11 @@ function facultyLabel(f?: { first_name?: string; last_name?: string; email?: str
   if (!f) return "";
   const L = (f.last_name || "").toUpperCase();
   const F = (f.first_name || "").toUpperCase();
-  return (L || F) ? `${L}, ${F}` : "";
+  return L || F ? `${L}, ${F}` : "";
 }
 
-
 /* ---------------- Departments ---------------- */
-const REQUESTER_DEPT = "Department of Software Technology"; // only this can send
+// NOTE: Faculty Service is bi-directional. "From" is always the logged-in chair's department.
 
 /* ------------- Faculty option type ------------- */
 type FacultyOption = {
@@ -388,32 +459,58 @@ type ChairFacultyServiceProps = {
    *   "Department of Computer Technology"
    *   "Department of Literature"
    *
-   * If omitted, we default to ST (requester) for backwards compatibility.
+   * If omitted, we derive it from getChairHeader(). As a last resort we fall back
+   * to "Department of Software Technology" for backwards compatibility.
    */
   chairDepartmentName?: string;
 };
 
-export default function CHAIR_FacultyService({
-  chairDepartmentName,
-}: ChairFacultyServiceProps) {
+export default function CHAIR_FacultyService({ chairDepartmentName }: ChairFacultyServiceProps) {
   /**
-   * DEPARTMENT-BASED BRANCHING (core logic):
-   *
-   * We derive the "active" department from the logged-in chair.
-   * - If it's Software Technology (ST), this screen acts as REQUESTER.
-   * - Otherwise, it acts as RECEIVER (IT, CT, LIT).
+   * Bi-directional behavior:
+   * - Any department can create and send requests to any other department.
+   * - Each chair sees BOTH: Sent (from my dept) and Received (to my dept).
    */
+
+  /* ---------------- toast state ---------------- */
+  const [toasts, setToasts] = useState<ToastItem[]>([]);
+  const toastTimers = useRef<Record<string, number>>({});
+
+  const removeToast = (id: string) => {
+    setToasts((prev) => prev.filter((t) => t.id !== id));
+    if (toastTimers.current[id]) {
+      window.clearTimeout(toastTimers.current[id]);
+      delete toastTimers.current[id];
+    }
+  };
+
+  const closeToast = (id: string) => {
+    setToasts((prev) => prev.map((t) => (t.id === id ? { ...t, open: false } : t)));
+    // allow exit transition to play
+    window.setTimeout(() => removeToast(id), 220);
+  };
+
+  const showToast = ({ type, title, message }: ToastInput) => {
+    const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const item: ToastItem = { id, type, title, message, open: true };
+
+    setToasts((prev) => [item, ...prev]);
+    toastTimers.current[id] = window.setTimeout(() => closeToast(id), 3000);
+  };
+
+  useEffect(() => {
+    return () => {
+      Object.values(toastTimers.current).forEach((t) => window.clearTimeout(t));
+      toastTimers.current = {};
+    };
+  }, []);
 
   // Working / planning term coming from backend activeTerm
   const [termLabel, setTermLabel] = useState<string>("");
 
-  // Start with ST (requester) as a safe default while we load the real dept.
-  const [activeDeptName, setActiveDeptName] = useState<string>(
-    chairDepartmentName || REQUESTER_DEPT
-  );
-
-
-   const isRequesterDept = eqDept(activeDeptName, REQUESTER_DEPT);
+  // Start empty; we derive from props or chair header.
+  // Fallback to ST only if we truly can't derive a department.
+  const [activeDeptName, setActiveDeptName] = useState<string>(chairDepartmentName || "");
 
   // Build a header label from options.activeTerm
   const updateTermLabelFromOptions = (o: any) => {
@@ -444,18 +541,20 @@ export default function CHAIR_FacultyService({
         const header = await getChairHeader(userId);
         // Prefer an explicit field if backend provides one; otherwise parse subtitle.
         const subtitle: string | undefined = header?.profileSubtitle;
-        const derivedDept =
-          header?.dept_label ||
-          (subtitle ? subtitle.split("|")[1]?.trim() : "");
+        const derivedDept = header?.dept_label || (subtitle ? subtitle.split("|")[1]?.trim() : "");
 
-        if (derivedDept) {
-          setActiveDeptName(derivedDept);
-        }
+        if (derivedDept) setActiveDeptName(derivedDept);
       } catch {
-        // ignore; we’ll stay on REQUESTER_DEPT (ST) as fallback
+        // ignore
       }
     })();
   }, [chairDepartmentName]);
+
+  // Final safety fallback (backwards compatibility): if we still can't derive, default to ST.
+  useEffect(() => {
+    if (!activeDeptName) setActiveDeptName("Department of Software Technology");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeDeptName]);
 
   const [toDepts, setToDepts] = useState<ToDept[]>([]);
   const [timeBegins] = useState<string[]>([...BEGIN_OPTIONS]);
@@ -492,8 +591,7 @@ export default function CHAIR_FacultyService({
 
   const [edits, setEdits] = useState<Record<string, ReceiverEdit>>({});
 
-  const getEditFrom = (all: Record<string, ReceiverEdit>, id: string): ReceiverEdit =>
-    all[id] || EMPTY_EDIT;
+  const getEditFrom = (all: Record<string, ReceiverEdit>, id: string): ReceiverEdit => all[id] || EMPTY_EDIT;
 
   const getEdit = (id: string): ReceiverEdit => getEditFrom(edits, id);
 
@@ -503,29 +601,27 @@ export default function CHAIR_FacultyService({
       [id]: { ...getEditFrom(prev, id), ...patch },
     }));
 
-  const [rows, setRows] = useState<FacultyServiceRow[]>([]);
+  const [sentRows, setSentRows] = useState<FacultyServiceRow[]>([]);
+  const [receivedRows, setReceivedRows] = useState<FacultyServiceRow[]>([]);
   const [loadingList, setLoadingList] = useState(false);
 
-  // Requester (Software Tech) options for creating requests
-  // Only needed when the logged-in CHAIR belongs to ST.
+  // Options for creating requests: departments list + working term.
   useEffect(() => {
-    if (!isRequesterDept) return;
-
+    if (!activeDeptName) return;
     (async () => {
-            try {
-        const o = await getFSOptions({ requesterDepartment: REQUESTER_DEPT });
+      try {
+        const o = await getFSOptions({ requesterDepartment: activeDeptName });
         if (o?.ok) {
-          setToDepts(
-            (o.departments || []).filter((d: string) => !eqDept(d, REQUESTER_DEPT)) as ToDept[]
-          );
-          updateTermLabelFromOptions(o); // NEW
+          setToDepts((o.departments || []).filter((d: string) => !eqDept(d, activeDeptName)) as ToDept[]);
+          updateTermLabelFromOptions(o);
+          // If the current draft "to" becomes invalid (e.g., dept changed), clear it.
+          setDraft((d) => (d.to_department && eqDept(d.to_department, activeDeptName) ? { ...d, to_department: "" } : d));
         }
       } catch {
-
         // ignore
       }
     })();
-  }, [isRequesterDept]);
+  }, [activeDeptName]);
 
   // Load faculty list per receiver dept
   async function ensureFacultyForDept(dept: string) {
@@ -547,18 +643,20 @@ export default function CHAIR_FacultyService({
   }
 
   /**
-   * Fetch rows for the logged-in CHAIR's department.
-   * - ST (requester) sees its SENT requests.
-   * - Other departments (IT/CT/LIT) see their RECEIVED requests only.
+   * Fetch BOTH boxes for the logged-in CHAIR's department.
+   * - sent:   from_department === myDept
+   * - received: to_department === myDept
    */
   async function refresh() {
     setLoadingList(true);
     try {
-      const deptForList = isRequesterDept ? REQUESTER_DEPT : activeDeptName;
-      const box = (isRequesterDept ? "sent" : "received") as "sent" | "received";
-      const res = await listFacultyService({ dept: deptForList, box });
-      const rows = (res?.rows || []) as FacultyServiceRow[];
-      setRows(rows);
+      if (!activeDeptName) return;
+      const [sent, received] = await Promise.all([
+        listFacultyService({ dept: activeDeptName, box: "sent" }),
+        listFacultyService({ dept: activeDeptName, box: "received" }),
+      ]);
+      setSentRows((sent?.rows || []) as FacultyServiceRow[]);
+      setReceivedRows((received?.rows || []) as FacultyServiceRow[]);
     } finally {
       setLoadingList(false);
     }
@@ -566,19 +664,18 @@ export default function CHAIR_FacultyService({
 
   // Course suggestions (Software Tech as requester)
   const [courseTerm, setCourseTerm] = useState("");
-  const [courseSuggestions, setCourseSuggestions] = useState<
-    Array<{ code: string; title: string; units?: number }>
-  >([]);
+  const [courseSuggestions, setCourseSuggestions] = useState<Array<{ code: string; title: string; units?: number }>>([]);
 
   useEffect(() => {
     let mounted = true;
-    if (!isRequesterDept) return () => {
-      mounted = false;
-    };
-
+    if (!activeDeptName) {
+      return () => {
+        mounted = false;
+      };
+    }
     (async () => {
       try {
-        const res = await getFSOptions({ q: courseTerm, requesterDepartment: REQUESTER_DEPT });
+        const res = await getFSOptions({ q: courseTerm, requesterDepartment: activeDeptName });
         if (mounted && res?.ok) setCourseSuggestions(res.courses || []);
       } catch {
         // ignore
@@ -587,30 +684,28 @@ export default function CHAIR_FacultyService({
     return () => {
       mounted = false;
     };
-  }, [courseTerm, isRequesterDept]);
+  }, [courseTerm, activeDeptName]);
 
   const codeOptions = useMemo(
     () => Array.from(new Set((courseSuggestions || []).map((c) => c.code))).sort(),
     [courseSuggestions]
   );
 
-  const canSend = Boolean(
-    draft.course_code && draft.course_title && draft.units != null && draft.to_department
-  );
+  const canSend = Boolean(draft.course_code && draft.course_title && draft.units != null && draft.to_department);
 
   function friendlyError(e: any) {
-    const m =
-      e?.response?.data?.detail ||
-      e?.response?.data?.message ||
-      e?.message ||
-      "Something went wrong.";
+    const m = e?.response?.data?.detail || e?.response?.data?.message || e?.message || "Something went wrong.";
     return typeof m === "string" ? m : JSON.stringify(m);
   }
 
   async function handleCreateAndSend() {
     try {
       if (!canSend) {
-        toast("Please complete Course, Units, and To Department.");
+        showToast({
+          type: "info",
+          title: "Missing details",
+          message: "Please complete Course, Units, and To Department.",
+        });
         return;
       }
       const crt = await createFacultyService({
@@ -618,28 +713,25 @@ export default function CHAIR_FacultyService({
         course_title: draft.course_title,
         units: draft.units,
         to_department: draft.to_department as ToDept,
-        from_department: REQUESTER_DEPT,
+        from_department: activeDeptName,
       });
       if (!crt?.ok || !crt.row?.fs_id) {
-        toast("Failed to create request.");
+        showToast({ type: "error", title: "Create failed", message: "Failed to create request." });
         return;
       }
 
       // ... inside handleCreateAndSend ...
       const snd = await sendFacultyService(crt.row.fs_id);
 
-      setRows((prev) => {
-        // Add the new row to the START of the array so it appears at the top
-        return [snd.row, ...prev];
-      });
+      setSentRows((prev) => [snd.row, ...prev]);
 
       setDraft({ course_code: "", course_title: "", units: null, to_department: "" });
       setCourseTerm("");
 
       await refresh();
-      toast("Request sent.");
+      showToast({ type: "success", message: "Request sent." });
     } catch (e: any) {
-      toast(friendlyError(e));
+      showToast({ type: "error", title: "Request failed", message: friendlyError(e) });
     }
   }
 
@@ -647,19 +739,17 @@ export default function CHAIR_FacultyService({
   // whenever the logged-in CHAIR's department "role" changes.
   useEffect(() => {
     setEdits({});
-    if (!isRequesterDept) {
-      // Only receiver departments (IT/CT/LIT) need faculty dropdown options.
-      ensureFacultyForDept(activeDeptName);
-    }
+    // Receiver actions use faculty dropdown for my department.
+    if (activeDeptName) ensureFacultyForDept(activeDeptName);
     refresh().catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeDeptName, isRequesterDept]);
+  }, [activeDeptName]);
 
   async function handleSendBack(fs_id: string, dept: string) {
     const e = getEdit(fs_id);
     try {
       if (!e.faculty?.faculty_id && !e.faculty?.email) {
-        toast("Select a faculty.");
+        showToast({ type: "info", title: "Select a faculty", message: "Please select a faculty to proceed." });
         return;
       }
       await respondFacultyService(fs_id, {
@@ -679,9 +769,9 @@ export default function CHAIR_FacultyService({
       }));
       await refresh();
       ensureFacultyForDept(dept);
-      toast("Sent back to requesting department.");
+      showToast({ type: "success", message: "Request Accepted." });
     } catch (err: any) {
-      toast(friendlyError(err));
+      showToast({ type: "error", title: "Send failed", message: friendlyError(err) });
     }
   }
 
@@ -689,115 +779,95 @@ export default function CHAIR_FacultyService({
     try {
       await rejectFacultyService(fs_id, { remarks: getEdit(fs_id).remarks || "" });
       await refresh();
-      toast("Request rejected.");
+      showToast({ type: "error", message: "Request rejected." });
     } catch (err: any) {
-      toast(friendlyError(err));
+      showToast({ type: "error", title: "Reject failed", message: friendlyError(err) });
     }
   }
 
-  // For ST, rows are "sent" by ST; for other departments, rows are "received" by that dept.
-  const sentRows = isRequesterDept
-    ? rows.filter((r) => eqDept(r.from_department, REQUESTER_DEPT))
-    : [];
-
-  const receivedRows = !isRequesterDept
-    ? rows.filter((r) => eqDept(r.to_department, activeDeptName))
-    : [];
-
   const acceptedRows = useMemo(
-    () =>
-      isRequesterDept
-        ? rows.filter(
-            (r) =>
-              eqDept(r.from_department, REQUESTER_DEPT) && r.status === "responded"
-          )
-        : [],
-    [isRequesterDept, rows]
+    () => sentRows.filter((r) => eqDept(r.from_department, activeDeptName) && r.status === "responded"),
+    [sentRows, activeDeptName]
   );
 
   /* ---------------- UI ---------------- */
   return (
     <div className="min-h-screen w-full bg-gray-50 text-slate-900 px-8 py-8">
-    <header className="mb-6">
-      <h1 className="text-2xl font-bold">Faculty Service</h1>
-      <p className="text-sm text-gray-600">
-        {isRequesterDept
-          ? "Create faculty service requests from Software Technology and track their status"
-          : "View and respond to faculty service requests addressed to your department"}
-        {termLabel ? ` for ${termLabel}` : ""}
-      </p>
-    </header>
+      <ToastViewport items={toasts} onClose={closeToast} />
+      <header className="mb-6">
+        <h1 className="text-2xl font-bold">Faculty Service</h1>
+        <p className="text-sm text-gray-600">
+          Create faculty service requests from your department, track sent requests, and respond to requests addressed to
+          your department.
+          {termLabel ? ` for ${termLabel}` : ""}
+        </p>
+      </header>
 
+      {/* 1) CREATE REQUEST (From = activeDeptName) */}
+      <div className={cls(PLANTILLA_TABLE_WRAP, "overflow-y-visible mb-8")}>
+        <div className={cls(PLANTILLA_SECTION_TITLE, "w-full")}>Create Request</div>
 
-
-      {/* REQUESTER VIEW (ST only): Create Request + Sent Requests + Accepted Requests */}
-      {isRequesterDept && (
-        <>
-          {/* 1) CREATE REQUEST (Software Technology as fixed requester) */}
-          <div className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-x-auto overflow-y-visible mb-8">
-            <div className="px-5 pt-4 text-[14px] text-sm font-semibold text-neutral-800 text-center">
-              Create Request
-            </div>
-            <table className={cls(SHARED_TABLE, "border-t border-gray-200")}>
+            <div className="overflow-x-auto">
+              <table className={PLANTILLA_TABLE}>
               <ColGroupReq />
-              <thead className="bg-neutral-50">
-                <tr>
-                  <th className={TH_TIGHT}>Course Code</th>
-                  <th className={TH_TIGHT}>Course Title</th>
-                  <th className={TH_TIGHT}>Units</th>
-                  <th className={TH_TIGHT}>From</th>
-                  <th className={TH_TIGHT}>To</th>
-                  <th className={TH_TIGHT}>Action</th>
+              <thead className={PLANTILLA_THEAD}>
+                <tr className={PLANTILLA_HEAD_TR}>
+                  <th className={PLANTILLA_TH}>Course Code</th>
+                  <th className={PLANTILLA_TH}>Course Title</th>
+                  <th className={PLANTILLA_TH}>Units</th>
+                  <th className={PLANTILLA_TH}>From</th>
+                  <th className={PLANTILLA_TH}>To</th>
+                  <th className={PLANTILLA_TH}>Action</th>
                 </tr>
               </thead>
 
               <tbody className="text-gray-800">
-              <tr className="even:bg-gray-50">
-                {/* Course Code */}
-                <td className={CELL_TIGHT}>
-                  <div className="relative">
-                    <Dropdown
-                      value={draft.course_code}
-                      onChange={(code) => {
-                        const hit = courseSuggestions.find((c) => c.code === code);
-                        setDraft((d) => ({
-                          ...d,
-                          course_code: code,
-                          course_title: hit?.title ?? d.course_title,
-                          units: hit?.units ?? d.units,
-                        }));
-                        setCourseTerm("");
-                      }}
-                      options={codeOptions}
-                      placeholder="Select code…"
-                      searchable
-                      className="min-w-[10rem] [&>button]:h-9 [&>button]:px-2"
-                      onOpen={() => setCourseTerm("")}
-                    />
-                  </div>
-                </td>
+                <tr className={PLANTILLA_ROW}>
+                  {/* Course Code */}
+                  <td className={cls(PLANTILLA_TD, "align-middle")}>
+                    <div className="relative">
+                      <Dropdown
+                        value={draft.course_code}
+                        onChange={(code) => {
+                          const hit = courseSuggestions.find((c) => c.code === code);
+                          setDraft((d) => ({
+                            ...d,
+                            course_code: code,
+                            course_title: hit?.title ?? d.course_title,
+                            units: hit?.units ?? d.units,
+                          }));
+                          setCourseTerm("");
+                        }}
+                        options={codeOptions}
+                        placeholder="Select code…"
+                        searchable
+                        className="min-w-[10rem] [&>button]:h-9 [&>button]:px-2"
+                        onOpen={() => setCourseTerm("")}
+                      />
+                    </div>
+                  </td>
 
                   {/* Course Title (readonly) */}
-                  <td className={cls(CELL_TIGHT, "text-center")}>
+                  <td className={cls(PLANTILLA_TD, "align-middle")}>
                     <span className="inline-block max-w-full truncate leading-6 px-1">
                       {draft.course_title || "\u00A0"}
                     </span>
                   </td>
 
                   {/* Units (readonly) */}
-                  <td className={cls(CELL_TIGHT, "text-center tabular-nums")}>
+                  <td className={cls(PLANTILLA_TD, "align-middle tabular-nums")}>
                     <span className="inline-block leading-6">{draft.units ?? "\u00A0"}</span>
                   </td>
 
                   {/* From */}
-                  <td className={cls(CELL_TIGHT, "text-center")}>
-                    <span className="inline-block leading-6" title={REQUESTER_DEPT}>
-                      {REQUESTER_DEPT}
+                  <td className={cls(PLANTILLA_TD, "align-middle")}>
+                    <span className="inline-block leading-6" title={activeDeptName}>
+                      {activeDeptName}
                     </span>
                   </td>
 
                   {/* To */}
-                  <td className={cls(CELL_TIGHT, "text-center")}>
+                  <td className={cls(PLANTILLA_TD, "align-middle")}>
                     <Dropdown
                       value={draft.to_department}
                       onChange={(v) => setDraft((d) => ({ ...d, to_department: v as ToDept }))}
@@ -808,7 +878,7 @@ export default function CHAIR_FacultyService({
                   </td>
 
                   {/* Action */}
-                  <td className={cls(CELL_TIGHT, "text-center")}>
+                  <td className={cls(PLANTILLA_TD, "align-middle")}>
                     <button
                       className={cls(
                         "inline-flex h-9 w-full items-center justify-center gap-1.5 rounded-md px-2 text-[13px] font-medium shadow-sm",
@@ -827,49 +897,47 @@ export default function CHAIR_FacultyService({
                 </tr>
               </tbody>
             </table>
-          </div>
+	      </div>
 
-         {/* 2) SENT REQUESTS (from Software Technology) */}
-          <div className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-x-auto overflow-y-visible">
-            <div className="px-5 pt-4 text-[14px] text-sm font-semibold text-neutral-800 text-center">
-              Sent Requests
-            </div>
-            <table className={cls(SHARED_TABLE, "border-t border-gray-200")}>
-            <ColGroupSent />
-            <thead className="bg-neutral-50">
-              <tr>
-                <th className={TH_TIGHT}>Course Code & Title</th>
-                <th className={TH_TIGHT}>Units</th>
-                <th className={TH_TIGHT}>From</th>
-                <th className={TH_TIGHT}>To</th>
-                <th className={TH_TIGHT}>Status</th>
-              </tr>
-            </thead>
+      </div>
+
+      {/* 2) SENT REQUESTS (from my department) */}
+      <div className={cls(PLANTILLA_TABLE_WRAP, "mt-3 flex-1 min-h-[320px]")}>
+          <div className="overflow-x-auto">
+            <div className={cls(PLANTILLA_SECTION_TITLE, "w-full")}>Sent Requests</div>
+
+            <table className={PLANTILLA_TABLE}>
+
+              <ColGroupSent />
+              <thead className={PLANTILLA_THEAD}>
+                <tr className={PLANTILLA_HEAD_TR}>
+                  <th className={PLANTILLA_TH}>Course Code &amp; Title</th>
+                  <th className={PLANTILLA_TH}>Units</th>
+                  <th className={PLANTILLA_TH}>From</th>
+                  <th className={PLANTILLA_TH}>To</th>
+                  <th className={PLANTILLA_TH}>Status</th>
+                </tr>
+              </thead>
+
               <tbody className="text-gray-800">
-                {sentRows.map((r, i) => (
-                  <tr
-                    key={r.fs_id}
-                    className={cls(
-                      "align-middle",
-                      i % 2 === 0 ? "bg-white" : "bg-gray-50",
-                      "border-b border-gray-200"
-                    )}
-                  >
-                    <td className={CELL}>
+                {sentRows.map((r) => (
+                  <tr key={r.fs_id} className={PLANTILLA_ROW}>
+                    <td className={cls(PLANTILLA_TD, "text-left")}>
                       <div className="font-semibold text-emerald-700">{r.course_code}</div>
-                      <div className="text-[12px] text-neutral-600 leading-tight">
-                        {r.course_title}
-                      </div>
+                      <div className="text-[12px] text-neutral-600 leading-tight">{r.course_title}</div>
                     </td>
 
-                    <td className={cls(CELL_TIGHT, "text-center tabular-nums")}>{r.units ?? ""}</td>
-                    <td className={cls(CELL_TIGHT, "text-center truncate")} title={r.from_department}>
+                    <td className={cls(PLANTILLA_TD, "tabular-nums")}>{r.units ?? ""}</td>
+
+                    <td className={cls(PLANTILLA_TD, "truncate")} title={r.from_department}>
                       {r.from_department}
                     </td>
-                    <td className={cls(CELL_TIGHT, "text-center truncate")} title={r.to_department}>
+
+                    <td className={cls(PLANTILLA_TD, "truncate")} title={r.to_department}>
                       {r.to_department}
                     </td>
-                    <td className={cls(CELL_TIGHT, "text-center")}>
+
+                    <td className={PLANTILLA_TD}>
                       <span
                         className={cls(
                           "inline-block rounded-full px-2 py-[2px] text-[12px]",
@@ -880,25 +948,23 @@ export default function CHAIR_FacultyService({
                             : "bg-amber-100 text-amber-700"
                         )}
                       >
-                        {r.status === "responded"
-                          ? "Responded"
-                          : r.status === "rejected"
-                          ? "Rejected"
-                          : "Sent"}
+                        {r.status === "responded" ? "Responded" : r.status === "rejected" ? "Rejected" : "Sent"}
                       </span>
                     </td>
                   </tr>
                 ))}
+
                 {sentRows.length === 0 && !loadingList && (
-                  <tr>
-                    <td className="px-4 py-6 text-center text-sm text-gray-500" colSpan={6}>
+                  <tr className={PLANTILLA_ROW}>
+                    <td className={cls(PLANTILLA_TD, "py-6 text-sm text-gray-500")} colSpan={5}>
                       No sent requests yet.
                     </td>
                   </tr>
                 )}
+
                 {loadingList && (
-                  <tr>
-                    <td className="px-4 py-6 text-center text-sm text-gray-500" colSpan={6}>
+                  <tr className={PLANTILLA_ROW}>
+                    <td className={cls(PLANTILLA_TD, "py-6 text-sm text-gray-500")} colSpan={5}>
                       Loading…
                     </td>
                   </tr>
@@ -906,78 +972,75 @@ export default function CHAIR_FacultyService({
               </tbody>
             </table>
           </div>
+      </div>
 
-          {/* 3) ACCEPTED REQUESTS (Requester view, already responded) */}
-          <div className="mt-8 rounded-xl border border-neutral-200 bg-white/80 shadow-sm">
-            <div className="border-b border-neutral-100 px-4 py-3 sm:px-6">
-              <div className="flex items-center justify-between gap-2">
-                <div>
-                  <h3 className="text-sm font-semibold text-neutral-800">Accepted Requests</h3>
-                </div>
-                <span className="rounded-full bg-emerald-50 px-2.5 py-1 text-[11px] font-medium text-emerald-700">
+      {/* 3) ACCEPTED / RESPONDED REQUESTS (subset of Sent) */}
+      <div className={cls(PLANTILLA_TABLE_WRAP, "mt-8 overflow-y-visible")}>
+          <div className="overflow-x-auto">
+            <div className={cls(PLANTILLA_SECTION_TITLE, "w-full border-b border-emerald-800/10")}>
+              <div className="relative flex items-center justify-center">
+                <span>Accepted Requests</span>
+                <span className="absolute right-0 rounded-full bg-white/20 px-2.5 py-1 text-[11px] font-medium text-white">
                   {acceptedRows.length} accepted
                 </span>
               </div>
             </div>
-            <div className="max-h-[420px] overflow-auto">
-            <table className="min-w-full table-fixed border-separate border-spacing-0 text-[13px] text-center">
-              <ColGroupAccepted />
-              <thead className="sticky top-0 z-[1] bg-neutral-50">
-                <tr>
-                  <th className={`${TH_TIGHT} text-center`}>Course</th>
-                  <th className={`${TH_TIGHT} text-center`}>Units</th>
-                  <th className={`${TH_TIGHT} text-center`}>From Department</th>
-                  <th className={`${TH_TIGHT} text-center`}>Faculty</th>
-                  <th className={`${TH_TIGHT} text-center`}>Schedule</th>
-                  <th className={`${TH_TIGHT} text-center`}>Status</th>
-                  <th className={`${TH_TIGHT} text-center`}>Remarks</th>
-                </tr>
-              </thead>
+
+            <div className="max-h-[420px] overflow-y-auto">
+              <table className={PLANTILLA_TABLE}>
+
+                <ColGroupAccepted />
+                <thead className={PLANTILLA_THEAD}>
+                  <tr className={PLANTILLA_HEAD_TR}>
+                    <th className={cls(PLANTILLA_TH, "text-left")}>Course</th>
+                    <th className={PLANTILLA_TH}>Units</th>
+                    <th className={PLANTILLA_TH}>From Department</th>
+                    <th className={PLANTILLA_TH}>Faculty</th>
+                    <th className={PLANTILLA_TH}>Schedule</th>
+                    <th className={PLANTILLA_TH}>Status</th>
+                    <th className={PLANTILLA_TH}>Remarks</th>
+                  </tr>
+                </thead>
+
                 <tbody>
                   {!loadingList && acceptedRows.length === 0 && (
-                    <tr>
-                      <td
-                        className="px-4 py-6 text-center text-sm text-neutral-500"
-                        colSpan={7}
-                      >
+                    <tr className={PLANTILLA_ROW}>
+                      <td className={cls(PLANTILLA_TD, "py-6 text-sm text-gray-500")} colSpan={7}>
                         No accepted requests yet.
                       </td>
                     </tr>
                   )}
+
                   {acceptedRows.map((r) => (
-                    <tr key={r.fs_id || r.id} className="border-t border-neutral-100">
+                    <tr key={r.fs_id || r.id} className={PLANTILLA_ROW}>
                       {/* Course */}
-                      <td className="whitespace-nowrap px-3 py-2 align-middle text-center">
-                        <div className="font-medium text-neutral-800">{r.course_code}</div>
-                        <div className="text-xs text-neutral-500">{r.course_title}</div>
+                      <td className={cls(PLANTILLA_TD, "text-left")}>
+                        <div className="font-semibold text-emerald-700">{r.course_code}</div>
+                        <div className="text-[12px] text-neutral-600 leading-tight">{r.course_title}</div>
                       </td>
+
                       {/* Units */}
-                      <td className="whitespace-nowrap px-3 py-2 align-middle text-center text-xs text-neutral-700">
-                        {r.units ?? "—"}
-                      </td>
+                      <td className={cls(PLANTILLA_TD, "tabular-nums")}>{r.units ?? "—"}</td>
+
                       {/* From Department */}
-                      <td className="whitespace-nowrap px-3 py-2 align-middle text-center text-xs text-neutral-700">
-                        {r.from_department}
-                      </td>
+                      <td className={PLANTILLA_TD}>{r.from_department}</td>
+
                       {/* Faculty */}
-                      <td className="px-3 py-2 align-middle text-center">
+                      <td className={cls(PLANTILLA_TD, "align-middle")}>
                         {r.faculty?.last_name || r.faculty?.first_name ? (
                           <div className="space-y-0.5">
                             <p className="text-xs font-medium text-neutral-800">
-                              {[r.faculty?.last_name, r.faculty?.first_name]
-                                .filter(Boolean)
-                                .join(", ")}
+                              {[r.faculty?.last_name, r.faculty?.first_name].filter(Boolean).join(", ")}
                             </p>
-                            {r.faculty?.email && (
-                              <p className="text-[11px] text-neutral-500">{r.faculty.email}</p>
-                            )}
+                            {r.faculty?.email && <p className="text-[11px] text-neutral-500">{r.faculty.email}</p>}
                           </div>
                         ) : (
                           <span className="text-xs italic text-neutral-400">Not set</span>
                         )}
                       </td>
+
                       {/* Schedule */}
-                      <td className="px-3 py-2 align-middle text-center text-xs text-neutral-700">
+                      <td className={cls(PLANTILLA_TD, "align-middle")}>
                         <div className="space-y-0.5">
                           {(r.day1 || r.begin1 || r.end1) && (
                             <div>
@@ -995,29 +1058,22 @@ export default function CHAIR_FacultyService({
                               </span>
                             </div>
                           )}
-                          {!r.day1 &&
-                            !r.begin1 &&
-                            !r.end1 &&
-                            !r.day2 &&
-                            !r.begin2 &&
-                            !r.end2 && (
-                              <span className="text-xs italic text-neutral-400">
-                                No schedule set
-                              </span>
-                            )}
+                          {!r.day1 && !r.begin1 && !r.end1 && !r.day2 && !r.begin2 && !r.end2 && (
+                            <span className="text-xs italic text-neutral-400">No schedule set</span>
+                          )}
                         </div>
                       </td>
+
                       {/* Status */}
-                      <td className="whitespace-nowrap px-3 py-2 align-middle text-center text-xs">
+                      <td className={cls(PLANTILLA_TD, "align-middle")}>
                         <span className="inline-flex items-center justify-center rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700">
                           Responded
                         </span>
                       </td>
+
                       {/* Remarks */}
-                      <td className="px-3 py-2 align-middle text-center text-xs text-neutral-700">
-                        {r.remarks || (
-                          <span className="italic text-neutral-400">No remarks</span>
-                        )}
+                      <td className={cls(PLANTILLA_TD, "align-middle")}>
+                        {r.remarks || <span className="italic text-neutral-400">No remarks</span>}
                       </td>
                     </tr>
                   ))}
@@ -1025,38 +1081,36 @@ export default function CHAIR_FacultyService({
               </table>
             </div>
           </div>
-        </>
-      )}
+      </div>
 
-      {/* RECEIVER VIEW (IT/CT/LIT): Received Requests only */}
-      {!isRequesterDept && (
-        <>
-          {/* RECEIVED REQUESTS (editable, full; based on logged-in receiver department) */}
-          <div className="mt-8 rounded-xl border border-gray-200 bg-white shadow-sm overflow-x-auto overflow-y-visible">
-            <div className="px-5 pt-4 text-[13px] text-neutral-600">Received Requests</div>
-            <table className={cls(SHARED_TABLE, "border-t border-gray-200")}>
+      {/* 4) RECEIVED REQUESTS (editable, full; to my department) */}
+      <div className={cls(PLANTILLA_TABLE_WRAP, "mt-8 flex-1 min-h-[320px] overflow-y-auto")}>
+        <div className={cls(PLANTILLA_SECTION_TITLE, "w-full")}>Received Requests</div>
+
+            <div className="overflow-x-auto">
+              <table className={PLANTILLA_TABLE}>
+
               <ColGroup14 />
-              <thead className="bg-neutral-50">
-                <tr>
-                  <th className={cls(TH, "text-left")}>Course Code &amp; Title</th>
-                  <th className={TH}>Units</th>
-                  <th className={TH}>From</th>
-                  <th className={TH}>To</th>
-                  <th className={TH}>Faculty</th>
-                  <th className={TH}>Day1</th>
-                  <th className={TH}>Begin1</th>
-                  <th className={TH}>End1</th>
-                  <th className={TH}>Day2</th>
-                  <th className={TH}>Begin2</th>
-                  <th className={TH}>End2</th>
-                  <th className={TH}>Remarks</th>
-                  <th className={TH}>Action</th>
+              <thead className={PLANTILLA_THEAD}>
+                <tr className={PLANTILLA_HEAD_TR}>
+                  <th className={cls(PLANTILLA_TH, "text-left")}>Course Code &amp; Title</th>
+                  <th className={PLANTILLA_TH}>Units</th>
+                  <th className={PLANTILLA_TH}>From</th>
+                  <th className={PLANTILLA_TH}>To</th>
+                  <th className={PLANTILLA_TH}>Faculty</th>
+                  <th className={PLANTILLA_TH}>Day1</th>
+                  <th className={PLANTILLA_TH}>Begin1</th>
+                  <th className={PLANTILLA_TH}>End1</th>
+                  <th className={PLANTILLA_TH}>Day2</th>
+                  <th className={PLANTILLA_TH}>Begin2</th>
+                  <th className={PLANTILLA_TH}>End2</th>
+                  <th className={PLANTILLA_TH}>Remarks</th>
+                  <th className={PLANTILLA_TH}>Action</th>
                 </tr>
               </thead>
 
-
               <tbody className="text-gray-800">
-                {receivedRows.map((r, idx) => {
+                {receivedRows.map((r) => {
                   const fsid = r.fs_id!;
                   const dept = r.to_department || "";
                   const e = getEdit(fsid);
@@ -1064,40 +1118,29 @@ export default function CHAIR_FacultyService({
                   const isClosed = r.status === "responded" || r.status === "rejected";
 
                   return (
-                    <tr
-                      key={fsid}
-                      className={cls(
-                        "align-middle",
-                        idx % 2 === 0 ? "bg-white" : "bg-gray-50",
-                        "border-b border-gray-200"
-                      )}
-                      onMouseEnter={() => ensureFacultyForDept(dept)}
-                    >
-                      <td className={CELL}>
+                    <tr key={fsid} className={PLANTILLA_ROW} onMouseEnter={() => ensureFacultyForDept(dept)}>
+                      <td className={cls(PLANTILLA_TD, "text-left")}>
                         <div className="font-semibold text-emerald-700">{r.course_code}</div>
-                        <div className="text-[12px] text-neutral-600 leading-tight">
-                          {r.course_title}
-                        </div>
+                        <div className="text-[12px] text-neutral-600 leading-tight">{r.course_title}</div>
                       </td>
 
+                      <td className={cls(PLANTILLA_TD, "tabular-nums")}>{r.units ?? ""}</td>
 
-                      <td className={cls(CELL, "text-center tabular-nums")}>{r.units ?? ""}</td>
-                      <td className={cls(CELL, "text-center truncate")} title={r.from_department}>
+                      <td className={cls(PLANTILLA_TD, "truncate")} title={r.from_department}>
                         {r.from_department}
                       </td>
-                      <td className={cls(CELL, "text-center truncate")} title={r.to_department}>
+
+                      <td className={cls(PLANTILLA_TD, "truncate")} title={r.to_department}>
                         {r.to_department}
                       </td>
 
                       {/* Faculty */}
-                      <td className={CELL}>
+                      <td className={cls(PLANTILLA_TD, "align-middle")}>
                         {!isClosed ? (
                           <Dropdown
                             value={
                               e.faculty?.faculty_id
-                                ? facultyOptions.find(
-                                    (f) => f.faculty_id === e.faculty?.faculty_id
-                                  )?.label || ""
+                                ? facultyOptions.find((f) => f.faculty_id === e.faculty?.faculty_id)?.label || ""
                                 : facultyLabel(e.faculty)
                             }
                             onChange={(label) => {
@@ -1118,17 +1161,14 @@ export default function CHAIR_FacultyService({
                             searchable
                           />
                         ) : (
-                          <span
-                            className="block truncate text-center"
-                            title={facultyLabel(r.faculty as any)}
-                          >
+                          <span className="block truncate text-center" title={facultyLabel(r.faculty as any)}>
                             {facultyLabel(r.faculty as any) || "—"}
                           </span>
                         )}
                       </td>
 
-                      {/* Day1 (M/T/W only, auto-pairs Day2) */}
-                      <td className={cls(CELL, "text-center")}>
+                      {/* Day1 */}
+                      <td className={cls(PLANTILLA_TD, "align-middle")}>
                         {!isClosed ? (
                           <Dropdown
                             value={e.day1 || ""}
@@ -1150,7 +1190,7 @@ export default function CHAIR_FacultyService({
                       </td>
 
                       {/* Begin1 */}
-                      <td className={cls(CELL, "text-center")}>
+                      <td className={cls(PLANTILLA_TD, "align-middle")}>
                         {!isClosed ? (
                           <Dropdown
                             value={e.begin1 || ""}
@@ -1172,27 +1212,31 @@ export default function CHAIR_FacultyService({
                       </td>
 
                       {/* End1 */}
-                      <td className={cls(CELL, "text-center")}>
+                      <td className={cls(PLANTILLA_TD, "align-middle")}>
                         {!isClosed ? (
-                          <input
-                            value={e.end1 ? String(e.end1) : ""}
-                            readOnly
-                            className={cls(CONTROL, "text-center bg-neutral-50")}
+                          <Dropdown
+                            value={e.end1 || ""}
+                            onChange={(v) => patchEdit(fsid, { end1: v })}
+                            options={timeBegins}
                             placeholder="—"
+                            className="max-w-[90px] mx-auto"
+                            searchable={false}
                           />
                         ) : (
                           r.end1 || "—"
                         )}
                       </td>
 
-                      {/* Day2 (auto from Day1: MH / TF / WS) */}
-                      <td className={cls(CELL, "text-center")}>
+                      {/* Day2 */}
+                      <td className={cls(PLANTILLA_TD, "align-middle")}>
                         {!isClosed ? (
-                          <input
-                            className={cls(CONTROL, "h-9 text-center bg-neutral-50")}
-                            readOnly
+                          <Dropdown
                             value={e.day2 || ""}
+                            onChange={(v) => patchEdit(fsid, { day2: v as DayShort | "" })}
+                            options={[...DAY1_OPTIONS, "H", "F", "S"]}
                             placeholder="—"
+                            className="max-w-[90px] mx-auto"
+                            searchable={false}
                           />
                         ) : (
                           r.day2 || "—"
@@ -1200,7 +1244,7 @@ export default function CHAIR_FacultyService({
                       </td>
 
                       {/* Begin2 */}
-                      <td className={cls(CELL, "text-center")}>
+                      <td className={cls(PLANTILLA_TD, "align-middle")}>
                         {!isClosed ? (
                           <Dropdown
                             value={e.begin2 || ""}
@@ -1222,13 +1266,15 @@ export default function CHAIR_FacultyService({
                       </td>
 
                       {/* End2 */}
-                      <td className={cls(CELL, "text-center")}>
+                      <td className={cls(PLANTILLA_TD, "align-middle")}>
                         {!isClosed ? (
-                          <input
-                            value={e.end2 ? String(e.end2) : ""}
-                            readOnly
-                            className={cls(CONTROL, "text-center bg-neutral-50")}
+                          <Dropdown
+                            value={e.end2 || ""}
+                            onChange={(v) => patchEdit(fsid, { end2: v })}
+                            options={timeBegins}
                             placeholder="—"
+                            className="max-w-[90px] mx-auto"
+                            searchable={false}
                           />
                         ) : (
                           r.end2 || "—"
@@ -1236,7 +1282,7 @@ export default function CHAIR_FacultyService({
                       </td>
 
                       {/* Remarks */}
-                      <td className={CELL}>
+                      <td className={cls(PLANTILLA_TD, "align-middle")}>
                         {!isClosed ? (
                           <input
                             value={e.remarks}
@@ -1252,7 +1298,7 @@ export default function CHAIR_FacultyService({
                       </td>
 
                       {/* Action */}
-                      <td className={cls(CELL, "text-center")}>
+                      <td className={cls(PLANTILLA_TD, "align-middle")}>
                         {!isClosed ? (
                           <div className="flex flex-row items-center justify-center gap-2">
                             {(() => {
@@ -1288,9 +1334,7 @@ export default function CHAIR_FacultyService({
                           <span
                             className={cls(
                               "inline-block rounded-full px-2 py-[2px] text-[12px]",
-                              r.status === "responded"
-                                ? "bg-emerald-100 text-emerald-700"
-                                : "bg-red-100 text-red-700"
+                              r.status === "responded" ? "bg-emerald-100 text-emerald-700" : "bg-red-100 text-red-700"
                             )}
                           >
                             {r.status === "responded" ? "Responded" : "Rejected"}
@@ -1302,24 +1346,24 @@ export default function CHAIR_FacultyService({
                 })}
 
                 {receivedRows.length === 0 && !loadingList && (
-                  <tr>
-                    <td className="px-4 py-6 text-center text-sm text-gray-500" colSpan={14}>
+                  <tr className={PLANTILLA_ROW}>
+                    <td className={cls(PLANTILLA_TD, "py-6 text-sm text-gray-500")} colSpan={14}>
                       No received requests for your department.
                     </td>
                   </tr>
                 )}
+
                 {loadingList && (
-                  <tr>
-                    <td className="px-4 py-6 text-center text-sm text-gray-500" colSpan={14}>
+                  <tr className={PLANTILLA_ROW}>
+                    <td className={cls(PLANTILLA_TD, "py-6 text-sm text-gray-500")} colSpan={14}>
                       Loading…
                     </td>
                   </tr>
                 )}
               </tbody>
             </table>
-          </div>
-        </>
-      )}
+              </div>
+      </div>
     </div>
   );
 }

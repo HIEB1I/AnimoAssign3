@@ -22,7 +22,6 @@ import {
   type FMOptions,
   type FacultyUpsertPayload,
   updateChairFacultyEntry,
-  getChairHeader, // <--- ADDED THIS IMPORT
 } from "../../api";
 
 /* ---- Small shared bits (from ADMIN pattern) ---- */
@@ -322,17 +321,6 @@ type EditFacultyForm = {
 };
 
 export default function CHAIR_FacultyManagement() {
-  // ---- ADDED: Session and userId derivation ----
-  const session = useMemo(() => {
-    try {
-      return JSON.parse(localStorage.getItem("animo.user") || "null");
-    } catch {
-      return null;
-    }
-  }, []);
-  const userId = session?.userId || "";
-  // ----------------------------------------------
-
   type ModalType = null | "schedule" | "history";
 
   // filters
@@ -350,9 +338,6 @@ export default function CHAIR_FacultyManagement() {
   // profile header info
   const [termLabel, setTermLabel] = useState<string>("");
   
-  // ---- ADDED: profileSubtitle state ----
- //const [profileSubtitle, setProfileSubtitle] = useState<string>("");
-  const [, setProfileSubtitle] = useState<string>("");
   // ---------------------------------------
 
   // table rows
@@ -574,15 +559,6 @@ export default function CHAIR_FacultyManagement() {
     })();
   }, []);
 
-  // Load Header profile
-  useEffect(() => {
-    (async () => {
-      try {
-        const hdr = await getChairHeader(userId || undefined);
-        if (hdr?.ok) setProfileSubtitle(hdr.profileSubtitle || "");
-      } catch { /* ignore */ }
-    })();
-  }, [userId]);
 
   // Debounce search
   useEffect(() => {

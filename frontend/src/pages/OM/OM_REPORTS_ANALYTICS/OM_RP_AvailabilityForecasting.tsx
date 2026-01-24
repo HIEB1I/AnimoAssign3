@@ -1,6 +1,6 @@
 // frontend/src/pages/OM/OM_REPORTS_ANALYTICS/OM-RP_AvailabilityForecasting.tsx
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ChevronDown, ChevronLeft } from "lucide-react";
+import { ChevronDown, ChevronLeft, CalendarCheck, Users, Clock, TrendingUp } from "lucide-react";
 import { fetchFacultyAvailabilityHeatmap } from "../../../api";
 import { Link } from "react-router-dom";
 
@@ -97,6 +97,9 @@ function SelectBox({
 type DayCode = "M" | "T" | "W" | "H" | "F" | "S";
 type SlotKey = `${DayCode}|${string}`;
 
+// FIX: Define TOP_N_PER_FACULTY constant as it is used in the legend text
+const TOP_N_PER_FACULTY = 5;
+
 type HeatPerson = {
   faculty_id: string;
   name: string;
@@ -114,6 +117,11 @@ type AvailabilityHeatmap = {
   history_terms: string[];
   warnings: string[];
   slots: Record<SlotKey, HeatSlot>;
+  // New Quality Metrics
+  total_faculty_considered: number;
+  faculty_with_recent_pref: number;
+  faculty_with_recent_history: number;
+  most_supported_slot_count: number;
 };
 
 const DAY_PAIRS: [DayCode, DayCode][] = [
@@ -143,6 +151,7 @@ function mergePairCells(a: HeatSlot, b: HeatSlot): HeatSlot {
   const byId = new Map<string, HeatPerson>();
   for (const p of [...a.list, ...b.list]) {
     const prev = byId.get(p.faculty_id);
+    // Take the person object with the higher confidence_pct if the faculty is in both single slots
     if (!prev || (p.confidence_pct ?? 0) > (prev.confidence_pct ?? 0)) {
       byId.set(p.faculty_id, p);
     }
@@ -167,6 +176,8 @@ function colorForCount(count: number, min: number, max: number) {
 function usePairMinMax(data: AvailabilityHeatmap | null) {
   return useMemo(() => {
     if (!data) return { pairMin: 0, pairMax: 0 };
+    // The max count is now provided directly by the backend as most_supported_slot_count.
+    // We still calculate the min for the ramp.
     const counts: number[] = [];
     for (const slot of TIME_ROWS) {
       for (const [d1, d2] of DAY_PAIRS) {
@@ -174,9 +185,62 @@ function usePairMinMax(data: AvailabilityHeatmap | null) {
         counts.push(merged.count);
       }
     }
-    if (!counts.length) return { pairMin: 0, pairMax: 0 };
-    return { pairMin: Math.min(...counts), pairMax: Math.max(...counts) };
+    const pairMin = counts.length ? Math.min(...counts) : 0;
+    const pairMax = data.most_supported_slot_count; // Use the backend's max count for the full scale
+    return { pairMin, pairMax };
   }, [data]);
+}
+
+/** Component for the new Quality Metrics Cards */
+function SummaryCards({ data }: { data: AvailabilityHeatmap | null }) {
+  if (!data) return null;
+
+  const cards = [
+    {
+      label: "Total Faculty Considered",
+      value: data.total_faculty_considered,
+      icon: <Users className="h-5 w-5 text-emerald-600" />,
+      tooltip: "Unique faculty considered after filtering by department, course, and approved leaves.",
+      color: "text-emerald-700",
+    },
+    {
+      label: "With Recent Preference",
+      value: data.faculty_with_recent_pref,
+      icon: <CalendarCheck className="h-5 w-5 text-blue-600" />,
+      tooltip: `Faculty with a preference record for the previous term (${data.previous_term_for_prefs}).`,
+      color: "text-blue-700",
+    },
+    {
+      label: "With Recent History",
+      value: data.faculty_with_recent_history,
+      icon: <Clock className="h-5 w-5 text-amber-600" />,
+      tooltip: `Faculty who had an assignment in the last ${data.history_terms.length} terms (${data.history_terms.join(", ")}).`,
+      color: "text-amber-700",
+    },
+    {
+      label: "Most Supported Slot",
+      value: data.most_supported_slot_count,
+      icon: <TrendingUp className="h-5 w-5 text-red-600" />,
+      tooltip: "The maximum number of faculty predicted available for any single time slot (the peak of the heatmap).",
+      color: "text-red-700",
+    },
+  ];
+
+  return (
+    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+      {cards.map((card) => (
+        <Card key={card.label} className="p-4 flex items-center justify-between">
+          <div>
+            <div className="text-sm text-gray-500 truncate">{card.label}</div>
+            <div className={cls("mt-1 text-2xl font-bold", card.color)} title={card.tooltip}>
+              {card.value}
+            </div>
+          </div>
+          {card.icon}
+        </Card>
+      ))}
+    </div>
+  );
 }
 
 /* ---------------- Main Page ---------------- */
@@ -191,7 +255,7 @@ export default function OM_RP_AvailabilityForecasting() {
 
   const [active, setActive] = useState<{ d1: DayCode; d2: DayCode; slot: string } | null>(null);
   const title = "Faculty Availability Forecasting (Pre-Survey)";
-  const subtitle = "Numbers show how many faculty have this paired slot in their top 5 strongest slots.";
+  const subtitle = "Assess forecast reliability via quality metrics and identify peak availability.";
   const right = <div className="hidden sm:block text-xs text-zinc-400"></div>;
 
   async function loadHeatmap() {
@@ -282,6 +346,9 @@ export default function OM_RP_AvailabilityForecasting() {
 
       <WarningPanel warnings={data?.warnings || []} />
 
+      {/* NEW: Summary Cards */}
+      <SummaryCards data={data} />
+
       {loading && (
         <Card className="overflow-hidden w-full">
           <div className="animate-pulse">
@@ -302,15 +369,12 @@ export default function OM_RP_AvailabilityForecasting() {
           {/* Legend / scale */}
           <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 border-b border-gray-200">
             <div className="text-sm text-gray-600">
-              Numbers show how many faculty have the paired slot in their top 5 strongest slots.
+              Cell count indicates unique faculty with the paired slot in their top {TOP_N_PER_FACULTY} strongest slots.
             </div>
             <div className="flex items-center gap-2">
-              <span className="text-xs text-gray-500">Min</span>
+              <span className="text-xs text-gray-500">Low ({pairMin})</span>
               <div className="h-3 w-24 rounded bg-gradient-to-r from-[#ecfdf5] via-[#6ee7b7] to-[#059669]" />
-              <span className="text-xs text-gray-500">Max</span>
-              <span className="ml-3 text-xs text-gray-500">
-                ({pairMin}–{pairMax})
-              </span>
+              <span className="text-xs text-gray-500">Peak ({pairMax})</span>
             </div>
           </div>
 
@@ -351,11 +415,15 @@ export default function OM_RP_AvailabilityForecasting() {
                       );
                       const bg = colorForCount(merged.count, pairMin, pairMax);
                       const darkText = merged.count <= Math.max(1, Math.round(pairMax * 0.35));
+                      const isPeak = merged.count === pairMax && pairMax > 0;
                       return (
                         <td
                           key={`${d1}${d2}-${slot}`}
                           onClick={() => setActive({ d1, d2, slot })}
-                          className="text-center align-middle border border-gray-100 cursor-pointer"
+                          className={cls(
+                            "text-center align-middle border border-gray-100 cursor-pointer",
+                            isPeak && "ring-2 ring-red-500 ring-offset-2" // Highlight peak
+                          )}
                           style={{
                             background: bg,
                             color: darkText ? "#0b3d2e" : "white",
@@ -363,7 +431,7 @@ export default function OM_RP_AvailabilityForecasting() {
                             borderRadius: 10,
                             height: 56, // taller for readability on wide screens
                           }}
-                          title={`${d1}–${d2} • ${slot} • ${merged.count}`}
+                          title={`${d1}–${d2} • ${slot} • ${merged.count}${isPeak ? " (Peak)" : ""}`}
                         >
                           {merged.count}
                           <div className={cls("text-[11px]", darkText ? "opacity-80" : "opacity-95")}>faculty</div>
@@ -400,12 +468,16 @@ export default function OM_RP_AvailabilityForecasting() {
 
             <div className="grid grid-cols-1 md:grid-cols-2 max-h-[70vh] overflow-auto">
               <div className="p-4 border-r border-gray-100">
-                <div className="font-semibold text-emerald-700 mb-2">Predicted Available</div>
+                <div className="font-semibold text-emerald-700 mb-2">Predicted Faculty</div>
                 {modalData.cell.list.length === 0 && <div className="text-gray-500">None</div>}
                 {modalData.cell.list.slice(0, 100).map((p) => (
-                  <div key={p.faculty_id} className="flex items-center justify-between py-1.5">
-                    <span title={p.email ? `${p.name} · ${p.email}` : p.name}>{p.name}</span>
-                    <span className="text-gray-700">{p.confidence_pct}%</span>
+                  <div key={p.faculty_id} className="flex flex-col py-1.5 border-b border-gray-50 last:border-b-0">
+                    <div className="flex items-center justify-between">
+                      <span className="font-medium" title={p.email ? `${p.name} · ${p.email}` : p.name}>{p.name}</span>
+                      <span className="text-gray-700 font-semibold">{p.confidence_pct}%</span>
+                    </div>
+                    {/* NEW: Display Reason */}
+                    <div className="text-xs text-gray-500 italic mt-0.5" title="Reason for this prediction">{p.reason}</div>
                   </div>
                 ))}
                 {modalData.cell.list.length > 100 && (
@@ -415,7 +487,7 @@ export default function OM_RP_AvailabilityForecasting() {
                 )}
               </div>
               <div className="p-4">
-                <div className="font-semibold text-emerald-700 mb-2">Notes</div>
+                <div className="font-semibold text-emerald-700 mb-2">Overall Faculty Notes</div>
                 {modalData.notes.length === 0 && <div className="text-gray-500">—</div>}
                 {modalData.notes.map((n, i) => (
                   <div key={i} className="text-gray-700 py-0.5">

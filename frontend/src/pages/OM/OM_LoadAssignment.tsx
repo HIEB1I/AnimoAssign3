@@ -2,19 +2,28 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Outlet, useLocation } from "react-router-dom";
 import AppShell from "../../base/AppShell";
 import { runOmAutoAssign } from "../../api.ts";
-import { submitOmLoadAssignment } from "../../api.ts";
+import {
+  submitOmLoadAssignment,
+  notifyChairLoadRecommendation,
+  sendOmLoadAssignmentsToFaculty,
+  getOmLoadAssignmentRfc,
+  respondOmLoadAssignmentRfc,
+  finalizeOmLoadAssignmentCourse,
+} from "../../api.ts";
 
 import {
   getOmLoadAssignmentList,
   getOmLoadAssignmentProfile,
   getAllFaculty,
+  getOmFacultyWithDeloadings,
+  getOmFacultyDeloadings,
+  type DeloadingRow
 } from "../../api";
 
 import { cls } from "../../utilities/cls";
 import {
   ChevronDown,
   Search as SearchIcon,
-  Upload,
   Play,
   RefreshCcw,
   Send,
@@ -24,7 +33,11 @@ import {
   MessageSquareText,
   Check,
   Trash2,
+  Undo2,
+  Redo2,
   X,
+  Copy,
+  Upload
 } from "lucide-react";
 import { InboxContent as OMInboxContent } from "./OM_Inbox";
 
@@ -76,6 +89,10 @@ interface ValidationContext {
 }
 
 /* ---------------- Small inputs ---------------- */
+
+// 1. Define the Option type to support both formats
+type SelectOption = string | { value: string; label: string };
+
 function SelectBox({
   value,
   onChange,
@@ -85,15 +102,22 @@ function SelectBox({
 }: {
   value: string;
   onChange: (v: string) => void;
-  options: string[];
+  options: SelectOption[]; // Updated to support objects
   placeholder?: string;
   className?: string;
 }) {
   const [open, setOpen] = useState(false);
+
+  // Helper to extract the label from an option (string or object)
+  const getLabel = (opt: SelectOption) => (typeof opt === "string" ? opt : opt.label);
+  // Helper to extract the value from an option
+  const getValue = (opt: SelectOption) => (typeof opt === "string" ? opt : opt.value);
+
+  // 2. Updated hover logic to find index based on value
   const [hover, setHover] = useState<number>(() =>
     Math.max(
       0,
-      options.findIndex((o) => o === value)
+      options.findIndex((o) => getValue(o) === value)
     )
   );
 
@@ -110,6 +134,10 @@ function SelectBox({
     return () => document.removeEventListener("mousedown", close);
   }, [open]);
 
+  // Find the label of the currently selected value for the button display
+const selectedOption = options.find((o) => getValue(o) === value);
+const displayLabel = selectedOption ? getValue(selectedOption) : null;
+
   return (
     <div className={cls("relative min-w-[120px]", className)}>
       <button
@@ -122,39 +150,178 @@ function SelectBox({
           "shadow-sm focus:ring-2 focus:ring-emerald-500/30"
         )}
       >
-        {value || <span className="text-gray-400">{placeholder}</span>}
+        {displayLabel || <span className="text-gray-400">{placeholder}</span>}
         <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-4 w-4 -translate-y-1/2" />
       </button>
 
       {open && (
         <div
           ref={listRef}
-          className="absolute z-20 mt-2 max-h-72 w-full overflow-auto rounded-xl border border-gray-300 bg-white shadow-xl"
+          className="absolute z-20 mt-1 max-h-60 w-full overflow-auto rounded-md border border-gray-200 bg-white py-1 shadow-lg"
         >
-          {options.map((opt, i) => (
-            <button
-              key={opt}
-              onMouseEnter={() => setHover(i)}
-              onClick={() => {
-                onChange(opt);
-                setOpen(false);
-                btnRef.current?.focus();
-              }}
-              className={cls(
-                "block w-full px-4 py-2 text-left text-sm",
-                i === hover && "bg-emerald-50",
-                value === opt && "bg-emerald-100 text-emerald-800 font-medium"
-              )}
-            >
-              {opt}
-            </button>
-          ))}
+          {options.map((opt, i) => {
+            const optValue = getValue(opt);
+            const optLabel = getLabel(opt);
+            const isSelected = optValue === value;
+
+            return (
+              <div
+                key={optValue}
+                onMouseEnter={() => setHover(i)}
+                onClick={() => {
+                  onChange(optValue);
+                  setOpen(false);
+                }}
+                className={cls(
+                  "cursor-pointer px-3 py-1.5 text-[13px]",
+                  isSelected ? "bg-emerald-50 text-emerald-700 font-medium" : 
+                  hover === i ? "bg-emerald-50" : ""
+                )}
+              >
+                {optLabel}
+              </div>
+            );
+          })}
         </div>
       )}
     </div>
   );
 }
 
+
+function normalizeTimeToHHMM(input: string): string {
+  const digits = (input || "").replace(/\D/g, "");
+  if (!digits) return "";
+  const d = digits.length === 3 ? "0" + digits : digits;
+  if (d.length !== 4) return "";
+  const hh = parseInt(d.slice(0, 2), 10);
+  const mm = parseInt(d.slice(2, 4), 10);
+  if (Number.isNaN(hh) || Number.isNaN(mm)) return "";
+  if (hh < 0 || hh > 23) return "";
+  if (mm < 0 || mm > 59) return "";
+  return d;
+}
+
+function TimeBeginInput({
+  value,
+  onChange,
+  options,
+  placeholder = "e.g. 07:30 - 09:00",
+  className = "",
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  options: SelectOption[];
+  placeholder?: string;
+  className?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const [hover, setHover] = useState<number | null>(null);
+  const [text, setText] = useState(value || "");
+
+  const inputRef = useRef<HTMLInputElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+
+  const getValue = (o: SelectOption) => (typeof o === "string" ? o : o.value);
+  const getLabel = (o: SelectOption) => (typeof o === "string" ? o : o.label ?? o.value);
+
+  useEffect(() => {
+    // Keep input in sync when not actively typing
+    if (!open) setText(value || "");
+  }, [value, open]);
+
+  useEffect(() => {
+    const close = (e: MouseEvent) =>
+      open &&
+      !inputRef.current?.contains(e.target as Node) &&
+      !listRef.current?.contains(e.target as Node) &&
+      setOpen(false);
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [open]);
+
+  const filtered = options.filter((o) => {
+    if (!text) return true;
+    const q = text.toLowerCase();
+    const v = getValue(o).toLowerCase();
+    const l = getLabel(o).toLowerCase();
+    return v.includes(q) || l.includes(q);
+  });
+
+  const pick = (optValue: string) => {
+    setText(optValue);
+    onChange(optValue);
+    setOpen(false);
+  };
+
+  const handleBlur = () => {
+    // allow click on dropdown items
+    setTimeout(() => setOpen(false), 120);
+
+    const normalized = normalizeTimeToHHMM(text);
+    if (normalized) {
+      setText(normalized);
+      onChange(normalized);
+    } else {
+      // revert to last valid value
+      setText(value || "");
+    }
+  };
+
+  return (
+    <div className={cls("relative", className)}>
+      <input
+        ref={inputRef}
+        className={cls(
+          "w-full rounded-md border border-gray-300 bg-white",
+          "px-1.5 py-1 text-center text-[13px] leading-tight",
+          "focus:outline-none focus:ring-2 focus:ring-emerald-200 focus:border-emerald-300"
+        )}
+        value={text}
+        placeholder={placeholder}
+        onFocus={() => setOpen(true)}
+        onChange={(e) => {
+          setText(e.target.value);
+          setOpen(true);
+        }}
+        onBlur={handleBlur}
+      />
+
+      {open && (
+        <div
+          ref={listRef}
+          className="absolute z-20 mt-1 max-h-60 w-full overflow-auto rounded-md border border-gray-200 bg-white py-1 shadow-lg"
+        >
+          {filtered.length ? (
+            filtered.map((opt, i) => {
+              const optValue = getValue(opt);
+              const optLabel = getLabel(opt);
+              const isSelected = optValue === value;
+
+              return (
+                <div
+                  key={optValue}
+                  onMouseDown={(e) => e.preventDefault()}
+                  onMouseEnter={() => setHover(i)}
+                  onClick={() => pick(optValue)}
+                  className={cls(
+                    "cursor-pointer px-3 py-1.5 text-[13px]",
+                    isSelected ? "bg-emerald-50 text-emerald-700 font-medium" :
+                    hover === i ? "bg-emerald-50" : ""
+                  )}
+                >
+                  {optLabel}
+                </div>
+              );
+            })
+          ) : (
+            <div className="px-3 py-2 text-[13px] text-gray-400">No matches</div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
 function TextBox({
   value,
   onChange,
@@ -297,9 +464,12 @@ type Row = {
   capacity: number | "";
   mode?: string;
   status?: "" | "Confirmed" | "Pending" | "Unassigned" | "Conflict";
+  pending_rfc?: boolean;
   conflictNote?: string;
   editable?: boolean;
   campus_id?: string;
+  /** When OM has already finalized this course for the faculty */
+  finalized?: boolean;
 };
 
 // --- Validation helpers & engine (row-level flags) ---
@@ -689,44 +859,76 @@ const timeRange = (begin?: string, end?: string) => {
   return b && e ? `${b}–${e}` : b || e || "—";
 };
 
-const DAY_OPTIONS = ["M", "T", "W", "H", "F", "S"];
+const DAY_OPTIONS = [
+  { value: "M", label: "Monday" },
+  { value: "T", label: "Tuesday" },
+  { value: "W", label: "Wednesday" },
+  { value: "H", label: "Thursday" },
+  { value: "F", label: "Friday" },
+  { value: "S", label: "Saturday" },
+];
 const MODE_OPTIONS = ["FOL", "HYB", "F2F"];
 const ROOM_OPTIONS = ["Online", "Classroom", "Comlab"];
 const TIME_BEGIN_OPTIONS = [
-  "0730",
-  "0800",
-  "0900",
-  "0915",
-  "1000",
-  "1100",
-  "1245",
-  "1300",
-  "1315",
-  "1400",
-  "1430",
-  "1440",
-  "1530",
-  "1615",
-  "1800",
-  "1945",
+  // Match APO time-band menu content: show full band label in menu,
+  // but keep stored/selected value as HHMM (shown in-cell via SelectBox displayLabel).
+  { value: "0730", label: "07:30 - 09:00" },
+  { value: "0915", label: "09:15 - 10:45" },
+  { value: "1100", label: "11:00 - 12:30" },
+  { value: "1245", label: "12:45 - 14:15" },
+  { value: "1430", label: "14:30 - 16:00" },
+  { value: "1615", label: "16:15 - 17:45" },
+  { value: "1800", label: "18:00 - 19:30" },
+  { value: "1945", label: "19:45 - 21:00" },
 ];
+
 const TIME_END_OPTIONS = [
-  "0900",
-  "1000",
-  "1200",
-  "1045",
-  "1230",
-  "1300",
-  "1500",
-  "1415",
-  "1600",
-  "1730",
-  "1745",
-  "1930",
-  "2000",
-  "2100",
-  "2115",
+  // Same menu labels as TIME_BEGIN_OPTIONS (full band label),
+  // while the selected value remains HHMM.
+  { value: "0900", label: "07:30 - 09:00" },
+  { value: "1045", label: "09:15 - 10:45" },
+  { value: "1230", label: "11:00 - 12:30" },
+  { value: "1415", label: "12:45 - 14:15" },
+  { value: "1600", label: "14:30 - 16:00" },
+  { value: "1745", label: "16:15 - 17:45" },
+  { value: "1930", label: "18:00 - 19:30" },
+  { value: "2100", label: "19:45 - 21:00" },
 ];
+
+// --- NEW UTILITY FUNCTION FOR AUTO-FILL ---
+/**
+ * Calculates the standard end time (90 minutes later) for a given start time in "HHMM" format.
+ * Returns the calculated "HHMM" string.
+ * @param startHhmm - Start time string, e.g., "0730"
+ */
+function calculateEndTime(startHhmm: string): string {
+  if (!startHhmm || startHhmm.length < 4) return "";
+
+  try {
+    const startH = parseInt(startHhmm.slice(0, 2), 10);
+    const startM = parseInt(startHhmm.slice(2), 10);
+
+    let endH = startH;
+    let endM = startM + 90; // Standard 90-minute slot
+
+    // Handle minute overflow
+    if (endM >= 60) {
+      endH += Math.floor(endM / 60);
+      endM = endM % 60;
+    }
+
+    // Handle end time past midnight (should not happen based on options, but safe guard)
+    if (endH >= 24) {
+      endH = 23; // Cap at 23:59 if needed, but for 21:15 end we cap at 21:15
+      endM = 15;
+    }
+
+    return `${String(endH).padStart(2, "0")}${String(endM).padStart(2, "0")}`;
+  } catch (e) {
+    console.error("Error calculating end time for", startHhmm, e);
+    return "";
+  }
+}
 
 /* ---------------- Reusable small components ---------------- */
 const StatusChip = ({ r }: { r: Row }) => {
@@ -812,11 +1014,7 @@ const ApproveModal = ({
         </h3>
         <p className="mx-auto mb-6 max-w-md text-center text-sm text-neutral-600">
           Please confirm that this is the final{" "}
-          <span className="font-semibold">Faculty Load Assignment</span> to be
-          submitted to the{" "}
-          <span className="font-semibold">Office Assistant</span>. Once
-          submitted, this action cannot be undone and the button will be
-          disabled.
+          <span className="font-semibold">Faculty Load Assignment.</span>Once submitted, this action cannot be undone and the button will be disabled.
         </p>
         <div className="flex justify-end gap-2">
           <button
@@ -840,11 +1038,16 @@ const SendModal = ({
   open,
   onClose,
   rows,
+  termLabel,
+  onSend,
 }: {
   open: boolean;
   onClose: () => void;
   rows: Row[];
+  termLabel?: string;
+  onSend: (rows: Row[]) => Promise<void>;
 }) => {
+  const [sending, setSending] = useState(false);
   if (!open) return null;
   const byFaculty = Object.entries(
     rows.reduce<Record<string, Row[]>>((acc, r) => {
@@ -860,7 +1063,7 @@ const SendModal = ({
       <div className="w-full max-w-5xl rounded-2xl bg-white p-6 shadow-2xl">
         <div className="mb-1">
           <h3 className="text-[22px] font-extrabold text-emerald-700">
-            Teaching Load Assignments for Term 1, AY 2025 - 2026
+            Teaching Load Assignments for {termLabel || "Current Term"}
           </h3>
           <div className="mt-0.5 text-[11px] text-gray-600">
             To:{" "}
@@ -875,7 +1078,7 @@ const SendModal = ({
           to you:
         </p>
 
-        <div className="mt-4">
+        <div className="mt-4 max-h-[60vh] overflow-auto pr-1">
           <div className="rounded-xl border border-gray-200 overflow-hidden">
             <table className="w-full table-fixed text-[13px]">
               <colgroup>
@@ -939,12 +1142,8 @@ const SendModal = ({
                         <td className="px-4 py-3 align-middle">
                           {r.units !== "" ? String(r.units) : "—"}
                         </td>
-                        <td className="px-4 py-3 align-middle text-gray-800">
-                          —
-                        </td>
-                        <td className="px-4 py-3 align-middle text-gray-800">
-                          —
-                        </td>
+                        <td className="px-4 py-3 align-middle text-gray-800">{(r as any).campus || r.campus_id || "—"}</td>
+                        <td className="px-4 py-3 align-middle text-gray-800">{r.mode || (r as any).room_type || "—"}</td>
                         <td className="px-4 py-3 align-middle">
                           {r.day1 || "—"}
                         </td>
@@ -981,11 +1180,25 @@ const SendModal = ({
             Cancel
           </button>
           <button
-            onClick={onClose}
-            className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:brightness-110"
+            disabled={sending || rows.length === 0}
+            onClick={async () => {
+              setSending(true);
+              try {
+                await onSend(rows);
+                onClose();
+              } catch (e: any) {
+                alert(e?.message || "Failed to send to faculty.");
+              } finally {
+                setSending(false);
+              }
+            }}
+            className={cls(
+              "inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:brightness-110",
+              (sending || rows.length === 0) && "opacity-60 cursor-not-allowed"
+            )}
           >
-            <Send className="h-4 w-4" />
-            Send
+            <Send className={cls("h-4 w-4", sending && "animate-spin")} />
+            {sending ? "Sending…" : "Send"}
           </button>
         </div>
       </div>
@@ -993,16 +1206,117 @@ const SendModal = ({
   );
 };
 
+
+
 const RequestChangeModal = ({
   open,
   from,
   onClose,
+  userId,
+  termId,
+  rows,
+  onAfterUpdate,
 }: {
   open: boolean;
   from?: string;
   onClose: () => void;
-}) =>
-  !open ? null : (
+  userId: string;
+  termId: string;
+  rows: Row[];
+  onAfterUpdate: () => Promise<void> | void;
+}) => {
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [messages, setMessages] = useState<Array<any>>([]);
+  const [status, setStatus] = useState<string | null>(null);
+  const [reply, setReply] = useState("");
+
+  const facultyRow = rows.find((r) => (r.faculty || "") === (from || ""));
+  const facultyId = facultyRow?.faculty_id;
+
+  const isTerminal = !!status && ["ACCEPTED", "APPROVED", "REJECTED"].includes(status);
+  const needsOm = status === "NEEDS_OM" || status === "OPEN" || status === "open";
+
+  useEffect(() => {
+    if (!open) {
+      setLoading(false);
+      setError(null);
+      setMessages([]);
+      setStatus(null);
+      setReply("");
+      return;
+    }
+
+    (async () => {
+      try {
+        setLoading(true);
+        setError(null);
+        setMessages([]);
+        setStatus(null);
+
+        if (!facultyId) {
+          setError("No faculty id found for this RFC.");
+          return;
+        }
+
+        const res = await getOmLoadAssignmentRfc(userId, {
+          term_id: termId,
+          faculty_id: facultyId,
+        });
+
+        if (!res?.ok || !res?.rfc) {
+          setStatus(null);
+          setMessages([]);
+          return;
+        }
+
+        const rfc = res.rfc;
+        setStatus(rfc.status || null);
+        setMessages(rfc.messages || rfc.thread || []);
+      } catch (e: any) {
+        setError(e?.message || "Failed to load RFC.");
+      } finally {
+        setLoading(false);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
+  if (!open) return null;
+
+  const respond = async (decision: "reply" | "approve" | "reject") => {
+    if (!userId || !termId || !facultyId) {
+      alert("Missing context.");
+      return;
+    }
+    if (isTerminal) {
+      alert("RFC is already locked.");
+      return;
+    }
+    if (decision === "reply" && !reply.trim()) {
+      alert("Please type a reply message.");
+      return;
+    }
+
+    setLoading(true);
+    try {
+      await respondOmLoadAssignmentRfc(userId, {
+        term_id: termId,
+        faculty_id: facultyId,
+        action: decision,
+        message: reply.trim() || undefined,
+      });
+
+      await onAfterUpdate();
+      onClose();
+    } catch (e: any) {
+      alert(e?.message || "Failed to send response.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
     <div className="fixed inset-0 z-[120] grid place-items-center bg-black/40 p-4">
       <div className="w-full max-w-2xl rounded-2xl bg-white p-6 shadow-2xl relative">
         <button
@@ -1013,47 +1327,83 @@ const RequestChangeModal = ({
           <X className="h-5 w-5 text-gray-500" />
         </button>
 
-        <h3 className="text-lg font-semibold text-emerald-700 mb-4">
-          Request for Change
-        </h3>
-        <div className="text-sm text-gray-600 mb-4">
+        <h3 className="text-lg font-semibold text-emerald-700 mb-2">Request for Change</h3>
+        <div className="text-sm text-gray-600 mb-1">
           From: <span className="font-semibold">{from}</span>
         </div>
+        <div className="text-[12px] text-gray-600 mb-4">
+          Status:{" "}
+          <span className={cls("font-semibold", isTerminal ? "text-gray-700" : needsOm ? "text-red-600" : "text-blue-600")}>
+            {status || "(none)"}
+          </span>
+        </div>
 
-        <div className="grid gap-2 text-sm mb-4">
-          <div>
-            <div className="font-semibold text-gray-900">Change</div>
-            <div className="text-gray-700">Change Class Time</div>
+        {loading && <div className="mb-4 text-sm text-gray-600">Loading…</div>}
+        {error && <div className="mb-4 text-sm text-red-600">{error}</div>}
+
+        {!loading && !error && !status && (
+          <div className="mb-4 rounded-lg border border-gray-200 bg-gray-50 p-3 text-sm text-gray-700">
+            No RFC thread found for this faculty in this term.
           </div>
-          <div>
-            <div className="font-semibold text-gray-900">Time</div>
-            <div className="text-gray-700">11:00AM - 12:30PM</div>
-          </div>
-          <div>
-            <div className="font-semibold text-gray-900">Other remarks</div>
-            <div className="text-gray-700">
-              Other commitments to that timeframe.
+        )}
+
+        <div className="mb-4 max-h-60 overflow-auto rounded-lg border border-gray-200 bg-gray-50 p-3">
+          {messages.length ? (
+            <div className="space-y-2">
+              {messages.map((m: any, idx: number) => {
+                const who = (m.sender_role || m.from || "").toString().toUpperCase();
+                const ts = m.created_at ? new Date(m.created_at).toLocaleString() : "";
+                return (
+                  <div key={idx} className="text-sm">
+                    <div className="text-[11px] text-gray-500">{who} {ts ? `• ${ts}` : ""}</div>
+                    <div className="whitespace-pre-wrap text-gray-800">{m.message || m.text || ""}</div>
+                  </div>
+                );
+              })}
             </div>
-          </div>
+          ) : (
+            <div className="text-sm text-gray-600">No messages yet.</div>
+          )}
         </div>
 
         <label className="block text-sm font-medium mb-1">Reply</label>
         <textarea
           className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30 mb-6"
           rows={4}
-          placeholder="Type your reply..."
+          placeholder={isTerminal ? "This RFC is locked." : "Type your reply…"}
+          value={reply}
+          disabled={loading || !status || isTerminal}
+          onChange={(e) => setReply(e.target.value)}
         />
 
         <div className="flex justify-end gap-2">
-          <button className="px-4 py-2 rounded-lg bg-red-600 text-white text-sm">
+          <button
+            disabled={loading || !status || isTerminal}
+            className={cls(
+              "px-4 py-2 rounded-lg bg-red-600 text-white text-sm",
+              (loading || !status || isTerminal) && "opacity-60 cursor-not-allowed"
+            )}
+            onClick={() => respond("reject")}
+          >
             Reject
           </button>
-          <button className="px-4 py-2 rounded-lg bg-emerald-700 text-white text-sm">
+          <button
+            disabled={loading || !status || isTerminal}
+            className={cls(
+              "px-4 py-2 rounded-lg bg-emerald-700 text-white text-sm",
+              (loading || !status || isTerminal) && "opacity-60 cursor-not-allowed"
+            )}
+            onClick={() => respond("approve")}
+          >
             Approve
           </button>
           <button
-            className="px-4 py-2 rounded-lg bg-blue-600 text-white text-sm"
-            onClick={onClose}
+            disabled={loading || !status || isTerminal}
+            className={cls(
+              "px-4 py-2 rounded-lg bg-blue-600 text-white text-sm",
+              (loading || !status || isTerminal) && "opacity-60 cursor-not-allowed"
+            )}
+            onClick={() => respond("reply")}
           >
             Reply
           </button>
@@ -1061,6 +1411,7 @@ const RequestChangeModal = ({
       </div>
     </div>
   );
+};
 
 const NewSectionModal = ({
   open,
@@ -1200,20 +1551,102 @@ const NewSectionModal = ({
 
 /* ---------------- Main ---------------- */
 export default function OM_LoadAssignment() {
-  // Session (DB-driven, no hardcodes)
-  const session: {
-    userId?: string;
-    fullName?: string;
-    roles?: string[];
-  } | null = (() => {
+  const [copiedRowId, setCopiedRowId] = useState<string | null>(null);
+
+  // Lightweight in-app toast (used for "Notified faculty…" success messages)
+  const [uiToast, setUiToast] = useState<{ open: boolean; message: string; kind: "success" | "error" }>({
+    open: false,
+    message: "",
+    kind: "success",
+  });
+  const toastTimerRef = useRef<number | null>(null);
+  const showToast = (message: string, kind: "success" | "error" = "success") => {
+    if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
+    setUiToast({ open: true, message, kind });
+    toastTimerRef.current = window.setTimeout(() => {
+      setUiToast((prev) => ({ ...prev, open: false }));
+    }, 3500);
+  };
+
+  // Import SHS file
+  const shsFileInputRef = useRef<HTMLInputElement>(null);
+  const [shsFile, setShsFile] = useState<File | null>(null);
+
+  const handlePickShsFile = () => {
+    shsFileInputRef.current?.click();
+  };
+
+  const handleShsFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0] || null;
+    if (!file) return;
+    setShsFile(file);
+
+    // NOTE: Hook your actual import/parse logic here.
+    // Keeping this non-blocking so the UI change compiles cleanly.
+    console.log("Selected SHS file:", file);
+
+    // allow selecting the same file again
+    e.target.value = "";
+  };
+
+  const formatRowForClipboard = (row: any) =>
+    [
+      "Course",
+      "Section",
+      "Faculty",
+      "Day 1",
+      "Begin 1",
+      "End 1",
+      "Room 1",
+      "Day 2",
+      "Begin 2",
+      "End 2",
+      "Room 2",
+      "Status",
+    ].join("\t") +
+    "\n" +
+    [
+      row.course,
+      row.section,
+      row.faculty,
+      row.day1,
+      row.begin1,
+      row.end1,
+      row.room1,
+      row.day2,
+      row.begin2,
+      row.end2,
+      row.room2,
+      row.status,
+    ].join("\t");
+
+  const handleCopyRow = async (row: any) => {
+    const text = formatRowForClipboard(row);
     try {
-      return JSON.parse(localStorage.getItem("animo.user") || "null");
+      await navigator.clipboard.writeText(text);
+    } catch {
+      const textarea = document.createElement("textarea");
+      textarea.value = text;
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand("copy");
+      document.body.removeChild(textarea);
+    }
+    setCopiedRowId(row.id);
+    setTimeout(() => setCopiedRowId(null), 1200);
+  };
+
+  // Session (same pattern as APO: localStorage["animo.user"])
+  const session = useMemo(() => {
+    try {
+      const raw = localStorage.getItem("animo.user");
+      return raw ? (JSON.parse(raw) as any) : null;
     } catch {
       return null;
     }
-  })();
+  }, []);
 
-  const userId = session?.userId || "";
+  const userId = (session as any)?.userId || (session as any)?.user_id || (session as any)?.id || "";
 
   const [isAssigning, setIsAssigning] = useState(false);
 
@@ -1251,6 +1684,7 @@ export default function OM_LoadAssignment() {
       setMode("run");
       setApproved(false);
       setHasLocalEdits(false); // result from algorithm is the new clean baseline
+      resetHistory();
     } catch (e) {
       console.error(e);
       alert(`Auto-assign failed: ${String(e)}`);
@@ -1259,51 +1693,79 @@ export default function OM_LoadAssignment() {
     }
   }
 
-  const normRoles = (session?.roles || []).map((r) =>
-    String(r).toLowerCase().replace(/\s+/g, "_")
-  );
 
-  // TopBar profile from DB (fallback to session)
-  const [profileName, setProfileName] = useState<string>(
-    session?.fullName || ""
+  const prettifyRole = (raw: string) => {
+    const s = String(raw || "").trim();
+    if (!s) return "";
+    // normalize underscores/spaces then Title Case
+    return s
+      .replace(/[_\-]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .split(" ")
+      .map((w) => (w ? w[0].toUpperCase() + w.slice(1).toLowerCase() : w))
+      .join(" ");
+  };
+
+  const computedRoleTitleFromRoles = (roles?: string[]) => {
+    const norm = (roles || [])
+      .map((r) => String(r || "").trim().toLowerCase())
+      .filter(Boolean);
+
+    if (norm.includes("office manager")) return "Office Manager";
+    if (norm.includes("gs coordinator")) return "GS Coordinator";
+
+    const first = norm[0];
+    return first ? prettifyRole(first) : "User";
+  };
+
+  // TopBar profile (session first, optionally enriched by OM profile API)
+  const [profileName, setProfileName] = useState<string>(session?.fullName || "");
+  const [profileSubtitle, setProfileSubtitle] = useState<string>(
+    computedRoleTitleFromRoles(session?.roles)
   );
-  const [profileSubtitle, setProfileSubtitle] = useState<string>("");
 
   // Term label from backend (no hardcoding)
   const [term, setTerm] = useState<string>("");
+  const [termId, setTermId] = useState<string>("");
 
   useEffect(() => {
     (async () => {
       if (!userId) return;
+
+      const baseName = session?.fullName || "";
+      const baseRole = computedRoleTitleFromRoles(session?.roles);
+
       try {
         const p = await getOmLoadAssignmentProfile(userId);
 
-        // 1. Determine Base Title from DB or Fallback
-        let roleTitle = p?.position_title || "";
+        const displayName = (p?.full_name || baseName || "").trim();
+        const roleTitle = (p?.position_title || baseRole || "").trim();
+        const dept = String(
+  p?.dept_name ??
+  (session as any)?.dept_name ??
+  (session as any)?.dept_label ??
+  (session as any)?.deptName ??
+  (session as any)?.department?.dept_name ??
+  ""
+).trim();
 
-        // Fallback: If no title in DB, but has OM role in session
-        if (
-          !roleTitle &&
-          (normRoles.includes("office_manager") ||
-            normRoles.includes("role0006"))
-        ) {
-          roleTitle = "Office Manager";
+
+        let subtitle = roleTitle;
+        if (dept) {
+          const subLower = subtitle.toLowerCase();
+          const deptLower = dept.toLowerCase();
+          // append dept exactly once
+          if (!subtitle) subtitle = dept;
+          else if (!subLower.includes(deptLower)) subtitle = `${subtitle} | ${dept}`;
         }
 
-        // 2. Append Department ONCE if available
-        if (roleTitle && p?.dept_name) {
-          roleTitle = `${roleTitle} | ${p.dept_name}`;
-        }
-
-        setProfileSubtitle(roleTitle);
-        setProfileName(p?.full_name || session?.fullName || "");
-
-        setProfileSubtitle(roleTitle);
-
-        // 3. Name Fallback
-        setProfileName(p?.full_name || session?.fullName || "");
+        setProfileName(displayName);
+        setProfileSubtitle(subtitle);
       } catch {
-        /* ignore; non-blocking for UI */
+        // If OM profile API fails, still show session-based values
+        setProfileName(baseName);
+        setProfileSubtitle(baseRole);
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1340,6 +1802,7 @@ export default function OM_LoadAssignment() {
   const [showApprove, setShowApprove] = useState(false);
   const [approved, setApproved] = useState(false);
   const [showSend, setShowSend] = useState(false);
+  const [sendRowsPreview, setSendRowsPreview] = useState<Row[]>([]);
   const [reqChange, setReqChange] = useState<{ open: boolean; from?: string }>({
     open: false,
   });
@@ -1347,7 +1810,76 @@ export default function OM_LoadAssignment() {
   /** Track if there are unsaved/manual edits in the grid */
   const [hasLocalEdits, setHasLocalEdits] = useState(false);
 
+  /**
+   * Scoped Undo/Redo for Load Recommendations only.
+   * Stores snapshots of `rows` + `hasLocalEdits` so auto-assign/save state stays consistent.
+   */
+  const undoStackRef = useRef<{ rows: Row[]; hasLocalEdits: boolean }[]>([]);
+  const redoStackRef = useRef<{ rows: Row[]; hasLocalEdits: boolean }[]>([]);
+  const HISTORY_LIMIT = 50;
+  const [historyVersion, setHistoryVersion] = useState(0); // forces rerender when stacks change
+  const bumpHistory = () => setHistoryVersion((v) => v + 1);
+
+  const resetHistory = () => {
+    undoStackRef.current = [];
+    redoStackRef.current = [];
+    bumpHistory();
+  };
+
+  const commitRows = (nextRows: Row[], options?: { markDirty?: boolean }) => {
+    // Push current snapshot to undo before applying the change
+    undoStackRef.current.push({ rows, hasLocalEdits });
+    if (undoStackRef.current.length > HISTORY_LIMIT) {
+      undoStackRef.current.shift();
+    }
+    // Any new action clears redo history
+    redoStackRef.current = [];
+
+    setRows(nextRows);
+
+    if (options?.markDirty !== false) {
+      setHasLocalEdits(true);
+    }
+    bumpHistory();
+  };
+
+  const updateRow = (
+  id: string,
+  patch: Partial<Row>,
+  options?: { markDirty?: boolean }
+) => {
+  const next = rows.map((r) => (r.id === id ? { ...r, ...patch } : r));
+  commitRows(next, { markDirty: options?.markDirty !== false });
+};
+
+
+  const handleUndo = () => {
+    if (!undoStackRef.current.length) return;
+    const prev = undoStackRef.current.pop()!;
+    redoStackRef.current.push({ rows, hasLocalEdits });
+    setRows(prev.rows);
+    setHasLocalEdits(prev.hasLocalEdits);
+    bumpHistory();
+  };
+
+  const handleRedo = () => {
+    if (!redoStackRef.current.length) return;
+    const next = redoStackRef.current.pop()!;
+    undoStackRef.current.push({ rows, hasLocalEdits });
+    setRows(next.rows);
+    setHasLocalEdits(next.hasLocalEdits);
+    bumpHistory();
+  };
+
   const [facultyList, setFacultyList] = useState<Faculty[]>([]);
+  // Faculty Deloading (per-faculty)
+  const [deloadFacultyQuery, setDeloadFacultyQuery] = useState<string>("");
+  const [deloadSelectedFaculty, setDeloadSelectedFaculty] = useState<Faculty | null>(null);
+  const [deloadRows, setDeloadRows] = useState<DeloadingRow[]>([]);
+  const [deloadLoading, setDeloadLoading] = useState(false);
+  const [deloadError, setDeloadError] = useState<string>("");
+  const [facultyWithDeloadings, setFacultyWithDeloadings] = useState<Faculty[]>([]);
+  const [deloadDropdownOpen, setDeloadDropdownOpen] = useState(false);
 
   // Load all faculty once on mount
   useEffect(() => {
@@ -1388,10 +1920,9 @@ export default function OM_LoadAssignment() {
   const [initialLoaded, setInitialLoaded] = useState(false);
 
   const setCell = <K extends keyof Row>(id: string, key: K, val: Row[K]) => {
-    setHasLocalEdits(true); // mark grid as dirty
-    setRows((prev) =>
-      prev.map((r) => (r.id === id ? { ...r, [key]: val } : r))
-    );
+    const markDirty = key !== ("selected" as K);
+    const next = rows.map((r) => (r.id === id ? { ...r, [key]: val } : r));
+    commitRows(next, { markDirty });
   };
 
   const filtered = rows.filter((r) => {
@@ -1406,14 +1937,56 @@ export default function OM_LoadAssignment() {
 
   const allSelected =
     isRunning && filtered.length > 0 && filtered.every((r) => r.selected);
-  const toggleSelectAll = (checked: boolean) =>
-    setRows((prev) =>
-      prev.map((r) =>
-        filtered.some((fr) => fr.id === r.id) ? { ...r, selected: checked } : r
-      )
+  const toggleSelectAll = (checked: boolean) => {
+    const next = rows.map((r) =>
+      filtered.some((fr) => fr.id === r.id) ? { ...r, selected: checked } : r
     );
+    commitRows(next, { markDirty: false });
+  };
   const selectedRows = rows.filter((r) => r.selected);
   const anySelected = selectedRows.length > 0;
+
+  const buildSendRowsForPreview = (): Row[] => {
+    if (!rows.length) return [];
+    if (!selectedRows.length) return [];
+
+    const all = rows.every((r) => r.selected);
+
+    const key = (r: Row) => String((r.faculty_id || r.faculty || "")).trim();
+    const selectedKeys = new Set(selectedRows.map(key).filter(Boolean));
+
+    if (all) {
+      // Send all rows that are assigned to a faculty
+      return rows.filter((r) => !!key(r));
+    }
+
+    // If any row is selected for a faculty, send ALL rows for that faculty (not per subject)
+    return rows.filter((r) => selectedKeys.has(key(r)));
+  };
+
+  const handleSendToFaculty = async (rowsToSend: Row[]) => {
+    if (!userId) throw new Error("Missing userId");
+    if (!rowsToSend?.length) throw new Error("No rows to send");
+
+    const term_id = termId || undefined;
+
+    await sendOmLoadAssignmentsToFaculty(userId, {
+      term_id,
+      rows: rowsToSend,
+    });
+
+    // After sending: clear selections and refresh
+    setShowSend(false);
+    setSendRowsPreview([]);
+    await loadFromServer();
+  };
+
+
+  // Derived: scoped history availability (re-rendered via historyVersion)
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+ const canUndo = isRunning && historyVersion >= 0 && undoStackRef.current.length > 0;
+const canRedo = isRunning && historyVersion >= 0 && redoStackRef.current.length > 0;
+
 
   const loadFromServer = async () => {
     if (!userId) return;
@@ -1438,9 +2011,11 @@ export default function OM_LoadAssignment() {
 
     setRows(Array.isArray(res?.rows) ? res.rows : []);
     setTerm(typeof res?.term === "string" ? res.term : "");
+    setTermId(typeof (res as any)?.term_id === "string" ? (res as any).term_id : "");
     setMode("run");
     setApproved(false);
     setHasLocalEdits(false);
+    resetHistory();
   };
 
   useEffect(() => {
@@ -1552,7 +2127,12 @@ export default function OM_LoadAssignment() {
 
     // REQUIRED core fields
     const missingCore =
-      !r.section || !r.faculty || !r.mode || !r.day1 || !r.begin1 || !r.end1;
+      !r.section ||
+      !r.faculty ||
+      !r.mode ||
+      !r.day1 ||
+      !r.begin1 ||
+      !r.end1;
 
     // For meeting 2: if any of the 4 is filled, require all 4
     const hasAnyMeet2 = !!r.day2 || !!r.begin2 || !!r.end2;
@@ -1601,6 +2181,43 @@ export default function OM_LoadAssignment() {
       ),
     [rowFlags]
   );
+
+  const deloadMatches = useMemo(() => {
+  const q = deloadFacultyQuery.trim().toLowerCase();
+  if (!q) return [] as Faculty[];
+  return (facultyList ?? [])
+    .filter((f) => (f.faculty_name_display || "").toLowerCase().includes(q))
+    .slice(0, 12);
+}, [deloadFacultyQuery, facultyList]);
+
+const loadFacultyDeloadings = async (fid: string) => {
+  if (!fid) return;
+  try {
+    setDeloadLoading(true);
+    setDeloadError("");
+    const res = await getOmFacultyDeloadings({ faculty_id: fid, term_id: termId || undefined });
+    setDeloadRows(Array.isArray(res?.rows) ? res.rows : []);
+  } catch (e: any) {
+    setDeloadError(e?.message || "Failed to load deloadings.");
+    setDeloadRows([]);
+  } finally {
+    setDeloadLoading(false);
+  }
+};
+
+useEffect(() => {
+  if (!termId) return;
+  (async () => {
+    try {
+      const r = await getOmFacultyWithDeloadings(termId);
+      setFacultyWithDeloadings(Array.isArray(r?.faculty) ? r.faculty : []);
+    } catch (e) {
+      console.error("Failed to load facultyWithDeloadings", e);
+      setFacultyWithDeloadings([]);
+    }
+  })();
+}, [termId]);
+
 
   type FacultySummaryRow = {
     facultyId: string;
@@ -2218,50 +2835,104 @@ export default function OM_LoadAssignment() {
                     }}
                   >
                     <CheckCheck className="h-4 w-4" />
-                    Approve
+                    Forward
                   </button>
                 </div>
               </div>
               <div className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
                 <div className="flex items-center justify-between px-4 pt-4">
-                  <h2 className="text-lg font-semibold">
-                    Load Recommendations
-                  </h2>
+                  <div className="flex items-center gap-2">
+                    <h2 className="text-lg font-semibold">Load Recommendations</h2>
 
-                  {!isRunning ? (
-                    <div className="flex items-center gap-2">
-                      <button className="inline-flex items-center gap-2 rounded-md bg-emerald-700 px-3.5 py-2 text-sm font-medium text-white shadow-sm hover:brightness-110">
-                        <Upload className="h-4 w-4" />
-                        Import CSV
-                      </button>
+                    <div className="flex items-center gap-1">
                       <button
-                        onClick={loadFromServer}
-                        className="inline-flex items-center gap-2 rounded-md border border-emerald-700 text-emerald-800 bg-white px-3.5 py-2 text-sm font-medium hover:bg-emerald-50"
-                      >
-                        <Play className="h-4 w-4" />
-                        Run
-                      </button>
-                    </div>
-                  ) : (
-                    <div className="flex items-center gap-2">
-                      <button
-                        disabled={!anySelected}
-                        onClick={() => setShowSend(true)}
+                        onClick={handleUndo}
+                        disabled={!canUndo || isAssigning}
                         className={cls(
-                          "inline-flex items-center gap-2 rounded-md px-3.5 py-2 text-sm font-medium shadow-sm",
-                          anySelected
-                            ? "bg-blue-600 text-white hover:brightness-110"
-                            : "bg-gray-200 text-gray-500 cursor-not-allowed"
+                          "inline-flex items-center justify-center rounded-md border border-gray-300 bg-white p-1.5 text-gray-600 shadow-sm",
+                          "hover:bg-gray-50",
+                          (!canUndo || isAssigning) &&
+                            "opacity-50 cursor-not-allowed hover:bg-white"
                         )}
                         title={
-                          anySelected
-                            ? "Send to selected faculty"
-                            : "Select at least one row"
+                          !canUndo
+                            ? "Nothing to undo"
+                            : "Undo last change in Load Recommendations"
                         }
                       >
-                        <Send className="h-4 w-4" />
-                        To Faculty
+                        <Undo2 className="h-4 w-4" />
                       </button>
+
+                      <button
+                        onClick={handleRedo}
+                        disabled={!canRedo || isAssigning}
+                        className={cls(
+                          "inline-flex items-center justify-center rounded-md border border-gray-300 bg-white p-1.5 text-gray-600 shadow-sm",
+                          "hover:bg-gray-50",
+                          (!canRedo || isAssigning) &&
+                            "opacity-50 cursor-not-allowed hover:bg-white"
+                        )}
+                        title={
+                          !canRedo
+                            ? "Nothing to redo"
+                            : "Redo last undone change in Load Recommendations"
+                        }
+                      >
+                        <Redo2 className="h-4 w-4" />
+                      </button>
+
+                      {/* Import SHS file */}
+                      <button
+                        type="button"
+                        onClick={handlePickShsFile}
+                        disabled={!isRunning || isAssigning}
+                        className={cls(
+                          "inline-flex items-center gap-2 rounded-md border border-gray-300 bg-white px-2.5 py-1.5 text-[13px] text-gray-700 shadow-sm",
+                          "hover:bg-gray-50",
+                          (!isRunning || isAssigning) &&
+                            "opacity-50 cursor-not-allowed hover:bg-white"
+                        )}
+                        title={
+                          !isRunning
+                            ? "Run Auto-assign or load data first"
+                            : shsFile
+                            ? `Selected: ${shsFile.name}`
+                            : "Import SHS file"
+                        }
+                      >
+                        <Upload className="h-4 w-4" />
+                        Import SHS file
+                      </button>
+
+                      <input
+                        ref={shsFileInputRef}
+                        type="file"
+                        accept=".csv,.xlsx,.xls"
+                        className="hidden"
+                        onChange={handleShsFileChange}
+                      />
+                    </div>
+                  </div>
+
+                  {/* --- MODIFIED SECTION START --- */}
+                  <div className="flex items-center gap-2">
+                    {/* New/Moved Auto-assign button */}
+                    <button
+                      onClick={runAutoAssign}
+                      disabled={isAssigning || hasLocalEdits}
+                      className="inline-flex items-center gap-2 rounded-md bg-emerald-700 px-3.5 py-2 text-sm font-medium text-white shadow-sm hover:brightness-110 disabled:opacity-60"
+                      title={
+                        hasLocalEdits
+                          ? "Auto-assign is disabled while you have manual edits. Save or refresh first."
+                          : "Run auto-assignment algorithm"
+                      }
+                    >
+                      <Play className="h-4 w-4" />
+                      {isAssigning ? "Assigning…" : "Auto-assign"}
+                    </button>
+
+                    {/* Refresh button (always visible if running) */}
+                    {isRunning && (
                       <button
                         onClick={loadFromServer}
                         className="inline-flex items-center gap-2 rounded-md border border-gray-300 bg-white px-3.5 py-2 text-sm font-medium hover:bg-gray-50"
@@ -2269,12 +2940,33 @@ export default function OM_LoadAssignment() {
                         <RefreshCcw className="h-4 w-4" />
                         Refresh
                       </button>
-                    </div>
-                  )}
+                    )}
+
+                    {/* Original Import CSV block removed */}
+                    {/* {isRunning ? (...) : (
+                        <div className="flex items-center gap-2">
+                          <button className="inline-flex items-center gap-2 rounded-md bg-emerald-700 px-3.5 py-2 text-sm font-medium text-white shadow-sm hover:brightness-110">
+                            <Upload className="h-4 w-4" />
+                            Import CSV
+                          </button>
+                          <button
+                            onClick={loadFromServer}
+                            className="inline-flex items-center gap-2 rounded-md border border-emerald-700 text-emerald-800 bg-white px-3.5 py-2 text-sm font-medium hover:bg-emerald-50"
+                          >
+                            <Play className="h-4 w-4" />
+                            Run
+                          </button>
+                        </div>
+                      )
+                    } */}
+                  </div>
+                  {/* --- MODIFIED SECTION END --- */}
+
                 </div>
 
-                <div className="overflow-x-auto overflow-y-auto max-h-[58vh] mt-3">
-                  <table className="min-w-full text-sm table-fixed">
+                {/* Match APO_CourseOfferings table styling (sticky header, bordered cells, emerald header text) */}
+                <div className="mt-3 max-h-[58vh] overflow-x-auto overflow-y-auto rounded-xl border border-gray-300 bg-white shadow-sm">
+                  <table className="min-w-full text-sm table-fixed border-collapse">
                     <colgroup>
                       <col className="w-[46px]" />
                       <col className="w-[160px]" />
@@ -2283,11 +2975,11 @@ export default function OM_LoadAssignment() {
                       <col className="w-[80px]" />
                       <col className="w-[18%]" />
                       <col className="w-[72px]" />
-                      <col className="w-[96px]" />
+                      <col className="w-[140px]" />
                       <col className="w-[96px]" />
                       <col className="w-[96px]" />
                       <col className="w-[72px]" />
-                      <col className="w-[96px]" />
+                      <col className="w-[140px]" />
                       <col className="w-[96px]" />
                       <col className="w-[96px]" />
                       <col className="w-[80px]" />
@@ -2295,9 +2987,9 @@ export default function OM_LoadAssignment() {
                       <col className="w-[110px]" />
                     </colgroup>
 
-                    <thead className="bg-gray-50 border-y text-gray-700">
-                      <tr className="whitespace-nowrap">
-                        <th className="px-3 py-2 text-center">
+                    <thead className="bg-gray-50 text-emerald-800 sticky top-0 z-10">
+                      <tr className="whitespace-nowrap text-[13px] font-semibold">
+                        <th className="px-3 py-2 text-center border border-gray-300">
                           {isRunning && (
                             <input
                               type="checkbox"
@@ -2310,33 +3002,33 @@ export default function OM_LoadAssignment() {
                             />
                           )}
                         </th>
-                        <th className="text-left px-4 py-2">Course & Title</th>
-                        <th className="text-center px-2 py-2">Units</th>
-                        <th className="text-center px-2 py-2">Section</th>
-                        <th className="text-left px-4 py-2">Faculty</th>
-                        <th className="text-center px-2 py-2">Day 1</th>
-                        <th className="text-center px-2 py-2">Begin 1</th>
-                        <th className="text-center px-2 py-2">End 1</th>
-                        <th className="text-center px-2 py-2">Room 1</th>
-                        <th className="text-center px-2 py-2">Day 2</th>
-                        <th className="text-center px-2 py-2">Begin 2</th>
-                        <th className="text-center px-2 py-2">End 2</th>
-                        <th className="text-center px-2 py-2">Room 2</th>
-                        <th className="text-center px-2 py-2">Capacity</th>
-                        <th className="text-center px-2 py-2">Mode</th>
-                        <th className="text-center px-2 py-2">Status</th>
-                        <th className="text-center px-2 py-2">Actions</th>
+                        <th className="px-3 py-2 text-left border border-gray-300">Course & Title</th>
+                        <th className="px-3 py-2 text-center border border-gray-300">Units</th>
+                        <th className="px-3 py-2 text-center border border-gray-300">Section</th>
+                        <th className="px-3 py-2 text-left border border-gray-300">Faculty</th>
+                        <th className="px-3 py-2 text-center border border-gray-300">Day 1</th>
+                        <th className="px-3 py-2 text-center border border-gray-300">Begin 1</th>
+                        <th className="px-3 py-2 text-center border border-gray-300">End 1</th>
+                        <th className="px-3 py-2 text-center border border-gray-300">Room 1</th>
+                        <th className="px-3 py-2 text-center border border-gray-300">Day 2</th>
+                        <th className="px-3 py-2 text-center border border-gray-300">Begin 2</th>
+                        <th className="px-3 py-2 text-center border border-gray-300">End 2</th>
+                        <th className="px-3 py-2 text-center border border-gray-300">Room 2</th>
+                        <th className="px-3 py-2 text-center border border-gray-300">Capacity</th>
+                        <th className="px-3 py-2 text-center border border-gray-300">Mode</th>
+                        <th className="px-3 py-2 text-center border border-gray-300">Status</th>
+                        <th className="px-3 py-2 text-center border border-gray-300">Actions</th>
                       </tr>
                     </thead>
 
-                    <tbody className="divide-y">
+                    <tbody>
                       {filtered.map((r, idx) => {
                         const e = getEditFlags(r);
-                        const unread = r.status === "Pending";
+                        const unread = !!(r as any).pending_rfc;
                         return (
                           <tr
                             key={r.id}
-                            className="hover:bg-gray-50 whitespace-nowrap"
+                            className="hover:bg-gray-50 whitespace-nowrap [&>td]:border [&>td]:border-gray-200"
                           >
                             <td className="px-3 py-2 text-center">
                               {isRunning && (
@@ -2363,14 +3055,16 @@ export default function OM_LoadAssignment() {
                                   <SelectBox
                                     value={r.course || ""}
                                     onChange={(code) => {
-                                      setCell(r.id, "course", code);
                                       const found = courseOptions.find(
                                         (c) => c.code === code
                                       );
-                                      setCell(
+                                      updateRow(
                                         r.id,
-                                        "title",
-                                        (found?.title || "") as Row["title"]
+                                        {
+                                          course: code,
+                                          title: (found?.title || "") as any,
+                                        },
+                                        { markDirty: true }
                                       );
                                     }}
                                     options={courseOptions.map((c) => c.code)}
@@ -2427,9 +3121,12 @@ export default function OM_LoadAssignment() {
                                 <ComboBox
                                   value={r.faculty ?? ""}
                                   onChange={(v) => {
-                                    setCell(r.id, "faculty", v);
                                     const fid = facultyNameToId[v] || "";
-                                    setCell(r.id, "faculty_id", fid as any);
+                                    updateRow(
+                                      r.id,
+                                      { faculty: v, faculty_id: fid as any },
+                                      { markDirty: true }
+                                    );
                                   }}
                                   options={facultyOptions}
                                   className="w-[200px] md:w-[240px] lg:w-[280px]"
@@ -2447,8 +3144,8 @@ export default function OM_LoadAssignment() {
                                   value={r.day1}
                                   onChange={(v) => setCell(r.id, "day1", v)}
                                   options={DAY_OPTIONS}
-                                  className="w-[70px] text-center"
                                 />
+
                               ) : (
                                 <span>{r.day1 || "—"}</span>
                               )}
@@ -2456,11 +3153,17 @@ export default function OM_LoadAssignment() {
 
                             <td className="px-2 py-2 text-center">
                               {e.begin1 ? (
-                                <SelectBox
+                                <TimeBeginInput
                                   value={r.begin1}
-                                  onChange={(v) => setCell(r.id, "begin1", v)}
+                                  onChange={(v) => {
+                                    const patch: Partial<Row> = { begin1: v };
+                                    if (v) patch.end1 = calculateEndTime(v);
+                                    updateRow(r.id, patch, { markDirty: true });
+                                  }}
+
                                   options={TIME_BEGIN_OPTIONS}
-                                  className="w-[70px] text-center"
+                                  className="w-[120px] text-center"
+
                                 />
                               ) : (
                                 <span>{r.begin1 || "—"}</span>
@@ -2501,8 +3204,9 @@ export default function OM_LoadAssignment() {
                                   value={r.day2}
                                   onChange={(v) => setCell(r.id, "day2", v)}
                                   options={DAY_OPTIONS}
-                                  className="w-[70px] text-center"
                                 />
+
+
                               ) : (
                                 <span>{r.day2 || "—"}</span>
                               )}
@@ -2510,11 +3214,18 @@ export default function OM_LoadAssignment() {
 
                             <td className="px-2 py-2 text-center">
                               {e.begin2 ? (
-                                <SelectBox
+                                <TimeBeginInput
                                   value={r.begin2}
-                                  onChange={(v) => setCell(r.id, "begin2", v)}
+                                  onChange={(v) => {
+                                    const patch: Partial<Row> = { begin2: v };
+                                    if (v) {
+                                      patch.end2 = calculateEndTime(v);
+                                    }
+                                    updateRow(r.id, patch, { markDirty: true });
+                                  }}
                                   options={TIME_BEGIN_OPTIONS}
-                                  className="w-[70px] text-center"
+                                  className="w-[120px] text-center"
+
                                 />
                               ) : (
                                 <span>{r.begin2 || "—"}</span>
@@ -2582,14 +3293,19 @@ export default function OM_LoadAssignment() {
                               {isRunning && (
                                 <div className="relative flex items-center justify-center gap-3 text-emerald-700">
                                   <button
-                                    className="relative hover:brightness-110"
+                                    disabled={!!r.finalized}
+                                    className={cls(
+                                      "relative hover:brightness-110",
+                                      !!r.finalized && "opacity-40 cursor-not-allowed hover:brightness-100"
+                                    )}
                                     title="Message"
-                                    onClick={() =>
+                                    onClick={() => {
+                                      if (r.finalized) return;
                                       setReqChange({
                                         open: true,
                                         from: r.faculty || "Faculty",
-                                      })
-                                    }
+                                      });
+                                    }}
                                   >
                                     <MessageSquareText className="h-5 w-5" />
                                     {unread && (
@@ -2598,8 +3314,35 @@ export default function OM_LoadAssignment() {
                                   </button>
 
                                   <button
-                                    className="flex h-7 w-7 items-center justify-center rounded-full border-2 border-emerald-700 text-emerald-700 hover:bg-emerald-50"
-                                    title="Approve row"
+                                    disabled={!!r.finalized}
+                                    className={cls(
+                                      "flex h-7 w-7 items-center justify-center rounded-full border-2 border-emerald-700 text-emerald-700 hover:bg-emerald-50",
+                                      !!r.finalized && "opacity-40 cursor-not-allowed hover:bg-transparent"
+                                    )}
+                                    title="Approve"
+                                  onClick={async () => {
+                                      if (!userId) return;
+                                      if (!r.faculty_id) {
+                                        alert('This row has no assigned faculty yet.');
+                                        return;
+                                      }
+                                      try {
+                                        await finalizeOmLoadAssignmentCourse(userId, {
+                                          term_id: termId || undefined,
+                                          faculty_id: r.faculty_id,
+                                          course_code: r.course,
+                                          section: r.section,
+                                        });
+                                        // lock actions for this row immediately (backend persists too)
+                                        setCell(r.id, "finalized", true as any);
+                                        showToast(
+                                          `Notified ${r.faculty || "faculty"} that ${r.course} – ${r.section} was added to their final schedule.`,
+                                          "success"
+                                        );
+                                      } catch (e: any) {
+                                        showToast(e?.message || "Failed to notify faculty.", "error");
+                                      }
+                                    }}
                                   >
                                     <Check
                                       className="h-4 w-4"
@@ -2607,13 +3350,27 @@ export default function OM_LoadAssignment() {
                                     />
                                   </button>
 
+                                  <button
+                                    type="button"
+                                    onClick={() => handleCopyRow(r)}
+                                    title={copiedRowId === r.id ? "Copied!" : "Copy"}
+                                    className="flex h-7 w-7 items-center justify-center rounded-full border-2 border-gray-300 text-gray-600 hover:bg-gray-50"
+                                  >
+                                    {copiedRowId === r.id ? (
+                                      <Check className="h-4 w-4 text-emerald-600" strokeWidth={2.5} />
+                                    ) : (
+                                      <Copy className="h-4 w-4" />
+                                    )}
+                                  </button>
+
+
                                   {String(r.id).startsWith("manual-") && (
                                     <button
                                       className="flex h-7 w-7 items-center justify-center rounded-full border-2 border-red-600 text-red-600 hover:bg-red-50"
                                       title="Remove this line"
                                       onClick={() =>
-                                        setRows((prev) =>
-                                          prev.filter((row) => row.id !== r.id)
+                                        commitRows(
+                                          rows.filter((row) => row.id !== r.id)
                                         )
                                       }
                                     >
@@ -2634,7 +3391,7 @@ export default function OM_LoadAssignment() {
                             className="px-4 py-10 text-center text-sm text-gray-500"
                           >
                             No data yet. Click{" "}
-                            <span className="font-medium">Run</span> or{" "}
+                            <span className="font-medium">Auto-assign</span> or{" "}
                             <span className="font-medium">Add new line</span> to
                             begin.
                           </td>
@@ -2645,7 +3402,7 @@ export default function OM_LoadAssignment() {
                 </div>
 
                 <div className="border-t px-4 py-3">
-                  <div className="flex justify-start">
+                  <div className="flex items-center justify-between gap-3">
                     <button
                       onClick={addRow}
                       className="inline-flex items-center gap-2 rounded-lg border border-gray-400 px-3 py-1.5 text-sm text-gray-800 hover:bg-gray-100"
@@ -2654,9 +3411,37 @@ export default function OM_LoadAssignment() {
                       <Plus className="h-4 w-4" />
                       Add new line
                     </button>
+
+                    {/* To Faculty button (bottom-right, aligned with Add new line) */}
+                    <button
+                      disabled={!anySelected || !isRunning}
+                      onClick={() => {
+                        const preview = buildSendRowsForPreview();
+                        if (!preview.length) {
+                          alert("Select at least one row with an assigned faculty.");
+                          return;
+                        }
+                        setSendRowsPreview(preview);
+                        setShowSend(true);
+                      }}
+                      className={cls(
+                        "inline-flex items-center gap-2 rounded-lg px-3 py-1.5 text-sm font-medium shadow-sm",
+                        anySelected && isRunning
+                          ? "bg-blue-600 text-white hover:brightness-110"
+                          : "bg-gray-200 text-gray-500 cursor-not-allowed"
+                      )}
+                      title={
+                        anySelected
+                          ? "Send to selected faculty"
+                          : "Select at least one row"
+                      }
+                    >
+                      <Send className="h-4 w-4" />
+                      To Faculty
+                    </button>
                   </div>
-                  {/* Right: Auto-assign (Run algorithm) */}
-                  <div className="flex items-center gap-2">
+                  {/* Right: Auto-assign (Run algorithm) - REMOVED from bottom */}
+                  {/* <div className="flex items-center gap-2">
                     <button
                       onClick={runAutoAssign}
                       disabled={isAssigning || hasLocalEdits}
@@ -2670,9 +3455,192 @@ export default function OM_LoadAssignment() {
                       <Play className="h-4 w-4" />
                       {isAssigning ? "Assigning…" : "Auto-assign"}
                     </button>
-                  </div>
+                  </div> */}
                 </div>
               </div>
+              {/* ---- Faculty Deloading (per-faculty) ---- */}
+              <div className="mt-6 rounded-xl border border-gray-200 bg-white shadow-sm">
+                <div className="flex flex-wrap items-start justify-between gap-4 px-4 pt-4 pb-2">
+                  <div>
+                    <h2 className="text-lg font-semibold">Faculty Deloading</h2>
+                    <p className="text-xs text-gray-500">
+                      View deloading records per faculty for{" "}
+                      <span className="font-semibold">{term || "this term"}</span>.
+                    </p>
+                  </div>
+
+                  <div className="w-full sm:w-[420px]">
+                    <label className="block text-xs font-medium text-gray-700 mb-1">
+                      Search faculty
+                    </label>
+                    <div className="relative">
+                      <div className="flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-3 py-2 shadow-sm">
+                        <SearchIcon className="h-4 w-4 text-gray-500" />
+                        <input
+                          value={deloadFacultyQuery}
+                          onChange={(e) => {
+                            setDeloadFacultyQuery(e.target.value);
+                            setDeloadDropdownOpen(true);
+                          }}
+                          onFocus={() => setDeloadDropdownOpen(true)}
+                          onBlur={() => window.setTimeout(() => setDeloadDropdownOpen(false), 120)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") {
+                              const best = deloadMatches[0];
+                              if (best) {
+                                setDeloadSelectedFaculty(best);
+                                setDeloadFacultyQuery(best.faculty_name_display);
+                                setDeloadDropdownOpen(false);
+                                loadFacultyDeloadings(best.faculty_id);
+                              }
+                            }
+                            if (e.key === "Escape") setDeloadDropdownOpen(false);
+                          }}
+                          placeholder="Type a name (e.g., Dela Cruz)"
+                          className="w-full bg-transparent text-sm outline-none placeholder:text-gray-400"
+                        />
+                        {deloadFacultyQuery.trim() && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setDeloadFacultyQuery("");
+                              setDeloadSelectedFaculty(null);
+                              setDeloadRows([]);
+                              setDeloadError("");
+                            }}
+                            className="rounded-md p-1 text-gray-500 hover:bg-gray-100"
+                            title="Clear"
+                          >
+                            <X className="h-4 w-4" />
+                          </button>
+                        )}
+                      </div>
+
+                      {deloadDropdownOpen && deloadFacultyQuery.trim() && deloadMatches.length > 0 && (
+                        <div className="absolute z-20 mt-1 w-full overflow-hidden rounded-lg border border-gray-200 bg-white shadow-lg">
+                          <ul className="max-h-60 overflow-auto py-1">
+                            {deloadMatches.map((f) => (
+                              <li key={f.faculty_id}>
+                                <button
+                                  type="button"
+                                  className="w-full px-3 py-2 text-left text-sm hover:bg-gray-50"
+                                  onMouseDown={(e) => e.preventDefault()}
+                                  onClick={() => {
+                                    setDeloadSelectedFaculty(f);
+                                    setDeloadFacultyQuery(f.faculty_name_display);
+                                    setDeloadDropdownOpen(false);
+                                    loadFacultyDeloadings(f.faculty_id);
+                                  }}
+                                >
+                                  {f.faculty_name_display}
+                                </button>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Faculty with current deloadings (quick awareness) */}
+                <div className="px-4 pb-3">
+                  <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2">
+                    <div className="text-xs font-medium text-gray-700">
+                      Faculty with current deloadings
+                      <span className="ml-2 text-[11px] font-normal text-gray-500">
+                        ({facultyWithDeloadings.length})
+                      </span>
+                    </div>
+                    {facultyWithDeloadings.length === 0 ? (
+                      <div className="mt-1 text-xs text-gray-500">None found for this term.</div>
+                    ) : (
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        {facultyWithDeloadings.map((f) => (
+                          <button
+                            key={f.faculty_id}
+                            type="button"
+                            className={cls(
+                              "rounded-full border px-2.5 py-1 text-xs shadow-sm",
+                              deloadSelectedFaculty?.faculty_id === f.faculty_id
+                                ? "border-emerald-300 bg-emerald-50 text-emerald-900"
+                                : "border-gray-200 bg-white text-gray-700 hover:bg-gray-100"
+                            )}
+                            onClick={() => {
+                              setDeloadSelectedFaculty(f);
+                              setDeloadFacultyQuery(f.faculty_name_display);
+                              loadFacultyDeloadings(f.faculty_id);
+                            }}
+                          >
+                            {f.faculty_name_display}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {deloadError && (
+                  <div className="mx-4 mb-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                    {deloadError}
+                  </div>
+                )}
+
+                <div className="border-t px-4 pb-4 pt-4 overflow-x-auto w-full">
+                  {!deloadSelectedFaculty ? (
+                    <div className="py-6 text-center text-sm text-gray-500">
+                      Select a faculty to view their deloadings.
+                    </div>
+                  ) : deloadLoading ? (
+                    <div className="py-6 text-center text-sm text-gray-500">Loading…</div>
+                  ) : deloadRows.length === 0 ? (
+                    <div className="py-6 text-center text-sm text-gray-500">
+                      No deloadings recorded for{" "}
+                      <span className="font-semibold">{deloadSelectedFaculty.faculty_name_display}</span>.
+                    </div>
+                  ) : (
+                    <table className="w-full text-sm table-fixed">
+                      <colgroup>
+                        <col style={{ width: "28%" }} />
+                        <col style={{ width: "12%" }} />
+                        <col style={{ width: "40%" }} />
+                        <col style={{ width: "20%" }} />
+                      </colgroup>
+                      <thead className="bg-gray-50 border-y text-gray-700">
+                        <tr>
+                          {["Deloading Type", "Units", "Notes", "Last Updated"].map((h) => (
+                            <th
+                              key={h}
+                              className="px-3 py-2 text-center text-xs font-semibold uppercase tracking-wide"
+                            >
+                              {h}
+                            </th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {deloadRows.map((r, i) => (
+                          <tr
+                            key={`${r.deloading_type || "row"}-${i}`}
+                            className={cls(
+                              i % 2 === 0 ? "bg-white" : "bg-gray-50",
+                              "text-gray-800 hover:bg-amber-50/40"
+                            )}
+                          >
+                            <td className="px-3 py-2 text-center">{r.deloading_type || "—"}</td>
+                            <td className="px-3 py-2 text-center">{r.units_deloaded ?? "—"}</td>
+                            <td className="px-3 py-2 text-center">{r.notes || "—"}</td>
+                            <td className="px-3 py-2 text-center">
+                              {r.updated_at ? new Date(r.updated_at).toLocaleString() : "—"}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+                </div>
+              </div>
+
               {/* ---- Summary section under Load Recommendations ---- */}
               {rows.length > 0 && (
                 <div className="mt-6 rounded-xl border border-gray-200 bg-white shadow-sm">
@@ -2998,31 +3966,46 @@ export default function OM_LoadAssignment() {
         open={showApprove}
         onClose={() => setShowApprove(false)}
         onApprove={() => {
-          (async () => {
-            try {
-              if (userId) {
-                await submitOmLoadAssignment(userId, { rows }, "approve"); // <-- key change
-              }
-              // pull fresh data so you see persisted faculty + any created schedules
-              await loadFromServer();
-              setApproved(true);
-            } finally {
-              setShowApprove(false);
+        (async () => {
+          try {
+            if (userId) {
+              const res = await submitOmLoadAssignment(userId, { rows }, "approve");
+
+              // Create the chair notification (forward vs update is decided by backend;
+              // but if approve returns kind/reco_id, we pass it through for correctness)
+              await notifyChairLoadRecommendation(userId, {
+                kind: (res as any)?.kind,
+                reco_id: (res as any)?.reco_id,
+              });
             }
-          })();
-        }}
+
+            // pull fresh data so you see persisted faculty + any created schedules
+            await loadFromServer();
+            setApproved(true);
+          } finally {
+            setShowApprove(false);
+          }
+        })();
+      }}
+
       />
 
       <SendModal
         open={showSend}
         onClose={() => setShowSend(false)}
-        rows={selectedRows}
+        rows={sendRowsPreview}
+        termLabel={term}
+        onSend={handleSendToFaculty}
       />
 
       <RequestChangeModal
         open={reqChange.open}
         from={reqChange.from}
         onClose={() => setReqChange({ open: false })}
+        userId={userId || ""}
+        termId={termId || ""}
+        rows={rows}
+        onAfterUpdate={loadFromServer}
       />
 
 <NewSectionModal
@@ -3035,8 +4018,8 @@ export default function OM_LoadAssignment() {
           const title =
             courseOptions.find((c) => c.code === course)?.title || "";
 
-          setRows((prev) => [
-            ...prev,
+          commitRows([
+            ...rows,
             {
               id: `manual-${Date.now()}`,
               course,
@@ -3063,10 +4046,35 @@ export default function OM_LoadAssignment() {
 
           setMode("manual");
           setApproved(false);
-          setHasLocalEdits(true);
           setShowNewSectionModal(false);
         }}
       />
+
+      {/* Global toast */}
+      {uiToast.open && (
+        <div className="fixed bottom-6 right-6 z-[250]">
+          <div
+            className={cls(
+              "max-w-md rounded-xl border p-4 shadow-lg",
+              uiToast.kind === "success"
+                ? "border-emerald-200 bg-emerald-50 text-emerald-900"
+                : "border-red-200 bg-red-50 text-red-900"
+            )}
+          >
+            <div className="flex items-start gap-3">
+              <div className="text-sm font-medium leading-snug">{uiToast.message}</div>
+              <button
+                type="button"
+                className="ml-auto rounded-md p-1 hover:bg-black/5"
+                aria-label="Close"
+                onClick={() => setUiToast((prev) => ({ ...prev, open: false }))}
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
     </AppShell>
   );

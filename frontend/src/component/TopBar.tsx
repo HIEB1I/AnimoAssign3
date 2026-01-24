@@ -1,3 +1,5 @@
+//used by faculty screen
+
 import { useState, useRef, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { UserCircle, LogOut, Inbox, Bell } from "lucide-react";
@@ -38,11 +40,25 @@ export default function TopBar({
 
   const [menuOpen, setMenuOpen] = useState(false);
   const [notifOpen, setNotifOpen] = useState(false);
+  const toDateSafe = (v: any): Date | null => {
+    const d = v instanceof Date ? v : new Date(v);
+    return Number.isFinite(d.getTime()) ? d : null;
+  };
+
+  const pickNotifTime = (n: any): Date | null => {
+    return (
+      toDateSafe(n?.time) ||
+      toDateSafe(n?.created_at) ||
+      toDateSafe(n?.createdAt) ||
+      toDateSafe(n?.created)
+    );
+  };
+
   const [notifications, setNotifications] = useState(
     incomingNotifs.length
       ? incomingNotifs.map((n) => ({
           ...n,
-          time: n.time instanceof Date ? n.time : new Date(n.time),
+          time: pickNotifTime(n) || new Date(),
         }))
       : [
           {
@@ -54,6 +70,19 @@ export default function TopBar({
           },
         ]
   );
+
+  // Keep state in sync when new notifications come in
+  useEffect(() => {
+    if (!incomingNotifs) return;
+    setNotifications(
+      incomingNotifs.length
+        ? incomingNotifs.map((n) => ({
+            ...n,
+            time: pickNotifTime(n) || new Date(),
+          }))
+        : []
+    );
+  }, [incomingNotifs]);
 
   const notifRef = useRef<HTMLDivElement | null>(null);
   const wrapperRef = useRef<HTMLDivElement | null>(null);
@@ -94,7 +123,9 @@ export default function TopBar({
 
   // “x minutes ago” helper
   const timeAgo = (d: Date) => {
+    if (!d || !Number.isFinite(d.getTime())) return "";
     const s = Math.floor((Date.now() - d.getTime()) / 1000);
+    if (!Number.isFinite(s) || s < 0) return "";
     if (s < 60) return `${s}s ago`;
     const m = Math.floor(s / 60);
     if (m < 60) return `${m} minute${m > 1 ? "s" : ""} ago`;
@@ -106,9 +137,13 @@ export default function TopBar({
 
   // Notification logic
   const hasUnseen = notifications.some((n) => !n.seen);
-  const sortedNotifs = [...notifications].sort(
-    (a, b) => (a.time as Date).getTime() - (b.time as Date).getTime()
-  ).reverse();
+  const sortedNotifs = [...notifications]
+    .sort((a, b) => {
+      const ta = (a.time as Date)?.getTime?.() ?? 0;
+      const tb = (b.time as Date)?.getTime?.() ?? 0;
+      return ta - tb;
+    })
+    .reverse();
 
   const toggleNotif = () => {
     setNotifOpen((v) => !v);
