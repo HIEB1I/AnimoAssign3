@@ -1,4 +1,5 @@
-// src/base/Topbar.tsx
+// src/Topbar.tsx
+//used by OM & CHAIR screen
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import {
@@ -11,10 +12,15 @@ import {
   ArrowLeftRight,
 } from "lucide-react";
 
-import { setActiveRole, userHasRole } from "@/api";
+import {
+  setActiveRole,
+  userHasRole,
+  listNotifications,
+  markNotificationsSeen,
+  type AppNotification,
+} from "@/api";
 
 // helpers for notifications
-type Notification = { id: number; title: string; details: string; time: Date; seen?: boolean };
 const timeAgo = (d: Date) => {
   const s = Math.floor((Date.now() - d.getTime()) / 1000);
   if (s < 60) return `${s}s ago`;
@@ -26,30 +32,23 @@ const timeAgo = (d: Date) => {
   return `${dd}d ago`;
 };
 
-// Chair-context sample data (Dean style, Chair content)
-const INITIAL_NOTIFS: Notification[] = [
-  {
-    id: 101,
-    title: "Dean requested minor revision",
-    details: "Please update the CT plantilla remarks for CCAPDEV by Oct 15.",
-    time: new Date(Date.now() - 2 * 60 * 1000),
-    seen: false,
-  },
-  {
-    id: 102,
-    title: "Section clash flagged",
-    details: "CCPROG3 S12 and S14 overlap on Monday 9:15–10:45. Review schedule.",
-    time: new Date(Date.now() - 20 * 60 * 1000),
-    seen: false,
-  },
-  {
-    id: 103,
-    title: "Office Manager posted an update",
-    details: "New template for AY 2025–2026 is now required for all uploads.",
-    time: new Date(Date.now() - 60 * 60 * 1000),
-    seen: false,
-  },
-];
+type NotifUI = {
+  notif_id: string;
+  title: string;
+  details: string;
+  created_at: Date;
+  seen: boolean;
+  meta?: { route?: string; fs_id?: string; kind?: string };
+};
+
+const getSessionUserId = () => {
+  try {
+    const u = JSON.parse(localStorage.getItem("animo.user") || "null");
+    return u?.userId || "";
+  } catch {
+    return "";
+  }
+};
 
 export type TopbarProps = {
   open: boolean;
@@ -132,16 +131,49 @@ export default function Topbar({
 
   // notifications dropdown state
   const [notifOpen, setNotifOpen] = useState(false);
-  const [notifications, setNotifications] = useState<Notification[]>(INITIAL_NOTIFS);
+  const [notifications, setNotifications] = useState<NotifUI[]>([]);
   const notifRef = useRef<HTMLDivElement>(null);
 
-  const hasUnseen = notifications.some((n) => !n.seen);
-  const sortedNotifs = [...notifications].sort((a, b) => b.time.getTime() - a.time.getTime());
+  const refreshNotifs = async () => {
+    const uid = getSessionUserId();
+    if (!uid) return;
 
-  const handleToggleNotif = () => {
-    setNotifOpen((o) => !o);
+    const res = await listNotifications(uid, 25);
+    const rows = (res?.rows || []).map((n: AppNotification): NotifUI => ({
+      notif_id: n.notif_id,
+      title: n.title,
+      details: n.details,
+      created_at: new Date(n.created_at),
+      seen: !!n.seen,
+      meta: n.meta,
+    }));
+
+    setNotifications(rows);
+  };
+
+  // Poll notifications so the bell reflects changes even if user stays on a page.
+  useEffect(() => {
+    refreshNotifs().catch(() => {});
+    const t = window.setInterval(() => refreshNotifs().catch(() => {}), 20000);
+    return () => window.clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const hasUnseen = notifications.some((n) => !n.seen);
+  const sortedNotifs = [...notifications].sort(
+    (a, b) => b.created_at.getTime() - a.created_at.getTime()
+  );
+
+  const handleToggleNotif = async () => {
+    const nextOpen = !notifOpen;
+    setNotifOpen(nextOpen);
+
     // mark all as seen when opening
-    if (!notifOpen) {
+    if (nextOpen) {
+      const uid = getSessionUserId();
+      if (uid) {
+        await markNotificationsSeen(uid, { all: true }).catch(() => {});
+      }
       setNotifications((prev) => prev.map((n) => ({ ...n, seen: true })));
     }
   };
@@ -216,7 +248,6 @@ export default function Topbar({
                 state: { from: location.pathname },
               })
             }
-
           >
             <Inbox size={18} />
           </button>
@@ -245,18 +276,16 @@ export default function Topbar({
                   {sortedNotifs.length ? (
                     sortedNotifs.map((n) => (
                       <div
-                        key={n.id}
+                        key={n.notif_id}
                         className="border-b border-neutral-100 px-4 py-3 last:border-0"
                       >
                         <div className="font-semibold text-slate-900">{n.title}</div>
                         <div className="text-sm text-gray-600">{n.details}</div>
-                        <div className="mt-1 text-xs text-gray-400">{timeAgo(n.time)}</div>
+                        <div className="mt-1 text-xs text-gray-400">{timeAgo(n.created_at)}</div>
                       </div>
                     ))
                   ) : (
-                    <div className="px-4 py-6 text-center text-sm text-gray-500">
-                      No notifications
-                    </div>
+                    <div className="px-4 py-6 text-center text-sm text-gray-500">No notifications</div>
                   )}
                 </div>
               </div>

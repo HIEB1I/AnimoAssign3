@@ -2638,6 +2638,44 @@ export async function getFacultyOverview(userId: string) {
   return getFacultyOverviewList(userId);
 }
 
+// ===== Load Assignment RFC workflow (Faculty) =====
+export async function getFacultyLoadAssignmentRfc(userId: string, params: { term_id?: string }) {
+  const base = (typeof API_BASE !== "undefined" ? API_BASE : "").replace(/\/+$/, "");
+  const qs = new URLSearchParams({ userId });
+  if (params.term_id) qs.set("term_id", params.term_id);
+  const url = `${base}/faculty/load-assignment/rfc?${qs.toString()}`;
+  const r = await fetch(url, { method: "GET" });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json() as Promise<{ ok: boolean; rfc: any | null }>;
+}
+
+export async function sendFacultyLoadAssignmentRfcMessage(
+  userId: string,
+  payload: { term_id?: string; message: string }
+) {
+  const base = (typeof API_BASE !== "undefined" ? API_BASE : "").replace(/\/+$/, "");
+  const url = `${base}/faculty/load-assignment/rfc/message?userId=${encodeURIComponent(userId)}`;
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json() as Promise<{ ok: boolean; rfc_id?: string; status?: string }>;
+}
+
+export async function acceptFacultyLoadAssignment(userId: string, payload: { term_id?: string }) {
+  const base = (typeof API_BASE !== "undefined" ? API_BASE : "").replace(/\/+$/, "");
+  const url = `${base}/faculty/load-assignment/accept?userId=${encodeURIComponent(userId)}`;
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json() as Promise<{ ok: boolean; status?: string }>;
+}
+
 /* =========================================================
    ===============  FACULTY: HISTORY  ======================
    ========================================================= */
@@ -2820,6 +2858,28 @@ export async function submitOmLoadAssignment(
   };
 }
 
+export async function notifyChairLoadRecommendation(
+  userId: string,
+  payload: {
+    department_id?: string;
+    reco_id?: string;
+    kind?: "om_load_forwarded" | "om_load_updated";
+    // optional: rows?: OmLoadRow[]; // if you want backend to infer dept_id
+  } = {}
+) {
+  const { data } = await axios.post(`${API_BASE}/om/loadassignment/notify-chair`, payload, {
+    params: { userId },
+  });
+  return data as {
+    ok: boolean;
+    created: number;
+    recipients: string[];
+    kind: "om_load_forwarded" | "om_load_updated";
+    reco_id?: string;
+  };
+}
+
+
 type Faculty = {
   faculty_id: string;
   faculty_name_display: string;
@@ -2875,6 +2935,73 @@ export async function runOmAutoAssign(params: {
   if (!r.ok) throw new Error(await r.text());
   return r.json() as Promise<{ term: string; rows: OmLoadRow[] }>;
 }
+
+/** Send OM proposed schedules to faculty (all rows per faculty) */
+export async function sendOmLoadAssignmentsToFaculty(
+  user_id: string,
+  payload: { term_id?: string; rows: any[] }
+) {
+  const base = (typeof API_BASE !== "undefined" ? API_BASE : "").replace(/\/+$/, "");
+  const url = `${base}/om/load-assignment/to-faculty`;
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ user_id, ...payload }),
+  });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json() as Promise<{ ok: boolean; term_id: string; sent_faculty: number }>;
+}
+
+export async function getOmLoadAssignmentRfc(
+  user_id: string,
+  params: { term_id?: string; faculty_id: string }
+) {
+  const base = (typeof API_BASE !== "undefined" ? API_BASE : "").replace(/\/+$/, "");
+  const qs = new URLSearchParams({ user_id, faculty_id: params.faculty_id });
+  if (params.term_id) qs.set("term_id", params.term_id);
+  const url = `${base}/om/load-assignment/rfc?${qs.toString()}`;
+  const r = await fetch(url, { method: "GET" });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json() as Promise<{ ok: boolean; rfc: any | null }>;
+}
+
+export async function respondOmLoadAssignmentRfc(
+  user_id: string,
+  payload: {
+    term_id: string;
+    faculty_id: string;
+    action: "reply" | "approve" | "reject";
+    message?: string;
+  }
+) {
+  const base = (typeof API_BASE !== "undefined" ? API_BASE : "").replace(/\/+$/, "");
+  const url = `${base}/om/load-assignment/rfc/respond`;
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ user_id, ...payload }),
+  });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json() as Promise<{ ok: boolean; status?: string }>;
+}
+
+/** When OM clicks the check button per course: notify faculty that subject is final */
+export async function finalizeOmLoadAssignmentCourse(
+  user_id: string,
+  payload: { term_id?: string; faculty_id: string; course_code: string; section: string }
+) {
+  const base = (typeof API_BASE !== "undefined" ? API_BASE : "").replace(/\/+$/, "");
+  const url = `${base}/om/load-assignment/finalize-course`;
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ user_id, ...payload }),
+  });
+
+  if (!r.ok) throw new Error(await r.text());
+  return r.json() as Promise<{ ok: boolean }>;
+}
+
 
 export async function getAllFaculty() {
   const base = (typeof API_BASE !== "undefined" ? API_BASE : "").replace(/\/+$/, "");
@@ -3076,6 +3203,37 @@ export async function rejectFacultyService(fs_id: string, payload?: { remarks?: 
 
 
 
+
+
+/* =========================================================
+   ===============  NOTIFICATIONS (Topbar bell)  ============
+   ========================================================= */
+export type AppNotification = {
+  notif_id: string;
+  user_id: string;
+  title: string;
+  details: string;
+  created_at: string; // ISO
+  seen: boolean;
+  seen_at?: string | null;
+  meta?: { route?: string; fs_id?: string; kind?: string };
+};
+
+export async function listNotifications(userId: string, limit = 25) {
+  const sp = new URLSearchParams();
+  sp.set("userId", userId);
+  sp.set("limit", String(limit));
+  const { data } = await api.get(`/notifications?${sp.toString()}`);
+  return data as { ok: boolean; rows: AppNotification[] };
+}
+
+export async function markNotificationsSeen(
+  userId: string,
+  opts: { all?: boolean; ids?: string[] }
+) {
+  const { data } = await api.post(`/notifications/mark-seen`, { userId, ...opts });
+  return data as { ok: boolean };
+}
 export async function chairClassRetention(userId: string) {
   const { data } = await api.post(`/chair/class-retention`, {}, {
     params: { userId, action: "fetch" },

@@ -2,7 +2,14 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Outlet, useLocation } from "react-router-dom";
 import AppShell from "../../base/AppShell";
 import { runOmAutoAssign } from "../../api.ts";
-import { submitOmLoadAssignment } from "../../api.ts";
+import {
+  submitOmLoadAssignment,
+  notifyChairLoadRecommendation,
+  sendOmLoadAssignmentsToFaculty,
+  getOmLoadAssignmentRfc,
+  respondOmLoadAssignmentRfc,
+  finalizeOmLoadAssignmentCourse,
+} from "../../api.ts";
 
 import {
   getOmLoadAssignmentList,
@@ -10,7 +17,7 @@ import {
   getAllFaculty,
   getOmFacultyWithDeloadings,
   getOmFacultyDeloadings,
-  type DeloadingRow,
+  type DeloadingRow
 } from "../../api";
 
 import { cls } from "../../utilities/cls";
@@ -457,9 +464,12 @@ type Row = {
   capacity: number | "";
   mode?: string;
   status?: "" | "Confirmed" | "Pending" | "Unassigned" | "Conflict";
+  pending_rfc?: boolean;
   conflictNote?: string;
   editable?: boolean;
   campus_id?: string;
+  /** When OM has already finalized this course for the faculty */
+  finalized?: boolean;
 };
 
 // --- Validation helpers & engine (row-level flags) ---
@@ -1028,11 +1038,16 @@ const SendModal = ({
   open,
   onClose,
   rows,
+  termLabel,
+  onSend,
 }: {
   open: boolean;
   onClose: () => void;
   rows: Row[];
+  termLabel?: string;
+  onSend: (rows: Row[]) => Promise<void>;
 }) => {
+  const [sending, setSending] = useState(false);
   if (!open) return null;
   const byFaculty = Object.entries(
     rows.reduce<Record<string, Row[]>>((acc, r) => {
@@ -1048,7 +1063,7 @@ const SendModal = ({
       <div className="w-full max-w-5xl rounded-2xl bg-white p-6 shadow-2xl">
         <div className="mb-1">
           <h3 className="text-[22px] font-extrabold text-emerald-700">
-            Teaching Load Assignments for Term 1, AY 2025 - 2026
+            Teaching Load Assignments for {termLabel || "Current Term"}
           </h3>
           <div className="mt-0.5 text-[11px] text-gray-600">
             To:{" "}
@@ -1063,7 +1078,7 @@ const SendModal = ({
           to you:
         </p>
 
-        <div className="mt-4">
+        <div className="mt-4 max-h-[60vh] overflow-auto pr-1">
           <div className="rounded-xl border border-gray-200 overflow-hidden">
             <table className="w-full table-fixed text-[13px]">
               <colgroup>
@@ -1127,12 +1142,8 @@ const SendModal = ({
                         <td className="px-4 py-3 align-middle">
                           {r.units !== "" ? String(r.units) : "—"}
                         </td>
-                        <td className="px-4 py-3 align-middle text-gray-800">
-                          —
-                        </td>
-                        <td className="px-4 py-3 align-middle text-gray-800">
-                          —
-                        </td>
+                        <td className="px-4 py-3 align-middle text-gray-800">{(r as any).campus || r.campus_id || "—"}</td>
+                        <td className="px-4 py-3 align-middle text-gray-800">{r.mode || (r as any).room_type || "—"}</td>
                         <td className="px-4 py-3 align-middle">
                           {r.day1 || "—"}
                         </td>
@@ -1169,11 +1180,25 @@ const SendModal = ({
             Cancel
           </button>
           <button
-            onClick={onClose}
-            className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:brightness-110"
+            disabled={sending || rows.length === 0}
+            onClick={async () => {
+              setSending(true);
+              try {
+                await onSend(rows);
+                onClose();
+              } catch (e: any) {
+                alert(e?.message || "Failed to send to faculty.");
+              } finally {
+                setSending(false);
+              }
+            }}
+            className={cls(
+              "inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:brightness-110",
+              (sending || rows.length === 0) && "opacity-60 cursor-not-allowed"
+            )}
           >
-            <Send className="h-4 w-4" />
-            Send
+            <Send className={cls("h-4 w-4", sending && "animate-spin")} />
+            {sending ? "Sending…" : "Send"}
           </button>
         </div>
       </div>
@@ -1181,16 +1206,117 @@ const SendModal = ({
   );
 };
 
+
+
 const RequestChangeModal = ({
   open,
   from,
   onClose,
+  userId,
+  termId,
+  rows,
+  onAfterUpdate,
 }: {
   open: boolean;
   from?: string;
   onClose: () => void;
-}) =>
-  !open ? null : (
+  userId: string;
+  termId: string;
+  rows: Row[];
+  onAfterUpdate: () => Promise<void> | void;
+}) => {
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [messages, setMessages] = useState<Array<any>>([]);
+  const [status, setStatus] = useState<string | null>(null);
+  const [reply, setReply] = useState("");
+
+  const facultyRow = rows.find((r) => (r.faculty || "") === (from || ""));
+  const facultyId = facultyRow?.faculty_id;
+
+  const isTerminal = !!status && ["ACCEPTED", "APPROVED", "REJECTED"].includes(status);
+  const needsOm = status === "NEEDS_OM" || status === "OPEN" || status === "open";
+
+  useEffect(() => {
+    if (!open) {
+      setLoading(false);
+      setError(null);
+      setMessages([]);
+      setStatus(null);
+      setReply("");
+      return;
+    }
+
+    (async () => {
+      try {
+        setLoading(true);
+        setError(null);
+        setMessages([]);
+        setStatus(null);
+
+        if (!facultyId) {
+          setError("No faculty id found for this RFC.");
+          return;
+        }
+
+        const res = await getOmLoadAssignmentRfc(userId, {
+          term_id: termId,
+          faculty_id: facultyId,
+        });
+
+        if (!res?.ok || !res?.rfc) {
+          setStatus(null);
+          setMessages([]);
+          return;
+        }
+
+        const rfc = res.rfc;
+        setStatus(rfc.status || null);
+        setMessages(rfc.messages || rfc.thread || []);
+      } catch (e: any) {
+        setError(e?.message || "Failed to load RFC.");
+      } finally {
+        setLoading(false);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
+  if (!open) return null;
+
+  const respond = async (decision: "reply" | "approve" | "reject") => {
+    if (!userId || !termId || !facultyId) {
+      alert("Missing context.");
+      return;
+    }
+    if (isTerminal) {
+      alert("RFC is already locked.");
+      return;
+    }
+    if (decision === "reply" && !reply.trim()) {
+      alert("Please type a reply message.");
+      return;
+    }
+
+    setLoading(true);
+    try {
+      await respondOmLoadAssignmentRfc(userId, {
+        term_id: termId,
+        faculty_id: facultyId,
+        action: decision,
+        message: reply.trim() || undefined,
+      });
+
+      await onAfterUpdate();
+      onClose();
+    } catch (e: any) {
+      alert(e?.message || "Failed to send response.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
     <div className="fixed inset-0 z-[120] grid place-items-center bg-black/40 p-4">
       <div className="w-full max-w-2xl rounded-2xl bg-white p-6 shadow-2xl relative">
         <button
@@ -1201,47 +1327,83 @@ const RequestChangeModal = ({
           <X className="h-5 w-5 text-gray-500" />
         </button>
 
-        <h3 className="text-lg font-semibold text-emerald-700 mb-4">
-          Request for Change
-        </h3>
-        <div className="text-sm text-gray-600 mb-4">
+        <h3 className="text-lg font-semibold text-emerald-700 mb-2">Request for Change</h3>
+        <div className="text-sm text-gray-600 mb-1">
           From: <span className="font-semibold">{from}</span>
         </div>
+        <div className="text-[12px] text-gray-600 mb-4">
+          Status:{" "}
+          <span className={cls("font-semibold", isTerminal ? "text-gray-700" : needsOm ? "text-red-600" : "text-blue-600")}>
+            {status || "(none)"}
+          </span>
+        </div>
 
-        <div className="grid gap-2 text-sm mb-4">
-          <div>
-            <div className="font-semibold text-gray-900">Change</div>
-            <div className="text-gray-700">Change Class Time</div>
+        {loading && <div className="mb-4 text-sm text-gray-600">Loading…</div>}
+        {error && <div className="mb-4 text-sm text-red-600">{error}</div>}
+
+        {!loading && !error && !status && (
+          <div className="mb-4 rounded-lg border border-gray-200 bg-gray-50 p-3 text-sm text-gray-700">
+            No RFC thread found for this faculty in this term.
           </div>
-          <div>
-            <div className="font-semibold text-gray-900">Time</div>
-            <div className="text-gray-700">11:00AM - 12:30PM</div>
-          </div>
-          <div>
-            <div className="font-semibold text-gray-900">Other remarks</div>
-            <div className="text-gray-700">
-              Other commitments to that timeframe.
+        )}
+
+        <div className="mb-4 max-h-60 overflow-auto rounded-lg border border-gray-200 bg-gray-50 p-3">
+          {messages.length ? (
+            <div className="space-y-2">
+              {messages.map((m: any, idx: number) => {
+                const who = (m.sender_role || m.from || "").toString().toUpperCase();
+                const ts = m.created_at ? new Date(m.created_at).toLocaleString() : "";
+                return (
+                  <div key={idx} className="text-sm">
+                    <div className="text-[11px] text-gray-500">{who} {ts ? `• ${ts}` : ""}</div>
+                    <div className="whitespace-pre-wrap text-gray-800">{m.message || m.text || ""}</div>
+                  </div>
+                );
+              })}
             </div>
-          </div>
+          ) : (
+            <div className="text-sm text-gray-600">No messages yet.</div>
+          )}
         </div>
 
         <label className="block text-sm font-medium mb-1">Reply</label>
         <textarea
           className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30 mb-6"
           rows={4}
-          placeholder="Type your reply..."
+          placeholder={isTerminal ? "This RFC is locked." : "Type your reply…"}
+          value={reply}
+          disabled={loading || !status || isTerminal}
+          onChange={(e) => setReply(e.target.value)}
         />
 
         <div className="flex justify-end gap-2">
-          <button className="px-4 py-2 rounded-lg bg-red-600 text-white text-sm">
+          <button
+            disabled={loading || !status || isTerminal}
+            className={cls(
+              "px-4 py-2 rounded-lg bg-red-600 text-white text-sm",
+              (loading || !status || isTerminal) && "opacity-60 cursor-not-allowed"
+            )}
+            onClick={() => respond("reject")}
+          >
             Reject
           </button>
-          <button className="px-4 py-2 rounded-lg bg-emerald-700 text-white text-sm">
+          <button
+            disabled={loading || !status || isTerminal}
+            className={cls(
+              "px-4 py-2 rounded-lg bg-emerald-700 text-white text-sm",
+              (loading || !status || isTerminal) && "opacity-60 cursor-not-allowed"
+            )}
+            onClick={() => respond("approve")}
+          >
             Approve
           </button>
           <button
-            className="px-4 py-2 rounded-lg bg-blue-600 text-white text-sm"
-            onClick={onClose}
+            disabled={loading || !status || isTerminal}
+            className={cls(
+              "px-4 py-2 rounded-lg bg-blue-600 text-white text-sm",
+              (loading || !status || isTerminal) && "opacity-60 cursor-not-allowed"
+            )}
+            onClick={() => respond("reply")}
           >
             Reply
           </button>
@@ -1249,6 +1411,7 @@ const RequestChangeModal = ({
       </div>
     </div>
   );
+};
 
 const NewSectionModal = ({
   open,
@@ -1390,6 +1553,21 @@ const NewSectionModal = ({
 export default function OM_LoadAssignment() {
   const [copiedRowId, setCopiedRowId] = useState<string | null>(null);
 
+  // Lightweight in-app toast (used for "Notified faculty…" success messages)
+  const [uiToast, setUiToast] = useState<{ open: boolean; message: string; kind: "success" | "error" }>({
+    open: false,
+    message: "",
+    kind: "success",
+  });
+  const toastTimerRef = useRef<number | null>(null);
+  const showToast = (message: string, kind: "success" | "error" = "success") => {
+    if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
+    setUiToast({ open: true, message, kind });
+    toastTimerRef.current = window.setTimeout(() => {
+      setUiToast((prev) => ({ ...prev, open: false }));
+    }, 3500);
+  };
+
   // Import SHS file
   const shsFileInputRef = useRef<HTMLInputElement>(null);
   const [shsFile, setShsFile] = useState<File | null>(null);
@@ -1462,13 +1640,13 @@ export default function OM_LoadAssignment() {
   const session = useMemo(() => {
     try {
       const raw = localStorage.getItem("animo.user");
-      return raw ? (JSON.parse(raw) as { userId?: string; fullName?: string; roles?: string[] }) : null;
+      return raw ? (JSON.parse(raw) as any) : null;
     } catch {
       return null;
     }
   }, []);
 
-  const userId = session?.userId || "";
+  const userId = (session as any)?.userId || (session as any)?.user_id || (session as any)?.id || "";
 
   const [isAssigning, setIsAssigning] = useState(false);
 
@@ -1624,6 +1802,7 @@ export default function OM_LoadAssignment() {
   const [showApprove, setShowApprove] = useState(false);
   const [approved, setApproved] = useState(false);
   const [showSend, setShowSend] = useState(false);
+  const [sendRowsPreview, setSendRowsPreview] = useState<Row[]>([]);
   const [reqChange, setReqChange] = useState<{ open: boolean; from?: string }>({
     open: false,
   });
@@ -1766,6 +1945,42 @@ export default function OM_LoadAssignment() {
   };
   const selectedRows = rows.filter((r) => r.selected);
   const anySelected = selectedRows.length > 0;
+
+  const buildSendRowsForPreview = (): Row[] => {
+    if (!rows.length) return [];
+    if (!selectedRows.length) return [];
+
+    const all = rows.every((r) => r.selected);
+
+    const key = (r: Row) => String((r.faculty_id || r.faculty || "")).trim();
+    const selectedKeys = new Set(selectedRows.map(key).filter(Boolean));
+
+    if (all) {
+      // Send all rows that are assigned to a faculty
+      return rows.filter((r) => !!key(r));
+    }
+
+    // If any row is selected for a faculty, send ALL rows for that faculty (not per subject)
+    return rows.filter((r) => selectedKeys.has(key(r)));
+  };
+
+  const handleSendToFaculty = async (rowsToSend: Row[]) => {
+    if (!userId) throw new Error("Missing userId");
+    if (!rowsToSend?.length) throw new Error("No rows to send");
+
+    const term_id = termId || undefined;
+
+    await sendOmLoadAssignmentsToFaculty(userId, {
+      term_id,
+      rows: rowsToSend,
+    });
+
+    // After sending: clear selections and refresh
+    setShowSend(false);
+    setSendRowsPreview([]);
+    await loadFromServer();
+  };
+
 
   // Derived: scoped history availability (re-rendered via historyVersion)
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -2809,7 +3024,7 @@ useEffect(() => {
                     <tbody>
                       {filtered.map((r, idx) => {
                         const e = getEditFlags(r);
-                        const unread = r.status === "Pending";
+                        const unread = !!(r as any).pending_rfc;
                         return (
                           <tr
                             key={r.id}
@@ -3078,14 +3293,19 @@ useEffect(() => {
                               {isRunning && (
                                 <div className="relative flex items-center justify-center gap-3 text-emerald-700">
                                   <button
-                                    className="relative hover:brightness-110"
+                                    disabled={!!r.finalized}
+                                    className={cls(
+                                      "relative hover:brightness-110",
+                                      !!r.finalized && "opacity-40 cursor-not-allowed hover:brightness-100"
+                                    )}
                                     title="Message"
-                                    onClick={() =>
+                                    onClick={() => {
+                                      if (r.finalized) return;
                                       setReqChange({
                                         open: true,
                                         from: r.faculty || "Faculty",
-                                      })
-                                    }
+                                      });
+                                    }}
                                   >
                                     <MessageSquareText className="h-5 w-5" />
                                     {unread && (
@@ -3094,8 +3314,35 @@ useEffect(() => {
                                   </button>
 
                                   <button
-                                    className="flex h-7 w-7 items-center justify-center rounded-full border-2 border-emerald-700 text-emerald-700 hover:bg-emerald-50"
+                                    disabled={!!r.finalized}
+                                    className={cls(
+                                      "flex h-7 w-7 items-center justify-center rounded-full border-2 border-emerald-700 text-emerald-700 hover:bg-emerald-50",
+                                      !!r.finalized && "opacity-40 cursor-not-allowed hover:bg-transparent"
+                                    )}
                                     title="Approve"
+                                  onClick={async () => {
+                                      if (!userId) return;
+                                      if (!r.faculty_id) {
+                                        alert('This row has no assigned faculty yet.');
+                                        return;
+                                      }
+                                      try {
+                                        await finalizeOmLoadAssignmentCourse(userId, {
+                                          term_id: termId || undefined,
+                                          faculty_id: r.faculty_id,
+                                          course_code: r.course,
+                                          section: r.section,
+                                        });
+                                        // lock actions for this row immediately (backend persists too)
+                                        setCell(r.id, "finalized", true as any);
+                                        showToast(
+                                          `Notified ${r.faculty || "faculty"} that ${r.course} – ${r.section} was added to their final schedule.`,
+                                          "success"
+                                        );
+                                      } catch (e: any) {
+                                        showToast(e?.message || "Failed to notify faculty.", "error");
+                                      }
+                                    }}
                                   >
                                     <Check
                                       className="h-4 w-4"
@@ -3168,7 +3415,15 @@ useEffect(() => {
                     {/* To Faculty button (bottom-right, aligned with Add new line) */}
                     <button
                       disabled={!anySelected || !isRunning}
-                      onClick={() => setShowSend(true)}
+                      onClick={() => {
+                        const preview = buildSendRowsForPreview();
+                        if (!preview.length) {
+                          alert("Select at least one row with an assigned faculty.");
+                          return;
+                        }
+                        setSendRowsPreview(preview);
+                        setShowSend(true);
+                      }}
                       className={cls(
                         "inline-flex items-center gap-2 rounded-lg px-3 py-1.5 text-sm font-medium shadow-sm",
                         anySelected && isRunning
@@ -3711,31 +3966,46 @@ useEffect(() => {
         open={showApprove}
         onClose={() => setShowApprove(false)}
         onApprove={() => {
-          (async () => {
-            try {
-              if (userId) {
-                await submitOmLoadAssignment(userId, { rows }, "approve"); // <-- key change
-              }
-              // pull fresh data so you see persisted faculty + any created schedules
-              await loadFromServer();
-              setApproved(true);
-            } finally {
-              setShowApprove(false);
+        (async () => {
+          try {
+            if (userId) {
+              const res = await submitOmLoadAssignment(userId, { rows }, "approve");
+
+              // Create the chair notification (forward vs update is decided by backend;
+              // but if approve returns kind/reco_id, we pass it through for correctness)
+              await notifyChairLoadRecommendation(userId, {
+                kind: (res as any)?.kind,
+                reco_id: (res as any)?.reco_id,
+              });
             }
-          })();
-        }}
+
+            // pull fresh data so you see persisted faculty + any created schedules
+            await loadFromServer();
+            setApproved(true);
+          } finally {
+            setShowApprove(false);
+          }
+        })();
+      }}
+
       />
 
       <SendModal
         open={showSend}
         onClose={() => setShowSend(false)}
-        rows={selectedRows}
+        rows={sendRowsPreview}
+        termLabel={term}
+        onSend={handleSendToFaculty}
       />
 
       <RequestChangeModal
         open={reqChange.open}
         from={reqChange.from}
         onClose={() => setReqChange({ open: false })}
+        userId={userId || ""}
+        termId={termId || ""}
+        rows={rows}
+        onAfterUpdate={loadFromServer}
       />
 
 <NewSectionModal
@@ -3779,6 +4049,32 @@ useEffect(() => {
           setShowNewSectionModal(false);
         }}
       />
+
+      {/* Global toast */}
+      {uiToast.open && (
+        <div className="fixed bottom-6 right-6 z-[250]">
+          <div
+            className={cls(
+              "max-w-md rounded-xl border p-4 shadow-lg",
+              uiToast.kind === "success"
+                ? "border-emerald-200 bg-emerald-50 text-emerald-900"
+                : "border-red-200 bg-red-50 text-red-900"
+            )}
+          >
+            <div className="flex items-start gap-3">
+              <div className="text-sm font-medium leading-snug">{uiToast.message}</div>
+              <button
+                type="button"
+                className="ml-auto rounded-md p-1 hover:bg-black/5"
+                aria-label="Close"
+                onClick={() => setUiToast((prev) => ({ ...prev, open: false }))}
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
     </AppShell>
   );
