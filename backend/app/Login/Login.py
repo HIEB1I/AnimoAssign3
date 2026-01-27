@@ -1,51 +1,43 @@
-# app/Login/Login.py
+# backend/app/Login/Login.py
 from __future__ import annotations
 
 import os
 from datetime import datetime, timezone
-from typing import List, Optional, Dict, Any
+from typing import List, Dict, Any
 
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query, Response
 from pydantic import BaseModel, EmailStr
 
-from app.main import db
+from app.db import get_db
+from app.AUTH.session_token import COOKIE_NAME, encode_session, cookie_set_options
 
-# NO /api here – mount it in main.py with prefix="/api"
 router = APIRouter(tags=["Login"])
+db = get_db()
 
 # ----------------------------
-# Existing email login models
+# Models
 # ----------------------------
-
 class LoginRequest(BaseModel):
     email: EmailStr
-
 
 class LoginResponse(BaseModel):
     userId: str
     email: EmailStr
     fullName: str
-    roles: List[str]  # normalized, lowercase
+    roles: List[str]
 
-
-async def _roles_for_user(user_id: str) -> List[str]:
-    # role_assignments.user_id → role_id → user_roles.role_type
-    ra_cursor = db["role_assignments"].find(
-        {"user_id": user_id},
-        {"_id": 0, "role_id": 1}
-    )
-    role_ids = [doc["role_id"] async for doc in ra_cursor]
+# ----------------------------
+# Helpers (SYNC pymongo)
+# ----------------------------
+def _roles_for_user(user_id: str) -> List[str]:
+    role_ids = [doc.get("role_id") for doc in db["role_assignments"].find({"user_id": user_id}, {"_id": 0, "role_id": 1})]
+    role_ids = [r for r in role_ids if r]
     if not role_ids:
         return []
 
-    ur_cursor = db["user_roles"].find(
-        {"role_id": {"$in": role_ids}},
-        {"_id": 0, "role_type": 1}
-    )
-    raw = [doc["role_type"] for doc in await ur_cursor.to_list(None)]
+    raw = [doc.get("role_type") for doc in db["user_roles"].find({"role_id": {"$in": role_ids}}, {"_id": 0, "role_type": 1})]
     return [str(r).strip().lower() for r in raw if r]
-
 
 def _fullname(user: Dict[str, Any]) -> str:
     first = (user.get("first_name") or "").strip()
@@ -53,33 +45,46 @@ def _fullname(user: Dict[str, Any]) -> str:
     full = f"{first} {last}".strip()
     return full or (user.get("email") or user.get("gmail") or "").strip() or "User"
 
+def _set_session_cookie(resp: Response, payload: Dict[str, Any]) -> None:
+    token = encode_session(payload)
+    resp.set_cookie(
+        key=COOKIE_NAME,
+        value=token,
+        **cookie_set_options(),
+    )
 
+# ----------------------------
+# Email login (optional)
+# ----------------------------
 @router.post("/login", response_model=LoginResponse)
-async def login(payload: LoginRequest):
-    user = await db["users"].find_one({"email": payload.email}, {"_id": 0})
+def login(payload: LoginRequest, response: Response):
+    user = db["users"].find_one({"email": payload.email}, {"_id": 0})
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    roles = await _roles_for_user(user["user_id"]) or ["user"]
-
-    return LoginResponse(
+    roles = _roles_for_user(user["user_id"]) or ["user"]
+    out = LoginResponse(
         userId=user["user_id"],
         email=user["email"],
         fullName=_fullname(user),
         roles=roles,
     )
 
-# ----------------------------
-# New Google auth-code login
-# ----------------------------
+    _set_session_cookie(response, out.model_dump())
+    return out
 
+# ----------------------------
+# Google auth
+# ----------------------------
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 USERINFO_URL = "https://openidconnect.googleapis.com/v1/userinfo"
-
 
 class GoogleAuthCodeRequest(BaseModel):
     code: str
 
+class GoogleConnectRequest(BaseModel):
+    userId: str
+    code: str
 
 async def _exchange_code_for_tokens(code: str) -> Dict[str, Any]:
     client_id = os.getenv("GOOGLE_CLIENT_ID")
@@ -87,10 +92,7 @@ async def _exchange_code_for_tokens(code: str) -> Dict[str, Any]:
     redirect_uri = os.getenv("GOOGLE_REDIRECT_URI", "postmessage")
 
     if not client_id or not client_secret:
-        raise HTTPException(
-            status_code=500,
-            detail="Missing GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET in backend environment.",
-        )
+        raise HTTPException(status_code=500, detail="Missing GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET.")
 
     data = {
         "client_id": client_id,
@@ -104,18 +106,13 @@ async def _exchange_code_for_tokens(code: str) -> Dict[str, Any]:
         r = await client.post(TOKEN_URL, data=data)
 
     if r.status_code >= 400:
-        # Return Google’s exact error text (super helpful for debugging)
         raise HTTPException(status_code=r.status_code, detail=r.text)
 
     return r.json()
 
-
 async def _google_email_from_access_token(access_token: str) -> str:
     async with httpx.AsyncClient(timeout=15) as client:
-        r = await client.get(
-            USERINFO_URL,
-            headers={"Authorization": f"Bearer {access_token}"},
-        )
+        r = await client.get(USERINFO_URL, headers={"Authorization": f"Bearer {access_token}"})
 
     if r.status_code != 200:
         raise HTTPException(status_code=401, detail="Invalid Google token (userinfo failed).")
@@ -125,25 +122,48 @@ async def _google_email_from_access_token(access_token: str) -> str:
         raise HTTPException(status_code=401, detail="Google account has no email.")
     return email
 
-
+# ----------------------------
+# 1) Google LOGIN (identity only cookie set)
+# ----------------------------
 @router.post("/auth/google/login", response_model=LoginResponse)
-async def google_login(payload: GoogleAuthCodeRequest):
-    """
-    Frontend sends:
-      POST /api/auth/google/login
-      { "code": "<auth_code>" }
+async def google_login(payload: GoogleAuthCodeRequest, response: Response):
+    tokens = await _exchange_code_for_tokens(payload.code)
+    access_token = tokens.get("access_token")
+    if not access_token:
+        raise HTTPException(status_code=401, detail="Google did not return access_token.")
 
-    Backend:
-      1) exchange code -> access_token (+ refresh_token sometimes)
-      2) userinfo -> google email
-      3) match email in users.gmail (fallback users.email)
-      4) upsert google_token into that user
-      5) return LoginResponse (same format as /login)
-    """
+    google_email = await _google_email_from_access_token(access_token)
+
+    user = db["users"].find_one({"$or": [{"gmail": google_email}, {"email": google_email}]}, {"_id": 0})
+    if not user:
+        raise HTTPException(status_code=403, detail="This Google account is not registered in AnimoAssign.")
+
+    roles = _roles_for_user(user["user_id"]) or ["user"]
+
+    out = LoginResponse(
+        userId=user["user_id"],
+        email=user.get("email") or google_email,
+        fullName=_fullname(user),
+        roles=roles,
+    )
+
+    #  create cookie session
+    _set_session_cookie(response, out.model_dump())
+    return out
+
+# ----------------------------
+# 2) Google CONNECT (store refresh token once)
+# ----------------------------
+@router.post("/auth/google/connect")
+async def google_connect(payload: GoogleConnectRequest):
+    user = db["users"].find_one({"user_id": payload.userId}, {"_id": 0})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found.")
+
     tokens = await _exchange_code_for_tokens(payload.code)
 
     access_token = tokens.get("access_token")
-    refresh_token = tokens.get("refresh_token")  # may only appear on first consent
+    refresh_token = tokens.get("refresh_token")  # might only appear once
     scope = tokens.get("scope")
     expires_in = tokens.get("expires_in")
 
@@ -152,30 +172,21 @@ async def google_login(payload: GoogleAuthCodeRequest):
 
     google_email = await _google_email_from_access_token(access_token)
 
-    # Match against users collection "gmail" row (fallback to "email")
-    user = await db["users"].find_one(
-        {"$or": [{"gmail": google_email}, {"email": google_email}]},
-        {"_id": 0}
+    allowed_emails = set(
+        x.strip().lower()
+        for x in [user.get("gmail") or "", user.get("email") or ""]
+        if x
     )
-    if not user:
-        # Step 5: no match -> error
-        raise HTTPException(
-            status_code=403,
-            detail="This Google account is not registered in AnimoAssign.",
-        )
+    if google_email not in allowed_emails:
+        raise HTTPException(status_code=403, detail="Selected Google account does not match this AnimoAssign user.")
 
-    # Update token fields
-    now = datetime.now(timezone.utc)
-
-    # Keep any existing refresh_token if Google didn't return one this time
-    existing = await db["users"].find_one(
-        {"user_id": user["user_id"]},
+    existing = db["users"].find_one(
+        {"user_id": payload.userId},
         {"_id": 0, "google_token.refresh_token": 1}
-    )
-    existing_refresh = (
-        (existing or {}).get("google_token", {}) or {}
-    ).get("refresh_token")
+    ) or {}
+    existing_refresh = ((existing.get("google_token") or {}) or {}).get("refresh_token")
 
+    now = datetime.now(timezone.utc)
     token_doc: Dict[str, Any] = {
         "access_token": access_token,
         "connected_email": google_email,
@@ -183,25 +194,38 @@ async def google_login(payload: GoogleAuthCodeRequest):
         "expires_in": expires_in,
         "updated_at": now,
     }
-
     if refresh_token:
         token_doc["refresh_token"] = refresh_token
     elif existing_refresh:
         token_doc["refresh_token"] = existing_refresh
 
-    # Step 3-4: insert/update under that user
-    await db["users"].update_one(
-        {"user_id": user["user_id"]},
+    #  creates google_token field if missing
+    db["users"].update_one(
+        {"user_id": payload.userId},
         {"$set": {"google_token": token_doc}},
         upsert=False
     )
 
-    roles = await _roles_for_user(user["user_id"]) or ["user"]
+    return {"ok": True, "connected_email": google_email, "has_refresh": bool(token_doc.get("refresh_token"))}
 
-    # Return same response model
-    return LoginResponse(
-        userId=user["user_id"],
-        email=user.get("email") or google_email,
-        fullName=_fullname(user),
-        roles=roles,
+# ----------------------------
+# 3) Status endpoint
+# ----------------------------
+@router.get("/auth/google/status")
+def google_status(userId: str = Query(...)):
+    user = db["users"].find_one(
+        {"user_id": userId},
+        {"_id": 0, "google_token": 1}
     )
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found.")
+
+    gt = (user.get("google_token") or {})
+    return {
+        "ok": True,
+        "connected_email": gt.get("connected_email"),
+        "has_google_token": bool(gt),
+        "has_refresh": bool(gt.get("refresh_token")),
+        "scope": gt.get("scope"),
+        "updated_at": gt.get("updated_at"),
+    }

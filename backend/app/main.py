@@ -8,6 +8,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from fastapi.concurrency import run_in_threadpool
 from .MESSAGING.store import ensure_messaging_indexes
+from app.SESSION.Session import router as session_router
+
 
 from .config import get_settings
 
@@ -29,7 +31,7 @@ client = AsyncIOMotorClient(
     directConnection=getattr(settings, "mongodb_direct_connection", False),
 )
 db = client.get_default_database()
-
+app.state.db = db
 
 @app.on_event("startup")
 async def _ensure_faculty_overview_indexes() -> None:
@@ -212,5 +214,7 @@ app.include_router(chair_inbox_router, prefix="/api")
 app.include_router(gmail_send_router, prefix="/api")
 app.include_router(gcal_router, prefix="/api")
 app.include_router(google_login_router, prefix="/api")
+
+app.include_router(session_router, prefix="/api")
 
 app = socketio_pkg.ASGIApp(sio, other_asgi_app=app)

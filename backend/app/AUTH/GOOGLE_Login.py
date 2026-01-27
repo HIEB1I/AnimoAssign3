@@ -77,7 +77,7 @@ async def google_login(
     payload: GoogleLoginBody,
     authorization: Optional[str] = Header(default=None),
 ):
-    # ✅ Accept token from:
+    #  Accept token from:
     # 1) auth-code in JSON body (preferred)
     # 2) Authorization: Bearer <access_token>
     # 3) accessToken in JSON body (fallback)

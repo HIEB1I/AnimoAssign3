@@ -1,9 +1,9 @@
-import React from "react";
+import * as React from "react";
 import { useNavigate } from "react-router-dom";
 import { Eye, EyeOff, Mail, CheckCircle2 } from "lucide-react";
 import AA_Logo from "@/assets/Images/AA_Logo.png";
 import { login as apiLogin, type LoginResponse } from "@/api";
-import { useGoogleLogin } from "@react-oauth/google";
+import { useGoogleLogin, type CodeResponse } from "@react-oauth/google";
 
 const Login: React.FC = () => {
   const [showPw, setShowPw] = React.useState(false);
@@ -14,79 +14,175 @@ const Login: React.FC = () => {
   const [loading, setLoading] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
 
+  const [pendingUser, setPendingUser] = React.useState<LoginResponse | null>(null);
+
+  // prevents accidental double-connect calls
+  const connectStartedRef = React.useRef(false);
+
   const navigate = useNavigate();
 
-function finishLogin(user: LoginResponse) {
-  const roles = (user.roles || []).map((r) => (r || "").toLowerCase());
+  function finishLogin(user: LoginResponse) {
+    const roles = (user.roles || []).map((r) => (r || "").toLowerCase());
 
-  let dest: string | null = null;
-  if (roles.includes("apo")) dest = "/apo/preenlistment";
-  else if (roles.includes("office manager") || roles.includes("gs coordinator"))
-    dest = "/om/load-assignment";
-  else if (roles.includes("department chair") || roles.includes("deparment chair"))
-    dest = "/chair";
-  else if (roles.includes("faculty")) dest = "/faculty/overview";
-  else if (roles.includes("student")) dest = "/student/petition";
-  else if (roles.includes("admin")) dest = "/admin";
-  else if (roles.includes("dean")) dest = null;
+    let dest: string | null = null;
+    if (roles.includes("apo")) dest = "/apo/preenlistment";
+    else if (roles.includes("office manager") || roles.includes("gs coordinator"))
+      dest = "/om/load-assignment";
+    else if (roles.includes("department chair") || roles.includes("deparment chair"))
+      dest = "/chair";
+    else if (roles.includes("faculty")) dest = "/faculty/overview";
+    else if (roles.includes("student")) dest = "/student/petition";
+    else if (roles.includes("admin")) dest = "/admin";
 
-  if (!dest) {
-    setError("Your account has no valid role configured. Please contact the administrator.");
-    return;
+    if (!dest) {
+      setError("Your account has no valid role configured. Please contact the administrator.");
+      return;
+    }
+
+    localStorage.setItem("animo.user", JSON.stringify(user));
+    navigate(dest, { replace: true });
   }
 
-  localStorage.setItem("animo.user", JSON.stringify(user));
-  navigate(dest, { replace: true });
-}
+  //  If session cookie exists, redirect immediately
+  React.useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch("/api/session/me", { credentials: "include" });
+        if (!res.ok) return;
+        const user: LoginResponse = await res.json();
+        finishLogin(user);
+      } catch {
+        // ignore
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-async function onSubmit(e: React.FormEvent) {
-  e.preventDefault();
-  setLoading(true);
-  setError(null);
-
-  try {
-    const user: LoginResponse = await apiLogin(email.trim());
-    finishLogin(user);
-  } catch (err: any) {
-    setError(err?.message || "Login failed");
-  } finally {
-    setLoading(false);
-  }
-}
-
-const googleLogin = useGoogleLogin({
-  flow: "auth-code",
-  scope: [
-    "openid",
-    "email",
-    "profile",
-    "https://www.googleapis.com/auth/gmail.send",
-    "https://www.googleapis.com/auth/calendar.events",
-  ].join(" "),
-  onSuccess: async (codeResponse) => {
+  async function onSubmit(e: React.FormEvent) {
+    e.preventDefault();
     setLoading(true);
     setError(null);
 
     try {
-      const res = await fetch("/api/auth/google/login", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ code: codeResponse.code }),
-      });
-
-      if (!res.ok) throw new Error(await res.text());
-
-      const user: LoginResponse = await res.json();
+      const user: LoginResponse = await apiLogin(email.trim());
       finishLogin(user);
-    } catch (e: any) {
-      setError(e?.message || "Google login failed.");
+    } catch (err: any) {
+      setError(err?.message || "Login failed");
     } finally {
       setLoading(false);
     }
-  },
-  onError: () => setError("Google sign-in failed. Please try again."),
-});
+  }
 
+  // A) SIGN-IN (identity only)
+  const googleSignIn = useGoogleLogin(
+    ({
+      flow: "auth-code",
+      scope: ["openid", "email", "profile"].join(" "),
+      onSuccess: async (codeResponse: CodeResponse) => {
+        setLoading(true);
+        setError(null);
+        connectStartedRef.current = false;
+
+        try {
+          const res = await fetch("/api/auth/google/login", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            credentials: "include", //  allow session cookie set
+            body: JSON.stringify({ code: codeResponse.code }),
+          });
+
+          if (!res.ok) throw new Error(await res.text());
+
+          const user: LoginResponse = await res.json();
+          localStorage.setItem("animo.user", JSON.stringify(user));
+
+          // Check refresh-token status
+          const sres = await fetch(`/api/auth/google/status?userId=${encodeURIComponent(user.userId)}`, {
+            credentials: "include",
+          });
+
+          if (!sres.ok) {
+            // If status fails, just continue login (do NOT auto-connect)
+            finishLogin(user);
+            return;
+          }
+
+          const status = await sres.json();
+          const hasRefresh = Boolean(status?.has_refresh);
+
+          if (hasRefresh) {
+            //  already connected: straight login
+            finishLogin(user);
+            return;
+          }
+
+          // ❗ needs connect once
+          setPendingUser(user);
+          if (!connectStartedRef.current) {
+            connectStartedRef.current = true;
+            googleConnect();
+          }
+        } catch (e: any) {
+          setError(e?.message || "Google login failed.");
+        } finally {
+          setLoading(false);
+        }
+      },
+      onError: () => setError("Google sign-in failed. Please try again."),
+    }) as any
+  );
+
+  // B) CONNECT (gmail/calendar offline refresh token)
+  const googleConnect = useGoogleLogin(
+    ({
+      flow: "auth-code",
+      // Force a refresh_token issuance if possible:
+      // (types may complain; we cast to any)
+      prompt: "consent select_account",
+      access_type: "offline",
+      include_granted_scopes: true,
+      scope: [
+        "openid",
+        "email",
+        "profile",
+        "https://www.googleapis.com/auth/gmail.send",
+        "https://www.googleapis.com/auth/calendar.events",
+      ].join(" "),
+      onSuccess: async (codeResponse: CodeResponse) => {
+        setLoading(true);
+        setError(null);
+
+        try {
+          const user = pendingUser || (JSON.parse(localStorage.getItem("animo.user") || "{}") as LoginResponse);
+          if (!user?.userId) throw new Error("Missing userId. Please log in again.");
+
+          const res = await fetch("/api/auth/google/connect", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            credentials: "include",
+            body: JSON.stringify({ userId: user.userId, code: codeResponse.code }),
+          });
+
+          if (!res.ok) throw new Error(await res.text());
+
+          //  now connected
+          finishLogin(user);
+        } catch (e: any) {
+          setError(e?.message || "Google connect failed.");
+        } finally {
+          setLoading(false);
+          setPendingUser(null);
+          connectStartedRef.current = false;
+        }
+      },
+      onError: () => {
+        setError("Google connect failed. Please try again.");
+        setLoading(false);
+        setPendingUser(null);
+        connectStartedRef.current = false;
+      },
+    }) as any
+  );
 
   return (
     <div className="min-h-screen w-full bg-[#f5f6f7] grid place-items-center px-4 py-10">
@@ -99,11 +195,15 @@ const googleLogin = useGoogleLogin({
               Use your DLSU email address to continue with AnimoAssign.
             </p>
 
-            {/* ✅ LEFT-ALIGNED BUTTON (no centering) */}
             <div className="mt-7">
               <button
                 type="button"
-                onClick={() => googleLogin()}
+                onClick={() => {
+                  setError(null);
+                  setPendingUser(null);
+                  connectStartedRef.current = false;
+                  googleSignIn();
+                }}
                 disabled={loading}
                 className="
                   group inline-flex w-full max-w-xl items-center justify-center gap-3
@@ -112,24 +212,19 @@ const googleLogin = useGoogleLogin({
                   transition
                   hover:border-emerald-700 hover:bg-emerald-700 hover:text-white
                   focus:outline-none focus:ring-2 focus:ring-emerald-500/30
+                  disabled:opacity-60
                 "
               >
-                {/* ✅ TRANSPARENT ICON WRAPPER: no bg, no border */}
                 <span className="grid h-9 w-9 place-items-center rounded-lg bg-transparent">
                   <Mail className="h-5 w-5 text-slate-700 transition group-hover:text-white" />
                 </span>
-
                 <span>Login with your DLSU Google Account</span>
               </button>
             </div>
 
-            <p className="mt-4 text-[11px] leading-relaxed text-slate-500">
-              By using AnimoAssign, you agree to follow the guidelines outlined in the{" "}
-              <span className="underline">DLSU Student Handbook</span> and{" "}
-              <span className="underline">Privacy Policy</span> of AnimoAssign.
-            </p>
+            {error && <div className="mt-4 text-sm text-red-600">{error}</div>}
 
-            {/* Reveal Email/Password AFTER clicking */}
+            {/* optional: email/password form */}
             {showForm && (
               <div className="mt-7 rounded-xl border border-neutral-200 bg-white p-5 shadow-sm">
                 <form className="space-y-4" onSubmit={onSubmit}>
@@ -182,8 +277,6 @@ const googleLogin = useGoogleLogin({
                     </div>
                   </div>
 
-                  {error && <div className="text-sm text-red-600 text-center">{error}</div>}
-
                   <button
                     type="submit"
                     disabled={loading}
@@ -196,17 +289,6 @@ const googleLogin = useGoogleLogin({
                   >
                     {loading ? "Logging in…" : "Login"}
                   </button>
-
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setShowForm(false);
-                      setError(null);
-                    }}
-                    className="w-full rounded-xl border border-neutral-300 bg-white py-3 text-sm font-medium hover:bg-neutral-50"
-                  >
-                    Back
-                  </button>
                 </form>
               </div>
             )}
@@ -217,11 +299,7 @@ const googleLogin = useGoogleLogin({
             <div className="flex h-full flex-col items-center justify-center px-8 py-12 text-center">
               <div className="text-sm font-semibold opacity-95">Welcome to</div>
 
-              <img
-                src={AA_Logo}
-                alt="AnimoAssign"
-                className="mt-2 w-[360px] sm:w-[420px] max-w-full"
-              />
+              <img src={AA_Logo} alt="AnimoAssign" className="mt-2 w-[360px] sm:w-[420px] max-w-full" />
 
               <p className="mt-4 max-w-md text-sm text-white/85">
                 AnimoAssign is a collaborative platform for centralizing course offerings, faculty
@@ -258,13 +336,6 @@ const googleLogin = useGoogleLogin({
               <div className="mt-10 w-full max-w-md">
                 <div className="h-px w-full bg-white/20" />
                 <div className="mt-4 text-xs text-white/80">College of Computer Studies</div>
-                <button
-                type="button"
-                onClick={() => navigate("/gmail-connect")}
-                className="absolute bottom-4 left-4 px-4 py-2 rounded-lg bg-white/90 text-gray-900 shadow hover:bg-white"
-              >
-                Connect Gmail
-              </button>
               </div>
             </div>
           </div>
@@ -272,7 +343,6 @@ const googleLogin = useGoogleLogin({
         </div>
       </div>
     </div>
-    
   );
 };
 

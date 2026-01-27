@@ -217,7 +217,7 @@ async def _insert_event_with_refresh(user_id: str, calendar_id: str, event_body:
 class TeachingLoadAcceptRequest(BaseModel):
     userId: str
     items: List[Dict[str, Any]] = Field(default_factory=list)
-    weeks: int = 5  # ✅ repeat for 5 weeks
+    weeks: int = 5  #  repeat for 5 weeks
 
 
 # ----------------------------
@@ -251,7 +251,7 @@ async def accept_teaching_load(payload: TeachingLoadAcceptRequest):
     accepted_date = datetime.now(tz).date()
     week_start = accepted_date - timedelta(days=accepted_date.weekday())  # Monday
 
-    # ✅ Always insert into the authenticated user's primary calendar
+    #  Always insert into the authenticated user's primary calendar
     calendar_id = "primary"
 
     tok = await _get_user_google_tokens(payload.userId)

@@ -121,11 +121,16 @@ export default function TopBar({
   }, []);
 
   // Logout
-  const logout = () => {
-    localStorage.removeItem("authToken");
+const logout = async () => {
+  try {
+    await fetch("/api/session/logout", { method: "POST", credentials: "include" });
+  } finally {
+    localStorage.removeItem("animo.user");
     sessionStorage.clear();
     navigate("/login");
-  };
+  }
+};
+
 
   // “x minutes ago” helper
   const timeAgo = (d: Date) => {
