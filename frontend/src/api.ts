@@ -491,7 +491,6 @@ export async function reactivateApoPreenlistment(
   const { data } = await axios.post(url);
   return data;
 }
-
 /* =========================================================
    ===============  APO: COURSE OFFERINGS  =================
    ========================================================= */
@@ -590,8 +589,17 @@ async function get<T>(url: string): Promise<T> {
   return data;
 }
 async function post<T>(url: string, body?: any): Promise<T> {
-  const { data } = await axios.post<T>(url, body);
-  return data;
+  try {
+    const { data } = await axios.post<T>(url, body);
+    return data;
+  } catch (err: any) {
+    const detail = err?.response?.data?.detail;
+    if (typeof detail === "string" && detail.trim()) {
+      // Keep status/response intact, but make e.message meaningful everywhere.
+      err.message = detail;
+    }
+    throw err;
+  }
 }
 
 /* ------------------ small utils / coercers ----------------- */
@@ -715,12 +723,14 @@ export type ApiConflict = {
 type GateError = { code?: "NEEDS_IMPORT" | "APPROVAL_REQUIRED"; message?: string };
 
 export type OfferingsQuery = {
-  view?: "offerings" | "curriculum";
+  view?: "offerings" | "curriculum" | "specialclass"; 
+  campus?: "MANILA" | "LAGUNA";
   level?: string;
   department_id?: string;
   batch_id?: string;
   program_id?: string;
-    /** Which term to use on the backend: 
+  term_id?: string;
+  /** Which term to use on the backend: 
    *  - "active"   = current term (e.g., TERM0014)
    *  - "planning" = next term used for loading (e.g., TERM0015)
    */
@@ -762,7 +772,16 @@ export async function getApoCourseOfferings(
 
   const data = await get<ApoOfferingsResponse>(url);
 
-  // Safe default + light coercion for course_code (string[] -> first string)
+  // Handle ONLINE rooms as TBA
+  if (data.room_options) {
+    data.room_options = data.room_options.map((room: any) => {
+      if (room.room_type === "ONLINE") {
+        room.room_number = "TBA";  // Convert ONLINE to TBA for display
+      }
+      return room;
+    });
+  }
+
   const list = Array.isArray(data.all_specific_electives) ? data.all_specific_electives : [];
   data.all_specific_electives = list.map((e) => ({
     ...e,
@@ -771,6 +790,7 @@ export async function getApoCourseOfferings(
 
   return data;
 }
+
 export function electivesToOptions(resp?: ApoOfferingsResponse) {
   const arr = resp?.all_specific_electives ?? [];
   return arr.map((e) => ({
@@ -778,6 +798,7 @@ export function electivesToOptions(resp?: ApoOfferingsResponse) {
     label: `${e.course_code} — ${e.course_title}`,
   }));
 }
+
 /** Add row (capacity defaults server-side to courses.max_enrollee if not provided). */
 export async function addApoOfferingRow(
   userId: string,
@@ -792,7 +813,6 @@ export async function addApoOfferingRow(
   try {
     return await post<{ ok: true; section_id: string }>(url, body);
   } catch (e) {
-    // (keep the rest of your conflict handling exactly as-is)
     const err = e as AxiosError<any>;
     if (err.response?.status === 409) {
       const conflict = _extractConflict(err);
@@ -823,7 +843,6 @@ export async function addApoOfferingRow(
   }
 }
 
-
 /** Edit row (capacity updates will be saved to sections.enrollment_cap). */
 export async function editApoOfferingRow(
   userId: string,
@@ -838,7 +857,6 @@ export async function editApoOfferingRow(
   try {
     return await post(url, body);
   } catch (e) {
-    // (keep the rest exactly as-is)
     const err = e as AxiosError<any>;
     if (err.response?.status === 409) {
       const conflict = _extractConflict(err);
@@ -868,7 +886,6 @@ export async function editApoOfferingRow(
     throw err;
   }
 }
-
 
 export type DeleteRowPayload = {
   section_id: string;
@@ -910,7 +927,6 @@ export function forwardApoCourseOfferings(
     .post(join(API_BASE, `/apo/forward/${userId}`), payload)
     .then(r => r.data);
 }
-
 
 export async function approveApoOfferingsPlan(
   userId: string
@@ -978,27 +994,20 @@ export async function getElectiveOptions(
 /* ---- Eligible rooms for a section (capacity + room_type guard) ---- */
 export type EligibleRoomsParams = {
   section_id?: string;
-
-  /** Preferred: server reads this as a minimum seat requirement */
-  min_capacity?: number;
-  /** Back-compat from the caller: we’ll map this to min_capacity */
-  enrollment_cap?: number;
-
-  /** Preferred: server expects this key */
-  required_type?: string;
-  /** Back-compat from the caller: we’ll map this to required_type */
+  schedule_id?: string;
+  capacity?: number;
   room_type?: string;
-
+  exclude?: string | string[];
+  min_capacity?: number;
+  enrollment_cap?: number;
+  required_type?: string;
   campus_id?: string;
 
   // time filter for clash checks
   day?: string;
-  /** Back-compat from the caller; we’ll emit as `start` */
   start_time?: string;
-  /** Back-compat from the caller; we’ll emit as `end` */
   end_time?: string;
 
-  /** IDs to ignore when checking conflicts (CSV or array) */
   exclude_schedule_ids?: string | string[];
 };
 
@@ -1016,31 +1025,32 @@ export async function getEligibleRoomsForOffering(
   delete qp.start_time;
   delete qp.end_time;
 
-  // --- Capacity/type: accept either naming, send server's expected keys
-  qp.required_type = qp.required_type ?? qp.room_type ?? undefined;
-  qp.min_capacity = qp.min_capacity ?? qp.enrollment_cap ?? undefined;
-  delete qp.room_type;
+  // --- Capacity/type: accept either naming, send BACKEND keys
+  qp.room_type = qp.room_type ?? qp.required_type ?? undefined;
+  qp.capacity = qp.capacity ?? qp.min_capacity ?? qp.enrollment_cap ?? undefined;
+
+  // --- Exclusions: backend expects `exclude` as comma-separated string
+  qp.exclude = qp.exclude ?? qp.exclude_schedule_ids ?? undefined;
+  if (Array.isArray(qp.exclude)) qp.exclude = qp.exclude.join(",");
+
+  // clean legacy keys (optional but keeps qp tidy)
+  delete qp.required_type;
+  delete qp.min_capacity;
   delete qp.enrollment_cap;
+  delete qp.exclude_schedule_ids;
 
-  // --- Day normalization: accept "TH" or "H" for Thursday; backend is tolerant but we help it.
-  const rawDay = String(qp.day || "").toUpperCase().trim();
-  qp.day = rawDay === "TH" ? "H" : rawDay; // keep M T W H F S
-
-  // --- Exclusions: ensure comma-separated string
-  if (Array.isArray(qp.exclude_schedule_ids)) {
-    qp.exclude_schedule_ids = qp.exclude_schedule_ids.join(",");
-  }
-
+  // NOTE: backend does not declare campus_id; it’s safe to omit
   const url = `${API_BASE}/apo/courseofferings${q({
     userId,
     action: "eligibleRooms",
-    campus_id: qp.campus_id,
+    section_id: qp.section_id,
+    schedule_id: (qp as any).schedule_id,
     day: qp.day,
     start: qp.start,
     end: qp.end,
-    required_type: qp.required_type,
-    min_capacity: qp.min_capacity,
-    exclude_schedule_ids: qp.exclude_schedule_ids,
+    room_type: qp.room_type,
+    capacity: qp.capacity,
+    exclude: qp.exclude,
   })}`;
 
   return get(url);
@@ -1050,13 +1060,11 @@ export async function searchCourseCatalog(
   userId: string,
   params: { q?: string; limit?: number; department_id?: string; program_level?: string } = {}
 ) {
-  // Use the POST /apo/courseofferings action that the backend wired for searching
   const url = `${API_BASE}/apo/courseofferings${q({
     userId,
-    action: "search_catalog",   // <-- match backend action
+    action: "search_catalog",
   })}`;
 
-  // Backend reads filters from JSON body
   const body: any = {};
   if (params.q != null) body.q = params.q;
   if (params.limit != null) body.limit = params.limit;
@@ -1080,21 +1088,20 @@ export async function searchCourseCatalog(
 }
 
 export async function createCatalogCourse(userId: string, payload: CreateCoursePayload) {
-  const url = join(API_BASE, "apo/courseofferings"); // same base/path family as catalog.search
+  const url = join(API_BASE, "apo/courseofferings");
   const { data } = await axios.post(
     `${url}?userId=${encodeURIComponent(userId)}&action=catalog.create`,
     payload
   );
-  return data; // { ok: true, course: {...} }
+  return data;
 }
+
 export async function editCatalogCourse(
   userId: string,
   payload: EditCoursePayload
 ): Promise<{ ok: boolean; course_id: string }> {
   const { course_id, course_code, course_title, units } = payload;
 
-  // Build the shape expected by backend's `curriculumEditCourse` global-update path:
-  // { old_course_id, update_course: { ... } }
   const body: any = {
     old_course_id: course_id,
     update_course: {},
@@ -1112,7 +1119,7 @@ export async function editCatalogCourse(
 
   const url = `${API_BASE}/apo/courseofferings${q({
     userId,
-    action: "curriculumEditCourse",   // <-- reuse existing backend action
+    action: "curriculumEditCourse",
   })}`;
 
   return post<{ ok: true; course_id: string }>(url, body);
@@ -1121,32 +1128,34 @@ export async function editCatalogCourse(
 // --- Types ---
 export type CreateCoursePayload = {
   department_id: string;
-  program_level: "UGS" | "GS";           // UGS = Undergraduate, GS = Graduate Studies
+  program_level: "UGS" | "GS";
   course_code: string;
   course_title: string;
   units?: number | null;
-  type_of_course?: string | null;        // e.g., "Elective Course", "GE", "Major"
+  type_of_course?: string | null;
   description?: string;
-  room_type?: string | null;             // e.g., "Classroom", "Comlab"
-  capacity?: number | null;              // max_enrollee
+  room_type?: string | null;
+  capacity?: number | null;
   min_enrollee?: number | null;
 };
+
 export type EditCoursePayload = {
   course_id: string;
-  course_code?: string[];     // stored as array in DB
+  course_code?: string[];
   course_title?: string;
   units?: number | null;
 };
+
 export type CourseCatalogItem = {
   course_id: string;
   course_code: string | string[];
   course_title: string;
   department_id?: string;
-  program_level?: string;                // "UGS" | "GS" | human label
+  program_level?: string;
   units?: number | null;
   type_of_course?: string | null;
 };
-// type near your other APO types (optional helper)
+
 export interface CurriculumCsvRow {
   batch_code: string;
   program_level: string;
@@ -1168,7 +1177,7 @@ export interface ImportCurriculumCsvResponse {
   imported?: number;
   created_batches?: string[];
   curricula?: { batch_id: string; curriculum_id: string; course_count: number }[];
-  errors?: any[]; // backend may also send row-level errors
+  errors?: any[];
 }
 
 export async function importCurriculumCsv(
@@ -1176,9 +1185,7 @@ export async function importCurriculumCsv(
   payload: ImportCurriculumCsvPayload
 ): Promise<ImportCurriculumCsvResponse> {
   const res = await fetch(
-    `/api/apo/courseofferings?userId=${encodeURIComponent(
-      userId
-    )}&action=import_curriculum_csv`,
+    `/api/apo/courseofferings?userId=${encodeURIComponent(userId)}&action=import_curriculum_csv`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1188,13 +1195,212 @@ export async function importCurriculumCsv(
 
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(
-      text || `CSV import failed with status ${res.status} ${res.statusText}`
-    );
+    throw new Error(text || `CSV import failed with status ${res.status} ${res.statusText}`);
   }
 
   return (await res.json()) as ImportCurriculumCsvResponse;
 }
+
+/* ===================== Special Class ===================== */
+
+export type SpecialClassSlot = {
+  schedule_id?: string | null;
+  day?: string | null;
+  start_time?: string | null; // backend normalizes to HHMM (e.g., "0730") or null
+  end_time?: string | null;   // backend normalizes to HHMM (e.g., "0900") or null
+  room_id?: string | null;
+  room_type?: string | null;
+  room_number?: string | null; // resolved room_number / room_name / "ONLINE"
+};
+
+export type SpecialClassRow = {
+  special_id: string;
+
+  campus_name?: string;
+  term_id?: string;
+  term_label?: string;
+
+  // Nested UI shape (adapter converts from backend flat fields)
+  student?: { student_number?: string; student_name?: string };
+  course?: { course_code?: string; course_title?: string };
+  section?: { section_id?: string; section_code?: string; section_remarks?: string };
+  faculty?: { faculty_name?: string };
+
+  // Backend now reliably provides/derives these
+  schedule_entries?: SpecialClassSlot[];
+  schedule_text?: string;
+
+  // Convenience slots (backend fills these; adapter still falls back to schedule_entries[0/1])
+  slot1?: SpecialClassSlot | null;
+  slot2?: SpecialClassSlot | null;
+
+  // Keep legacy row remarks (special_class.remarks) if present
+  remarks?: string | null;
+
+  [k: string]: any;
+};
+
+export type SpecialClassResponse = {
+  campus?: { campus_id?: string; campus_name?: string };
+  term_id?: string;
+  term_label?: string;
+  rows: SpecialClassRow[];
+};
+
+// ---- adapter: backend may return flat fields; we convert into nested UI shape
+type SpecialClassBackendRow = {
+  special_id: string;
+
+  campus_name?: string;
+  term_id?: string;
+  term_label?: string;
+
+  // flat fields from backend
+  student_name?: string;
+  student_number?: string | number;
+
+  course_code?: string | string[];
+  course_title?: string;
+
+  section_id?: string;
+  section_code?: string;
+  section_remarks?: string;
+
+  faculty_name?: string; // backend sets "UNASSIGNED" if empty
+  schedule_entries?: any[];
+  schedule_text?: string;
+
+  slot1?: any;
+  slot2?: any;
+
+  remarks?: string | null;
+
+  [k: string]: any;
+};
+
+type SpecialClassBackendResponse = {
+  ok?: boolean;
+  view?: string;
+  campus?: { campus_id?: string; campus_name?: string };
+  campus_name?: string;
+  term_id?: string;
+  term_label?: string;
+  rows?: SpecialClassBackendRow[];
+  [k: string]: any;
+};
+
+function _firstCode(x: any): string | undefined {
+  if (Array.isArray(x)) return (x[0] ?? "") as string;
+  if (x == null) return undefined;
+  return String(x);
+}
+
+function _coerceSlot(e: any): SpecialClassSlot | null {
+  if (!e || typeof e !== "object") return null;
+  return {
+    schedule_id: e.schedule_id ?? null,
+    day: e.day ?? null,
+    start_time: e.start_time ?? null,
+    end_time: e.end_time ?? null,
+    room_id: e.room_id ?? null,
+    room_type: e.room_type ?? null,
+    room_number: e.room_number ?? null,
+  };
+}
+
+function _coerceSpecialClassResponse(raw: SpecialClassBackendResponse): SpecialClassResponse {
+  const rawRows = Array.isArray(raw.rows) ? raw.rows : [];
+
+  return {
+    campus: raw.campus ?? (raw.campus_name ? { campus_name: raw.campus_name } : undefined),
+    term_id: raw.term_id,
+    term_label: raw.term_label,
+    rows: rawRows.map((r) => {
+      const seRaw = Array.isArray(r.schedule_entries) ? r.schedule_entries : [];
+      const schedule_entries = seRaw.map(_coerceSlot).filter(Boolean) as SpecialClassSlot[];
+
+      const slot1 = _coerceSlot(r.slot1) ?? schedule_entries[0] ?? null;
+      const slot2 = _coerceSlot(r.slot2) ?? schedule_entries[1] ?? null;
+
+      const faculty_name = (r.faculty_name ?? "").trim() || "UNASSIGNED";
+
+      return {
+        special_id: r.special_id,
+
+        campus_name: r.campus_name ?? raw.campus_name,
+        term_id: r.term_id ?? raw.term_id,
+        term_label: r.term_label ?? raw.term_label,
+
+        student: {
+          student_number: r.student_number != null ? String(r.student_number) : undefined,
+          student_name: r.student_name,
+        },
+
+        course: {
+          course_code: _firstCode(r.course_code),
+          course_title: r.course_title,
+        },
+
+        section:
+          r.section_id || r.section_code || r.section_remarks
+            ? {
+                section_id: r.section_id,
+                section_code: r.section_code,
+                section_remarks: r.section_remarks,
+              }
+            : undefined,
+
+        faculty: { faculty_name },
+
+        schedule_entries,
+        schedule_text: r.schedule_text,
+
+        slot1,
+        slot2,
+
+        remarks: r.remarks ?? null,
+      };
+    }),
+  };
+}
+
+export async function getSpecialClassData(
+  userId: string,
+  opts: { term_id?: string; term_mode?: "active" | "planning" } = {}
+): Promise<SpecialClassResponse> {
+  const url = `${API_BASE}/apo/courseofferings${q({
+    userId,
+    view: "specialclass",
+    term_id: opts.term_id,
+    term_mode: opts.term_mode ?? "active",
+  })}`;
+
+  const raw = await get<any>(url);
+  return _coerceSpecialClassResponse(raw as any);
+}
+
+export async function getApoSpecialClass(
+  userId: string,
+  opts: { term_id?: string; term_mode?: "active" | "planning" } = {}
+): Promise<SpecialClassResponse> {
+  return getSpecialClassData(userId, opts);
+}
+
+export type ApoSpecialClassUpdatePayload = {
+  special_id: string;
+  term_id?: string;
+  remarks?: string;
+  schedule_entries?: Array<{ schedule_id?: string | null; room_id?: string | null }>;
+};
+
+export async function updateApoSpecialClassRow(
+  userId: string,
+  payload: ApoSpecialClassUpdatePayload
+): Promise<{ ok: boolean }> {
+  const url = `${API_BASE}/apo/courseofferings${q({ userId, action: "specialclassUpdate" })}`;
+  return post(url, payload as any);
+}
+
 
 /* =========================================================
    ===============  APO: ROOM ALLOCATION  ==================
@@ -1211,12 +1417,14 @@ export type RoomDoc = {
   campus_id: string;
   status: string;
 };
+
 export type SectionDoc = {
   section_id: string;
   section_code: string;
   course_id?: string;
   course_code?: string;
 };
+
 export type SectionScheduleDoc = {
   schedule_id: string;
   section_id: string;
@@ -1226,6 +1434,7 @@ export type SectionScheduleDoc = {
   room_id?: string | null;
   time_band: string;
 };
+
 export type RoomScheduleCell = {
   schedule_id?: string;
   section_id?: string | null;
@@ -1256,6 +1465,48 @@ export type RoomAllocationResponse = {
 };
 
 const base = API_BASE.replace(/\/$/, "");
+
+function normalizeRoomTimeBand(band: string): string {
+  const s = String(band ?? "").trim();
+  if (!s) return s;
+
+  const split = s.split(/\s*[–—\-−]\s*/).filter(Boolean);
+
+  const parseTok = (tok: string): { h: number; m: number } | null => {
+    const m = tok.trim().match(/^(\d{1,2})\s*:?\s*(\d{2})$/);
+    if (!m) return null;
+    const hh = Number(m[1]);
+    const mm = Number(m[2]);
+    if (!Number.isFinite(hh) || !Number.isFinite(mm)) return null;
+    if (hh < 0 || hh > 23 || mm < 0 || mm > 59) return null;
+    return { h: hh, m: mm };
+  };
+
+  let t1: { h: number; m: number } | null = null;
+  let t2: { h: number; m: number } | null = null;
+
+  if (split.length === 2) {
+    t1 = parseTok(split[0]);
+    t2 = parseTok(split[1]);
+  }
+
+  if (!t1 || !t2) {
+    const found = Array.from(s.matchAll(/(\d{1,2})\s*:?\s*(\d{2})/g)).map((m) => ({
+      h: Number(m[1]),
+      m: Number(m[2]),
+    }));
+    if (found.length >= 2) {
+      t1 = found[0];
+      t2 = found[1];
+    }
+  }
+
+  if (!t1 || !t2) return s;
+
+  const a = `${String(t1.h).padStart(2, "0")}:${String(t1.m).padStart(2, "0")}`;
+  const b = `${String(t2.h).padStart(2, "0")}:${String(t2.m).padStart(2, "0")}`;
+  return `${a} – ${b}`;
+}
 
 export async function getApoRoomAllocation(
   userId: string,
@@ -1302,9 +1553,14 @@ export async function setRoomAvailability(
   userId: string,
   data: { room_id: string; day: Day; time_bands: string[] }
 ) {
+  const payload = {
+    ...data,
+    time_bands: (data.time_bands || []).map(normalizeRoomTimeBand),
+  };
+
   const r = await fetch(
     `${base}/apo/roomallocation?${new URLSearchParams({ userId, action: "setAvailability" }).toString()}`,
-    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) }
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) }
   );
   if (!r.ok) throw new Error(await r.text());
   return r.json();
@@ -1314,12 +1570,14 @@ export async function assignRoom(
   userId: string,
   data: { room_id: string; section_id: string; day: Day; time_band: string; term_id?: string }
 ) {
+  const payload = { ...data, time_band: normalizeRoomTimeBand(data.time_band) };
+
   const r = await fetch(
     `${base}/apo/roomallocation?${new URLSearchParams({ userId, action: "assign" }).toString()}`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(data),
+      body: JSON.stringify(payload),
     }
   );
   if (!r.ok) throw new Error(await r.text());
@@ -1330,9 +1588,11 @@ export async function unassignRoom(
   userId: string,
   data: { room_id: string; section_id: string; day: Day; time_band: string }
 ) {
+  const payload = { ...data, time_band: normalizeRoomTimeBand(data.time_band) };
+
   const r = await fetch(
     `${base}/apo/roomallocation?${new URLSearchParams({ userId, action: "unassign" }).toString()}`,
-    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) }
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) }
   );
   if (!r.ok) throw new Error(await r.text());
   return r.json();
@@ -1989,6 +2249,16 @@ export type OMSCFaultyOpt = {
   department_id?: string;
 };
 
+export type OMSCRoomOpt = {
+  room_id: string;
+  room_number: string;
+  capacity?: number;
+  building?: string;
+  campus_id?: string;
+  status?: string;
+  room_type?: string;
+};
+
 export type DayCode = "M" | "T" | "W" | "H" | "F" | "S";
 
 export type OMSCSchedulePreset = {
@@ -2006,6 +2276,10 @@ export type OMSCSchedulePreset = {
   day2: DayCode | "";
   begin2: string;
   end2: string;
+
+  // NEW: read-only room ids coming from section_schedules
+  room_id1?: string | null;
+  room_id2?: string | null;
 
   schedule_id1?: string | null;
   schedule_id2?: string | null;
@@ -2038,7 +2312,6 @@ export type OMSpecialClassRow = {
   faculty_name?: string;
 
   section_id?: string | null;
-
   section_code?: string;
 
   day1?: DayCode | "";
@@ -2048,11 +2321,26 @@ export type OMSpecialClassRow = {
   begin2?: string;
   end2?: string;
 
+  // NEW: read-only room display columns (default "TBA" from backend)
+  room_id1?: string | null;
+  room1?: string; // room_number
+  room1_building?: string;
+  room1_capacity?: number | null;
+  room1_room_type?: string;
+
+  room_id2?: string | null;
+  room2?: string; // room_number
+  room2_building?: string;
+  room2_capacity?: number | null;
+  room2_room_type?: string;
+
   submitted_at?: string;
+
   schedule_id1?: string | null;
   schedule_id2?: string | null;
   assignment_id?: string | null;
-
+  schedule_cleared?: boolean;
+  clear_schedule_only?: boolean;
 };
 
 export type OMSpecialClassDetail = OMSpecialClassRow & {
@@ -2074,6 +2362,8 @@ export type OMSpecialClassOptions = {
   statuses: string[];
   activeTerm?: { term_id: string; term_number: number; acad_year_start: number } | null;
   facultyOptions?: OMSCFaultyOpt[];
+  // backend includes this in options, even if UI doesn't edit rooms yet
+  roomOptions?: OMSCRoomOpt[];
 };
 
 // ---------- OM: Special Class endpoints ----------
@@ -2139,16 +2429,6 @@ async function tryDecodePdfError(err: any): Promise<string | null> {
   }
 }
 
-/**
- * ✅ Export Special Class PDF
- * Backend: POST /om/specialclass?action=exportPdf
- *
- * Supports:
- * - Query params: { termId?, status?, q?, specialId? } for filtered/single export
- * - Body payload: { special_ids: string[] } for exporting selected rows
- *
- * Returns: PDF Blob
- */
 export async function exportOMSC_Pdf(args: {
   termId?: string;
   status?: string;
@@ -2173,14 +2453,13 @@ export async function exportOMSC_Pdf(args: {
   } catch (err: any) {
     const decoded = await tryDecodePdfError(err);
     if (decoded) {
-      // attach a nicer message
       err.message = decoded;
     }
     throw err;
   }
 }
 
-/** ✅ Helper: trigger browser download */
+/** Helper: trigger browser download */
 export function downloadBlob(blob: Blob, filename: string) {
   const url = window.URL.createObjectURL(blob);
   const a = document.createElement("a");
@@ -2191,7 +2470,6 @@ export function downloadBlob(blob: Blob, filename: string) {
   a.remove();
   window.URL.revokeObjectURL(url);
 }
-
 
 /* =========================================================
    ==============  OM: CLASS RETENTION  ====================

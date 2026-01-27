@@ -32,7 +32,9 @@ import {
   createCatalogCourse, 
   getEligibleRoomsForOffering,          
   importCurriculumCsv,    
-  editCatalogCourse,          
+  editCatalogCourse,  
+  getSpecialClassData,
+  updateApoSpecialClassRow,
   type ApiConflict,
   type CreateCoursePayload,  
   type CourseCatalogItem           
@@ -497,6 +499,40 @@ type OfferingsResponse = {
   };
 };
 
+type SpecialClassSlot = {
+  schedule_id?: string | null;
+  day?: string | null;          // M/T/W/H/F/S
+  start_time?: string | null;   // "0730"
+  end_time?: string | null;     // "0900"
+  room_id?: string | null;      // real room_id or "ONLINE"
+  room_type?: string | null;    // e.g. "LECTURE", "LAB", "ONLINE"
+  room_number?: string | null;  // resolved display label from backend
+};
+
+type SpecialClassRow = {
+  special_id: string;
+  campus_name?: string;
+  term_id?: string;
+  term_label?: string;
+  student?: { student_number?: string; student_name?: string };
+  course?: { course_code?: string; course_title?: string };
+  section?: { section_id?: string; section_code?: string; section_remarks?: string };
+  faculty?: { faculty_name?: string };
+  schedule_entries?: SpecialClassSlot[];
+  schedule_text?: string;
+  slot1?: SpecialClassSlot | null;
+  slot2?: SpecialClassSlot | null;
+  remarks?: string | null;
+  [k: string]: any; // Additional fields
+};
+
+type SpecialClassResponse = {
+  campus?: { campus_id?: string; campus_name?: string };
+  term_id?: string;
+  term_label?: string;
+  rows: SpecialClassRow[];
+};
+
 type CurriculumItem = {
   program_id: string;
   program_code: string;
@@ -678,6 +714,23 @@ export default function CourseOfferingsPage() {
 
   const [data, setData] = useState<OfferingsResponse | null>(null);
   const [rows, setRows] = useState<OfferingRow[]>([]);
+  const [scData, setScData] = useState<SpecialClassResponse | null>(null);
+  const [scRows, setScRows] = useState<SpecialClassRow[]>([]);
+  const [scLoading, setScLoading] = useState(false);
+  const [scErr, setScErr] = useState<string | null>(null);
+
+  /** ------------------ Editing state ------------------ */
+  const [scEditingId, setScEditingId] = useState<string | null>(null);
+  const [scEditRemarks, setScEditRemarks] = useState<string>("");
+
+  /** room edits (we store room_id because backend update wants room_id) */
+  const [scEditRoom1, setScEditRoom1] = useState<string>(""); // room_id or "ONLINE"
+  const [scEditRoom2, setScEditRoom2] = useState<string>("");
+
+  /** eligible rooms cache per slot key `${special_id}:1` or `${special_id}:2` */
+  const [scEligibleRooms, setScEligibleRooms] = useState<Record<string, any[]>>({});
+  const [scEligibleRoomsLoading, setScEligibleRoomsLoading] = useState<Record<string, boolean>>({});
+  const [scSaveLoadingId, setScSaveLoadingId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
   const [conflict, setConflict] = useState<ConflictState | null>(null);
@@ -704,21 +757,21 @@ const RoomSelectBox: React.FC<{
   const currentLabel = React.useMemo(() => {
     const currentId = (value ?? tbaId ?? "") as string;
     const hit = opts.find(o => o.id === currentId);
-    return hit ? hit.label : "—";
+    return hit ? hit.label : "TBA";
   }, [opts, value, tbaId]);
 
   return (
-    <div className={cls("relative z-20 w-full min-w-0 max-w-full overflow-hidden", className)}>
-    <SelectBox
-      value={currentLabel}
-      onChange={(label: string) => {
-        const match = opts.find(o => o.label === label);
-        onChange(match?.id ?? tbaId ?? null);
-      }}
-      options={opts.map(o => o.label)}
-      disabled={!!disabled}
-      className="!min-w-0 w-full max-w-full"
-    />
+    <div className={cls("relative z-50 w-full min-w-0 max-w-full overflow-visible", className)}>
+      <SelectBox
+        value={currentLabel}
+        onChange={(label: string) => {
+          const match = opts.find(o => o.label === label);
+          onChange(match?.id ?? tbaId ?? null);
+        }}
+        options={opts.map(o => o.label)}
+        disabled={!!disabled}
+        className="!min-w-0 w-full max-w-full"
+      />
     </div>
   );
 };
@@ -734,6 +787,9 @@ const EligibleRoomSelect: React.FC<{
     roomType?: string | null;
     capacity?: number | null;
     excludeScheduleIds?: string[];
+    // Optional context (especially useful for Special Class rows)
+    sectionId?: string | null;
+    scheduleId?: string | null;
   };
   fallbackRooms: RoomOption[];  // e.g., data.room_options (used when slot not ready)
   value: string | null | undefined;
@@ -750,39 +806,80 @@ const EligibleRoomSelect: React.FC<{
 
   useEffect(() => {
     let cancelled = false;
+
+    const pickTba = (): RoomOption => {
+      const hit =
+        fallbackRooms.find(
+          (r) =>
+            String(r.room_number || "")
+              .replace(/[-–—]/g, "")
+              .trim()
+              .toUpperCase() === "TBA"
+        ) ?? null;
+
+      return (
+        hit ??
+        ({
+          room_id: "",
+          room_number: "TBA",
+          capacity: null,
+          room_type: null,
+        } as any)
+      );
+    };
+
     (async () => {
+      const tbaOpt = pickTba();
+
       if (!ready || disabled) {
-        setOpts(filterRoomsByCap(fallbackRooms, spec.capacity));
+        const base = filterRoomsByCap(fallbackRooms, spec.capacity).filter(
+          (r) => String(r.room_id || "").toUpperCase() !== "ONLINE"
+        );
+        if (!cancelled) setOpts(base.length ? base : [tbaOpt]);
         return;
       }
+
       try {
+        // IMPORTANT: match backend query keys (handled by api.ts mapping too)
         const payload = {
-          campus_id: campusId,
+          // When present, these allow the backend to infer enrollment_cap/room_type even if
+          // Special Class rows lack those fields locally.
+          section_id: spec.sectionId || undefined,
+          schedule_id: spec.scheduleId || undefined,
           day: toAbbrevDay(spec.day || ""),
           start: toHHMM(spec.start || ""),
           end: toHHMM(spec.end || ""),
-          required_type: spec.roomType || undefined,
-          min_capacity: spec.capacity ?? undefined,
-          exclude_schedule_ids: spec.excludeScheduleIds || [],
+          room_type: spec.roomType || undefined,
+          capacity: spec.capacity ?? undefined,
+          exclude: spec.excludeScheduleIds || [],
         } as any;
 
         const res: any = await getEligibleRoomsForOffering(userId, payload);
-        const list: RoomOption[] = Array.isArray(res?.rooms) ? res.rooms : (res ?? []);
+        const list: RoomOption[] = Array.isArray(res?.rooms) ? res.rooms : res ?? [];
 
-        const filtered = filterRoomsByCap(list, spec.capacity).filter((r) => {
-          if (!spec.roomType) return true;
-          const a = String(r.room_type || "").toLowerCase();
-          const b = String(spec.roomType || "").toLowerCase();
-          return a === b;
-        });
+        const filtered = filterRoomsByCap(list, spec.capacity)
+          .filter((r) => {
+            if (!spec.roomType) return true;
+            const a = String(r.room_type || "").toLowerCase();
+            const b = String(spec.roomType || "").toLowerCase();
+            return a === b;
+          })
+          .filter((r) => String(r.room_id || "").toUpperCase() !== "ONLINE");
 
-        if (!cancelled) setOpts(filtered);
+        const merged: RoomOption[] = [
+          tbaOpt,
+          ...filtered.filter((r) => String(r.room_id || "") !== String(tbaOpt.room_id || "")),
+        ];
 
+        if (!cancelled) setOpts(merged);
       } catch {
-        if (!cancelled) setOpts([]);
+        if (!cancelled) setOpts([tbaOpt]);
       }
     })();
-    return () => { cancelled = true; };
+
+    return () => {
+      cancelled = true;
+    };
   }, [
     userId,
     campusId,
@@ -838,6 +935,23 @@ const EligibleRoomSelect: React.FC<{
       : (user.roles[0] as string) || "User";
   }, [user]);
   const campusLabel = data?.campus?.campus_name || curr?.campus?.campus_name || "";
+  const apoCampus = String(user?.campus_name || user?.campus || user?.campusName || "").toUpperCase();
+
+  const scRowsForCampus = useMemo(() => {
+    const myCampus =
+      apoCampus ||
+      String(scData?.campus?.campus_name || "").toUpperCase() ||
+      String(data?.campus?.campus_name || "").toUpperCase();
+
+    if (!myCampus) return scRows;
+
+    return scRows.filter((r) => {
+      const rowCampus = String(r.campus_name || scData?.campus?.campus_name || "").toUpperCase();
+      return !rowCampus || rowCampus === myCampus;
+    });
+  }, [scRows, apoCampus, scData?.campus?.campus_name, data?.campus?.campus_name]);
+
+
   // --- Electives: per-placeholder fetch helper ---
   async function ensureElectiveOptionsFor(placeholderId?: string) {
     if (!user?.userId || !placeholderId) return;
@@ -860,16 +974,29 @@ const EligibleRoomSelect: React.FC<{
       departmentName === "All Departments"
         ? undefined
         : data?.filters.departments.find((d) => d.department_name === departmentName)?.department_id;
+
     const progId =
       programCode === "All Programs"
         ? undefined
         : (data?.filters.programs || []).find((p) => p.program_code === programCode)?.program_id;
-    const bId =
-      batchCode === "All ID"
-        ? undefined
-        : (data?.filters.ids || []).find((b) => normCode(b.batch_code) === normCode(batchCode))?.batch_id;
+
+    // IMPORTANT: "All ID" dropdown is by batch_code label, but backend filters by batch_id.
+    // Multiple batch_id can share the same batch_code. Send them ALL as CSV.
+    let bId: string | undefined = undefined;
+    if (batchCode !== "All ID") {
+      const want = normCode(batchCode);
+      const hits = (data?.filters.ids || [])
+        .filter((b) => normCode(b.batch_code) === want)
+        .map((b) => b.batch_id)
+        .filter(Boolean);
+
+      if (hits.length === 1) bId = hits[0];
+      else if (hits.length > 1) bId = hits.join(",");
+    }
+
     return { deptId, progId, bId };
   };
+
 
 const loadOfferings = async () => {
   if (!user?.userId) return;
@@ -911,7 +1038,6 @@ const loadOfferings = async () => {
   }
 };
 
-
   const loadCurriculum = async () => {
     if (!user?.userId) return;
     setLoading(true);
@@ -926,16 +1052,250 @@ const loadOfferings = async () => {
     }
   };
 
-  useEffect(() => {
-    if (view === "offerings" || view === "specialclass") loadOfferings();
-    else loadCurriculum();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [view]);
+  const [currentTermId, setCurrentTermId] = useState<string | null>(() =>
+    localStorage.getItem("currentTermId")
+  );
+
+  const loadCurrentTerm = async () => {
+    try {
+      const response = await fetch("/api/terms?is_current=true");
+      const data = await response.json();
+
+      if (data?.term_id) {
+        localStorage.setItem("currentTermId", data.term_id);
+        setCurrentTermId(data.term_id);
+      } else {
+        console.error("No current term found.");
+      }
+    } catch (error) {
+      console.error("Error fetching the current term:", error);
+    }
+  };
 
   useEffect(() => {
-    if (view === "offerings") loadOfferings();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [level, departmentName, programCode, batchCode]);
+    loadCurrentTerm();
+  }, []);
+
+
+  const loadSpecialClass = async (termId?: string) => {
+    setScLoading(true);
+    setScErr(null);
+
+    try {
+      const userId = user?.userId;
+      if (!userId) {
+        setScErr("User is not logged in");
+        return;
+      }
+
+      const data = await getSpecialClassData(userId, {
+        term_id: termId,
+        term_mode: "active",
+      });
+
+      setScData(data);
+      setScRows(data.rows || []);
+    } catch (e: any) {
+      setScErr(
+        e?.message ? `Failed to load special class data: ${e.message}` : "Failed to load special class data"
+      );
+    } finally {
+      setScLoading(false);
+    }
+  };
+
+  /** ------------------ helpers for edit mode ------------------ */
+  const _slotFromRow = (row: any, idx: 1 | 2) => {
+    const se = Array.isArray(row?.schedule_entries) ? row.schedule_entries : [];
+    if (idx === 1) return row?.slot1 ?? se[0] ?? null;
+    return row?.slot2 ?? se[1] ?? null;
+  };
+
+  const _roomIdFromSlot = (slot: any): string => {
+    const rid = String(slot?.room_id ?? "").trim();
+    if (rid && rid.toUpperCase() !== "ONLINE") return rid;
+
+    const rn = String(slot?.room_number ?? "").trim().toUpperCase();
+    if (rn === "ONLINE") return ""; // treat ONLINE as TBA
+
+    return "";
+  };
+
+  const _scheduleIdsFromRow = (row: any): string[] => {
+    const se = Array.isArray(row?.schedule_entries) ? row.schedule_entries : [];
+    return se
+      .map((x: any) => String(x?.schedule_id ?? "").trim())
+      .filter(Boolean);
+  };
+
+  const _minCapacityFromRow = (row: any): number | undefined => {
+    // best-effort: only pass if it exists in data model
+    const v =
+      row?.min_capacity ??
+      row?.required_capacity ??
+      row?.capacity ??
+      row?.section?.min_capacity ??
+      row?.section?.capacity;
+
+    const n = typeof v === "number" ? v : Number(String(v ?? "").trim());
+    return Number.isFinite(n) && n > 0 ? n : undefined;
+  };
+
+  /** Load eligible rooms for a specific row+slot using the SAME room-filter endpoint used in offerings */
+  const ensureEligibleRoomsForSlot = async (row: SpecialClassRow, idx: 1 | 2) => {
+    const key = `${row.special_id}:${idx}`;
+    if (scEligibleRooms[key]) return;
+
+    const userId = user?.userId;
+    if (!userId) return;
+
+    const slot = _slotFromRow(row as any, idx);
+    const section_id = String((row as any)?.section_id ?? "").trim();
+    const schedule_id = String((slot as any)?.schedule_id ?? "").trim();
+    const day = String(slot?.day ?? "").trim();
+    const start = String(slot?.start_time ?? "").trim();
+    const end = String(slot?.end_time ?? "").trim();
+    if (!day || !start || !end) return;
+
+    const room_type = String(slot?.room_type ?? "").trim() || undefined;
+    const capacity = _minCapacityFromRow(row);
+    const exclude = _scheduleIdsFromRow(row);
+
+    setScEligibleRoomsLoading((p) => ({ ...p, [key]: true }));
+    try {
+      const rooms = await getEligibleRoomsForOffering(userId, {
+        section_id: section_id || undefined,
+        schedule_id: schedule_id || undefined,
+        day,
+        start_time: start,
+        end_time: end,
+        room_type,
+        capacity,
+        exclude,
+      });
+
+      // rooms shape can vary; we keep it generic and label it in UI
+      // rooms shape can vary; we keep it generic and label it in UI
+      setScEligibleRooms((p) => ({ ...p, [key]: Array.isArray(rooms) ? rooms : [] }));
+    } catch (e) {
+      // don’t block editing; just keep rooms empty and rely on current room display
+      setScEligibleRooms((p) => ({ ...p, [key]: [] }));
+    } finally {
+      setScEligibleRoomsLoading((p) => ({ ...p, [key]: false }));
+    }
+  };
+
+  const beginEditSpecialClassRow = async (row: SpecialClassRow) => {
+    setScEditingId(row.special_id);
+
+    // remarks edit (special class remarks)
+    setScEditRemarks(String(row.remarks ?? ""));
+
+    // room edits (we store room_id)
+    const s1 = _slotFromRow(row as any, 1);
+    const s2 = _slotFromRow(row as any, 2);
+    setScEditRoom1(_roomIdFromSlot(s1));
+    setScEditRoom2(_roomIdFromSlot(s2));
+
+    // preload eligible rooms for dropdowns (same logic as offerings)
+    await Promise.all([ensureEligibleRoomsForSlot(row, 1), ensureEligibleRoomsForSlot(row, 2)]);
+  };
+
+  const cancelEditSpecialClassRow = () => {
+    setScEditingId(null);
+    setScEditRemarks("");
+    setScEditRoom1("");
+    setScEditRoom2("");
+    setScSaveLoadingId(null);
+  };
+
+  const saveSpecialClassRowEdits = async (row: SpecialClassRow) => {
+    const userId = user?.userId;
+    if (!userId) {
+      setScErr("User is not logged in");
+      return;
+    }
+
+    setScSaveLoadingId(row.special_id);
+    setScErr(null);
+
+    try {
+      // build schedule_entries payload (keep day/start/end; update room_id only)
+      // IMPORTANT: some Special Class rows may not have schedule_entries populated,
+      // but do have slot1/slot2. Use those as fallback so room changes persist and
+      // immediately reflect in the table.
+      const seBase =
+        Array.isArray(row.schedule_entries) && row.schedule_entries.length > 0
+          ? row.schedule_entries
+          : [row.slot1, row.slot2].filter(Boolean);
+      const next = [...(seBase as any[])].map((x) => ({ ...x }));
+
+      if (next[0]) next[0].room_id = scEditRoom1 || null;
+      if (next[1]) next[1].room_id = scEditRoom2 || null;
+
+      await updateApoSpecialClassRow(userId, {
+        special_id: row.special_id,
+        term_id: row.term_id ?? scData?.term_id, // important for correct record
+        remarks: scEditRemarks,
+        schedule_entries: next.map((x) => ({
+          schedule_id: x?.schedule_id ?? null,
+          room_id: x?.room_id ?? null,
+        })),
+      });
+
+      // Update UI after successful save
+      setScRows((prev) =>
+        prev.map((r) =>
+          r.special_id !== row.special_id
+            ? r
+            : {
+                ...r,
+                remarks: scEditRemarks,
+                schedule_entries: next,
+                slot1: next[0] ?? r.slot1 ?? null,
+                slot2: next[1] ?? r.slot2 ?? null,
+              }
+        )
+      );
+
+      cancelEditSpecialClassRow();
+    } catch (e: any) {
+      setScErr(
+        e?.message
+          ? `Failed to save special class edits: ${e.message}`
+          : "Failed to save special class edits"
+      );
+      // keep edit mode open so user doesn’t lose input
+    } finally {
+      setScSaveLoadingId(null);
+    }
+  };
+
+  // View switching: specialclass + curriculum only
+  useEffect(() => {
+    if (view === "specialclass") {
+      const tid = currentTermId || data?.term_id || curr?.term_id || undefined;
+      loadSpecialClass(tid);
+      return;
+    }
+
+    if (view === "curriculum") loadCurriculum();
+  }, [view, currentTermId, data?.term_id, curr?.term_id]);
+
+  // Offerings: reload whenever dropdown filters change
+  useEffect(() => {
+    if (view !== "offerings") return;
+    if (!user?.userId) return;
+
+    // small debounce so rapid changes don't spam requests
+    const t = setTimeout(() => {
+      loadOfferings();
+    }, 150);
+
+    return () => clearTimeout(t);
+  }, [view, user?.userId, level, departmentName, batchCode, programCode]);
+
+
 
   /* -------------------------- planning banner only -------------------------- */
 
@@ -1734,18 +2094,6 @@ if (isGE) {
     await curriculumRemoveCourse(user.userId, { program_id, batch_id, course_id });
     await loadCurriculum();
   };
-  // treat either inline edit row or inline add row as "edit UI"
-    // treat either inline edit row or inline add row as "edit UI"
-  const inEditUI = !!editing || addAnchorKey !== null;
-
-  // NEW: give the table container extra bottom space while editing/adding
-  const [editPad, setEditPad] = useState(0);
-
-  useEffect(() => {
-    // When any dropdown-heavy UI is open, add space so menus won't be cut off
-    if (inEditUI) setEditPad(260);     // adjust if you want more/less space
-    else setEditPad(0);
-  }, [inEditUI]);
 
   /* ----------------------------------- UI ----------------------------------- */
 
@@ -1851,7 +2199,15 @@ if (isGE) {
                 onChange={(v: string) => setDepartmentName(v)}
                 options={["All Departments", ...(data?.filters.departments || []).map((d) => d.department_name)]}
               />
-              <SelectBox value={batchCode} onChange={(v: string) => setBatchCode(v)} options={idOptions} />
+              <SelectBox
+                value={batchCode}
+                onChange={(v: string) => {
+                  setBatchCode(v);
+                  setProgramCode("All Programs"); // prevent stale program filter narrowing results
+                }}
+                options={idOptions}
+              />
+
               <SelectBox
                 value={programCode}
                 onChange={(v: string) => setProgramCode(v)}
@@ -1871,7 +2227,6 @@ if (isGE) {
           </button>
             )}
           </div>
-          {/* Curriculum filters */}
           {/* Curriculum filters */}
           {view === "curriculum" && (
             <>
@@ -2014,7 +2369,10 @@ if (response.ok) {
         <div className="rounded-xl bg-white shadow-sm border border-gray-200 p-4 sm:p-6 w-full" data-course-offerings>
           <div className="flex items-center justify-between mb-3 sm:mb-4">
             <div>
-              <h2 className="text-lg font-bold">{view === "curriculum" ? "List of Courses" : "Course Offerings"}</h2>
+              <h2 className="text-lg font-bold">
+                {view === "curriculum" ? "List of Courses" :
+                view === "specialclass" ? "Special Class" : "Course Offerings"}
+              </h2>
               <p className="text-sm text-gray-500">{loading ? "Loading…" : data?.term_label || curr?.term_label || ""}</p>
               {err && <p className="text-sm text-red-600">{err}</p>}
             </div>
@@ -2057,7 +2415,7 @@ if (response.ok) {
               ) : (
                 Object.entries(groups).map(([idLabel, byProgram]) => (
                   <div   key={idLabel}
-                    className="rounded-xl border border-gray-300 bg-white shadow-sm overflow-hidden mb-6">
+                    className="rounded-xl border border-gray-300 bg-white shadow-sm overflow-visible mb-6">
                     <div className="bg-[#21804A] text-white px-4 py-3 text-center font-semibold">{idLabel}</div>
                     {Object.entries(byProgram).map(([progLabel, list]) => {
                       const key = `${idLabel}::${progLabel}`;
@@ -2079,11 +2437,8 @@ if (response.ok) {
 
                           {!isCollapsed && (
                             <div className="p-0">
-                            <div
-                                className="overflow-x-auto relative"
-                                style={{ overflowY: "visible", paddingBottom: editPad }}
-                              >
-                                <table className={`w-full text-sm border-collapse ${inEditUI ? "table-auto" : "table-fixed"}`}>
+                            <div className="overflow-x-auto relative" style={{ overflowY: "visible" }}>
+                              <table className="w-full text-sm border-collapse table-fixed">
                                   <colgroup>
                                     <col style={{ width: 96 }} />   {/* Program No. */}
                                     <col style={{ width: 230 }} />  {/* Course Code & Title */}
@@ -2472,8 +2827,8 @@ if (response.ok) {
                                             fmtTime(r.slot1?.end_time)
                                           )}
                                           </td>
-                                          <td className="px-3 py-2 border border-gray-200 bg-white relative overflow-hidden">
-                                            <div className="w-full max-w-[120px] overflow-hidden">
+                                          <td className="px-3 py-2 border border-gray-200 bg-white relative overflow-visible">
+                                            <div className="w-full max-w-[120px] overflow-visible">
                                               <EligibleRoomSelect
                                               userId={user?.userId}
                                               campusId={data?.campus?.campus_id || ""}
@@ -2481,13 +2836,13 @@ if (response.ok) {
                                                 day: (editing?.draft.slot1?.day || r.slot1?.day || "") as string,
                                                 start: editing?.draft.slot1?.start_time || r.slot1?.start_time || "",
                                                 end: editing?.draft.slot1?.end_time || r.slot1?.end_time || "",
-                                                roomType: (r as any)?.course?.room_type || null,
+                                                roomType: (r as any)?.slot1?.room_type || (r as any)?.slot2?.room_type || null,
                                                 capacity: r.section.enrollment_cap ?? null,
                                                 excludeScheduleIds: [r.slot1?.schedule_id, r.slot2?.schedule_id].filter(Boolean) as string[],
                                               }}
                                               fallbackRooms={filterRoomsByCap(data?.room_options || [], r.section.enrollment_cap)}
                                               value={editing?.draft.slot1?.room_id || null}
-                                              disabled={!slotReady(editing?.draft.slot1) && !slotReady(r.slot1 as any)}
+                                              disabled={scEligibleRoomsLoading[editing?.draft.slot1?.room_id ?? ""] || !slotReady(editing?.draft.slot1) && !slotReady(r.slot1 as any)}
                                               onChange={(roomId) =>
                                                 setEditing(p => p && ({
                                                   ...p,
@@ -2549,8 +2904,8 @@ if (response.ok) {
                                             fmtTime(r.slot2?.end_time)
                                           )}
                                           </td>
-                                          <td className="px-3 py-2 border border-gray-200 bg-white relative overflow-hidden">
-                                            <div className="w-full max-w-[120px] overflow-hidden">
+                                          <td className="px-3 py-2 border border-gray-200 bg-white relative overflow-visible">
+                                            <div className="w-full max-w-[120px] overflow-visible">
                                               <EligibleRoomSelect
                                               userId={user?.userId}
                                               campusId={data?.campus?.campus_id || ""}
@@ -2564,7 +2919,7 @@ if (response.ok) {
                                               }}
                                               fallbackRooms={filterRoomsByCap(data?.room_options || [], r.section.enrollment_cap)}
                                               value={editing?.draft.slot2?.room_id || null}
-                                              disabled={!slotReady(editing?.draft.slot2) && !slotReady(r.slot2 as any)}
+                                              disabled={scEligibleRoomsLoading[editing?.draft.slot2?.room_id ?? ""] || !slotReady(editing?.draft.slot2) && !slotReady(r.slot2 as any)}
                                               onChange={(roomId) =>
                                                 setEditing(p => p && ({
                                                   ...p,
@@ -2793,12 +3148,12 @@ if (response.ok) {
                                             <td className="px-3 py-2 border border-gray-200 bg-white">—</td>
                                             <td className="px-3 py-2 border border-gray-200 bg-white">
                                               <RoomSelectBox
-                                                rooms={filterRoomsByCap(data?.room_options || [])}
-                                                value={addDraft.slot1?.room_id || null}
-                                                disabled={true}                         // stays disabled in Add Row
-                                                onChange={(roomId) =>
-                                                  setAddDraft(p => ({ ...p, slot1: { ...(p.slot1 || {}), room_id: roomId ?? "" } }))
-                                                }
+                                                rooms={filterRoomsByCap(data?.room_options || []).filter(
+                                                  (room) => String(room.room_id || "").toUpperCase() !== "ONLINE"
+                                                )}
+                                                value={addDraft.slot2?.room_id || null}
+                                                onChange={(roomId) => setAddDraft(p => ({ ...p, slot2: { ...(p.slot2 || {}), room_id: roomId ?? "" } }))}
+
                                                 className="opacity-60"
                                               />
                                             </td>
@@ -2808,12 +3163,12 @@ if (response.ok) {
                                             <td className="px-3 py-2 border border-gray-200 bg-white">—</td>
                                             <td className="px-3 py-2 border border-gray-200 bg-white">
                                               <RoomSelectBox
-                                                rooms={filterRoomsByCap(data?.room_options || [])}
-                                                value={addDraft.slot2?.room_id || null}
-                                                disabled={true}
-                                                onChange={(roomId) =>
-                                                  setAddDraft(p => ({ ...p, slot2: { ...(p.slot2 || {}), room_id: roomId ?? "" } }))
-                                                }
+                                                rooms={filterRoomsByCap(data?.room_options || []).filter(
+                                                  (room) => String(room.room_id || "").toUpperCase() !== "ONLINE"
+                                                )}
+                                                value={addDraft.slot1?.room_id || null}
+                                                onChange={(roomId) => setAddDraft(p => ({ ...p, slot1: { ...(p.slot1 || {}), room_id: roomId ?? "" } }))}
+
                                                 className="opacity-60"
                                               />
                                             </td>
@@ -2889,7 +3244,7 @@ if (response.ok) {
 
           {/* ------------------------------ Curriculum ----------------------------- */}
           {view === "curriculum" && (
-            <div className="rounded-xl border border-gray-300 bg-white shadow-sm overflow-hidden">
+            <div className="rounded-xl border border-gray-300 bg-white shadow-sm overflow-visible">
               {/* Header follows selection state */}
               <div className="bg-emerald-700 text-white px-4 py-3 text-center font-semibold">
                 {selectedBatchId
@@ -3252,6 +3607,272 @@ if (response.ok) {
               )}
             </div>
           )}
+          {/* ------------------------------ Special Class ------------------------------ */}
+{view === "specialclass" && (
+  <div className="rounded-xl border border-gray-300 bg-white shadow-sm overflow-hidden">
+    <div className="bg-emerald-700 text-white px-4 py-3 text-center font-semibold">
+      Special Class
+    </div>
+
+    <div className="p-3">
+      {scErr && <div className="mb-2 text-sm text-red-600">{scErr}</div>}
+
+      {scLoading ? (
+        <div className="text-sm text-neutral-500">Loading…</div>
+      ) : scErr ? (
+        <div className="text-sm text-red-600">Failed to load special class: {scErr}</div>
+      ) : scRowsForCampus.length === 0 ? (
+        <div className="text-sm text-neutral-500">No special class records found.</div>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm border-collapse">
+            <thead className="bg-gray-50 text-emerald-800">
+              <tr className="text-[13px] font-semibold">
+                {[
+                  "Student",
+                  "Course",
+                  "Section",
+                  "Faculty",
+                  "Day 1",
+                  "Begin 1",
+                  "End 1",
+                  "Room 1",
+                  "Day 2",
+                  "Begin 2",
+                  "End 2",
+                  "Room 2",
+                  "Remarks",
+                  "Actions",
+                ].map((h) => (
+                  <th key={h} className="px-3 py-2 text-left border border-gray-300">
+                    {h}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+
+            <tbody>
+              {scRowsForCampus.map((raw) => {
+                const row = raw as any;
+                const isEditing = scEditingId === String(row.special_id);
+
+                const student_name = row?.student?.student_name ?? row?.student_name ?? "—";
+                const student_number = row?.student?.student_number ?? row?.student_number ?? "—";
+
+                const course_code_raw = row?.course?.course_code ?? row?.course_code ?? "";
+                const course_code = Array.isArray(course_code_raw)
+                  ? String(course_code_raw[0] ?? "—")
+                  : String(course_code_raw || "—");
+
+                const course_title = row?.course?.course_title ?? row?.course_title ?? "—";
+
+                const section_code = row?.section?.section_code ?? row?.section_code ?? "—";
+                const faculty_name = row?.faculty?.faculty_name ?? row?.faculty_name ?? "—";
+
+                const se = Array.isArray(row?.schedule_entries) ? row.schedule_entries : [];
+                const slot1 = row?.slot1 ?? se[0] ?? null;
+                const slot2 = row?.slot2 ?? se[1] ?? null;
+
+                const slotDay = (s: any) => (s?.day || "—");
+
+                const safeTime = (x: any) => {
+                  const digits = String(x ?? "").replace(/\D/g, "");
+                  if (!digits) return "—";
+                  const hhmm = digits.padStart(4, "0");
+                  return typeof fmtTime === "function" ? fmtTime(hhmm) : hhmm;
+                };
+                const slotStart = (s: any) => safeTime(s?.start_time);
+                const slotEnd = (s: any) => safeTime(s?.end_time);
+
+                const slotRoomLabel = (s: any) => {
+                const rn = String(s?.room_number || s?.room_name || "").trim();
+                const rid = String(s?.room_id || "").trim();
+
+                // Treat ONLINE as "no physical room". If a room_id exists, display it even
+                // if room_type was (incorrectly) stored as "Online" (delivery mode).
+                const ridOrRn = String(rn || rid).trim().toUpperCase();
+                if (ridOrRn === "ONLINE") return "TBA";
+                if (!rn && !rid) return "TBA";
+                return rn || rid || "TBA";
+
+                };
+
+
+                // Prefer row.remarks; fallback to section_remarks if backend sends it there
+                const remarks =
+                  row?.remarks ?? row?.section?.section_remarks ?? row?.section_remarks ?? "—";
+
+                const slotReadySC = (s: any) =>
+                  !!String(s?.day ?? "").trim() &&
+                  !!String(s?.start_time ?? "").trim() &&
+                  !!String(s?.end_time ?? "").trim();
+
+                const campusId =
+                  scData?.campus?.campus_id ||
+                  (data as any)?.campus?.campus_id ||
+                  "";
+
+                const minCap = typeof _minCapacityFromRow === "function" ? _minCapacityFromRow(row) : undefined;
+                const excludeScheduleIds =
+                  typeof _scheduleIdsFromRow === "function" ? _scheduleIdsFromRow(row) : [];
+
+                const fallbackRoomsBase = filterRoomsByCap(
+                  ((data as any)?.room_options || []) as any[],
+                  minCap
+                );
+
+                const fallbackRooms = fallbackRoomsBase;;
+
+                return (
+                  <tr key={String(row.special_id)} className="hover:bg-neutral-50">
+                    <td className="px-3 py-2 border border-gray-300">
+                      <div className="font-medium">{student_name || "—"}</div>
+                      <div className="text-xs text-gray-500">{student_number || "—"}</div>
+                    </td>
+
+                    <td className="px-3 py-2 border border-gray-300">
+                      <div className="font-semibold text-emerald-700">{course_code || "—"}</div>
+                      <div className="text-xs text-gray-500">{course_title || "—"}</div>
+                    </td>
+
+                    <td className="px-3 py-2 border border-gray-300">{section_code || "—"}</td>
+                    <td className="px-3 py-2 border border-gray-300">{faculty_name || "—"}</td>
+
+                    <td className="px-3 py-2 border border-gray-300">{slotDay(slot1)}</td>
+                    <td className="px-3 py-2 border border-gray-300">{slotStart(slot1)}</td>
+                    <td className="px-3 py-2 border border-gray-300">{slotEnd(slot1)}</td>
+                    <td className="px-3 py-2 border border-gray-300">
+                    {isEditing ? (
+                    <div className="w-full max-w-[160px] overflow-visible">
+                      <EligibleRoomSelect
+                          userId={user?.userId}
+                          campusId={campusId}
+                          spec={{
+                            day: String(slot1?.day ?? "").trim(),
+                            start: String(slot1?.start_time ?? "").trim(),
+                            end: String(slot1?.end_time ?? "").trim(),
+                            roomType: String(slot1?.room_type ?? row?.course?.room_type ?? "").trim() || null,
+                            capacity: minCap ?? null,
+                            excludeScheduleIds,
+                            // Let backend infer the correct section enrollment_cap from DB
+                            sectionId: String(row?.section_id ?? row?.section?.section_id ?? "").trim() || null,
+                            scheduleId: String(slot1?.schedule_id ?? "").trim() || null,
+                          }}
+                          fallbackRooms={fallbackRooms}
+                          value={scEditRoom1 || null}
+                          disabled={ 
+                            !slotReadySC(slot1) || !user?.userId || !campusId || scEligibleRoomsLoading[slot1?.room_id ?? ""] || fallbackRooms.length === 0
+                          }
+
+
+                          onChange={(roomId) => setScEditRoom1(roomId ?? "")}
+                        />
+                      </div>
+                    ) : (
+                      slotRoomLabel(slot1)
+                    )}
+                    </td>
+
+                    <td className="px-3 py-2 border border-gray-300">{slotDay(slot2)}</td>
+                    <td className="px-3 py-2 border border-gray-300">{slotStart(slot2)}</td>
+                    <td className="px-3 py-2 border border-gray-300">{slotEnd(slot2)}</td>
+                    <td className="px-3 py-2 border border-gray-300">
+                      {isEditing ? (
+                      <div className="w-full max-w-[160px] overflow-visible">
+                        <EligibleRoomSelect
+                            userId={user?.userId}
+                            campusId={campusId}
+                            spec={{
+                              day: String(slot2?.day ?? "").trim(),
+                              start: String(slot2?.start_time ?? "").trim(),
+                              end: String(slot2?.end_time ?? "").trim(),
+                              roomType:
+                                String(slot2?.room_type ?? slot1?.room_type ?? row?.course?.room_type ?? "")
+                                  .trim() || null,
+                              capacity: minCap ?? null,
+                              excludeScheduleIds,
+                              // Let backend infer the correct section enrollment_cap from DB
+                              sectionId: String(row?.section_id ?? row?.section?.section_id ?? "").trim() || null,
+                              scheduleId: String(slot2?.schedule_id ?? "").trim() || null,
+                            }}
+                            fallbackRooms={fallbackRooms}
+                            value={scEditRoom2 || null}
+                            disabled={!slotReadySC(slot2) || !user?.userId || !campusId}
+                            onChange={(roomId) => setScEditRoom2(roomId ?? "")}
+                          />
+                        </div>
+                      ) : (
+                        slotRoomLabel(slot2)
+                      )}
+                    </td>
+
+                    <td className="px-3 py-2 border border-gray-300">
+                      {isEditing ? (
+                        <input
+                          className={cls(SOFT_INPUT, "w-64")}
+                          value={scEditRemarks}
+                          onChange={(e) => setScEditRemarks(e.target.value)}
+                          placeholder="Enter remarks…"
+                        />
+                      ) : (
+                        String(remarks || "—")
+                      )}
+                    </td>
+
+                    <td className="px-3 py-2 border border-gray-300">
+                      {isEditing ? (
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() => saveSpecialClassRowEdits(row)}
+                            disabled={scSaveLoadingId === String(row.special_id)}
+                            className={cls(
+                              "flex h-8 w-8 items-center justify-center rounded-full border-2",
+                              "border-green-600 text-green-600 hover:bg-green-50",
+                              scSaveLoadingId === String(row.special_id) && "opacity-50 cursor-not-allowed"
+                            )}
+                            title="Save"
+                          >
+                            <Check className="h-4 w-4" strokeWidth={2.5} />
+                          </button>
+
+                          <button
+                            onClick={cancelEditSpecialClassRow}
+                            disabled={scSaveLoadingId === String(row.special_id)}
+                            className={cls(
+                              "flex h-8 w-8 items-center justify-center rounded-full border-2",
+                              "border-red-600 text-red-600 hover:bg-red-50",
+                              scSaveLoadingId === String(row.special_id) && "opacity-50 cursor-not-allowed"
+                            )}
+                            title="Cancel"
+                          >
+                            <X className="h-4 w-4" strokeWidth={2.5} />
+                          </button>
+
+                          {scSaveLoadingId === String(row.special_id) && (
+                            <span className="text-xs text-gray-500">Saving…</span>
+                          )}
+                        </div>
+                      ) : (
+                        <button
+                          className="text-emerald-700 hover:text-emerald-900"
+                          title="Edit"
+                          onClick={() => beginEditSpecialClassRow(row)}
+                        >
+                          <Edit className="h-4 w-4" />
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  </div>
+)}
+
         </div>
       </main>
 
