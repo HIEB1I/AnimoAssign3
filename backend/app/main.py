@@ -177,6 +177,7 @@ app.include_router(om_loadassignment_router, prefix="/api")
 app.include_router(om_reportsanalytics_router, prefix="/api")
 
 app.include_router(apo_preenlistment_router, prefix="/api")
+app.include_router(apo_inbox_router, prefix="/api")
 app.include_router(apo_roomallocation_router, prefix="/api")
 app.include_router(apo_courseofferings_router, prefix="/api")
 app.include_router(student_studentpetition_router, prefix="/api")

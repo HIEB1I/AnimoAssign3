@@ -1,13 +1,15 @@
 //used by faculty screen
 
 import { useState, useRef, useEffect } from "react";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import { UserCircle, LogOut, Inbox, Bell } from "lucide-react";
 
 interface TopBarProps {
   fullName: string;
   role: string;
   department?: string;
+  /** If provided, clicking the Inbox icon navigates here (OM-style). */
+  inboxPath?: string;
   notifications?: {
     id: number;
     title: string;
@@ -34,9 +36,11 @@ export default function TopBar({
   role,
   department,
   notifications: incomingNotifs = [],
+  inboxPath,
   inboxEvent = "faculty:openInbox",
 }: TopBarProps) {
   const navigate = useNavigate();
+  const location = useLocation();
 
   const [menuOpen, setMenuOpen] = useState(false);
   const [notifOpen, setNotifOpen] = useState(false);
@@ -152,8 +156,20 @@ export default function TopBar({
     }
   };
 
-  // Open Inbox inside Overview (no route/navigation)
-  const openInboxInline = () => {
+  // Inbox: If a route is provided, navigate (like OM). Otherwise, keep legacy event behavior.
+  const openInbox = () => {
+    if (inboxPath) {
+      navigate(inboxPath, {
+        state: {
+          from: location.pathname,
+          // pass through what the TopBar is currently showing, so target screen can render consistently
+          topbarName: fullName,
+          topbarRole: role,
+          topbarDepartment: department,
+        },
+      });
+      return;
+    }
     window.dispatchEvent(new Event(inboxEvent));
   };
 
@@ -202,7 +218,7 @@ export default function TopBar({
           {/* --- Right icons --- */}
           <div className="flex items-center gap-2">
             <button
-              onClick={openInboxInline}
+              onClick={openInbox}
               className="rounded-md p-2 hover:bg-white/15"
               title="Inbox"
               aria-label="Open Inbox"

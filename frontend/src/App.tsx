@@ -49,6 +49,7 @@ import ADMIN_Inbox from "./pages/ADMIN/ADMIN_Inbox";
 import APO_PreEnlistment from "./pages/APO/APO_PreEnlistment";
 import APO_CourseOfferings from "./pages/APO/APO_CourseOfferings";
 import APO_RoomAllocation from "./pages/APO/APO_RoomAllocation";
+import APO_Inbox from "./pages/APO/APO_Inbox";
 
 // ---------------- CHAIR ----------------
 import CHAIR_Plantilla from "./pages/CHAIR/CHAIR_Plantilla";
@@ -175,6 +176,7 @@ export default function App() {
           <Route path="/apo/preenlistment" element={<APO_PreEnlistment />} />
           <Route path="/apo/courseofferings" element={<APO_CourseOfferings />} />
           <Route path="/apo/roomallocation" element={<APO_RoomAllocation />} />
+          <Route path="/apo/inbox" element={<APO_Inbox />} />
 
           {/* Faculty */}
           <Route path="/faculty/overview" element={<FACULTY_Overview />} />
