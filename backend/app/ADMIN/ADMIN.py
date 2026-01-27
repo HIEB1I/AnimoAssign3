@@ -17,6 +17,26 @@ def _format_fullname(last_name: Optional[str], first_name: Optional[str]) -> str
         return "Unknown User"
     return f"{ln}, {fn}".strip(", ")
 
+async def _resolve_role_type(user_id: Optional[str]) -> str:
+    """Resolve a user's role_type via role_assignments -> user_roles.
+
+    If multiple role assignments exist, we take the first match.
+    Returns "N/A" when no role is found.
+    """
+    if not user_id:
+        return "N/A"
+
+    ra = await db.role_assignments.find_one({"user_id": user_id})
+    if not ra:
+        return "N/A"
+    role_id = ra.get("role_id")
+    if not role_id:
+        return "N/A"
+    role = await db.user_roles.find_one({"role_id": role_id})
+    if not role:
+        return "N/A"
+    return str(role.get("role_type") or "N/A")
+
 # -----------------------------
 # Endpoints
 # -----------------------------
@@ -26,6 +46,7 @@ async def get_admin_logs() -> Dict[str, Any]:
     """
     Returns rows for the Audit Logs table with:
       user (Full Name from users by user_id)
+      role (role_type resolved via role_assignments -> user_roles)
       action (action)
       details (remarks)
       timestamp (timestamp, split-friendly)
@@ -37,28 +58,27 @@ async def get_admin_logs() -> Dict[str, Any]:
     async for log in cursor:
         uid = log.get("user_id")
         full = "Unknown User"
+        role_type = "N/A"
         if uid:
             # We still read the user name for the log display, 
             # but we don't manage the user here.
             u = await db.users.find_one({"user_id": uid})
             if u:
                 full = _format_fullname(u.get("last_name"), u.get("first_name"))
-        ts = log.get("timestamp")
-        
-        try:
-            dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
-            ts_fmt = f"{dt.date().isoformat()} {dt.time().strftime('%H:%M:%S')}"
-        except Exception:
-            ts_fmt = str(ts)
+            role_type = await _resolve_role_type(uid)
+        # Send raw ISO timestamp to the frontend; the UI handles formatting.
+        ts = str(log.get("timestamp") or "")
 
         i += 1
         out.append(
             {
                 "id": i,
+                "user_id": uid,
                 "user": full,
+                "role": role_type,
                 "action": log.get("action", ""),
                 "details": log.get("remarks", ""),
-                "timestamp": ts_fmt,
+                "timestamp": ts,
             }
         )
     return {"ok": True, "logs": out}
@@ -83,24 +103,24 @@ async def admin_manage(
         async for log in cursor:
             uid = log.get("user_id")
             full = "Unknown User"
+            role_type = "N/A"
             if uid:
                 u = await db.users.find_one({"user_id": uid})
                 if u:
                     full = _format_fullname(u.get("last_name"), u.get("first_name"))
-            ts = log.get("timestamp")
-            try:
-                dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
-                ts_fmt = f"{dt.date().isoformat()} {dt.time().strftime('%H:%M:%S')}"
-            except Exception:
-                ts_fmt = str(ts)
+                role_type = await _resolve_role_type(uid)
+            # Send raw ISO timestamp to the frontend; the UI handles formatting.
+            ts = str(log.get("timestamp") or "")
             i += 1
             out.append(
                 {
                     "id": i,
+                    "user_id": uid,
                     "user": full,
+                    "role": role_type,
                     "action": log.get("action", ""),
                     "details": log.get("remarks", ""),
-                    "timestamp": ts_fmt,
+                    "timestamp": ts,
                 }
             )
         return {"ok": True, "logs": out}

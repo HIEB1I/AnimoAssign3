@@ -24,44 +24,25 @@ const normalizeFullName = (raw: string) => {
 };
 
 /* ===================== primitives ===================== */
-const Pill = ({
-  children,
-  tone = "neutral",
-  minW = "",
-}: {
-  children: React.ReactNode;
-  tone?: "neutral" | "emerald" | "blue" | "amber" | "red";
-  minW?: string;
-}) => {
-  const map = {
-    neutral: "border border-neutral-200 bg-white text-neutral-700",
-    emerald: "border border-emerald-200 bg-emerald-50 text-emerald-700",
-    blue: "border border-blue-200 bg-blue-50 text-blue-700",
-    amber: "border border-amber-200 bg-amber-50 text-amber-700",
-    red: "border border-red-200 bg-red-50 text-red-600",
-  } as const;
-  return (
-    <span
-      className={cls(
-        "inline-flex h-8 items-center justify-center rounded-full px-3 text-xs font-medium",
-        minW,
-        map[tone]
-      )}
-    >
-      {children}
-    </span>
-  );
-};
-
 const TimestampCell = ({ ts }: { ts: string }) => {
-  const [d, t] = ts.includes("T") && ts.includes(":")
-    ? ts.replace("T", " ").split(" ")
-    : (ts || "").split(" ");
+  if (!ts) return null;
+  
+  const d = new Date(ts); // ISO 8601-safe
+  
+  const pad = (n: number) => String(n).padStart(2, "0");
+  
+  const formatted =
+  `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ` +
+  `${pad(d.getHours() % 12 || 12)}:` +
+  `${pad(d.getMinutes())}:` +
+  `${pad(d.getSeconds())} ` +
+  `${d.getHours() >= 12 ? "PM" : "AM"}`;
+  
+  
   return (
-    <div className="leading-tight">
-      <div className="text-[13px] text-slate-700">{d || ts}</div>
-      {t && <div className="text-[11px] text-gray-500">{t}</div>}
-    </div>
+  <div className="text-sm text-gray-600 whitespace-nowrap">
+  {formatted}
+  </div>
   );
 };
 
@@ -158,7 +139,9 @@ function Dropdown({
 /* ===================== data types for API ===================== */
 type LogRow = {
   id: number;
+  user_id?: string;
   user: string;       // "Last, First"
+  role?: string;
   action: string;
   details: string;    // from remarks
   timestamp: string;  // "YYYY-MM-DD HH:mm:ss"
@@ -222,19 +205,34 @@ export default function ADMIN() {
   // Logs filter/search
   const [qLogs, setQLogs] = useState("");
   const [action, setAction] = useState<string>("All Actions");
+  const [fromDate, setFromDate] = useState<string>(""); // YYYY-MM-DD
+  const [toDate, setToDate] = useState<string>(""); // YYYY-MM-DD
+
   const actionsAvailable = useMemo(
     () => ["All Actions", ...Array.from(new Set(logsRemote.map((l) => l.action))).sort()],
     [logsRemote]
   );
-  const logs = useMemo(
-    () =>
-      logsRemote.filter(
-        (r) =>
-          (action === "All Actions" || r.action === action) &&
-          `${r.user} ${r.action} ${r.details}`.toLowerCase().includes(qLogs.toLowerCase().trim())
-      ),
-    [logsRemote, action, qLogs]
-  );
+  const logs = useMemo(() => {
+    const q = qLogs.toLowerCase().trim();
+  
+    // Inclusive day range
+    const fromMs = fromDate ? new Date(`${fromDate}T00:00:00`).getTime() : null;
+    const toMs = toDate ? new Date(`${toDate}T23:59:59.999`).getTime() : null;
+  
+    return logsRemote
+      .filter((r) => {
+        const okAction = action === "All Actions" || r.action === action;
+        const okSearch = `${r.user} ${r.role || ""} ${r.action} ${r.details}`.toLowerCase().includes(q);
+  
+        const tsMs = new Date(r.timestamp).getTime();
+        const okFrom = fromMs === null || tsMs >= fromMs;
+        const okTo = toMs === null || tsMs <= toMs;
+  
+        return okAction && okSearch && okFrom && okTo;
+      })
+      .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+    }, [logsRemote, action, qLogs, fromDate, toDate]);
+
   const hasAnyForAction = action === "All Actions" ? true : logsRemote.some((r) => r.action === action);
 
   if (loading) {
@@ -275,7 +273,10 @@ export default function ADMIN() {
   }
 
   return (
-    <div className="min-h-screen w-full bg-gray-50 text-slate-900" style={{ scrollbarGutter: "stable both-edges" }}>
+    <div
+      className="min-h-screen w-full bg-gray-50 text-slate-900"
+      style={{ scrollbarGutter: "stable both-edges" }}
+    >
       <TopBar
         fullName={fullName}
         role={role}
@@ -291,12 +292,14 @@ export default function ADMIN() {
           <div className="flex items-center justify-between border-b border-gray-100 px-5 py-4">
             <div>
               <h2 className="text-xl font-bold text-slate-900">Audit Logs</h2>
-              <p className="mt-1 text-sm text-gray-500">Track all system activities and user actions</p>
+              <p className="mt-1 text-sm text-gray-500">
+                Track all system activities and user actions
+              </p>
             </div>
           </div>
 
           <div className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center">
-            <div className="relative flex-1">
+            <div className="relative w-80">
               <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-gray-400">
                 <Search className="h-4 w-4" />
               </span>
@@ -326,22 +329,30 @@ export default function ADMIN() {
               options={actionsAvailable}
               className="w-56 text-left"
             />
+            {/* Date range (aligned) */}
+            <div className="flex items-center gap-2">
+              <input
+                type="date"
+                value={fromDate}
+                onChange={(e) => setFromDate(e.target.value)}
+                className="rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm shadow-sm outline-none focus:ring-2 focus:ring-emerald-500/30"
+              />
+              <span className="text-sm text-gray-500">to</span>
+              <input
+                type="date"
+                value={toDate}
+                onChange={(e) => setToDate(e.target.value)}
+                className="rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm shadow-sm outline-none focus:ring-2 focus:ring-emerald-500/30"
+              />
+            </div>
           </div>
-
-          <div className="flex items-center justify-between px-5">
-            <h3 className="text-sm font-semibold text-slate-800">
-              Activity Log ({logs.length} {logs.length === 1 ? "entry" : "entries"})
-            </h3>
-          </div>
-
           <div className="p-4">
-            <div className="grid grid-cols-[25%_20%_35%_20%] items-center px-3 py-2 text-xs font-semibold text-gray-500">
+            <div className="grid grid-cols-[12%_12%_14%_18%_32%] items-center px-3 py-2 text-sm font-bold text-gray-700">
               <div>User</div>
-              <div className="flex justify-center">
-                <span className="inline-block min-w-34 text-center">Action</span>
-              </div>
-              <div>Details</div>
+              <div>Role</div>
               <div>Timestamp</div>
+              <div>Action</div>
+              <div>Details</div>
             </div>
             <div className="mx-3 mb-2 h-px bg-gray-300" />
             <div className="max-h-[600px] overflow-y-auto">
@@ -349,23 +360,31 @@ export default function ADMIN() {
                 <div
                   key={r.id}
                   className={cls(
-                    "grid grid-cols-[25%_20%_35%_20%] items-center",
+                    "grid grid-cols-[12%_12%_14%_18%_32%] items-center",
                     "px-3 py-3 text-sm",
+                    i % 2 === 1 && "bg-gray-50",
+                    "hover:bg-emerald-50/30",
                     i !== logs.length - 1 && "border-b border-gray-200"
                   )}
                 >
-                  <div>
-                    <button className="font-semibold text-emerald-700 hover:underline">
+                  <div className="min-w-0">
+                    <button className="truncate font-semibold text-emerald-700 hover:underline">
                       {normalizeFullName(r.user)}
                     </button>
                   </div>
-                  <div className="flex justify-center whitespace-nowrap">
-                    <Pill minW="min-w-34">{r.action}</Pill>
+
+                  <div className="whitespace-nowrap text-sm text-slate-700">
+                    {r.role || "N/A"}
                   </div>
-                  <div className="text-gray-600">{r.details}</div>
-                  <div>
+
+                  <div className="whitespace-nowrap">
                     <TimestampCell ts={r.timestamp} />
                   </div>
+
+                  <div className="whitespace-nowrap text-sm font-medium text-slate-700">
+                    {r.action}
+                  </div>
+                  <div className="text-gray-600">{r.details}</div>
                 </div>
               ))}
               {!logs.length && (
@@ -373,12 +392,14 @@ export default function ADMIN() {
                   {action !== "All Actions" ? (
                     hasAnyForAction ? (
                       <>
-                        No <span className="font-semibold">“{action}”</span> logs
+                        No <span className="font-semibold">“{action}”</span>{" "}
+                        logs
                         {qLogs.trim() && <> matching “{qLogs.trim()}”</>}.
                       </>
                     ) : (
                       <>
-                        There are currently no <span className="font-semibold">“{action}”</span> logs.
+                        There are currently no{" "}
+                        <span className="font-semibold">“{action}”</span> logs.
                       </>
                     )
                   ) : (
