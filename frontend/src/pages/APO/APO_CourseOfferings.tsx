@@ -1751,7 +1751,11 @@ if (isGE) {
 
   return (
     <div className="min-h-screen w-full bg-gray-50 text-slate-900">
-      <TopBar fullName={fullName} role={campusLabel ? `${roleName} | ${campusLabel}` : roleName} />
+      <TopBar
+        fullName={fullName}
+        role={campusLabel ? `${roleName} | ${campusLabel}` : roleName}
+        inboxPath="/apo/inbox"
+      />
       <Tabs
         mode="nav"
         items={[

@@ -44,6 +44,23 @@ export default function TopBar({
 }: TopBarProps) {
   const navigate = useNavigate();
 
+    const pathname =
+    typeof window !== "undefined" && window.location?.pathname ? window.location.pathname : "";
+
+  const inferredInboxPath =
+    pathname.startsWith("/admin")
+      ? "/admin/inbox"
+      : pathname.startsWith("/chair")
+      ? "/chair/inbox"
+      : pathname.startsWith("/om")
+      ? "/om/inbox"
+      : pathname.startsWith("/apo")
+      ? "/apo/inbox"
+      : pathname.startsWith("/faculty")
+      ? "/faculty/inbox"
+      : "";
+
+
   const [menuOpen, setMenuOpen] = useState(false);
   const [notifOpen, setNotifOpen] = useState(false);
   const toDateSafe = (v: any): Date | null => {
@@ -161,13 +178,15 @@ export default function TopBar({
   // Inbox click:
   // - If inboxPath provided -> navigate
   // - Else -> dispatch existing custom event (backward compatible)
-  const handleInboxClick = () => {
-    if (inboxPath) {
-      navigate(inboxPath);
+    const handleInboxClick = () => {
+    const target = inboxPath || inferredInboxPath;
+    if (target) {
+      navigate(target);
       return;
     }
     window.dispatchEvent(new Event(inboxEvent));
   };
+
 
   return (
     <header className="sticky top-0 z-80" ref={headerRef}>

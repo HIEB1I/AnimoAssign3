@@ -1148,7 +1148,11 @@ const refresh = async (): Promise<RoomAllocationResponse | null> => {
 
   return (
     <div className="min-h-screen w-full bg-gray-50 text-slate-900">
-      <TopBar fullName={fullName} role={campusName ? `${roleName} | ${campusName}` : roleName} />
+      <TopBar
+        fullName={fullName}
+        role={campusName ? `${roleName} | ${campusName}` : roleName}
+        inboxPath="/apo/inbox"
+      />
       <Tabs
         mode="nav"
         items={[
