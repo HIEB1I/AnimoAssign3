@@ -1652,17 +1652,21 @@ export default function FACULTY_Preferences() {
     };
   }
 
-  useEffect(() => {
-    (async () => {
-      try {
-        if (!userId) {
-          setLoading(false);
-          return;
-        }
-        const [profile, opts] = await Promise.all([
-          getFacultyPreferencesProfile(userId),
-          getFacultyPreferencesOptions(userId),
-        ]);
+useEffect(() => {
+  (async () => {
+    try {
+      if (!userId) {
+        setLoading(false);
+        return;
+      }
+
+      // NEW: trigger deadline reminder generation (safe to call repeatedly; backend dedupes)
+      fetch("/api/notifications/run-prefs-deadline-reminders", { method: "POST" }).catch(() => {});
+
+      const [profile, opts] = await Promise.all([
+        getFacultyPreferencesProfile(userId),
+        getFacultyPreferencesOptions(userId),
+      ]);
 
         setPrefsWindow({
           openISO: opts?.prefs_window?.openISO || "",

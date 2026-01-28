@@ -1549,7 +1549,6 @@ async def get_om_load_assignment_list(user_id: str, db=Depends(get_db)):
         "sectionCampus": section_campus,
         "sectionCourse": section_course,
         "courseTypeOfCourse": course_type_of_course,
-        "blockedGeCmps2": blocked_ge_cmps2,            
     }
 
 

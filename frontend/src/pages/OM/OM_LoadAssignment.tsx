@@ -37,7 +37,7 @@ import {
   Redo2,
   X,
   Copy,
-  Upload
+  Upload,
 } from "lucide-react";
 import { InboxContent as OMInboxContent } from "./OM_Inbox";
 
@@ -109,9 +109,11 @@ function SelectBox({
   const [open, setOpen] = useState(false);
 
   // Helper to extract the label from an option (string or object)
-  const getLabel = (opt: SelectOption) => (typeof opt === "string" ? opt : opt.label);
+  const getLabel = (opt: SelectOption) =>
+    typeof opt === "string" ? opt : opt.label;
   // Helper to extract the value from an option
-  const getValue = (opt: SelectOption) => (typeof opt === "string" ? opt : opt.value);
+  const getValue = (opt: SelectOption) =>
+    typeof opt === "string" ? opt : opt.value;
 
   // 2. Updated hover logic to find index based on value
   const [hover, setHover] = useState<number>(() =>
@@ -135,8 +137,8 @@ function SelectBox({
   }, [open]);
 
   // Find the label of the currently selected value for the button display
-const selectedOption = options.find((o) => getValue(o) === value);
-const displayLabel = selectedOption ? getValue(selectedOption) : null;
+  const selectedOption = options.find((o) => getValue(o) === value);
+  const displayLabel = selectedOption ? getValue(selectedOption) : null;
 
   return (
     <div className={cls("relative min-w-[120px]", className)}>
@@ -174,8 +176,11 @@ const displayLabel = selectedOption ? getValue(selectedOption) : null;
                 }}
                 className={cls(
                   "cursor-pointer px-3 py-1.5 text-[13px]",
-                  isSelected ? "bg-emerald-50 text-emerald-700 font-medium" : 
-                  hover === i ? "bg-emerald-50" : ""
+                  isSelected
+                    ? "bg-emerald-50 text-emerald-700 font-medium"
+                    : hover === i
+                    ? "bg-emerald-50"
+                    : ""
                 )}
               >
                 {optLabel}
@@ -187,7 +192,6 @@ const displayLabel = selectedOption ? getValue(selectedOption) : null;
     </div>
   );
 }
-
 
 function normalizeTimeToHHMM(input: string): string {
   const digits = (input || "").replace(/\D/g, "");
@@ -223,7 +227,8 @@ function TimeBeginInput({
   const listRef = useRef<HTMLDivElement>(null);
 
   const getValue = (o: SelectOption) => (typeof o === "string" ? o : o.value);
-  const getLabel = (o: SelectOption) => (typeof o === "string" ? o : o.label ?? o.value);
+  const getLabel = (o: SelectOption) =>
+    typeof o === "string" ? o : o.label ?? o.value;
 
   useEffect(() => {
     // Keep input in sync when not actively typing
@@ -306,8 +311,11 @@ function TimeBeginInput({
                   onClick={() => pick(optValue)}
                   className={cls(
                     "cursor-pointer px-3 py-1.5 text-[13px]",
-                    isSelected ? "bg-emerald-50 text-emerald-700 font-medium" :
-                    hover === i ? "bg-emerald-50" : ""
+                    isSelected
+                      ? "bg-emerald-50 text-emerald-700 font-medium"
+                      : hover === i
+                      ? "bg-emerald-50"
+                      : ""
                   )}
                 >
                   {optLabel}
@@ -315,7 +323,9 @@ function TimeBeginInput({
               );
             })
           ) : (
-            <div className="px-3 py-2 text-[13px] text-gray-400">No matches</div>
+            <div className="px-3 py-2 text-[13px] text-gray-400">
+              No matches
+            </div>
           )}
         </div>
       )}
@@ -1014,7 +1024,9 @@ const ApproveModal = ({
         </h3>
         <p className="mx-auto mb-6 max-w-md text-center text-sm text-neutral-600">
           Please confirm that this is the final{" "}
-          <span className="font-semibold">Faculty Load Assignment.</span>Once submitted, this action cannot be undone and the button will be disabled.
+          <span className="font-semibold">Faculty Load Assignment.</span>Once
+          submitted, this action cannot be undone and the button will be
+          disabled.
         </p>
         <div className="flex justify-end gap-2">
           <button
@@ -1082,31 +1094,29 @@ const SendModal = ({
           <div className="rounded-xl border border-gray-200 overflow-hidden">
             <table className="w-full table-fixed text-[13px]">
               <colgroup>
-                <col className="w-[140px]" />
-                <col />
-                <col className="w-[90px]" />
-                <col className="w-[72px]" />
-                <col className="w-[120px]" />
-                <col className="w-[110px]" />
-                <col className="w-[70px]" />
-                <col className="w-[120px]" />
-                <col className="w-[120px]" />
-              </colgroup>
+              <col className="w-[140px]" />
+              <col />
+              <col className="w-[90px]" />
+              <col className="w-[72px]" />
+              <col className="w-[110px]" />
+              <col className="w-[70px]" />
+              <col className="w-[120px]" />
+              <col className="w-[120px]" />
+            </colgroup>
               <thead className="bg-gray-50 text-gray-700">
                 <tr className="[&>th]:border-b [&>th]:border-gray-200">
                   <th className="px-4 py-3 text-left font-semibold">
                     Course Code
                   </th>
-                  <th className="px-4 py-3 text-left font-semibold">
+                  <th className="px-4 py-3 text-center font-semibold">
                     Course Title
                   </th>
                   <th className="px-4 py-3 text-left font-semibold">Section</th>
                   <th className="px-4 py-3 text-left font-semibold">Units</th>
-                  <th className="px-4 py-3 text-left font-semibold">Campus</th>
                   <th className="px-4 py-3 text-left font-semibold">Mode</th>
                   <th className="px-4 py-3 text-left font-semibold">Day</th>
                   <th className="px-4 py-3 text-left font-semibold">Room</th>
-                  <th className="px-4 py-3 text-left font-semibold">Time</th>
+                  <th className="px-4 py-3 text-center font-semibold">Time</th>
                 </tr>
               </thead>
               <tbody className="text-gray-900">
@@ -1115,7 +1125,7 @@ const SendModal = ({
                     {manyGroups && (
                       <tr className="bg-white">
                         <td
-                          colSpan={9}
+                          colSpan={8}
                           className="px-4 pt-5 pb-2 text-[12px] font-semibold text-gray-900"
                         >
                           {faculty}
@@ -1142,7 +1152,6 @@ const SendModal = ({
                         <td className="px-4 py-3 align-middle">
                           {r.units !== "" ? String(r.units) : "—"}
                         </td>
-                        <td className="px-4 py-3 align-middle text-gray-800">{(r as any).campus || r.campus_id || "—"}</td>
                         <td className="px-4 py-3 align-middle text-gray-800">{r.mode || (r as any).room_type || "—"}</td>
                         <td className="px-4 py-3 align-middle">
                           {r.day1 || "—"}
@@ -1844,14 +1853,13 @@ export default function OM_LoadAssignment() {
   };
 
   const updateRow = (
-  id: string,
-  patch: Partial<Row>,
-  options?: { markDirty?: boolean }
-) => {
-  const next = rows.map((r) => (r.id === id ? { ...r, ...patch } : r));
-  commitRows(next, { markDirty: options?.markDirty !== false });
-};
-
+    id: string,
+    patch: Partial<Row>,
+    options?: { markDirty?: boolean }
+  ) => {
+    const next = rows.map((r) => (r.id === id ? { ...r, ...patch } : r));
+    commitRows(next, { markDirty: options?.markDirty !== false });
+  };
 
   const handleUndo = () => {
     if (!undoStackRef.current.length) return;
@@ -1963,30 +1971,35 @@ export default function OM_LoadAssignment() {
     // If any row is selected for a faculty, send ALL rows for that faculty (not per subject)
     return rows.filter((r) => selectedKeys.has(key(r)));
   };
-
+  
   const handleSendToFaculty = async (rowsToSend: Row[]) => {
     if (!userId) throw new Error("Missing userId");
     if (!rowsToSend?.length) throw new Error("No rows to send");
 
     const term_id = termId || undefined;
 
+    // 1️⃣ Send selected rows to faculty (proposal + notification)
     await sendOmLoadAssignmentsToFaculty(userId, {
       term_id,
       rows: rowsToSend,
     });
 
-    // After sending: clear selections and refresh
+    // 2️⃣ Persist the FULL OM table so refresh doesn't revert changes
+    await submitOmLoadAssignment(userId, { rows }, "save");
+
+    // 3️⃣ Reset UI + reload from DB
     setShowSend(false);
     setSendRowsPreview([]);
     await loadFromServer();
+    setHasLocalEdits(false);
   };
-
 
   // Derived: scoped history availability (re-rendered via historyVersion)
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
- const canUndo = isRunning && historyVersion >= 0 && undoStackRef.current.length > 0;
-const canRedo = isRunning && historyVersion >= 0 && redoStackRef.current.length > 0;
-
+  const canUndo =
+    isRunning && historyVersion >= 0 && undoStackRef.current.length > 0;
+  const canRedo =
+    isRunning && historyVersion >= 0 && redoStackRef.current.length > 0;
 
   const loadFromServer = async () => {
     if (!userId) return;
@@ -2009,6 +2022,12 @@ const canRedo = isRunning && historyVersion >= 0 && redoStackRef.current.length 
       courseTypeOfCourse: (res as any)?.courseTypeOfCourse || {},
     });
 
+    setBlockedGeCmps2(
+      Array.isArray((res as any)?.blockedGeCmps2)
+        ? (res as any).blockedGeCmps2
+        : []
+    );
+
     setRows(Array.isArray(res?.rows) ? res.rows : []);
     setTerm(typeof res?.term === "string" ? res.term : "");
     setTermId(typeof (res as any)?.term_id === "string" ? (res as any).term_id : "");
@@ -2026,7 +2045,7 @@ const canRedo = isRunning && historyVersion >= 0 && redoStackRef.current.length 
 
   const addRow = () => {
     setShowNewSectionModal(true);
-  };  
+  };
 
   const getEditFlags = (r: Row) => {
     const editAll = !!r.editable;
@@ -2127,12 +2146,7 @@ const canRedo = isRunning && historyVersion >= 0 && redoStackRef.current.length 
 
     // REQUIRED core fields
     const missingCore =
-      !r.section ||
-      !r.faculty ||
-      !r.mode ||
-      !r.day1 ||
-      !r.begin1 ||
-      !r.end1;
+      !r.section || !r.faculty || !r.mode || !r.day1 || !r.begin1 || !r.end1;
 
     // For meeting 2: if any of the 4 is filled, require all 4
     const hasAnyMeet2 = !!r.day2 || !!r.begin2 || !!r.end2;
@@ -2673,66 +2687,63 @@ useEffect(() => {
     return alerts;
   }, [rows, rowFlags, validationContext, isRowIncompleteForApproval]);
 
+  type BlockedGeCmps2Item = {
+    campus_id: string;
+    campus_name?: string;
+    course_id: string;
+    course_code?: string;
+    section_id: string;
+    section_code?: string;
+    day: string;
+    begin: string;
+    end: string;
+  };
+
+  const [blockedGeCmps2, setBlockedGeCmps2] = useState<BlockedGeCmps2Item[]>(
+    []
+  );
+
   type BlockedSectionRow = {
-    rowId: string;
-    course: string; // course_code
-    section: string; // sections.section_code
+    rowId: string; // section_id
+    course: string;
+    section: string;
     campusId: string;
     campusName?: string;
-    day1?: string;
-    begin1?: string;
-    end1?: string;
-    day2?: string;
-    begin2?: string;
-    end2?: string;
   };
 
   const blockedSections: BlockedSectionRow[] = useMemo(() => {
-    const res: BlockedSectionRow[] = [];
-    const seen = new Set<string>();
+    const bySection: Record<string, BlockedSectionRow> = {};
 
-    const sectionCampus = validationContext.sectionCampus || {};
-    const sectionCourse = validationContext.sectionCourse || {};
-    const courseType = validationContext.courseTypeOfCourse || {};
-    const campusNames = validationContext.campusNames || {};
+    (blockedGeCmps2 || []).forEach(
+      (b) => {
+        const sid = b.section_id;
+        if (!sid) return;
 
-    for (const r of rows) {
-      const sid = r.id;
-      if (!sid) continue;
+        if (!bySection[sid]) {
+          bySection[sid] = {
+            rowId: sid,
+            course: b.course_code || b.course_id || "—",
+            section: b.section_code || sid,
+            campusId: b.campus_id || "",
+            campusName: b.campus_name || b.campus_id || "",
+          };
+        }
+        return Object.values(bySection).filter(
+          (x) => (x.campusId || "").toUpperCase() === "CMPS0002"
+        );
+      },
+      [blockedGeCmps2]
+    );
 
-      const campusIdRaw = sectionCampus[sid] || "";
-      const campusId = campusIdRaw.toUpperCase();
-      if (campusId !== "CMPS0002") continue; // only CMPS0002
+    // keep only CMPS0002 in this tab (optional)
+    return Object.values(bySection).filter(
+      (x) => (x.campusId || "").toUpperCase() === "CMPS0002"
+    );
+  }, [blockedGeCmps2]);
 
-      const cid = sectionCourse[sid];
-      const toc = (courseType[cid] || "").toUpperCase();
-      if (toc !== "GE") continue; // only GE courses are "blocked"
-
-      const key = sid;
-      if (seen.has(key)) continue;
-      seen.add(key);
-
-      res.push({
-        rowId: sid,
-        course: r.course || cid || "?",
-        section: r.section || "",
-        campusId: campusIdRaw || "",
-        campusName: campusNames[campusIdRaw] || campusIdRaw || "",
-        day1: r.day1,
-        begin1: r.begin1,
-        end1: r.end1,
-        day2: r.day2,
-        begin2: r.begin2,
-        end2: r.end2,
-      });
-    }
-
-    return res;
-  }, [rows, validationContext]);
-
-  const [summaryTab, setSummaryTab] = useState<"units" | "second" | "blocked">(
-    "units"
-  );
+  const [summaryTab, setSummaryTab] = useState<
+    "units" | "second" | "blocked"
+  >("units");
 
   const courseOptions = useMemo(() => {
     const map: Record<string, string> = {};
@@ -2835,14 +2846,16 @@ useEffect(() => {
                     }}
                   >
                     <CheckCheck className="h-4 w-4" />
-                    Forward
+                    Forward to Chair
                   </button>
                 </div>
               </div>
               <div className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
                 <div className="flex items-center justify-between px-4 pt-4">
                   <div className="flex items-center gap-2">
-                    <h2 className="text-lg font-semibold">Load Recommendations</h2>
+                    <h2 className="text-lg font-semibold">
+                      Load Recommendations
+                    </h2>
 
                     <div className="flex items-center gap-1">
                       <button
@@ -2932,15 +2945,43 @@ useEffect(() => {
                     </button>
 
                     {/* Refresh button (always visible if running) */}
-                    {isRunning && (
+                      {isRunning && (
+                        <button
+                          onClick={loadFromServer}
+                          className="inline-flex items-center gap-2 rounded-md border border-gray-300 bg-white px-3.5 py-2 text-sm font-medium hover:bg-gray-50"
+                        >
+                          <RefreshCcw className="h-4 w-4" />
+                          Refresh
+                        </button>
+                      )}
+
+                      {/* To Faculty button moved here (beside Refresh) */}
                       <button
-                        onClick={loadFromServer}
-                        className="inline-flex items-center gap-2 rounded-md border border-gray-300 bg-white px-3.5 py-2 text-sm font-medium hover:bg-gray-50"
+                        disabled={!anySelected || !isRunning}
+                        onClick={() => {
+                          const preview = buildSendRowsForPreview();
+                          if (!preview.length) {
+                            alert("Select at least one row with an assigned faculty.");
+                            return;
+                          }
+                          setSendRowsPreview(preview);
+                          setShowSend(true);
+                        }}
+                        className={cls(
+                          "inline-flex items-center gap-2 rounded-md px-3.5 py-2 text-sm font-medium shadow-sm",
+                          anySelected && isRunning
+                            ? "bg-blue-600 text-white hover:brightness-110"
+                            : "bg-gray-200 text-gray-500 cursor-not-allowed"
+                        )}
+                        title={
+                          anySelected
+                            ? "Send to selected faculty"
+                            : "Select at least one row"
+                        }
                       >
-                        <RefreshCcw className="h-4 w-4" />
-                        Refresh
+                        <Send className="h-4 w-4" />
+                        To Faculty
                       </button>
-                    )}
 
                     {/* Original Import CSV block removed */}
                     {/* {isRunning ? (...) : (
@@ -2961,7 +3002,6 @@ useEffect(() => {
                     } */}
                   </div>
                   {/* --- MODIFIED SECTION END --- */}
-
                 </div>
 
                 {/* Match APO_CourseOfferings table styling (sticky header, bordered cells, emerald header text) */}
@@ -3002,29 +3042,63 @@ useEffect(() => {
                             />
                           )}
                         </th>
-                        <th className="px-3 py-2 text-left border border-gray-300">Course & Title</th>
-                        <th className="px-3 py-2 text-center border border-gray-300">Units</th>
-                        <th className="px-3 py-2 text-center border border-gray-300">Section</th>
-                        <th className="px-3 py-2 text-left border border-gray-300">Faculty</th>
-                        <th className="px-3 py-2 text-center border border-gray-300">Day 1</th>
-                        <th className="px-3 py-2 text-center border border-gray-300">Begin 1</th>
-                        <th className="px-3 py-2 text-center border border-gray-300">End 1</th>
-                        <th className="px-3 py-2 text-center border border-gray-300">Room 1</th>
-                        <th className="px-3 py-2 text-center border border-gray-300">Day 2</th>
-                        <th className="px-3 py-2 text-center border border-gray-300">Begin 2</th>
-                        <th className="px-3 py-2 text-center border border-gray-300">End 2</th>
-                        <th className="px-3 py-2 text-center border border-gray-300">Room 2</th>
-                        <th className="px-3 py-2 text-center border border-gray-300">Capacity</th>
-                        <th className="px-3 py-2 text-center border border-gray-300">Mode</th>
-                        <th className="px-3 py-2 text-center border border-gray-300">Status</th>
-                        <th className="px-3 py-2 text-center border border-gray-300">Actions</th>
+                        <th className="px-3 py-2 text-left border border-gray-300">
+                          Course & Title
+                        </th>
+                        <th className="px-3 py-2 text-center border border-gray-300">
+                          Units
+                        </th>
+                        <th className="px-3 py-2 text-center border border-gray-300">
+                          Section
+                        </th>
+                        <th className="px-3 py-2 text-left border border-gray-300">
+                          Faculty
+                        </th>
+                        <th className="px-3 py-2 text-center border border-gray-300">
+                          Day 1
+                        </th>
+                        <th className="px-3 py-2 text-center border border-gray-300">
+                          Begin 1
+                        </th>
+                        <th className="px-3 py-2 text-center border border-gray-300">
+                          End 1
+                        </th>
+                        <th className="px-3 py-2 text-center border border-gray-300">
+                          Room 1
+                        </th>
+                        <th className="px-3 py-2 text-center border border-gray-300">
+                          Day 2
+                        </th>
+                        <th className="px-3 py-2 text-center border border-gray-300">
+                          Begin 2
+                        </th>
+                        <th className="px-3 py-2 text-center border border-gray-300">
+                          End 2
+                        </th>
+                        <th className="px-3 py-2 text-center border border-gray-300">
+                          Room 2
+                        </th>
+                        <th className="px-3 py-2 text-center border border-gray-300">
+                          Capacity
+                        </th>
+                        <th className="px-3 py-2 text-center border border-gray-300">
+                          Mode
+                        </th>
+                        <th className="px-3 py-2 text-center border border-gray-300">
+                          Status
+                        </th>
+                        <th className="px-3 py-2 text-center border border-gray-300">
+                          Actions
+                        </th>
                       </tr>
                     </thead>
 
                     <tbody>
                       {filtered.map((r, idx) => {
                         const e = getEditFlags(r);
-                        const unread = !!(r as any).pending_rfc;
+                        // Show the red dot only when there is a pending RFC AND the row is still actionable.
+                        // Once the schedule is approved/finalized, the message icon is disabled; the dot should disappear.
+                        const unread = !!(r as any).pending_rfc && !r.finalized;
                         return (
                           <tr
                             key={r.id}
@@ -3145,7 +3219,6 @@ useEffect(() => {
                                   onChange={(v) => setCell(r.id, "day1", v)}
                                   options={DAY_OPTIONS}
                                 />
-
                               ) : (
                                 <span>{r.day1 || "—"}</span>
                               )}
@@ -3160,10 +3233,8 @@ useEffect(() => {
                                     if (v) patch.end1 = calculateEndTime(v);
                                     updateRow(r.id, patch, { markDirty: true });
                                   }}
-
                                   options={TIME_BEGIN_OPTIONS}
                                   className="w-[120px] text-center"
-
                                 />
                               ) : (
                                 <span>{r.begin1 || "—"}</span>
@@ -3205,8 +3276,6 @@ useEffect(() => {
                                   onChange={(v) => setCell(r.id, "day2", v)}
                                   options={DAY_OPTIONS}
                                 />
-
-
                               ) : (
                                 <span>{r.day2 || "—"}</span>
                               )}
@@ -3225,7 +3294,6 @@ useEffect(() => {
                                   }}
                                   options={TIME_BEGIN_OPTIONS}
                                   className="w-[120px] text-center"
-
                                 />
                               ) : (
                                 <span>{r.begin2 || "—"}</span>
@@ -3357,12 +3425,14 @@ useEffect(() => {
                                     className="flex h-7 w-7 items-center justify-center rounded-full border-2 border-gray-300 text-gray-600 hover:bg-gray-50"
                                   >
                                     {copiedRowId === r.id ? (
-                                      <Check className="h-4 w-4 text-emerald-600" strokeWidth={2.5} />
+                                      <Check
+                                        className="h-4 w-4 text-emerald-600"
+                                        strokeWidth={2.5}
+                                      />
                                     ) : (
                                       <Copy className="h-4 w-4" />
                                     )}
                                   </button>
-
 
                                   {String(r.id).startsWith("manual-") && (
                                     <button
@@ -3412,33 +3482,6 @@ useEffect(() => {
                       Add new line
                     </button>
 
-                    {/* To Faculty button (bottom-right, aligned with Add new line) */}
-                    <button
-                      disabled={!anySelected || !isRunning}
-                      onClick={() => {
-                        const preview = buildSendRowsForPreview();
-                        if (!preview.length) {
-                          alert("Select at least one row with an assigned faculty.");
-                          return;
-                        }
-                        setSendRowsPreview(preview);
-                        setShowSend(true);
-                      }}
-                      className={cls(
-                        "inline-flex items-center gap-2 rounded-lg px-3 py-1.5 text-sm font-medium shadow-sm",
-                        anySelected && isRunning
-                          ? "bg-blue-600 text-white hover:brightness-110"
-                          : "bg-gray-200 text-gray-500 cursor-not-allowed"
-                      )}
-                      title={
-                        anySelected
-                          ? "Send to selected faculty"
-                          : "Select at least one row"
-                      }
-                    >
-                      <Send className="h-4 w-4" />
-                      To Faculty
-                    </button>
                   </div>
                   {/* Right: Auto-assign (Run algorithm) - REMOVED from bottom */}
                   {/* <div className="flex items-center gap-2">
@@ -3915,19 +3958,12 @@ useEffect(() => {
                               </tr>
                             ) : (
                               blockedSections.map((b) => {
-                                const slot1 =
-                                  b.day1 && b.begin1 && b.end1
-                                    ? `${b.day1} ${toPrettyTime(
-                                        b.begin1
-                                      )}–${toPrettyTime(b.end1)}`
-                                    : "—";
+                                const slots = blockedGeCmps2
+                                  .filter((x) => x.section_id === b.rowId)
+                                  .map((x) => `${x.day} ${x.begin}–${x.end}`);
 
-                                const slot2 =
-                                  b.day2 && b.begin2 && b.end2
-                                    ? `${b.day2} ${toPrettyTime(
-                                        b.begin2
-                                      )}–${toPrettyTime(b.end2)}`
-                                    : "—";
+                                const slot1 = slots[0] ?? "—";
+                                const slot2 = slots[1] ?? "—";
 
                                 return (
                                   <tr key={b.rowId}>
@@ -4008,7 +4044,7 @@ useEffect(() => {
         onAfterUpdate={loadFromServer}
       />
 
-<NewSectionModal
+      <NewSectionModal
         open={showNewSectionModal}
         onClose={() => setShowNewSectionModal(false)}
         courseOptions={courseOptions}
@@ -4024,7 +4060,7 @@ useEffect(() => {
               id: `manual-${Date.now()}`,
               course,
               title,
-              units: units ? (Number(units) || "") : "",
+              units: units ? Number(units) || "" : "",
               section,
               faculty: "",
               faculty_id: undefined,
@@ -4040,7 +4076,7 @@ useEffect(() => {
               mode: "",
               status: "",
               editable: true,
-              campus_id, 
+              campus_id,
             },
           ]);
 

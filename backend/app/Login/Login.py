@@ -1,6 +1,7 @@
 # app/Login/Login.py
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, EmailStr
+from datetime import datetime, timezone
 from typing import List
 from app.main import db
 
@@ -44,6 +45,28 @@ async def login(payload: LoginRequest):
     first = (user.get("first_name") or "").strip()
     last  = (user.get("last_name") or "").strip()
     full  = f"{first} {last}".strip() or user["email"]
+
+    # generate timestamp
+    now = datetime.now(timezone.utc).isoformat()
+
+    # generate next log_id (simple example)
+    last_log = await db["audit_logs"].find_one(
+        {}, sort=[("log_id", -1)]
+    )
+    next_num = int(last_log["log_id"][2:]) + 1 if last_log else 1
+    log_id = f"AL{next_num:04d}"
+
+    await db["audit_logs"].insert_one({
+        "log_id": log_id,
+        "user_id": user["user_id"],
+        "action": "login_success",
+        "timestamp": now,
+        "old_value": "N/A",
+        "new_value": "N/A",
+        "label_name": "Authentication",
+        "remarks": "Successful login",
+        "record_id": "N/A"
+    })
 
     return LoginResponse(
         userId=user["user_id"],
