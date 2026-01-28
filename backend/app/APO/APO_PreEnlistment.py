@@ -1,8 +1,9 @@
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Literal
-
+import re
 from fastapi import APIRouter, HTTPException, Query, Body
 from pymongo import ReturnDocument
+from ..Notifications import create_notification
 
 from ..main import db  # Motor/Mongo client
 
@@ -20,6 +21,9 @@ COL_CAMPUSES = "campuses"
 COL_COLLEGES = "colleges"
 COL_ROLE_ASSIGNMENTS = "role_assignments"
 COL_COUNTERS = "counters"
+COL_USER_ROLES = "user_roles"
+COL_STAFF_PROFILES = "staff_profiles"
+COL_FACULTY_PROFILES = "faculty_profiles"
 
 ACTIVE_Q = {"$ne": True}  # is_archived != True
 ARCH_Q = True
@@ -83,6 +87,132 @@ async def _term_meta(term_id: str) -> Dict[str, Any]:
         "ay_label": _ay_label(t.get("acad_year_start")),
     }
 
+
+
+def _dedupe(ids: List[str]) -> List[str]:
+    out: List[str] = []
+    seen = set()
+    for x in ids or []:
+        if not x:
+            continue
+        s = str(x).strip()
+        if not s or s in seen:
+            continue
+        seen.add(s)
+        out.append(s)
+    return out
+
+
+def _term_display(meta: Dict[str, Any]) -> str:
+    tn = meta.get("term_number")
+    ay = meta.get("ay_label") or _ay_label(meta.get("acad_year_start"))
+    if tn:
+        return f"Term {tn}, {ay}"
+    return str(ay or "AY —")
+
+
+async def _user_ids_by_role_regex(role_regex: str) -> List[str]:
+    # role_regex can be a normal regex string, e.g. r"faculty" or r"(^OM$|Office Manager)"
+    role_ids = [
+        r.get("role_id")
+        async for r in db[COL_USER_ROLES].find(
+            {"role_type": {"$regex": role_regex, "$options": "i"}},
+            {"_id": 0, "role_id": 1},
+        )
+    ]
+    role_ids = [rid for rid in role_ids if rid]
+    if not role_ids:
+        return []
+    user_ids = [
+        ra.get("user_id")
+        async for ra in db[COL_ROLE_ASSIGNMENTS].find(
+            {"role_id": {"$in": role_ids}},
+            {"_id": 0, "user_id": 1},
+        )
+    ]
+    return _dedupe([u for u in user_ids if u])
+
+
+async def _chair_user_ids() -> List[str]:
+    # Prefer staff_profiles position_title, fallback to roles
+    staff = [
+        s.get("user_id")
+        async for s in db[COL_STAFF_PROFILES].find(
+            {"position_title": {"$regex": "chair", "$options": "i"}},
+            {"_id": 0, "user_id": 1},
+        )
+    ]
+    staff = _dedupe([u for u in staff if u])
+    if staff:
+        return staff
+    return await _user_ids_by_role_regex("chair")
+
+
+async def _faculty_user_ids() -> List[str]:
+    uids = await _user_ids_by_role_regex("faculty")
+    if uids:
+        return uids
+    # fallback: faculty_profiles
+    fps = [
+        f.get("user_id")
+        async for f in db[COL_FACULTY_PROFILES].find({}, {"_id": 0, "user_id": 1})
+    ]
+    return _dedupe([u for u in fps if u])
+
+
+async def _om_user_ids() -> List[str]:
+    # Some seeds use 'OM', others 'Office Manager'
+    uids = await _user_ids_by_role_regex(r"(^OM$|Office Manager)")
+    if uids:
+        return uids
+    # fallback: staff_profiles position_title
+    staff = [
+        s.get("user_id")
+        async for s in db[COL_STAFF_PROFILES].find(
+            {"position_title": {"$regex": "office manager|\bom\b", "$options": "i"}},
+            {"_id": 0, "user_id": 1},
+        )
+    ]
+    staff = _dedupe([u for u in staff if u])
+    if staff:
+        return staff
+    return await _user_ids_by_role_regex("om")
+
+async def _notify_planning_started(*, actor_user_id: str, planning_term_id: str) -> Dict[str, Any]:
+    """Notify OM + Chair + Faculty that course offerings planning started."""
+    actor_campus = await _apo_campus_label_for_user(actor_user_id)
+    actor_label = f"APO ({actor_campus})" if actor_campus else "APO"
+
+    plan_meta = await _term_meta(planning_term_id)
+    plan_label = _term_display(plan_meta)
+
+    title = "Course Offerings Planning Started"
+    details = f"{actor_label} archived pre-enlistment. Planning for course offerings for {plan_label} has started."
+
+    om_ids = await _om_user_ids()
+    chair_ids = await _chair_user_ids()
+    faculty_ids = await _faculty_user_ids()
+
+    om_set = set(om_ids)
+    chair_set = set(chair_ids)
+
+    all_ids = _dedupe(om_ids + chair_ids + faculty_ids)
+
+    created = 0
+    for uid in all_ids:
+        if uid == actor_user_id:
+            continue
+        route = "/faculty/overview"
+        if uid in om_set:
+            route = "/om/home/load-assignment"
+        elif uid in chair_set:
+            route = "/chair/plantilla"
+
+        meta = {"route": route, "kind": "preenlistment_archived", "term_id": planning_term_id}
+        await create_notification(user_id=uid, title=title, details=details, meta=meta)
+        created += 1
+
+    return {"created": created, "recipients": all_ids}
 
 async def _active_term_id() -> Optional[str]:
     t = await db[COL_TERMS].find_one({"is_current": True}, {"_id": 0, "term_id": 1})
@@ -262,12 +392,10 @@ async def _college_by_code(code: Optional[str]) -> Optional[Dict[str, Any]]:
 
 def _normalize_prog_code_for_regex(p: str) -> str:
     # Collapse whitespace and escape regex specials so "BSCS (CBL)" matches literally
-    import re
     s = re.sub(r"\s+", " ", (p or "").strip())
     specials = r".^$*+?{}[]\|()"
     esc = "".join([f"\\{ch}" if ch in specials else ch for ch in s])
     return esc
-
 
 async def _program_by_code(program_code: str) -> Optional[Dict[str, Any]]:
     code = (program_code or "").strip()
@@ -644,8 +772,19 @@ async def preenlistment_post(
         next_term_doc = await _get_next_term_doc(term_doc)
         new_planning_tid = next_term_doc.get("term_id", termId)
 
+        # Notify OM + Chair + Faculty that Course Offerings planning has started for the next term
+        notif_created = 0
+        try:
+            notif_res = await _notify_planning_started(actor_user_id=userId, planning_term_id=new_planning_tid)
+            notif_created = int((notif_res or {}).get("created") or 0)
+        except Exception:
+            # Best-effort notification; do not block archive
+            pass
+
+
         return {
             "ok": True,
+            "notifCreated": notif_created,
             "archivedCounts": upd1.modified_count,
             "archivedStats": upd2.modified_count,
             "previousActiveTermId": prev_active_tid,
