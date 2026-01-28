@@ -38,6 +38,11 @@ type PTResponse = {
   params: any;
 };
 
+type DepartmentItem = {
+  department_id: string;
+  department_name: string;
+};
+
 /** ---------------- Tiny util ---------------- */
 const cls = (...s: Array<string | false | undefined>) => s.filter(Boolean).join(" ");
 
@@ -133,10 +138,30 @@ const RiskDistributionVisual = ({ data }: { data: PTResponse }) => {
 export default function OM_RP_LoadRisk() {
   // knobs (ported from OM_pred2)
   const [departmentId, setDepartmentId] = useState("DEPT0001");
+  const [departments, setDepartments] = useState<DepartmentItem[]>([]);
   const [overload, setOverload] = useState(0);
   const [histK, setHistK] = useState(3);
   const [onlyWithPrefs] = useState(false);
   const [allowFallback] = useState(false); 
+
+  type RiskFilter = "HIGH_ONLY" | "HIGH_MED" | "ALL";
+  const [riskFilter, setRiskFilter] = useState<RiskFilter>("HIGH_MED");
+  const [showLowRisk, setShowLowRisk] = useState(false);
+
+  // defaults (for Reset)
+  const DEFAULT_DEPT = "DEPT0001";
+  const DEFAULT_OVERLOAD = 0;
+  const DEFAULT_HISTK = 3;
+
+  const resetInputs = () => {
+    setDepartmentId(DEFAULT_DEPT);
+    setOverload(DEFAULT_OVERLOAD);
+    setHistK(DEFAULT_HISTK);
+    setError(null);
+  };
+
+  const canRun = Boolean(departmentId?.trim()) && histK >= 1 && histK <= 6;
+
 
   // data state
   const [loading, setLoading] = useState(false);
@@ -163,9 +188,21 @@ export default function OM_RP_LoadRisk() {
     }
   };
 
+  const loadDepartments = async () => {
+    try {
+      const res = await fetch("/analytics/departments");
+      if (!res.ok) return;
+      const json = await res.json();
+      setDepartments(json?.departments || []);
+    } catch {
+      // fail silently; fallback to manual input still works
+    }
+  };
+
   useEffect(() => {
     // auto-load on mount
     // eslint-disable-next-line @typescript-eslint/no-floating-promises
+    loadDepartments();
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -191,6 +228,16 @@ export default function OM_RP_LoadRisk() {
 
     return { sortedRows, totals: { demand, ft, pt }, lowRiskCount };
   }, [data]);
+
+  const displayedRows = useMemo(() => {
+    const highs = sortedRows.filter((r) => r.risk === "High");
+    const meds = sortedRows.filter((r) => r.risk === "Medium");
+    const lows = sortedRows.filter((r) => r.risk === "Low");
+
+    if (riskFilter === "HIGH_ONLY") return { main: highs, low: lows };
+    if (riskFilter === "HIGH_MED") return { main: [...highs, ...meds], low: lows };
+    return { main: sortedRows, low: lows };
+  }, [sortedRows, riskFilter]);
 
   const displayTerm = data ? `AY ${data.acad_year_start} - ${data.end_at} | Term ${data.term_number}` : 'N/A';
   const displayDept = data?.dept_name || data?.department_id || 'N/A';
@@ -222,15 +269,23 @@ export default function OM_RP_LoadRisk() {
 
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4 items-end">
               <div>
-                <label className="block text-xs text-gray-600 mb-1">Department</label>
-                <input
-                  value={departmentId}
-                  onChange={(e) => setDepartmentId(e.target.value)}
-                  placeholder="DEPT0001"
-                  className="w-full rounded-lg border border-gray-300 px-3.5 py-2 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30"
-                />
+              <label className="block text-xs text-gray-600 mb-1">Department</label>
+              <select
+                value={departmentId}
+                onChange={(e) => setDepartmentId(e.target.value)}
+                className="w-full rounded-lg border border-gray-300 px-3.5 py-2 text-sm shadow-sm bg-white focus:ring-2 focus:ring-emerald-500/30"
+              >
+                {departments.length === 0 ? (
+                  <option value={departmentId}>{departmentId}</option>
+                ) : (
+                  departments.map((d) => (
+                    <option key={d.department_id} value={d.department_id}>
+                      {d.department_name}
+                    </option>
+                  ))
+                )}
+              </select>
               </div>
-
               <div>
                 <label className="block text-xs text-gray-600 mb-1">Overload allowance (units)</label>
                 <select
@@ -257,14 +312,30 @@ export default function OM_RP_LoadRisk() {
 
               <div className="flex gap-2 sm:justify-end">
                 <button
+                  type="button"
                   disabled={loading}
-                  onClick={load}
+                  onClick={resetInputs}
                   className={cls(
                     "w-full sm:w-auto rounded-lg border px-4 py-2 text-sm font-semibold",
                     loading
-                      ? "cursor-default border-emerald-200 bg-emerald-200 text-emerald-900"
+                      ? "cursor-not-allowed border-gray-200 bg-gray-100 text-gray-400"
+                      : "border-gray-300 bg-white text-gray-700 hover:bg-gray-50"
+                  )}
+                  title="Reset inputs"
+                >
+                  Reset
+                </button>
+
+                <button
+                  disabled={loading || !canRun}
+                  onClick={load}
+                  className={cls(
+                    "w-full sm:w-auto rounded-lg border px-4 py-2 text-sm font-semibold",
+                    loading || !canRun
+                      ? "cursor-not-allowed border-gray-200 bg-gray-100 text-gray-400"
                       : "cursor-pointer border-emerald-500 bg-emerald-400 text-emerald-950 hover:bg-emerald-300"
                   )}
+                  title={!canRun ? "Select a Department and a valid History window first." : "Run forecast"}
                 >
                   {loading ? "Loading…" : "Run"}
                 </button>
@@ -345,7 +416,7 @@ export default function OM_RP_LoadRisk() {
                 </div>
                 <div className="lg:col-span-1 p-6 rounded-xl border border-gray-200 bg-white shadow-sm flex flex-col justify-center items-center">
                     <div className="text-center">
-                        <p className="text-sm font-medium text-gray-600 mb-2">Model Average Confidence</p>
+                        <p className="text-sm font-medium text-gray-600 mb-2" title="Confidence reflects data completeness and coverage (e.g., preferences/history), not certainty.">Model Average Confidence</p>
                         <span className={cls(
                             "inline-block text-5xl font-extrabold tabular-nums",
                             data.summary.avg_confidence_score >= 80 ? "text-emerald-600" :
@@ -359,11 +430,77 @@ export default function OM_RP_LoadRisk() {
                     </div>
                 </div>
             </div>
+            
+            <p className="text-xs text-gray-500 mb-2">
+              Note: Values shown are <span className="font-semibold">model estimates</span> for planning purposes only, not final assignments.
+            </p>
 
             {/* Raw Data Table (Secondary Section) */}
             <h2 className="text-xl font-bold text-gray-800 pt-4 border-t border-gray-200">
                 Detailed Course-by-Course Analysis (Sorted by Risk)
             </h2>
+
+            <div className="flex flex-wrap items-center gap-2 mt-3 mb-2">
+              <span className="text-xs text-gray-600">Show:</span>
+
+              <button
+                type="button"
+                disabled={loading}
+                className={cls(
+                  "text-xs px-3 py-1 rounded-full border",
+                  riskFilter === "HIGH_ONLY"
+                    ? "bg-rose-50 border-rose-200 text-rose-800"
+                    : "bg-white border-gray-200 text-gray-700 hover:bg-gray-50"
+                )}
+                onClick={() => setRiskFilter("HIGH_ONLY")}
+              >
+                High only
+              </button>
+
+              <button
+                type="button"
+                disabled={loading}
+                className={cls(
+                  "text-xs px-3 py-1 rounded-full border",
+                  riskFilter === "HIGH_MED"
+                    ? "bg-amber-50 border-amber-200 text-amber-800"
+                    : "bg-white border-gray-200 text-gray-700 hover:bg-gray-50"
+                )}
+                onClick={() => setRiskFilter("HIGH_MED")}
+              >
+                High + Medium
+              </button>
+
+              <button
+                type="button"
+                disabled={loading}
+                className={cls(
+                  "text-xs px-3 py-1 rounded-full border",
+                  riskFilter === "ALL"
+                    ? "bg-gray-100 border-gray-200 text-gray-800"
+                    : "bg-white border-gray-200 text-gray-700 hover:bg-gray-50"
+                )}
+                onClick={() => setRiskFilter("ALL")}
+              >
+                All
+              </button>
+
+              {riskFilter !== "ALL" && (
+                <button
+                  type="button"
+                  className={cls(
+                    "ml-auto text-xs px-3 py-1 rounded-lg border",
+                    showLowRisk
+                      ? "bg-emerald-50 border-emerald-200 text-emerald-800"
+                      : "bg-white border-gray-200 text-gray-700 hover:bg-gray-50"
+                  )}
+                  onClick={() => setShowLowRisk((v) => !v)}
+                >
+                  {showLowRisk ? "Hide" : "Show"} Low Risk ({displayedRows.low.length})
+                </button>
+              )}
+            </div>
+
             <div className="overflow-x-auto rounded-xl border border-gray-200">
                 <table className="min-w-full table-fixed text-sm border-collapse">
                   <colgroup>
@@ -379,14 +516,14 @@ export default function OM_RP_LoadRisk() {
                   <thead className="bg-gray-50 text-gray-700 text-xs uppercase tracking-wide sticky top-0 z-[1]">
                     <tr>
                       {[
-                        "Course",
-                        "Demand (sections)",
-                        "FT Filled (sections)",
-                        "FT Assignees",
-                        "PT Needed",
-                        "Risk",
-                        "Confidence Level",
-                      ].map((h) => (
+                          "Course",
+                          "Demand (sections)",
+                          "FT Capacity Used (estimated)",
+                          "Suggested FT Candidates (model)",
+                          "PT Needed",
+                          "Risk",
+                          "Confidence Level",
+                        ].map((h) => (
                         <th key={h} className="px-4 py-2.5 text-center font-semibold whitespace-nowrap border-b">
                           {h}
                         </th>
@@ -395,7 +532,7 @@ export default function OM_RP_LoadRisk() {
                   </thead>
 
                   <tbody>
-                    {sortedRows.map((r, i) => ( // Use sortedRows here
+                    {displayedRows.main.map((r, i) => ( // filtered rows
                       <tr
                         key={r.course_id}
                         className={cls(
@@ -463,6 +600,71 @@ export default function OM_RP_LoadRisk() {
               <div className="text-xs text-gray-500 mt-3">
                 Tip: The table is automatically sorted by **Risk (High to Low)** to prioritize critical staffing needs.
               </div>
+
+              {riskFilter !== "ALL" && showLowRisk && displayedRows.low.length > 0 && (
+                <div className="mt-5">
+                  <h3 className="text-sm font-semibold text-gray-800 mb-2">
+                    Low Risk Courses ({displayedRows.low.length})
+                  </h3>
+                  <div className="overflow-x-auto rounded-xl border border-gray-200">
+                    <table className="min-w-full table-fixed text-sm border-collapse">
+                      <colgroup>
+                        <col style={{ width: "34%" }} />
+                        <col style={{ width: "14%" }} />
+                        <col style={{ width: "14%" }} />
+                        <col style={{ width: "14%" }} />
+                        <col style={{ width: "12%" }} />
+                        <col style={{ width: "12%" }} />
+                      </colgroup>
+
+                      <thead className="bg-gray-50 text-gray-700 text-xs uppercase tracking-wide">
+                        <tr>
+                          {["Course", "Demand", "FT Cap Used", "PT Needed", "Risk", "Confidence"].map((h) => (
+                            <th
+                              key={h}
+                              className="px-4 py-2.5 text-center font-semibold whitespace-nowrap border-b"
+                            >
+                              {h}
+                            </th>
+                          ))}
+                        </tr>
+                      </thead>
+
+                      <tbody>
+                        {displayedRows.low.map((r, idx) => (
+                          <tr
+                            key={r.course_id}
+                            className={cls(
+                              idx % 2 === 0 ? "bg-white" : "bg-gray-50",
+                              "text-gray-800 hover:bg-gray-100 transition"
+                            )}
+                          >
+                            <td className="px-4 py-2.5 text-left font-medium text-gray-900">
+                              {r.course_code}
+                            </td>
+                            <td className="px-4 py-2.5 text-center tabular-nums">{r.demand_sections}</td>
+                            <td className="px-4 py-2.5 text-center tabular-nums">{r.ft_filled_sections}</td>
+                            <td className="px-4 py-2.5 text-center font-semibold tabular-nums">
+                              {r.pt_needed_sections}
+                            </td>
+                            <td className="px-4 py-2.5 text-center">
+                              <span className={cls("px-2 py-0.5 rounded-full text-xs inline-block", badgeClasses("risk", r.risk))}>
+                                {r.risk}
+                              </span>
+                            </td>
+                            <td className="px-4 py-2.5 text-center">
+                              <span className={cls("px-2 py-0.5 rounded-full text-xs inline-block", badgeClasses("confidence", r.confidence))}>
+                                {r.confidence}
+                              </span>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
           </div>
         )}
 
