@@ -1082,31 +1082,29 @@ const SendModal = ({
           <div className="rounded-xl border border-gray-200 overflow-hidden">
             <table className="w-full table-fixed text-[13px]">
               <colgroup>
-                <col className="w-[140px]" />
-                <col />
-                <col className="w-[90px]" />
-                <col className="w-[72px]" />
-                <col className="w-[120px]" />
-                <col className="w-[110px]" />
-                <col className="w-[70px]" />
-                <col className="w-[120px]" />
-                <col className="w-[120px]" />
-              </colgroup>
+              <col className="w-[140px]" />
+              <col />
+              <col className="w-[90px]" />
+              <col className="w-[72px]" />
+              <col className="w-[110px]" />
+              <col className="w-[70px]" />
+              <col className="w-[120px]" />
+              <col className="w-[120px]" />
+            </colgroup>
               <thead className="bg-gray-50 text-gray-700">
                 <tr className="[&>th]:border-b [&>th]:border-gray-200">
                   <th className="px-4 py-3 text-left font-semibold">
                     Course Code
                   </th>
-                  <th className="px-4 py-3 text-left font-semibold">
+                  <th className="px-4 py-3 text-center font-semibold">
                     Course Title
                   </th>
                   <th className="px-4 py-3 text-left font-semibold">Section</th>
                   <th className="px-4 py-3 text-left font-semibold">Units</th>
-                  <th className="px-4 py-3 text-left font-semibold">Campus</th>
                   <th className="px-4 py-3 text-left font-semibold">Mode</th>
                   <th className="px-4 py-3 text-left font-semibold">Day</th>
                   <th className="px-4 py-3 text-left font-semibold">Room</th>
-                  <th className="px-4 py-3 text-left font-semibold">Time</th>
+                  <th className="px-4 py-3 text-center font-semibold">Time</th>
                 </tr>
               </thead>
               <tbody className="text-gray-900">
@@ -1115,7 +1113,7 @@ const SendModal = ({
                     {manyGroups && (
                       <tr className="bg-white">
                         <td
-                          colSpan={9}
+                          colSpan={8}
                           className="px-4 pt-5 pb-2 text-[12px] font-semibold text-gray-900"
                         >
                           {faculty}
@@ -1142,7 +1140,6 @@ const SendModal = ({
                         <td className="px-4 py-3 align-middle">
                           {r.units !== "" ? String(r.units) : "—"}
                         </td>
-                        <td className="px-4 py-3 align-middle text-gray-800">{(r as any).campus || r.campus_id || "—"}</td>
                         <td className="px-4 py-3 align-middle text-gray-800">{r.mode || (r as any).room_type || "—"}</td>
                         <td className="px-4 py-3 align-middle">
                           {r.day1 || "—"}
@@ -2835,7 +2832,7 @@ useEffect(() => {
                     }}
                   >
                     <CheckCheck className="h-4 w-4" />
-                    Forward
+                    Forward to Chair
                   </button>
                 </div>
               </div>
@@ -2932,15 +2929,43 @@ useEffect(() => {
                     </button>
 
                     {/* Refresh button (always visible if running) */}
-                    {isRunning && (
+                      {isRunning && (
+                        <button
+                          onClick={loadFromServer}
+                          className="inline-flex items-center gap-2 rounded-md border border-gray-300 bg-white px-3.5 py-2 text-sm font-medium hover:bg-gray-50"
+                        >
+                          <RefreshCcw className="h-4 w-4" />
+                          Refresh
+                        </button>
+                      )}
+
+                      {/* To Faculty button moved here (beside Refresh) */}
                       <button
-                        onClick={loadFromServer}
-                        className="inline-flex items-center gap-2 rounded-md border border-gray-300 bg-white px-3.5 py-2 text-sm font-medium hover:bg-gray-50"
+                        disabled={!anySelected || !isRunning}
+                        onClick={() => {
+                          const preview = buildSendRowsForPreview();
+                          if (!preview.length) {
+                            alert("Select at least one row with an assigned faculty.");
+                            return;
+                          }
+                          setSendRowsPreview(preview);
+                          setShowSend(true);
+                        }}
+                        className={cls(
+                          "inline-flex items-center gap-2 rounded-md px-3.5 py-2 text-sm font-medium shadow-sm",
+                          anySelected && isRunning
+                            ? "bg-blue-600 text-white hover:brightness-110"
+                            : "bg-gray-200 text-gray-500 cursor-not-allowed"
+                        )}
+                        title={
+                          anySelected
+                            ? "Send to selected faculty"
+                            : "Select at least one row"
+                        }
                       >
-                        <RefreshCcw className="h-4 w-4" />
-                        Refresh
+                        <Send className="h-4 w-4" />
+                        To Faculty
                       </button>
-                    )}
 
                     {/* Original Import CSV block removed */}
                     {/* {isRunning ? (...) : (
@@ -3024,7 +3049,9 @@ useEffect(() => {
                     <tbody>
                       {filtered.map((r, idx) => {
                         const e = getEditFlags(r);
-                        const unread = !!(r as any).pending_rfc;
+                        // Show the red dot only when there is a pending RFC AND the row is still actionable.
+                        // Once the schedule is approved/finalized, the message icon is disabled; the dot should disappear.
+                        const unread = !!(r as any).pending_rfc && !r.finalized;
                         return (
                           <tr
                             key={r.id}
@@ -3412,33 +3439,6 @@ useEffect(() => {
                       Add new line
                     </button>
 
-                    {/* To Faculty button (bottom-right, aligned with Add new line) */}
-                    <button
-                      disabled={!anySelected || !isRunning}
-                      onClick={() => {
-                        const preview = buildSendRowsForPreview();
-                        if (!preview.length) {
-                          alert("Select at least one row with an assigned faculty.");
-                          return;
-                        }
-                        setSendRowsPreview(preview);
-                        setShowSend(true);
-                      }}
-                      className={cls(
-                        "inline-flex items-center gap-2 rounded-lg px-3 py-1.5 text-sm font-medium shadow-sm",
-                        anySelected && isRunning
-                          ? "bg-blue-600 text-white hover:brightness-110"
-                          : "bg-gray-200 text-gray-500 cursor-not-allowed"
-                      )}
-                      title={
-                        anySelected
-                          ? "Send to selected faculty"
-                          : "Select at least one row"
-                      }
-                    >
-                      <Send className="h-4 w-4" />
-                      To Faculty
-                    </button>
                   </div>
                   {/* Right: Auto-assign (Run algorithm) - REMOVED from bottom */}
                   {/* <div className="flex items-center gap-2">

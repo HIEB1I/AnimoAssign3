@@ -501,118 +501,121 @@ export default function OM_FacultyForm() {
         {/* View Preference Modal */}
         {selected && (
           <div className="fixed inset-0 z-[100] grid place-items-center bg-black/40 p-4">
-            <div className="w-full max-w-xl rounded-2xl bg-white p-8 shadow-2xl">
-              <h2 className="text-lg font-semibold text-emerald-700 mb-1">
-                Faculty Preference
-              </h2>
-              <p className="text-sm text-gray-600 mb-6">
-                Instructor:{" "}
-                <span className="font-medium text-gray-800">{selected.name}</span>
-              </p>
+            <div className="w-full max-w-xl rounded-2xl bg-white shadow-2xl max-h-[90vh] flex flex-col">
+              {/* Header (stays visible) */}
+              <div className="flex-none px-8 pt-8">
+                <h2 className="text-lg font-semibold text-emerald-700 mb-1">
+                  Faculty Preference
+                </h2>
+                <p className="text-sm text-gray-600 mb-6">
+                  Instructor:{" "}
+                  <span className="font-medium text-gray-800">{selected.name}</span>
+                </p>
+              </div>
 
-              {prefLoading && (
-                <div className="text-sm text-gray-600">Loading preference…</div>
-              )}
-              {!prefLoading && !pref && (
-                <div className="text-sm text-gray-600">
-                  No preference record found for this term.
+              {/* Body (scrolls) */}
+              <div className="flex-1 min-h-0 overflow-y-auto px-8">
+                {prefLoading && (
+                  <div className="text-sm text-gray-600">Loading preference…</div>
+                )}
+                {!prefLoading && !pref && (
+                  <div className="text-sm text-gray-600">
+                    No preference record found for this term.
+                  </div>
+                )}
+
+                {!prefLoading && pref && (
+                  <div className="grid grid-cols-2 gap-x-10 gap-y-6 text-sm pb-6">
+                    <div>
+                      <h4 className="font-semibold flex items-center gap-2 mb-2 text-gray-800">
+                        <GraduationCap className="h-4 w-4 text-emerald-700" /> Teaching Load
+                      </h4>
+                      <p>Preferred Teaching Units</p>
+                      <p className="text-gray-500 break-words">
+                        {pref.teaching?.preferred_units ?? "—"}
+                      </p>
+                      <p className="mt-1">Deloading</p>
+                      <p className="text-gray-500 break-words">
+                        {Array.isArray(pref.teaching?.deloading)
+                          ? pref.teaching?.deloading.join(", ")
+                          : pref.teaching?.deloading ?? "—"}
+                      </p>
+                    </div>
+
+                    <div>
+                      <h4 className="font-semibold flex items-center gap-2 mb-2 text-gray-800">
+                        <MapPin className="h-4 w-4 text-emerald-700" /> Location and Mode
+                      </h4>
+                      <p>Mode</p>
+                      <p className="text-gray-500 break-words">
+                        {typeof pref.location_mode?.mode === "object"
+                          ? JSON.stringify(pref.location_mode?.mode)
+                          : pref.location_mode?.mode ?? "—"}
+                      </p>
+                    </div>
+
+                    <div>
+                      <h4 className="font-semibold flex items-center gap-2 mb-2 text-gray-800">
+                        <Calendar className="h-4 w-4 text-emerald-700" /> Schedule
+                      </h4>
+                      <p>Days</p>
+                      <p className="text-gray-500 break-words">
+                        {(pref.schedule?.days || []).length
+                          ? pref.schedule.days.join(", ")
+                          : "—"}
+                      </p>
+                      <p className="mt-1">Time Slots</p>
+                      <p className="text-gray-500 break-words">
+                        {(pref.schedule?.times || []).length
+                          ? pref.schedule.times.join(", ")
+                          : "—"}
+                      </p>
+                    </div>
+
+                    <div>
+                      <h4 className="font-semibold flex items-center gap-2 mb-2 text-gray-800">
+                        <BookOpen className="h-4 w-4 text-emerald-700" /> Academic Specialization
+                      </h4>
+                      <p>Courses</p>
+                      <p className="text-gray-500 break-words">
+                        {(pref.specialization?.courses || []).length
+                          ? pref.specialization.courses.join(", ")
+                          : "—"}
+                      </p>
+                    </div>
+
+                    <div className="col-span-2 mt-2">
+                      <h4 className="font-semibold mb-1">Remarks</h4>
+                      <p className="text-gray-700 whitespace-pre-wrap break-words">
+                        {pref.submission?.notes && pref.submission.notes.trim()
+                          ? pref.submission.notes
+                          : "—"}
+                      </p>
+
+                      <h4 className="font-semibold mt-3 mb-1">Submission</h4>
+                      <p className="text-gray-700 break-words">
+                        Status:{" "}
+                        <span className="font-medium">
+                          {pref.submission?.status ?? "Not Submitted"}
+                        </span>{" "}
+                        • Date:{" "}
+                        <span className="font-medium">{fmtDate(pref.submission?.date)}</span>
+                      </p>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Footer (stays visible) */}
+              <div className="flex-none px-8 pb-8 pt-4 border-t border-gray-100">
+                <div className="flex justify-end">
+                  <button
+                    onClick={closeView}
+                    className="px-4 py-2 rounded-lg bg-gray-100 hover:bg-gray-200 text-sm"
+                  >
+                    Close
+                  </button>
                 </div>
-              )}
-
-              {!prefLoading && pref && (
-                <div className="grid grid-cols-2 gap-x-10 gap-y-6 text-sm">
-                  <div>
-                    <h4 className="font-semibold flex items-center gap-2 mb-2 text-gray-800">
-                      <GraduationCap className="h-4 w-4 text-emerald-700" /> Teaching
-                      Load
-                    </h4>
-                    <p>Preferred Teaching Units</p>
-                    <p className="text-gray-500">
-                      {pref.teaching?.preferred_units ?? "—"}
-                    </p>
-                    <p className="mt-1">Deloading</p>
-                    <p className="text-gray-500">
-                      {Array.isArray(pref.teaching?.deloading)
-                        ? pref.teaching?.deloading.join(", ")
-                        : pref.teaching?.deloading ?? "—"}
-                    </p>
-                  </div>
-
-                  <div>
-                    <h4 className="font-semibold flex items-center gap-2 mb-2 text-gray-800">
-                      <MapPin className="h-4 w-4 text-emerald-700" /> Location and Mode
-                    </h4>
-                    <p>Mode</p>
-                    <p className="text-gray-500">
-                      {typeof pref.location_mode?.mode === "object"
-                        ? JSON.stringify(pref.location_mode?.mode)
-                        : pref.location_mode?.mode ?? "—"}
-                    </p>
-                  </div>
-
-                  <div>
-                    <h4 className="font-semibold flex items-center gap-2 mb-2 text-gray-800">
-                      <Calendar className="h-4 w-4 text-emerald-700" /> Schedule
-                    </h4>
-                    <p>Days</p>
-                    <p className="text-gray-500">
-                      {(pref.schedule?.days || []).length
-                        ? pref.schedule.days.join(", ")
-                        : "—"}
-                    </p>
-                    <p className="mt-1">Time Slots</p>
-                    <p className="text-gray-500">
-                      {(pref.schedule?.times || []).length
-                        ? pref.schedule.times.join(", ")
-                        : "—"}
-                    </p>
-                  </div>
-
-                  <div>
-                    <h4 className="font-semibold flex items-center gap-2 mb-2 text-gray-800">
-                      <BookOpen className="h-4 w-4 text-emerald-700" /> Academic
-                      Specialization
-                    </h4>
-                    <p>Courses</p>
-                    <p className="text-gray-500">
-                      {(pref.specialization?.courses || []).length
-                        ? pref.specialization.courses.join(", ")
-                        : "—"}
-                    </p>
-                  </div>
-
-                  <div className="col-span-2 mt-2">
-                    <h4 className="font-semibold mb-1">Remarks</h4>
-                    <p className="text-gray-700">
-                      {pref.submission?.notes && pref.submission.notes.trim()
-                        ? pref.submission.notes
-                        : "—"}
-                    </p>
-
-                    {/* add mt-3 (or mt-4) for a little space */}
-                    <h4 className="font-semibold mt-3 mb-1">Submission</h4>
-                    <p className="text-gray-700">
-                      Status:{" "}
-                      <span className="font-medium">
-                        {pref.submission?.status ?? "Not Submitted"}
-                      </span>{" "}
-                      • Date:{" "}
-                      <span className="font-medium">
-                        {fmtDate(pref.submission?.date)}
-                      </span>
-                    </p>
-                  </div>
-
-                </div>
-              )}
-
-              <div className="flex justify-end mt-8">
-                <button
-                  onClick={closeView}
-                  className="px-4 py-2 rounded-lg bg-gray-100 hover:bg-gray-200 text-sm"
-                >
-                  Close
-                </button>
               </div>
             </div>
           </div>
