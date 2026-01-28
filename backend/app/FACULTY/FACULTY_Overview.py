@@ -7,6 +7,7 @@ from ..Notifications import create_notification
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+
 import os
 import base64
 from email.message import EmailMessage
@@ -1008,32 +1009,48 @@ async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[s
     if not proposal:
         return {"ok": True, "message": "No proposal to accept."}
 
-    await db[COL_LOAD_PROPOSALS].update_one({"faculty_id": fid, "term_id": term_id}, {"$set": {"status": "accepted", "accepted_at": _now_utc()}})
+    now = _now_utc()
 
-    # lock RFC thread (even if none existed)
-    existing =await db[COL_LOAD_RFC].update_many(
-    {"faculty_id": fid, "term_id": term_id},
-    {"$set": {"status": "ACCEPTED", "locked": True, "updated_at": _now_utc()}},
+    # mark proposal accepted
+    await db[COL_LOAD_PROPOSALS].update_one(
+        {"faculty_id": fid, "term_id": term_id},
+        {"$set": {"status": "accepted", "accepted_at": now, "updated_at": now}},
     )
-    rfc_id = None
-    if existing:
-        existing = _normalize_rfc_doc(existing)
-        rfc_id = existing.get("rfc_id")
-        await db[COL_LOAD_RFC].update_one({"faculty_id": fid, "term_id": term_id}, {"$set": {"status": "ACCEPTED", "locked": True, "updated_at": _now_utc()}})
-    else:
-        rfc_id = "RFC" + uuid.uuid4().hex[:10].upper()
-        await db[COL_LOAD_RFC].insert_one({"rfc_id": rfc_id, "faculty_id": fid, "faculty_user_id": userId, "om_user_id": (proposal.get("om_user_id") or ""), "term_id": term_id, "status": "ACCEPTED", "locked": True, "messages": [], "created_at": _now_utc(), "updated_at": _now_utc()})
 
+    # lock ALL RFC threads for this faculty+term (per-course RFCs)
+    await db[COL_LOAD_RFC].update_many(
+        {"faculty_id": fid, "term_id": term_id},
+        {"$set": {"status": "ACCEPTED", "locked": True, "updated_at": now}},
+    )
+
+    # best-effort: grab latest rfc_id for notification
+    rfc_id = None
+    lst = await db[COL_LOAD_RFC].find(
+        {"faculty_id": fid, "term_id": term_id},
+        {"_id": 0, "rfc_id": 1},
+    ).sort([("updated_at", -1), ("created_at", -1)]).to_list(1)
+    if lst:
+        rfc_id = lst[0].get("rfc_id")
+
+    # notify OM
     om_uid = (proposal.get("om_user_id") or "").strip()
     if om_uid:
         await create_notification(
             user_id=om_uid,
             title="Load Assignment: Faculty accepted schedule",
             details=f"{faculty.get('first_name','')} {faculty.get('last_name','')} accepted the proposed schedule.",
-            meta={"route": "/om/load-assignment", "kind": "proposal_accepted", "term_id": term_id, "faculty_id": fid, "rfc_id": rfc_id},
+            meta={
+                "route": "/om/load-assignment",
+                "kind": "proposal_accepted",
+                "term_id": term_id,
+                "faculty_id": fid,
+                "rfc_id": rfc_id or "",
+            },
         )
 
     return {"ok": True, "status": "ACCEPTED"}
+
+
 
 async def _refresh_google_access_token(refresh_token: str) -> str:
     client_id = (os.getenv("GOOGLE_CLIENT_ID") or "").strip()

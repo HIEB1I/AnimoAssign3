@@ -2,13 +2,12 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime, timedelta, timezone, date, time
+from datetime import datetime, timedelta, timezone, time
 from typing import Any, Dict, List, Optional, Tuple
-
 from urllib.parse import quote
 
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query, Body
 from pydantic import BaseModel, Field
 from zoneinfo import ZoneInfo
 
@@ -18,11 +17,6 @@ router = APIRouter(tags=["Google Calendar"])
 
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GCAL_BASE = "https://www.googleapis.com/calendar/v3/calendars"
-
-
-# ----------------------------
-# Helpers: parsing
-# ----------------------------
 
 DAY_MAP = {
     "monday": 0, "mon": 0,
@@ -34,7 +28,12 @@ DAY_MAP = {
     "sunday": 6, "sun": 6,
 }
 
+RRULE_BYDAY = {0: "MO", 1: "TU", 2: "WE", 3: "TH", 4: "FR", 5: "SA", 6: "SU"}
 
+
+# ----------------------------
+# Helpers: parsing
+# ----------------------------
 def _safe_str(x: Any) -> str:
     return ("" if x is None else str(x)).strip()
 
@@ -50,10 +49,23 @@ def _parse_time_hhmm(t: str) -> Optional[time]:
     Accepts:
       "07:30"
       "7:30"
+      "0730"
+      "730"
     """
     if not t:
         return None
     s = t.strip()
+
+    # digits-only forms
+    if s.isdigit():
+        if len(s) == 4:
+            hh = int(s[:2]); mm = int(s[2:])
+            return time(hour=hh, minute=mm)
+        if len(s) == 3:
+            hh = int(s[:1]); mm = int(s[1:])
+            return time(hour=hh, minute=mm)
+        return None
+
     parts = s.split(":")
     if len(parts) != 2:
         return None
@@ -67,7 +79,7 @@ def _parse_time_hhmm(t: str) -> Optional[time]:
 
 def _normalize_time_range(s: str) -> str:
     """
-    Converts common dash variants to a normal "-" and strips spaces:
+    Converts common dash variants to "-" and removes spaces:
       "7:30 – 9:00" -> "7:30-9:00"
       "7:30 — 9:00" -> "7:30-9:00"
       "7:30 − 9:00" -> "7:30-9:00"
@@ -75,11 +87,7 @@ def _normalize_time_range(s: str) -> str:
     if not s:
         return ""
     out = s.strip()
-
-    # replace common unicode dashes with "-"
     out = out.replace("–", "-").replace("—", "-").replace("−", "-")
-
-    # remove spaces around
     out = out.replace(" ", "")
     return out
 
@@ -89,17 +97,14 @@ def _parse_time_range(range_s: str) -> Optional[Tuple[time, time]]:
     Accepts:
       "7:30-9:00"
       "7:30 - 9:00"
-      "7:30 – 9:00"  (en dash)
-      "7:30 — 9:00"  (em dash)
-      "7:30 − 9:00"  (minus sign)
+      "7:30 – 9:00"
+      "0730-0900"
     """
     if not range_s:
         return None
-
     raw = _normalize_time_range(range_s)
     if "-" not in raw:
         return None
-
     a, b = raw.split("-", 1)
     start_t = _parse_time_hhmm(a)
     end_t = _parse_time_hhmm(b)
@@ -111,10 +116,9 @@ def _parse_time_range(range_s: str) -> Optional[Tuple[time, time]]:
 # ----------------------------
 # Helpers: token handling
 # ----------------------------
-
 async def _refresh_access_token(refresh_token: str) -> Dict[str, Any]:
-    client_id = os.getenv("GOOGLE_CLIENT_ID")
-    client_secret = os.getenv("GOOGLE_CLIENT_SECRET")
+    client_id = (os.getenv("GOOGLE_CLIENT_ID") or "").strip()
+    client_secret = (os.getenv("GOOGLE_CLIENT_SECRET") or "").strip()
 
     if not client_id or not client_secret:
         raise HTTPException(500, "Missing GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET in backend env.")
@@ -127,7 +131,11 @@ async def _refresh_access_token(refresh_token: str) -> Dict[str, Any]:
     }
 
     async with httpx.AsyncClient(timeout=20) as client:
-        r = await client.post(GOOGLE_TOKEN_URL, data=data)
+        r = await client.post(
+            GOOGLE_TOKEN_URL,
+            data=data,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
 
     if r.status_code >= 400:
         raise HTTPException(status_code=r.status_code, detail=r.text)
@@ -136,10 +144,6 @@ async def _refresh_access_token(refresh_token: str) -> Dict[str, Any]:
 
 
 async def _get_user_google_tokens(user_id: str) -> Dict[str, Any]:
-    """
-    Return user's stored tokens + connected email.
-    connected_email is informational; we insert into "primary" calendar.
-    """
     user = await db["users"].find_one(
         {"user_id": user_id},
         {"_id": 0, "google_token": 1, "gmail": 1, "email": 1},
@@ -157,7 +161,8 @@ async def _get_user_google_tokens(user_id: str) -> Dict[str, Any]:
     if not connected_email:
         connected_email = (user.get("gmail") or user.get("email") or "").strip().lower()
 
-    if not access_token:
+    # Access token may be empty but refresh token exists; we can refresh later.
+    if not access_token and not refresh_token:
         raise HTTPException(401, "User has no Google token stored. Please login with Google again.")
 
     return {
@@ -182,8 +187,19 @@ async def _insert_event(access_token: str, calendar_id: str, body: Dict[str, Any
 
 async def _insert_event_with_refresh(user_id: str, calendar_id: str, event_body: Dict[str, Any]) -> Dict[str, Any]:
     tokens = await _get_user_google_tokens(user_id)
-    access_token = tokens["access_token"]
-    refresh_token = tokens["refresh_token"]
+    access_token = (tokens.get("access_token") or "").strip()
+    refresh_token = (tokens.get("refresh_token") or "").strip()
+
+    # If no access token but we have refresh, refresh first
+    if not access_token and refresh_token:
+        new_tokens = await _refresh_access_token(refresh_token)
+        access_token = (new_tokens.get("access_token") or "").strip()
+        if not access_token:
+            raise HTTPException(401, "Failed to refresh Google token. Please login again.")
+        await db["users"].update_one(
+            {"user_id": user_id},
+            {"$set": {"google_token.access_token": access_token, "google_token.updated_at": datetime.now(timezone.utc)}},
+        )
 
     first = await _insert_event(access_token, calendar_id, event_body)
     if first["status_code"] != 401:
@@ -191,6 +207,7 @@ async def _insert_event_with_refresh(user_id: str, calendar_id: str, event_body:
             raise HTTPException(status_code=first["status_code"], detail=first["text"])
         return first["json"] or {}
 
+    # 401 -> refresh and retry
     if not refresh_token:
         raise HTTPException(401, "Google token expired/invalid. Please login with Google again.")
 
@@ -213,31 +230,28 @@ async def _insert_event_with_refresh(user_id: str, calendar_id: str, event_body:
 # ----------------------------
 # Request model
 # ----------------------------
-
 class TeachingLoadAcceptRequest(BaseModel):
-    userId: str
+    # allow userId either in body OR query param
+    userId: Optional[str] = None
     items: List[Dict[str, Any]] = Field(default_factory=list)
-    weeks: int = 5  # ✅ repeat for 5 weeks
+    weeks: int = 5
 
 
 # ----------------------------
 # Endpoint
 # ----------------------------
-
 @router.post("/gcal/teaching-load/accept")
-async def accept_teaching_load(payload: TeachingLoadAcceptRequest):
+async def accept_teaching_load(
+    payload: TeachingLoadAcceptRequest = Body(...),
+    userId: str = Query("", alias="userId"),
+):
     """
-    Expects items from FACULTY_Overview.tsx blocks:
-      {
-        code, title, section, mode, room, time,
-        day: "Monday" | "Tuesday" | ...
-      }
-
-    Creates events on the user's PRIMARY calendar using their stored token.
-    Title: [Code][Section][Mode]
-    Start from acceptance week and repeat weekly for 5 weeks.
+    Creates Google Calendar events on the user's PRIMARY calendar using stored Google tokens.
+    Creates ONE event per schedule item, weekly recurrence for N weeks.
+    Prevents timezone shifting by using timezone-aware datetimes (+08:00) and BYDAY in RRULE.
     """
-    if not payload.userId:
+    uid = (payload.userId or userId or "").strip()
+    if not uid:
         raise HTTPException(400, "Missing userId")
     if not payload.items:
         raise HTTPException(400, "No schedule items to add")
@@ -247,14 +261,12 @@ async def accept_teaching_load(payload: TeachingLoadAcceptRequest):
         weeks = 1
 
     tz = ZoneInfo("Asia/Manila")
+    now_local = datetime.now(tz)
+    accepted_date = now_local.date()
+    week_start = accepted_date - timedelta(days=accepted_date.weekday())  # Monday anchor
 
-    accepted_date = datetime.now(tz).date()
-    week_start = accepted_date - timedelta(days=accepted_date.weekday())  # Monday
-
-    # ✅ Always insert into the authenticated user's primary calendar
     calendar_id = "primary"
-
-    tok = await _get_user_google_tokens(payload.userId)
+    tok = await _get_user_google_tokens(uid)
     connected_email = tok.get("connected_email")
 
     created: List[Dict[str, Any]] = []
@@ -265,7 +277,7 @@ async def accept_teaching_load(payload: TeachingLoadAcceptRequest):
         title = _safe_str(item.get("title") or item.get("course_title") or item.get("data", {}).get("title"))
         section = _safe_str(item.get("section") or item.get("sec") or item.get("data", {}).get("sec"))
         mode = _safe_str(item.get("mode") or item.get("modality") or item.get("data", {}).get("mode"))
-        room = _safe_str(item.get("room") or item.get("data", {}).get("room")) or "Online"
+        room = _safe_str(item.get("room") or item.get("data", {}).get("room"))
         day = _safe_str(item.get("day"))
         time_range = _safe_str(item.get("time") or item.get("data", {}).get("time"))
 
@@ -279,30 +291,42 @@ async def accept_teaching_load(payload: TeachingLoadAcceptRequest):
         if wd is None:
             skipped.append({"item": item, "reason": f"Unknown day value: {day}"})
             continue
-
         if tr is None:
             skipped.append({"item": item, "reason": f"Bad time range: {time_range}"})
             continue
 
         start_t, end_t = tr
 
-        # first occurrence in acceptance week
+        # pick first occurrence: acceptance week day, else next week
         first_date = week_start + timedelta(days=wd)
 
-        # if the day already passed before acceptance date, schedule next week
+        # If the date is already behind accepted date, push next week
         if first_date < accepted_date:
             first_date = first_date + timedelta(days=7)
 
-        start_dt = datetime.combine(first_date, start_t).replace(tzinfo=tz)
-        end_dt = datetime.combine(first_date, end_t).replace(tzinfo=tz)
+        # If it's today but time already passed, also push next week
+        if first_date == accepted_date:
+            start_dt_test = datetime.combine(first_date, start_t, tzinfo=tz)
+            if start_dt_test <= now_local:
+                first_date = first_date + timedelta(days=7)
 
-        event_title = f"[{code}][{section}][{mode}]".strip()
+        start_dt = datetime.combine(first_date, start_t, tzinfo=tz)
+        end_dt = datetime.combine(first_date, end_t, tzinfo=tz)
+        if end_dt <= start_dt:
+            end_dt = end_dt + timedelta(days=1)
+
+        byday = RRULE_BYDAY.get(wd, None)
+
+        event_title = f'[{code}][{section}][{mode}]'.strip()
         if event_title == "[][][]":
             event_title = "[AnimoAssign] Class"
 
+        if not room:
+            room = "Online"
+
         event_body: Dict[str, Any] = {
             "summary": event_title,
-            "location": room if room else None,
+            "location": room,
             "description": (
                 f"Code: {code}\n"
                 f"Title: {title}\n"
@@ -310,17 +334,18 @@ async def accept_teaching_load(payload: TeachingLoadAcceptRequest):
                 f"Mode: {mode}\n"
                 f"Room: {room}\n"
                 f"Time: {time_range}\n\n"
-                f"Created by AnimoAssign on acceptance week."
+                "Created by AnimoAssign on acceptance week."
             ),
-            "start": {"dateTime": start_dt.isoformat(), "timeZone": "Asia/Manila"},
+            # timezone-aware ISO like 2026-01-28T07:30:00+08:00 (prevents 11:30pm shift)
+           "start": {"dateTime": start_dt.isoformat(), "timeZone": "Asia/Manila"},
             "end": {"dateTime": end_dt.isoformat(), "timeZone": "Asia/Manila"},
-            "recurrence": [f"RRULE:FREQ=WEEKLY;COUNT={weeks}"],
+            "recurrence": [
+                f"RRULE:FREQ=WEEKLY;COUNT={weeks}" + (f";BYDAY={byday}" if byday else "")
+            ],
+            "reminders": {"useDefault": False, "overrides": [{"method": "popup", "minutes": 30}]},
         }
 
-        if event_body.get("location") is None:
-            event_body.pop("location", None)
-
-        created_event = await _insert_event_with_refresh(payload.userId, calendar_id, event_body)
+        created_event = await _insert_event_with_refresh(uid, calendar_id, event_body)
 
         created.append({
             "summary": created_event.get("summary"),

@@ -8,6 +8,8 @@ import HistoryMain from "./FACULTY_History";
 import PreferencesContent from "./FACULTY_Preferences";
 import DeloadingsContent from "./FACULTY_Deloadings";
 import { InboxContent } from "./FACULTY_Inbox";
+import { acceptTeachingLoadToGcal } from "../../api"; 
+
 
 import {
   getFacultyOverviewList,
@@ -501,16 +503,62 @@ function TeachingLoadEnhanced({ teachingLoad, term }: TeachingLoadEnhancedProps)
           <button
             type="button"
             onClick={async () => {
+            try {
+              const raw = JSON.parse(localStorage.getItem("animo.user") || "{}");
+              const userId = raw.userId || raw.user_id || raw.id || "";
+
+              const termId = (term as any)?.term_id || (term as any)?._id || (term as any)?.id;
+
+              // 1) Accept proposal in backend
+              await acceptFacultyLoadAssignment(userId, { term_id: termId });
+
+              // 2) Create Google Calendar events using items already computed for calendar view
+              const itemsForGcal = (placed || []).map((p) => ({
+                day: p.day, // "Monday".."Saturday"
+                code: p.data.code,
+                title: p.data.title,
+                section: p.data.sec,
+                mode: p.data.mode,
+                room: p.data.room,
+                time: p.data.time, // "7:30 – 9:00"
+              }));
+
+              // remove duplicates (same course/day/time/room)
+              const seen = new Set<string>();
+              const uniqueItems = itemsForGcal.filter((x) => {
+                const key = `${x.code}|${x.section}|${x.day}|${x.time}|${x.room}|${x.mode}`;
+                if (seen.has(key)) return false;
+                seen.add(key);
+                return true;
+              });
+
+              if (uniqueItems.length > 0) {
               try {
-                const raw = JSON.parse(localStorage.getItem("animo.user") || "{}");
-                const userId = raw.userId || raw.user_id || raw.id || "";
-                await acceptFacultyLoadAssignment(userId, { term_id: (term as any)?.term_id || (term as any)?._id || (term as any)?.id });
-                setIsAccepted(true);
-                window.location.reload();
-              } catch (e) {
-                console.error(e);
+                // include userId in body too (works even if backend expects it in body)
+                const resp = await acceptTeachingLoadToGcal(userId, { userId, items: uniqueItems, weeks: 5 });
+                console.log("GCAL insert resp:", resp);
+              } catch (e: any) {
+                const msg =
+                  e?.response?.data?.detail ||
+                  e?.message ||
+                  "Calendar insert failed. Check backend logs.";
+                alert(msg);
+                console.error("Accepted schedule, but calendar insert failed:", e);
+                return; // ✅ do NOT reload; let user retry
               }
-            }}
+            } else {
+              alert("No sched items to add to calendar (all TBA / missing day-time).");
+              return;
+            }
+
+            setIsAccepted(true);
+            window.location.reload();
+
+            } catch (e) {
+              console.error(e);
+            }
+          }}
+
             disabled={isAccepted}
             className={cls(
               "inline-flex h-9 items-center justify-center rounded-lg px-4 text-sm font-medium shadow",

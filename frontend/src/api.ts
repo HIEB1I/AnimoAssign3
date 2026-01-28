@@ -2408,6 +2408,33 @@ export async function acceptFacultyLoadAssignment(userId: string, payload: { ter
   return r.json() as Promise<{ ok: boolean; status?: string }>;
 }
 
+export async function acceptTeachingLoadToGcal(
+  userId: string,
+  payload: { items: any[]; weeks?: number; userId?: string }
+) {
+  const base = (typeof API_BASE !== "undefined" ? API_BASE : "").replace(/\/+$/, "");
+  const url = `${base}/gcal/teaching-load/accept`;
+
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      userId,
+      items: payload.items || [],
+      weeks: payload.weeks ?? 5,
+    }),
+  });
+
+  if (!r.ok) throw new Error(await r.text());
+  return r.json() as Promise<{
+    calendarId: string;
+    connected_email?: string;
+    created_count: number;
+    skipped_count: number;
+  }>;
+}
+
+
 /* =========================================================
    ===============  FACULTY: HISTORY  ======================
    ========================================================= */
