@@ -2361,10 +2361,14 @@ export async function getFacultyOverview(userId: string) {
 }
 
 // ===== Load Assignment RFC workflow (Faculty) =====
-export async function getFacultyLoadAssignmentRfc(userId: string, params: { term_id?: string }) {
+export async function getFacultyLoadAssignmentRfc(
+  userId: string,
+  params: { term_id?: string; section_id?: string }
+) {
   const base = (typeof API_BASE !== "undefined" ? API_BASE : "").replace(/\/+$/, "");
   const qs = new URLSearchParams({ userId });
   if (params.term_id) qs.set("term_id", params.term_id);
+  if (params.section_id) qs.set("section_id", params.section_id);
   const url = `${base}/faculty/load-assignment/rfc?${qs.toString()}`;
   const r = await fetch(url, { method: "GET" });
   if (!r.ok) throw new Error(await r.text());
@@ -2373,7 +2377,7 @@ export async function getFacultyLoadAssignmentRfc(userId: string, params: { term
 
 export async function sendFacultyLoadAssignmentRfcMessage(
   userId: string,
-  payload: { term_id?: string; message: string }
+  payload: { term_id?: string; section_id: string; message: string }
 ) {
   const base = (typeof API_BASE !== "undefined" ? API_BASE : "").replace(/\/+$/, "");
   const url = `${base}/faculty/load-assignment/rfc/message?userId=${encodeURIComponent(userId)}`;
@@ -2383,7 +2387,13 @@ export async function sendFacultyLoadAssignmentRfcMessage(
     body: JSON.stringify(payload),
   });
   if (!r.ok) throw new Error(await r.text());
-  return r.json() as Promise<{ ok: boolean; rfc_id?: string; status?: string }>;
+  return r.json() as Promise<{
+    ok: boolean;
+    rfc_id?: string;
+    status?: string;
+    email_sent?: boolean;
+    email_error?: string | null;
+  }>;
 }
 
 export async function acceptFacultyLoadAssignment(userId: string, payload: { term_id?: string }) {

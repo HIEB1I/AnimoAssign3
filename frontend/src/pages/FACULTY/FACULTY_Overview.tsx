@@ -263,6 +263,7 @@ function normalizeDay(raw?: string): DayLong | null {
 
 // --- *** NEW: This type matches the backend (Python) output *** ---
 type TLItem = {
+  section_id: string;
   course_code: string;
   course_title: string;
   section: string;
@@ -276,6 +277,7 @@ type TLItem = {
   time2?: string;
   syllabus?: string;
 };
+
 
 // --- *** NEW: This type is for the Calendar items *** ---
 type TLItemForCalendar = {
@@ -908,7 +910,14 @@ function ChangeRequestModal({
             </div>
           )}
 
-          <RfcThreadView term={term} />
+          <RfcThreadView
+            term={term}
+            sectionId={
+              (context.item.originalItem as any)?.section_id ||
+              (context.item.originalItem as any)?.sectionId ||
+              ""
+            }
+          />
 
           <label className="block text-sm font-medium text-neutral-700">Change</label>
           <div className="flex flex-wrap gap-2">
@@ -998,11 +1007,30 @@ function ChangeRequestModal({
                 if (choices.includes("Other") && otherText.trim()) parts.push(otherText.trim());
                 const changeSummary = parts.join("; ");
                 const msg = `${context.item.code} ${context.item.sec} • ${context.day} • ${context.item.time}\n${changeSummary}\n\nRemarks: ${remarks.trim()}`;
-                await sendFacultyLoadAssignmentRfcMessage(userId, {
-                  term_id: (term as any)?.term_id || (term as any)?._id || (term as any)?.id,
-                  message: msg,
-                });
-                window.location.reload();
+               const sectionId =
+                (context.item.originalItem as any)?.section_id ||
+                (context.item.originalItem as any)?.sectionId ||
+                "";
+
+              if (!sectionId) {
+                console.error("Missing section_id for this course row. Backend must return section_id in teaching_load.");
+                return;
+              }
+
+              const resp = await sendFacultyLoadAssignmentRfcMessage(userId, {
+                term_id: (term as any)?.term_id || (term as any)?._id || (term as any)?.id,
+                section_id: sectionId,
+                message: msg,
+              });
+
+
+              // Optional: show a useful message if Gmail isn't connected
+              if (resp && resp.email_sent === false && resp.email_error) {
+                console.warn("RFC saved but email was not sent:", resp.email_error);
+              }
+
+              window.location.reload();
+
               } catch (e) {
                 console.error(e);
               } finally {
@@ -1025,7 +1053,7 @@ function ChangeRequestModal({
   );
 }
 
-function RfcThreadView({ term }: { term: any }) {
+function RfcThreadView({ term, sectionId }: { term: any; sectionId: string }) {
   const [thread, setThread] = useState<any | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -1038,6 +1066,7 @@ function RfcThreadView({ term }: { term: any }) {
         const userId = raw.userId || raw.user_id || raw.id || "";
         const resp = await getFacultyLoadAssignmentRfc(userId, {
           term_id: term?.term_id || term?._id || term?.id,
+          section_id: sectionId,
         });
         if (!alive) return;
         setThread(resp?.rfc || null);
@@ -1050,7 +1079,7 @@ function RfcThreadView({ term }: { term: any }) {
     return () => {
       alive = false;
     };
-  }, [term?.term_id, term?._id, term?.id]);
+  }, [term?.term_id, term?._id, term?.id, sectionId]);
 
   if (loading && !thread) {
     return (

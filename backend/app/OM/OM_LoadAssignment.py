@@ -1611,9 +1611,9 @@ async def om_send_to_faculty(payload: Dict[str, Any] = Body(...), db=Depends(get
 async def om_get_rfc(
     faculty_id: str = Query(...),
     term_id: Optional[str] = Query(None),
+    section_id: Optional[str] = Query(None),
     db=Depends(get_db),
 ):
-    """Return the RFC thread for a given faculty+term (any status)."""
     if not term_id:
         active = await _active_term()
         term_id = (active or {}).get("term_id")
@@ -1621,11 +1621,11 @@ async def om_get_rfc(
     if not term_id:
         return {"ok": True, "rfc": None}
 
-    rfc = await db[COL_LOAD_RFC].find_one(
-        {"faculty_id": faculty_id, "term_id": term_id},
-        {"_id": 0},
-    )
+    q = {"faculty_id": faculty_id, "term_id": term_id}
+    if section_id and section_id.strip():
+        q["section_id"] = section_id.strip()
 
+    rfc = await db[COL_LOAD_RFC].find_one(q, {"_id": 0})
     if not rfc:
         return {"ok": True, "rfc": None}
 
@@ -1637,11 +1637,10 @@ async def respond_load_assignment_rfc(
     payload: Dict[str, Any] = Body(...),
     db=Depends(get_db),
 ):
-    """OM responds on an RFC thread: reply | approve | reject."""
-    # IMPORTANT: user_id must be accepted from JSON body (frontend may not send query params)
     user_id = (payload.get("user_id") or payload.get("userId") or "").strip()
     term_id = (payload.get("term_id") or "").strip()
     faculty_id = (payload.get("faculty_id") or "").strip()
+    section_id = (payload.get("section_id") or payload.get("sectionId") or "").strip()
     action = (payload.get("action") or "").strip().lower()
     message = (payload.get("message") or "").strip()
 
@@ -1654,12 +1653,26 @@ async def respond_load_assignment_rfc(
     if action == "reply" and not message:
         raise HTTPException(status_code=400, detail="message is required for reply")
 
-    rfc = await db[COL_LOAD_RFC].find_one({"faculty_id": faculty_id, "term_id": term_id}, {"_id": 0})
+    # ✅ RFC key (isolated per subject when section_id is present)
+    qkey: Dict[str, Any] = {"faculty_id": faculty_id, "term_id": term_id}
+    if section_id:
+        qkey["section_id"] = section_id
+
+    # Find RFC (if section_id missing, fallback to latest for faculty+term)
+    if section_id:
+        rfc = await db[COL_LOAD_RFC].find_one(qkey, {"_id": 0})
+    else:
+        lst = await db[COL_LOAD_RFC].find(
+            {"faculty_id": faculty_id, "term_id": term_id},
+            {"_id": 0},
+        ).sort([("updated_at", -1), ("created_at", -1)]).to_list(1)
+        rfc = lst[0] if lst else None
+
     if not rfc:
         raise HTTPException(status_code=404, detail="No RFC found")
 
     rfc = _normalize_rfc_doc(rfc)
-    if rfc.get("status") in RFC_TERMINAL:
+    if (rfc.get("status") or "").upper() in RFC_TERMINAL:
         raise HTTPException(status_code=409, detail="RFC is already locked")
 
     now = datetime.now(timezone.utc)
@@ -1680,56 +1693,52 @@ async def respond_load_assignment_rfc(
     if action == "reply":
         new_status = "NEEDS_FACULTY"
         locked = False
+
     elif action == "approve":
         new_status = "APPROVED"
         locked = True
         extra["closed_at"] = now
-    else:
+
+    else:  # reject
         new_status = "REJECTED"
         locked = True
         extra["closed_at"] = now
 
-        # If OM rejects the RFC, automatically approve/lock the proposed schedule
-        # so the faculty can no longer RFC for the same courses.
-        try:
-            await db[COL_LOAD_PROPOSALS].update_one(
-                {"faculty_id": faculty_id, "term_id": term_id},
-                {
-                    "$set": {
-                        "rows.$[].finalized": True,
-                        "locked": True,
-                        "updated_at": now,
-                    },
-                    "$setOnInsert": {"created_at": now},
-                },
-                upsert=True,
-            )
-        except Exception:
-            # Best-effort only: do not block the RFC response if proposal is missing/has different schema
-            pass
+        # ✅ Reject only finalizes the matching subject row (not all rows)
+        if section_id:
+            try:
+                await db[COL_LOAD_PROPOSALS].update_one(
+                    {"faculty_id": faculty_id, "term_id": term_id},
+                    {"$set": {"rows.$[row].finalized": True, "updated_at": now}},
+                    array_filters=[{"row.section_id": section_id}],
+                )
+            except Exception:
+                pass
 
     rfc_id = rfc.get("rfc_id")
 
+    # ✅ Update only this RFC thread (qkey includes section_id when present)
     await db[COL_LOAD_RFC].update_one(
-        {"faculty_id": faculty_id, "term_id": term_id},
-        {
-            "$set": {
-                "rfc_id": rfc_id,
-                "faculty_id": faculty_id,
-                "term_id": term_id,
-                "status": new_status,
-                "locked": locked,
-                "messages": msgs,
-                "updated_at": now,
-                **extra,
-            },
-            "$setOnInsert": {"created_at": now},
-        },
-        upsert=True,
+        qkey,
+        {"$set": {
+            "rfc_id": rfc_id,
+            "faculty_id": faculty_id,
+            "term_id": term_id,
+            "section_id": section_id or rfc.get("section_id"),
+            "status": new_status,
+            "locked": locked,
+            "messages": msgs,
+            "updated_at": now,
+            **extra,
+        }},
+        upsert=False,
     )
 
     # notify faculty
-    fac = await db[COL_FACULTY].find_one({"faculty_id": faculty_id}, {"_id": 0, "user_id": 1}) or {}
+    fac = await db[COL_FACULTY].find_one(
+        {"faculty_id": faculty_id},
+        {"_id": 0, "user_id": 1},
+    ) or {}
     fac_user_id = (fac.get("user_id") or "").strip()
 
     if fac_user_id:
@@ -1755,11 +1764,16 @@ async def respond_load_assignment_rfc(
                 "kind": kind,
                 "term_id": term_id,
                 "faculty_id": faculty_id,
+                "section_id": section_id,
                 "rfc_id": rfc_id,
             },
         )
 
     return {"ok": True, "status": new_status}
+
+
+
+
 
 
 @router.post("/load-assignment/finalize-course")
