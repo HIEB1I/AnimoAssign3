@@ -1960,24 +1960,28 @@ export default function OM_LoadAssignment() {
     // If any row is selected for a faculty, send ALL rows for that faculty (not per subject)
     return rows.filter((r) => selectedKeys.has(key(r)));
   };
-
+  
   const handleSendToFaculty = async (rowsToSend: Row[]) => {
     if (!userId) throw new Error("Missing userId");
     if (!rowsToSend?.length) throw new Error("No rows to send");
 
     const term_id = termId || undefined;
 
+    // 1️⃣ Send selected rows to faculty (proposal + notification)
     await sendOmLoadAssignmentsToFaculty(userId, {
       term_id,
       rows: rowsToSend,
     });
 
-    // After sending: clear selections and refresh
+    // 2️⃣ Persist the FULL OM table so refresh doesn't revert changes
+    await submitOmLoadAssignment(userId, { rows }, "save");
+
+    // 3️⃣ Reset UI + reload from DB
     setShowSend(false);
     setSendRowsPreview([]);
     await loadFromServer();
+    setHasLocalEdits(false);
   };
-
 
   // Derived: scoped history availability (re-rendered via historyVersion)
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
