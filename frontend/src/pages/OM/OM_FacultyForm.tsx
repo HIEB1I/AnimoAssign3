@@ -277,11 +277,15 @@ export default function OM_FacultyForm() {
   };
 
   // Load dropdown options
-  useEffect(() => {
+useEffect(() => {
     (async () => {
-      try {
-        const opt = await getOMFOptions();
-        if (!opt.ok) throw new Error("Failed to load options");
+    try {
+    // NEW: trigger deadline reminder generation (safe to call repeatedly; backend dedupes)
+    fetch("/api/notifications/run-prefs-deadline-reminders", { method: "POST" }).catch(() => {});
+
+
+    const opt = await getOMFOptions();
+    if (!opt.ok) throw new Error("Failed to load options");
         setDeptOptions(["All Departments", ...opt.departments]);
         setTypeOptions(["All Faculty Type", ...opt.facultyTypes]);
         setActiveTerm(opt.activeTerm || null);
