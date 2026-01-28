@@ -141,6 +141,7 @@ from .OM.OM_LoadAssignment import router as om_loadassignment_router
 from .OM.OM_ReportsAnalytics import router as om_reportsanalytics_router
 
 from .APO.APO_PreEnlistment import router as apo_preenlistment_router
+from .APO.APO_Inbox import router as apo_inbox_router
 from .APO.APO_RoomAllocation import router as apo_roomallocation_router
 from .APO.APO_CourseOfferings import router as apo_courseofferings_router
 from .STUDENT.STUDENT_Petition import router as student_studentpetition_router
@@ -177,6 +178,7 @@ app.include_router(om_loadassignment_router, prefix="/api")
 app.include_router(om_reportsanalytics_router, prefix="/api")
 
 app.include_router(apo_preenlistment_router, prefix="/api")
+app.include_router(apo_inbox_router, prefix="/api")
 app.include_router(apo_roomallocation_router, prefix="/api")
 app.include_router(apo_courseofferings_router, prefix="/api")
 app.include_router(student_studentpetition_router, prefix="/api")
