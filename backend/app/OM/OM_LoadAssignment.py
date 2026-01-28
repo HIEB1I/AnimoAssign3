@@ -28,12 +28,38 @@ COL_STAFF = "staff_profiles"
 COL_FACULTY = "faculty_profiles"
 COL_ASSIGN = "faculty_assignments"
 COL_SECTIONS = "sections"
+COL_SECTIONS_SUBMITTED = "sections_submitted"
 COL_SCHED = "section_schedules"
 COL_ROOMS = "rooms"
 COL_COURSES = "courses"
 COL_TERMS = "terms"
 COL_DEPTS = "departments"
 COL_CAMPUSES = "campuses"
+
+
+async def _om_department_ids(user_id: str, db) -> List[str]:
+    """Departments this OM should see.
+    Tries role_assignments(role=office_manager/om) then staff_profiles.department_id.
+    """
+    ra = await db.get_collection("role_assignments").find_one(
+        {"user_id": user_id, "role": {"$in": ["office_manager", "om"]}},
+        {"_id": 0, "department_ids": 1, "department_id": 1},
+    ) or {}
+
+    dept_ids: List[str] = []
+    if isinstance(ra.get("department_ids"), list):
+        dept_ids = [str(x).strip() for x in ra["department_ids"] if str(x).strip()]
+    elif ra.get("department_id"):
+        dept_ids = [str(ra["department_id"]).strip()]
+
+    if dept_ids:
+        return dept_ids
+
+    staff = await db[COL_STAFF].find_one({"user_id": user_id}, {"_id": 0, "department_id": 1}) or {}
+    if staff.get("department_id"):
+        return [str(staff["department_id"]).strip()]
+
+    return []
 COL_LEAVES = "leaves"
 COL_PREFERENCES = "faculty_preferences"
 COL_FACULTY_LOADS = "faculty_loads"
@@ -534,11 +560,14 @@ def _preferred_cap_for(ctx, fid: str) -> int:
     return int(pref.get("preferred_units") or pref.get("load_units") or 12)
 
 async def _fetch_rows(user_id: str, term_id: str, db) -> Dict[str, Any]:
+    dept_ids = await _om_department_ids(user_id, db)
     pipe: List[Dict[str, Any]] = [
-        {"$match": {"term_id": term_id}} if term_id else {"$match": {}},
+        {"$match": {"term_id": term_id, "submitted_for_scheduling": True}} if term_id else {"$match": {"submitted_for_scheduling": True}},
 
         {"$lookup": {"from": COL_COURSES, "localField": "course_id", "foreignField": "course_id", "as": "course"}},
         {"$unwind": {"path": "$course", "preserveNullAndEmptyArrays": True}},
+        # Dept restriction (each OM only sees their department)
+        ({"$match": {"course.department_id": {"$in": dept_ids}}} if dept_ids else {"$match": {}}),
         {
         "$match": {
             "$or": [
@@ -581,7 +610,7 @@ async def _fetch_rows(user_id: str, term_id: str, db) -> Dict[str, Any]:
         {"$sort": {"course_code": 1}},
     ]
 
-    docs = [x async for x in db[COL_SECTIONS].aggregate(pipe)]
+    docs = [x async for x in db[COL_SECTIONS_SUBMITTED].aggregate(pipe)]
 
     # --- Preload rooms into a lookup: { room_id → room_number } ---
     room_docs = [

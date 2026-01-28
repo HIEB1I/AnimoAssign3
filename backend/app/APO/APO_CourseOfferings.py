@@ -13,6 +13,7 @@ from collections import defaultdict
 from fastapi import APIRouter, HTTPException, Query, Body
 from pymongo.errors import DuplicateKeyError
 from ..main import db
+from ..Notifications import create_notification
 
 router = APIRouter(prefix="/apo", tags=["apo"])
 
@@ -24,6 +25,7 @@ COL_DEPARTMENTS = "departments"
 COL_PROGRAMS = "programs"
 COL_BATCHES = "batches"
 COL_SECTIONS = "sections"
+COL_SECTIONS_SUBMITTED = "sections_submitted"
 COL_SCHEDS = "section_schedules"
 COL_ROOMS = "rooms"
 COL_USERS = "users"
@@ -40,9 +42,147 @@ COL_OVR_TOKENS = "override_tokens"
 COL_OVR_AUDIT = "override_audit"
 COL_PLANSTATE = "planning_state"
 COL_SPECIAL = "special_class"
-
-
+COL_APO_OFFERINGS_AUDIT = "apo_offerings_audit"
+COL_APO_SUBMISSIONS = "apo_scheduling_submissions"
 DEFAULT_CAP = 20
+def _audit_id() -> str:
+    return _id("AUD-")
+
+async def _course_meta(course_id: str, db) -> Dict[str, Any]:
+    if not course_id:
+        return {}
+    return await db[COL_COURSES].find_one(
+        {"course_id": course_id},
+        {"_id": 0, "course_code": 1, "department_id": 1},
+    ) or {}
+
+def _course_code_str(course_doc: Dict[str, Any]) -> str:
+    cc = course_doc.get("course_code")
+    if isinstance(cc, list):
+        return (cc[0] or "").strip()
+    return (cc or "").strip()
+
+async def _audit_offering_change(
+    *, action: str, user_id: str, term_id: str, campus_id: str,
+    section_id: str, section_code: str, course_id: str,
+    changes: Optional[Dict[str, Any]], db
+):
+    c = await _course_meta(course_id, db)
+    await db[COL_APO_OFFERINGS_AUDIT].insert_one({
+        "audit_id": _audit_id(),
+        "action": action,  # "add" | "edit" | "delete"
+        "user_id": user_id,
+        "term_id": term_id,
+        "campus_id": campus_id,
+        "department_id": (c.get("department_id") or "").strip(),
+        "course_id": course_id,
+        "course_code": _course_code_str(c),
+        "section_id": section_id,
+        "section_code": section_code,
+        "changes": changes or {},
+        "created_at": now(),
+    })
+
+async def _last_submit_at(term_id: str, campus_id: str, db):
+    doc = await db[COL_APO_SUBMISSIONS].find_one(
+        {"term_id": term_id, "campus_id": campus_id},
+        {"_id": 0, "last_submitted_at": 1},
+    ) or {}
+    return doc.get("last_submitted_at")
+
+def _summarize_audits(audits: List[Dict[str, Any]], max_items: int = 5) -> str:
+    if not audits:
+        return "No tracked changes."
+
+    added = [a for a in audits if a.get("action") == "add"]
+    edited = [a for a in audits if a.get("action") == "edit"]
+    deleted = [a for a in audits if a.get("action") == "delete"]
+
+    def fmt(a: Dict[str, Any]) -> str:
+        cc = (a.get("course_code") or a.get("course_id") or "").strip()
+        sc = (a.get("section_code") or a.get("section_id") or "").strip()
+        if a.get("action") == "edit":
+            fields = list((a.get("changes") or {}).keys())
+            fields_s = ", ".join(fields[:4]) + ("…" if len(fields) > 4 else "")
+            return f"Edited {cc} {sc} ({fields_s})" if fields_s else f"Edited {cc} {sc}"
+        if a.get("action") == "add":
+            return f"Added {cc} {sc}"
+        return f"Deleted {cc} {sc}"
+
+    lines = []
+    lines.append(f"Changes: +{len(added)} added, {len(edited)} edited, -{len(deleted)} deleted.")
+    examples = (added + edited + deleted)[:max_items]
+    for e in examples:
+        lines.append(f"- {fmt(e)}")
+
+    return "\n".join(lines)
+
+def _reset_submission_fields():
+    return {
+        "submitted_for_scheduling": False,
+        "submitted_at": None,
+        "submitted_by": None,
+    }
+
+async def _dept_name_by_id(dept_id: str, db) -> str:
+    if not dept_id:
+        return ""
+    d = await db[COL_DEPARTMENTS].find_one(
+        {"$or": [{"department_id": dept_id}, {"dept_id": dept_id}, {"id": dept_id}]},
+        {"_id": 0, "dept_name": 1, "department_name": 1, "name": 1},
+    ) or {}
+    return (d.get("dept_name") or d.get("department_name") or d.get("name") or "").strip()
+
+
+async def _om_user_ids_for_department_id(dept_id: str, db) -> List[str]:
+    """
+    Resolve OM user_id(s) for a department (best effort).
+    Uses role_assignments scope(type=department,id=dept_id) and role name matching OM.
+    """
+    if not dept_id:
+        return []
+
+    # 1) Find role_ids that look like OM
+    om_roles = await db[COL_USER_ROLES].find(
+        {"role_type": {"$regex": r"(^OM$|Office Manager)", "$options": "i"}},
+        {"_id": 0, "role_id": 1},
+    ).to_list(100)
+    om_role_ids = [r.get("role_id") for r in om_roles if r.get("role_id")]
+
+    if not om_role_ids:
+        return []
+
+    # 2) role_assignments with that role_id and dept scope
+    ras = await db[COL_ROLE_ASSIGN].find(
+        {"role_id": {"$in": om_role_ids}},
+        {"_id": 0, "user_id": 1, "scope": 1},
+    ).to_list(500)
+
+    recipients: List[str] = []
+    for ra in ras:
+        uid = (ra.get("user_id") or "").strip()
+        if not uid:
+            continue
+
+        scope = ra.get("scope") or []
+        if isinstance(scope, dict):
+            scope = [scope]
+
+        for s in scope:
+            if not isinstance(s, dict):
+                continue
+            if (s.get("type") or "").lower() == "department" and (s.get("id") or "").strip() == dept_id:
+                recipients.append(uid)
+                break
+
+    # Deduplicate
+    out: List[str] = []
+    seen = set()
+    for u in recipients:
+        if u not in seen:
+            seen.add(u)
+            out.append(u)
+    return out
 
 # ---------- helpers for ID generation ----------
 
@@ -552,6 +692,11 @@ def _coerce_cap(value) -> int | None:
         return None
 
 async def _sync_section_status_flags(current_term_id: str) -> None:
+    """Keep per-term status flags in sync without resurrecting archived rows.
+
+    We use status=active/inactive to indicate whether a section belongs to the planning term.
+    Deletions after submission are represented by status=archived; those must remain archived.
+    """
     try:
         await db[COL_SECTIONS].create_index(
             [("term_id", 1), ("fulfilled_placeholder_course_id", 1)],
@@ -559,12 +704,14 @@ async def _sync_section_status_flags(current_term_id: str) -> None:
         )
     except Exception:
         pass
+
+    # Do not touch archived rows (soft-deleted after submission)
     await db[COL_SECTIONS].update_many(
-        {"term_id": current_term_id, "status": {"$ne": "active"}},
+        {"term_id": current_term_id, "status": {"$nin": ["active", "archived"]}},
         {"$set": {"status": "active", "updated_at": now()}}
     )
     await db[COL_SECTIONS].update_many(
-        {"term_id": {"$ne": current_term_id}, "status": {"$ne": "inactive"}},
+        {"term_id": {"$ne": current_term_id}, "status": {"$nin": ["inactive", "archived"]}},
         {"$set": {"status": "inactive", "updated_at": now()}}
     )
 
@@ -575,6 +722,58 @@ def term_label(t: Optional[Dict[str, Any]]) -> str:
     ays = t.get("acad_year_start")
     aye = (ays + 1) if isinstance(ays, int) else None
     return f"Term {n} · AY {ays}-{aye}" if (n and ays and aye) else (t.get("term_id") or "")
+
+async def _refresh_submitted_sections_snapshot(*, term_id: str, campus_id: str, db) -> Dict[str, Any]:
+    """Create/refresh the submitted snapshot that OM reads.
+
+    Snapshot is per term_id + campus_id, keyed by (term_id, campus_id, section_id).
+    We copy the live section doc (minus _id) so OM sees exactly what was last submitted,
+    while assignments/schedules remain live.
+    """
+    ts = now()
+    live_q = {"term_id": term_id, "campus_id": campus_id, "status": {"$ne": "archived"}}
+    live_secs = [s async for s in db[COL_SECTIONS].find(live_q, {"_id": 0})]
+    live_ids = [s.get("section_id") for s in live_secs if s.get("section_id")]
+
+    # Upsert each live section into snapshot
+    upserted = 0
+    for s in live_secs:
+        sid = (s.get("section_id") or "").strip()
+        if not sid:
+            continue
+
+        # IMPORTANT:
+        # - Do NOT write created_at via $set because it conflicts with $setOnInsert
+        # - Do NOT write updated_at in multiple operators
+        snap = dict(s)
+        snap.pop("created_at", None)
+        snap.pop("updated_at", None)
+
+        snap["submitted_for_scheduling"] = True
+        snap["snapshot_at"] = ts
+        snap["updated_at"] = ts
+
+        await db[COL_SECTIONS_SUBMITTED].update_one(
+            {"term_id": term_id, "campus_id": campus_id, "section_id": sid},
+            {
+                "$set": snap,
+                "$setOnInsert": {"created_at": ts},
+            },
+            upsert=True,
+        )
+        upserted += 1
+
+    # Remove snapshot rows that no longer exist in live (or are archived)
+    snap_q = {"term_id": term_id, "campus_id": campus_id}
+    if live_ids:
+        removed = await db[COL_SECTIONS_SUBMITTED].delete_many({**snap_q, "section_id": {"$nin": live_ids}})
+        removed_n = int(getattr(removed, "deleted_count", 0) or 0)
+    else:
+        removed = await db[COL_SECTIONS_SUBMITTED].delete_many(snap_q)
+        removed_n = int(getattr(removed, "deleted_count", 0) or 0)
+
+    return {"upserted": upserted, "removed": removed_n}
+
 
 def _strip_room_when_no_time(slot: dict | None) -> dict:
     slot = (slot or {}).copy()
@@ -1722,7 +1921,9 @@ async def validate_soft_conflicts(
         warn("NO_ROOM_SET", "No room selected yet (TBA).")
 
     if plan_cid:
-        sec_q: Dict[str, Any] = {"term_id": term_id}
+        # Exclude soft-deleted (archived) sections from capacity math.
+        # Otherwise, deleted sections still count towards capacity and can also keep showing in the UI.
+        sec_q: Dict[str, Any] = {"term_id": term_id, "campus_id": campus_id, "status": {"$ne": "archived"}}
         sec_q["$or"] = [{"course_id": plan_cid}, {"fulfilled_placeholder_course_id": plan_cid}]
 
         pref_pat = prefix_pattern_for_level(campus_name, plan_lvl)
@@ -1977,7 +2178,11 @@ async def _cohort_snapshot(term_id: str, campus_id: str) -> Dict[str, Dict[str, 
 async def _planned_capacity_by_course_multi(term_id: str, prefix_map: Dict[str, str], course_ids: List[str]) -> Dict[str, int]:
     out: Dict[str, int] = {}
     for cid in course_ids:
-        sec_q: Dict[str, Any] = {"term_id": term_id, "$or": [{"course_id": cid}, {"fulfilled_placeholder_course_id": cid}]}
+        sec_q: Dict[str, Any] = {
+            "term_id": term_id,
+            "status": {"$ne": "archived"},
+            "$or": [{"course_id": cid}, {"fulfilled_placeholder_course_id": cid}],
+        }
         pref = (prefix_map.get(cid) or "").strip()
         if pref:
             sec_q["section_code"] = {"$regex": f"^{pref}", "$options": "i"}
@@ -1988,7 +2193,7 @@ async def _planned_capacity_by_course_multi(term_id: str, prefix_map: Dict[str, 
     return out
 
 async def _section_count(term_id: str, campus_prefix_pattern: str, course_id: str) -> int:
-    q: Dict[str, Any] = {"term_id": term_id}
+    q: Dict[str, Any] = {"term_id": term_id, "status": {"$ne": "archived"}}
     q["$or"] = [{"course_id": course_id}, {"fulfilled_placeholder_course_id": course_id}]
     if campus_prefix_pattern:
         q["section_code"] = {"$regex": f"^{campus_prefix_pattern}", "$options": "i"}
@@ -2625,10 +2830,36 @@ async def get_course_offerings(
             course_options_by_program[pid] = opts
 
         departments = [{"department_id": d, "department_name": dep_map.get(d,{}).get("department_name","")} for d in dep_ids]
+        
+        # Submission state (for UI: decide whether re-submission must include a comment)
+        sub_doc = await db[COL_APO_SUBMISSIONS].find_one(
+            {"term_id": term_id, "campus_id": campus_id},
+            {"_id": 0, "submit_count": 1, "first_submitted_at": 1, "last_submitted_at": 1, "last_submitted_by": 1},
+        ) or {}
+
+        has_prior_submit = int(sub_doc.get("submit_count") or 0) > 0
+
+        # Fallback for older data: if no submissions record exists yet, check if any section was ever submitted
+        if not has_prior_submit:
+            prior = await db[COL_SECTIONS].find_one(
+                {"term_id": term_id, "campus_id": campus_id, "submitted_for_scheduling": True},
+                {"_id": 0, "section_id": 1},
+            )
+            has_prior_submit = bool(prior)
+
+        submission = {
+            "has_prior_submit": has_prior_submit,
+            "submit_count": int(sub_doc.get("submit_count") or (1 if has_prior_submit else 0)),
+            "first_submitted_at": sub_doc.get("first_submitted_at"),
+            "last_submitted_at": sub_doc.get("last_submitted_at"),
+            "last_submitted_by": sub_doc.get("last_submitted_by"),
+        }
+
         return {
             "campus": campus,
             "term_id": term_id,
-            "term_label": term_label(planning_term), 
+            "term_label": term_label(planning_term),
+        "submission": submission, 
             "items": items,
             "course_options_by_program": course_options_by_program,
             "departments": departments
@@ -3410,7 +3641,14 @@ async def get_course_offerings(
     for cid in allowed_course_ids:
         lvl = (c_map_all.get(cid) or {}).get("program_level")
         pref_pat = prefix_pattern_for_level(campus.get("campus_name",""), lvl)
-        sec_q: Dict[str, Any] = {"term_id": term_id, "$or": [{"course_id": cid}, {"fulfilled_placeholder_course_id": cid}]}
+        # Hide soft-deleted (archived) sections from APO view immediately.
+        # OM will keep seeing the old snapshot until APO re-submits, but APO should no longer see the deleted row.
+        sec_q: Dict[str, Any] = {
+            "term_id": term_id,
+            "campus_id": campus_id,
+            "status": {"$ne": "archived"},
+            "$or": [{"course_id": cid}, {"fulfilled_placeholder_course_id": cid}],
+        }
         if pref_pat:
             sec_q["section_code"] = {"$regex": f"^{pref_pat}", "$options": "i"}
 
@@ -4944,6 +5182,9 @@ async def post_course_offerings(
             "status": "active",
             "created_at": now(), "updated_at": now(),
         }
+
+        doc.update(_reset_submission_fields())   
+
         if (payload.get("section_code") or "").strip():
             doc["_code_from_user"] = True
 
@@ -5091,6 +5332,9 @@ async def post_course_offerings(
             sec_updates["fulfilled_placeholder_course_id"] = _new_placeholder
         if sec_updates:
             sec_updates["updated_at"] = now()
+
+            sec_updates.update(_reset_submission_fields()) 
+
             try:
                 await db[COL_SECTIONS].update_one({"section_id": section_id}, {"$set": sec_updates})
             except DuplicateKeyError:
@@ -5244,9 +5488,221 @@ async def post_course_offerings(
     # ---------- DELETE ROW ----------
     if action == "deleteRow":
         section_id = (payload.get("section_id") or "").strip()
-        await db[COL_SCHEDS].delete_many({"section_id": section_id})
-        await db[COL_FAC_ASSIGN].update_many({"section_id": section_id}, {"$set": {"is_archived": True, "updated_at": now()}})
-        await db[COL_SECTIONS].delete_one({"section_id": section_id})
-        return {"ok": True, "deleted": 1}
+        if not section_id:
+            raise HTTPException(400, "Missing section_id")
+
+        # If section was ever submitted (exists in snapshot), DO NOT hard-delete immediately.
+        # This prevents OM from losing the section (and its current assignments/schedules) until APO re-submits.
+        was_submitted = await db[COL_SECTIONS_SUBMITTED].find_one(
+            {"term_id": term_id, "campus_id": campus_id, "section_id": section_id},
+            {"_id": 0, "section_id": 1},
+        )
+
+        if was_submitted:
+            await db[COL_SECTIONS].update_one(
+                {"term_id": term_id, "campus_id": campus_id, "section_id": section_id},
+                {"$set": {"status": "archived", "archived_at": now(), "archived_by": userId, "updated_at": now()}},
+            )
+            # IMPORTANT: keep schedules/assignments untouched for now (OM + APO see them live)
+            # Snapshot will be refreshed on next Submit for Scheduling and only then the OM will stop seeing it.
+            return {"ok": True, "deleted": 1, "mode": "soft"}
+
+        # Never submitted yet: safe to hard delete and cleanup
+        await db[COL_SCHEDS].delete_many({"term_id": term_id, "campus_id": campus_id, "section_id": section_id})
+        await db[COL_FAC_ASSIGN].update_many(
+            {"term_id": term_id, "campus_id": campus_id, "section_id": section_id},
+            {"$set": {"is_archived": True, "updated_at": now()}},
+        )
+        await db[COL_SECTIONS].delete_one({"term_id": term_id, "campus_id": campus_id, "section_id": section_id})
+        return {"ok": True, "deleted": 1, "mode": "hard"}
+
+@router.post("/forward/{userId}")
+async def apo_forward_courseofferings_to_scheduling(
+    userId: str,
+    payload: Dict[str, Any] = Body(...),
+):
+    # Use the same planning term logic
+    planning_term = await _get_planning_term()
+    term_id = (planning_term or {}).get("term_id")
+    if not term_id:
+        raise HTTPException(409, "No planning term found.")
+
+    await _sync_section_status_flags(term_id)
+
+    # APO campus scope -> makes Manila/Laguna independent
+    campus_id, _ = await apo_scope(userId)
+    if not campus_id:
+        raise HTTPException(409, "Unable to resolve APO campus from role_assignments.")
+
+    campus = await campus_meta(campus_id)
+    campus_name = (campus or {}).get("campus_name") or ""
+
+    tlabel = term_label(planning_term)
+
+    # Read comment/note from payload
+    message = (payload.get("message") or "").strip()
+
+    
+    # Determine if this campus has already submitted before (persisted in apo_scheduling_submissions)
+    sub_doc = await db[COL_APO_SUBMISSIONS].find_one(
+        {"term_id": term_id, "campus_id": campus_id},
+        {"_id": 0, "submit_count": 1, "first_submitted_at": 1},
+    )
+
+    # Fallback for older DBs: infer from snapshot presence
+    seed_first = now()
+    submit_count = int((sub_doc or {}).get("submit_count") or 0)
+    if not sub_doc:
+        prior_snap = await db[COL_SECTIONS_SUBMITTED].find_one(
+            {"term_id": term_id, "campus_id": campus_id},
+            {"_id": 0, "section_id": 1, "submitted_at": 1},
+        )
+        if prior_snap:
+            submit_count = 1
+            seed_first = prior_snap.get("submitted_at") or seed_first
+
+    is_initial = submit_count == 0
+    if (not is_initial) and (not message):
+        raise HTTPException(422, "Comment is required for updates after initial submission.")
+
+    # Publish: mark sections as submitted for THIS campus only
+    ts = now()
+    res = await db[COL_SECTIONS].update_many(
+        {"term_id": term_id, "campus_id": campus_id, "status": {"$ne": "archived"}},
+        {"$set": {
+            "submitted_for_scheduling": True,
+            "submitted_at": ts,
+            "submitted_by": userId,
+            "updated_at": ts,
+        }},
+    )
+
+    # Refresh submitted snapshot so OM sees changes ONLY after submit
+    snap_res = await _refresh_submitted_sections_snapshot(term_id=term_id, campus_id=campus_id, db=db)
+
+    # Optional cleanup: if APO previously soft-archived sections, archive their assignments and remove schedules now
+    archived_ids = [s.get("section_id") async for s in db[COL_SECTIONS].find(
+        {"term_id": term_id, "campus_id": campus_id, "status": "archived"},
+        {"_id": 0, "section_id": 1},
+    )]
+    if archived_ids:
+        await db[COL_SCHEDS].delete_many({"section_id": {"$in": archived_ids}})
+        await db[COL_FAC_ASSIGN].update_many(
+            {"section_id": {"$in": archived_ids}},
+            {"$set": {"is_archived": True, "updated_at": now()}},
+        )
+
+
+    # Keep existing outbox behavior (optional but consistent)
+    to = (payload.get("to") or "").strip()
+    if to:
+        oid = _id("OUT-")
+        await db[COL_OUTBOX].insert_one({
+            "outbox_id": oid,
+            "to": to,
+            "subject": (payload.get("subject") or "").strip(),
+            "message": (payload.get("message") or "").strip(),
+            "attachment_html": (payload.get("attachment_html") or "").strip(),
+            "term_id": term_id,
+            "campus_id": campus_id,
+            "created_at": now(),
+            "status": "queued",
+        })
+
+    # --- NOTIFY OM per department (same style as notify-chair) ---
+
+    # Determine departments included in this campus submission
+    dept_pipe = [
+        {"$match": {"term_id": term_id, "campus_id": campus_id, "submitted_for_scheduling": True}},
+        {"$lookup": {"from": COL_COURSES, "localField": "course_id", "foreignField": "course_id", "as": "course"}},
+        {"$unwind": {"path": "$course", "preserveNullAndEmptyArrays": False}},
+        {"$group": {"_id": "$course.department_id"}},
+    ]
+    dept_rows = [d async for d in db[COL_SECTIONS].aggregate(dept_pipe)]
+    dept_ids = [d.get("_id") for d in dept_rows if d and d.get("_id")]
+
+    created = 0
+    notified: List[str] = []
+
+    for dept_id in dept_ids:
+        recipients = await _om_user_ids_for_department_id(dept_id, db)
+        dept_name = await _dept_name_by_id(dept_id, db)
+
+        # kind inference: forwarded vs updated (same idea as your notify-chair)
+        kind = "apo_offerings_forwarded"
+        prior = await db["notifications"].find_one(
+            {
+                "meta.kind": "apo_offerings_forwarded",
+                "meta.term_id": term_id,
+                "meta.campus_id": campus_id,
+                "meta.department_id": dept_id,
+            },
+            {"_id": 0, "notif_id": 1},
+        )
+        if prior:
+            kind = "apo_offerings_updated"
+
+        title = "Course Offerings Updated" if kind == "apo_offerings_updated" else "Course Offerings Submitted"
+
+        # show term number + acad year instead of (TERM0015)
+        details = (
+            f"APO ({campus_name}) "
+            f"{'updated' if kind == 'apo_offerings_updated' else 'submitted'} course offerings "
+            f"for {dept_name or dept_id} ({tlabel})."
+        )
+        if message:
+            details += f"\n\nNote: {message}"
+
+        meta = {
+            "route": "/om/loadassignment",
+            "kind": kind,
+            "term_id": term_id,         # keep for routing/filters
+            "campus_id": campus_id,
+            "department_id": dept_id,
+            "term_label": tlabel,       # optional (handy for UI later)
+        }
+
+        for uid in recipients:
+            await create_notification(user_id=uid, title=title, details=details, meta=meta)
+            created += 1
+            notified.append(uid)
+
+    # dedupe notified
+    seen = set()
+    notified = [x for x in notified if not (x in seen or seen.add(x))]
+
+    
+    # Persist submission history (so UI can require notes even if section flags get reset on edits)
+    upd = {
+        "$set": {
+            "term_id": term_id,
+            "campus_id": campus_id,
+            "last_submitted_at": ts,
+            "last_submitted_by": userId,
+            "last_note": message,
+            "updated_at": ts,
+        }
+    }
+    if sub_doc:
+        upd["$inc"] = {"submit_count": 1}
+    else:
+        upd["$setOnInsert"] = {"first_submitted_at": seed_first, "submit_count": 1}
+
+    await db[COL_APO_SUBMISSIONS].update_one(
+        {"term_id": term_id, "campus_id": campus_id},
+        upd,
+        upsert=True,
+    )
+
+    return {
+        "ok": True,
+        "published": int(getattr(res, "modified_count", 0) or 0),
+        "snapshot": snap_res,
+        "term_id": term_id,
+        "campus_id": campus_id,
+        "term_label": tlabel,          # optional
+        "notif_created": created,
+        "notif_recipients": notified,
+    }
 
     raise HTTPException(status_code=400, detail="Invalid action.")
