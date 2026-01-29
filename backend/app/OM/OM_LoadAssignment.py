@@ -1025,58 +1025,60 @@ async def loadassignment_handler(
 
         existing_header = await db[COL_FACULTY_LOADS].find_one(
             {"term_id": active.get("term_id"), "department_id": dept_id_header},
-            {"_id": 1, "load_id": 1},
+            {"_id": 1, "load_id": 1, "forwarded_to_chair": 1, "forwarded_to_chair_at": 1},
         )
+
+        # IMPORTANT:
+        # A header can exist even before OM actually forwards to the chair.
+        # So "updated vs submitted" should be based on forwarded_to_chair, not existence alone.
+        was_forwarded_before = bool((existing_header or {}).get("forwarded_to_chair"))
 
         # 1) persist the final assignments/schedules
         await _approve_and_persist(active["term_id"], rows, db)
 
-        # 2) create/update faculty_loads header for this term
+        # 2) create/update faculty_loads header for this term (also marks forwarded_to_chair=True)
         await _upsert_faculty_load_header(
             active,
             db,
             department_id=dept_id_header,  # existing behavior
-            user_id=userId,            # query param from the route
+            user_id=userId,                # query param from the route
         )
-
-        # 3) notify the department chair(s) so their CHAIR Plantilla alerts updates
-        try:
-            recipients = await _chair_user_ids_for_department_id(dept_id_notif, db)
-            dept_name = await _dept_name_by_id(dept_id_notif, db)
-
-            is_update = bool(existing_header)
-            title = "Load Recommendation Updated" if is_update else "Load Recommendation Forwarded"
-            details = (
-                f"OM {'updated' if is_update else 'forwarded'} the load recommendation"
-                f" for {dept_name or dept_id_notif} ({_term_label(active)})."
-            )
-            meta = {
-                "route": "/chair/plantilla",
-                "kind": "om_load_updated" if is_update else "om_load_forwarded",
-                "term_id": active.get("term_id"),
-                "department_id": dept_id_notif,
-                "load_id": (existing_header or {}).get("load_id"),
-            }
-
-            for uid in recipients:
-                await create_notification(
-                    user_id=uid,
-                    title=title,
-                    details=details,
-                    meta=meta,
-                )
-        except Exception:
-            # Never break approval due to notification failure
-            pass
 
         # fetch header again to get reco_id after upsert
         header_after = await db[COL_FACULTY_LOADS].find_one(
             {"term_id": active.get("term_id"), "department_id": dept_id_header},
             {"_id": 0, "load_id": 1},
         ) or {}
-
-        kind = "om_load_updated" if bool(existing_header) else "om_load_forwarded"
         reco_id = header_after.get("load_id") or (existing_header or {}).get("load_id")
+
+        kind = "om_load_updated" if was_forwarded_before else "om_load_forwarded"
+
+        # 3) notify the department chair(s)
+        try:
+            recipients = await _chair_user_ids_for_department_id(dept_id_notif, db)
+            dept_name = await _dept_name_by_id(dept_id_notif, db)
+
+            is_update = was_forwarded_before
+            title = "Load Recommendation Revised" if is_update else "Load Recommendation Submitted"
+            details = (
+                f"OM {'revised' if is_update else 'submitted'} the load recommendation "
+                f"for {dept_name or dept_id_notif} ({_term_label(active)})."
+            )
+            meta = {
+                "route": "/chair/plantilla",
+                "kind": kind,
+                "reco_id": reco_id,                 # aligns with notify-chair endpoint spec
+                "term_id": active.get("term_id"),
+                "department_id": dept_id_notif,
+                # keep old key for backward compatibility if any UI depends on it
+                "load_id": reco_id,
+            }
+
+            for uid in recipients:
+                await create_notification(user_id=uid, title=title, details=details, meta=meta)
+        except Exception:
+            # Never break approval due to notification failure
+            pass
 
         return {
             "ok": True,
@@ -1130,9 +1132,9 @@ async def om_notify_chair_load_forwarded(
     recipients = await _chair_user_ids_for_department_id(dept_id_notif, db)
     dept_name = await _dept_name_by_id(dept_id_notif, db)
 
-    title = "Load Recommendation Updated" if kind == "om_load_updated" else "Load Recommendation Forwarded"
+    title = "Load Recommendation Revised" if kind == "om_load_updated" else "Load Recommendation Submitted"
     details = (
-        f"OM {'updated' if kind == 'om_load_updated' else 'forwarded'} the load recommendation "
+        f"OM {'revised' if kind == 'om_load_updated' else 'submitted'} the load recommendation "
         f"for {dept_name or dept_id_notif} ({_term_label(active)})."
     )
     meta = {
@@ -6000,6 +6002,10 @@ async def _upsert_faculty_load_header(
             "created_at": now,
             "finalized_at": now,
             "updated_at": now,
+
+            # NEW: marks that OM has forwarded/submitted to Chair
+            "forwarded_to_chair": True,
+            "forwarded_to_chair_at": now,
         }
         await db[COL_FACULTY_LOADS].insert_one(doc)
     else:
@@ -6008,13 +6014,17 @@ async def _upsert_faculty_load_header(
             {"_id": existing["_id"]},
             {
                 "$set": {
-                    "status": "approved",
-                    "total_units": total_units,
-                    "updated_at": now,
-                    "finalized_at": now,
-                    # keep old created_by/created_at if already set
-                    "created_by": existing.get("created_by") or user_id,
-                }
+                "status": "approved",
+                "total_units": total_units,
+                "updated_at": now,
+                "finalized_at": now,
+                # keep old created_by/created_at if already set
+                "created_by": existing.get("created_by") or user_id,
+
+                # NEW: ensure it's marked forwarded; preserve first forwarded timestamp if it exists
+                "forwarded_to_chair": True,
+                "forwarded_to_chair_at": existing.get("forwarded_to_chair_at") or now,
+            }
             },
         )
 

@@ -14,6 +14,7 @@ router = APIRouter(prefix="/chair", tags=["chair"])
 # ---------- Collections ----------
 COL_TERMS = "terms"
 COL_PREEN_COUNT = "preenlistment_count"
+COL_FACULTY_LOADS = "faculty_loads"
 
 
 async def _active_term() -> Dict[str, Any]:
@@ -220,9 +221,53 @@ async def chair_plantilla_get(
         term = await _active_term()
         term_id = term.get("term_id") if term else None
 
+        # --- NEW: show plantilla only after OM forwards (faculty_loads header exists) ---
+        if not term_id:
+            return {"ok": True, "rows": []}
+
+        dept_id: Optional[str] = None
+        if userId:
+            sp = await db.staff_profiles.find_one({"user_id": userId}) or {}
+            dept_id = sp.get("department_id") or sp.get("dept_id")
+
+            if not dept_id:
+                ra = await db.role_assignments.find(
+                    {
+                        "user_id": userId,
+                        "is_active": {"$in": [True, None]},
+                        "$or": [
+                            {"department_id": {"$exists": True, "$ne": None}},
+                            {"dept_id": {"$exists": True, "$ne": None}},
+                        ],
+                    }
+                ).sort([("updated_at", -1), ("created_at", -1)]).to_list(1)
+                if ra:
+                    dept_id = ra[0].get("department_id") or ra[0].get("dept_id")
+
+            if not dept_id:
+                fprof = await db.faculty_profiles.find_one({"user_id": userId}) or {}
+                dept_id = fprof.get("department_id") or fprof.get("dept_id")
+
+        dept_candidates = ["DEPT0001"]  # keep existing behavior used by OM forward
+        if dept_id and dept_id not in dept_candidates:
+            dept_candidates.insert(0, dept_id)
+
+        forwarded = await db[COL_FACULTY_LOADS].find_one(
+            {
+                "term_id": term_id,
+                "department_id": {"$in": dept_candidates},
+                "forwarded_to_chair": True,   # <-- NEW requirement
+            },
+            {"_id": 1, "load_id": 1},
+        )
+        if not forwarded:
+            # Not forwarded yet → chair should not see plantilla rows
+            return {"ok": True, "rows": []}
+
         # Sections for that term
         sec_match = {"term_id": term_id} if term_id else {}
         section_docs = await db.sections.find(sec_match).to_list(10000)
+        
 
         # Fallback: If no sections, try to guess from assignments
         asg_docs: List[dict] = []
