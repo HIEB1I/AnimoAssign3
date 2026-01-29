@@ -1603,6 +1603,16 @@ async def om_send_to_faculty(payload: Dict[str, Any] = Body(...), db=Depends(get
         fac = await db[COL_FACULTY].find_one({"faculty_id": fid}, {"_id": 0, "user_id": 1}) or {}
         fac_user_id = (fac.get("user_id") or "").strip()
 
+        # --- NEW: do not overwrite an already-finalized schedule ---
+        existing_prop = await db[COL_LOAD_PROPOSALS].find_one(
+            {"faculty_id": fid, "term_id": term_id},
+            {"_id": 0, "status": 1, "locked": 1},
+        ) or None
+        if existing_prop:
+            st = str((existing_prop.get("status") or "")).lower()
+            if bool(existing_prop.get("locked")) or st in ("accepted", "approved"):
+                raise HTTPException(status_code=409, detail="Schedule is already finalized. You can no longer send/overwrite the proposal for this faculty.")
+
         doc = {
             "faculty_id": fid,
             "term_id": term_id,
@@ -1714,20 +1724,16 @@ async def respond_load_assignment_rfc(
         new_status = "APPROVED"
         locked = True
         extra["closed_at"] = now
-    else:
-        new_status = "REJECTED"
-        locked = True
-        extra["closed_at"] = now
 
-        # If OM rejects the RFC, automatically approve/lock the proposed schedule
-        # so the faculty can no longer RFC for the same courses.
+        # --- NEW: RFC APPROVED → schedule becomes FINAL/APPROVED and locked ---
         try:
             await db[COL_LOAD_PROPOSALS].update_one(
                 {"faculty_id": faculty_id, "term_id": term_id},
                 {
                     "$set": {
-                        "rows.$[].finalized": True,
+                        "status": "approved",
                         "locked": True,
+                        "rows.$[].finalized": True,
                         "updated_at": now,
                     },
                     "$setOnInsert": {"created_at": now},
@@ -1735,7 +1741,30 @@ async def respond_load_assignment_rfc(
                 upsert=True,
             )
         except Exception:
-            # Best-effort only: do not block the RFC response if proposal is missing/has different schema
+            pass
+    else:
+        new_status = "REJECTED"
+        locked = True
+        extra["closed_at"] = now
+
+        # --- NEW: RFC reached a terminal state (REJECTED) → schedule becomes FINAL/APPROVED ---
+        # If OM rejects an RFC, the schedule is considered APPROVED and must be locked.
+        try:
+            await db[COL_LOAD_PROPOSALS].update_one(
+                {"faculty_id": faculty_id, "term_id": term_id},
+                {
+                    "$set": {
+                        "status": "approved",
+                        "locked": True,
+                        "rows.$[].finalized": True,
+                        "updated_at": now,
+                    },
+                    "$setOnInsert": {"created_at": now},
+                },
+                upsert=True,
+            )
+        except Exception:
+            # Best-effort only
             pass
 
     rfc_id = rfc.get("rfc_id")
