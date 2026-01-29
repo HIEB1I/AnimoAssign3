@@ -884,7 +884,7 @@ async def faculty_send_load_rfc_message(userId: str = Query(...), payload: Dict[
             meta={"route": "/om/load-assignment", "kind": "load_rfc_received", "term_id": term_id, "faculty_id": fid, "rfc_id": existing.get("rfc_id")},
         )
 
-    return {"ok": True, "rfc_id": existing.get("rfc_id"), "status": "NEEDS_OM"}
+    return {"ok": True, "rfc_id": existing.get("rfc_id"), "status": "NEEDS_OM", "message": "Request sent to OM."}
 
 
 @router.post("/load-assignment/accept")
@@ -958,4 +958,4 @@ async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[s
             meta={"route": "/om/load-assignment", "kind": "proposal_accepted", "term_id": term_id, "faculty_id": fid, "rfc_id": rfc_id},
         )
 
-    return {"ok": True, "status": "ACCEPTED"}
+    return {"ok": True, "status": "ACCEPTED", "message": "Schedule accepted."}

@@ -1114,7 +1114,7 @@ const SendModal = ({
                     Course Title
                   </th>
                   <th className="px-4 py-3 text-left font-semibold">Section <span className="text-red-600" aria-hidden="true">*</span></th>
-                  <th className="px-4 py-3 text-left font-semibold">Units <span className="text-red-600" aria-hidden="true">*</span></th>
+                  <th className="px-4 py-3 text-left font-semibold">Units</th>
                   <th className="px-4 py-3 text-left font-semibold">Mode <span className="text-red-600" aria-hidden="true">*</span></th>
                   <th className="px-4 py-3 text-left font-semibold">Day</th>
                   <th className="px-4 py-3 text-left font-semibold">Room</th>
@@ -2052,32 +2052,27 @@ export default function OM_LoadAssignment() {
       v === null || v === undefined || String(v).trim() === "";
 
     const hasAnySecondMeeting = (r: Row) =>
-      !isBlank(r.day2) || !isBlank(r.begin2) || !isBlank(r.end2) || !isBlank(r.room2);
+      !isBlank(r.day2) || !isBlank(r.begin2) || !isBlank(r.end2);
 
     for (const r of rowsToSend) {
       const fields: string[] = [];
 
       // Required for sending a usable proposal
       if (isBlank(r.course)) fields.push("Course");
-      if (isBlank(r.title)) fields.push("Title");
-      if (isBlank(r.units)) fields.push("Units");
       if (isBlank(r.section)) fields.push("Section");
       if (isBlank(r.faculty_id) && isBlank(r.faculty)) fields.push("Faculty");
       if (isBlank(r.day1)) fields.push("Day 1");
       if (isBlank(r.begin1)) fields.push("Begin 1");
       if (isBlank(r.end1)) fields.push("End 1");
-      if (isBlank(r.room1)) fields.push("Room 1");
-      if (isBlank(r.capacity) && r.capacity !== 0) fields.push("Capacity");
       if (isBlank(r.mode)) fields.push("Mode");
 
-      // Second meeting is optional, but if any part exists, require all parts
+      // Second meeting is optional, but if any part exists, require the time/day parts only
       if (hasAnySecondMeeting(r)) {
         if (isBlank(r.day2)) fields.push("Day 2");
         if (isBlank(r.begin2)) fields.push("Begin 2");
         if (isBlank(r.end2)) fields.push("End 2");
-        if (isBlank(r.room2)) fields.push("Room 2");
+        // Room 2 is NOT required
       }
-
       if (fields.length) {
         missing.push({
           course: r.course || "—",
@@ -3193,7 +3188,7 @@ useEffect(() => {
                           )}
                         </th>
                         <th className="px-3 py-2 text-left border border-gray-300">
-                          Course & Title <span className="text-red-600" aria-hidden="true">*</span>
+                          Course Code & Title<span className="text-red-600" aria-hidden="true">*</span>
                         </th>
                         <th className="px-3 py-2 text-center border border-gray-300">
                           Units
@@ -3214,7 +3209,7 @@ useEffect(() => {
                           End 1 <span className="text-red-600" aria-hidden="true">*</span>
                         </th>
                         <th className="px-3 py-2 text-center border border-gray-300">
-                          Room 1 <span className="text-red-600" aria-hidden="true">*</span>
+                          Room 1
                         </th>
                         <th className="px-3 py-2 text-center border border-gray-300">
                           Day 2 <span className="text-red-600" aria-hidden="true">*</span>
@@ -3226,10 +3221,10 @@ useEffect(() => {
                           End 2 <span className="text-red-600" aria-hidden="true">*</span>
                         </th>
                         <th className="px-3 py-2 text-center border border-gray-300">
-                          Room 2 <span className="text-red-600" aria-hidden="true">*</span>
+                          Room 2
                         </th>
                         <th className="px-3 py-2 text-center border border-gray-300">
-                          Capacity <span className="text-red-600" aria-hidden="true">*</span>
+                          Capacity
                         </th>
                         <th className="px-3 py-2 text-center border border-gray-300">
                           Mode <span className="text-red-600" aria-hidden="true">*</span>

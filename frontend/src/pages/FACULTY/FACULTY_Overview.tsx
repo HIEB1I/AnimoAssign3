@@ -1,5 +1,5 @@
 // frontend/src/pages/FACULTY/FAC_Overview.tsx
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Send as SendIcon, X, BookOpen as SyllabusIcon } from "lucide-react";
 
 import TopBar from "../../component/TopBar";
@@ -24,6 +24,82 @@ import {
 } from "../../api.ts";
 import { useNavigate } from "react-router-dom";
 
+
+type ToastKind = "success" | "error" | "warning" | "info";
+
+function Toast({
+  open,
+  kind = "info",
+  message,
+  onClose,
+}: {
+  open: boolean;
+  kind?: ToastKind;
+  message: string;
+  onClose: () => void;
+}) {
+  if (!open) return null;
+  const tone =
+    kind === "success"
+      ? "border-emerald-200 bg-emerald-50 text-emerald-900"
+      : kind === "error"
+      ? "border-red-200 bg-red-50 text-red-900"
+      : kind === "warning"
+      ? "border-yellow-200 bg-yellow-50 text-yellow-900"
+      : "border-neutral-200 bg-white text-neutral-900";
+
+  const label =
+    kind === "success"
+      ? "Success"
+      : kind === "error"
+      ? "Error"
+      : kind === "warning"
+      ? "Warning"
+      : "Info";
+
+  return (
+    <div className="fixed bottom-4 left-1/2 z-[1200] w-[92vw] max-w-md -translate-x-1/2">
+      <div className={`rounded-xl border px-4 py-3 text-sm shadow-lg ${tone}`}>
+        <div className="flex items-start justify-between gap-3">
+          <div className="leading-snug"><span className="font-semibold">{label}:</span> {message}</div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-md px-2 py-1 text-xs hover:bg-black/5"
+            aria-label="Close message"
+            title="Close"
+          >
+            ✕
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function useToast() {
+  const [toast, setToast] = useState<{ kind: ToastKind; message: string } | null>(null);
+  const timerRef = useRef<number | null>(null);
+
+  const clear = useCallback(() => {
+    if (timerRef.current) window.clearTimeout(timerRef.current);
+    timerRef.current = null;
+    setToast(null);
+  }, []);
+
+  const show = useCallback((message: string, kind: ToastKind = "info", ms = 2500) => {
+    if (timerRef.current) window.clearTimeout(timerRef.current);
+    setToast({ kind, message });
+    timerRef.current = window.setTimeout(() => {
+      setToast(null);
+      timerRef.current = null;
+    }, ms);
+  }, []);
+
+  useEffect(() => () => clear(), [clear]);
+
+  return { toast, show, clear };
+}
 
 /* =========================================
    0) Page
@@ -66,42 +142,51 @@ export default function FAC_Overview() {
   const raw = JSON.parse(localStorage.getItem("animo.user") || "{}");
   const userId = raw.userId || raw.user_id || raw.id;
 
-  useEffect(() => {
-    if (!userId) {
-      setError("Missing userId in local storage.");
-      return;
-    }
-    (async () => {
-      try {
-        // Parallel loads (pattern parity with Student Petition)
-        const [list, profile] = await Promise.all([
-          getFacultyOverviewList(userId),
-          getFacultyOverviewProfile(userId),
-          // getFacultyOverviewOptions(userId) // not needed by this page; stub is available
-        ]);
+  const { toast, show: showToast, clear: clearToast } = useToast();
 
-        if (!list?.ok) throw new Error(list?.detail || "Failed to load list.");
-        if (!profile?.ok) throw new Error(profile?.detail || "Failed to load profile.");
+const loadOverview = useCallback(async () => {
+  if (!userId) {
+    setError("Missing userId in local storage.");
+    return;
+  }
+  try {
+    setError(null);
+    // Parallel loads (pattern parity with Student Petition)
+    const [list, profile] = await Promise.all([
+      getFacultyOverviewList(userId),
+      getFacultyOverviewProfile(userId),
+      // getFacultyOverviewOptions(userId) // not needed by this page; stub is available
+    ]);
 
-        // Compose into the same shape the page already renders
-        setData({
-          ok: true,
-          faculty: profile.faculty,
-          term: list.term,
-          summary: list.summary,
-          teaching_load: list.teaching_load,
-          notifications: profile.notifications || [],
-          // Load assignment workflow flags (backwards-compatible)
-          is_proposed: (list as any).is_proposed,
-          proposal_status: (list as any).proposal_status,
-          rfc: (list as any).rfc,
-          schedule_final: (list as any).schedule_final,
-        });
-      } catch (e: any) {
-        setError(e?.response?.data?.detail || e?.message || "Failed to load faculty overview.");
-      }
-    })();
-  }, [userId]);
+    if (!list?.ok) throw new Error(list?.detail || "Failed to load list.");
+    if (!profile?.ok) throw new Error(profile?.detail || "Failed to load profile.");
+
+    // Compose into the same shape the page already renders
+    setData({
+      ok: true,
+      faculty: profile.faculty,
+      term: list.term,
+      summary: list.summary,
+      teaching_load: list.teaching_load,
+      notifications: profile.notifications || [],
+      // Load assignment workflow flags (backwards-compatible)
+      is_proposed: (list as any).is_proposed,
+      proposal_status: (list as any).proposal_status,
+      rfc: (list as any).rfc,
+      schedule_final: (list as any).schedule_final,
+    });
+  } catch (e: any) {
+    setError(e?.response?.data?.detail || e?.message || "Failed to load faculty overview.");
+  }
+}, [userId]);
+
+useEffect(() => {
+  loadOverview();
+}, [loadOverview]);
+
+const refreshOverview = useCallback(async () => {
+  await loadOverview();
+}, [loadOverview]);
 
 
   if (error) return <div className="p-10 text-red-600">{error}</div>;
@@ -114,6 +199,13 @@ export default function FAC_Overview() {
 
   return (
     <div className="min-h-screen w-full bg-gray-50 text-slate-900">
+
+<Toast
+  open={!!toast}
+  kind={toast?.kind}
+  message={toast?.message || ""}
+  onClose={clearToast}
+/>
       <TopBar
         fullName={fullName}
         role={data.faculty.role}
@@ -161,6 +253,9 @@ export default function FAC_Overview() {
                   teachingLoad={data.teaching_load}
                   term={data.term}
                   workflow={data}
+                  onToast={showToast}
+                  onRefresh={refreshOverview}
+                 
                 />
               </>
             )}
@@ -444,6 +539,8 @@ type TeachingLoadEnhancedProps = {
     proposal_status?: string | null;
     rfc?: { status?: string | null } | null;
   };
+  onToast?: (message: string, kind?: ToastKind) => void;
+  onRefresh?: () => Promise<void> | void;
 };
 
 
@@ -460,10 +557,12 @@ const LIST_HEADERS = [
   "Syllabus",
 ];
 
-function TeachingLoadEnhanced({ teachingLoad, term, workflow }: TeachingLoadEnhancedProps) {
+function TeachingLoadEnhanced({ teachingLoad, term, workflow, onToast, onRefresh }: TeachingLoadEnhancedProps) {
   const [view, setView] = useState<"Calendar" | "List">("Calendar");
   const [modal, setModal] = useState<{ day: DayLong; item: TLItemForCalendar } | null>(null);
   const [isAccepted, setIsAccepted] = useState(false);
+  const [rfcTick, setRfcTick] = useState(0);
+
 
   // Schedule is finalized once: Faculty accepted OR OM approved/rejected an RFC.
 const scheduleFinal = Boolean(
@@ -540,10 +639,21 @@ const scheduleFinalLabel = (() => {
               try {
                 const raw = JSON.parse(localStorage.getItem("animo.user") || "{}");
                 const userId = raw.userId || raw.user_id || raw.id || "";
-                await acceptFacultyLoadAssignment(userId, { term_id: (term as any)?.term_id || (term as any)?._id || (term as any)?.id });
+                const resp = await acceptFacultyLoadAssignment(userId, {
+                  term_id: (term as any)?.term_id || (term as any)?._id || (term as any)?.id,
+                });
                 setIsAccepted(true);
-                window.location.reload();
-              } catch (e) {
+                onToast?.((resp as any)?.message || "Schedule accepted.", "success");
+                await onRefresh?.();
+                setRfcTick((t) => t + 1);
+              } catch (e: any) {
+                const status = e?.response?.status;
+                const msg = e?.response?.data?.detail || e?.message || "Failed to accept schedule.";
+                if (status === 409) {
+                  onToast?.(msg, "warning");
+                } else {
+                  onToast?.(msg, "error");
+                }
                 console.error(e);
               }
             }}
@@ -754,7 +864,7 @@ const scheduleFinalLabel = (() => {
         </div>
       )}
 
-      <ChangeRequestModal open={!!modal} onClose={() => setModal(null)} context={modal} term={term} scheduleFinal={scheduleFinal} />
+      <ChangeRequestModal open={!!modal} onClose={() => setModal(null)} context={modal} term={term} scheduleFinal={scheduleFinal} onToast={onToast} onRefresh={onRefresh} rfcTick={rfcTick} bumpRfcTick={() => setRfcTick((t) => t + 1)} />
     </section>
   );
 }
@@ -871,12 +981,20 @@ function ChangeRequestModal({
   context,
   term,
   scheduleFinal,
+  onToast,
+  onRefresh,
+  rfcTick,
+  bumpRfcTick,
 }: {
   open: boolean;
   onClose: () => void;
   context: { day: DayLong; item: TLItemForCalendar } | null; // <-- MODIFIED
   term: any;
   scheduleFinal: boolean;
+  onToast?: (message: string, kind?: ToastKind) => void;
+  onRefresh?: () => Promise<void> | void;
+  rfcTick?: number;
+  bumpRfcTick?: () => void;
 }) {
   const TIME_SLOTS = [
     "07:30 – 09:00",
@@ -928,7 +1046,14 @@ function ChangeRequestModal({
   const mustTime = choices.includes("Change class time");
   const mustDay = choices.includes("Change class day");
   const isFinalized = Boolean((context?.item as any)?.finalized);
-  const disabled = scheduleFinal || isFinalized || choices.length === 0 || (mustTime && !selTime) || (mustDay && !selDay);
+  const disabled =
+    scheduleFinal ||
+    isFinalized ||
+    choices.length === 0 ||
+    (mustTime && !selTime) ||
+    (mustDay && !selDay) ||
+    (!!choices.length && !remarks.trim()) ||
+    (choices.includes("Other") && !otherText.trim());
 
   return (
     <div className="fixed inset-0 z-80 grid place-items-center bg-black/30 p-3">
@@ -961,7 +1086,7 @@ function ChangeRequestModal({
             </div>
           )}
 
-          <RfcThreadView term={term} />
+          <RfcThreadView term={term} refreshTick={rfcTick} />
 
           <label className="block text-sm font-medium text-neutral-700">Change</label>
           <div className="flex flex-wrap gap-2">
@@ -1041,7 +1166,6 @@ function ChangeRequestModal({
           <button
             disabled={disabled}
             onClick={async () => {
-              // Hook into your backend here if needed
               try {
                 const raw = JSON.parse(localStorage.getItem("animo.user") || "{}");
                 const userId = raw.userId || raw.user_id || raw.id || "";
@@ -1051,14 +1175,19 @@ function ChangeRequestModal({
                 if (choices.includes("Other") && otherText.trim()) parts.push(otherText.trim());
                 const changeSummary = parts.join("; ");
                 const msg = `${context.item.code} ${context.item.sec} • ${context.day} • ${context.item.time}\n${changeSummary}\n\nRemarks: ${remarks.trim()}`;
-                await sendFacultyLoadAssignmentRfcMessage(userId, {
+                const resp = await sendFacultyLoadAssignmentRfcMessage(userId, {
                   term_id: (term as any)?.term_id || (term as any)?._id || (term as any)?.id,
                   message: msg,
                   course_code: context.item.code,
                   section: context.item.sec,
                 });
-                window.location.reload();
-              } catch (e) {
+                onToast?.((resp as any)?.message || "Request sent to OM.", "success");
+                bumpRfcTick?.();
+                await onRefresh?.();
+              } catch (e: any) {
+                const msg =
+                  e?.response?.data?.detail || e?.message || "Failed to send request.";
+                onToast?.(msg, "error");
                 console.error(e);
               } finally {
                 onClose();
@@ -1080,7 +1209,7 @@ function ChangeRequestModal({
   );
 }
 
-function RfcThreadView({ term }: { term: any }) {
+function RfcThreadView({ term, refreshTick }: { term: any; refreshTick?: number }) {
   const [thread, setThread] = useState<any | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -1105,7 +1234,7 @@ function RfcThreadView({ term }: { term: any }) {
     return () => {
       alive = false;
     };
-  }, [term?.term_id, term?._id, term?.id]);
+  }, [term?.term_id, term?._id, term?.id, refreshTick]);
 
   if (loading && !thread) {
     return (
