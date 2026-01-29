@@ -449,8 +449,33 @@ async def overview_handler(
         proposal = await db[COL_LOAD_PROPOSALS].find_one({"faculty_id": faculty_id, "term_id": term_id}, {"_id": 0}) or None
         rfc_doc = await db[COL_LOAD_RFC].find_one({"faculty_id": faculty_id, "term_id": term_id}, {"_id": 0}) or None
         rfc_norm = _normalize_rfc_doc(rfc_doc) if rfc_doc else None
+
+        # IMPORTANT BEHAVIOR CHANGE:
+        # - If this is a PLANNING term (next/upcoming term) and OM has NOT forwarded a proposal yet,
+        #   do NOT surface any schedule/teaching load on the faculty side.
+        # - Once OM forwards (proposal exists), faculty will see the proposed schedule (overlay below).
+        is_planning_term = bool(term and not term.get("is_current"))
+        if is_planning_term and not proposal:
+            # Hide any pre-populated assignments for the planning term until OM forwards.
+            final_teaching_load = []
+            summary["teaching_units"] = f"0/{int(pref_units_for_calc)}"
+            summary["course_preps"] = f"0/{max_preps}"
+            summary["percent"] = 0
+            # keep the header-derived status if present, otherwise show Pending
+            summary["load_status"] = (summary.get("load_status") or "Pending")
+            return {
+                "ok": True,
+                "term": term,
+                "summary": summary,
+                "teaching_load": final_teaching_load,
+                "is_proposed": False,
+                "proposal_status": None,
+                "rfc": None,
+            }
+
         proposal_status = (proposal or {}).get("status")
         is_proposed = bool(proposal and str(proposal_status or "").lower() in ("proposed", "reply", "replied"))
+
 
         if is_proposed and isinstance(proposal.get("rows"), list):
             proposed_load: List[Dict[str, Any]] = []
@@ -694,6 +719,22 @@ async def get_faculty_overview(userId: str = Query(...)):
         "load_status": status,
         "percent": int((total_units / pref_units_for_calc) * 100) if pref_units_for_calc > 0 else 0,
     }
+
+    # IMPORTANT BEHAVIOR CHANGE (mirrors POST /overview?action=fetch):
+    # If this is a PLANNING term and OM has NOT forwarded a proposal yet,
+    # hide any schedule/teaching load on the faculty side.
+    is_planning_term = bool(term and not term.get("is_current"))
+    if is_planning_term:
+        proposal = await db[COL_LOAD_PROPOSALS].find_one(
+            {"faculty_id": faculty_id, "term_id": term_id},
+            {"_id": 1},
+        )
+        if not proposal:
+            final_teaching_load = []
+            summary["teaching_units"] = f"0/{int(pref_units_for_calc)}"
+            summary["course_preps"] = f"0/{max_preps}"
+            summary["percent"] = 0
+            summary["load_status"] = (summary.get("load_status") or "Pending")
 
     notifications = await db[COL_NOTIFICATIONS].find(
         {"user_id": userId}, {"_id": 0}
