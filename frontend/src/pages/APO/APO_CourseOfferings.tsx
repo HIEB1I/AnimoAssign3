@@ -1314,6 +1314,7 @@ const loadOfferings = async () => {
   const [showPlanModal, setShowPlanModal] = useState(false);
   // If backend requires a comment but UI didn't know yet, force showing the comment prompt
   const [forceRequireNote, setForceRequireNote] = useState(false);
+  const [submitAck, setSubmitAck] = useState<{ open: boolean; title: string; details: string }>({ open: false, title: '', details: '' });
   const hasPriorSubmit = useMemo(() => {
     const s: any = (data as any)?.submission;
     if (s && typeof s.has_prior_submit === "boolean") return !!s.has_prior_submit;
@@ -2236,36 +2237,11 @@ if (isGE) {
           <div className="ml-auto flex items-center gap-3">
           {view === "offerings" && (
             <button
-              onClick={async () => {
+              onClick={() => {
                 if (!user?.userId) return;
-
-                // First submission: no comment required
-                if (!hasPriorSubmit) {
-                  try {
-                    await forwardApoCourseOfferings(user.userId, {
-                      to: "scheduling",
-                      subject: `Submit for Scheduling — ${data?.term_label || ""}`,
-                      message: "",
-                      exclude_conflicts: true,
-                    });
-                    await loadOfferings();
-                    setForceRequireNote(false);
-                    alert("Submitted to Scheduling.");
-                  } catch (e: any) {
-                    const detail = e?.response?.data?.detail;
-                    if (String(detail || "").toLowerCase().includes("comment is required")) {
-                      setForceRequireNote(true);
-                      setShowForward(true);
-                      return;
-                    }
-                    const msg = detail || e?.message || "Submit failed.";
-                    alert(msg);
-                  }
-                  return;
-                }
-
-                // Subsequent submissions: require comment modal
-                setForceRequireNote(true);
+                // Always show the same styled confirmation modal (like OM → Forward to Chair).
+                // For updates, the modal will require a comment.
+                setForceRequireNote(false);
                 setShowForward(true);
               }}
               className="inline-flex items-center gap-2 rounded-md bg-emerald-700 px-4 py-2 text-sm font-medium text-white shadow-sm"
@@ -4005,31 +3981,59 @@ if (response.ok) {
       )}
 
       {/* ----------------------------- Forward Modal ----------------------------- */}
-     {showForward && (
-      <SubmitModal
-        requireNote={hasPriorSubmit || forceRequireNote}
-        onClose={() => setShowForward(false)}
-        onSubmit={async (note) => {
-          if (!user?.userId) return;
-          try {
-            await forwardApoCourseOfferings(user.userId, {
-              to: "scheduling",
-              subject: `Submit for Scheduling — ${data?.term_label || ""}`,
-              message: note,
-              exclude_conflicts: true,
-            });
-            await loadOfferings();
-            setForceRequireNote(false);
-            setShowForward(false);
-            alert("Submitted to Scheduling.");
-          } catch (e: any) {
-            const detail = e?.response?.data?.detail;
-            const msg = detail || e?.message || "Submit failed.";
-            alert(msg);
-          }
-        }}
-      />
-    )}
+      {showForward && (
+        <SubmitModal
+          requireNote={hasPriorSubmit || forceRequireNote}
+          onClose={() => setShowForward(false)}
+          onSubmit={async (note) => {
+            if (!user?.userId) return;
+
+            const isUpdate = hasPriorSubmit || forceRequireNote;
+
+            try {
+              await forwardApoCourseOfferings(user.userId, {
+                to: "scheduling",
+                subject: `Submit for Scheduling — ${data?.term_label || ""}`,
+                // First submission: no comment box, so send empty note.
+                message: isUpdate ? (note || "") : "",
+                exclude_conflicts: true,
+              });
+
+              await loadOfferings();
+              setForceRequireNote(false);
+              setShowForward(false);
+
+              setSubmitAck({
+                open: true,
+                title: isUpdate ? "Course Offerings Updated" : "Course Offerings Submitted",
+                details: isUpdate
+                  ? "Your updates were submitted for scheduling and the Office Manager will see the changes."
+                  : "Your course offerings were submitted for scheduling and the Office Manager can now review them.",
+              });
+            } catch (e: any) {
+              const detail = e?.response?.data?.detail;
+              const msg = detail || e?.message || "Submit failed.";
+
+              if (String(detail || "").toLowerCase().includes("comment is required")) {
+                setForceRequireNote(true);
+                throw new Error("Comment is required for updates after initial submission.");
+              }
+
+              throw new Error(msg);
+            }
+          }}
+        />
+      )}
+
+      {/* --------------------------- Acknowledgement Modal --------------------------- */}
+      {submitAck.open && (
+        <AckModal
+          open={submitAck.open}
+          title={submitAck.title}
+          details={submitAck.details}
+          onClose={() => setSubmitAck({ open: false, title: "", details: "" })}
+        />
+      )}
 
       {/* --------------------------- Planning Review Modal --------------------------- */}
       {showPlanModal && data?.planning && (
@@ -4090,6 +4094,7 @@ if (response.ok) {
 }
 
 /* --------------------------- Small helper components --------------------------- */
+
 const SubmitModal: React.FC<{
   onClose: () => void;
   onSubmit: (note: string) => void | Promise<void>;
@@ -4097,38 +4102,70 @@ const SubmitModal: React.FC<{
 }> = ({ onClose, onSubmit, requireNote = false }) => {
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string>("");
 
   const canSubmit = !busy && (!requireNote || note.trim().length > 0);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-      <div className="w-full max-w-lg rounded-xl bg-white shadow-xl border border-gray-200">
-        <div className="border-b px-4 py-3 font-semibold">Submit for Scheduling</div>
-        <div className="p-4 space-y-2">
-          <div className="text-sm text-slate-700">
-            {requireNote
-              ? "You already submitted before. Please describe what changed so the Office Manager knows what to review."
-              : "This hands the plan to the Office Manager to assign faculty and schedules."}
-          </div>
-
-          <textarea
-            className="w-full rounded border px-3 py-2 text-sm min-h-[120px]"
-            value={note}
-            onChange={(e) => setNote(e.target.value)}
-            placeholder={requireNote ? "Required: describe what changed…" : "Optional note…"}
-          />
+    <div className="fixed inset-0 z-[120] grid place-items-center bg-black/40 p-4">
+      <div className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-2xl">
+        <div className="mx-auto mb-4 grid h-16 w-16 place-items-center rounded-full border-2 border-emerald-600 text-emerald-700">
+          <Send className="h-8 w-8" strokeWidth={2.5} />
         </div>
-        <div className="flex items-center justify-end gap-2 border-t px-4 py-3">
-          <button className="rounded-md border px-3 py-1.5 text-sm" onClick={onClose} disabled={busy}>
+
+        <h3 className="mb-2 text-center text-2xl font-semibold">Submit for Scheduling?</h3>
+
+        <p className="mx-auto mb-4 max-w-md text-center text-sm text-neutral-600">
+          {requireNote ? (
+            <>
+              You already submitted before. Please describe what changed so the{' '}
+              <span className="font-semibold">Office Manager</span> knows what to review.
+            </>
+          ) : (
+            <>
+              This will send the current{' '}
+              <span className="font-semibold">Course Offerings</span> to the Office Manager for scheduling.
+            </>
+          )}
+        </p>
+
+        {requireNote && (
+          <div className="mb-4">
+            <label className="mb-1 block text-sm font-semibold text-gray-700">Comment (required)</label>
+            <textarea
+              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm min-h-[120px] shadow-sm focus:ring-2 focus:ring-emerald-500/30"
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+              placeholder="Describe what was added, edited, or deleted…"
+            />
+          </div>
+        )}
+
+        {error && (
+          <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+            {error}
+          </div>
+        )}
+
+        <div className="flex justify-end gap-2">
+          <button
+            onClick={onClose}
+            disabled={busy}
+            className="rounded-lg border border-neutral-300 bg-neutral-100 px-4 py-2 text-sm hover:bg-neutral-200 disabled:opacity-50"
+          >
             Cancel
           </button>
+
           <button
             disabled={!canSubmit}
-            className="rounded-md bg-emerald-700 px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50"
+            className="rounded-lg bg-emerald-700 px-4 py-2 text-sm font-medium text-white hover:brightness-110 disabled:opacity-50"
             onClick={async () => {
               setBusy(true);
+              setError("");
               try {
                 await onSubmit(note);
+              } catch (e: any) {
+                setError(e?.message || "Submit failed.");
               } finally {
                 setBusy(false);
               }
@@ -4141,6 +4178,32 @@ const SubmitModal: React.FC<{
     </div>
   );
 };
+
+const AckModal: React.FC<{
+  open: boolean;
+  title: string;
+  details: string;
+  onClose: () => void;
+}> = ({ open, title, details, onClose }) =>
+  !open ? null : (
+    <div className="fixed inset-0 z-[120] grid place-items-center bg-black/40 p-4">
+      <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl">
+        <div className="mx-auto mb-4 grid h-16 w-16 place-items-center rounded-full border-2 border-emerald-600 text-emerald-700">
+          <Check className="h-8 w-8" strokeWidth={2.5} />
+        </div>
+        <h3 className="mb-2 text-center text-2xl font-semibold">{title}</h3>
+        <p className="mx-auto mb-6 max-w-sm text-center text-sm text-neutral-600">{details}</p>
+        <div className="flex justify-end">
+          <button
+            onClick={onClose}
+            className="rounded-lg bg-emerald-700 px-4 py-2 text-sm font-medium text-white hover:brightness-110"
+          >
+            OK
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 
 const PlanReviewModal: React.FC<{
   changes: PlanningChange[];
