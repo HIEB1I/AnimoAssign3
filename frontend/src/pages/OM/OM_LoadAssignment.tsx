@@ -8,7 +8,6 @@ import {
   sendOmLoadAssignmentsToFaculty,
   getOmLoadAssignmentRfc,
   respondOmLoadAssignmentRfc,
-  finalizeOmLoadAssignmentCourse,
 } from "../../api.ts";
 
 import {
@@ -481,6 +480,9 @@ type Row = {
   /** When OM has already finalized this course for the faculty */
   finalized?: boolean;
 };
+
+// Used for hard validation before sending proposals to faculty
+export type MissingFieldRow = { course: string; section: string; faculty: string; fields: string[] };
 
 // --- Validation helpers & engine (row-level flags) ---
 
@@ -1111,9 +1113,9 @@ const SendModal = ({
                   <th className="px-4 py-3 text-center font-semibold">
                     Course Title
                   </th>
-                  <th className="px-4 py-3 text-left font-semibold">Section</th>
-                  <th className="px-4 py-3 text-left font-semibold">Units</th>
-                  <th className="px-4 py-3 text-left font-semibold">Mode</th>
+                  <th className="px-4 py-3 text-left font-semibold">Section <span className="text-red-600" aria-hidden="true">*</span></th>
+                  <th className="px-4 py-3 text-left font-semibold">Units <span className="text-red-600" aria-hidden="true">*</span></th>
+                  <th className="px-4 py-3 text-left font-semibold">Mode <span className="text-red-600" aria-hidden="true">*</span></th>
                   <th className="px-4 py-3 text-left font-semibold">Day</th>
                   <th className="px-4 py-3 text-left font-semibold">Room</th>
                   <th className="px-4 py-3 text-center font-semibold">Time</th>
@@ -1216,6 +1218,72 @@ const SendModal = ({
 };
 
 
+const SendBlockedModal = ({
+  open,
+  onClose,
+  missing,
+}: {
+  open: boolean;
+  onClose: () => void;
+  missing: MissingFieldRow[];
+}) => {
+  if (!open) return null;
+
+  const total = missing.length;
+  const show = missing.slice(0, 12);
+
+  return (
+    <div className="fixed inset-0 z-[140] grid place-items-center bg-black/40 p-4">
+      <div className="w-full max-w-3xl rounded-2xl bg-white p-6 shadow-2xl">
+        <div className="mb-2 flex items-start gap-3">
+          <div className="mt-0.5 grid h-10 w-10 place-items-center rounded-full bg-amber-50 text-amber-700 border border-amber-200">
+            <MessageSquareText className="h-5 w-5" />
+          </div>
+          <div className="min-w-0">
+            <h3 className="text-lg font-semibold text-gray-900">
+              Cannot send to Faculty yet
+            </h3>
+            <p className="mt-0.5 text-sm text-gray-600">
+              Please complete all <span className="font-semibold">required</span> fields for the selected faculty’s load recommendation rows before clicking <span className="font-semibold">To Faculty</span>.
+            </p>
+          </div>
+        </div>
+
+        <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+          <div className="font-semibold">What’s missing:</div>
+          <ul className="mt-2 list-disc space-y-1 pl-5">
+            {show.map((m, i) => (
+              <li key={`${m.course}-${m.section}-${i}`}>
+                <span className="font-medium">{m.course}</span> – {m.section}{" "}
+                <span className="text-amber-900/80">({m.faculty})</span>:{" "}
+                <span className="font-medium">{m.fields.join(", ")}</span>
+              </li>
+            ))}
+          </ul>
+          {total > show.length && (
+            <div className="mt-2 text-xs text-amber-900/80">
+              …plus {total - show.length} more row(s).
+            </div>
+          )}
+        </div>
+
+        <div className="mt-5 flex items-center justify-between gap-3">
+          <div className="text-xs text-gray-500">
+            Tip: Required columns are marked with a{" "}
+            <span className="text-red-600 font-bold">*</span> in the table header.
+          </div>
+
+          <button
+            onClick={onClose}
+            className="rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:brightness-110"
+          >
+            Got it
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
 
 const RequestChangeModal = ({
   open,
@@ -1812,6 +1880,8 @@ export default function OM_LoadAssignment() {
   const [approved, setApproved] = useState(false);
   const [showSend, setShowSend] = useState(false);
   const [sendRowsPreview, setSendRowsPreview] = useState<Row[]>([]);
+  const [sendBlocked, setSendBlocked] = useState<{ open: boolean; missing: MissingFieldRow[] }>({ open: false, missing: [] });
+
   const [reqChange, setReqChange] = useState<{ open: boolean; from?: string }>({
     open: false,
   });
@@ -1970,6 +2040,55 @@ export default function OM_LoadAssignment() {
 
     // If any row is selected for a faculty, send ALL rows for that faculty (not per subject)
     return rows.filter((r) => selectedKeys.has(key(r)));
+  };
+/**
+   * Before forwarding to faculty, require that the rows being sent are complete.
+   * This prevents faculty from receiving half-filled / unusable schedules.
+   */
+  const validateRowsCompleteForSend = (rowsToSend: Row[]) => {
+    const missing: MissingFieldRow[] = [];
+
+    const isBlank = (v: any) =>
+      v === null || v === undefined || String(v).trim() === "";
+
+    const hasAnySecondMeeting = (r: Row) =>
+      !isBlank(r.day2) || !isBlank(r.begin2) || !isBlank(r.end2) || !isBlank(r.room2);
+
+    for (const r of rowsToSend) {
+      const fields: string[] = [];
+
+      // Required for sending a usable proposal
+      if (isBlank(r.course)) fields.push("Course");
+      if (isBlank(r.title)) fields.push("Title");
+      if (isBlank(r.units)) fields.push("Units");
+      if (isBlank(r.section)) fields.push("Section");
+      if (isBlank(r.faculty_id) && isBlank(r.faculty)) fields.push("Faculty");
+      if (isBlank(r.day1)) fields.push("Day 1");
+      if (isBlank(r.begin1)) fields.push("Begin 1");
+      if (isBlank(r.end1)) fields.push("End 1");
+      if (isBlank(r.room1)) fields.push("Room 1");
+      if (isBlank(r.capacity) && r.capacity !== 0) fields.push("Capacity");
+      if (isBlank(r.mode)) fields.push("Mode");
+
+      // Second meeting is optional, but if any part exists, require all parts
+      if (hasAnySecondMeeting(r)) {
+        if (isBlank(r.day2)) fields.push("Day 2");
+        if (isBlank(r.begin2)) fields.push("Begin 2");
+        if (isBlank(r.end2)) fields.push("End 2");
+        if (isBlank(r.room2)) fields.push("Room 2");
+      }
+
+      if (fields.length) {
+        missing.push({
+          course: r.course || "—",
+          section: r.section || "—",
+          faculty: r.faculty || r.faculty_id || "—",
+          fields,
+        });
+      }
+    }
+
+    return missing;
   };
   
   const handleSendToFaculty = async (rowsToSend: Row[]) => {
@@ -2799,8 +2918,20 @@ useEffect(() => {
                     value={search}
                     onChange={(e) => setSearch(e.target.value)}
                     placeholder="Search by course, section, or faculty..."
-                    className="w-full rounded-lg border border-gray-300 px-9 py-2 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30"
+                    className="w-full rounded-lg border border-gray-300 px-9 pr-10 py-2 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30"
                   />
+
+                  {/* Clear (X) button */}
+                  {search.trim().length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setSearch("")}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-neutral-500 hover:text-neutral-700"
+                      title="Clear search"
+                    >
+                      <X className="h-4 w-4" />
+                    </button>
+                  )}
                 </div>
 
                 <div className="ml-auto flex items-center gap-2">
@@ -2808,7 +2939,7 @@ useEffect(() => {
                     disabled={!hasReco}
                     onClick={handleSaveDraft}
                     className={cls(
-                      "inline-flex items-center gap-2 rounded-md px-3.5 py-2 text-sm font-medium shadow-sm",
+                      "inline-flex h-10 min-w-[140px] items-center justify-center gap-2 rounded-md px-4 py-2 text-sm font-medium shadow-sm",
                       hasReco
                         ? "bg-gray-800 text-white hover:brightness-110"
                         : "bg-gray-200 text-gray-500 cursor-not-allowed"
@@ -2831,19 +2962,29 @@ useEffect(() => {
                         : "bg-gray-200 text-gray-400 cursor-not-allowed" // disabled
                     )}
                     onClick={() => {
-                      if (hasAnyErrors) {
-                        const proceed = window.confirm(
-                          [
-                            "There are validation errors (e.g., KAC mismatch, mode mismatch, or schedule conflicts).",
-                            "",
-                            "Do you still want to proceed with approval?",
-                          ].join("\n")
-                        );
-                        if (!proceed) return;
-                      }
+                    //HARD BLOCK: required fields must be complete before forwarding
+                    const incomplete = rows.filter(isRowIncompleteForApproval);
+                    if (incomplete.length > 0) {
+                      alert(
+                        `Cannot forward to Chair yet.\n\nPlease complete all required fields (including Mode) for ${incomplete.length} row(s).`
+                      );
+                      return;
+                    }
 
-                      setShowApprove(true);
-                    }}
+                    // Existing behavior: warn about other validation errors, but allow override
+                    if (hasAnyErrors) {
+                      const proceed = window.confirm(
+                        [
+                          "There are validation errors (e.g., KAC mismatch, mode mismatch, or schedule conflicts).",
+                          "",
+                          "Do you still want to proceed with approval?",
+                        ].join("\n")
+                      );
+                      if (!proceed) return;
+                    }
+
+                    setShowApprove(true);
+                  }}
                   >
                     <CheckCheck className="h-4 w-4" />
                     Forward to Chair
@@ -2900,7 +3041,7 @@ useEffect(() => {
                         onClick={handlePickShsFile}
                         disabled={!isRunning || isAssigning}
                         className={cls(
-                          "inline-flex items-center gap-2 rounded-md border border-gray-300 bg-white px-2.5 py-1.5 text-[13px] text-gray-700 shadow-sm",
+                          "inline-flex h-10 min-w-[140px] items-center justify-center gap-2 rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 shadow-sm",
                           "hover:bg-gray-50",
                           (!isRunning || isAssigning) &&
                             "opacity-50 cursor-not-allowed hover:bg-white"
@@ -2933,7 +3074,7 @@ useEffect(() => {
                     <button
                       onClick={runAutoAssign}
                       disabled={isAssigning || hasLocalEdits}
-                      className="inline-flex items-center gap-2 rounded-md bg-emerald-700 px-3.5 py-2 text-sm font-medium text-white shadow-sm hover:brightness-110 disabled:opacity-60"
+                      className="inline-flex h-10 min-w-[140px] items-center justify-center gap-2 rounded-md bg-emerald-700 px-4 py-2 text-sm font-medium text-white shadow-sm hover:brightness-110 disabled:opacity-60"
                       title={
                         hasLocalEdits
                           ? "Auto-assign is disabled while you have manual edits. Save or refresh first."
@@ -2948,7 +3089,7 @@ useEffect(() => {
                       {isRunning && (
                         <button
                           onClick={loadFromServer}
-                          className="inline-flex items-center gap-2 rounded-md border border-gray-300 bg-white px-3.5 py-2 text-sm font-medium hover:bg-gray-50"
+                          className="inline-flex h-10 min-w-[140px] items-center justify-center gap-2 rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium hover:bg-gray-50"
                         >
                           <RefreshCcw className="h-4 w-4" />
                           Refresh
@@ -2964,6 +3105,15 @@ useEffect(() => {
                             alert("Select at least one row with an assigned faculty.");
                             return;
                           }
+
+                          const missing = validateRowsCompleteForSend(preview);
+                          if (missing.length) {
+                            // Hard validation: block sending until required fields are filled
+                            setSendBlocked({ open: true, missing });
+                            showToast("Cannot send to faculty: please complete all required fields in the selected faculty’s rows.", "error");
+                            return;
+                          }
+
                           setSendRowsPreview(preview);
                           setShowSend(true);
                         }}
@@ -3043,7 +3193,7 @@ useEffect(() => {
                           )}
                         </th>
                         <th className="px-3 py-2 text-left border border-gray-300">
-                          Course & Title
+                          Course & Title <span className="text-red-600" aria-hidden="true">*</span>
                         </th>
                         <th className="px-3 py-2 text-center border border-gray-300">
                           Units
@@ -3052,37 +3202,37 @@ useEffect(() => {
                           Section
                         </th>
                         <th className="px-3 py-2 text-left border border-gray-300">
-                          Faculty
+                          Faculty <span className="text-red-600" aria-hidden="true">*</span>
                         </th>
                         <th className="px-3 py-2 text-center border border-gray-300">
-                          Day 1
+                          Day 1 <span className="text-red-600" aria-hidden="true">*</span>
                         </th>
                         <th className="px-3 py-2 text-center border border-gray-300">
-                          Begin 1
+                          Begin 1 <span className="text-red-600" aria-hidden="true">*</span>
                         </th>
                         <th className="px-3 py-2 text-center border border-gray-300">
-                          End 1
+                          End 1 <span className="text-red-600" aria-hidden="true">*</span>
                         </th>
                         <th className="px-3 py-2 text-center border border-gray-300">
-                          Room 1
+                          Room 1 <span className="text-red-600" aria-hidden="true">*</span>
                         </th>
                         <th className="px-3 py-2 text-center border border-gray-300">
-                          Day 2
+                          Day 2 <span className="text-red-600" aria-hidden="true">*</span>
                         </th>
                         <th className="px-3 py-2 text-center border border-gray-300">
-                          Begin 2
+                          Begin 2 <span className="text-red-600" aria-hidden="true">*</span>
                         </th>
                         <th className="px-3 py-2 text-center border border-gray-300">
-                          End 2
+                          End 2 <span className="text-red-600" aria-hidden="true">*</span>
                         </th>
                         <th className="px-3 py-2 text-center border border-gray-300">
-                          Room 2
+                          Room 2 <span className="text-red-600" aria-hidden="true">*</span>
                         </th>
                         <th className="px-3 py-2 text-center border border-gray-300">
-                          Capacity
+                          Capacity <span className="text-red-600" aria-hidden="true">*</span>
                         </th>
                         <th className="px-3 py-2 text-center border border-gray-300">
-                          Mode
+                          Mode <span className="text-red-600" aria-hidden="true">*</span>
                         </th>
                         <th className="px-3 py-2 text-center border border-gray-300">
                           Status
@@ -3381,42 +3531,7 @@ useEffect(() => {
                                     )}
                                   </button>
 
-                                  <button
-                                    disabled={!!r.finalized}
-                                    className={cls(
-                                      "flex h-7 w-7 items-center justify-center rounded-full border-2 border-emerald-700 text-emerald-700 hover:bg-emerald-50",
-                                      !!r.finalized && "opacity-40 cursor-not-allowed hover:bg-transparent"
-                                    )}
-                                    title="Approve"
-                                  onClick={async () => {
-                                      if (!userId) return;
-                                      if (!r.faculty_id) {
-                                        alert('This row has no assigned faculty yet.');
-                                        return;
-                                      }
-                                      try {
-                                        await finalizeOmLoadAssignmentCourse(userId, {
-                                          term_id: termId || undefined,
-                                          faculty_id: r.faculty_id,
-                                          course_code: r.course,
-                                          section: r.section,
-                                        });
-                                        // lock actions for this row immediately (backend persists too)
-                                        setCell(r.id, "finalized", true as any);
-                                        showToast(
-                                          `Notified ${r.faculty || "faculty"} that ${r.course} – ${r.section} was added to their final schedule.`,
-                                          "success"
-                                        );
-                                      } catch (e: any) {
-                                        showToast(e?.message || "Failed to notify faculty.", "error");
-                                      }
-                                    }}
-                                  >
-                                    <Check
-                                      className="h-4 w-4"
-                                      strokeWidth={2.5}
-                                    />
-                                  </button>
+                                  {/* Per-class approve action removed (finalization is handled by the workflow) */}
 
                                   <button
                                     type="button"
@@ -4032,6 +4147,12 @@ useEffect(() => {
         rows={sendRowsPreview}
         termLabel={term}
         onSend={handleSendToFaculty}
+      />
+
+      <SendBlockedModal
+        open={sendBlocked.open}
+        missing={sendBlocked.missing}
+        onClose={() => setSendBlocked({ open: false, missing: [] })}
       />
 
       <RequestChangeModal
