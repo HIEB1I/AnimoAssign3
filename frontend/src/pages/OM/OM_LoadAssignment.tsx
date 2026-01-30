@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Outlet, useLocation } from "react-router-dom";
 import AppShell from "../../base/AppShell";
 import { runOmAutoAssign } from "../../api.ts";
@@ -1054,12 +1054,14 @@ const SendModal = ({
   rows,
   termLabel,
   onSend,
+  onToast,
 }: {
   open: boolean;
   onClose: () => void;
   rows: Row[];
   termLabel?: string;
   onSend: (rows: Row[]) => Promise<void>;
+  onToast?: (message: string, kind?: "success" | "error") => void;
 }) => {
   const [sending, setSending] = useState(false);
   if (!open) return null;
@@ -1198,7 +1200,7 @@ const SendModal = ({
                 await onSend(rows);
                 onClose();
               } catch (e: any) {
-                alert(e?.message || "Failed to send to faculty.");
+                onToast?.(e?.message || "Failed to send to faculty.", "error");
               } finally {
                 setSending(false);
               }
@@ -1293,6 +1295,7 @@ const RequestChangeModal = ({
   termId,
   rows,
   onAfterUpdate,
+  onToast,
 }: {
   open: boolean;
   from?: string;
@@ -1301,6 +1304,7 @@ const RequestChangeModal = ({
   termId: string;
   rows: Row[];
   onAfterUpdate: () => Promise<void> | void;
+  onToast?: (message: string, kind?: "success" | "error") => void;
 }) => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -1363,15 +1367,15 @@ const RequestChangeModal = ({
 
   const respond = async (decision: "reply" | "approve" | "reject") => {
     if (!userId || !termId || !facultyId) {
-      alert("Missing context.");
+      onToast?.("Missing context.", "error");
       return;
     }
     if (isTerminal) {
-      alert("RFC is already locked.");
+      onToast?.("RFC is already locked.", "error");
       return;
     }
     if (decision === "reply" && !reply.trim()) {
-      alert("Please type a reply message.");
+      onToast?.("Please type a reply message.", "error");
       return;
     }
 
@@ -1385,9 +1389,16 @@ const RequestChangeModal = ({
       });
 
       await onAfterUpdate();
+      const msg =
+        decision === "reply"
+          ? "Reply sent to faculty."
+          : decision === "approve"
+          ? "RFC approved. Schedule is now locked."
+          : "RFC rejected. Schedule is now locked.";
+      onToast?.(msg, "success");
       onClose();
     } catch (e: any) {
-      alert(e?.message || "Failed to send response.");
+      onToast?.(e?.message || "Failed to send response.", "error");
     } finally {
       setLoading(false);
     }
@@ -1495,6 +1506,7 @@ const NewSectionModal = ({
   onClose,
   onSave,
   courseOptions,
+  onToast,
 }: {
   open: boolean;
   onClose: () => void;
@@ -1505,6 +1517,7 @@ const NewSectionModal = ({
     campus_id: string;
   }) => void;
   courseOptions: { code: string; title: string }[];
+  onToast?: (message: string, kind?: "success" | "error") => void;
 }) => {
   const [course, setCourse] = useState("");
   const [section, setSection] = useState("");
@@ -1527,7 +1540,7 @@ const NewSectionModal = ({
 
   const handleSave = () => {
     if (!course || !section) {
-      alert("Please fill at least course code and section code.");
+      onToast?.("Please fill at least Course Code and Section Code.", "error");
       return;
     }
     onSave({
@@ -1626,24 +1639,92 @@ const NewSectionModal = ({
   );
 };
 
+
+
+type ToastKind = "success" | "error" | "warning" | "info";
+
+function Toast({
+  open,
+  kind = "info",
+  message,
+  onClose,
+}: {
+  open: boolean;
+  kind?: ToastKind;
+  message: string;
+  onClose: () => void;
+}) {
+  if (!open) return null;
+
+  const tone =
+    kind === "success"
+      ? "border-emerald-200 bg-emerald-50 text-emerald-900"
+      : kind === "error"
+      ? "border-red-200 bg-red-50 text-red-900"
+      : kind === "warning"
+      ? "border-yellow-200 bg-yellow-50 text-yellow-900"
+      : "border-neutral-200 bg-white text-neutral-900";
+
+  const label =
+    kind === "success"
+      ? "Success"
+      : kind === "error"
+      ? "Error"
+      : kind === "warning"
+      ? "Warning"
+      : "Info";
+
+  return (
+    <div className="fixed bottom-4 left-1/2 z-[1200] w-[92vw] max-w-md -translate-x-1/2">
+      <div className={`rounded-xl border px-4 py-3 text-sm shadow-lg ${tone}`}>
+        <div className="flex items-start justify-between gap-3">
+          <div className="leading-snug">
+            <span className="font-semibold">{label}:</span> {message}
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-md px-2 py-1 text-xs hover:bg-black/5"
+            aria-label="Close message"
+            title="Close"
+          >
+            ✕
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function useToast() {
+  const [toast, setToast] = useState<{ kind: ToastKind; message: string } | null>(null);
+  const timerRef = useRef<number | null>(null);
+
+  const clear = useCallback(() => {
+    if (timerRef.current) window.clearTimeout(timerRef.current);
+    timerRef.current = null;
+    setToast(null);
+  }, []);
+
+  const show = useCallback((message: string, kind: ToastKind = "info", ms = 2500) => {
+    if (timerRef.current) window.clearTimeout(timerRef.current);
+    setToast({ kind, message });
+    timerRef.current = window.setTimeout(() => {
+      setToast(null);
+      timerRef.current = null;
+    }, ms);
+  }, []);
+
+  useEffect(() => () => clear(), [clear]);
+
+  return { toast, show, clear };
+}
 /* ---------------- Main ---------------- */
 export default function OM_LoadAssignment() {
   const [copiedRowId, setCopiedRowId] = useState<string | null>(null);
 
-  // Lightweight in-app toast (used for "Notified faculty…" success messages)
-  const [uiToast, setUiToast] = useState<{ open: boolean; message: string; kind: "success" | "error" }>({
-    open: false,
-    message: "",
-    kind: "success",
-  });
-  const toastTimerRef = useRef<number | null>(null);
-  const showToast = (message: string, kind: "success" | "error" = "success") => {
-    if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
-    setUiToast({ open: true, message, kind });
-    toastTimerRef.current = window.setTimeout(() => {
-      setUiToast((prev) => ({ ...prev, open: false }));
-    }, 3500);
-  };
+  // In-app toast (styled to match Faculty pages)
+  const { toast, show: showToast, clear: clearToast } = useToast();
 
   // Import SHS file
   const shsFileInputRef = useRef<HTMLInputElement>(null);
@@ -1738,8 +1819,9 @@ export default function OM_LoadAssignment() {
 
     // FRONTEND GUARD: block auto-assign while there are unsaved edits
     if (hasLocalEdits) {
-      alert(
-        "Auto-assign is disabled while you have manual edits.\n\nPlease save/discard your changes or refresh the list before running Auto-assign."
+      showToast(
+        "Auto-assign is disabled while you have manual edits. Save/discard your changes or refresh first.",
+        "error"
       );
       return;
     }
@@ -1762,9 +1844,10 @@ export default function OM_LoadAssignment() {
       setApproved(false);
       setHasLocalEdits(false); // result from algorithm is the new clean baseline
       resetHistory();
+      showToast("Auto-assign completed.", "success");
     } catch (e) {
       console.error(e);
-      alert(`Auto-assign failed: ${String(e)}`);
+      showToast(`Auto-assign failed: ${String(e)}`, "error");
     } finally {
       setIsAssigning(false);
     }
@@ -2106,6 +2189,15 @@ export default function OM_LoadAssignment() {
     setSendRowsPreview([]);
     await loadFromServer();
     setHasLocalEdits(false);
+    const uniqueFaculty = new Set(
+      rowsToSend.map((r) => (r.faculty || r.faculty_id || "").toString().trim()).filter(Boolean)
+    );
+    showToast(
+      uniqueFaculty.size <= 1
+        ? "Sent proposal to faculty."
+        : `Sent proposal to ${uniqueFaculty.size} faculty member(s).`,
+      "success"
+    );
   };
 
   // Derived: scoped history availability (re-rendered via historyVersion)
@@ -2221,9 +2313,10 @@ export default function OM_LoadAssignment() {
       await submitOmLoadAssignment(userId, { rows }, "save");
       await loadFromServer(); // pull fresh rows from DB
       setHasLocalEdits(false); // grid now matches DB
+      showToast("Draft saved.", "success");
     } catch (e) {
       console.error(e);
-      alert(`Save draft failed: ${String(e)}`);
+      showToast(`Save draft failed: ${String(e)}`, "error");
     }
   }
 
@@ -2960,8 +3053,9 @@ useEffect(() => {
                     //HARD BLOCK: required fields must be complete before forwarding
                     const incomplete = rows.filter(isRowIncompleteForApproval);
                     if (incomplete.length > 0) {
-                      alert(
-                        `Cannot forward to Chair yet.\n\nPlease complete all required fields (including Mode) for ${incomplete.length} row(s).`
+                      showToast(
+                        `Cannot forward to Chair yet. Please complete all required fields (including Mode) for ${incomplete.length} row(s).`,
+                        "error"
                       );
                       return;
                     }
@@ -3097,7 +3191,7 @@ useEffect(() => {
                         onClick={() => {
                           const preview = buildSendRowsForPreview();
                           if (!preview.length) {
-                            alert("Select at least one row with an assigned faculty.");
+                            showToast("Select at least one row with an assigned faculty.", "error");
                             return;
                           }
 
@@ -4117,17 +4211,18 @@ useEffect(() => {
             if (userId) {
               const res = await submitOmLoadAssignment(userId, { rows }, "approve");
 
-              // Create the chair notification (forward vs update is decided by backend;
-              // but if approve returns kind/reco_id, we pass it through for correctness)
               await notifyChairLoadRecommendation(userId, {
                 kind: (res as any)?.kind,
                 reco_id: (res as any)?.reco_id,
               });
+
+              showToast("Forwarded to Chair.", "success");
             }
 
-            // pull fresh data so you see persisted faculty + any created schedules
             await loadFromServer();
             setApproved(true);
+          } catch (e: any) {
+            showToast(e?.message || "Failed to forward to Chair.", "error");
           } finally {
             setShowApprove(false);
           }
@@ -4142,6 +4237,7 @@ useEffect(() => {
         rows={sendRowsPreview}
         termLabel={term}
         onSend={handleSendToFaculty}
+        onToast={showToast}
       />
 
       <SendBlockedModal
@@ -4158,12 +4254,14 @@ useEffect(() => {
         termId={termId || ""}
         rows={rows}
         onAfterUpdate={loadFromServer}
+        onToast={showToast}
       />
 
       <NewSectionModal
         open={showNewSectionModal}
         onClose={() => setShowNewSectionModal(false)}
         courseOptions={courseOptions}
+        onToast={showToast}
         onSave={({ course, section, units, campus_id }) => {
           // create a new manual row that behaves like other rows,
           // but with the extra campus_id attached
@@ -4203,30 +4301,12 @@ useEffect(() => {
       />
 
       {/* Global toast */}
-      {uiToast.open && (
-        <div className="fixed bottom-6 right-6 z-[250]">
-          <div
-            className={cls(
-              "max-w-md rounded-xl border p-4 shadow-lg",
-              uiToast.kind === "success"
-                ? "border-emerald-200 bg-emerald-50 text-emerald-900"
-                : "border-red-200 bg-red-50 text-red-900"
-            )}
-          >
-            <div className="flex items-start gap-3">
-              <div className="text-sm font-medium leading-snug">{uiToast.message}</div>
-              <button
-                type="button"
-                className="ml-auto rounded-md p-1 hover:bg-black/5"
-                aria-label="Close"
-                onClick={() => setUiToast((prev) => ({ ...prev, open: false }))}
-              >
-                <X className="h-4 w-4" />
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      <Toast
+        open={!!toast}
+        kind={toast?.kind}
+        message={toast?.message || ""}
+        onClose={clearToast}
+      />
 
     </AppShell>
   );

@@ -1156,6 +1156,7 @@ async def om_notify_chair_load_forwarded(
         "recipients": recipients,
         "kind": kind,
         "reco_id": reco_id,
+        "message": f"Notified {created} chair recipient(s).",
     }
 
 @router.get("/load-assignment/faculty-all")
@@ -1644,7 +1645,7 @@ async def om_send_to_faculty(payload: Dict[str, Any] = Body(...), db=Depends(get
 
         sent += 1
 
-    return {"ok": True, "term_id": term_id, "sent_faculty": sent}
+    return {"ok": True, "term_id": term_id, "sent_faculty": sent, "message": f"Sent proposal to {sent} faculty member(s)."}
 
 
 @router.get("/load-assignment/rfc")
@@ -1818,7 +1819,7 @@ async def respond_load_assignment_rfc(
             },
         )
 
-    return {"ok": True, "status": new_status}
+    return {"ok": True, "status": new_status, "message": ("Reply recorded." if action=="reply" else "RFC locked.")}
 
 
 @router.post("/load-assignment/finalize-course")
@@ -1874,7 +1875,7 @@ async def om_finalize_course(payload: Dict[str, Any] = Body(...), db=Depends(get
     except Exception:
         pass
 
-    return {"ok": True, "course_code": course_code, "section": section}
+    return {"ok": True, "course_code": course_code, "section": section, "message": "Faculty notified for finalized course."}
 
 @router.post("/load-assignment/run")
 async def run_auto_assignment(
