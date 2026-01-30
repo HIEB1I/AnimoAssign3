@@ -1,6 +1,6 @@
 // frontend/src/pages/CHAIR/CHAIR_FacultyService.tsx
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { Send, ChevronDown, X, CheckCircle2, AlertCircle, Info } from "lucide-react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Send, ChevronDown, X } from "lucide-react";
 import {
   getFSOptions,
   listFacultyService,
@@ -19,91 +19,84 @@ const cls = (...s: (string | false | undefined)[]) => s.filter(Boolean).join(" "
 const norm = (s?: string) => (s || "").trim().replace(/\s+/g, " ").toLowerCase();
 const eqDept = (a?: string, b?: string) => norm(a) === norm(b);
 
-/* ---------------- Toasts (in-file, no external libs) ---------------- */
-type ToastType = "success" | "error" | "info";
-type ToastInput = { type: ToastType; title?: string; message: string };
-type ToastItem = {
-  id: string;
-  type: ToastType;
-  title?: string;
-  message: string;
-  open: boolean;
-};
+/* ---------------- Toasts (match Faculty style) ---------------- */
+type ToastKind = "success" | "error" | "warning" | "info";
 
-function ToastViewport({
-  items,
+function Toast({
+  open,
+  kind = "info",
+  message,
   onClose,
 }: {
-  items: ToastItem[];
-  onClose: (id: string) => void;
+  open: boolean;
+  kind?: ToastKind;
+  message: string;
+  onClose: () => void;
 }) {
-  const iconFor = (t: ToastType) => {
-    if (t === "success") return <CheckCircle2 className="h-5 w-5 text-emerald-700" />;
-    if (t === "error") return <AlertCircle className="h-5 w-5 text-red-700" />;
-    return <Info className="h-5 w-5 text-amber-700" />;
-  };
+  if (!open) return null;
 
-  const accentFor = (t: ToastType) => {
-    if (t === "success") return "bg-emerald-600";
-    if (t === "error") return "bg-red-600";
-    return "bg-amber-500";
-  };
+  const tone =
+    kind === "success"
+      ? "border-emerald-200 bg-emerald-50 text-emerald-900"
+      : kind === "error"
+      ? "border-red-200 bg-red-50 text-red-900"
+      : kind === "warning"
+      ? "border-yellow-200 bg-yellow-50 text-yellow-900"
+      : "border-neutral-200 bg-white text-neutral-900";
 
-  const ringFor = (t: ToastType) => {
-    if (t === "success") return "ring-emerald-700/10";
-    if (t === "error") return "ring-red-700/10";
-    return "ring-amber-700/10";
-  };
-
-  if (!items.length) return null;
+  const label =
+    kind === "success"
+      ? "Success"
+      : kind === "error"
+      ? "Error"
+      : kind === "warning"
+      ? "Warning"
+      : "Info";
 
   return (
-    <div
-      className={cls(
-        "fixed z-[9999] right-4 top-4",
-        "w-[360px] max-w-[calc(100vw-2rem)]",
-        "space-y-3"
-      )}
-      role="region"
-      aria-label="Notifications"
-    >
-      {items.map((t) => (
-        <div
-          key={t.id}
-          className={cls(
-            "relative overflow-hidden rounded-xl border border-neutral-200 bg-white",
-            "shadow-[0_10px_30px_rgba(0,0,0,0.12)] ring-1",
-            ringFor(t.type),
-            "transition-all duration-200 ease-out",
-            t.open ? "opacity-100 translate-y-0" : "opacity-0 -translate-y-2"
-          )}
-        >
-          <div className={cls("absolute left-0 top-0 h-full w-1.5", accentFor(t.type))} />
-
-          <div className="flex gap-3 px-4 py-3">
-            <div className="mt-0.5">{iconFor(t.type)}</div>
-            <div className="min-w-0 flex-1">
-              <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0">
-                  {t.title && <div className="text-[13px] font-semibold text-neutral-900">{t.title}</div>}
-                  <div className="text-[13px] text-neutral-700 leading-snug break-words">{t.message}</div>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => onClose(t.id)}
-                  className="shrink-0 rounded-md p-1 hover:bg-neutral-100"
-                  aria-label="Dismiss"
-                  title="Dismiss"
-                >
-                  <X className="h-4 w-4 text-neutral-500" />
-                </button>
-              </div>
-            </div>
+    <div className="fixed bottom-4 left-1/2 z-[1200] w-[92vw] max-w-md -translate-x-1/2">
+      <div className={`rounded-xl border px-4 py-3 text-sm shadow-lg ${tone}`}>
+        <div className="flex items-start justify-between gap-3">
+          <div className="leading-snug">
+            <span className="font-semibold">{label}:</span> {message}
           </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-md px-2 py-1 text-xs hover:bg-black/5"
+            aria-label="Close message"
+            title="Close"
+          >
+            ✕
+          </button>
         </div>
-      ))}
+      </div>
     </div>
   );
+}
+
+function useToast() {
+  const [toast, setToast] = useState<{ kind: ToastKind; message: string } | null>(null);
+  const timerRef = useRef<number | null>(null);
+
+  const clear = useCallback(() => {
+    if (timerRef.current) window.clearTimeout(timerRef.current);
+    timerRef.current = null;
+    setToast(null);
+  }, []);
+
+  const show = useCallback((message: string, kind: ToastKind = "info", ms = 2500) => {
+    if (timerRef.current) window.clearTimeout(timerRef.current);
+    setToast({ kind, message });
+    timerRef.current = window.setTimeout(() => {
+      setToast(null);
+      timerRef.current = null;
+    }, ms);
+  }, []);
+
+  useEffect(() => () => clear(), [clear]);
+
+  return { toast, show, clear };
 }
 
 /** unify control heights */
@@ -472,38 +465,8 @@ export default function CHAIR_FacultyService({ chairDepartmentName }: ChairFacul
    * - Each chair sees BOTH: Sent (from my dept) and Received (to my dept).
    */
 
-  /* ---------------- toast state ---------------- */
-  const [toasts, setToasts] = useState<ToastItem[]>([]);
-  const toastTimers = useRef<Record<string, number>>({});
-
-  const removeToast = (id: string) => {
-    setToasts((prev) => prev.filter((t) => t.id !== id));
-    if (toastTimers.current[id]) {
-      window.clearTimeout(toastTimers.current[id]);
-      delete toastTimers.current[id];
-    }
-  };
-
-  const closeToast = (id: string) => {
-    setToasts((prev) => prev.map((t) => (t.id === id ? { ...t, open: false } : t)));
-    // allow exit transition to play
-    window.setTimeout(() => removeToast(id), 220);
-  };
-
-  const showToast = ({ type, title, message }: ToastInput) => {
-    const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    const item: ToastItem = { id, type, title, message, open: true };
-
-    setToasts((prev) => [item, ...prev]);
-    toastTimers.current[id] = window.setTimeout(() => closeToast(id), 3000);
-  };
-
-  useEffect(() => {
-    return () => {
-      Object.values(toastTimers.current).forEach((t) => window.clearTimeout(t));
-      toastTimers.current = {};
-    };
-  }, []);
+  /* ---------------- toast (match Faculty style) ---------------- */
+  const { toast, show: showToast, clear: clearToast } = useToast();
 
   // Working / planning term coming from backend activeTerm
   const [termLabel, setTermLabel] = useState<string>("");
@@ -701,11 +664,7 @@ export default function CHAIR_FacultyService({ chairDepartmentName }: ChairFacul
   async function handleCreateAndSend() {
     try {
       if (!canSend) {
-        showToast({
-          type: "info",
-          title: "Missing details",
-          message: "Please complete Course, Units, and To Department.",
-        });
+        showToast("Missing details: Please complete Course, Units, and To Department.", "warning");
         return;
       }
       const crt = await createFacultyService({
@@ -716,7 +675,7 @@ export default function CHAIR_FacultyService({ chairDepartmentName }: ChairFacul
         from_department: activeDeptName,
       });
       if (!crt?.ok || !crt.row?.fs_id) {
-        showToast({ type: "error", title: "Create failed", message: "Failed to create request." });
+        showToast("Create failed: Failed to create request.", "error");
         return;
       }
 
@@ -729,9 +688,9 @@ export default function CHAIR_FacultyService({ chairDepartmentName }: ChairFacul
       setCourseTerm("");
 
       await refresh();
-      showToast({ type: "success", message: "Request sent." });
+      showToast("Request sent.", "success");
     } catch (e: any) {
-      showToast({ type: "error", title: "Request failed", message: friendlyError(e) });
+      showToast(`Request failed: ${friendlyError(e)}`, "error");
     }
   }
 
@@ -749,7 +708,7 @@ export default function CHAIR_FacultyService({ chairDepartmentName }: ChairFacul
     const e = getEdit(fs_id);
     try {
       if (!e.faculty?.faculty_id && !e.faculty?.email) {
-        showToast({ type: "info", title: "Select a faculty", message: "Please select a faculty to proceed." });
+        showToast("Select a faculty: Please select a faculty to proceed.", "info");
         return;
       }
       await respondFacultyService(fs_id, {
@@ -769,9 +728,9 @@ export default function CHAIR_FacultyService({ chairDepartmentName }: ChairFacul
       }));
       await refresh();
       ensureFacultyForDept(dept);
-      showToast({ type: "success", message: "Request Accepted." });
+      showToast("Request accepted.", "success");
     } catch (err: any) {
-      showToast({ type: "error", title: "Send failed", message: friendlyError(err) });
+      showToast(`Send failed: ${friendlyError(err)}`, "error");
     }
   }
 
@@ -779,9 +738,9 @@ export default function CHAIR_FacultyService({ chairDepartmentName }: ChairFacul
     try {
       await rejectFacultyService(fs_id, { remarks: getEdit(fs_id).remarks || "" });
       await refresh();
-      showToast({ type: "error", message: "Request rejected." });
+      showToast("Request rejected.", "success");
     } catch (err: any) {
-      showToast({ type: "error", title: "Reject failed", message: friendlyError(err) });
+      showToast(`Reject failed: ${friendlyError(err)}`, "error");
     }
   }
 
@@ -793,7 +752,7 @@ export default function CHAIR_FacultyService({ chairDepartmentName }: ChairFacul
   /* ---------------- UI ---------------- */
   return (
     <div className="min-h-screen w-full bg-gray-50 text-slate-900 px-8 py-8">
-      <ToastViewport items={toasts} onClose={closeToast} />
+      <Toast open={!!toast} kind={toast?.kind} message={toast?.message || ""} onClose={clearToast} />
       <header className="mb-6">
         <h1 className="text-2xl font-bold">Faculty Service</h1>
         <p className="text-sm text-gray-600">
