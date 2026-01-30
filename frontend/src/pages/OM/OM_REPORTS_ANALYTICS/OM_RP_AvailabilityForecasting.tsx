@@ -1,6 +1,6 @@
 // frontend/src/pages/OM/OM_REPORTS_ANALYTICS/OM-RP_AvailabilityForecasting.tsx
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ChevronDown, ChevronLeft, CalendarCheck, Users, Clock, TrendingUp } from "lucide-react";
+import { ChevronDown, ChevronLeft, CalendarCheck, Users, Clock, TrendingUp, AlertTriangle } from "lucide-react";
 import { fetchFacultyAvailabilityHeatmap } from "../../../api";
 import { Link } from "react-router-dom";
 
@@ -113,11 +113,17 @@ type HeatSlot = { count: number; list: HeatPerson[] };
 
 type AvailabilityHeatmap = {
   term_id: string;
+  term_label?: string;
+
   previous_term_for_prefs?: string | null;
+  previous_term_for_prefs_label?: string | null;
+
   history_terms: string[];
+  history_terms_labels?: string[];
+
   warnings: string[];
   slots: Record<SlotKey, HeatSlot>;
-  // New Quality Metrics
+
   total_faculty_considered: number;
   faculty_with_recent_pref: number;
   faculty_with_recent_history: number;
@@ -162,15 +168,42 @@ function mergePairCells(a: HeatSlot, b: HeatSlot): HeatSlot {
   };
 }
 
-/** A soft emerald ramp for counts → background */
+/** Soft red → neutral → emerald ramp for counts */
 function colorForCount(count: number, min: number, max: number) {
-  if (count <= 0 || max <= 0) return "#F2F4F7"; // light gray
+  if (max <= 0) return "#F2F4F7";
+
   const span = Math.max(1, max - min);
   const ratio = (count - min) / span;
 
-  const steps = ["#ecfdf5", "#d1fae5", "#a7f3d0", "#6ee7b7", "#34d399", "#10b981", "#059669"];
-  const idx = Math.min(steps.length - 1, Math.max(0, Math.floor(ratio * (steps.length - 1))));
+  // Very light red → neutral → green
+  const steps = [
+    "#fee2e2", 
+    "#fecaca", 
+    "#fca5a5", 
+    "#f2f2f2", 
+    "#d1fae5",
+    "#a7f3d0",
+    "#6ee7b7",
+    "#34d399",
+    "#059669",
+  ];
+
+  const idx = Math.min(
+    steps.length - 1,
+    Math.max(0, Math.round(ratio * (steps.length - 1)))
+  );
+
   return steps[idx];
+}
+
+function shouldUseDarkText(bg: string) {
+  // simple luminance check
+  const hex = bg.replace("#", "");
+  const r = parseInt(hex.slice(0, 2), 16);
+  const g = parseInt(hex.slice(2, 4), 16);
+  const b = parseInt(hex.slice(4, 6), 16);
+  const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+  return luminance > 0.6;
 }
 
 function usePairMinMax(data: AvailabilityHeatmap | null) {
@@ -195,48 +228,66 @@ function usePairMinMax(data: AvailabilityHeatmap | null) {
 function SummaryCards({ data }: { data: AvailabilityHeatmap | null }) {
   if (!data) return null;
 
+  // Low-support slots based on the paired grid you're showing (M–H, T–F, W–S)
+  // "Low support" = 0 or 1 faculty (safe + defensible; highlights risk without overclaiming)
+  const totalCells = TIME_ROWS.length * DAY_PAIRS.length;
+  let lowSupportCells = 0;
+
+  for (const slot of TIME_ROWS) {
+    for (const [d1, d2] of DAY_PAIRS) {
+      const merged = mergePairCells(getSingleCell(data, d1, slot), getSingleCell(data, d2, slot));
+      if (merged.count <= 1) lowSupportCells += 1;
+    }
+  }
+  const prefLabel = data.previous_term_for_prefs_label || data.previous_term_for_prefs || "—";
+  const histLabels = (data.history_terms_labels?.length ? data.history_terms_labels : data.history_terms);
   const cards = [
     {
-      label: "Total Faculty Considered",
+      label: "Faculty Considered",
       value: data.total_faculty_considered,
       icon: <Users className="h-5 w-5 text-emerald-600" />,
-      tooltip: "Unique faculty considered after filtering by department, course, and approved leaves.",
+      tooltip:
+        "Number of unique faculty included in the forecast after applying department, qualification, and approved-leave filters.",
       color: "text-emerald-700",
     },
     {
-      label: "With Recent Preference",
-      value: data.faculty_with_recent_pref,
-      icon: <CalendarCheck className="h-5 w-5 text-blue-600" />,
-      tooltip: `Faculty with a preference record for the previous term (${data.previous_term_for_prefs}).`,
-      color: "text-blue-700",
-    },
-    {
-      label: "With Recent History",
+      label: "Faculty with Recent Teaching History",
       value: data.faculty_with_recent_history,
       icon: <Clock className="h-5 w-5 text-amber-600" />,
-      tooltip: `Faculty who had an assignment in the last ${data.history_terms.length} terms (${data.history_terms.join(", ")}).`,
+      tooltip:
+      `Faculty who have recorded teaching assignments within the last ${histLabels.length} term(s) ` +
+      `(${histLabels.join(", ")}). Used as the basis for history-driven forecasting.`,
       color: "text-amber-700",
     },
     {
-      label: "Most Supported Slot",
-      value: data.most_supported_slot_count,
-      icon: <TrendingUp className="h-5 w-5 text-red-600" />,
-      tooltip: "The maximum number of faculty predicted available for any single time slot (the peak of the heatmap).",
-      color: "text-red-700",
+      label: "Slots with Low Faculty Support",
+      value: `${lowSupportCells} / ${totalCells}`,
+      icon: <AlertTriangle className="h-5 w-5 text-rose-600" />,
+      tooltip:
+        "Number of time slots with little to no historical faculty support (0–1), indicating potential scheduling risk.",
+      color: "text-rose-700",
     },
   ];
 
+  // Stacked layout (matches your latest UI)
   return (
-    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+    <div className="flex flex-col gap-4">
       {cards.map((card) => (
-        <Card key={card.label} className="p-4 flex items-center justify-between">
-          <div>
-            <div className="text-sm text-gray-500 truncate">{card.label}</div>
-            <div className={cls("mt-1 text-2xl font-bold", card.color)} title={card.tooltip}>
-              {card.value}
+        <Card key={card.label} className="p-4">
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <div className="text-sm text-gray-500 truncate" title={card.tooltip}>
+                {card.label}
+              </div>
+              <div className={cls("mt-1 text-2xl font-bold", card.color)} title={card.tooltip}>
+                {card.value}
+              </div>
             </div>
+            <div className="shrink-0">{card.icon}</div>
           </div>
-          {card.icon}
+
+          {/* helper text under the value (panel-proof) */}
+          <div className="mt-2 text-xs text-gray-500 leading-snug">{card.tooltip}</div>
         </Card>
       ))}
     </div>
@@ -287,6 +338,95 @@ export default function OM_RP_AvailabilityForecasting() {
     return { dayLabel: `${active.d1}–${active.d2}`, slot: active.slot, cell: merged, notes };
   }, [active, data]);
 
+  const heatmapEl = data && !loading ? (
+    <Card className="overflow-x-auto">
+      {/* Legend / scale */}
+      <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 border-b border-gray-200">
+        <div className="text-sm text-gray-600">
+          Cell count indicates unique faculty with the paired slot in their top {TOP_N_PER_FACULTY} strongest slots.
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-gray-500">Low ({pairMin})</span>
+          {/* IMPORTANT: make legend match red→green now */}
+          <div className="h-3 w-28 rounded bg-gradient-to-r from-[#fca5a5] via-[#f2f2f2] to-[#059669]" />
+          <span className="text-xs text-gray-500">Peak ({pairMax})</span>
+        </div>
+      </div>
+  
+      {/* Heatmap */}
+      <div className="w-fit mx-auto px-4 pb-3">
+        <table className="w-fit table-auto border-separate border-spacing-[6px] text-sm">
+          <colgroup>
+            <col style={{ width: 170 }} />
+            <col style={{ width: 72 }} />
+            <col style={{ width: 72 }} />
+            <col style={{ width: 72 }} />
+          </colgroup>
+  
+          <thead className="sticky top-0 z-[1] bg-white">
+            <tr>
+            <th className="text-right px-3 py-2 border-b border-gray-200 sticky left-0 bg-white align-middle">
+              <span className="inline-flex w-full items-center justify-between">
+                <span>Time ↓</span>
+                <span className="text-gray-400">/</span>
+                <span>Day →</span>
+              </span>
+            </th>
+              {DAY_PAIRS.map(([d1, d2]) => (
+                <th key={`${d1}${d2}`} className="text-center py-2 border-b border-gray-200 text-emerald-700">
+                  {d1}–{d2}
+                </th>
+              ))}
+            </tr>
+          </thead>
+  
+          <tbody>
+            {TIME_ROWS.map((slot) => (
+              <tr key={slot}>
+                <th className="text-right px-3 py-2 whitespace-nowrap sticky left-0 bg-white align-middle">
+                  {slot}
+                </th>
+  
+                {DAY_PAIRS.map(([d1, d2]) => {
+                  const merged = mergePairCells(getSingleCell(data, d1, slot), getSingleCell(data, d2, slot));
+                  const bg = colorForCount(merged.count, pairMin, pairMax);
+                  const darkText = shouldUseDarkText(bg);
+                  const isPeak = merged.count === pairMax && pairMax > 0;
+  
+                  return (
+                    <td
+                      key={`${d1}${d2}-${slot}`}
+                      onClick={() => setActive({ d1, d2, slot })}
+                      className={cls(
+                        "text-center align-middle cursor-pointer select-none",
+                        isPeak && "ring-2 ring-red-500 ring-offset-2"
+                      )}
+                      style={{
+                        background: bg,
+                        color: darkText ? "#0b3d2e" : "white",
+                        fontWeight: 700,
+                        borderRadius: 0,
+                        height: 22,
+                        width: 64,
+                      }}
+                      title={`${d1}–${d2} • ${slot} • ${merged.count}${isPeak ? " (Peak)" : ""}`}
+                    >
+                      {merged.count > 0 ? merged.count : ""}
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+  
+        <div className="text-[12px] text-gray-600 mt-2 px-3 pb-3">
+          Click a slot to view predicted faculty candidates and confidence (history/preference-based).
+        </div>
+      </div>
+    </Card>
+  ) : null;
+
   return (
     // CENTER + MAX WIDTH CONTAINER
     <div className="w-full max-w-[1400px] mx-auto px-4 sm:px-6 lg:px-8 py-8">
@@ -317,7 +457,7 @@ export default function OM_RP_AvailabilityForecasting() {
             <SelectBox value={term} onChange={setTerm} options={["2025 Term 1", "2024 Term 3", "2024 Term 2"]} />
           </div>
 
-          <div className="relative w-full sm:w-[28rem]">
+          {/* <div className="relative w-full sm:w-[28rem]">
             <input
               className="w-full rounded-lg border border-gray-300 px-3.5 py-2 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30"
               placeholder="Filter by course ID (qualified only)"
@@ -336,7 +476,7 @@ export default function OM_RP_AvailabilityForecasting() {
                 ×
               </button>
             )}
-          </div>
+          </div> */}
 
           <div className="ml-auto text-sm text-gray-600">
             Term scope: <span className="font-semibold text-emerald-700">Pre-survey</span>
@@ -344,110 +484,30 @@ export default function OM_RP_AvailabilityForecasting() {
         </div>
       </Card>
 
-      <WarningPanel warnings={data?.warnings || []} />
+      <WarningPanel
+        warnings={(data?.warnings || []).map((w) => {
+          const curr = data?.term_id;
+          const currLabel = data?.term_label;
+          if (curr && currLabel) return w.replaceAll(String(curr), String(currLabel));
+          return w;
+        })}
+      />
 
-      {/* NEW: Summary Cards */}
-      <SummaryCards data={data} />
+      {/* MAIN GRID (left cards + right heatmap) */}
+      <div className="grid grid-cols-1 lg:grid-cols-[420px_1fr] gap-6 mt-4 items-start">
+        {/* Left: metrics */}
+        <div className="space-y-0">
+          <SummaryCards data={data} />
+        </div>
 
-      {loading && (
-        <Card className="overflow-hidden w-full">
-          <div className="animate-pulse">
-            <div className="h-10 bg-gray-50 border-b border-gray-100" />
-            {[...Array(6)].map((_, i) => (
-              <div key={i} className="h-12 border-t border-gray-100 bg-gray-50/80" />
-            ))}
-          </div>
-        </Card>
-      )}
+        {/* Right: heatmap */}
+        <div>
+          {heatmapEl}
+        </div>
+      </div>
 
       {error && (
         <div className="px-4 py-3 text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg">{error}</div>
-      )}
-
-      {data && !loading && (
-        <Card className="overflow-x-auto w-full">
-          {/* Legend / scale */}
-          <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 border-b border-gray-200">
-            <div className="text-sm text-gray-600">
-              Cell count indicates unique faculty with the paired slot in their top {TOP_N_PER_FACULTY} strongest slots.
-            </div>
-            <div className="flex items-center gap-2">
-              <span className="text-xs text-gray-500">Low ({pairMin})</span>
-              <div className="h-3 w-24 rounded bg-gradient-to-r from-[#ecfdf5] via-[#6ee7b7] to-[#059669]" />
-              <span className="text-xs text-gray-500">Peak ({pairMax})</span>
-            </div>
-          </div>
-
-          {/* Heatmap table (full width, centered within card) */}
-          <div className="w-full">
-            <table className="w-full table-fixed border-separate border-spacing-0 text-sm">
-              {/* Fix first column width; remaining columns flex */}
-              <colgroup>
-                <col style={{ width: 160 }} />
-                <col />
-                <col />
-                <col />
-              </colgroup>
-
-              <thead className="sticky top-0 z-[1] bg-white">
-                <tr>
-                  <th className="text-left px-3 py-2 border-b border-gray-200 sticky left-0 bg-white">
-                    Time ↓ / Day →
-                  </th>
-                  {DAY_PAIRS.map(([d1, d2]) => (
-                    <th key={`${d1}${d2}`} className="text-center px-3 py-2 border-b border-gray-200 text-emerald-700">
-                      {d1}–{d2}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-
-              <tbody>
-                {TIME_ROWS.map((slot) => (
-                  <tr key={slot}>
-                    <th className="text-right px-3 py-2 border-r border-gray-100 whitespace-nowrap sticky left-0 bg-white">
-                      {slot}
-                    </th>
-                    {DAY_PAIRS.map(([d1, d2]) => {
-                      const merged = mergePairCells(
-                        getSingleCell(data, d1, slot),
-                        getSingleCell(data, d2, slot)
-                      );
-                      const bg = colorForCount(merged.count, pairMin, pairMax);
-                      const darkText = merged.count <= Math.max(1, Math.round(pairMax * 0.35));
-                      const isPeak = merged.count === pairMax && pairMax > 0;
-                      return (
-                        <td
-                          key={`${d1}${d2}-${slot}`}
-                          onClick={() => setActive({ d1, d2, slot })}
-                          className={cls(
-                            "text-center align-middle border border-gray-100 cursor-pointer",
-                            isPeak && "ring-2 ring-red-500 ring-offset-2" // Highlight peak
-                          )}
-                          style={{
-                            background: bg,
-                            color: darkText ? "#0b3d2e" : "white",
-                            fontWeight: 700,
-                            borderRadius: 10,
-                            height: 56, // taller for readability on wide screens
-                          }}
-                          title={`${d1}–${d2} • ${slot} • ${merged.count}${isPeak ? " (Peak)" : ""}`}
-                        >
-                          {merged.count}
-                          <div className={cls("text-[11px]", darkText ? "opacity-80" : "opacity-95")}>faculty</div>
-                        </td>
-                      );
-                    })}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-
-            <div className="text-[12px] text-gray-600 mt-2 px-3 pb-3">
-              Click a cell to see predicted faculty and confidence.
-            </div>
-          </div>
-        </Card>
       )}
 
       {/* Modal */}
