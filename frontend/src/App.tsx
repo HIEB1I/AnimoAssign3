@@ -1,5 +1,16 @@
 import { BrowserRouter, Route, Routes, Navigate, Outlet } from "react-router-dom";
 import "./App.css";
+import { getSocket } from "@/realtime/socket";
+import { useEffect } from "react";
+
+
+// Pages
+
+import GmailConnect from "./pages/Login/GmailConnect";
+import BlankPage from "./pages/Login/BlankPage";
+import CalendarManager from "./pages/Login/CalendarManager";
+import CalendarInvite from "./pages/Login/CalendarInvite";
+
 
 // Pages
 import Login from "./pages/Login/Login";
@@ -71,8 +82,16 @@ function RequireAuth() {
   } catch {
     ok = false;
   }
+
+  useEffect(() => {
+    if (!ok) return;
+    // connect once (singleton)
+    getSocket();
+  }, [ok]);
+
   return ok ? <Outlet /> : <Navigate to="/Login" replace />;
 }
+
 
 /**
  * Small wrapper for the CHAIR Faculty Service route.
@@ -116,6 +135,11 @@ export default function App() {
         {/* Public */}
         <Route path="/Login" element={<Login />} />
         <Route path="/auth/callback" element={<AuthCallback />} />
+        <Route path="/blank" element={<BlankPage />} />
+        <Route path="/gmail-connect" element={<GmailConnect />} />
+        <Route path="/blank" element={<BlankPage />} />
+        <Route path="/calendar-manager" element={<CalendarManager />} />
+        <Route path="/calendar-invite" element={<CalendarInvite />} />
 
         {/* Protected */}
         <Route element={<RequireAuth />}>
@@ -139,6 +163,7 @@ export default function App() {
             <Route path="student-petition" element={<OM_StudentPetition />} />
              <Route path="special-class" element={<OM_SpecialClass />} />
             <Route path="class-retention" element={<OM_ClassRetention />} />
+            <Route path="special-class" element={<OM_SpecialClass />} />
 
   <Route path="reports-analytics" element={<OM_ReportsAnalytics />} />
   <Route path="reports-analytics/teaching-history" element={<OM_RP_FacultyTeachingHistory />} />
@@ -183,7 +208,7 @@ export default function App() {
           <Route path="/faculty/history" element={<FACULTY_History />} />
           <Route path="/faculty/preferences" element={<FACULTY_Preferences />} />
           <Route path="/faculty/deloadings" element={<FACULTY_Deloadings />} />
-          <Route path="/inbox" element={<FACULTY_Inbox />} />
+          <Route path="/faculty/inbox" element={<FACULTY_Inbox />} />
 
           {/* Admin */}
           <Route path="/admin" element={<ADMIN />} />
@@ -196,7 +221,7 @@ export default function App() {
             <Route path="plantilla" element={<div />} />
 
             {/* Children per mapping */}
-            <Route path="inbox" element={<CHAIR_Inbox />} /> {/* ✅ ADD THIS */}
+            <Route path="inbox" element={<CHAIR_Inbox />} /> 
             <Route path="faculty-management" element={<CHAIR_FacultyManagement />} />
             <Route path="course-management" element={<CHAIR_CourseManagement />} />
             {/* use wrapper that passes chairDepartmentName */}
@@ -205,7 +230,8 @@ export default function App() {
             <Route path="class-retention" element={<CHAIR_ClassRetention />} />
             <Route path="special-class" element={<CHAIR_SpecialClass />} />
           </Route>
-
+        
+          
 
           {/* Authenticated wildcard: unknown paths for logged-in users go OM home */}
           <Route path="*" element={<Navigate to="/om/home" replace />} />

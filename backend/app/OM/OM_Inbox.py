@@ -1,15 +1,24 @@
-# backend/app/CHAIR/CHAIR_Inbox.py
+# backend/app/OM/OM_Inbox.py
 from fastapi import APIRouter, Query
-from ..main import db
+from fastapi.concurrency import run_in_threadpool
+from typing import Any, Dict, List
 
-router = APIRouter(prefix="/chair", tags=["chair"])
+from ..db import get_collection
+
+router = APIRouter(prefix="/om", tags=["om"])
+
 
 @router.get("/inbox")
-async def get_chair_inbox(userId: str = Query(...)):
+async def get_om_inbox(userId: str = Query(...)) -> Dict[str, Any]:
     """
-    Chair Inbox feed, mirroring OM's /om/inbox.
-    Returns messages for userId from 'chair_inbox'.
+    OM Inbox feed.
+    Returns messages for userId from 'om_inbox'.
     UI expects: id, from, email, subject, preview/body, receivedAt.
     """
-    inbox = await db.chair_inbox.find({"user_id": userId}, {"_id": 0}).to_list(None)
+    col = get_collection("om_inbox")
+
+    def _fetch() -> List[Dict[str, Any]]:
+        return list(col.find({"user_id": userId}, {"_id": 0}))
+
+    inbox = await run_in_threadpool(_fetch)
     return {"ok": True, "inbox": inbox or []}

@@ -4,7 +4,7 @@ WORKDIR /app
 ARG VITE_BASE=/
 ENV VITE_BASE=${VITE_BASE}
 COPY package*.json ./
-RUN npm ci
+RUN npm install && npm ci
 COPY . .
 RUN npm run build
 

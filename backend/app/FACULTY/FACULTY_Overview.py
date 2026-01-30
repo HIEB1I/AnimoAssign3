@@ -7,6 +7,15 @@ from ..Notifications import create_notification
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+
+import os
+import base64
+from email.message import EmailMessage
+import httpx
+
+_GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
+_GMAIL_SEND_URL = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send"
+
 router = APIRouter(prefix="/faculty", tags=["faculty"])
 
 COL_NOTIFICATIONS = "notifications"
@@ -373,19 +382,21 @@ async def overview_handler(
 
 
             final_teaching_load.append({
-                "course_code": _as_code_str(r.get("course_code")),
-                "course_title": r.get("course_title", ""),
-                "section": r.get("section", ""),
-                "units": r.get("units", 0) or 0,
-                "mode": mode,
-                "day1": day1,
-                "day2": day2,
-                "room1": room1,
-                "room2": room2,
-                "time1": time1,
-                "time2": time2,
-                "syllabus": r.get("syllabus", ""),
-            })
+            "section_id": _as_code_str(sec_id),  # ✅ ADD THIS
+            "course_code": _as_code_str(r.get("course_code")),
+            "course_title": r.get("course_title", ""),
+            "section": r.get("section", ""),
+            "units": r.get("units", 0) or 0,
+            "mode": mode,
+            "day1": day1,
+            "day2": day2,
+            "room1": room1,
+            "room2": room2,
+            "time1": time1,
+            "time2": time2,
+            "syllabus": r.get("syllabus", ""),
+        })
+
             
         final_teaching_load.sort(key=lambda x: (x.get("course_code", ""), x.get("section", "")))
 
@@ -830,6 +841,11 @@ async def faculty_send_load_rfc_message(userId: str = Query(...), payload: Dict[
     if not term_id:
         term = await _active_term()
         term_id = (term or {}).get("term_id")
+        
+    section_id = (payload.get("section_id") or payload.get("sectionId") or "").strip()
+    if not section_id:
+         raise HTTPException(status_code=400, detail="section_id is required")
+
 
     if not term_id:
         raise HTTPException(status_code=409, detail="No active/upcoming term")
@@ -875,16 +891,146 @@ async def faculty_send_load_rfc_message(userId: str = Query(...), payload: Dict[
          "$setOnInsert": {"created_at": now}},
         upsert=True,
     )
+    msgs.append({
+        "sender_role": "faculty",
+        "sender_user_id": userId,
+        "message": message,
+        "created_at": now.isoformat(),
+    })
+
+    # Best-effort context (course/section/schedule)
+    sec = await db[COL_SECTIONS].find_one({"section_id": section_id}, {"_id": 0, "section_code": 1, "course_id": 1}) or {}
+    course = await db[COL_COURSES].find_one({"course_id": sec.get("course_id")}, {"_id": 0, "course_code": 1, "course_title": 1}) or {}
+
+    course_code = _as_code_str(course.get("course_code"))
+    section_code = _as_code_str(sec.get("section_code"))
+    course_title = _as_code_str(course.get("course_title"))
+
+    def _fmt_hhmm(v: Any) -> str:
+        if v is None:
+            return ""
+        s = str(v).strip()
+        if s.isdigit() and len(s) == 4:
+            return f"{s[:2]}:{s[2:]}"
+        return s
+
+    scheds = await db[COL_SCHED].find({"section_id": section_id}, {"_id": 0}).to_list(10)
+    room_ids = [str(s.get("room_id") or "").strip() for s in scheds if str(s.get("room_id") or "").strip()]
+    rooms: Dict[str, str] = {}
+    if room_ids:
+        async for r in db[COL_ROOMS].find({"room_id": {"$in": room_ids}}, {"_id": 0, "room_id": 1, "room_number": 1}):
+            rooms[str(r.get("room_id") or "").strip()] = str(r.get("room_number") or "").strip()
+
+    sched_lines: list[str] = []
+    for s in scheds:
+        d = _as_code_str(s.get("day") or s.get("day_of_week"))
+        st = _fmt_hhmm(s.get("start_time"))
+        en = _fmt_hhmm(s.get("end_time"))
+        rid = str(s.get("room_id") or "").strip()
+        rn = rooms.get(rid) or "TBA"
+        band = f"{st}–{en}".strip("–") if st and en else (st or en or "")
+        if d or band or rid:
+            sched_lines.append(f"{d} {band} @ {rn}".strip())
+
+    await db[COL_LOAD_RFC].update_one(
+        {"faculty_id": fid, "term_id": term_id, "section_id": section_id},
+        {"$set": {
+            "rfc_id": existing.get("rfc_id"),
+            "faculty_id": fid,
+            "faculty_user_id": userId,
+            "om_user_id": om_uid,
+            "term_id": term_id,
+            "section_id": section_id,
+            "course_code": course_code,
+            "section_code": section_code,
+            "course_title": course_title,
+            "status": "NEEDS_OM",
+            "locked": False,
+            "messages": msgs,
+            "updated_at": now,
+        }, "$setOnInsert": {"created_at": now}},
+        upsert=True,
+    )
 
     if om_uid:
         await create_notification(
             user_id=om_uid,
             title="Load Assignment: Faculty sent a Request for Change",
-            details=f"{faculty.get('first_name','')} {faculty.get('last_name','')} sent a Request for Change. Open Load Assignment to respond.",
-            meta={"route": "/om/load-assignment", "kind": "load_rfc_received", "term_id": term_id, "faculty_id": fid, "rfc_id": existing.get("rfc_id")},
+            details=f"{faculty.get('first_name','')} {faculty.get('last_name','')} sent an RFC for {course_code} {section_code}.",
+            meta={
+                "route": "/om/load-assignment",
+                "kind": "load_rfc_received",
+                "term_id": term_id,
+                "faculty_id": fid,
+                "section_id": section_id,  # ✅ important
+                "rfc_id": existing.get("rfc_id"),
+            },
         )
 
-    return {"ok": True, "rfc_id": existing.get("rfc_id"), "status": "NEEDS_OM"}
+    # ✅ Email requirements:
+    # - to johntario27@gmail.com
+    # - include fields + messages
+    # - include sender name
+    # - include [AnimoAssign] in subject and end of email
+    user_doc = await db.users.find_one(
+        {"user_id": userId},
+        {"_id": 0, "first_name": 1, "last_name": 1, "firstName": 1, "lastName": 1, "email": 1},
+    ) or {}
+
+    def _pick(*vals: Any) -> str:
+        for v in vals:
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+        return ""
+
+    sender_first = _pick(faculty.get("first_name"), faculty.get("firstName"), user_doc.get("first_name"), user_doc.get("firstName"))
+    sender_last = _pick(faculty.get("last_name"), faculty.get("lastName"), user_doc.get("last_name"), user_doc.get("lastName"))
+    sender_name = (f"{sender_first} {sender_last}".strip() or _pick(faculty.get("full_name"), faculty.get("fullName"))).strip() or "Faculty"
+
+    term_doc = await db[COL_TERMS].find_one({"term_id": term_id}, {"_id": 0}) or {}
+    term_label = _term_label(term_doc) if term_doc else term_id
+
+    email_subject = f"[AnimoAssign] RFC: {course_code or 'Course'} {section_code or ''} ({term_label})"
+    schedule_block = "\n".join(f"- {x}" for x in sched_lines) if sched_lines else "- (no schedule found)"
+
+    email_body = (
+        "Request for Change (RFC)\n\n"
+        f"Sender: {sender_name}\n"
+        f"Sender User ID: {userId}\n"
+        f"Faculty ID: {fid}\n"
+        f"Term: {term_label}\n\n"
+        f"Course: {course_code or '(unknown)'}\n"
+        f"Title: {course_title or '(unknown)'}\n"
+        f"Section: {section_code or '(unknown)'}\n"
+        f"Section ID: {section_id}\n\n"
+        "Current Schedule:\n"
+        f"{schedule_block}\n\n"
+        "Message:\n"
+        f"{message}\n\n"
+        "Thread:\n"
+        + "\n".join(
+            f"- {str(m.get('sender_role') or '').upper()} • {m.get('created_at') or ''}\n  {m.get('message') or ''}".rstrip()
+            for m in msgs
+        )
+        + "\n\n—\n"
+        + f"{sender_name}\n"
+        + "[AnimoAssign]"
+    )
+
+    email_sent, email_error = await _send_email_via_user_gmail(
+        user_id=userId,
+        to_email="johntario27@gmail.com",
+        subject=email_subject,
+        body=email_body,
+    )
+
+    return {
+        "ok": True,
+        "rfc_id": existing.get("rfc_id"),
+        "status": "NEEDS_OM",
+        "email_sent": email_sent,
+        "email_error": email_error,
+    }
 
 
 @router.post("/load-assignment/accept")
