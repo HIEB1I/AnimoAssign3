@@ -340,7 +340,7 @@ const DepartmentPlantilla: React.FC<{
             {rows.length === 0 ? (
               <tr>
                 <td colSpan={21} className="px-4 py-10 text-center text-sm text-gray-500">
-                  No plantilla rows to display.
+                  No plantilla to display.
                 </td>
               </tr>
             ) : (

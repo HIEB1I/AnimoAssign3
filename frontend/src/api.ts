@@ -2651,7 +2651,7 @@ export async function getFacultyLoadAssignmentRfc(userId: string, params: { term
 
 export async function sendFacultyLoadAssignmentRfcMessage(
   userId: string,
-  payload: { term_id?: string; message: string }
+  payload: { term_id?: string; message: string; course_code?: string; section?: string }
 ) {
   const base = (typeof API_BASE !== "undefined" ? API_BASE : "").replace(/\/+$/, "");
   const url = `${base}/faculty/load-assignment/rfc/message?userId=${encodeURIComponent(userId)}`;

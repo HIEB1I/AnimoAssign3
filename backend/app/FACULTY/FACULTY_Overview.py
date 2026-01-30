@@ -449,10 +449,39 @@ async def overview_handler(
         proposal = await db[COL_LOAD_PROPOSALS].find_one({"faculty_id": faculty_id, "term_id": term_id}, {"_id": 0}) or None
         rfc_doc = await db[COL_LOAD_RFC].find_one({"faculty_id": faculty_id, "term_id": term_id}, {"_id": 0}) or None
         rfc_norm = _normalize_rfc_doc(rfc_doc) if rfc_doc else None
-        proposal_status = (proposal or {}).get("status")
-        is_proposed = bool(proposal and str(proposal_status or "").lower() in ("proposed", "reply", "replied"))
 
-        if is_proposed and isinstance(proposal.get("rows"), list):
+        # IMPORTANT BEHAVIOR CHANGE:
+        # - If this is a PLANNING term (next/upcoming term) and OM has NOT forwarded a proposal yet,
+        #   do NOT surface any schedule/teaching load on the faculty side.
+        # - Once OM forwards (proposal exists), faculty will see the proposed schedule (overlay below).
+        is_planning_term = bool(term and not term.get("is_current"))
+        if is_planning_term and not proposal:
+            # Hide any pre-populated assignments for the planning term until OM forwards.
+            final_teaching_load = []
+            summary["teaching_units"] = f"0/{int(pref_units_for_calc)}"
+            summary["course_preps"] = f"0/{max_preps}"
+            summary["percent"] = 0
+            # keep the header-derived status if present, otherwise show Pending
+            summary["load_status"] = (summary.get("load_status") or "Pending")
+            return {
+                "ok": True,
+                "term": term,
+                "summary": summary,
+                "teaching_load": final_teaching_load,
+                "is_proposed": False,
+                "proposal_status": None,
+                "rfc": None,
+                "schedule_final": False,
+            }
+
+        proposal_status = (proposal or {}).get("status")
+        proposal_status_l = str(proposal_status or "").lower()
+
+        is_proposed = bool(proposal and proposal_status_l in ("proposed", "reply", "replied"))
+        is_final = bool(proposal and (bool((proposal or {}).get("locked")) or proposal_status_l in ("accepted", "approved")))
+        schedule_final = bool(is_final or (rfc_norm and str((rfc_norm.get("status") or "")).upper() in RFC_TERMINAL))
+
+        if (is_proposed or is_final) and isinstance(proposal.get("rows"), list):
             proposed_load: List[Dict[str, Any]] = []
             for rr in proposal.get("rows"):
                 if not isinstance(rr, dict):
@@ -476,7 +505,7 @@ async def overview_handler(
 
             if proposed_load:
                 final_teaching_load = proposed_load
-                summary["load_status"] = "Proposed"
+                summary["load_status"] = "Approved" if is_final else "Proposed"
 
         return {
             "ok": True,
@@ -486,6 +515,7 @@ async def overview_handler(
             "is_proposed": is_proposed,
             "proposal_status": proposal_status,
             "rfc": rfc_norm,
+            "schedule_final": schedule_final,
         }
     raise HTTPException(status_code=400, detail="Invalid action parameter.")
 
@@ -695,6 +725,22 @@ async def get_faculty_overview(userId: str = Query(...)):
         "percent": int((total_units / pref_units_for_calc) * 100) if pref_units_for_calc > 0 else 0,
     }
 
+    # IMPORTANT BEHAVIOR CHANGE (mirrors POST /overview?action=fetch):
+    # If this is a PLANNING term and OM has NOT forwarded a proposal yet,
+    # hide any schedule/teaching load on the faculty side.
+    is_planning_term = bool(term and not term.get("is_current"))
+    if is_planning_term:
+        proposal = await db[COL_LOAD_PROPOSALS].find_one(
+            {"faculty_id": faculty_id, "term_id": term_id},
+            {"_id": 1},
+        )
+        if not proposal:
+            final_teaching_load = []
+            summary["teaching_units"] = f"0/{int(pref_units_for_calc)}"
+            summary["course_preps"] = f"0/{max_preps}"
+            summary["percent"] = 0
+            summary["load_status"] = (summary.get("load_status") or "Pending")
+
     notifications = await db[COL_NOTIFICATIONS].find(
         {"user_id": userId}, {"_id": 0}
     ).to_list(None)
@@ -793,8 +839,25 @@ async def faculty_send_load_rfc_message(userId: str = Query(...), payload: Dict[
         raise HTTPException(status_code=400, detail="message is required")
 
     fid = faculty.get("faculty_id")
-    proposal = await db[COL_LOAD_PROPOSALS].find_one({"faculty_id": fid, "term_id": term_id}, {"_id": 0, "om_user_id": 1}) or {}
+    proposal = await db[COL_LOAD_PROPOSALS].find_one({"faculty_id": fid, "term_id": term_id}, {"_id": 0, "om_user_id": 1, "status": 1, "locked": 1, "rows": 1}) or {}
     om_uid = (proposal.get("om_user_id") or "").strip()
+
+    # --- NEW: prevent RFC if schedule is already finalized/approved ---
+    p_status = str((proposal.get("status") or "")).lower()
+    if bool(proposal.get("locked")) or p_status in ("accepted", "approved"):
+        raise HTTPException(status_code=409, detail="Schedule is already finalized. RFC is disabled.")
+
+    # --- NEW: prevent RFC for already-finalized classes (backend enforcement) ---
+    req_course = str(payload.get("course_code") or payload.get("course") or "").strip()
+    req_section = str(payload.get("section") or "").strip()
+    if req_course and req_section and isinstance(proposal.get("rows"), list):
+        for rr in proposal.get("rows") or []:
+            if not isinstance(rr, dict):
+                continue
+            c = str(rr.get("course") or rr.get("course_code") or "").strip()
+            s = str(rr.get("section") or "").strip()
+            if c == req_course and s == req_section and bool(rr.get("finalized")):
+                raise HTTPException(status_code=409, detail="This class is already finalized. RFC is disabled for this class.")
 
     existing = await db[COL_LOAD_RFC].find_one({"faculty_id": fid, "term_id": term_id}, {"_id": 0}) or {}
     existing = _normalize_rfc_doc(existing) if existing else {"rfc_id": "RFC" + uuid.uuid4().hex[:10].upper(), "faculty_id": fid, "term_id": term_id, "messages": [], "status": "OPEN"}
@@ -843,7 +906,37 @@ async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[s
     if not proposal:
         return {"ok": True, "message": "No proposal to accept."}
 
-    await db[COL_LOAD_PROPOSALS].update_one({"faculty_id": fid, "term_id": term_id}, {"$set": {"status": "accepted", "accepted_at": _now_utc()}})
+
+    # --- NEW: do not allow "Accept Schedule" if there is a pending RFC thread ---
+    pending_rfc = await db[COL_LOAD_RFC].find_one({"faculty_id": fid, "term_id": term_id}, {"_id": 0}) or None
+    if pending_rfc:
+        existing_norm = _normalize_rfc_doc(pending_rfc)
+        st = str(existing_norm.get("status") or "").upper()
+        if st and st not in RFC_TERMINAL:
+            raise HTTPException(status_code=409, detail="You have a pending RFC. Please wait for OM to respond before accepting the schedule.")
+
+    await db[COL_LOAD_PROPOSALS].update_one(
+        {"faculty_id": fid, "term_id": term_id},
+        {
+            "$set": {
+                "status": "approved",
+                "locked": True,
+                "accepted_at": _now_utc(),
+                "updated_at": _now_utc(),
+            },
+            # mark all proposed rows as finalized so OM & Faculty UIs become read-only
+            "$setOnInsert": {"created_at": _now_utc()},
+        },
+    )
+
+    # Best-effort: finalize all rows (schema-compatible)
+    try:
+        await db[COL_LOAD_PROPOSALS].update_one(
+            {"faculty_id": fid, "term_id": term_id},
+            {"$set": {"rows.$[].finalized": True}},
+        )
+    except Exception:
+        pass
 
     # lock RFC thread (even if none existed)
     existing = await db[COL_LOAD_RFC].find_one({"faculty_id": fid, "term_id": term_id}, {"_id": 0})

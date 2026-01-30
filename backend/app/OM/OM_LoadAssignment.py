@@ -28,12 +28,38 @@ COL_STAFF = "staff_profiles"
 COL_FACULTY = "faculty_profiles"
 COL_ASSIGN = "faculty_assignments"
 COL_SECTIONS = "sections"
+COL_SECTIONS_SUBMITTED = "sections_submitted"
 COL_SCHED = "section_schedules"
 COL_ROOMS = "rooms"
 COL_COURSES = "courses"
 COL_TERMS = "terms"
 COL_DEPTS = "departments"
 COL_CAMPUSES = "campuses"
+
+
+async def _om_department_ids(user_id: str, db) -> List[str]:
+    """Departments this OM should see.
+    Tries role_assignments(role=office_manager/om) then staff_profiles.department_id.
+    """
+    ra = await db.get_collection("role_assignments").find_one(
+        {"user_id": user_id, "role": {"$in": ["office_manager", "om"]}},
+        {"_id": 0, "department_ids": 1, "department_id": 1},
+    ) or {}
+
+    dept_ids: List[str] = []
+    if isinstance(ra.get("department_ids"), list):
+        dept_ids = [str(x).strip() for x in ra["department_ids"] if str(x).strip()]
+    elif ra.get("department_id"):
+        dept_ids = [str(ra["department_id"]).strip()]
+
+    if dept_ids:
+        return dept_ids
+
+    staff = await db[COL_STAFF].find_one({"user_id": user_id}, {"_id": 0, "department_id": 1}) or {}
+    if staff.get("department_id"):
+        return [str(staff["department_id"]).strip()]
+
+    return []
 COL_LEAVES = "leaves"
 COL_PREFERENCES = "faculty_preferences"
 COL_FACULTY_LOADS = "faculty_loads"
@@ -534,11 +560,14 @@ def _preferred_cap_for(ctx, fid: str) -> int:
     return int(pref.get("preferred_units") or pref.get("load_units") or 12)
 
 async def _fetch_rows(user_id: str, term_id: str, db) -> Dict[str, Any]:
+    dept_ids = await _om_department_ids(user_id, db)
     pipe: List[Dict[str, Any]] = [
-        {"$match": {"term_id": term_id}} if term_id else {"$match": {}},
+        {"$match": {"term_id": term_id, "submitted_for_scheduling": True}} if term_id else {"$match": {"submitted_for_scheduling": True}},
 
         {"$lookup": {"from": COL_COURSES, "localField": "course_id", "foreignField": "course_id", "as": "course"}},
         {"$unwind": {"path": "$course", "preserveNullAndEmptyArrays": True}},
+        # Dept restriction (each OM only sees their department)
+        ({"$match": {"course.department_id": {"$in": dept_ids}}} if dept_ids else {"$match": {}}),
         {
         "$match": {
             "$or": [
@@ -581,7 +610,7 @@ async def _fetch_rows(user_id: str, term_id: str, db) -> Dict[str, Any]:
         {"$sort": {"course_code": 1}},
     ]
 
-    docs = [x async for x in db[COL_SECTIONS].aggregate(pipe)]
+    docs = [x async for x in db[COL_SECTIONS_SUBMITTED].aggregate(pipe)]
 
     # --- Preload rooms into a lookup: { room_id → room_number } ---
     room_docs = [
@@ -996,58 +1025,60 @@ async def loadassignment_handler(
 
         existing_header = await db[COL_FACULTY_LOADS].find_one(
             {"term_id": active.get("term_id"), "department_id": dept_id_header},
-            {"_id": 1, "load_id": 1},
+            {"_id": 1, "load_id": 1, "forwarded_to_chair": 1, "forwarded_to_chair_at": 1},
         )
+
+        # IMPORTANT:
+        # A header can exist even before OM actually forwards to the chair.
+        # So "updated vs submitted" should be based on forwarded_to_chair, not existence alone.
+        was_forwarded_before = bool((existing_header or {}).get("forwarded_to_chair"))
 
         # 1) persist the final assignments/schedules
         await _approve_and_persist(active["term_id"], rows, db)
 
-        # 2) create/update faculty_loads header for this term
+        # 2) create/update faculty_loads header for this term (also marks forwarded_to_chair=True)
         await _upsert_faculty_load_header(
             active,
             db,
             department_id=dept_id_header,  # existing behavior
-            user_id=userId,            # query param from the route
+            user_id=userId,                # query param from the route
         )
-
-        # 3) notify the department chair(s) so their CHAIR Plantilla alerts updates
-        try:
-            recipients = await _chair_user_ids_for_department_id(dept_id_notif, db)
-            dept_name = await _dept_name_by_id(dept_id_notif, db)
-
-            is_update = bool(existing_header)
-            title = "Load Recommendation Updated" if is_update else "Load Recommendation Forwarded"
-            details = (
-                f"OM {'updated' if is_update else 'forwarded'} the load recommendation"
-                f" for {dept_name or dept_id_notif} ({_term_label(active)})."
-            )
-            meta = {
-                "route": "/chair/plantilla",
-                "kind": "om_load_updated" if is_update else "om_load_forwarded",
-                "term_id": active.get("term_id"),
-                "department_id": dept_id_notif,
-                "load_id": (existing_header or {}).get("load_id"),
-            }
-
-            for uid in recipients:
-                await create_notification(
-                    user_id=uid,
-                    title=title,
-                    details=details,
-                    meta=meta,
-                )
-        except Exception:
-            # Never break approval due to notification failure
-            pass
 
         # fetch header again to get reco_id after upsert
         header_after = await db[COL_FACULTY_LOADS].find_one(
             {"term_id": active.get("term_id"), "department_id": dept_id_header},
             {"_id": 0, "load_id": 1},
         ) or {}
-
-        kind = "om_load_updated" if bool(existing_header) else "om_load_forwarded"
         reco_id = header_after.get("load_id") or (existing_header or {}).get("load_id")
+
+        kind = "om_load_updated" if was_forwarded_before else "om_load_forwarded"
+
+        # 3) notify the department chair(s)
+        try:
+            recipients = await _chair_user_ids_for_department_id(dept_id_notif, db)
+            dept_name = await _dept_name_by_id(dept_id_notif, db)
+
+            is_update = was_forwarded_before
+            title = "Load Recommendation Revised" if is_update else "Load Recommendation Submitted"
+            details = (
+                f"OM {'revised' if is_update else 'submitted'} the load recommendation "
+                f"for {dept_name or dept_id_notif} ({_term_label(active)})."
+            )
+            meta = {
+                "route": "/chair/plantilla",
+                "kind": kind,
+                "reco_id": reco_id,                 # aligns with notify-chair endpoint spec
+                "term_id": active.get("term_id"),
+                "department_id": dept_id_notif,
+                # keep old key for backward compatibility if any UI depends on it
+                "load_id": reco_id,
+            }
+
+            for uid in recipients:
+                await create_notification(user_id=uid, title=title, details=details, meta=meta)
+        except Exception:
+            # Never break approval due to notification failure
+            pass
 
         return {
             "ok": True,
@@ -1101,9 +1132,9 @@ async def om_notify_chair_load_forwarded(
     recipients = await _chair_user_ids_for_department_id(dept_id_notif, db)
     dept_name = await _dept_name_by_id(dept_id_notif, db)
 
-    title = "Load Recommendation Updated" if kind == "om_load_updated" else "Load Recommendation Forwarded"
+    title = "Load Recommendation Revised" if kind == "om_load_updated" else "Load Recommendation Submitted"
     details = (
-        f"OM {'updated' if kind == 'om_load_updated' else 'forwarded'} the load recommendation "
+        f"OM {'revised' if kind == 'om_load_updated' else 'submitted'} the load recommendation "
         f"for {dept_name or dept_id_notif} ({_term_label(active)})."
     )
     meta = {
@@ -1572,6 +1603,16 @@ async def om_send_to_faculty(payload: Dict[str, Any] = Body(...), db=Depends(get
         fac = await db[COL_FACULTY].find_one({"faculty_id": fid}, {"_id": 0, "user_id": 1}) or {}
         fac_user_id = (fac.get("user_id") or "").strip()
 
+        # --- NEW: do not overwrite an already-finalized schedule ---
+        existing_prop = await db[COL_LOAD_PROPOSALS].find_one(
+            {"faculty_id": fid, "term_id": term_id},
+            {"_id": 0, "status": 1, "locked": 1},
+        ) or None
+        if existing_prop:
+            st = str((existing_prop.get("status") or "")).lower()
+            if bool(existing_prop.get("locked")) or st in ("accepted", "approved"):
+                raise HTTPException(status_code=409, detail="Schedule is already finalized. You can no longer send/overwrite the proposal for this faculty.")
+
         doc = {
             "faculty_id": fid,
             "term_id": term_id,
@@ -1683,20 +1724,16 @@ async def respond_load_assignment_rfc(
         new_status = "APPROVED"
         locked = True
         extra["closed_at"] = now
-    else:
-        new_status = "REJECTED"
-        locked = True
-        extra["closed_at"] = now
 
-        # If OM rejects the RFC, automatically approve/lock the proposed schedule
-        # so the faculty can no longer RFC for the same courses.
+        # --- NEW: RFC APPROVED → schedule becomes FINAL/APPROVED and locked ---
         try:
             await db[COL_LOAD_PROPOSALS].update_one(
                 {"faculty_id": faculty_id, "term_id": term_id},
                 {
                     "$set": {
-                        "rows.$[].finalized": True,
+                        "status": "approved",
                         "locked": True,
+                        "rows.$[].finalized": True,
                         "updated_at": now,
                     },
                     "$setOnInsert": {"created_at": now},
@@ -1704,7 +1741,30 @@ async def respond_load_assignment_rfc(
                 upsert=True,
             )
         except Exception:
-            # Best-effort only: do not block the RFC response if proposal is missing/has different schema
+            pass
+    else:
+        new_status = "REJECTED"
+        locked = True
+        extra["closed_at"] = now
+
+        # --- NEW: RFC reached a terminal state (REJECTED) → schedule becomes FINAL/APPROVED ---
+        # If OM rejects an RFC, the schedule is considered APPROVED and must be locked.
+        try:
+            await db[COL_LOAD_PROPOSALS].update_one(
+                {"faculty_id": faculty_id, "term_id": term_id},
+                {
+                    "$set": {
+                        "status": "approved",
+                        "locked": True,
+                        "rows.$[].finalized": True,
+                        "updated_at": now,
+                    },
+                    "$setOnInsert": {"created_at": now},
+                },
+                upsert=True,
+            )
+        except Exception:
+            # Best-effort only
             pass
 
     rfc_id = rfc.get("rfc_id")
@@ -5971,6 +6031,10 @@ async def _upsert_faculty_load_header(
             "created_at": now,
             "finalized_at": now,
             "updated_at": now,
+
+            # NEW: marks that OM has forwarded/submitted to Chair
+            "forwarded_to_chair": True,
+            "forwarded_to_chair_at": now,
         }
         await db[COL_FACULTY_LOADS].insert_one(doc)
     else:
@@ -5979,13 +6043,17 @@ async def _upsert_faculty_load_header(
             {"_id": existing["_id"]},
             {
                 "$set": {
-                    "status": "approved",
-                    "total_units": total_units,
-                    "updated_at": now,
-                    "finalized_at": now,
-                    # keep old created_by/created_at if already set
-                    "created_by": existing.get("created_by") or user_id,
-                }
+                "status": "approved",
+                "total_units": total_units,
+                "updated_at": now,
+                "finalized_at": now,
+                # keep old created_by/created_at if already set
+                "created_by": existing.get("created_by") or user_id,
+
+                # NEW: ensure it's marked forwarded; preserve first forwarded timestamp if it exists
+                "forwarded_to_chair": True,
+                "forwarded_to_chair_at": existing.get("forwarded_to_chair_at") or now,
+            }
             },
         )
 

@@ -482,6 +482,13 @@ type OfferingsResponse = {
   campus: { campus_id: string; campus_name: string };
   term_id: string;
   term_label: string;
+  submission?: {
+    has_prior_submit?: boolean;
+    submit_count?: number;
+    first_submitted_at?: any;
+    last_submitted_at?: any;
+    last_submitted_by?: string;
+  };
   filters: {
     levels: string[];
     departments: { department_id: string; department_name: string }[];
@@ -1305,8 +1312,14 @@ const loadOfferings = async () => {
 
   const [showForward, setShowForward] = useState(false);
   const [showPlanModal, setShowPlanModal] = useState(false);
-  
-  // Build a lookup so the modal can show "CODE — Title" instead of course_id
+  // If backend requires a comment but UI didn't know yet, force showing the comment prompt
+  const [forceRequireNote, setForceRequireNote] = useState(false);
+  const hasPriorSubmit = useMemo(() => {
+    const s: any = (data as any)?.submission;
+    if (s && typeof s.has_prior_submit === "boolean") return !!s.has_prior_submit;
+    return (data?.rows || []).some((r: any) => !!r.submitted_for_scheduling);
+  }, [data]);
+// Build a lookup so the modal can show "CODE — Title" instead of course_id
 const planCourseIndex = useMemo(() => {
   type Meta = { code: string; title: string };
   const m: Record<string, Meta> = {};
@@ -2221,15 +2234,47 @@ if (isGE) {
           )}
           {/* Right side of toolbar */}
           <div className="ml-auto flex items-center gap-3">
-            {view === "offerings" && (
-          <button
-            onClick={() => setShowForward(true)}
-            className="inline-flex items-center gap-2 rounded-md bg-emerald-700 px-4 py-2 text-sm font-medium text-white shadow-sm"
-          >
-            <Send className="h-4 w-4" />
-            Submit for Scheduling
-          </button>
-            )}
+          {view === "offerings" && (
+            <button
+              onClick={async () => {
+                if (!user?.userId) return;
+
+                // First submission: no comment required
+                if (!hasPriorSubmit) {
+                  try {
+                    await forwardApoCourseOfferings(user.userId, {
+                      to: "scheduling",
+                      subject: `Submit for Scheduling — ${data?.term_label || ""}`,
+                      message: "",
+                      exclude_conflicts: true,
+                    });
+                    await loadOfferings();
+                    setForceRequireNote(false);
+                    alert("Submitted to Scheduling.");
+                  } catch (e: any) {
+                    const detail = e?.response?.data?.detail;
+                    if (String(detail || "").toLowerCase().includes("comment is required")) {
+                      setForceRequireNote(true);
+                      setShowForward(true);
+                      return;
+                    }
+                    const msg = detail || e?.message || "Submit failed.";
+                    alert(msg);
+                  }
+                  return;
+                }
+
+                // Subsequent submissions: require comment modal
+                setForceRequireNote(true);
+                setShowForward(true);
+              }}
+              className="inline-flex items-center gap-2 rounded-md bg-emerald-700 px-4 py-2 text-sm font-medium text-white shadow-sm"
+            >
+              <Send className="h-4 w-4" />
+              Submit for Scheduling
+            </button>
+          )}
+
           </div>
           {/* Curriculum filters */}
           {view === "curriculum" && (
@@ -3962,17 +4007,26 @@ if (response.ok) {
       {/* ----------------------------- Forward Modal ----------------------------- */}
      {showForward && (
       <SubmitModal
+        requireNote={hasPriorSubmit || forceRequireNote}
         onClose={() => setShowForward(false)}
         onSubmit={async (note) => {
           if (!user?.userId) return;
-          await forwardApoCourseOfferings(user.userId, {
-            to: "scheduling",
-            subject: `Submit for Scheduling — ${data?.term_label || ""}`,
-            message: note,
-            exclude_conflicts: true,
-          });
-          setShowForward(false);
-          alert("Submitted to Scheduling. Conflicted sections remain visible on the APO side.");
+          try {
+            await forwardApoCourseOfferings(user.userId, {
+              to: "scheduling",
+              subject: `Submit for Scheduling — ${data?.term_label || ""}`,
+              message: note,
+              exclude_conflicts: true,
+            });
+            await loadOfferings();
+            setForceRequireNote(false);
+            setShowForward(false);
+            alert("Submitted to Scheduling.");
+          } catch (e: any) {
+            const detail = e?.response?.data?.detail;
+            const msg = detail || e?.message || "Submit failed.";
+            alert(msg);
+          }
         }}
       />
     )}
@@ -4039,31 +4093,37 @@ if (response.ok) {
 const SubmitModal: React.FC<{
   onClose: () => void;
   onSubmit: (note: string) => void | Promise<void>;
-}> = ({ onClose, onSubmit }) => {
+  requireNote?: boolean;
+}> = ({ onClose, onSubmit, requireNote = false }) => {
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
+
+  const canSubmit = !busy && (!requireNote || note.trim().length > 0);
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
       <div className="w-full max-w-lg rounded-xl bg-white shadow-xl border border-gray-200">
         <div className="border-b px-4 py-3 font-semibold">Submit for Scheduling</div>
         <div className="p-4 space-y-2">
           <div className="text-sm text-slate-700">
-            This hands the plan to the Office Manager to assign faculty and schedules.
-            Conflicted sections are kept on your (APO) side and are not included in the submission.
+            {requireNote
+              ? "You already submitted before. Please describe what changed so the Office Manager knows what to review."
+              : "This hands the plan to the Office Manager to assign faculty and schedules."}
           </div>
+
           <textarea
             className="w-full rounded border px-3 py-2 text-sm min-h-[120px]"
             value={note}
             onChange={(e) => setNote(e.target.value)}
-            placeholder="Optional note…"
+            placeholder={requireNote ? "Required: describe what changed…" : "Optional note…"}
           />
         </div>
         <div className="flex items-center justify-end gap-2 border-t px-4 py-3">
-          <button className="rounded-md border px-3 py-1.5 text-sm" onClick={onClose}>
+          <button className="rounded-md border px-3 py-1.5 text-sm" onClick={onClose} disabled={busy}>
             Cancel
           </button>
           <button
-            disabled={busy}
+            disabled={!canSubmit}
             className="rounded-md bg-emerald-700 px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50"
             onClick={async () => {
               setBusy(true);

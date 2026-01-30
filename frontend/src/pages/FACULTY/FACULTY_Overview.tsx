@@ -91,6 +91,11 @@ export default function FAC_Overview() {
           summary: list.summary,
           teaching_load: list.teaching_load,
           notifications: profile.notifications || [],
+          // Load assignment workflow flags (backwards-compatible)
+          is_proposed: (list as any).is_proposed,
+          proposal_status: (list as any).proposal_status,
+          rfc: (list as any).rfc,
+          schedule_final: (list as any).schedule_final,
         });
       } catch (e: any) {
         setError(e?.response?.data?.detail || e?.message || "Failed to load faculty overview.");
@@ -152,7 +157,11 @@ export default function FAC_Overview() {
               <>
                 <StatCards summary={data.summary} />
                 <div className="my-6" />
-                <TeachingLoadEnhanced teachingLoad={data.teaching_load} term={data.term} />
+                <TeachingLoadEnhanced
+                  teachingLoad={data.teaching_load}
+                  term={data.term}
+                  workflow={data}
+                />
               </>
             )}
             {tab === "History" && <HistoryMain />}
@@ -428,9 +437,15 @@ const ClassBlock = ({ onClick, it }: { onClick?: () => void; it: TLItemForCalend
 );
 
 type TeachingLoadEnhancedProps = {
-  teachingLoad: TLItem[]; // <-- Use the new type
+  teachingLoad: TLItem[];
   term: any;
+  workflow?: {
+    schedule_final?: boolean;
+    proposal_status?: string | null;
+    rfc?: { status?: string | null } | null;
+  };
 };
+
 
 // --- *** MODIFIED: Headers for the new list view *** ---
 const LIST_HEADERS = [
@@ -445,10 +460,33 @@ const LIST_HEADERS = [
   "Syllabus",
 ];
 
-function TeachingLoadEnhanced({ teachingLoad, term }: TeachingLoadEnhancedProps) {
+function TeachingLoadEnhanced({ teachingLoad, term, workflow }: TeachingLoadEnhancedProps) {
   const [view, setView] = useState<"Calendar" | "List">("Calendar");
   const [modal, setModal] = useState<{ day: DayLong; item: TLItemForCalendar } | null>(null);
   const [isAccepted, setIsAccepted] = useState(false);
+
+  // Schedule is finalized once: Faculty accepted OR OM approved/rejected an RFC.
+const scheduleFinal = Boolean(
+  workflow?.schedule_final ||
+    workflow?.proposal_status?.toString?.().toLowerCase?.() === "approved" ||
+    workflow?.proposal_status?.toString?.().toLowerCase?.() === "accepted" ||
+    (workflow?.rfc?.status &&
+      ["ACCEPTED", "APPROVED", "REJECTED"].includes(String(workflow.rfc.status).toUpperCase()))
+);
+
+
+const scheduleFinalLabel = (() => {
+  const st = String(workflow?.rfc?.status || "").toUpperCase();
+  if (st === "REJECTED") return "Finalized (RFC Rejected)";
+  if (st === "APPROVED") return "Finalized (RFC Approved)";
+  if (st === "ACCEPTED") return "Finalized (Accepted)";
+
+  const ps = String(workflow?.proposal_status || "").toLowerCase();
+  if (ps === "approved") return "Finalized (Approved)";
+  if (ps === "accepted") return "Finalized (Accepted)";
+  return "Finalized";
+})();
+
 
   // --- *** MODIFIED: Remove TLData, pass teachingLoad to placeItems *** ---
   const placed = useMemo(() => placeItems(teachingLoad || []), [teachingLoad]);
@@ -509,19 +547,25 @@ function TeachingLoadEnhanced({ teachingLoad, term }: TeachingLoadEnhancedProps)
                 console.error(e);
               }
             }}
-            disabled={isAccepted}
+            disabled={isAccepted || scheduleFinal}
             className={cls(
               "inline-flex h-9 items-center justify-center rounded-lg px-4 text-sm font-medium shadow",
               "focus:outline-none focus:ring-2 focus:ring-emerald-600/40",
-              isAccepted
+              (isAccepted || scheduleFinal)
                 ? "bg-neutral-300 text-neutral-600 cursor-not-allowed"
                 : "bg-blue-700 text-white hover:bg-blue-800 active:translate-y-[0.5px]"
             )}
           >
-            {isAccepted ? "Accepted" : "Accept Schedule"}
+            {(isAccepted || scheduleFinal) ? "Finalized" : "Accept Schedule"}
           </button>
         </div>
       </div>
+
+      {scheduleFinal && (
+        <div className="mt-3 rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900">
+          <span className="font-semibold">Schedule Locked:</span> {scheduleFinalLabel}. You can no longer submit RFCs.
+        </div>
+      )}
 
         {view === "Calendar" ? (
           <div className="overflow-x-auto">
@@ -584,7 +628,7 @@ function TeachingLoadEnhanced({ teachingLoad, term }: TeachingLoadEnhancedProps)
                         <ClassBlock
                           key={j}
                           it={it}
-                          onClick={() => setModal({ day: g.day, item: it })}
+                          onClick={() => { if (scheduleFinal) return; setModal({ day: g.day, item: it }); }}
                         />
                       ))}
                     </div>
@@ -710,7 +754,7 @@ function TeachingLoadEnhanced({ teachingLoad, term }: TeachingLoadEnhancedProps)
         </div>
       )}
 
-      <ChangeRequestModal open={!!modal} onClose={() => setModal(null)} context={modal} term={term} />
+      <ChangeRequestModal open={!!modal} onClose={() => setModal(null)} context={modal} term={term} scheduleFinal={scheduleFinal} />
     </section>
   );
 }
@@ -825,12 +869,14 @@ function ChangeRequestModal({
   open,
   onClose,
   context,
-  term, 
+  term,
+  scheduleFinal,
 }: {
   open: boolean;
   onClose: () => void;
   context: { day: DayLong; item: TLItemForCalendar } | null; // <-- MODIFIED
-  term: any
+  term: any;
+  scheduleFinal: boolean;
 }) {
   const TIME_SLOTS = [
     "07:30 – 09:00",
@@ -882,7 +928,7 @@ function ChangeRequestModal({
   const mustTime = choices.includes("Change class time");
   const mustDay = choices.includes("Change class day");
   const isFinalized = Boolean((context?.item as any)?.finalized);
-  const disabled = isFinalized || choices.length === 0 || (mustTime && !selTime) || (mustDay && !selDay);
+  const disabled = scheduleFinal || isFinalized || choices.length === 0 || (mustTime && !selTime) || (mustDay && !selDay);
 
   return (
     <div className="fixed inset-0 z-80 grid place-items-center bg-black/30 p-3">
@@ -901,6 +947,13 @@ function ChangeRequestModal({
         </div>
 
         <div className="space-y-3">
+
+          
+          {scheduleFinal && (
+            <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900">
+              The schedule is already finalized and locked. RFC is disabled.
+            </div>
+          )}
 
           {isFinalized && (
             <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
@@ -1001,6 +1054,8 @@ function ChangeRequestModal({
                 await sendFacultyLoadAssignmentRfcMessage(userId, {
                   term_id: (term as any)?.term_id || (term as any)?._id || (term as any)?.id,
                   message: msg,
+                  course_code: context.item.code,
+                  section: context.item.sec,
                 });
                 window.location.reload();
               } catch (e) {
