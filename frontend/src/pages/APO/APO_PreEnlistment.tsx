@@ -175,7 +175,44 @@ export default function APO_PreEnlistment() {
     return raw ? JSON.parse(raw) : null;
   }, []);
   const fullName = user?.fullName ?? "APO";
-  const campusName = campusFromRoles(user?.roles || []); // "MANILA" | "LAGUNA" | null
+  // NOTE: login roles are normalized from user_roles.role_type and typically do NOT include campus.
+  // We keep this as a legacy fallback only. The reliable campus comes from backend meta (activeMeta.campus_label).
+  const campusName = campusFromRoles(user?.roles || []); // legacy fallback
+
+  // SAFETY UX: if we can't detect campus from role/meta/data, allow user to pick it once.
+  // This is stored on this device (per-user) so imports + views remain campus-scoped.
+  const campusOverrideKey = user?.userId
+    ? `apo.preenCampusOverride.${user.userId}`
+    : "apo.preenCampusOverride";
+  const [campusOverride, setCampusOverride] = useState<"" | "MANILA" | "LAGUNA">(() => {
+    try {
+      const v = window.localStorage.getItem(campusOverrideKey);
+      return v === "MANILA" || v === "LAGUNA" ? v : "";
+    } catch {
+      return "";
+    }
+  });
+
+  useEffect(() => {
+    try {
+      const v = window.localStorage.getItem(campusOverrideKey);
+      const norm = v === "MANILA" || v === "LAGUNA" ? v : "";
+      setCampusOverride(norm);
+    } catch {
+      // ignore
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [campusOverrideKey]);
+
+  const setCampusOverridePersist = (v: "" | "MANILA" | "LAGUNA") => {
+    setCampusOverride(v);
+    try {
+      if (!v) window.localStorage.removeItem(campusOverrideKey);
+      else window.localStorage.setItem(campusOverrideKey, v);
+    } catch {
+      // ignore
+    }
+  };
   const roleName = useMemo(() => {
     if (!user?.roles) return "Academic Programming Officer";
     return (user.roles as string[]).some((r) => /^apo\b/i.test(r))
@@ -201,11 +238,15 @@ export default function APO_PreEnlistment() {
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.userId, campusName]);
+  }, [user?.userId, campusName, campusOverride]);
 
   const headerLabel = activeMeta ? `Term ${activeMeta.term_number ?? ""} ${activeMeta.ay_label}` : "";
   const campusLabel = activeMeta?.campus_label
     ? activeMeta.campus_label
+    : campusOverride === "MANILA"
+    ? "Manila"
+    : campusOverride === "LAGUNA"
+    ? "Laguna"
     : campusName === "MANILA"
     ? "Manila"
     : campusName === "LAGUNA"
@@ -223,18 +264,26 @@ const refresh = async (forcedTermId?: string) => {
   // (it will pick "next after is_current").
   const termToLoad = forcedTermId;
 
+  // Prefer explicit campus override (saved on this device), then role-based legacy fallback.
+  const campusFilter = (campusOverride || campusName || undefined) as
+    | "MANILA"
+    | "LAGUNA"
+    | undefined;
+
   const { count, statistics, meta } = await getApoPreenlistment(
     user.userId,
     termToLoad,
     "active",
-    campusName || undefined
+    campusFilter
   );
 
   const termMeta = (meta as TermMeta) ?? null;
   setActiveMeta(termMeta);
 
-  if (campusName && termMeta?.term_id) {
-    setPlanningTermForCampus(campusName, termMeta.term_id);
+  // Use backend campus_label for storage key when available.
+  const campusKey = normCampus(termMeta?.campus_label) || campusFilter || campusName;
+  if (campusKey && termMeta?.term_id) {
+    setPlanningTermForCampus(campusKey, termMeta.term_id);
   }
 
   setEnlistedCourses(
@@ -287,7 +336,7 @@ const refresh = async (forcedTermId?: string) => {
           [],
           activeMeta?.term_id,
           { replaceCount: true },
-          campusName || undefined
+          campusCodeFromUi() || undefined
         );
         await refresh();
       } catch (e) {
@@ -333,7 +382,7 @@ const saveNewCourseRow = async () => {
       [],
       activeMeta?.term_id,
       { replaceCount: false },
-      campusName || undefined
+      campusCodeFromUi() || undefined
     );
 
     if (!res || (res.insertedCount ?? 0) < 1) {
@@ -381,7 +430,7 @@ const saveNewCourseRow = async () => {
           rows,
           activeMeta?.term_id,
           { replaceStats: true },
-          campusName || undefined
+          campusCodeFromUi() || undefined
         );
         await refresh();
       } catch (e) {
@@ -446,75 +495,196 @@ const saveNewCourseRow = async () => {
 type CsvResult<T> = {
   data: T[];
   errors?: unknown[];
-  meta?: unknown;
+  meta?: any;
 };
 
-const handleImportCourses = (event: React.ChangeEvent<HTMLInputElement>) => {
-  const file = event.target.files?.[0];
+const parseCsvFile = async <T,>(file: File): Promise<CsvResult<T>> =>
+  await new Promise((resolve, reject) => {
+    Papa.parse(file, {
+      header: true,
+      skipEmptyLines: true,
+      complete: (results: any) => resolve(results as CsvResult<T>),
+      error: (err: unknown) => reject(err),
+    });
+  });
+
+const normCampus = (v: any): "MANILA" | "LAGUNA" | null => {
+  const s = String(v ?? "").trim().toUpperCase();
+  if (s === "MANILA") return "MANILA";
+  if (s === "LAGUNA") return "LAGUNA";
+  return null;
+};
+
+const campusCodeFromUi = (): "MANILA" | "LAGUNA" | null => {
+  // Prefer backend meta (always title-case: Manila/Laguna when configured)
+  const fromMeta = normCampus(activeMeta?.campus_label);
+  if (fromMeta) return fromMeta;
+  // Safety override chosen by the user (stored locally)
+  if (campusOverride === "MANILA" || campusOverride === "LAGUNA") return campusOverride;
+  // Legacy fallback (only works if role_type includes campus)
+  if (campusName) return campusName;
+  // Last-resort: infer from currently displayed rows (column 3 is campus name)
+  const anyRowCampus = (enlistedCourses?.[0]?.[3] || "") as any;
+  return normCampus(anyRowCampus);
+};
+
+const downloadCsv = (filename: string, csv: string) => {
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+};
+
+const downloadCountTemplate = () => {
+  const campusCode = campusCodeFromUi();
+  if (!campusCode) {
+    setImportModalError("Please select a campus first (Manila/Laguna), then download the template.");
+    return;
+  }
+  const campusTitle = campusCode === "LAGUNA" ? "Laguna" : "Manila";
+  const csv = [
+    "Code,Career,Acad Group,Campus,Course Code,Count",
+    `1,UGB,CCS,${campusTitle},CCPROG1,40`,
+    `2,GSM,CCS,${campusTitle},MSDS,25`,
+  ].join("\n");
+  downloadCsv(`preenlistment_count_TEMPLATE_${campusTitle}.csv`, csv);
+};
+
+const downloadStatsTemplate = () => {
+  const csv = [
+    "Program,FRESHMAN,SOPHOMORE,JUNIOR,SENIOR",
+    "BSCS-ST,106,92,87,76",
+  ].join("\n");
+  downloadCsv("preenlistment_statistics_TEMPLATE.csv", csv);
+};
+
+const apiErrorToMessage = (e: any): string => {
+  const resp = e?.response?.data;
+  const detail = resp?.detail ?? resp;
+  if (typeof detail === "string") return detail;
+  if (detail?.message && Array.isArray(detail?.errors)) {
+    const lines = (detail.errors as string[]).slice(0, 8);
+    return [detail.message, ...lines.map((x) => `• ${x}`)].join("\n");
+  }
+  if (detail?.message) return detail.message;
+  return e?.message || "Import failed.";
+};
+
+const [showImportModal, setShowImportModal] = useState(false);
+const [importKind, setImportKind] = useState<"count" | "stats">("count");
+const [importBusy, setImportBusy] = useState(false);
+const [importModalError, setImportModalError] = useState<string>("");
+  const importFileRef = React.useRef<HTMLInputElement | null>(null);
+
+const openImport = (kind: "count" | "stats") => {
+  setImportKind(kind);
+  setImportModalError("");
+  setShowImportModal(true);
+};
+
+const closeImport = () => {
+  if (importBusy) return;
+  setShowImportModal(false);
+  setImportModalError("");
+};
+
+const importCountCsvFile = async (file: File) => {
   if (!file || !user?.userId) return;
 
-  Papa.parse(file, {
-    header: true,
-    skipEmptyLines: true,
-    complete: async (results: CsvResult<CountCsvRow>) => {
-      const rows = results.data
-        .map((r: CountCsvRow) => {
-          if (!r.Campus && campusName) (r as any).Campus = campusName;
-          return r;
-        })
-        .filter(
-          (r: CountCsvRow) =>
-            r["Course Code"] && r.Career && r.Campus && r.Count !== undefined
-        );
+  const required = ["Career", "Acad Group", "Campus", "Course Code", "Count"];
+  const results = await parseCsvFile<CountCsvRow>(file);
+  const fields: string[] = (results?.meta?.fields || []) as string[];
 
-      await importApoPreenlistment(
-        user.userId,
-        rows,
-        [],
-        undefined,
-        { replaceCount: true },
-        campusName || undefined
-      );
-      await refresh();
-      event.currentTarget.value = "";
-    },
-    error: (err: unknown) => {
-      console.error("CSV parse error (courses):", err);
-      event.currentTarget.value = "";
-    },
-  });
+  const missing = required.filter((h) => !fields.includes(h));
+  if (missing.length) {
+    throw new Error(
+      `Missing required column(s): ${missing.join(", ")}\n\nExpected columns: ${required.join(", ")}`
+    );
+  }
+
+  const rows = (results.data || [])
+    .map((r: any) => {
+      // normalize keys + keep raw values
+      const campusRaw = r.Campus ?? r["Campus"];
+      return {
+        ...r,
+        Campus: campusRaw,
+      } as CountCsvRow;
+    })
+    .filter((r: any) => r["Course Code"] && r.Career && r.Campus && r.Count !== undefined);
+
+  // Frontend campus guard (prevents cross-campus pollution)
+  const campusSelected = campusCodeFromUi();
+  if (!campusSelected) {
+    throw new Error(
+      "Campus cannot be determined yet. Please select your campus (Manila/Laguna) in the import dialog, then try again."
+    );
+  }
+
+  const mismatched = new Set<string>();
+  for (const r of rows as any[]) {
+    const c = normCampus((r as any).Campus);
+    if (!c) mismatched.add(String((r as any).Campus ?? ""));
+    else if (c !== campusSelected) mismatched.add(String((r as any).Campus ?? ""));
+  }
+  if (mismatched.size) {
+    throw new Error(
+      `This file appears to be for a different campus.\n\nSelected campus: ${campusSelected}\nFound campus value(s): ${[
+        ...mismatched,
+      ].join(", ")}`
+    );
+  }
+
+  await importApoPreenlistment(
+    user.userId,
+    rows,
+    [],
+    activeMeta?.term_id,
+    { replaceCount: true },
+    campusSelected
+  );
 };
 
-const handleImportStats = (event: React.ChangeEvent<HTMLInputElement>) => {
-  const file = event.target.files?.[0];
+const importStatsCsvFile = async (file: File) => {
   if (!file || !user?.userId) return;
 
-  Papa.parse(file, {
-    header: true,
-    skipEmptyLines: true,
-    complete: async (results: CsvResult<StatCsvRow>) => {
-      const rows = results.data.filter((r: StatCsvRow) => !!r.Program);
+  const required = ["Program", "FRESHMAN", "SOPHOMORE", "JUNIOR", "SENIOR"];
+  const results = await parseCsvFile<StatCsvRow>(file);
+  const fields: string[] = (results?.meta?.fields || []) as string[];
 
-      await importApoPreenlistment(
-        user.userId,
-        [],
-        rows,
-        undefined,
-        { replaceStats: true },
-        campusName || undefined
-      );
-      await refresh();
-      event.currentTarget.value = "";
-    },
-    error: (err: unknown) => {
-      console.error("CSV parse error (stats):", err);
-      event.currentTarget.value = "";
-    },
-  });
+  const missing = required.filter((h) => !fields.includes(h));
+  if (missing.length) {
+    throw new Error(
+      `Missing required column(s): ${missing.join(", ")}\n\nExpected columns: ${required.join(", ")}`
+    );
+  }
+
+  const rows = (results.data || []).filter((r: any) => !!r.Program);
+
+  const campusSelected = campusCodeFromUi();
+  if (!campusSelected) {
+    throw new Error(
+      "Campus cannot be determined yet. Please select your campus (Manila/Laguna) in the import dialog, then try again."
+    );
+  }
+
+  await importApoPreenlistment(
+    user.userId,
+    [],
+    rows,
+    activeMeta?.term_id,
+    { replaceStats: true },
+    campusSelected
+  );
 };
 
 
-  const [archiveCountTotal, setArchiveCountTotal] = useState(0);
+const [archiveCountTotal, setArchiveCountTotal] = useState(0);
   const [archiveStatsTotals, setArchiveStatsTotals] = useState([0, 0, 0, 0]);
 
   const calcArchiveTotals = (countRows: string[][], statRows: string[][]) => {
@@ -546,7 +716,7 @@ const handleImportStats = (event: React.ChangeEvent<HTMLInputElement>) => {
       const res = await archiveApoPreenlistment(
         user.userId,
         activeMeta?.term_id,
-        campusName || undefined
+        campusCodeFromUi() || undefined
       );
 
       const nextPlanningTermId = (res as any)?.newPlanningTermId as string | undefined;
@@ -570,7 +740,8 @@ const handleImportStats = (event: React.ChangeEvent<HTMLInputElement>) => {
     setView("archives");
     setArchiveLoading(true);
     try {
-      const { archives } = await getApoPreenlistmentMeta(user.userId, campusName || undefined);
+      const campusFilter = campusCodeFromUi() || undefined;
+      const { archives } = await getApoPreenlistmentMeta(user.userId, campusFilter);
       setArchiveTerms(archives);
       const firstTid = archives[0]?.term_id ?? "";
       setArchiveTermId(firstTid);
@@ -579,7 +750,7 @@ const handleImportStats = (event: React.ChangeEvent<HTMLInputElement>) => {
           user.userId,
           firstTid,
           "archive",
-          campusName || undefined
+          campusFilter
         );
         const countRows = (count ?? ([] as PreenlistmentCountDoc[])).map((d) => [
           d.career || "",
@@ -619,7 +790,7 @@ const handleImportStats = (event: React.ChangeEvent<HTMLInputElement>) => {
         user.userId,
         tid,
         "archive",
-        campusName || undefined
+        campusCodeFromUi() || undefined
       );
       const countRows = (count ?? ([] as PreenlistmentCountDoc[])).map((d) => [
         d.career || "",
@@ -672,6 +843,183 @@ const handleImportStats = (event: React.ChangeEvent<HTMLInputElement>) => {
       />
 
       <main className="p-6 w-full">
+{showImportModal && (
+  <div className="fixed inset-0 z-[120] grid place-items-center bg-black/40 p-4">
+    <div className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-2xl">
+      <div className="mx-auto mb-4 grid h-16 w-16 place-items-center rounded-full border-2 border-emerald-600 text-emerald-700">
+        <Upload className="h-8 w-8" strokeWidth={2.5} />
+      </div>
+
+      <h3 className="mb-2 text-center text-2xl font-semibold">
+        {importKind === "count"
+          ? "Import Pre-Enlistment Count CSV"
+          : "Import Pre-Enlistment Statistics CSV"}
+      </h3>
+
+      <p className="mx-auto mb-4 max-w-md text-center text-sm text-neutral-600">
+        This will replace the current{" "}
+        <span className="font-semibold">
+          {importKind === "count" ? "course counts" : "program statistics"}
+        </span>{" "}
+        for <span className="font-semibold">{campusLabel || campusName || "Selected campus"}</span>{" "}
+        {headerLabel ? `(${headerLabel})` : ""}.
+      </p>
+
+      {/* SAFETY UX: allow campus selection if we can't reliably detect it from the user/account yet */}
+      {!normCampus(activeMeta?.campus_label) && (
+        <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+          <div className="mb-1 font-semibold">Select campus</div>
+          <p className="text-xs text-amber-900/80">
+            We couldn’t detect your campus from your account yet. Choose the campus you’re importing for.
+            This will be saved on this device for future imports.
+          </p>
+
+          <div className="mt-2 flex items-center gap-2">
+            <MiniSelectMenu
+              value={campusOverride || normCampus((enlistedCourses?.[0]?.[3] || "") as any) || campusName || ""}
+              onChange={(v) => setCampusOverridePersist(normCampus(v) || "")}
+              options={["MANILA", "LAGUNA"]}
+              placeholder="Choose campus"
+              className="min-w-[170px]"
+            />
+
+            {!!campusOverride && (
+              <button
+                type="button"
+                onClick={() => setCampusOverridePersist("")}
+                className="inline-flex items-center gap-1 rounded-lg border border-amber-300 bg-white px-3 py-2 text-xs font-medium text-amber-900 hover:bg-amber-100"
+              >
+                <X className="h-4 w-4" />
+                Clear
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      <div className="mb-4 rounded-lg border border-emerald-100 bg-emerald-50 px-3 py-2 text-sm text-emerald-900">
+        <div className="mb-1 font-semibold">CSV format</div>
+        {importKind === "count" ? (
+          <ul className="list-disc pl-5 space-y-1">
+            <li>
+              Required columns: <span className="font-mono">Career</span>,{" "}
+              <span className="font-mono">Acad Group</span>,{" "}
+              <span className="font-mono">Campus</span>,{" "}
+              <span className="font-mono">Course Code</span>,{" "}
+              <span className="font-mono">Count</span> (optional:{" "}
+              <span className="font-mono">Code</span>)
+            </li>
+            <li>
+              <span className="font-mono">Campus</span> must be{" "}
+              <span className="font-semibold">{campusLabel || campusName || "Selected campus"}</span>{" "}
+              for every row.
+            </li>
+            <li>
+              <span className="font-mono">Career</span> must be{" "}
+              <span className="font-mono">UGB/UGS</span> or{" "}
+              <span className="font-mono">GSM</span>.
+            </li>
+            <li className="text-emerald-800/80">
+              Example row: <span className="font-mono">1, UGB, CCS, {campusLabel || "Manila"}, ADART-2, 31</span>
+            </li>
+          </ul>
+        ) : (
+          <ul className="list-disc pl-5 space-y-1">
+            <li>
+              Required columns: <span className="font-mono">Program</span>,{" "}
+              <span className="font-mono">FRESHMAN</span>,{" "}
+              <span className="font-mono">SOPHOMORE</span>,{" "}
+              <span className="font-mono">JUNIOR</span>,{" "}
+              <span className="font-mono">SENIOR</span> (optional:{" "}
+              <span className="font-mono">ENROLLMENT</span>)
+            </li>
+            <li>
+              Program codes must belong to{" "}
+              <span className="font-semibold">{campusLabel || campusName || "Selected campus"}</span>.
+            </li>
+            <li className="text-emerald-800/80">
+              Example row: <span className="font-mono">BSCS-ST, 106, 92, 87, 76</span>
+            </li>
+          </ul>
+        )}
+
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={() => (importKind === "count" ? downloadCountTemplate() : downloadStatsTemplate())}
+            disabled={importKind === "count" && !campusCodeFromUi()}
+            className="inline-flex items-center gap-2 rounded-lg border border-emerald-300 bg-white px-3 py-2 text-sm font-medium text-emerald-800 hover:bg-emerald-100 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <Download className="h-4 w-4" />
+            Download CSV template
+          </button>
+
+          <span className="text-xs text-emerald-900/70">
+            Use the template to avoid wrong columns / formatting.
+          </span>
+        </div>
+      </div>
+
+      {importModalError && (
+        <div className="mb-4 whitespace-pre-line rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+          {importModalError}
+        </div>
+      )}
+
+      <input
+        ref={importFileRef}
+        type="file"
+        accept=".csv"
+        className="hidden"
+        onChange={async (e) => {
+          const file = e.target.files?.[0];
+          e.currentTarget.value = "";
+          if (!file) return;
+
+          setImportBusy(true);
+          setImportModalError("");
+          try {
+            if (importKind === "count") {
+              await importCountCsvFile(file);
+            } else {
+              await importStatsCsvFile(file);
+            }
+            setErr(null);
+            await refresh();
+            setShowImportModal(false);
+          } catch (err: any) {
+            const msg = apiErrorToMessage(err);
+            setImportModalError(msg);
+            // Keep a short persistent banner on the page
+            setErr(msg.split("\n")[0] || msg);
+          } finally {
+            setImportBusy(false);
+          }
+        }}
+      />
+
+      <div className="flex justify-end gap-2">
+        <button
+          onClick={closeImport}
+          disabled={importBusy}
+          className="rounded-lg border border-neutral-300 bg-neutral-100 px-4 py-2 text-sm hover:bg-neutral-200 disabled:opacity-50"
+        >
+          Cancel
+        </button>
+
+        <button
+          disabled={importBusy || !campusCodeFromUi()}
+          className="inline-flex items-center gap-2 rounded-lg bg-emerald-700 px-4 py-2 text-sm font-medium text-white hover:brightness-110 disabled:opacity-50 disabled:cursor-not-allowed"
+          onClick={() => importFileRef.current?.click()}
+        >
+          <Upload className="h-4 w-4" />
+          {importBusy ? "Importing…" : campusCodeFromUi() ? "Choose File" : "Choose campus first"}
+        </button>
+      </div>
+    </div>
+  </div>
+)}
+
         <div className="mb-3 flex items-center gap-2">
           <button
             className={`rounded-md px-3 py-2 text-sm border ${view === "active" ? "bg-white border-gray-300 shadow-sm" : "bg-transparent border-transparent text-gray-500"}`}
@@ -722,11 +1070,14 @@ const handleImportStats = (event: React.ChangeEvent<HTMLInputElement>) => {
                 <div className="flex items-center justify-between mb-3">
                   <h3 className="text-base font-semibold">List of Enlisted Courses</h3>
                   <div className="flex items-center gap-2">
-                    <label className="inline-flex items-center gap-2 rounded-md bg-[#008e4e] px-4 py-2 text-sm font-medium text-white shadow-sm hover:brightness-110">
+                    <button
+                      type="button"
+                      onClick={() => openImport("count")}
+                      className="inline-flex items-center gap-2 rounded-md bg-[#008e4e] px-4 py-2 text-sm font-medium text-white shadow-sm hover:brightness-110"
+                    >
                       <Upload className="h-4 w-4" />
                       Import CSV
-                      <input type="file" accept=".csv" onChange={handleImportCourses} className="hidden" />
-                    </label>
+                    </button>
                     <button
                       onClick={() => {
                         setErr(null);
@@ -889,11 +1240,14 @@ const handleImportStats = (event: React.ChangeEvent<HTMLInputElement>) => {
               <section className="flex-1 max-h-[420px] overflow-y-auto pl-4">
                 <div className="flex items-center justify-between mb-3">
                   <h3 className="text-base font-semibold">Enrollment Statistics</h3>
-                  <label className="inline-flex items-center gap-2 rounded-md bg-[#008e4e] px-4 py-2 text-sm font-medium text-white shadow-sm hover:brightness-110">
-                    <Upload className="h-4 w-4" />
-                    Import CSV
-                    <input type="file" accept=".csv" onChange={handleImportStats} className="hidden" />
-                  </label>
+                  <button
+                      type="button"
+                      onClick={() => openImport("stats")}
+                      className="inline-flex items-center gap-2 rounded-md bg-[#008e4e] px-4 py-2 text-sm font-medium text-white shadow-sm hover:brightness-110"
+                    >
+                      <Upload className="h-4 w-4" />
+                      Import CSV
+                    </button>
                 </div>
                 <table className="w-full text-sm">
                   <thead className="bg-gray-50 text-left text-xs text-gray-500 border-b">
@@ -1000,7 +1354,7 @@ const handleImportStats = (event: React.ChangeEvent<HTMLInputElement>) => {
                       const res = await reactivateApoPreenlistment(
                         user.userId,
                         archiveTermId,
-                        campusName || undefined
+                        campusCodeFromUi() || undefined
                       );
                       const planningTermId =
                         (res as any)?.planningTermId || archiveTermId;

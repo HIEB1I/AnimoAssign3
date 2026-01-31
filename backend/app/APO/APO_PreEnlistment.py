@@ -888,155 +888,241 @@ async def preenlistment_post(
     count_rows: List[Dict[str, Any]] = (payload or {}).get("countRows") or []
     stat_rows: List[Dict[str, Any]] = (payload or {}).get("statRows") or []
 
+    # Resolve campus strictly: import is ALWAYS scoped to the caller's campus.
     if not campus_uc:
         campus_label = await _apo_campus_label_for_user(userId)
         campus_uc = _norm_campus_name(campus_label)
+    if not campus_uc:
+        raise HTTPException(status_code=400, detail="Cannot resolve campus; pass campus=MANILA|LAGUNA.")
 
-    base_campus_doc = await _campus_by_name(campus_uc) if campus_uc else None
+    base_campus_doc = await _campus_by_name(campus_uc)
     base_campus_id = (base_campus_doc or {}).get("campus_id")
+    if not base_campus_id:
+        raise HTTPException(status_code=400, detail="Unknown campus; pass campus=MANILA|LAGUNA.")
 
-    # scoped delete
-    if replaceCount:
-        target_campuses: List[str] = []
-        if base_campus_id:
-            target_campuses = [base_campus_id]
-        else:
-            seen = set()
-            for r in count_rows:
-                cname = _norm_campus_name(r.get("Campus") or r.get("campus"))
-                if not cname:
-                    continue
-                cdoc = await _campus_by_name(cname)
-                cid = (cdoc or {}).get("campus_id")
-                if cid and cid not in seen:
-                    seen.add(cid)
-                    target_campuses.append(cid)
-        if not target_campuses:
-            raise HTTPException(status_code=400, detail="Cannot resolve campus for COUNT replace; pass campus=MANILA|LAGUNA or include 'Campus' per row.")
-        for cid in target_campuses:
-            await db[COL_COUNT].delete_many({"term_id": termId, "is_archived": False, "campus_id": cid})
+    def _row_label(i: int) -> str:
+        # CSV row numbers are 1-based with a header line, so first data row is Row 2
+        return f"Row {i + 2}"
 
-    if replaceStats:
-        target_campuses: List[str] = []
-        if base_campus_id:
-            target_campuses = [base_campus_id]
-        else:
-            seen = set()
-            for r in stat_rows:
-                pcode = (r.get("Program") or "").strip()
-                if not pcode:
-                    continue
-                pinfo = await _program_by_code(pcode)
-                cid = (pinfo or {}).get("campus_id")
-                if cid and cid not in seen:
-                    seen.add(cid)
-                    target_campuses.append(cid)
-        if not target_campuses:
-            raise HTTPException(status_code=400, detail="Cannot resolve campus for STATS replace; pass campus=MANILA|LAGUNA.")
-        for cid in target_campuses:
-            await db[COL_STATS].delete_many({"term_id": termId, "is_archived": False, "campus_id": cid})
-
-    # ---- INSERT COUNT ----
-    now = _now()
-    count_docs: List[Dict[str, Any]] = []
-
-    def _to_int(x: Any) -> int:
+    def _as_int(v: Any) -> Optional[int]:
+        if v is None or v == "":
+            return None
         try:
-            return int(x or 0)
+            return int(float(str(v).strip()))
         except Exception:
-            return 0
+            return None
 
-    for r in count_rows:
-        pre_code = (r.get("Code") or r.get("code") or "").strip()
-        career_csv = (r.get("Career") or r.get("career") or "").strip()
-        campus_name = _norm_campus_name(r.get("Campus") or r.get("campus")) or campus_uc
-        acad_group_csv = (r.get("Acad Group") or r.get("acad_group") or "").strip().upper()  # display only
-        course_code = (r.get("Course Code") or r.get("course_code") or "").strip().upper()
-        if not (career_csv and campus_name and course_code):
-            continue
+    # --------------------------
+    # Validate & normalize COUNT
+    # --------------------------
+    count_errors: List[str] = []
+    normalized_count_rows: List[Dict[str, Any]] = []
 
-        course = await _course_by_code(course_code)
-        if not course:
-            continue
+    if count_rows:
+        for i, r in enumerate(count_rows):
+            career_csv = (r.get("Career") or r.get("career") or "").strip()
+            acad_group_csv = (r.get("Acad Group") or r.get("acad_group") or "").strip()
+            campus_csv_raw = (r.get("Campus") or r.get("campus") or "").strip()
+            course_code = (r.get("Course Code") or r.get("course_code") or "").strip().upper()
+            count_val = _as_int(r.get("Count", r.get("count")))
 
+            if not campus_csv_raw:
+                count_errors.append(f"{_row_label(i)}: Missing 'Campus' (must be Manila/Laguna).")
+                continue
+
+            campus_from_row = _norm_campus_name(campus_csv_raw)
+            if not campus_from_row:
+                count_errors.append(f"{_row_label(i)}: Invalid Campus '{campus_csv_raw}'. Use Manila or Laguna.")
+                continue
+
+            if campus_from_row != campus_uc:
+                count_errors.append(
+                    f"{_row_label(i)}: Campus '{campus_csv_raw}' does not match your selected campus ({campus_uc})."
+                )
+                continue
+
+            if not career_csv:
+                count_errors.append(f"{_row_label(i)}: Missing 'Career'.")
+                continue
+
+            if not _career_to_program_level(career_csv):
+                count_errors.append(f"{_row_label(i)}: Invalid Career '{career_csv}'. Use UGB/UGS or GSM.")
+                continue
+
+            if not acad_group_csv:
+                count_errors.append(f"{_row_label(i)}: Missing 'Acad Group'.")
+                continue
+
+            if not course_code:
+                count_errors.append(f"{_row_label(i)}: Missing 'Course Code'.")
+                continue
+
+            if count_val is None:
+                count_errors.append(f"{_row_label(i)}: Invalid 'Count' value.")
+                continue
+
+            course = await _course_by_code(course_code)
+            if not course:
+                count_errors.append(f"{_row_label(i)}: Unknown Course Code '{course_code}'.")
+                continue
+
+            normalized_count_rows.append(
+                {
+                    "pre_code": (r.get("Code") or r.get("code") or "").strip(),
+                    "career": career_csv,
+                    "acad_group": acad_group_csv.strip().upper(),
+                    "course": course,
+                    "count": count_val,
+                }
+            )
+
+        if count_errors:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "message": f"Invalid Pre-enlistment COUNT file for {campus_uc}. Nothing was saved.",
+                    "errors": count_errors[:60],
+                },
+            )
+
+        if not normalized_count_rows:
+            raise HTTPException(
+                status_code=400,
+                detail=f"No valid COUNT rows found. Please check the CSV format and values.",
+            )
+
+    # --------------------------
+    # Validate & normalize STATS
+    # --------------------------
+    stat_errors: List[str] = []
+    normalized_stat_rows: List[Dict[str, Any]] = []
+
+    if stat_rows:
+        for i, r in enumerate(stat_rows):
+            program_code = (r.get("Program") or r.get("program") or "").strip()
+            if not program_code:
+                stat_errors.append(f"{_row_label(i)}: Missing 'Program'.")
+                continue
+
+            pinfo = await _program_by_code(program_code)
+            if not pinfo:
+                stat_errors.append(f"{_row_label(i)}: Unknown Program '{program_code}'.")
+                continue
+
+            prog_campus_id = pinfo.get("campus_id")
+            if prog_campus_id and prog_campus_id != base_campus_id:
+                stat_errors.append(
+                    f"{_row_label(i)}: Program '{program_code}' belongs to a different campus; you are importing for {campus_uc}."
+                )
+                continue
+
+            freshman = _as_int(r.get("FRESHMAN"))
+            sophomore = _as_int(r.get("SOPHOMORE"))
+            junior = _as_int(r.get("JUNIOR"))
+            senior = _as_int(r.get("SENIOR"))
+            enrollment = _as_int(r.get("ENROLLMENT"))
+
+            if freshman is None or sophomore is None or junior is None or senior is None:
+                stat_errors.append(
+                    f"{_row_label(i)}: Year-level counts must be numbers (FRESHMAN/SOPHOMORE/JUNIOR/SENIOR)."
+                )
+                continue
+
+            if enrollment is None:
+                enrollment = freshman + sophomore + junior + senior
+
+            normalized_stat_rows.append(
+                {
+                    "program_id": pinfo.get("program_id"),
+                    "freshman": freshman,
+                    "sophomore": sophomore,
+                    "junior": junior,
+                    "senior": senior,
+                    "enrollment": enrollment,
+                }
+            )
+
+        if stat_errors:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "message": f"Invalid Pre-enlistment STATISTICS file for {campus_uc}. Nothing was saved.",
+                    "errors": stat_errors[:60],
+                },
+            )
+
+        if not normalized_stat_rows:
+            raise HTTPException(
+                status_code=400,
+                detail="No valid STATISTICS rows found. Please check the CSV format and values.",
+            )
+
+    # --------------------------
+    # Apply replace + insert (safe: campus-scoped only)
+    # --------------------------
+    if replaceCount:
+        await db[COL_COUNT].delete_many({"term_id": termId, "is_archived": False, "campus_id": base_campus_id})
+    if replaceStats:
+        await db[COL_STATS].delete_many({"term_id": termId, "is_archived": False, "campus_id": base_campus_id})
+
+    now = _now()
+
+    count_docs: List[Dict[str, Any]] = []
+    for r in normalized_count_rows:
+        course = r["course"]
+        # prefer course's college_id; allow Acad Group fallback
         college_id = course.get("college_id")
-        if not college_id and acad_group_csv:
-            college_doc = await _college_by_code(acad_group_csv)
+        if not college_id and r.get("acad_group"):
+            college_doc = await _college_by_code(r.get("acad_group"))
             college_id = (college_doc or {}).get("college_id")
-            
-        campus_doc_row = await _campus_by_name(campus_name)
-        campus_id = (campus_doc_row or {}).get("campus_id")
-        if not campus_id:
-            continue
 
-        doc = {
-            "count_id": await _next_id("PRCNT", COL_COUNT),
-            "term_id": termId,
-            "college_id": college_id,
-            "campus_id": campus_id,
-            "course_id": course["course_id"],
-            "preenlistment_code": pre_code,
-            # keep CSV code for display
-            "career": career_csv,
-            # store program_level for reference (not displayed)
-            "program_level": _career_to_program_level(career_csv),
-            # keep CSV acad group code for display (fallback in GET via lookup when missing)
-            "acad_group_code": acad_group_csv or None,
-            "preenlistment_count": _to_int(r.get("Count", r.get("count", 0))),
-            "is_archived": False,
-            "created_at": now,
-            "updated_at": now,
-        }
-        count_docs.append(doc)
+        count_docs.append(
+            {
+                "count_id": await _next_id("PRCNT", COL_COUNT),
+                "term_id": termId,
+                "college_id": college_id,
+                "campus_id": base_campus_id,
+                "course_id": course["course_id"],
+                "preenlistment_code": r.get("pre_code") or "",
+                "career": r["career"],  # keep CSV code for display
+                "program_level": _career_to_program_level(r["career"]),
+                "acad_group_code": r.get("acad_group") or None,
+                "preenlistment_count": int(r["count"]),
+                "is_archived": False,
+                "created_at": now,
+                "updated_at": now,
+            }
+        )
+
+    stat_docs: List[Dict[str, Any]] = []
+    now2 = _now()
+    for r in normalized_stat_rows:
+        stat_docs.append(
+            {
+                "stat_id": await _next_id("PRSTAT", COL_STATS),
+                "term_id": termId,
+                "program_id": r.get("program_id"),
+                "campus_id": base_campus_id,
+                "enrollment": int(r.get("enrollment") or 0),
+                "freshman": int(r.get("freshman") or 0),
+                "sophomore": int(r.get("sophomore") or 0),
+                "junior": int(r.get("junior") or 0),
+                "senior": int(r.get("senior") or 0),
+                "is_archived": False,
+                "created_at": now2,
+                "updated_at": now2,
+            }
+        )
 
     if count_docs:
         await db[COL_COUNT].insert_many(count_docs)
-
-    # ---- INSERT STATS ----
-    now2 = _now()
-    stat_docs: List[Dict[str, Any]] = []
-
-    for r in stat_rows:
-        program_code = (r.get("Program") or r.get("program") or "").strip()
-        if not program_code:
-            continue
-        pinfo = await _program_by_code(program_code)
-        if not pinfo:
-            # skip unknown program code like BSCS (CBL) only if really not found
-            continue
-
-        freshman = _to_int(r.get("FRESHMAN"))
-        sophomore = _to_int(r.get("SOPHOMORE"))
-        junior = _to_int(r.get("JUNIOR"))
-        senior = _to_int(r.get("SENIOR"))
-        enrollment = _to_int(r.get("ENROLLMENT")) or (freshman + sophomore + junior + senior)
-
-        campus_name = _norm_campus_name(campus_uc)
-        campus_id_for_stat = None
-        if campus_name:
-            cdoc = await _campus_by_name(campus_name)
-            campus_id_for_stat = (cdoc or {}).get("campus_id")
-        if not campus_id_for_stat:
-            campus_id_for_stat = pinfo.get("campus_id")
-        if not campus_id_for_stat:
-            continue
-
-        stat_docs.append({
-            "stat_id": await _next_id("PRSTAT", COL_STATS),
-            "term_id": termId,
-            "program_id": pinfo.get("program_id"),
-            "campus_id": campus_id_for_stat,
-            "enrollment": enrollment,
-            "freshman": freshman,
-            "sophomore": sophomore,
-            "junior": junior,
-            "senior": senior,
-            "is_archived": False,
-            "created_at": now2,
-            "updated_at": now2,
-        })
-
     if stat_docs:
         await db[COL_STATS].insert_many(stat_docs)
 
-    return {"insertedCount": len(count_docs), "insertedStats": len(stat_docs)}
+    return {
+        "ok": True,
+        "campus": campus_uc,
+        "termId": termId,
+        "insertedCount": len(count_docs),
+        "insertedStats": len(stat_docs),
+    }
