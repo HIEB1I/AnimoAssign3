@@ -8,6 +8,8 @@ import HistoryMain from "./FACULTY_History";
 import PreferencesContent from "./FACULTY_Preferences";
 import DeloadingsContent from "./FACULTY_Deloadings";
 import { InboxContent } from "./FACULTY_Inbox";
+import { acceptTeachingLoadToGcal } from "../../api"; 
+
 
 import {
   getFacultyOverviewList,
@@ -91,6 +93,11 @@ export default function FAC_Overview() {
           summary: list.summary,
           teaching_load: list.teaching_load,
           notifications: profile.notifications || [],
+          // Load assignment workflow flags (backwards-compatible)
+          is_proposed: (list as any).is_proposed,
+          proposal_status: (list as any).proposal_status,
+          rfc: (list as any).rfc,
+          schedule_final: (list as any).schedule_final,
         });
       } catch (e: any) {
         setError(e?.response?.data?.detail || e?.message || "Failed to load faculty overview.");
@@ -152,7 +159,11 @@ export default function FAC_Overview() {
               <>
                 <StatCards summary={data.summary} />
                 <div className="my-6" />
-                <TeachingLoadEnhanced teachingLoad={data.teaching_load} term={data.term} />
+                <TeachingLoadEnhanced
+                  teachingLoad={data.teaching_load}
+                  term={data.term}
+                  workflow={data}
+                />
               </>
             )}
             {tab === "History" && <HistoryMain />}
@@ -263,6 +274,7 @@ function normalizeDay(raw?: string): DayLong | null {
 
 // --- *** NEW: This type matches the backend (Python) output *** ---
 type TLItem = {
+  section_id: string;
   course_code: string;
   course_title: string;
   section: string;
@@ -276,6 +288,7 @@ type TLItem = {
   time2?: string;
   syllabus?: string;
 };
+
 
 // --- *** NEW: This type is for the Calendar items *** ---
 type TLItemForCalendar = {
@@ -428,9 +441,15 @@ const ClassBlock = ({ onClick, it }: { onClick?: () => void; it: TLItemForCalend
 );
 
 type TeachingLoadEnhancedProps = {
-  teachingLoad: TLItem[]; // <-- Use the new type
+  teachingLoad: TLItem[];
   term: any;
+  workflow?: {
+    schedule_final?: boolean;
+    proposal_status?: string | null;
+    rfc?: { status?: string | null } | null;
+  };
 };
+
 
 // --- *** MODIFIED: Headers for the new list view *** ---
 const LIST_HEADERS = [
@@ -445,10 +464,33 @@ const LIST_HEADERS = [
   "Syllabus",
 ];
 
-function TeachingLoadEnhanced({ teachingLoad, term }: TeachingLoadEnhancedProps) {
+function TeachingLoadEnhanced({ teachingLoad, term, workflow }: TeachingLoadEnhancedProps) {
   const [view, setView] = useState<"Calendar" | "List">("Calendar");
   const [modal, setModal] = useState<{ day: DayLong; item: TLItemForCalendar } | null>(null);
   const [isAccepted, setIsAccepted] = useState(false);
+
+  // Schedule is finalized once: Faculty accepted OR OM approved/rejected an RFC.
+const scheduleFinal = Boolean(
+  workflow?.schedule_final ||
+    workflow?.proposal_status?.toString?.().toLowerCase?.() === "approved" ||
+    workflow?.proposal_status?.toString?.().toLowerCase?.() === "accepted" ||
+    (workflow?.rfc?.status &&
+      ["ACCEPTED", "APPROVED", "REJECTED"].includes(String(workflow.rfc.status).toUpperCase()))
+);
+
+
+const scheduleFinalLabel = (() => {
+  const st = String(workflow?.rfc?.status || "").toUpperCase();
+  if (st === "REJECTED") return "Finalized (RFC Rejected)";
+  if (st === "APPROVED") return "Finalized (RFC Approved)";
+  if (st === "ACCEPTED") return "Finalized (Accepted)";
+
+  const ps = String(workflow?.proposal_status || "").toLowerCase();
+  if (ps === "approved") return "Finalized (Approved)";
+  if (ps === "accepted") return "Finalized (Accepted)";
+  return "Finalized";
+})();
+
 
   // --- *** MODIFIED: Remove TLData, pass teachingLoad to placeItems *** ---
   const placed = useMemo(() => placeItems(teachingLoad || []), [teachingLoad]);
@@ -499,29 +541,81 @@ function TeachingLoadEnhanced({ teachingLoad, term }: TeachingLoadEnhancedProps)
           <button
             type="button"
             onClick={async () => {
+            try {
+              const raw = JSON.parse(localStorage.getItem("animo.user") || "{}");
+              const userId = raw.userId || raw.user_id || raw.id || "";
+
+              const termId = (term as any)?.term_id || (term as any)?._id || (term as any)?.id;
+
+              // 1) Accept proposal in backend
+              await acceptFacultyLoadAssignment(userId, { term_id: termId });
+
+              // 2) Create Google Calendar events using items already computed for calendar view
+              const itemsForGcal = (placed || []).map((p) => ({
+                day: p.day, // "Monday".."Saturday"
+                code: p.data.code,
+                title: p.data.title,
+                section: p.data.sec,
+                mode: p.data.mode,
+                room: p.data.room,
+                time: p.data.time, // "7:30 – 9:00"
+              }));
+
+              // remove duplicates (same course/day/time/room)
+              const seen = new Set<string>();
+              const uniqueItems = itemsForGcal.filter((x) => {
+                const key = `${x.code}|${x.section}|${x.day}|${x.time}|${x.room}|${x.mode}`;
+                if (seen.has(key)) return false;
+                seen.add(key);
+                return true;
+              });
+
+              if (uniqueItems.length > 0) {
               try {
-                const raw = JSON.parse(localStorage.getItem("animo.user") || "{}");
-                const userId = raw.userId || raw.user_id || raw.id || "";
-                await acceptFacultyLoadAssignment(userId, { term_id: (term as any)?.term_id || (term as any)?._id || (term as any)?.id });
-                setIsAccepted(true);
-                window.location.reload();
-              } catch (e) {
-                console.error(e);
+                // include userId in body too (works even if backend expects it in body)
+                const resp = await acceptTeachingLoadToGcal(userId, { userId, items: uniqueItems, weeks: 5 });
+                console.log("GCAL insert resp:", resp);
+              } catch (e: any) {
+                const msg =
+                  e?.response?.data?.detail ||
+                  e?.message ||
+                  "Calendar insert failed. Check backend logs.";
+                alert(msg);
+                console.error("Accepted schedule, but calendar insert failed:", e);
+                return; // ✅ do NOT reload; let user retry
               }
-            }}
+            } else {
+              alert("No sched items to add to calendar (all TBA / missing day-time).");
+              return;
+            }
+
+            setIsAccepted(true);
+            window.location.reload();
+
+            } catch (e) {
+              console.error(e);
+            }
+          }}
+
             disabled={isAccepted}
             className={cls(
               "inline-flex h-9 items-center justify-center rounded-lg px-4 text-sm font-medium shadow",
               "focus:outline-none focus:ring-2 focus:ring-emerald-600/40",
-              isAccepted
+              (isAccepted || scheduleFinal)
                 ? "bg-neutral-300 text-neutral-600 cursor-not-allowed"
                 : "bg-blue-700 text-white hover:bg-blue-800 active:translate-y-[0.5px]"
             )}
           >
-            {isAccepted ? "Accepted" : "Accept Schedule"}
+            {(isAccepted || scheduleFinal) ? "Finalized" : "Accept Schedule"}
           </button>
         </div>
       </div>
+
+      {scheduleFinal && (
+        <div className="mt-3 rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900">
+          <span className="font-semibold">Schedule Locked:</span> {scheduleFinalLabel}. You can no longer submit RFCs.
+        </div>
+      )}
 
         {view === "Calendar" ? (
           <div className="overflow-x-auto">
@@ -584,7 +678,7 @@ function TeachingLoadEnhanced({ teachingLoad, term }: TeachingLoadEnhancedProps)
                         <ClassBlock
                           key={j}
                           it={it}
-                          onClick={() => setModal({ day: g.day, item: it })}
+                          onClick={() => { if (scheduleFinal) return; setModal({ day: g.day, item: it }); }}
                         />
                       ))}
                     </div>
@@ -710,7 +804,7 @@ function TeachingLoadEnhanced({ teachingLoad, term }: TeachingLoadEnhancedProps)
         </div>
       )}
 
-      <ChangeRequestModal open={!!modal} onClose={() => setModal(null)} context={modal} term={term} />
+      <ChangeRequestModal open={!!modal} onClose={() => setModal(null)} context={modal} term={term} scheduleFinal={scheduleFinal} />
     </section>
   );
 }
@@ -825,12 +919,14 @@ function ChangeRequestModal({
   open,
   onClose,
   context,
-  term, 
+  term,
+  scheduleFinal,
 }: {
   open: boolean;
   onClose: () => void;
   context: { day: DayLong; item: TLItemForCalendar } | null; // <-- MODIFIED
-  term: any
+  term: any;
+  scheduleFinal: boolean;
 }) {
   const TIME_SLOTS = [
     "07:30 – 09:00",
@@ -882,7 +978,7 @@ function ChangeRequestModal({
   const mustTime = choices.includes("Change class time");
   const mustDay = choices.includes("Change class day");
   const isFinalized = Boolean((context?.item as any)?.finalized);
-  const disabled = isFinalized || choices.length === 0 || (mustTime && !selTime) || (mustDay && !selDay);
+  const disabled = scheduleFinal || isFinalized || choices.length === 0 || (mustTime && !selTime) || (mustDay && !selDay);
 
   return (
     <div className="fixed inset-0 z-80 grid place-items-center bg-black/30 p-3">
@@ -902,13 +998,27 @@ function ChangeRequestModal({
 
         <div className="space-y-3">
 
+          
+          {scheduleFinal && (
+            <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900">
+              The schedule is already finalized and locked. RFC is disabled.
+            </div>
+          )}
+
           {isFinalized && (
             <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
               This course has already been finalized by the Office Manager. RFC is disabled for this course.
             </div>
           )}
 
-          <RfcThreadView term={term} />
+          <RfcThreadView
+            term={term}
+            sectionId={
+              (context.item.originalItem as any)?.section_id ||
+              (context.item.originalItem as any)?.sectionId ||
+              ""
+            }
+          />
 
           <label className="block text-sm font-medium text-neutral-700">Change</label>
           <div className="flex flex-wrap gap-2">
@@ -1001,8 +1111,34 @@ function ChangeRequestModal({
                 await sendFacultyLoadAssignmentRfcMessage(userId, {
                   term_id: (term as any)?.term_id || (term as any)?._id || (term as any)?.id,
                   message: msg,
+                  course_code: context.item.code,
+                  section: context.item.sec,
                 });
                 window.location.reload();
+               const sectionId =
+                (context.item.originalItem as any)?.section_id ||
+                (context.item.originalItem as any)?.sectionId ||
+                "";
+
+              if (!sectionId) {
+                console.error("Missing section_id for this course row. Backend must return section_id in teaching_load.");
+                return;
+              }
+
+              const resp = await sendFacultyLoadAssignmentRfcMessage(userId, {
+                term_id: (term as any)?.term_id || (term as any)?._id || (term as any)?.id,
+                section_id: sectionId,
+                message: msg,
+              });
+
+
+              // Optional: show a useful message if Gmail isn't connected
+              if (resp && resp.email_sent === false && resp.email_error) {
+                console.warn("RFC saved but email was not sent:", resp.email_error);
+              }
+
+              window.location.reload();
+
               } catch (e) {
                 console.error(e);
               } finally {
@@ -1025,7 +1161,7 @@ function ChangeRequestModal({
   );
 }
 
-function RfcThreadView({ term }: { term: any }) {
+function RfcThreadView({ term, sectionId }: { term: any; sectionId: string }) {
   const [thread, setThread] = useState<any | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -1038,6 +1174,7 @@ function RfcThreadView({ term }: { term: any }) {
         const userId = raw.userId || raw.user_id || raw.id || "";
         const resp = await getFacultyLoadAssignmentRfc(userId, {
           term_id: term?.term_id || term?._id || term?.id,
+          section_id: sectionId,
         });
         if (!alive) return;
         setThread(resp?.rfc || null);
@@ -1050,7 +1187,7 @@ function RfcThreadView({ term }: { term: any }) {
     return () => {
       alive = false;
     };
-  }, [term?.term_id, term?._id, term?.id]);
+  }, [term?.term_id, term?._id, term?.id, sectionId]);
 
   if (loading && !thread) {
     return (

@@ -1,0 +1,315 @@
+name: Deploy Production (S1 + S2)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: main }
+
+      - name: Frontend build
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Backend tests (best-effort)
+        working-directory: backend
+        run: |
+          python -m pip install -r requirements.txt || true
+          pytest -q || true
+
+      - name: Analytics tests (best-effort)
+        working-directory: analytics
+        run: |
+          python -m pip install -r requirements.txt || true
+          pytest -q || true
+
+  deploy-s1:
+    needs: build-test
+    runs-on: ubuntu-latest
+    env:
+      S1_HOST: ${{ secrets.S1_HOST }}
+      S1_PORT: ${{ secrets.S1_PORT }}
+      S1_USER: ${{ secrets.S1_USER }}
+      S1_KEY:  ${{ secrets.S1_KEY }}
+    steps:
+      - name: Validate S1 secrets
+        run: |
+          for v in S1_HOST S1_PORT S1_USER S1_KEY; do
+            [ -n "${!v}" ] || { echo "::error ::$v is empty. Set it in Settings → Secrets → Actions."; exit 1; }
+          done
+          echo "S1 → $S1_USER@$S1_HOST:$S1_PORT"
+
+      - name: Trust S1 host key
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -p "$S1_PORT" "$S1_HOST" >> ~/.ssh/known_hosts
+
+      - name: Deploy to S1 (prod)
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host:     ${{ env.S1_HOST }}
+          port:     ${{ env.S1_PORT }}
+          username: ${{ env.S1_USER }}
+          key:      ${{ env.S1_KEY }}
+          script: |
+            set -Eeuo pipefail
+
+            REPO_DIR=/opt/AnimoAssign3
+            DATA_DIR=/opt/AnimoAssign3-prod-data
+            FILE=docker/docker-compose.prod.s1.yml
+            ENVF=docker/.env
+
+            mkdir -p "$REPO_DIR" "$DATA_DIR/tmp"
+            cd "$REPO_DIR" || exit 1
+
+            git config --global --add safe.directory "$REPO_DIR"
+            git config --global url.https://github.com/.insteadof git@github.com:
+            git config --global url.https://github.com/.insteadof ssh://git@github.com/
+
+            if [ ! -d .git ]; then
+              git clone https://github.com/HIEB1I/AnimoAssign3.git .
+            fi
+
+            git fetch --all --prune
+
+            if ! git merge-base --is-ancestor HEAD origin/main; then
+              ts=$(date +%Y%m%d-%H%M%S)
+              echo "::warning ::Local 'main' diverged; bundling to $DATA_DIR/backup-$ts.bundle"
+              git bundle create "$DATA_DIR/backup-$ts.bundle" --all || true
+            fi
+
+            git checkout -B main origin/main
+            git reset --hard origin/main
+            git clean -fdx
+
+            [ -f "$FILE" ] || { echo "Compose file not found: $FILE"; exit 1; }
+            [ -f "$ENVF" ] || { echo "Env file not found: $ENVF"; exit 1; }
+
+            export COMPOSE_PROJECT_NAME=animo_prod_s1
+            DEF_NET="${COMPOSE_PROJECT_NAME}_default"
+            EXT_NET="docker_animoassign"
+
+            set -a
+            . "$ENVF"
+            set +a
+
+            # --- One-time-safe pre-clean to absorb legacy containers ---
+            # S1 names:
+            for c in mongo-primary backend-primary analytics-primary frontend-primary nginx-primary; do
+              docker rm -f "$c" 2>/dev/null || true
+            done
+
+            docker compose -f "$FILE" --env-file "$ENVF" up -d mongo-primary
+
+            # Wait until a PRIMARY is elected 
+            i=0; tries=180
+            until docker exec -i mongo-primary mongosh \
+                -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" \
+                --authenticationDatabase admin --quiet \
+                --eval 'const s=rs.status(); if (s.ok===1 && s.members && s.members.some(m=>m.stateStr==="PRIMARY")) quit(0); quit(1);' >/dev/null 2>&1; do
+              i=$((i+1)); [ "$i" -ge "$tries" ] && { echo "::error ::No PRIMARY elected"; docker logs mongo-primary | tail -n 200; exit 1; }
+              sleep 2
+            done
+            echo "::notice ::Replica set has a PRIMARY"
+
+            docker compose -f "$FILE" --env-file "$ENVF" up -d --build backend-primary analytics-primary frontend-primary nginx
+
+            # show what actually came up (helps catch name mismatches fast)
+            echo "== compose ps =="; docker compose -f "$FILE" ps
+            echo "== container names =="; docker ps --format '{{.Names}}'
+
+            # optional: quick DB sanity
+            docker exec -i mongo-primary mongosh \
+              -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" \
+              --authenticationDatabase admin --quiet \
+              --eval 'db.adminCommand({ listDatabases: 1, nameOnly: true })' || true
+
+            # Probe via the target container's network namespace (no DNS issues)
+            curl_in() { # usage: curl_in <container> <url> <svc> [tries]
+              local c="$1" url="$2" svc="$3" tries="${4:-90}" i=0
+              while true; do
+                if docker run --rm --network "container:$c" curlimages/curl:8.10.1 -fsS "$url" >/dev/null 2>&1; then
+                  echo "::notice ::$svc healthy (via container:$c) $url"
+                  break
+                fi
+                i=$((i+1)); if [ "$i" -ge "$tries" ]; then
+                  echo "::error ::$svc did not become ready at $url"
+                  docker logs "$c" --tail=200 || true
+                  # also print networks to catch mis-wiring
+                  echo "Networks for $c:"; docker inspect -f '{{json .NetworkSettings.Networks}}' "$c" || true
+                  exit 1
+                fi
+                sleep 2
+              done
+            }
+
+            # Use loopback because we're in the container's netns
+            curl_in backend-primary   http://127.0.0.1:8000/health   backend-primary
+            curl_in analytics-primary http://127.0.0.1:8000/health   analytics-primary
+            curl_in frontend-primary  http://127.0.0.1:80/health     frontend-primary
+
+            # Frontend can be checked through the external net or nginx reload (either is fine)
+
+            # Then nginx reload
+            if docker ps --format '{{.Names}}' | grep -q '^nginx-primary$'; then
+              docker exec nginx-primary nginx -t
+              docker exec nginx-primary nginx -s reload || true
+            fi
+
+            docker system prune -f || true
+
+  deploy-s2:
+    needs: deploy-s1
+    runs-on: ubuntu-latest
+    env:
+      S2_HOST: ${{ secrets.S2_HOST }}
+      S2_PORT: ${{ secrets.S2_PORT }}
+      S2_USER: ${{ secrets.S2_USER }}
+      S2_KEY:  ${{ secrets.S2_KEY }}
+    steps:
+      - name: Validate S2 secrets
+        run: |
+          for v in S2_HOST S2_PORT S2_USER S2_KEY; do
+            [ -n "${!v}" ] || { echo "::error ::$v is empty. Set it in Settings → Secrets → Actions."; exit 1; }
+          done
+          echo "S2 → $S2_USER@$S2_HOST:$S2_PORT"
+
+      - name: Trust S2 host key
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -p "$S2_PORT" "$S2_HOST" >> ~/.ssh/known_hosts
+
+      - name: Deploy to S2 (prod)
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host:     ${{ env.S2_HOST }}
+          port:     ${{ env.S2_PORT }}
+          username: ${{ env.S2_USER }}
+          key:      ${{ env.S2_KEY }}
+          script: |
+            set -Eeuo pipefail
+
+            REPO_DIR=/opt/AnimoAssign3
+            DATA_DIR=/opt/AnimoAssign3-prod-data
+            FILE=docker/docker-compose.prod.s2.yml
+            ENVF=docker/.env
+
+            mkdir -p "$REPO_DIR" "$DATA_DIR/tmp"
+            cd "$REPO_DIR" || exit 1
+
+            git config --global --add safe.directory "$REPO_DIR"
+            git config --global url.https://github.com/.insteadof git@github.com:
+            git config --global url.https://github.com/.insteadof ssh://git@github.com/
+
+            if [ ! -d .git ]; then
+              git clone https://github.com/HIEB1I/AnimoAssign3.git .
+            fi
+
+            git fetch --all --prune
+            if ! git merge-base --is-ancestor HEAD origin/main; then
+              ts=$(date +%Y%m%d-%H%M%S)
+              echo "::warning ::Local 'main' diverged; bundling to $DATA_DIR/backup-$ts.bundle"
+              git bundle create "$DATA_DIR/backup-$ts.bundle" --all || true
+            fi
+
+            git checkout -B main origin/main
+            git reset --hard origin/main
+            git clean -fdx
+
+            [ -f "$FILE" ] || { echo "Compose file not found: $FILE"; exit 1; }
+            [ -f "$ENVF" ] || { echo "Env file not found: $ENVF"; exit 1; }
+
+            export COMPOSE_PROJECT_NAME=animo_prod_s2
+            DEF_NET="${COMPOSE_PROJECT_NAME}_default"
+            EXT_NET="docker_animoassign"
+
+            set -a
+            . "$ENVF"
+            set +a
+
+            for c in mongo-secondary backend-secondary analytics-secondary frontend-secondary mongo-tertiary nginx-secondary; do
+              docker rm -f "$c" 2>/dev/null || true
+            done
+
+            docker compose -f "$FILE" --env-file "$ENVF" up -d --build --remove-orphans
+
+            # Wait for a PRIMARY (up to ~6 minutes)
+            i=0; tries=180
+            while true; do
+              if docker exec -i mongo-secondary mongosh \
+                -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" \
+                --authenticationDatabase admin --quiet \
+                --eval 'const s=rs.status(); if (s.ok===1 && s.members && s.members.some(m=>m.stateStr==="PRIMARY")) quit(0); quit(1);' >/dev/null 2>&1
+              then
+                echo "::notice ::Replica set has a PRIMARY"
+                break
+              fi
+              i=$((i+1)); if [ "$i" -ge "$tries" ]; then
+                echo "::error ::No PRIMARY elected"
+                docker logs mongo-secondary | tail -n 200 || true
+                exit 1
+              fi
+              sleep 2
+            done
+            
+            # Show what's running (helps catch name mismatches)
+            echo "== compose ps =="; docker compose -f "$FILE" ps
+            echo "== container names =="; docker ps --format '{{.Names}}'
+
+            docker exec -i mongo-secondary mongosh \
+              -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" \
+              --authenticationDatabase admin --quiet \
+              --eval "db.runCommand({ping:1})" || {
+                echo "::error ::mongo-secondary ping failed"
+                docker logs mongo-secondary | tail -n 200 || true
+                exit 1
+              }
+
+            docker exec -i mongo-secondary mongosh \
+              -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" \
+              --authenticationDatabase admin --quiet --eval "
+                const s=rs.status();
+                printjson(s.members.map(m=>({host:m.name,state:m.stateStr,self:!!m.self})));
+              " || true
+
+            # Probe from inside each container's netns (no DNS/network guessing)
+            curl_in() { # usage: curl_in <container> <url> <svc> [tries]
+              local c="$1" url="$2" svc="$3" tries="${4:-90}" i=0
+              while true; do
+                if docker run --rm --network "container:$c" curlimages/curl:8.10.1 -fsS "$url" >/dev/null 2>&1; then
+                  echo "::notice ::$svc healthy (via container:$c) $url"
+                  break
+                fi
+                i=$((i+1)); if [ "$i" -ge "$tries" ]; then
+                  echo "::error ::$svc did not become ready at $url"
+                  docker logs "$c" --tail=200 || true
+                  echo "Networks for $c:"; docker inspect -f '{{json .NetworkSettings.Networks}}' "$c" || true
+                  exit 1
+                fi
+                sleep 2
+              done
+            }
+
+            # Hit loopback because we’re inside the target container’s network namespace
+            curl_in backend-secondary    http://127.0.0.1:8000/health   backend-secondary
+            curl_in analytics-secondary  http://127.0.0.1:8000/health   analytics-secondary
+            curl_in frontend-secondary   http://127.0.0.1/              frontend-secondary
+
+            # Reload nginx if present
+            if docker ps --format '{{.Names}}' | grep -q '^nginx-secondary$'; then
+              docker exec nginx-secondary nginx -t
+              docker exec nginx-secondary nginx -s reload || true
+            fi
+
+            docker system prune -f || true

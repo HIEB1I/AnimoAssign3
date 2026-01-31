@@ -1025,13 +1025,18 @@ async def loadassignment_handler(
 
         existing_header = await db[COL_FACULTY_LOADS].find_one(
             {"term_id": active.get("term_id"), "department_id": dept_id_header},
-            {"_id": 1, "load_id": 1},
+            {"_id": 1, "load_id": 1, "forwarded_to_chair": 1, "forwarded_to_chair_at": 1},
         )
+
+        # IMPORTANT:
+        # A header can exist even before OM actually forwards to the chair.
+        # So "updated vs submitted" should be based on forwarded_to_chair, not existence alone.
+        was_forwarded_before = bool((existing_header or {}).get("forwarded_to_chair"))
 
         # 1) persist the final assignments/schedules
         await _approve_and_persist(active["term_id"], rows, db)
 
-        # 2) create/update faculty_loads header for this term
+        # 2) create/update faculty_loads header for this term (also marks forwarded_to_chair=True)
         await _upsert_faculty_load_header(
             active,
             db,
@@ -1074,9 +1079,36 @@ async def loadassignment_handler(
             {"term_id": active.get("term_id"), "department_id": dept_id_header},
             {"_id": 0, "load_id": 1},
         ) or {}
-
-        kind = "om_load_updated" if bool(existing_header) else "om_load_forwarded"
         reco_id = header_after.get("load_id") or (existing_header or {}).get("load_id")
+
+        kind = "om_load_updated" if was_forwarded_before else "om_load_forwarded"
+
+        # 3) notify the department chair(s)
+        try:
+            recipients = await _chair_user_ids_for_department_id(dept_id_notif, db)
+            dept_name = await _dept_name_by_id(dept_id_notif, db)
+
+            is_update = was_forwarded_before
+            title = "Load Recommendation Revised" if is_update else "Load Recommendation Submitted"
+            details = (
+                f"OM {'revised' if is_update else 'submitted'} the load recommendation "
+                f"for {dept_name or dept_id_notif} ({_term_label(active)})."
+            )
+            meta = {
+                "route": "/chair/plantilla",
+                "kind": kind,
+                "reco_id": reco_id,                 # aligns with notify-chair endpoint spec
+                "term_id": active.get("term_id"),
+                "department_id": dept_id_notif,
+                # keep old key for backward compatibility if any UI depends on it
+                "load_id": reco_id,
+            }
+
+            for uid in recipients:
+                await create_notification(user_id=uid, title=title, details=details, meta=meta)
+        except Exception:
+            # Never break approval due to notification failure
+            pass
 
         return {
             "ok": True,
@@ -1130,9 +1162,9 @@ async def om_notify_chair_load_forwarded(
     recipients = await _chair_user_ids_for_department_id(dept_id_notif, db)
     dept_name = await _dept_name_by_id(dept_id_notif, db)
 
-    title = "Load Recommendation Updated" if kind == "om_load_updated" else "Load Recommendation Forwarded"
+    title = "Load Recommendation Revised" if kind == "om_load_updated" else "Load Recommendation Submitted"
     details = (
-        f"OM {'updated' if kind == 'om_load_updated' else 'forwarded'} the load recommendation "
+        f"OM {'revised' if kind == 'om_load_updated' else 'submitted'} the load recommendation "
         f"for {dept_name or dept_id_notif} ({_term_label(active)})."
     )
     meta = {
@@ -1601,6 +1633,16 @@ async def om_send_to_faculty(payload: Dict[str, Any] = Body(...), db=Depends(get
         fac = await db[COL_FACULTY].find_one({"faculty_id": fid}, {"_id": 0, "user_id": 1}) or {}
         fac_user_id = (fac.get("user_id") or "").strip()
 
+        # --- NEW: do not overwrite an already-finalized schedule ---
+        existing_prop = await db[COL_LOAD_PROPOSALS].find_one(
+            {"faculty_id": fid, "term_id": term_id},
+            {"_id": 0, "status": 1, "locked": 1},
+        ) or None
+        if existing_prop:
+            st = str((existing_prop.get("status") or "")).lower()
+            if bool(existing_prop.get("locked")) or st in ("accepted", "approved"):
+                raise HTTPException(status_code=409, detail="Schedule is already finalized. You can no longer send/overwrite the proposal for this faculty.")
+
         doc = {
             "faculty_id": fid,
             "term_id": term_id,
@@ -1639,9 +1681,9 @@ async def om_send_to_faculty(payload: Dict[str, Any] = Body(...), db=Depends(get
 async def om_get_rfc(
     faculty_id: str = Query(...),
     term_id: Optional[str] = Query(None),
+    section_id: Optional[str] = Query(None),
     db=Depends(get_db),
 ):
-    """Return the RFC thread for a given faculty+term (any status)."""
     if not term_id:
         active = await _active_term()
         term_id = (active or {}).get("term_id")
@@ -1649,11 +1691,11 @@ async def om_get_rfc(
     if not term_id:
         return {"ok": True, "rfc": None}
 
-    rfc = await db[COL_LOAD_RFC].find_one(
-        {"faculty_id": faculty_id, "term_id": term_id},
-        {"_id": 0},
-    )
+    q = {"faculty_id": faculty_id, "term_id": term_id}
+    if section_id and section_id.strip():
+        q["section_id"] = section_id.strip()
 
+    rfc = await db[COL_LOAD_RFC].find_one(q, {"_id": 0})
     if not rfc:
         return {"ok": True, "rfc": None}
 
@@ -1665,11 +1707,10 @@ async def respond_load_assignment_rfc(
     payload: Dict[str, Any] = Body(...),
     db=Depends(get_db),
 ):
-    """OM responds on an RFC thread: reply | approve | reject."""
-    # IMPORTANT: user_id must be accepted from JSON body (frontend may not send query params)
     user_id = (payload.get("user_id") or payload.get("userId") or "").strip()
     term_id = (payload.get("term_id") or "").strip()
     faculty_id = (payload.get("faculty_id") or "").strip()
+    section_id = (payload.get("section_id") or payload.get("sectionId") or "").strip()
     action = (payload.get("action") or "").strip().lower()
     message = (payload.get("message") or "").strip()
 
@@ -1682,12 +1723,26 @@ async def respond_load_assignment_rfc(
     if action == "reply" and not message:
         raise HTTPException(status_code=400, detail="message is required for reply")
 
-    rfc = await db[COL_LOAD_RFC].find_one({"faculty_id": faculty_id, "term_id": term_id}, {"_id": 0})
+    # ✅ RFC key (isolated per subject when section_id is present)
+    qkey: Dict[str, Any] = {"faculty_id": faculty_id, "term_id": term_id}
+    if section_id:
+        qkey["section_id"] = section_id
+
+    # Find RFC (if section_id missing, fallback to latest for faculty+term)
+    if section_id:
+        rfc = await db[COL_LOAD_RFC].find_one(qkey, {"_id": 0})
+    else:
+        lst = await db[COL_LOAD_RFC].find(
+            {"faculty_id": faculty_id, "term_id": term_id},
+            {"_id": 0},
+        ).sort([("updated_at", -1), ("created_at", -1)]).to_list(1)
+        rfc = lst[0] if lst else None
+
     if not rfc:
         raise HTTPException(status_code=404, detail="No RFC found")
 
     rfc = _normalize_rfc_doc(rfc)
-    if rfc.get("status") in RFC_TERMINAL:
+    if (rfc.get("status") or "").upper() in RFC_TERMINAL:
         raise HTTPException(status_code=409, detail="RFC is already locked")
 
     now = datetime.now(timezone.utc)
@@ -1712,20 +1767,16 @@ async def respond_load_assignment_rfc(
         new_status = "APPROVED"
         locked = True
         extra["closed_at"] = now
-    else:
-        new_status = "REJECTED"
-        locked = True
-        extra["closed_at"] = now
 
-        # If OM rejects the RFC, automatically approve/lock the proposed schedule
-        # so the faculty can no longer RFC for the same courses.
+        # --- NEW: RFC APPROVED → schedule becomes FINAL/APPROVED and locked ---
         try:
             await db[COL_LOAD_PROPOSALS].update_one(
                 {"faculty_id": faculty_id, "term_id": term_id},
                 {
                     "$set": {
-                        "rows.$[].finalized": True,
+                        "status": "approved",
                         "locked": True,
+                        "rows.$[].finalized": True,
                         "updated_at": now,
                     },
                     "$setOnInsert": {"created_at": now},
@@ -1733,31 +1784,47 @@ async def respond_load_assignment_rfc(
                 upsert=True,
             )
         except Exception:
-            # Best-effort only: do not block the RFC response if proposal is missing/has different schema
             pass
+    else:
+        new_status = "REJECTED"
+        locked = True
+        extra["closed_at"] = now
+
+        # ✅ Reject only finalizes the matching subject row (not all rows)
+        if section_id:
+            try:
+                await db[COL_LOAD_PROPOSALS].update_one(
+                    {"faculty_id": faculty_id, "term_id": term_id},
+                    {"$set": {"rows.$[row].finalized": True, "updated_at": now}},
+                    array_filters=[{"row.section_id": section_id}],
+                )
+            except Exception:
+                pass
 
     rfc_id = rfc.get("rfc_id")
 
+    # ✅ Update only this RFC thread (qkey includes section_id when present)
     await db[COL_LOAD_RFC].update_one(
-        {"faculty_id": faculty_id, "term_id": term_id},
-        {
-            "$set": {
-                "rfc_id": rfc_id,
-                "faculty_id": faculty_id,
-                "term_id": term_id,
-                "status": new_status,
-                "locked": locked,
-                "messages": msgs,
-                "updated_at": now,
-                **extra,
-            },
-            "$setOnInsert": {"created_at": now},
-        },
-        upsert=True,
+        qkey,
+        {"$set": {
+            "rfc_id": rfc_id,
+            "faculty_id": faculty_id,
+            "term_id": term_id,
+            "section_id": section_id or rfc.get("section_id"),
+            "status": new_status,
+            "locked": locked,
+            "messages": msgs,
+            "updated_at": now,
+            **extra,
+        }},
+        upsert=False,
     )
 
     # notify faculty
-    fac = await db[COL_FACULTY].find_one({"faculty_id": faculty_id}, {"_id": 0, "user_id": 1}) or {}
+    fac = await db[COL_FACULTY].find_one(
+        {"faculty_id": faculty_id},
+        {"_id": 0, "user_id": 1},
+    ) or {}
     fac_user_id = (fac.get("user_id") or "").strip()
 
     if fac_user_id:
@@ -1783,6 +1850,7 @@ async def respond_load_assignment_rfc(
                 "kind": kind,
                 "term_id": term_id,
                 "faculty_id": faculty_id,
+                "section_id": section_id,
                 "rfc_id": rfc_id,
             },
         )
@@ -6000,6 +6068,10 @@ async def _upsert_faculty_load_header(
             "created_at": now,
             "finalized_at": now,
             "updated_at": now,
+
+            # NEW: marks that OM has forwarded/submitted to Chair
+            "forwarded_to_chair": True,
+            "forwarded_to_chair_at": now,
         }
         await db[COL_FACULTY_LOADS].insert_one(doc)
     else:
@@ -6008,13 +6080,17 @@ async def _upsert_faculty_load_header(
             {"_id": existing["_id"]},
             {
                 "$set": {
-                    "status": "approved",
-                    "total_units": total_units,
-                    "updated_at": now,
-                    "finalized_at": now,
-                    # keep old created_by/created_at if already set
-                    "created_by": existing.get("created_by") or user_id,
-                }
+                "status": "approved",
+                "total_units": total_units,
+                "updated_at": now,
+                "finalized_at": now,
+                # keep old created_by/created_at if already set
+                "created_by": existing.get("created_by") or user_id,
+
+                # NEW: ensure it's marked forwarded; preserve first forwarded timestamp if it exists
+                "forwarded_to_chair": True,
+                "forwarded_to_chair_at": existing.get("forwarded_to_chair_at") or now,
+            }
             },
         )
 

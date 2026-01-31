@@ -1,13 +1,19 @@
 # backend/app/main.py
+import socketio as socketio_pkg
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
+from fastapi.concurrency import run_in_threadpool
+from .MESSAGING.store import ensure_messaging_indexes
 
 from .config import get_settings
 
+# NEW (Phase 9)
+from .MESSAGING.store import ensure_messaging_indexes
+from .REALTIME.sio_server import sio
 # --------------------------------------------------------------------
 # Settings & App
 # --------------------------------------------------------------------
@@ -27,6 +33,8 @@ db = client.get_default_database()
 
 @app.on_event("startup")
 async def _ensure_faculty_overview_indexes() -> None:
+    
+    await run_in_threadpool(ensure_messaging_indexes)
     # lookups / filters
     await db.faculty_profiles.create_index("user_id")
     await db.faculty_assignments.create_index([("faculty_id", 1), ("is_archived", 1)])
@@ -81,6 +89,11 @@ async def _ensure_faculty_overview_indexes() -> None:
     await db.notifications.create_index('notif_id', unique=True)
 
 
+# NEW (Phase 9): messaging + unread indexes (pymongo store.py; run in threadpool)
+@app.on_event("startup")
+async def _ensure_messaging_indexes() -> None:
+    await run_in_threadpool(ensure_messaging_indexes)
+    
 __all__ = ["app", "db"]
 
 # --------------------------------------------------------------------
@@ -100,7 +113,6 @@ app.add_middleware(
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
-
 def _service_result(name: str, ok: bool, detail: str, latency_ms: Optional[float]) -> Dict[str, Any]:
     out: Dict[str, Any] = {"service": name, "ok": ok, "detail": detail}
     if latency_ms is not None:
@@ -113,6 +125,8 @@ def _service_result(name: str, ok: bool, detail: str, latency_ms: Optional[float
 # --------------------------------------------------------------------
 @app.get("/health", tags=["system"])
 async def health():
+    return {"status": "ok", "service": getattr(settings, "service_name", "backend")}
+
     return {"status": "ok", "service": getattr(settings, "service_name", "backend")}
 
 
@@ -163,6 +177,9 @@ from .CHAIR.CHAIR_StudentPetition import router as chair_studentpetition_router
 from .CHAIR.CHAIR_SpecialClass import router as chair_specialclass_router
 from .CHAIR.CHAIR_Inbox import router as chair_inbox_router
 
+from .GMAIL.GMAIL_Send import router as gmail_send_router
+from .GCAL.GCAL import router as gcal_router
+from .AUTH.GOOGLE_Login import router as google_login_router
 
 from .ADMIN.ADMIN import router as admin_router
 from .ADMIN.ADMIN_Inbox import router as admin_inbox_router
@@ -208,3 +225,9 @@ app.include_router(chair_classretention_router, prefix="/api")
 app.include_router(chair_studentpetition_router, prefix="/api")
 app.include_router(chair_specialclass_router, prefix="/api")
 app.include_router(chair_inbox_router, prefix="/api")
+
+app.include_router(gmail_send_router, prefix="/api")
+app.include_router(gcal_router, prefix="/api")
+app.include_router(google_login_router, prefix="/api")
+
+app = socketio_pkg.ASGIApp(sio, other_asgi_app=app)

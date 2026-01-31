@@ -1,5 +1,4 @@
-//used by faculty screen
-
+// frontend/src/component/TopBar.tsx
 import { useState, useRef, useEffect } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { UserCircle, LogOut, Inbox, Bell } from "lucide-react";
@@ -17,10 +16,6 @@ interface TopBarProps {
     time: Date | string;
     seen?: boolean;
   }[];
-  /** Which CustomEvent to dispatch when the Inbox icon is clicked.
-   * Defaults to "faculty:openInbox" so Faculty keeps working without changes.
-   * Use "admin:openInbox" on the Admin page.
-   */
   inboxEvent?: string;
 }
 
@@ -29,18 +24,35 @@ interface TopBarProps {
  * - Dynamic gradient bar and account dropdown
  * - Notifications dropdown with live "time ago"
  * - Optional department + notifications
- * - Inbox button dispatches a role-specific CustomEvent
+ * - Inbox button: navigate to inboxPath if provided; otherwise dispatches inboxEvent
  */
 export default function TopBar({
   fullName,
   role,
   department,
   notifications: incomingNotifs = [],
-  inboxPath,
   inboxEvent = "faculty:openInbox",
+  inboxPath,
 }: TopBarProps) {
   const navigate = useNavigate();
   const location = useLocation();
+
+    const pathname =
+    typeof window !== "undefined" && window.location?.pathname ? window.location.pathname : "";
+
+  const inferredInboxPath =
+    pathname.startsWith("/admin")
+      ? "/admin/inbox"
+      : pathname.startsWith("/chair")
+      ? "/chair/inbox"
+      : pathname.startsWith("/om")
+      ? "/om/inbox"
+      : pathname.startsWith("/apo")
+      ? "/apo/inbox"
+      : pathname.startsWith("/faculty")
+      ? "/faculty/inbox"
+      : "";
+
 
   const [menuOpen, setMenuOpen] = useState(false);
   const [notifOpen, setNotifOpen] = useState(false);
@@ -156,22 +168,18 @@ export default function TopBar({
     }
   };
 
-  // Inbox: If a route is provided, navigate (like OM). Otherwise, keep legacy event behavior.
-  const openInbox = () => {
-    if (inboxPath) {
-      navigate(inboxPath, {
-        state: {
-          from: location.pathname,
-          // pass through what the TopBar is currently showing, so target screen can render consistently
-          topbarName: fullName,
-          topbarRole: role,
-          topbarDepartment: department,
-        },
-      });
+  // Inbox click:
+  // - If inboxPath provided -> navigate
+  // - Else -> dispatch existing custom event (backward compatible)
+    const handleInboxClick = () => {
+    const target = inboxPath || inferredInboxPath;
+    if (target) {
+      navigate(target);
       return;
     }
     window.dispatchEvent(new Event(inboxEvent));
   };
+
 
   return (
     <header className="sticky top-0 z-80" ref={headerRef}>
@@ -218,7 +226,7 @@ export default function TopBar({
           {/* --- Right icons --- */}
           <div className="flex items-center gap-2">
             <button
-              onClick={openInbox}
+              onClick={handleInboxClick}
               className="rounded-md p-2 hover:bg-white/15"
               title="Inbox"
               aria-label="Open Inbox"

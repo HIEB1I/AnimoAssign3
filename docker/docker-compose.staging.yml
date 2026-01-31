@@ -26,7 +26,7 @@ services:
       BACKEND_ANALYTICS_URL: http://analytics-stg:8000 
     depends_on: [mongo-stg]
     restart: unless-stopped
-    networks: [default, animoassign]   # <-- join nginx network
+    networks: [default, animoassign]   # <- join nginx network
 
   analytics:
     build:

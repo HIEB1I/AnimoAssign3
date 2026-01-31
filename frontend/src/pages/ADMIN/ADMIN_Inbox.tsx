@@ -2,6 +2,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Search, Plus, ChevronLeft } from "lucide-react";
+import { getSessionUserId } from "@/lib/session";
+
 
 /* ========== local helpers (scoped to this file) ========== */
 type Mail = {
@@ -43,8 +45,7 @@ export function InboxContent() {
   const [selected, setSelected] = useState<Mail | null>(null);
 
   useEffect(() => {
-    const user = JSON.parse(localStorage.getItem("animo.user") || "{}");
-    const userId: string | undefined = user.userId || user.user_id || user.id;
+    const userId = getSessionUserId();
     if (!userId) return;
 
     fetch(`/api/admin/inbox?userId=${encodeURIComponent(userId)}`)
