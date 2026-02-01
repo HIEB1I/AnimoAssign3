@@ -22,6 +22,7 @@ import {
   addApoOfferingRow,
   editApoOfferingRow,
   deleteApoOfferingRow,
+  restoreApoOfferingRow,
   forwardApoCourseOfferings,
   approveApoOfferingsPlan,
   curriculumAddCourse,
@@ -1292,6 +1293,14 @@ const loadOfferings = async () => {
   // Offerings: reload whenever dropdown filters change
   useEffect(() => {
     if (view !== "offerings") return;
+  if (blockedByImport) {
+    alert("You must import pre-enlistment data before making changes.");
+    return;
+  }
+  if (blockedByImport) {
+    alert("You must import pre-enlistment data before making changes.");
+    return;
+  }
     if (!user?.userId) return;
 
     // small debounce so rapid changes don't spam requests
@@ -1307,11 +1316,14 @@ const loadOfferings = async () => {
   /* -------------------------- planning banner only -------------------------- */
 
   const blockedByImport = view === "offerings" && !!data?.planning?.needs_import;
+  // Avoid showing the approval UI when there are no actionable updates.
+  const hasPlanUpdates = view === "offerings" && !!data?.planning?.pending_changes?.length;
   // Show banner, but do NOT block editing
-  const showApprovalBanner = view === "offerings" && !blockedByImport && !!data?.planning?.approval_required;
+  const showApprovalBanner = view === "offerings" && !blockedByImport && hasPlanUpdates && !!data?.planning?.approval_required;
 
   const [showForward, setShowForward] = useState(false);
   const [showPlanModal, setShowPlanModal] = useState(false);
+  const didAutoOpenPlan = useRef(false);
   // If backend requires a comment but UI didn't know yet, force showing the comment prompt
   const [forceRequireNote, setForceRequireNote] = useState(false);
   const [submitAck, setSubmitAck] = useState<{ open: boolean; title: string; details: string }>({ open: false, title: '', details: '' });
@@ -1320,6 +1332,27 @@ const loadOfferings = async () => {
     if (s && typeof s.has_prior_submit === "boolean") return !!s.has_prior_submit;
     return (data?.rows || []).some((r: any) => !!r.submitted_for_scheduling);
   }, [data]);
+
+  // Make the approval step hard to miss: auto-open the planning review once per update cycle.
+  // (But never show it when there are no pending changes.)
+  useEffect(() => {
+    if (view !== "offerings") return;
+    if (!showApprovalBanner) return;
+    if (showPlanModal) return;
+    if (didAutoOpenPlan.current) return;
+    didAutoOpenPlan.current = true;
+    setShowPlanModal(true);
+  }, [view, showApprovalBanner, showPlanModal]);
+
+  // If updates disappear (approved or none), allow auto-open again when a new set appears later.
+  useEffect(() => {
+    if (!hasPlanUpdates) didAutoOpenPlan.current = false;
+  }, [hasPlanUpdates, data?.term_id]);
+
+  // If updates are no longer available (e.g., approved), ensure the modal is closed.
+  useEffect(() => {
+    if (showPlanModal && !hasPlanUpdates) setShowPlanModal(false);
+  }, [showPlanModal, hasPlanUpdates]);
 // Build a lookup so the modal can show "CODE — Title" instead of course_id
 const planCourseIndex = useMemo(() => {
   type Meta = { code: string; title: string };
@@ -1480,6 +1513,23 @@ useEffect(() => {
 
   const [editing, setEditing] = useState<{ row: OfferingRow; draft: EditDraft } | null>(null);
 
+  /* ------------------------- Keyboard shortcut refs ------------------------- */
+  // Keep keydown listener stable (mounted once) while always calling the latest
+  // undo/redo handlers and reading the latest modal/edit state.
+  const editingRef = useRef<{ row: OfferingRow; draft: EditDraft } | null>(null);
+  const conflictRef = useRef<ConflictState | null>(null);
+  const shortcutFnsRef = useRef<{
+    undoEditDraft: () => void;
+    redoEditDraft: () => void;
+    undoServerChange: () => Promise<void>;
+    redoServerChange: () => Promise<void>;
+  }>({
+    undoEditDraft: () => {},
+    redoEditDraft: () => {},
+    undoServerChange: async () => {},
+    redoServerChange: async () => {},
+  });
+
 /* ------------------------- Undo / Redo (Edit Draft) ------------------------- */
 // History applies to the current editing.draft only (safe: does not touch saved server data)
 const [editUndo, setEditUndo] = useState<EditDraft[]>([]);
@@ -1559,6 +1609,386 @@ useEffect(() => {
 
   lastDraftSigRef.current = sig;
 }, [editing?.row?.section?.section_id, editing?.draft]);
+
+/* -------------------- Undo / Redo (Server mutations) -------------------- */
+// NOTE: This is for committed server changes (add/edit/delete/replace).
+// It intentionally does NOT attempt to undo plan approvals or submissions.
+type ServerOp = {
+  label: string;
+  undo: () => Promise<void>;
+  redo: () => Promise<void>;
+};
+
+const [srvUndo, setSrvUndo] = useState<ServerOp[]>([]);
+const [srvRedo, setSrvRedo] = useState<ServerOp[]>([]);
+const srvUndoRef = useRef<ServerOp[]>([]);
+const srvRedoRef = useRef<ServerOp[]>([]);
+const [srvBusy, setSrvBusy] = useState(false);
+
+const syncSrvStacks = (u: ServerOp[], r: ServerOp[]) => {
+  srvUndoRef.current = u;
+  srvRedoRef.current = r;
+  setSrvUndo(u);
+  setSrvRedo(r);
+};
+
+const pushSrvOp = (op: ServerOp) => {
+  // Any new server mutation invalidates the redo stack
+  syncSrvStacks([...srvUndoRef.current, op], []);
+};
+
+
+const cloneJson = <T,>(x: T): T => JSON.parse(JSON.stringify(x));
+
+const slotFromRow = (slot?: OfferingRow["slot1"]) => {
+  if (!slot) return undefined;
+
+  const day = toAbbrevDay(slot.day) || "";
+  const st = toHHMM(slot.start_time);
+  const en = toHHMM(slot.end_time);
+
+  // keep explicit nulls (clear room)
+  const roomId =
+    (slot as any).room_id === null ? null : ((slot as any).room_id || "").toString().trim();
+
+  const roomType = ((slot as any).room_type || "").toString().trim();
+
+  if (!day && !st && !en && !roomId) return undefined;
+
+  const out: any = {};
+  if (day) out.day = day;
+  if (st) out.start_time = st;
+  if (en) out.end_time = en;
+
+  if (roomId === null) out.room_id = null;
+  else if (roomId) out.room_id = roomId;
+
+  if (roomType) out.room_type = roomType;
+  return out;
+};
+
+const rowToAddPayload = (r: OfferingRow) => {
+  const courseType = r.course?.type_of_course || "";
+  const isGE = isGEType(courseType);
+
+  const rowIsPlaceholder = isElectivePlaceholderType(
+    r.course.type_of_course || "",
+    r.course.course_code,
+    r.course.course_title
+  );
+  const rowIsSpecific = isSpecificElectiveType(r.course.type_of_course || "");
+
+  const electiveParentId =
+    r.links?.elective_placeholder_course_id ||
+    (rowIsPlaceholder ? r.course.course_id : undefined);
+
+  const payload: any = {
+    batch_id: r.batch.batch_id,
+    program_id: r.program.program_id,
+    section_code: (r.section.section_code || "").toString(),
+    enrollment_cap: r.section.enrollment_cap ?? "",
+    remarks: r.section.remarks ?? "",
+    campus_id: data?.campus?.campus_id || undefined,
+    ...(isGE ? { auto_override: true } : {}),
+  };
+
+  if (rowIsSpecific && electiveParentId) {
+    payload.for_placeholder_course_id = electiveParentId;
+    payload.specific_course_id = r.course.course_id;
+  } else {
+    payload.course_id = r.course.course_id;
+  }
+
+  const s1 = slotFromRow(r.slot1);
+  const s2 = slotFromRow(r.slot2);
+  if (s1) payload.slot1 = s1;
+  if (s2) payload.slot2 = s2;
+
+  const fname = (r.faculty?.faculty_name || "").toString().trim();
+  if (fname) payload.faculty_name = fname;
+
+  // preserve ids if present (helpful for full-edit courses)
+  if (r.faculty && "user_id" in r.faculty) payload.faculty_user_id = r.faculty.user_id ?? null;
+  if (r.faculty && "faculty_id" in r.faculty) payload.faculty_id = r.faculty.faculty_id ?? null;
+
+  return payload;
+};
+
+const rowToEditPayload = (r: OfferingRow) => {
+  const courseType = r.course?.type_of_course || "";
+  const isGE = isGEType(courseType);
+
+  const rowIsPlaceholder = isElectivePlaceholderType(
+    r.course.type_of_course || "",
+    r.course.course_code,
+    r.course.course_title
+  );
+  const rowIsSpecific = isSpecificElectiveType(r.course.type_of_course || "");
+
+  const electiveParentId =
+    r.links?.elective_placeholder_course_id ||
+    (rowIsPlaceholder ? r.course.course_id : undefined);
+
+  const payload: any = {
+    section_id: r.section.section_id,
+    course_id: r.course.course_id,
+    section_code: (r.section.section_code || "").toString(),
+    enrollment_cap: r.section.enrollment_cap ?? "",
+    remarks: r.section.remarks ?? "",
+    ...(isGE ? { auto_override: true } : {}),
+  };
+
+  if (rowIsSpecific && electiveParentId) {
+    payload.for_placeholder_course_id = electiveParentId;
+    payload.specific_course_id = r.course.course_id;
+  } else if (rowIsPlaceholder) {
+    payload.for_placeholder_course_id = r.course.course_id; // placeholder is its own parent
+    payload.specific_course_id = undefined;
+  }
+
+  const s1 = slotFromRow(r.slot1);
+  const s2 = slotFromRow(r.slot2);
+  if (s1) payload.slot1 = s1;
+  if (s2) payload.slot2 = s2;
+
+  const fname = (r.faculty?.faculty_name || "").toString().trim();
+  if (fname) payload.faculty_name = fname;
+
+  if (r.faculty && "user_id" in r.faculty) payload.faculty_user_id = r.faculty.user_id ?? null;
+  if (r.faculty && "faculty_id" in r.faculty) payload.faculty_id = r.faculty.faculty_id ?? null;
+
+  return payload;
+};
+
+const runAddWithAutoOverride = async (payload: any, reason: string) => {
+  if (!user?.userId) throw new Error("Not logged in.");
+  const res = await addApoOfferingRow(user.userId, payload as any);
+  if ("conflict" in res) {
+    const res2 = await addApoOfferingRow(user.userId, {
+      ...payload,
+      override: true,
+      override_token: res.conflict.override_token,
+      override_reason: reason,
+    } as any);
+    if ("conflict" in res2) throw new Error("Action still has conflicts after override.");
+    return res2;
+  }
+  return res;
+};
+
+const runEditWithAutoOverride = async (payload: any, reason: string) => {
+  if (!user?.userId) throw new Error("Not logged in.");
+  const res = await editApoOfferingRow(user.userId, payload as any);
+  if ("conflict" in res) {
+    const res2 = await editApoOfferingRow(user.userId, {
+      ...payload,
+      override: true,
+      override_token: res.conflict.override_token,
+      override_reason: reason,
+    } as any);
+    if ("conflict" in res2) throw new Error("Action still has conflicts after override.");
+    return res2;
+  }
+  return res;
+};
+
+const runDeleteWithAutoOverride = async (payload: any, reason: string) => {
+  if (!user?.userId) throw new Error("Not logged in.");
+  const res = await deleteApoOfferingRow(user.userId, payload as any);
+  if ("conflict" in res) {
+    const res2 = await deleteApoOfferingRow(user.userId, {
+      ...payload,
+      override: true,
+      override_token: res.conflict.override_token,
+      override_reason: reason,
+    } as any);
+    if ("conflict" in res2) throw new Error("Action still has conflicts after override.");
+    return res2;
+  }
+  return res;
+};
+
+
+const runRestoreRow = async (section_id: string) => {
+  if (!user?.userId) throw new Error("Not logged in.");
+  return await restoreApoOfferingRow(user.userId, { section_id });
+};
+
+const makeAddOp = (basePayload: any, createdSectionId: string): ServerOp => {
+  let currentId = createdSectionId;
+  const label = `Add ${String(basePayload?.course_id || basePayload?.specific_course_id || "section")}`;
+
+  return {
+    label,
+    undo: async () => {
+      await runDeleteWithAutoOverride({ section_id: currentId }, "Undo add");
+    },
+    redo: async () => {
+      // If the prior undo was a SOFT delete (archived), restore in-place; otherwise re-add.
+      try {
+        await runRestoreRow(currentId);
+      } catch {
+        const r = await runAddWithAutoOverride(basePayload, "Redo add");
+        currentId = (r as any).section_id || currentId;
+      }
+    },
+  };
+};
+
+const makeEditOp = (sectionId: string, beforePayload: any, afterPayload: any, label?: string): ServerOp => {
+  return {
+    label: label || `Edit ${sectionId}`,
+    undo: async () => {
+      await runEditWithAutoOverride({ ...beforePayload, section_id: sectionId }, "Undo edit");
+    },
+    redo: async () => {
+      await runEditWithAutoOverride({ ...afterPayload, section_id: sectionId }, "Redo edit");
+    },
+  };
+};
+
+const makeDeleteOp = (snapshotRow: OfferingRow): ServerOp => {
+  const snap = cloneJson(snapshotRow);
+  let currentId = snap.section.section_id;
+
+  const label = `Delete ${String(snap.course?.course_code || snap.course?.course_id || "section")}`;
+
+  return {
+    label,
+    undo: async () => {
+      // If the delete was SOFT (archived), restore the original section_id; otherwise re-add from snapshot.
+      try {
+        await runRestoreRow(currentId);
+        return;
+      } catch {
+        // fall back to re-add
+      }
+      const payload = rowToAddPayload(snap);
+      const r = await runAddWithAutoOverride(payload, "Undo delete (re-add)");
+      currentId = (r as any).section_id || currentId;
+    },
+    redo: async () => {
+      await runDeleteWithAutoOverride({ section_id: currentId }, "Redo delete");
+    },
+  };
+};
+
+const undoServerChange = async () => {
+  if (srvBusy) return;
+  if (editing) return; // while editing, use draft undo/redo
+  if (view !== "offerings") return;
+  const stack = srvUndoRef.current;
+  if (!stack.length) return;
+
+  const op = stack[stack.length - 1];
+  setSrvBusy(true);
+  try {
+    await op.undo();
+    syncSrvStacks(stack.slice(0, -1), [...srvRedoRef.current, op]);
+    await loadOfferings();
+  } catch (e: any) {
+    alert(e?.message || `Failed to undo: ${op.label}`);
+  } finally {
+    setSrvBusy(false);
+  }
+};
+
+const redoServerChange = async () => {
+  if (srvBusy) return;
+  if (editing) return; // while editing, use draft undo/redo
+  if (view !== "offerings") return;
+  const stack = srvRedoRef.current;
+  if (!stack.length) return;
+
+  const op = stack[stack.length - 1];
+  setSrvBusy(true);
+  try {
+    await op.redo();
+    syncSrvStacks([...srvUndoRef.current, op], stack.slice(0, -1));
+    await loadOfferings();
+  } catch (e: any) {
+    alert(e?.message || `Failed to redo: ${op.label}`);
+  } finally {
+    setSrvBusy(false);
+  }
+};
+
+/* ---------------------- Keyboard shortcuts (Ctrl/Cmd) ---------------------- */
+// NOTE: We intentionally do NOT override native undo/redo inside text inputs.
+useEffect(() => {
+  editingRef.current = editing;
+}, [editing]);
+
+useEffect(() => {
+  conflictRef.current = conflict;
+}, [conflict]);
+
+useEffect(() => {
+  shortcutFnsRef.current = {
+    undoEditDraft,
+    redoEditDraft,
+    undoServerChange,
+    redoServerChange,
+  };
+}, [undoEditDraft, redoEditDraft, undoServerChange, redoServerChange]);
+
+useEffect(() => {
+  const isEditableTarget = (t: EventTarget | null) => {
+    const el = t as HTMLElement | null;
+    if (!el) return false;
+
+    // Native form fields
+    const tag = (el as any).tagName ? String((el as any).tagName).toLowerCase() : "";
+    if (tag === "input" || tag === "textarea" || tag === "select") return true;
+
+    // contenteditable / rich editors
+    if ((el as any).isContentEditable) return true;
+    if (el.closest?.("[contenteditable='true']")) return true;
+    if (el.getAttribute?.("role") === "textbox") return true;
+    return false;
+  };
+
+  const onKeyDown = (e: KeyboardEvent) => {
+    if (e.defaultPrevented) return;
+    if (e.altKey) return;
+
+    const mod = e.ctrlKey || e.metaKey; // Ctrl (Win/Linux) / Cmd (Mac)
+    if (!mod) return;
+
+    const key = String(e.key || "").toLowerCase();
+    if (key !== "z" && key !== "y") return;
+
+    // Don’t intercept while the user is typing in an editable control
+    if (isEditableTarget(e.target)) return;
+
+    // Avoid undo/redo while resolving conflicts (keeps UX predictable)
+    if (conflictRef.current) return;
+
+    // We will handle it
+    e.preventDefault();
+    e.stopPropagation();
+
+    const fns = shortcutFnsRef.current;
+    const isEditing = !!editingRef.current;
+
+    // Ctrl/Cmd+Z => Undo
+    if (key === "z" && !e.shiftKey) {
+      if (isEditing) fns.undoEditDraft();
+      else void fns.undoServerChange();
+      return;
+    }
+
+    // Ctrl/Cmd+Y or Ctrl/Cmd+Shift+Z => Redo
+    if (key === "y" || (key === "z" && e.shiftKey)) {
+      if (isEditing) fns.redoEditDraft();
+      else void fns.redoServerChange();
+    }
+  };
+
+  window.addEventListener("keydown", onKeyDown, true);
+  return () => window.removeEventListener("keydown", onKeyDown, true);
+}, []);
+
 
   const startEdit = (row: OfferingRow) => {
     if (blockedByImport) return; // only block when import not done
@@ -1701,6 +2131,10 @@ const saveEdit = async () => {
 
   const isGE = isGEType(editing.row?.course?.type_of_course || "");
 
+  // For Undo/Redo: capture the full "before" state (server payload shape)
+  const undoBeforePayload = rowToEditPayload(editing.row);
+
+
   // --- Grab current + draft codes ---
   const campusName = data?.campus?.campus_name || "";
   const currentCode = (editing.row.section.section_code || "").toUpperCase().replace(/\s+/g, "");
@@ -1754,7 +2188,7 @@ if (isGE) {
     // conflict handling (+ override on second attempt)
     if ("conflict" in res) {
       if (!isGE) {
-        handleConflict("edit", res.conflict, payload);
+        handleConflict("edit", res.conflict, { ...payload, __undo_before: undoBeforePayload });
         return;
       }
       const ov = await editApoOfferingRow(user.userId, {
@@ -1764,9 +2198,24 @@ if (isGE) {
         override_reason: "GE edit – allow free-form section code, time, day, faculty",
       } as any);
       if ("conflict" in ov) {
-        handleConflict("edit", ov.conflict, payload);
+        handleConflict("edit", ov.conflict, { ...payload, __undo_before: undoBeforePayload });
         return;
       }
+    }
+
+    // For Undo/Redo: store a reversible server op
+    try {
+      const afterPayloadFull = { ...undoBeforePayload, ...payload };
+      pushSrvOp(
+        makeEditOp(
+          String(payload.section_id),
+          undoBeforePayload,
+          afterPayloadFull,
+          `Edit ${String(editing.row.course?.course_code || editing.row.course?.course_id || payload.section_id)}`
+        )
+      );
+    } catch {
+      // ignore history errors
     }
 
     setEditing(null);
@@ -1813,6 +2262,11 @@ if (isGE) {
     }
 
     setAdding(true);
+
+    // For Undo/Redo: if we are "replacing" an elective placeholder row, capture the before-state
+    const undoAnchorRow = addAnchorSectionId ? rows.find((r) => r.section.section_id === addAnchorSectionId) : undefined;
+    const undoBeforeAnchor = undoAnchorRow ? rowToEditPayload(undoAnchorRow) : null;
+
     try {
       const courseType = addOptionsTypeById[effectiveCourseId] || "";
       const isGE = isGEType(courseType);
@@ -1835,11 +2289,28 @@ if (isGE) {
             override_reason: "Elective replacement",
           } as any);
           if ("conflict" in ov) {
-            handleConflict("edit", ov.conflict, editPayload);
+            handleConflict("edit", ov.conflict, { ...(editPayload as any), __undo_before: undoBeforeAnchor });
             return;
           }
         }
-      } else {
+              // For Undo/Redo: record the placeholder replacement as a reversible EDIT operation
+        try {
+          if (undoBeforeAnchor && addAnchorSectionId) {
+            const afterPayloadFull = { ...undoBeforeAnchor, ...(editPayload as any) };
+            pushSrvOp(
+              makeEditOp(
+                addAnchorSectionId,
+                undoBeforeAnchor,
+                afterPayloadFull,
+                `Replace elective on ${addAnchorSectionId}`
+              )
+            );
+          }
+        } catch {
+          // ignore history errors
+        }
+
+} else {
         // normal, non-elective add flow
         const base: AddDraft = {
           ...addDraft,
@@ -1847,7 +2318,11 @@ if (isGE) {
           auto_override: isGE,
           campus_id: data?.campus?.campus_id || undefined,
         };
+        let createdSectionId: string | null = null;
         const res = await addApoOfferingRow(user.userId, base as any);
+        if (!("conflict" in res)) {
+          createdSectionId = (res as any).section_id || null;
+        }
         if ("conflict" in res) {
           const SAFE_AUTO_CODES = new Set(["NO_ROOM_SET","SEAT_DEFICIT","PREFIX_MISMATCH","CODE_WITHOUT_NUMBER","PLAN_NOT_APPROVED"]);
           const canAuto = isGE || (res.conflict.violations || []).every((v) => SAFE_AUTO_CODES.has(v.code));
@@ -1861,9 +2336,21 @@ if (isGE) {
             override_token: res.conflict.override_token,
             override_reason: isGE ? "GE course – relax planning rules" : "Proceed despite planning warnings",
           } as any);
+          if (!("conflict" in ov)) {
+            createdSectionId = (ov as any).section_id || null;
+          }
           if ("conflict" in ov) {
             handleConflict("add", ov.conflict, base);
             return;
+          }
+        }
+
+        // For Undo/Redo: record ADD as reversible operation
+        if (createdSectionId) {
+          try {
+            pushSrvOp(makeAddOp(base, createdSectionId));
+          } catch {
+            // ignore history errors
           }
         }
       }
@@ -1964,14 +2451,26 @@ if (isGE) {
   const doDelete = async (row: OfferingRow) => {
     if (blockedByImport) return;
     if (!user?.userId || !row.section.section_id) return;
-    if (!confirm("Delete this section? This cannot be undone.")) return;
+    if (!confirm("Delete this section? You can undo using the Undo button.")) return;
+
+    // For Undo/Redo: capture the row snapshot before deleting
+    const undoSnapshot = cloneJson(row);
+
     setRows((prev) => prev.filter((r) => r.section.section_id !== row.section.section_id));
     if (editing?.row.section.section_id === row.section.section_id) setEditing(null);
     const res = await deleteApoOfferingRow(user.userId, { section_id: row.section.section_id } as any);
     if ("conflict" in res) {
-      handleConflict("delete", res.conflict, { section_id: row.section.section_id });
+      handleConflict("delete", res.conflict, { section_id: row.section.section_id, __undo_snapshot: undoSnapshot });
       return;
     }
+
+    // For Undo/Redo: record DELETE as reversible operation
+    try {
+      pushSrvOp(makeDeleteOp(undoSnapshot));
+    } catch {
+      // ignore history errors
+    }
+
     await loadOfferings();
   };
   
@@ -2165,38 +2664,52 @@ if (isGE) {
       <main className="p-6 w-full">
         {/* toolbar */}
         <div className="flex flex-wrap items-center gap-3 rounded-xl border border-gray-200 bg-white p-4 shadow-sm mb-6">
-          {/* Undo / Redo (edit draft only) */}
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              title="Undo (edit draft)"
-              onClick={undoEditDraft}
-              disabled={!editing || editUndo.length === 0}
-              className={cls(
-                "inline-flex h-9 w-9 items-center justify-center rounded-md border",
-                (!editing || editUndo.length === 0)
-                  ? "opacity-40 cursor-not-allowed"
-                  : "hover:bg-gray-50"
-              )}
-            >
-              <Undo2 className="h-4 w-4 text-emerald-700" />
-            </button>
+          {/* Undo / Redo (Course Offerings tab only) */}
+          {view === "offerings" && (
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                title={
+                  editing
+                    ? "Undo (edit draft)"
+                    : srvUndo.length
+                    ? `Undo: ${srvUndo[srvUndo.length - 1].label}`
+                    : "Undo"
+                }
+                onClick={editing ? undoEditDraft : undoServerChange}
+                disabled={editing ? editUndo.length === 0 : srvBusy || srvUndo.length === 0}
+                className={cls(
+                  "inline-flex h-9 w-9 items-center justify-center rounded-md border",
+                  (editing ? editUndo.length === 0 : srvBusy || srvUndo.length === 0)
+                    ? "opacity-40 cursor-not-allowed"
+                    : "hover:bg-gray-50"
+                )}
+              >
+                <Undo2 className="h-4 w-4 text-emerald-700" />
+              </button>
 
-            <button
-              type="button"
-              title="Redo (edit draft)"
-              onClick={redoEditDraft}
-              disabled={!editing || editRedo.length === 0}
-              className={cls(
-                "inline-flex h-9 w-9 items-center justify-center rounded-md border",
-                (!editing || editRedo.length === 0)
-                  ? "opacity-40 cursor-not-allowed"
-                  : "hover:bg-gray-50"
-              )}
-            >
-              <Redo2 className="h-4 w-4 text-emerald-700" />
-            </button>
-          </div>
+              <button
+                type="button"
+                title={
+                  editing
+                    ? "Redo (edit draft)"
+                    : srvRedo.length
+                    ? `Redo: ${srvRedo[srvRedo.length - 1].label}`
+                    : "Redo"
+                }
+                onClick={editing ? redoEditDraft : redoServerChange}
+                disabled={editing ? editRedo.length === 0 : srvBusy || srvRedo.length === 0}
+                className={cls(
+                  "inline-flex h-9 w-9 items-center justify-center rounded-md border",
+                  (editing ? editRedo.length === 0 : srvBusy || srvRedo.length === 0)
+                    ? "opacity-40 cursor-not-allowed"
+                    : "hover:bg-gray-50"
+                )}
+              >
+                <Redo2 className="h-4 w-4 text-emerald-700" />
+              </button>
+            </div>
+          )}
 
           <div className="relative min-w-[220px] flex-1">
             <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-500" />
@@ -2343,29 +2856,29 @@ if (isGE) {
                           return;
                         }
 
-           const response = await importCurriculumCsv(user.userId, {
-  rows,
-  term_id: termId,
-  campus_name: campusName,
-});
+                              const response = await importCurriculumCsv(user.userId, {
+                      rows,
+                      term_id: termId,
+                      campus_name: campusName,
+                    });
 
-console.log("CSV import response:", response);
+                    console.log("CSV import response:", response);
 
-if (response.ok) {
-  const imported =
-    response.imported ?? response.curricula?.length ?? 0;
+                    if (response.ok) {
+                      const imported =
+                        response.imported ?? response.curricula?.length ?? 0;
 
-  // NEW: always fall back to an empty array
-  const created = response.created_batches ?? [];
-  const createdText = created.length
-    ? `\nCreated batches: ${created.join(", ")}`
-    : "";
+                      // NEW: always fall back to an empty array
+                      const created = response.created_batches ?? [];
+                      const createdText = created.length
+                        ? `\nCreated batches: ${created.join(", ")}`
+                        : "";
 
-  alert(
-    `CSV import successful.\n` +
-      `Imported ${imported} row(s).` +
-      createdText
-  );
+                      alert(
+                        `CSV import successful.\n` +
+                          `Imported ${imported} row(s).` +
+                          createdText
+                      );
 
                         }
                       } catch (err: any) {
@@ -2389,8 +2902,6 @@ if (response.ok) {
             </>
           )}
         </div>
-
-        {/* card */}
         <div className="rounded-xl bg-white shadow-sm border border-gray-200 p-4 sm:p-6 w-full" data-course-offerings>
           <div className="flex items-center justify-between mb-3 sm:mb-4">
             <div>
@@ -2407,15 +2918,31 @@ if (response.ok) {
           {view === "offerings" && data?.planning && (
             <>
               {showApprovalBanner && (
-                <div className="mb-4 rounded-lg border border-blue-300 bg-blue-50 px-3 py-2 text-blue-900">
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="font-medium">Planning updates are ready</div>
-                    <button
-                      className="rounded-md bg-emerald-700 px-3 py-1.5 text-sm font-medium text-white shadow-sm"
-                      onClick={() => setShowPlanModal(true)}
-                    >
-                      Review &amp; Approve
-                    </button>
+                <div className="mb-4 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-amber-950 shadow-sm">
+                  <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="flex items-start gap-3">
+                      <div className="mt-0.5 grid h-9 w-9 place-items-center rounded-full bg-amber-200 text-amber-900">
+                        <AlertTriangle className="h-5 w-5" />
+                      </div>
+                      <div>
+                        <div className="font-semibold text-amber-950">
+                          Action required: Approve planning updates
+                        </div>
+                        <div className="text-sm text-amber-900">
+                          {data?.planning?.pending_changes?.length || 0} change(s) are waiting for your approval.
+                          These are <span className="font-semibold">not applied</span> until you approve.
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center justify-end gap-2">
+                      <button
+                        className="rounded-lg bg-emerald-700 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:brightness-110"
+                        onClick={() => setShowPlanModal(true)}
+                      >
+                        Review &amp; Approve
+                      </button>
+                    </div>
                   </div>
                 </div>
               )}
@@ -3633,271 +4160,270 @@ if (response.ok) {
             </div>
           )}
           {/* ------------------------------ Special Class ------------------------------ */}
-{view === "specialclass" && (
-  <div className="rounded-xl border border-gray-300 bg-white shadow-sm overflow-hidden">
-    <div className="bg-emerald-700 text-white px-4 py-3 text-center font-semibold">
-      Special Class
-    </div>
+          {view === "specialclass" && (
+            <div className="rounded-xl border border-gray-300 bg-white shadow-sm overflow-hidden">
+              <div className="bg-emerald-700 text-white px-4 py-3 text-center font-semibold">
+                Special Class
+              </div>
 
-    <div className="p-3">
-      {scErr && <div className="mb-2 text-sm text-red-600">{scErr}</div>}
+              <div className="p-3">
+                {scErr && <div className="mb-2 text-sm text-red-600">{scErr}</div>}
 
-      {scLoading ? (
-        <div className="text-sm text-neutral-500">Loading…</div>
-      ) : scErr ? (
-        <div className="text-sm text-red-600">Failed to load special class: {scErr}</div>
-      ) : scRowsForCampus.length === 0 ? (
-        <div className="text-sm text-neutral-500">No special class records found.</div>
-      ) : (
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm border-collapse">
-            <thead className="bg-gray-50 text-emerald-800">
-              <tr className="text-[13px] font-semibold">
-                {[
-                  "Student",
-                  "Course",
-                  "Section",
-                  "Faculty",
-                  "Day 1",
-                  "Begin 1",
-                  "End 1",
-                  "Room 1",
-                  "Day 2",
-                  "Begin 2",
-                  "End 2",
-                  "Room 2",
-                  "Remarks",
-                  "Actions",
-                ].map((h) => (
-                  <th key={h} className="px-3 py-2 text-left border border-gray-300">
-                    {h}
-                  </th>
-                ))}
-              </tr>
-            </thead>
+                {scLoading ? (
+                  <div className="text-sm text-neutral-500">Loading…</div>
+                ) : scErr ? (
+                  <div className="text-sm text-red-600">Failed to load special class: {scErr}</div>
+                ) : scRowsForCampus.length === 0 ? (
+                  <div className="text-sm text-neutral-500">No special class records found.</div>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm border-collapse">
+                      <thead className="bg-gray-50 text-emerald-800">
+                        <tr className="text-[13px] font-semibold">
+                          {[
+                            "Student",
+                            "Course",
+                            "Section",
+                            "Faculty",
+                            "Day 1",
+                            "Begin 1",
+                            "End 1",
+                            "Room 1",
+                            "Day 2",
+                            "Begin 2",
+                            "End 2",
+                            "Room 2",
+                            "Remarks",
+                            "Actions",
+                          ].map((h) => (
+                            <th key={h} className="px-3 py-2 text-left border border-gray-300">
+                              {h}
+                            </th>
+                          ))}
+                        </tr>
+                      </thead>
 
-            <tbody>
-              {scRowsForCampus.map((raw) => {
-                const row = raw as any;
-                const isEditing = scEditingId === String(row.special_id);
+                      <tbody>
+                        {scRowsForCampus.map((raw) => {
+                          const row = raw as any;
+                          const isEditing = scEditingId === String(row.special_id);
 
-                const student_name = row?.student?.student_name ?? row?.student_name ?? "—";
-                const student_number = row?.student?.student_number ?? row?.student_number ?? "—";
+                          const student_name = row?.student?.student_name ?? row?.student_name ?? "—";
+                          const student_number = row?.student?.student_number ?? row?.student_number ?? "—";
 
-                const course_code_raw = row?.course?.course_code ?? row?.course_code ?? "";
-                const course_code = Array.isArray(course_code_raw)
-                  ? String(course_code_raw[0] ?? "—")
-                  : String(course_code_raw || "—");
+                          const course_code_raw = row?.course?.course_code ?? row?.course_code ?? "";
+                          const course_code = Array.isArray(course_code_raw)
+                            ? String(course_code_raw[0] ?? "—")
+                            : String(course_code_raw || "—");
 
-                const course_title = row?.course?.course_title ?? row?.course_title ?? "—";
+                          const course_title = row?.course?.course_title ?? row?.course_title ?? "—";
 
-                const section_code = row?.section?.section_code ?? row?.section_code ?? "—";
-                const faculty_name = row?.faculty?.faculty_name ?? row?.faculty_name ?? "—";
+                          const section_code = row?.section?.section_code ?? row?.section_code ?? "—";
+                          const faculty_name = row?.faculty?.faculty_name ?? row?.faculty_name ?? "—";
 
-                const se = Array.isArray(row?.schedule_entries) ? row.schedule_entries : [];
-                const slot1 = row?.slot1 ?? se[0] ?? null;
-                const slot2 = row?.slot2 ?? se[1] ?? null;
+                          const se = Array.isArray(row?.schedule_entries) ? row.schedule_entries : [];
+                          const slot1 = row?.slot1 ?? se[0] ?? null;
+                          const slot2 = row?.slot2 ?? se[1] ?? null;
 
-                const slotDay = (s: any) => (s?.day || "—");
+                          const slotDay = (s: any) => (s?.day || "—");
 
-                const safeTime = (x: any) => {
-                  const digits = String(x ?? "").replace(/\D/g, "");
-                  if (!digits) return "—";
-                  const hhmm = digits.padStart(4, "0");
-                  return typeof fmtTime === "function" ? fmtTime(hhmm) : hhmm;
-                };
-                const slotStart = (s: any) => safeTime(s?.start_time);
-                const slotEnd = (s: any) => safeTime(s?.end_time);
+                          const safeTime = (x: any) => {
+                            const digits = String(x ?? "").replace(/\D/g, "");
+                            if (!digits) return "—";
+                            const hhmm = digits.padStart(4, "0");
+                            return typeof fmtTime === "function" ? fmtTime(hhmm) : hhmm;
+                          };
+                          const slotStart = (s: any) => safeTime(s?.start_time);
+                          const slotEnd = (s: any) => safeTime(s?.end_time);
 
-                const slotRoomLabel = (s: any) => {
-                const rn = String(s?.room_number || s?.room_name || "").trim();
-                const rid = String(s?.room_id || "").trim();
+                          const slotRoomLabel = (s: any) => {
+                          const rn = String(s?.room_number || s?.room_name || "").trim();
+                          const rid = String(s?.room_id || "").trim();
 
-                // Treat ONLINE as "no physical room". If a room_id exists, display it even
-                // if room_type was (incorrectly) stored as "Online" (delivery mode).
-                const ridOrRn = String(rn || rid).trim().toUpperCase();
-                if (ridOrRn === "ONLINE") return "TBA";
-                if (!rn && !rid) return "TBA";
-                return rn || rid || "TBA";
+                          // Treat ONLINE as "no physical room". If a room_id exists, display it even
+                          // if room_type was (incorrectly) stored as "Online" (delivery mode).
+                          const ridOrRn = String(rn || rid).trim().toUpperCase();
+                          if (ridOrRn === "ONLINE") return "TBA";
+                          if (!rn && !rid) return "TBA";
+                          return rn || rid || "TBA";
 
-                };
-
-
-                // Prefer row.remarks; fallback to section_remarks if backend sends it there
-                const remarks =
-                  row?.remarks ?? row?.section?.section_remarks ?? row?.section_remarks ?? "—";
-
-                const slotReadySC = (s: any) =>
-                  !!String(s?.day ?? "").trim() &&
-                  !!String(s?.start_time ?? "").trim() &&
-                  !!String(s?.end_time ?? "").trim();
-
-                const campusId =
-                  scData?.campus?.campus_id ||
-                  (data as any)?.campus?.campus_id ||
-                  "";
-
-                const minCap = typeof _minCapacityFromRow === "function" ? _minCapacityFromRow(row) : undefined;
-                const excludeScheduleIds =
-                  typeof _scheduleIdsFromRow === "function" ? _scheduleIdsFromRow(row) : [];
-
-                const fallbackRoomsBase = filterRoomsByCap(
-                  ((data as any)?.room_options || []) as any[],
-                  minCap
-                );
-
-                const fallbackRooms = fallbackRoomsBase;;
-
-                return (
-                  <tr key={String(row.special_id)} className="hover:bg-neutral-50">
-                    <td className="px-3 py-2 border border-gray-300">
-                      <div className="font-medium">{student_name || "—"}</div>
-                      <div className="text-xs text-gray-500">{student_number || "—"}</div>
-                    </td>
-
-                    <td className="px-3 py-2 border border-gray-300">
-                      <div className="font-semibold text-emerald-700">{course_code || "—"}</div>
-                      <div className="text-xs text-gray-500">{course_title || "—"}</div>
-                    </td>
-
-                    <td className="px-3 py-2 border border-gray-300">{section_code || "—"}</td>
-                    <td className="px-3 py-2 border border-gray-300">{faculty_name || "—"}</td>
-
-                    <td className="px-3 py-2 border border-gray-300">{slotDay(slot1)}</td>
-                    <td className="px-3 py-2 border border-gray-300">{slotStart(slot1)}</td>
-                    <td className="px-3 py-2 border border-gray-300">{slotEnd(slot1)}</td>
-                    <td className="px-3 py-2 border border-gray-300">
-                    {isEditing ? (
-                    <div className="w-full max-w-[160px] overflow-visible">
-                      <EligibleRoomSelect
-                          userId={user?.userId}
-                          campusId={campusId}
-                          spec={{
-                            day: String(slot1?.day ?? "").trim(),
-                            start: String(slot1?.start_time ?? "").trim(),
-                            end: String(slot1?.end_time ?? "").trim(),
-                            roomType: String(slot1?.room_type ?? row?.course?.room_type ?? "").trim() || null,
-                            capacity: minCap ?? null,
-                            excludeScheduleIds,
-                            // Let backend infer the correct section enrollment_cap from DB
-                            sectionId: String(row?.section_id ?? row?.section?.section_id ?? "").trim() || null,
-                            scheduleId: String(slot1?.schedule_id ?? "").trim() || null,
-                          }}
-                          fallbackRooms={fallbackRooms}
-                          value={scEditRoom1 || null}
-                          disabled={ 
-                            !slotReadySC(slot1) || !user?.userId || !campusId || scEligibleRoomsLoading[slot1?.room_id ?? ""] || fallbackRooms.length === 0
-                          }
+                          };
 
 
-                          onChange={(roomId) => setScEditRoom1(roomId ?? "")}
-                        />
-                      </div>
-                    ) : (
-                      slotRoomLabel(slot1)
-                    )}
-                    </td>
+                          // Prefer row.remarks; fallback to section_remarks if backend sends it there
+                          const remarks =
+                            row?.remarks ?? row?.section?.section_remarks ?? row?.section_remarks ?? "—";
 
-                    <td className="px-3 py-2 border border-gray-300">{slotDay(slot2)}</td>
-                    <td className="px-3 py-2 border border-gray-300">{slotStart(slot2)}</td>
-                    <td className="px-3 py-2 border border-gray-300">{slotEnd(slot2)}</td>
-                    <td className="px-3 py-2 border border-gray-300">
-                      {isEditing ? (
-                      <div className="w-full max-w-[160px] overflow-visible">
-                        <EligibleRoomSelect
-                            userId={user?.userId}
-                            campusId={campusId}
-                            spec={{
-                              day: String(slot2?.day ?? "").trim(),
-                              start: String(slot2?.start_time ?? "").trim(),
-                              end: String(slot2?.end_time ?? "").trim(),
-                              roomType:
-                                String(slot2?.room_type ?? slot1?.room_type ?? row?.course?.room_type ?? "")
-                                  .trim() || null,
-                              capacity: minCap ?? null,
-                              excludeScheduleIds,
-                              // Let backend infer the correct section enrollment_cap from DB
-                              sectionId: String(row?.section_id ?? row?.section?.section_id ?? "").trim() || null,
-                              scheduleId: String(slot2?.schedule_id ?? "").trim() || null,
-                            }}
-                            fallbackRooms={fallbackRooms}
-                            value={scEditRoom2 || null}
-                            disabled={!slotReadySC(slot2) || !user?.userId || !campusId}
-                            onChange={(roomId) => setScEditRoom2(roomId ?? "")}
-                          />
-                        </div>
-                      ) : (
-                        slotRoomLabel(slot2)
-                      )}
-                    </td>
+                          const slotReadySC = (s: any) =>
+                            !!String(s?.day ?? "").trim() &&
+                            !!String(s?.start_time ?? "").trim() &&
+                            !!String(s?.end_time ?? "").trim();
 
-                    <td className="px-3 py-2 border border-gray-300">
-                      {isEditing ? (
-                        <input
-                          className={cls(SOFT_INPUT, "w-64")}
-                          value={scEditRemarks}
-                          onChange={(e) => setScEditRemarks(e.target.value)}
-                          placeholder="Enter remarks…"
-                        />
-                      ) : (
-                        String(remarks || "—")
-                      )}
-                    </td>
+                          const campusId =
+                            scData?.campus?.campus_id ||
+                            (data as any)?.campus?.campus_id ||
+                            "";
 
-                    <td className="px-3 py-2 border border-gray-300">
-                      {isEditing ? (
-                        <div className="flex items-center gap-2">
-                          <button
-                            onClick={() => saveSpecialClassRowEdits(row)}
-                            disabled={scSaveLoadingId === String(row.special_id)}
-                            className={cls(
-                              "flex h-8 w-8 items-center justify-center rounded-full border-2",
-                              "border-green-600 text-green-600 hover:bg-green-50",
-                              scSaveLoadingId === String(row.special_id) && "opacity-50 cursor-not-allowed"
-                            )}
-                            title="Save"
-                          >
-                            <Check className="h-4 w-4" strokeWidth={2.5} />
-                          </button>
+                          const minCap = typeof _minCapacityFromRow === "function" ? _minCapacityFromRow(row) : undefined;
+                          const excludeScheduleIds =
+                            typeof _scheduleIdsFromRow === "function" ? _scheduleIdsFromRow(row) : [];
 
-                          <button
-                            onClick={cancelEditSpecialClassRow}
-                            disabled={scSaveLoadingId === String(row.special_id)}
-                            className={cls(
-                              "flex h-8 w-8 items-center justify-center rounded-full border-2",
-                              "border-red-600 text-red-600 hover:bg-red-50",
-                              scSaveLoadingId === String(row.special_id) && "opacity-50 cursor-not-allowed"
-                            )}
-                            title="Cancel"
-                          >
-                            <X className="h-4 w-4" strokeWidth={2.5} />
-                          </button>
+                          const fallbackRoomsBase = filterRoomsByCap(
+                            ((data as any)?.room_options || []) as any[],
+                            minCap
+                          );
 
-                          {scSaveLoadingId === String(row.special_id) && (
-                            <span className="text-xs text-gray-500">Saving…</span>
-                          )}
-                        </div>
-                      ) : (
-                        <button
-                          className="text-emerald-700 hover:text-emerald-900"
-                          title="Edit"
-                          onClick={() => beginEditSpecialClassRow(row)}
-                        >
-                          <Edit className="h-4 w-4" />
-                        </button>
-                      )}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </div>
-  </div>
-)}
+                          const fallbackRooms = fallbackRoomsBase;;
 
+                          return (
+                            <tr key={String(row.special_id)} className="hover:bg-neutral-50">
+                              <td className="px-3 py-2 border border-gray-300">
+                                <div className="font-medium">{student_name || "—"}</div>
+                                <div className="text-xs text-gray-500">{student_number || "—"}</div>
+                              </td>
+
+                              <td className="px-3 py-2 border border-gray-300">
+                                <div className="font-semibold text-emerald-700">{course_code || "—"}</div>
+                                <div className="text-xs text-gray-500">{course_title || "—"}</div>
+                              </td>
+
+                              <td className="px-3 py-2 border border-gray-300">{section_code || "—"}</td>
+                              <td className="px-3 py-2 border border-gray-300">{faculty_name || "—"}</td>
+
+                              <td className="px-3 py-2 border border-gray-300">{slotDay(slot1)}</td>
+                              <td className="px-3 py-2 border border-gray-300">{slotStart(slot1)}</td>
+                              <td className="px-3 py-2 border border-gray-300">{slotEnd(slot1)}</td>
+                              <td className="px-3 py-2 border border-gray-300">
+                              {isEditing ? (
+                              <div className="w-full max-w-[160px] overflow-visible">
+                                <EligibleRoomSelect
+                                    userId={user?.userId}
+                                    campusId={campusId}
+                                    spec={{
+                                      day: String(slot1?.day ?? "").trim(),
+                                      start: String(slot1?.start_time ?? "").trim(),
+                                      end: String(slot1?.end_time ?? "").trim(),
+                                      roomType: String(slot1?.room_type ?? row?.course?.room_type ?? "").trim() || null,
+                                      capacity: minCap ?? null,
+                                      excludeScheduleIds,
+                                      // Let backend infer the correct section enrollment_cap from DB
+                                      sectionId: String(row?.section_id ?? row?.section?.section_id ?? "").trim() || null,
+                                      scheduleId: String(slot1?.schedule_id ?? "").trim() || null,
+                                    }}
+                                    fallbackRooms={fallbackRooms}
+                                    value={scEditRoom1 || null}
+                                    disabled={ 
+                                      !slotReadySC(slot1) || !user?.userId || !campusId || scEligibleRoomsLoading[slot1?.room_id ?? ""] || fallbackRooms.length === 0
+                                    }
+
+
+                                    onChange={(roomId) => setScEditRoom1(roomId ?? "")}
+                                  />
+                                </div>
+                              ) : (
+                                slotRoomLabel(slot1)
+                              )}
+                              </td>
+
+                              <td className="px-3 py-2 border border-gray-300">{slotDay(slot2)}</td>
+                              <td className="px-3 py-2 border border-gray-300">{slotStart(slot2)}</td>
+                              <td className="px-3 py-2 border border-gray-300">{slotEnd(slot2)}</td>
+                              <td className="px-3 py-2 border border-gray-300">
+                                {isEditing ? (
+                                <div className="w-full max-w-[160px] overflow-visible">
+                                  <EligibleRoomSelect
+                                      userId={user?.userId}
+                                      campusId={campusId}
+                                      spec={{
+                                        day: String(slot2?.day ?? "").trim(),
+                                        start: String(slot2?.start_time ?? "").trim(),
+                                        end: String(slot2?.end_time ?? "").trim(),
+                                        roomType:
+                                          String(slot2?.room_type ?? slot1?.room_type ?? row?.course?.room_type ?? "")
+                                            .trim() || null,
+                                        capacity: minCap ?? null,
+                                        excludeScheduleIds,
+                                        // Let backend infer the correct section enrollment_cap from DB
+                                        sectionId: String(row?.section_id ?? row?.section?.section_id ?? "").trim() || null,
+                                        scheduleId: String(slot2?.schedule_id ?? "").trim() || null,
+                                      }}
+                                      fallbackRooms={fallbackRooms}
+                                      value={scEditRoom2 || null}
+                                      disabled={!slotReadySC(slot2) || !user?.userId || !campusId}
+                                      onChange={(roomId) => setScEditRoom2(roomId ?? "")}
+                                    />
+                                  </div>
+                                ) : (
+                                  slotRoomLabel(slot2)
+                                )}
+                              </td>
+
+                              <td className="px-3 py-2 border border-gray-300">
+                                {isEditing ? (
+                                  <input
+                                    className={cls(SOFT_INPUT, "w-64")}
+                                    value={scEditRemarks}
+                                    onChange={(e) => setScEditRemarks(e.target.value)}
+                                    placeholder="Enter remarks…"
+                                  />
+                                ) : (
+                                  String(remarks || "—")
+                                )}
+                              </td>
+
+                              <td className="px-3 py-2 border border-gray-300">
+                                {isEditing ? (
+                                  <div className="flex items-center gap-2">
+                                    <button
+                                      onClick={() => saveSpecialClassRowEdits(row)}
+                                      disabled={scSaveLoadingId === String(row.special_id)}
+                                      className={cls(
+                                        "flex h-8 w-8 items-center justify-center rounded-full border-2",
+                                        "border-green-600 text-green-600 hover:bg-green-50",
+                                        scSaveLoadingId === String(row.special_id) && "opacity-50 cursor-not-allowed"
+                                      )}
+                                      title="Save"
+                                    >
+                                      <Check className="h-4 w-4" strokeWidth={2.5} />
+                                    </button>
+
+                                    <button
+                                      onClick={cancelEditSpecialClassRow}
+                                      disabled={scSaveLoadingId === String(row.special_id)}
+                                      className={cls(
+                                        "flex h-8 w-8 items-center justify-center rounded-full border-2",
+                                        "border-red-600 text-red-600 hover:bg-red-50",
+                                        scSaveLoadingId === String(row.special_id) && "opacity-50 cursor-not-allowed"
+                                      )}
+                                      title="Cancel"
+                                    >
+                                      <X className="h-4 w-4" strokeWidth={2.5} />
+                                    </button>
+
+                                    {scSaveLoadingId === String(row.special_id) && (
+                                      <span className="text-xs text-gray-500">Saving…</span>
+                                    )}
+                                  </div>
+                                ) : (
+                                  <button
+                                    className="text-emerald-700 hover:text-emerald-900"
+                                    title="Edit"
+                                    onClick={() => beginEditSpecialClassRow(row)}
+                                  >
+                                    <Edit className="h-4 w-4" />
+                                  </button>
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
         </div>
       </main>
 
@@ -3960,12 +4486,51 @@ if (response.ok) {
 
                   try {
                     if (conflict.action === "add") {
-                      await addApoOfferingRow(user.userId, { ...(conflict.original as any), ...ov });
+                      const basePayload = { ...(conflict.original as any) };
+                      delete (basePayload as any).__undo_before;
+                      delete (basePayload as any).__undo_snapshot;
+
+                      const resp = await addApoOfferingRow(user.userId, { ...basePayload, ...ov } as any);
+                      if ("conflict" in (resp as any)) {
+                        // If still conflicting, keep the modal open with the latest details
+                        handleConflict("add", (resp as any).conflict, basePayload);
+                        return;
+                      }
+
+                      const createdId = (resp as any).section_id as string;
+                      if (createdId) pushSrvOp(makeAddOp(basePayload, createdId));
                     } else if (conflict.action === "edit") {
-                      await editApoOfferingRow(user.userId, { ...(conflict.original as any), ...ov });
+                      const raw = { ...(conflict.original as any) };
+                      const before = (raw as any).__undo_before;
+                      delete (raw as any).__undo_before;
+                      delete (raw as any).__undo_snapshot;
+
+                      const resp = await editApoOfferingRow(user.userId, { ...raw, ...ov } as any);
+                      if ("conflict" in (resp as any)) {
+                        handleConflict("edit", (resp as any).conflict, { ...raw, __undo_before: before });
+                        return;
+                      }
+
+                      const sid = String((raw as any).section_id || "");
+                      if (before && sid) {
+                        const afterFull = { ...(before as any), ...(raw as any) };
+                        pushSrvOp(makeEditOp(sid, before, afterFull, `Edit ${sid}`));
+                      }
                     } else if (conflict.action === "delete") {
-                      await deleteApoOfferingRow(user.userId, { ...(conflict.original as any), ...ov });
+                      const raw = { ...(conflict.original as any) };
+                      const snap = (raw as any).__undo_snapshot;
+                      delete (raw as any).__undo_before;
+                      delete (raw as any).__undo_snapshot;
+
+                      const resp = await deleteApoOfferingRow(user.userId, { ...raw, ...ov } as any);
+                      if ("conflict" in (resp as any)) {
+                        handleConflict("delete", (resp as any).conflict, { ...raw, __undo_snapshot: snap });
+                        return;
+                      }
+
+                      if (snap) pushSrvOp(makeDeleteOp(snap));
                     }
+
                     setConflict(null);
                     await loadOfferings();
                   } catch (e: any) {
@@ -4036,7 +4601,7 @@ if (response.ok) {
       )}
 
       {/* --------------------------- Planning Review Modal --------------------------- */}
-      {showPlanModal && data?.planning && (
+      {showPlanModal && data?.planning && hasPlanUpdates && (
         <PlanReviewModal
           changes={data.planning.pending_changes || []}
           courseIndex={{ ...planCourseIndex, ...extraCourseIndex }}  // ⟵ merged
@@ -4212,15 +4777,67 @@ const PlanReviewModal: React.FC<{
   courseIndex?: Record<string, { code: string; title: string }>;
 }> = ({ changes, onClose, onApprove, courseIndex = {} }) => {
   const [busy, setBusy] = useState(false);
+  const summary = useMemo(() => {
+    const s = { total: changes.length, add: 0, increase: 0, reduce: 0 };
+    for (const ch of changes as any[]) {
+      if (ch?.type === "add_course_to_curriculum") s.add += 1;
+      else if (ch?.type === "sections_increase") s.increase += 1;
+      else if (ch?.type === "sections_decrease") s.reduce += 1;
+    }
+    return s;
+  }, [changes]);
   return (
-  <div className="fixed inset-0 z-[9999] flex items-start justify-center bg-black/40 p-3 sm:p-4">
-    <div className="w-[92vw] max-w-[900px] max-h-[88vh] mt-6 rounded-2xl bg-white shadow-2xl border border-gray-200 flex flex-col">
-      <div className="sticky top-0 z-10 bg-white border-b border-gray-200 px-4 py-3 font-semibold">
-        Review Planning Updates
-      </div>
-        <div className="flex-1 min-h-0 p-4 overflow-auto">
+    <div className="fixed inset-0 z-[9999] flex items-start justify-center bg-black/50 p-3 sm:p-6">
+      <div className="w-[95vw] max-w-[980px] max-h-[90vh] mt-4 sm:mt-8 rounded-2xl bg-white shadow-2xl border border-gray-200 flex flex-col overflow-hidden">
+        {/* Header (high-visibility) */}
+        <div className="bg-amber-600 text-white px-5 py-4">
+          <div className="flex items-start gap-3">
+            <div className="mt-0.5 grid h-10 w-10 place-items-center rounded-full bg-white/15">
+              <AlertTriangle className="h-5 w-5" />
+            </div>
+            <div className="min-w-0">
+              <div className="text-base sm:text-lg font-extrabold tracking-tight">
+                Approval required — Planning updates are pending
+              </div>
+              <div className="mt-1 text-sm text-white/90">
+                These changes were generated from Pre‑Enlistment and <span className="font-semibold">will not be applied</span> until you approve.
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Summary */}
+        <div className="border-b border-amber-200 bg-amber-50 px-5 py-3">
+          <div className="flex flex-wrap items-center gap-2 text-sm text-amber-950">
+            <span className="inline-flex items-center rounded-full bg-amber-100 px-3 py-1 font-semibold">
+              Total: {summary.total}
+            </span>
+            {summary.add > 0 && (
+              <span className="inline-flex items-center rounded-full bg-emerald-100 px-3 py-1 font-semibold text-emerald-800">
+                Add: {summary.add}
+              </span>
+            )}
+            {summary.increase > 0 && (
+              <span className="inline-flex items-center rounded-full bg-blue-100 px-3 py-1 font-semibold text-blue-800">
+                Increase: {summary.increase}
+              </span>
+            )}
+            {summary.reduce > 0 && (
+              <span className="inline-flex items-center rounded-full bg-rose-100 px-3 py-1 font-semibold text-rose-800">
+                Reduce: {summary.reduce}
+              </span>
+            )}
+            <span className="ml-auto text-xs text-amber-900">
+              Tip: review the list below, then click <span className="font-semibold">Approve updates</span>.
+            </span>
+          </div>
+        </div>
+
+        <div className="flex-1 min-h-0 p-4 sm:p-5 overflow-auto">
           {changes.length === 0 ? (
-            <div className="text-sm text-slate-700">No pending changes.</div>
+            <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm text-slate-700">
+              No pending changes.
+            </div>
           ) : (
             <ul className="space-y-3">
               {changes.map((ch: any, i: number) => {
@@ -4285,7 +4902,7 @@ const PlanReviewModal: React.FC<{
                 }
 
                 return (
-                  <li key={i} className="rounded-xl border border-gray-200 bg-gray-50 p-3 shadow-sm">
+                  <li key={i} className="rounded-xl border border-gray-200 bg-white p-3 shadow-sm">
                     <div className="flex items-center justify-between">
                       <div className="text-sm font-semibold text-slate-800">{title}</div>
                       <TypeBadge text={badge} />
@@ -4306,13 +4923,17 @@ const PlanReviewModal: React.FC<{
           )}
         </div>
 
-        <div className="flex items-center justify-end gap-2 border-t px-4 py-3">
-          <button className="rounded-md border px-3 py-1.5 text-sm" onClick={onClose}>
-            Close
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-end gap-2 border-t px-5 py-4">
+          <button
+            className="rounded-lg border border-neutral-300 bg-neutral-100 px-4 py-2 text-sm font-medium hover:bg-neutral-200"
+            onClick={onClose}
+            disabled={busy}
+          >
+            Not now
           </button>
           <button
             disabled={busy || changes.length === 0}
-            className="rounded-md bg-emerald-700 px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50"
+            className="rounded-lg bg-emerald-700 px-4 py-2 text-sm font-extrabold text-white shadow-sm hover:brightness-110 disabled:opacity-50"
             onClick={async () => {
               setBusy(true);
               try {
@@ -4323,7 +4944,7 @@ const PlanReviewModal: React.FC<{
             }}
           >
             <Check className="inline-block h-4 w-4 mr-1 align-[-2px]" />
-            Approve
+            Approve updates
           </button>
         </div>
       </div>

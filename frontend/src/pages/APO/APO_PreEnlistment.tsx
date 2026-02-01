@@ -164,6 +164,7 @@ export default function APO_PreEnlistment() {
   // --- Add Row state (left panel - enlisted courses) ---
   const [addingRow, setAddingRow] = useState(false);
   const [newCareer, setNewCareer] = useState<"UGB" | "GSM">("UGB"); // uses SelectBox now
+  const [newCode, setNewCode] = useState<string>("");
   const [newCourseCode, setNewCourseCode] = useState("");
   const [newCount, setNewCount] = useState<string>("0");
 
@@ -316,6 +317,13 @@ const refresh = async (forcedTermId?: string) => {
     if (editIndexCourses !== null && editRowCourses) {
       const updated = [...enlistedCourses];
       updated[editIndexCourses] = editRowCourses;
+
+      const missingCodeIdx = updated.findIndex((r) => !(r?.[0] || "").trim());
+      if (missingCodeIdx !== -1) {
+        setErr(`Code is required (row ${missingCodeIdx + 1}).`);
+        return;
+      }
+
       setEnlistedCourses(updated);
       setEditIndexCourses(null);
       setEditRowCourses(null);
@@ -365,10 +373,16 @@ const saveNewCourseRow = async () => {
     return;
   }
 
+  if (!newCode.trim()) {
+    setErr("Code is required.");
+    return;
+  }
+
   try {
     setErr(null);
 
     const rows: CountCsvRow[] = [{
+      Code: newCode.trim(),
       Career: newCareer,                    // "UGB" | "GSM"
       "Acad Group": "CCS",                  // fixed as requested
       Campus: campusCSV,                    // fixed from role
@@ -392,6 +406,7 @@ const saveNewCourseRow = async () => {
 
     // reset UI
     setAddingRow(false);
+    setNewCode("");
     setNewCourseCode("");
     setNewCount("0");
     setNewCareer("UGB");
@@ -596,7 +611,7 @@ const closeImport = () => {
 const importCountCsvFile = async (file: File) => {
   if (!file || !user?.userId) return;
 
-  const required = ["Career", "Acad Group", "Campus", "Course Code", "Count"];
+  const required = ["Code", "Career", "Acad Group", "Campus", "Course Code", "Count"];
   const results = await parseCsvFile<CountCsvRow>(file);
   const fields: string[] = (results?.meta?.fields || []) as string[];
 
@@ -611,12 +626,16 @@ const importCountCsvFile = async (file: File) => {
     .map((r: any) => {
       // normalize keys + keep raw values
       const campusRaw = r.Campus ?? r["Campus"];
+      const codeRaw = r.Code ?? r["Code"];
       return {
         ...r,
+        Code: String(codeRaw ?? "").trim(),
         Campus: campusRaw,
       } as CountCsvRow;
     })
-    .filter((r: any) => r["Course Code"] && r.Career && r.Campus && r.Count !== undefined);
+    .filter(
+      (r: any) => r.Code && r["Course Code"] && r.Career && r.Campus && r.Count !== undefined
+    );
 
   // Frontend campus guard (prevents cross-campus pollution)
   const campusSelected = campusCodeFromUi();
@@ -902,12 +921,12 @@ const [archiveCountTotal, setArchiveCountTotal] = useState(0);
         {importKind === "count" ? (
           <ul className="list-disc pl-5 space-y-1">
             <li>
-              Required columns: <span className="font-mono">Career</span>,{" "}
+              Required columns: <span className="font-mono">Code</span>,{" "}
+              <span className="font-mono">Career</span>,{" "}
               <span className="font-mono">Acad Group</span>,{" "}
               <span className="font-mono">Campus</span>,{" "}
               <span className="font-mono">Course Code</span>,{" "}
-              <span className="font-mono">Count</span> (optional:{" "}
-              <span className="font-mono">Code</span>)
+              <span className="font-mono">Count</span>
             </li>
             <li>
               <span className="font-mono">Campus</span> must be{" "}
@@ -930,12 +949,12 @@ const [archiveCountTotal, setArchiveCountTotal] = useState(0);
               <span className="font-mono">FRESHMAN</span>,{" "}
               <span className="font-mono">SOPHOMORE</span>,{" "}
               <span className="font-mono">JUNIOR</span>,{" "}
-              <span className="font-mono">SENIOR</span> (optional:{" "}
-              <span className="font-mono">ENROLLMENT</span>)
+              <span className="font-mono">SENIOR</span>
             </li>
             <li>
-              Program codes must belong to{" "}
-              <span className="font-semibold">{campusLabel || campusName || "Selected campus"}</span>.
+              Programs must be offered under{" "}
+              <span className="font-semibold">{campusLabel || campusName || "Selected campus"}</span>{" "}
+              (validated via the curriculum campus).
             </li>
             <li className="text-emerald-800/80">
               Example row: <span className="font-mono">BSCS-ST, 106, 92, 87, 76</span>
@@ -1081,7 +1100,13 @@ const [archiveCountTotal, setArchiveCountTotal] = useState(0);
                     <button
                       onClick={() => {
                         setErr(null);
-                        setAddingRow((v) => !v);
+                        setAddingRow((v) => {
+                          const next = !v;
+                          if (next) {
+                            setNewCode(String((enlistedCourses?.length || 0) + 1));
+                          }
+                          return next;
+                        });
                       }}
                       className="inline-flex items-center gap-2 rounded-md border border-emerald-300 text-emerald-700 bg-white px-3 py-2 text-sm hover:bg-emerald-50"
                       title="Add a single course row"
@@ -1095,6 +1120,7 @@ const [archiveCountTotal, setArchiveCountTotal] = useState(0);
                   <thead className="bg-gray-50 text-left text-xs text-gray-500 border-b">
                     <tr>
                       <th className="py-2">No.</th>
+                      <th className="py-2">Code</th>
                       <th className="py-2">Career</th>
                       <th className="py-2">Acad Group</th>
                       <th className="py-2">Campus</th>
@@ -1107,18 +1133,22 @@ const [archiveCountTotal, setArchiveCountTotal] = useState(0);
                     {enlistedCourses.map((row, i) => (
                       <tr key={i} className="border-b last:border-0 hover:bg-gray-50">
                         <td className="py-2 px-2">{i + 1}</td>
-                        {row.slice(1).map((cell, j) => (
+                        {row.map((cell, j) => (
                           <td key={j} className="py-2 px-2 whitespace-nowrap">
-                            {editIndexCourses === i && j === row.length - 2 ? (
+                            {editIndexCourses === i && (j === 0 || j === 5) ? (
                               <input
-                                value={editRowCourses?.[j + 1] ?? ""}
+                                value={editRowCourses?.[j] ?? ""}
                                 onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
                                   const copy = [...(editRowCourses ?? [])];
-                                  copy[j + 1] = e.target.value;
+                                  copy[j] = e.target.value;
                                   setEditRowCourses(copy);
                                 }}
-                                type="number"
-                                className="w-full px-2 py-1 text-sm rounded-md border border-gray-300 focus:ring-1 focus:ring-emerald-500"
+                                type={j === 5 ? "number" : "text"}
+                                className={
+                                  j === 5
+                                    ? "w-full px-2 py-1 text-sm rounded-md border border-gray-300 focus:ring-1 focus:ring-emerald-500"
+                                    : "w-[90px] px-2 py-1 text-sm rounded-md border border-gray-300 focus:ring-1 focus:ring-emerald-500"
+                                }
                               />
                             ) : (
                               cell
@@ -1151,6 +1181,16 @@ const [archiveCountTotal, setArchiveCountTotal] = useState(0);
                       <tr className="bg-emerald-50/60 border-t">
                         {/* No. */}
                         <td className="py-2 px-2">—</td>
+
+                        {/* Code — required */}
+                        <td className="py-2 px-2">
+                          <MiniFieldInput
+                            value={newCode}
+                            onChange={(v) => setNewCode(v)}
+                            placeholder="Code"
+                            className="w-[90px]"
+                          />
+                        </td>
 
                         {/* Career — compact select with matching style */}
                         <td className="py-2 px-2">
@@ -1210,6 +1250,7 @@ const [archiveCountTotal, setArchiveCountTotal] = useState(0);
                             <button
                               onClick={() => {
                                 setAddingRow(false);
+                                setNewCode("");
                                 setNewCourseCode("");
                                 setNewCount("0");
                                 setNewCareer("UGB");
@@ -1225,7 +1266,7 @@ const [archiveCountTotal, setArchiveCountTotal] = useState(0);
                     )}
                     {enlistedCourses.length === 0 && !addingRow && (
                       <tr>
-                        <td colSpan={7} className="py-8 text-center text-gray-500">
+                        <td colSpan={8} className="py-8 text-center text-gray-500">
                           No rows yet — import a CSV.
                         </td>
                       </tr>

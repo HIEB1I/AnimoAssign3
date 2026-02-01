@@ -44,6 +44,12 @@ COL_PLANSTATE = "planning_state"
 COL_SPECIAL = "special_class"
 COL_APO_OFFERINGS_AUDIT = "apo_offerings_audit"
 COL_APO_SUBMISSIONS = "apo_scheduling_submissions"
+
+# Undo/Redo support:
+# - When a section is SOFT-deleted we can restore it by flipping status back to active.
+# - When a section is HARD-deleted (never submitted yet), we keep a short-lived snapshot here
+#   so the UI can restore the exact record (same section_id / section_code) without re-adding.
+COL_APO_SECTION_TRASH = "apo_section_trash"
 DEFAULT_CAP = 20
 def _audit_id() -> str:
     return _id("AUD-")
@@ -223,39 +229,58 @@ async def _get_planning_term() -> Dict[str, Any]:
     """
     Returns the 'planning' term for offerings/preen planning.
 
-      - base = result of _ensure_current_term()
-               (the term where is_current == True, or the latest term if none is flagged yet)
-      - planning = next term in sequence (TERM0015 after TERM0014, etc.)
-      - if the next term does not exist, we fall back to the base term
+    We follow the same rule used by Pre-Enlistment and OM:
+      - base term = the term where is_current == True (or the latest term if none is flagged yet)
+      - planning term = the NEXT term in chronological order by (acad_year_start, term_number)
+      - if no next term exists, fall back to the base term
     """
     base = await _ensure_current_term()
     if not base or not base.get("term_id"):
         raise HTTPException(status_code=404, detail="No current term found in terms collection.")
 
-    base_id = base["term_id"]  # e.g., "TERM0014"
+    base_year = base.get("acad_year_start")
+    base_no = base.get("term_number")
 
-    # Compute next term id (TERM0015) from suffix
-    try:
-        prefix = base_id[:4]
-        num = int(base_id[4:])
-    except (TypeError, ValueError):
-        raise HTTPException(status_code=500, detail=f"Invalid term_id format: {base_id}")
-
-    next_id = f"{prefix}{num + 1:04d}"
-
-    planning = await db[COL_TERMS].find_one(
-        {"term_id": next_id},
-        {"_id": 0, "term_id": 1, "acad_year_start": 1, "term_number": 1},
-    )
-
-    # If there is no TERM0015 (or next), just fall back to the current term
-    if not planning:
+    # If term metadata is missing, fall back to TERM#### + 1 behavior
+    if base_year is None or base_no is None:
+        base_id = base["term_id"]  # e.g., "TERM0014"
+        try:
+            prefix = base_id[:4]
+            num = int(base_id[4:])
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=500, detail=f"Invalid term_id format: {base_id}")
+        next_id = f"{prefix}{num + 1:04d}"
         planning = await db[COL_TERMS].find_one(
-            {"term_id": base_id},
+            {"term_id": next_id},
             {"_id": 0, "term_id": 1, "acad_year_start": 1, "term_number": 1},
-        ) or {}
+        )
+        if not planning:
+            planning = await db[COL_TERMS].find_one(
+                {"term_id": base_id},
+                {"_id": 0, "term_id": 1, "acad_year_start": 1, "term_number": 1},
+            ) or {}
+        return planning
 
-    return planning
+    cur = db[COL_TERMS].find(
+        {
+            "$or": [
+                {"acad_year_start": {"$gt": base_year}},
+                {"acad_year_start": base_year, "term_number": {"$gt": base_no}},
+            ]
+        },
+        {"_id": 0, "term_id": 1, "acad_year_start": 1, "term_number": 1},
+    ).sort([("acad_year_start", 1), ("term_number", 1)]).limit(1)
+
+    rows = await cur.to_list(1)
+    if rows:
+        return rows[0]
+
+    # No future term configured: reuse base so we don't crash
+    return {
+        "term_id": base.get("term_id"),
+        "acad_year_start": base_year,
+        "term_number": base_no,
+    }
 
 def _parse_course_seq(course_id: str) -> int:
     m = re.match(r"^CRS(\d+)$", course_id or "")
@@ -1572,13 +1597,36 @@ async def map_programs(p_ids: List[str]) -> Dict[str, Dict[str, Any]]:
 
 # ---------- demand helpers ----------
 async def preen_total_for_course(term_id: str, campus_id: Optional[str], course_id: str) -> int:
-    cond: Dict[str, Any] = {"course_id": course_id, "term_id": term_id, "is_archived": {"$ne": True}}
-    if campus_id and await db[COL_PREEN].count_documents({**cond, "campus_id": campus_id}) > 0:
-        cond["campus_id"] = campus_id
-    total = 0
-    async for r in db[COL_PREEN].find(cond, {"_id": 0, "preenlistment_count": 1, "count": 1}):
-        total += int(r.get("preenlistment_count") or r.get("count") or 0)
-    return total
+    """
+    Sum pre-enlistment demand for a course.
+
+    IMPORTANT:
+    - If preenlistment_count docs are campus-scoped (have campus_id in this term),
+      we must NOT fall back to other campuses when this campus has no rows.
+    - If this is a legacy dataset where campus_id is not stored, we fall back to term-wide rows.
+    """
+    base_cond: Dict[str, Any] = {"course_id": course_id, "term_id": term_id, "is_archived": {"$ne": True}}
+
+    async def _sum(cond: Dict[str, Any]) -> int:
+        total = 0
+        async for r in db[COL_PREEN].find(cond, {"_id": 0, "preenlistment_count": 1, "count": 1}):
+            total += int(r.get("preenlistment_count") or r.get("count") or 0)
+        return total
+
+    if campus_id:
+        campus_cond = {**base_cond, "campus_id": campus_id}
+        total = await _sum(campus_cond)
+        if total > 0:
+            return total
+
+        # No rows for this campus. Only fall back if the dataset is legacy (no campus_id stored at all for this term).
+        term_has_any_campus = await db[COL_PREEN].count_documents(
+            {"term_id": term_id, "is_archived": {"$ne": True}, "campus_id": {"$exists": True, "$ne": ""}}
+        ) > 0
+        if term_has_any_campus:
+            return 0
+
+    return await _sum(base_cond)
 
 async def _program_latest_batch_number(program_id: str, campus_id: Optional[str]) -> Optional[int]:
     qs: Dict[str, Any] = {"program_id": program_id}
@@ -2151,14 +2199,36 @@ async def reduce_sections_if_excess(*, term_id: str, campus_prefix: str, course_
 
 # ---------- planning snapshots & diffs ----------
 async def _preen_snapshot(term_id: str, campus_id: str) -> Dict[str, int]:
-    cond = {"term_id": term_id, "is_archived": {"$ne": True}}
-    if await db[COL_PREEN].count_documents({**cond, "campus_id": campus_id}) > 0:
-        cond["campus_id"] = campus_id
-    out: Dict[str, int] = {}
-    async for d in db[COL_PREEN].find(cond, {"_id": 0, "course_id": 1, "preenlistment_count": 1, "count": 1}):
-        cid = d.get("course_id") or ""
-        out[cid] = out.get(cid, 0) + int(d.get("preenlistment_count") or d.get("count") or 0)
-    return out
+    """
+    Snapshot of pre-enlistment counts keyed by course_id.
+
+    Campus behavior:
+    - If the preenlistment_count collection stores campus_id for this term, we STRICTLY scope to campus_id.
+    - If the dataset is legacy (no campus_id stored at all for this term), we fall back to term-wide rows.
+    """
+    base_cond: Dict[str, Any] = {"term_id": term_id, "is_archived": {"$ne": True}}
+
+    async def _scan(cond: Dict[str, Any]) -> Dict[str, int]:
+        out: Dict[str, int] = {}
+        async for d in db[COL_PREEN].find(cond, {"_id": 0, "course_id": 1, "preenlistment_count": 1, "count": 1}):
+            cid = d.get("course_id") or ""
+            out[cid] = out.get(cid, 0) + int(d.get("preenlistment_count") or d.get("count") or 0)
+        return out
+
+    campus_cond = {**base_cond, "campus_id": campus_id}
+    out = await _scan(campus_cond)
+    if out:
+        return out
+
+    # If there are *any* campus-tagged rows for this term, do NOT mix campuses.
+    term_has_any_campus = await db[COL_PREEN].count_documents(
+        {**base_cond, "campus_id": {"$exists": True, "$ne": ""}}
+    ) > 0
+    if term_has_any_campus:
+        return {}
+
+    # Legacy fallback: campus_id not stored
+    return await _scan(base_cond)
 
 async def _cohort_snapshot(term_id: str, campus_id: str) -> Dict[str, Dict[str, int]]:
     cur = db[COL_CURRICULUM].find({"term_id": term_id, "campus_id": campus_id}, {"_id": 0, "program_id": 1})
@@ -2202,8 +2272,65 @@ async def _section_count(term_id: str, campus_prefix_pattern: str, course_id: st
 async def _pending_changes(
     *, term_id: str, campus_id: str, campus_name: str
 ) -> Tuple[bool, List[Dict[str, Any]], str, str]:
-    has_preen = await db[COL_PREEN].count_documents({"term_id": term_id, "is_archived": {"$ne": True}}) > 0
-    has_stats = await db[COL_PREEN_STATS].count_documents({"term_id": term_id}) > 0
+    # IMPORTANT:
+    # Keep Manila/Laguna truly independent.
+    # If pre-enlistment rows are campus-scoped (campus_id stored for this term),
+    # do NOT fall back to other campuses when this campus has no data yet.
+    preen_base = {"term_id": term_id, "is_archived": {"$ne": True}}
+
+    has_preen_campus = await db[COL_PREEN].count_documents({**preen_base, "campus_id": campus_id}) > 0
+    if has_preen_campus:
+        has_preen = True
+    else:
+        term_has_any_campus = await db[COL_PREEN].count_documents(
+            {**preen_base, "campus_id": {"$exists": True, "$ne": ""}}
+        ) > 0
+        if term_has_any_campus:
+            has_preen = False
+        else:
+            # Legacy dataset (no campus_id stored): use term-wide rows
+            has_preen = await db[COL_PREEN].count_documents(preen_base) > 0
+
+    # Program statistics are imported per program. To avoid "phantom readiness" caused by other campuses,
+    # we consider stats "ready" only if this campus' curriculum programs have stats in this term.
+    prog_ids = await db[COL_CURRICULUM].distinct("program_id", {"term_id": term_id, "campus_id": campus_id})
+    prog_ids = [str(x).strip() for x in prog_ids if str(x).strip()]
+
+    if prog_ids:
+        prog_rows = [p async for p in db[COL_PROGRAMS].find(
+            {"program_id": {"$in": prog_ids}},
+            {"_id": 0, "program_id": 1, "program_code": 1},
+        )]
+        pid_to_code = {
+            (p.get("program_id") or "").strip(): (p.get("program_code") or "").strip().upper()
+            for p in prog_rows
+        }
+        codes = [c for c in pid_to_code.values() if c]
+
+        stats_q: Dict[str, Any] = {"term_id": term_id, "$or": []}
+        stats_q["$or"].append({"program_id": {"$in": prog_ids}})
+        if codes:
+            stats_q["$or"].append({"program_code": {"$in": codes}})
+
+        present_pids: Set[str] = set()
+        present_codes: Set[str] = set()
+        async for d in db[COL_PREEN_STATS].find(stats_q, {"_id": 0, "program_id": 1, "program_code": 1}):
+            if d.get("program_id"):
+                present_pids.add(str(d.get("program_id")).strip())
+            if d.get("program_code"):
+                present_codes.add(str(d.get("program_code")).strip().upper())
+
+        # require stats for every program in this campus curriculum
+        has_stats = True
+        for pid in prog_ids:
+            code = pid_to_code.get(pid, "")
+            if (pid not in present_pids) and (not code or code not in present_codes):
+                has_stats = False
+                break
+    else:
+        # If no curriculum exists, keep old behavior (term-wide presence)
+        has_stats = await db[COL_PREEN_STATS].count_documents({"term_id": term_id}) > 0
+
     needs_import = not (has_preen and has_stats)
 
     preen_map = await _preen_snapshot(term_id, campus_id)
@@ -4003,7 +4130,7 @@ async def get_course_offerings(
 async def post_course_offerings(
     userId: str = Query(..., min_length=3),
     action: Literal[
-        "addRow", "editRow", "deleteRow", "forward",
+        "addRow", "editRow", "deleteRow", "restoreRow", "forward",
         "curriculumAddCourse", "curriculumEditCourse", "curriculumRemoveCourse",
         "approvePlan",
         "specialclassUpdate", 
@@ -5039,7 +5166,7 @@ async def post_course_offerings(
 
     # ----- GE/SHS EXEMPTION -----
     plan_warning = False
-    if action in {"addRow", "editRow", "deleteRow"}:
+    if action in {"addRow", "editRow", "deleteRow", "restoreRow"}:
         ge_shs_exempt = False
         target_cid = ""
 
@@ -5137,7 +5264,121 @@ async def post_course_offerings(
             violations=info.get("violations") or soft, payload=info.get("payload") or payload,
         )
 
-    # ---------- ADD ROW ----------
+    
+    # ---------- RESTORE ROW (Undo/Redo support) ----------
+    # The frontend Undo/Redo history relies on this endpoint:
+    #   • SOFT delete: section.status="archived"  -> restore by flipping back to "active" (keeps same section_id)
+    #   • HARD delete: section removed entirely    -> restore from COL_APO_SECTION_TRASH snapshot (same section_id)
+    # This prevents re-adding rows (which can fail due to section_code uniqueness rules).
+    if action == "restoreRow":
+        section_id = (payload.get("section_id") or "").strip()
+        if not section_id:
+            raise HTTPException(status_code=400, detail="Missing section_id")
+
+        # 1) Try SOFT restore (archived -> active)
+        res = await db[COL_SECTIONS].update_one(
+            {"term_id": term_id, "campus_id": campus_id, "section_id": section_id, "status": "archived"},
+            {
+                "$set": {"status": "active", "updated_at": now()},
+                "$unset": {"archived_at": "", "archived_by": "", "archived_reason": "", "archived_note": ""},
+            },
+        )
+        if res.matched_count:
+            # Ensure placeholder schedules + faculty assignment exist (forward/cleanup might have removed them)
+            try:
+                sec_doc = await db[COL_SECTIONS].find_one(
+                    {"term_id": term_id, "campus_id": campus_id, "section_id": section_id},
+                    {"_id": 0},
+                )
+                if sec_doc:
+                    await _provision_sched_and_assignment_for_new_section(sec_doc)
+            except Exception:
+                pass
+            return {"ok": True, "restored": int(res.modified_count or 1), "mode": "soft", "status": "active"}
+
+        # 2) If the section still exists (already active / not archived), treat as idempotent
+        existing = await db[COL_SECTIONS].find_one(
+            {"term_id": term_id, "campus_id": campus_id, "section_id": section_id},
+            {"_id": 0, "status": 1},
+        )
+        if existing:
+            return {"ok": True, "restored": 0, "mode": "noop", "status": existing.get("status")}
+
+        # 3) Attempt HARD restore from trash snapshot
+        trash = await db[COL_APO_SECTION_TRASH].find_one(
+            {"term_id": term_id, "campus_id": campus_id, "section_id": section_id},
+            {"_id": 0},
+        )
+        if not trash:
+            raise HTTPException(status_code=404, detail="Section not found.")
+
+        sec_doc = dict(trash.get("section") or {})
+        scheds = list(trash.get("schedules") or [])
+        facs = list(trash.get("faculty_assignments") or [])
+
+        # Sanitize any accidental Mongo _id fields
+        sec_doc.pop("_id", None)
+        for d in scheds:
+            if isinstance(d, dict):
+                d.pop("_id", None)
+        for d in facs:
+            if isinstance(d, dict):
+                d.pop("_id", None)
+
+        # Bring the section back as active
+        sec_doc["status"] = "active"
+        sec_doc["updated_at"] = now()
+        sec_doc.pop("archived_at", None)
+        sec_doc.pop("archived_by", None)
+        sec_doc.pop("archived_reason", None)
+        sec_doc.pop("archived_note", None)
+
+        # Recreate section + dependent docs
+        await db[COL_SECTIONS].replace_one(
+            {"term_id": term_id, "campus_id": campus_id, "section_id": section_id},
+            sec_doc,
+            upsert=True,
+        )
+
+        # Replace schedules/assignments for this section_id (prevents duplicates)
+        try:
+            await db[COL_SCHEDS].delete_many({"section_id": section_id})
+        except Exception:
+            pass
+        if scheds:
+            try:
+                await db[COL_SCHEDS].insert_many(scheds, ordered=False)
+            except Exception:
+                # ignore partial duplicates
+                pass
+
+        try:
+            await db[COL_FAC_ASSIGN].delete_many({"section_id": section_id})
+        except Exception:
+            pass
+        if facs:
+            try:
+                await db[COL_FAC_ASSIGN].insert_many(facs, ordered=False)
+            except Exception:
+                pass
+
+        # Ensure placeholders exist even if snapshot was incomplete
+        try:
+            await _provision_sched_and_assignment_for_new_section(sec_doc)
+        except Exception:
+            pass
+
+        # Consume snapshot so redo/undo stays consistent
+        try:
+            await db[COL_APO_SECTION_TRASH].delete_one(
+                {"term_id": term_id, "campus_id": campus_id, "section_id": section_id}
+            )
+        except Exception:
+            pass
+
+        return {"ok": True, "restored": 1, "mode": "hard", "status": "active"}
+
+# ---------- ADD ROW ----------
     if action == "addRow":
         batch_id = (payload.get("batch_id") or "").strip()
 
@@ -5507,12 +5748,37 @@ async def post_course_offerings(
             # Snapshot will be refreshed on next Submit for Scheduling and only then the OM will stop seeing it.
             return {"ok": True, "deleted": 1, "mode": "soft"}
 
-        # Never submitted yet: safe to hard delete and cleanup
-        await db[COL_SCHEDS].delete_many({"term_id": term_id, "campus_id": campus_id, "section_id": section_id})
-        await db[COL_FAC_ASSIGN].update_many(
-            {"term_id": term_id, "campus_id": campus_id, "section_id": section_id},
-            {"$set": {"is_archived": True, "updated_at": now()}},
-        )
+        # Never submitted yet: hard delete.
+        # To support Undo/Redo, store a snapshot first so the UI can restore the *exact* record later.
+        try:
+            sec_doc = await db[COL_SECTIONS].find_one(
+                {"term_id": term_id, "campus_id": campus_id, "section_id": section_id},
+                {"_id": 0},
+            )
+            scheds = [s async for s in db[COL_SCHEDS].find({"section_id": section_id}, {"_id": 0})]
+            facs = [f async for f in db[COL_FAC_ASSIGN].find({"section_id": section_id}, {"_id": 0})]
+            if sec_doc:
+                await db[COL_APO_SECTION_TRASH].update_one(
+                    {"term_id": term_id, "campus_id": campus_id, "section_id": section_id},
+                    {"$set": {
+                        "term_id": term_id,
+                        "campus_id": campus_id,
+                        "section_id": section_id,
+                        "section": sec_doc,
+                        "schedules": scheds,
+                        "faculty_assignments": facs,
+                        "deleted_at": now(),
+                        "deleted_by": userId,
+                    }},
+                    upsert=True,
+                )
+        except Exception:
+            # Don't block deletion if snapshot fails
+            pass
+
+        # Cleanup by section_id (schedule/faculty docs may not store term_id/campus_id)
+        await db[COL_SCHEDS].delete_many({"section_id": section_id})
+        await db[COL_FAC_ASSIGN].delete_many({"section_id": section_id})
         await db[COL_SECTIONS].delete_one({"term_id": term_id, "campus_id": campus_id, "section_id": section_id})
         return {"ok": True, "deleted": 1, "mode": "hard"}
 

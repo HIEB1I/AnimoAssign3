@@ -380,7 +380,7 @@ export type ApoPreenlistmentResponse = {
 };
 
 export type CountCsvRow = {
-  Code?: string;
+  Code: string;
   Career: string; // UGB / GSM
   "Acad Group": string; // CCS (display)
   Campus: "MANILA" | "LAGUNA";
@@ -897,7 +897,7 @@ export type DeleteRowPayload = {
 export async function deleteApoOfferingRow(
   userId: string,
   payload: DeleteRowPayload
-): Promise<{ ok: true; deleted: number } | { conflict: ApiConflict }> {
+): Promise<{ ok: true; deleted: number; mode?: "soft" | "hard" } | { conflict: ApiConflict }> {
   try {
     const url = `${API_BASE}/apo/courseofferings${q({ userId, action: "deleteRow" })}`;
     return await post(url, _coerceOnline(payload));
@@ -912,6 +912,20 @@ export async function deleteApoOfferingRow(
     throw err;
   }
 }
+
+
+export type RestoreRowPayload = {
+  section_id: string;
+};
+
+export async function restoreApoOfferingRow(
+  userId: string,
+  payload: RestoreRowPayload
+): Promise<{ ok: true; restored: number; mode?: string; status?: string }> {
+  const url = `${API_BASE}/apo/courseofferings${q({ userId, action: "restoreRow" })}`;
+  return await post(url, _coerceOnline(payload));
+}
+
 
 /* ---- Plan routing ---- */
 export function forwardApoCourseOfferings(

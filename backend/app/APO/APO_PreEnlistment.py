@@ -24,6 +24,7 @@ COL_COUNTERS = "counters"
 COL_USER_ROLES = "user_roles"
 COL_STAFF_PROFILES = "staff_profiles"
 COL_FACULTY_PROFILES = "faculty_profiles"
+COL_CURRICULUM = "curriculum"
 
 ACTIVE_Q = {"$ne": True}  # is_archived != True
 ARCH_Q = True
@@ -920,11 +921,16 @@ async def preenlistment_post(
 
     if count_rows:
         for i, r in enumerate(count_rows):
+            pre_code = (r.get("Code") or r.get("code") or "").strip()
             career_csv = (r.get("Career") or r.get("career") or "").strip()
             acad_group_csv = (r.get("Acad Group") or r.get("acad_group") or "").strip()
             campus_csv_raw = (r.get("Campus") or r.get("campus") or "").strip()
             course_code = (r.get("Course Code") or r.get("course_code") or "").strip().upper()
             count_val = _as_int(r.get("Count", r.get("count")))
+
+            if not pre_code:
+                count_errors.append(f"{_row_label(i)}: Missing 'Code'.")
+                continue
 
             if not campus_csv_raw:
                 count_errors.append(f"{_row_label(i)}: Missing 'Campus' (must be Manila/Laguna).")
@@ -968,7 +974,7 @@ async def preenlistment_post(
 
             normalized_count_rows.append(
                 {
-                    "pre_code": (r.get("Code") or r.get("code") or "").strip(),
+                    "pre_code": pre_code,
                     "career": career_csv,
                     "acad_group": acad_group_csv.strip().upper(),
                     "course": course,
@@ -1009,12 +1015,26 @@ async def preenlistment_post(
                 stat_errors.append(f"{_row_label(i)}: Unknown Program '{program_code}'.")
                 continue
 
-            prog_campus_id = pinfo.get("campus_id")
-            if prog_campus_id and prog_campus_id != base_campus_id:
-                stat_errors.append(
-                    f"{_row_label(i)}: Program '{program_code}' belongs to a different campus; you are importing for {campus_uc}."
+            # Campus validation for STATISTICS should not rely solely on programs.campus_id
+            # because some programs can appear in multiple campuses (e.g., 2 years Manila + 2 years Laguna).
+            # We primarily validate campus membership via the curriculum table's campus_id.
+            prog_id = pinfo.get("program_id")
+            has_curriculum_for_campus = False
+            if prog_id:
+                cur = await db[COL_CURRICULUM].find_one(
+                    {"program_id": prog_id, "campus_id": base_campus_id},
+                    {"_id": 0, "curriculum_id": 1},
                 )
-                continue
+                has_curriculum_for_campus = bool(cur)
+
+            # Fallback: if curriculum is missing for this program, allow only when programs.campus_id matches.
+            if not has_curriculum_for_campus:
+                prog_campus_id = pinfo.get("campus_id")
+                if prog_campus_id and prog_campus_id != base_campus_id:
+                    stat_errors.append(
+                        f"{_row_label(i)}: Program '{program_code}' isn't offered in {campus_uc} (no curriculum match for this campus)."
+                    )
+                    continue
 
             freshman = _as_int(r.get("FRESHMAN"))
             sophomore = _as_int(r.get("SOPHOMORE"))
