@@ -939,7 +939,11 @@ async def apo_scope(user_id: str) -> Tuple[Optional[str], Optional[str]]:
     return (campus_id, college_id)
 async def apo_import_curriculum_csv(userId: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Import curriculum rows from CSV.
+    Import curriculum rows (List of Courses / flowcharts) from CSV.
+
+    Supports MULTI-TERM import: each CSV row determines its target term via
+    (Academic Year start, Term Number). The payload's term_id is kept for backward
+    compatibility as a default/fallback only.
 
     Expected payload from frontend:
     {
@@ -952,29 +956,33 @@ async def apo_import_curriculum_csv(userId: str, payload: Dict[str, Any]) -> Dic
             "Academic Year": "2027",
             "Campus": "Manila",
             "Course 1": "CCDSALG",
-            "Course 2": "CCPROG2",
-            "Course 3": "ITSTRAG"
+            "Course 2": "CCPROG2"
           },
           ...
         ],
         "term_id": "TERM0015",
         "campus_name": "Manila"
     }
+
+    Behavior:
+      - Validates ALL rows first (all-or-nothing). If any error exists, nothing is saved.
+      - Upserts curriculum rows by (batch_id, term_id, campus_id).
+      - Ensures referenced programs + courses exist.
     """
     rows = payload.get("rows") or []
-    term_id = payload.get("term_id")
+    default_term_id = payload.get("term_id")
     campus_name = payload.get("campus_name")
 
-    if not isinstance(rows, list) or not term_id or not campus_name:
+    if not isinstance(rows, list) or not default_term_id or not campus_name:
         raise HTTPException(
             status_code=400,
             detail="rows, term_id and campus_name are required for import_curriculum_csv",
         )
 
-    # Validate term
-    term = await db[COL_TERMS].find_one({"term_id": term_id})
-    if not term:
-        raise HTTPException(status_code=400, detail=f"Unknown term_id {term_id!r}")
+    # Validate default term (kept for backward compatibility / fallback)
+    default_term = await db[COL_TERMS].find_one({"term_id": default_term_id})
+    if not default_term:
+        raise HTTPException(status_code=400, detail=f"Unknown term_id {default_term_id!r}")
 
     # Resolve campus_name -> campus_id
     campus = await db["campuses"].find_one(
@@ -984,142 +992,294 @@ async def apo_import_curriculum_csv(userId: str, payload: Dict[str, Any]) -> Dic
         raise HTTPException(status_code=400, detail=f"Unknown campus {campus_name!r}")
     campus_id = campus["campus_id"]
 
+    def _norm(s: Any) -> str:
+        return re.sub(r"\s+", "", str(s or "")).strip().lower()
+
+    target_campus_norm = _norm(campus.get("campus_name") or campus_name)
+    target_campus_id_norm = _norm(campus_id)
+
+    # ---- Gather unique codes for bulk lookups ----
+    program_codes: set[str] = set()
+    all_course_codes: set[str] = set()
+    term_pairs: set[tuple[int, int]] = set()
+
+    # Detect course columns (Course 1, Course 2, ...)
+    def _course_codes_from_row(raw: Dict[str, Any]) -> list[str]:
+        out: list[str] = []
+        for k, v in (raw or {}).items():
+            if isinstance(k, str) and k.strip().lower().startswith("course"):
+                s = str(v or "").strip()
+                if s:
+                    out.append(s)
+        return out
+
+    def _parse_term_no(v: Any) -> Optional[int]:
+        if v is None:
+            return None
+        s = str(v).strip()
+        if not s:
+            return None
+        try:
+            return int(s)
+        except Exception:
+            return None
+
+    def _parse_ay_start(v: Any) -> Optional[int]:
+        if v is None:
+            return None
+        s = str(v).strip()
+        if not s:
+            return None
+        m = re.search(r"(\d{4})", s)
+        if not m:
+            return None
+        try:
+            return int(m.group(1))
+        except Exception:
+            return None
+
+    # Pre-scan to collect lookup keys
+    for raw in rows:
+        if not raw or not isinstance(raw, dict):
+            continue
+        pc = str(raw.get("Program") or raw.get("Program Code") or raw.get("program") or "").strip()
+        if pc:
+            program_codes.add(pc)
+        for cc in _course_codes_from_row(raw):
+            all_course_codes.add(cc)
+
+        tno = _parse_term_no(raw.get("Term Number") or raw.get("TermNumber") or raw.get("term_number"))
+        ay = _parse_ay_start(raw.get("Academic Year") or raw.get("AY") or raw.get("acad_year_start"))
+        if tno and ay:
+            term_pairs.add((ay, tno))
+
+    # Bulk resolve programs
+    programs = await db[COL_PROGRAMS].find({"program_code": {"$in": sorted(program_codes)}}).to_list(None)
+    program_by_code = {p.get("program_code"): p for p in programs if p and p.get("program_code")}
+
+    # Bulk resolve courses (course_code is an array field)
+    course_docs = await db[COL_COURSES].find({"course_code": {"$in": sorted(all_course_codes)}}).to_list(None)
+    course_by_code: Dict[str, str] = {}
+    for doc in course_docs:
+        for code in (doc.get("course_code") or []):
+            if code and code not in course_by_code:
+                course_by_code[str(code)] = doc["course_id"]
+
+    # Bulk resolve terms by (acad_year_start, term_number)
+    term_map: Dict[tuple[int, int], str] = {}
+    if term_pairs:
+        ay_set = sorted({ay for (ay, _) in term_pairs})
+        tn_set = sorted({tn for (_, tn) in term_pairs})
+        term_docs = await db[COL_TERMS].find(
+            {"acad_year_start": {"$in": ay_set}, "term_number": {"$in": tn_set}},
+            {"_id": 0, "term_id": 1, "acad_year_start": 1, "term_number": 1},
+        ).to_list(None)
+        for td in term_docs:
+            ay = td.get("acad_year_start")
+            tn = td.get("term_number")
+            tid = td.get("term_id")
+            if ay is not None and tn is not None and tid:
+                term_map[(int(ay), int(tn))] = tid
+
+    # ---- Validate ALL rows first (all-or-nothing) ----
+    errors: list[str] = []
+    normalized_rows: list[Dict[str, Any]] = []
+
+    seen_keys: set[str] = set()
+
+    for i, raw in enumerate(rows):
+        row_no = i + 2  # header = row 1
+        if not raw or not isinstance(raw, dict):
+            continue
+
+        batch_code = str(raw.get("Batch") or raw.get("batch") or "").strip()
+        program_code = str(raw.get("Program") or raw.get("Program Code") or raw.get("program") or "").strip()
+        campus_cell = str(raw.get("Campus") or raw.get("campus") or "").strip()
+
+        term_no = _parse_term_no(raw.get("Term Number") or raw.get("TermNumber") or raw.get("term_number"))
+        ay_start = _parse_ay_start(raw.get("Academic Year") or raw.get("AY") or raw.get("acad_year_start"))
+
+        course_codes = _course_codes_from_row(raw)
+
+        row_errs: list[str] = []
+        if not batch_code:
+            row_errs.append("Batch is required")
+        if not program_code:
+            row_errs.append("Program is required")
+        if not campus_cell:
+            row_errs.append("Campus is required")
+        if not term_no:
+            row_errs.append("Term Number is required")
+        elif term_no < 1 or term_no > 3:
+            row_errs.append("Term Number must be 1, 2, or 3")
+        if not ay_start:
+            row_errs.append("Academic Year must include a 4-digit start year (e.g., 2027)")
+
+        # Campus must match the selected campus (case-insensitive)
+        if campus_cell and target_campus_norm and (_norm(campus_cell) not in {target_campus_norm, target_campus_id_norm}):
+            row_errs.append(f"Program campus mismatch; you are importing for {campus_name}")
+
+        if not course_codes:
+            row_errs.append("At least one course code is required (Course 1, Course 2, ...)")
+
+        # Program exists?
+        program = program_by_code.get(program_code) if program_code else None
+        if program_code and not program:
+            row_errs.append(f"Program {program_code!r} not found")
+
+        # Term exists?
+        term_id = default_term_id
+        if ay_start and term_no:
+            term_id = term_map.get((ay_start, term_no))
+            if not term_id:
+                row_errs.append(f"No term found for Academic Year {ay_start} Term {term_no}")
+
+        # Courses exist?
+        missing_courses = [cc for cc in course_codes if cc not in course_by_code]
+        if missing_courses:
+            row_errs.append("Unknown course code(s): " + ", ".join(sorted(set(missing_courses))))
+
+        # Duplicate row in file?
+        if batch_code and program_code and ay_start and term_no:
+            key = f"{batch_code}|{program_code}|{ay_start}|{term_no}".lower()
+            if key in seen_keys:
+                row_errs.append("Duplicate row for the same Batch + Program + Academic Year + Term Number")
+            else:
+                seen_keys.add(key)
+
+        if row_errs:
+            errors.append(f"Row {row_no}: " + "; ".join(row_errs))
+            continue
+
+        program_id = program["program_id"]
+        course_ids = [course_by_code[cc] for cc in course_codes if cc in course_by_code]
+
+        normalized_rows.append(
+            {
+                "batch_code": batch_code,
+                "program_code": program_code,
+                "program_id": program_id,
+                "term_id": term_id,
+                "ay_start": ay_start,
+                "term_no": term_no,
+                "course_ids": course_ids,
+            }
+        )
+
+    if errors:
+        detail = (
+            f"Invalid Curriculum CSV file for {str(campus_name).upper()}. Nothing was saved.\n"
+            + "\n".join(f"- {e}" for e in errors)
+        )
+        raise HTTPException(status_code=400, detail=detail)
+
+    if not normalized_rows:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid Curriculum CSV file for {str(campus_name).upper()}. Nothing was saved.\n- No valid rows found.",
+        )
+
+    # ---- Apply writes (validated) ----
     created_batches: List[str] = []
     updated_curricula: List[Dict[str, Any]] = []
 
-    for raw in rows:
-        if not raw:
+    # Batch existence map
+    batch_key_to_id: Dict[tuple[str, str], str] = {}
+    batch_docs = await db[COL_BATCHES].find(
+        {"batch_code": {"$in": sorted({r["batch_code"] for r in normalized_rows})}}
+    ).to_list(None)
+    for b in batch_docs:
+        if not b:
             continue
+        key = (b.get("batch_code"), b.get("program_id"))
+        if key[0] and key[1]:
+            batch_key_to_id[(key[0], key[1])] = b["batch_id"]
 
-        # ---- CSV columns ----
-        batch_code = (str(raw.get("Batch") or raw.get("batch") or "")).strip()
-        program_level = (str(raw.get("Program Level") or raw.get("ProgramLevel") or "")).strip()
-        program_code = (str(raw.get("Program") or raw.get("Program Code") or "")).strip()
+    # Next batch_id counter
+    last_batch = await db[COL_BATCHES].find({"batch_id": {"$regex": r"^BATCH[0-9]+$"}}).sort("batch_id", -1).limit(1).to_list(1)
+    next_batch_num = int(last_batch[0]["batch_id"][5:]) if last_batch else 0
 
-        # not strictly needed for DB, but read them if you want to log/use later
-        term_number_csv = raw.get("Term Number") or raw.get("TermNumber")
-        acad_year_csv = raw.get("Academic Year") or raw.get("AY")
+    # Determine intake term per (batch_code, program_id) as earliest (ay_start, term_no)
+    intake_term_by_batch: Dict[tuple[str, str], str] = {}
+    # Compute earliest tuple
+    earliest_tuple_by_batch: Dict[tuple[str, str], tuple[int, int, str]] = {}
+    for r in normalized_rows:
+        key = (r["batch_code"], r["program_id"])
+        tup = (int(r["ay_start"]), int(r["term_no"]), r["term_id"])
+        prev = earliest_tuple_by_batch.get(key)
+        if not prev or (tup[0], tup[1]) < (prev[0], prev[1]):
+            earliest_tuple_by_batch[key] = tup
 
-        if not batch_code or not program_code:
-            # skip incomplete row
+    for key, tup in earliest_tuple_by_batch.items():
+        intake_term_by_batch[key] = tup[2]
+
+    # Create missing batches
+    for (batch_code, program_id), intake_tid in intake_term_by_batch.items():
+        if (batch_code, program_id) in batch_key_to_id:
             continue
-
-        # 1) Resolve program_id from Program column (e.g., "BSCS-ST")
-        program = await db[COL_PROGRAMS].find_one({"program_code": program_code})
-        if not program:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Program {program_code!r} not found in programs collection",
-            )
-        program_id = program["program_id"]
-
-        # 2) Ensure batch exists (CSV "Batch" = batches.batch_code)
-        batch = await db[COL_BATCHES].find_one(
-            {"batch_code": batch_code, "program_id": program_id}
-        )
-
-        if not batch:
-            # Generate next batch_id, e.g., BATCH0001, BATCH0002, ...
-            last_batch = await db[COL_BATCHES].find(
-                {"batch_id": {"$regex": r"^BATCH[0-9]+$"}}
-            ).sort("batch_id", -1).limit(1).to_list(1)
-            if last_batch:
-                last_num = int(last_batch[0]["batch_id"][5:])
-            else:
-                last_num = 0
-            batch_id = f"BATCH{last_num + 1:04d}"
-
-            batch_doc = {
-                "batch_id": batch_id,
-                "batch_code": batch_code,      # <-- "ID 126"
-                "program_id": program_id,
-                "intake_term_id": term_id,
-                "curriculum_id": None,         # filled after curriculum insert
-                "status": "active",
-                "created_at": datetime.utcnow(),
-                "updated_at": datetime.utcnow(),
-            }
-            await db[COL_BATCHES].insert_one(batch_doc)
-            created_batches.append(batch_id)
-        else:
-            batch_id = batch["batch_id"]
-
-        # 3) Collect course codes from Course 1, Course 2, ...
-        course_codes: List[str] = []
-        for key, value in raw.items():
-            if key.lower().startswith("course"):
-                v = str(value or "").strip()
-                if v:
-                    course_codes.append(v)
-
-        if not course_codes:
-            continue
-
-        # 4) Resolve course_ids using courses.course_code (ARRAY)
-        course_docs = await db[COL_COURSES].find(
-            {"course_code": {"$in": course_codes}}
-        ).to_list(None)
-
-        found_codes = {
-            code for doc in course_docs for code in doc.get("course_code", [])
+        next_batch_num += 1
+        batch_id = f"BATCH{next_batch_num:04d}"
+        batch_doc = {
+            "batch_id": batch_id,
+            "batch_code": batch_code,
+            "program_id": program_id,
+            "intake_term_id": intake_tid,
+            "curriculum_id": None,
+            "status": "active",
+            "created_at": datetime.utcnow(),
+            "updated_at": datetime.utcnow(),
         }
-        missing = sorted(set(course_codes) - found_codes)
-        if missing:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"Unknown course_code(s) in CSV for program {program_code!r}: "
-                    + ", ".join(missing)
-                ),
-            )
+        await db[COL_BATCHES].insert_one(batch_doc)
+        batch_key_to_id[(batch_code, program_id)] = batch_id
+        created_batches.append(batch_id)
 
-        course_ids = [doc["course_id"] for doc in course_docs]
+    # Next curriculum_id counter
+    last_cur = await db[COL_CURRICULUM].find({"curriculum_id": {"$regex": r"^CUR[0-9]+$"}}).sort("curriculum_id", -1).limit(1).to_list(1)
+    next_cur_num = int(last_cur[0]["curriculum_id"][3:]) if last_cur else 0
 
-        # 5) Upsert curriculum (one per batch_id + term_id + campus_id)
+    # Upsert curricula
+    for r in normalized_rows:
+        batch_id = batch_key_to_id[(r["batch_code"], r["program_id"])]
+        term_id = r["term_id"]
         existing_cur = await db[COL_CURRICULUM].find_one(
             {"batch_id": batch_id, "term_id": term_id, "campus_id": campus_id}
         )
         if existing_cur:
             curriculum_id = existing_cur["curriculum_id"]
         else:
-            last_cur = await db[COL_CURRICULUM].find(
-                {"curriculum_id": {"$regex": r"^CUR[0-9]+$"}}
-            ).sort("curriculum_id", -1).limit(1).to_list(1)
-            if last_cur:
-                last_num = int(last_cur[0]["curriculum_id"][3:])
-            else:
-                last_num = 0
-            curriculum_id = f"CUR{last_num + 1:04d}"
+            next_cur_num += 1
+            curriculum_id = f"CUR{next_cur_num:04d}"
 
         curriculum_doc = {
             "curriculum_id": curriculum_id,
             "batch_id": batch_id,
-            "program_id": program_id,
+            "program_id": r["program_id"],
             "term_id": term_id,
             "campus_id": campus_id,
-            # *** IMPORTANT: list of course_id strings ***
-            "course_list": course_ids,
-            "created_at": datetime.utcnow(),
+            "course_list": r["course_ids"],
+            "created_at": existing_cur.get("created_at") if existing_cur else datetime.utcnow(),
             "updated_at": datetime.utcnow(),
         }
-
         await db[COL_CURRICULUM].update_one(
             {"curriculum_id": curriculum_id},
             {"$set": curriculum_doc},
             upsert=True,
         )
 
-        # 6) Link batch -> curriculum
-        await db[COL_BATCHES].update_one(
-            {"batch_id": batch_id},
-            {"$set": {"curriculum_id": curriculum_id, "updated_at": datetime.utcnow()}},
-        )
+        # Link batch -> curriculum only for the intake term (earliest term in the import for that batch)
+        intake_tid = intake_term_by_batch[(r["batch_code"], r["program_id"])]
+        if term_id == intake_tid:
+            await db[COL_BATCHES].update_one(
+                {"batch_id": batch_id},
+                {"$set": {"curriculum_id": curriculum_id, "updated_at": datetime.utcnow()}},
+            )
 
         updated_curricula.append(
             {
                 "batch_id": batch_id,
                 "curriculum_id": curriculum_id,
-                "course_count": len(course_ids),
+                "course_count": len(r["course_ids"]),
+                "term_id": term_id,
             }
         )
 

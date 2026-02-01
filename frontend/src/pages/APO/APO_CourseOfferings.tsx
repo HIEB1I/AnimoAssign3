@@ -10,6 +10,7 @@ import {
   Plus,
   ChevronDown,
   AlertTriangle,
+  Upload,
   Copy,
   Undo2,
   Redo2,
@@ -928,7 +929,49 @@ const EligibleRoomSelect: React.FC<{
   const [showEditCourseModal, setShowEditCourseModal] = useState(false); // ← NEW
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [importBusy, setImportBusy] = useState(false);
-  // Offerings collapse state (keyed by "ID::PROGRAM")
+const [showCurrImportModal, setShowCurrImportModal] = useState(false);
+const [currImportErr, setCurrImportErr] = useState<string | null>(null);
+
+  const downloadCurriculumCsvTemplate = () => {
+    // CSV template for List of Courses (curriculum/flowchart import)
+    const headers = [
+      "Batch",
+      "Program Level",
+      "Program",
+      "Term Number",
+      "Academic Year",
+      "Campus",
+      "Course 1",
+      "Course 2",
+      "Course 3",
+      "Course 4",
+      "Course 5",
+    ];
+    const sample = [
+      "ID 126",
+      "Undergraduate",
+      "BSCS-ST",
+      "1",
+      String(new Date().getFullYear() + 1),
+      (curr?.campus?.campus_name ?? data?.campus?.campus_name ?? "Manila"),
+      "CCDSALG",
+      "CCPROG2",
+      "",
+      "",
+      "",
+    ];
+    const csv = headers.join(",") + "\n" + sample.join(",") + "\n";
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "apo_list_of_courses_template.csv";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  };
+// Offerings collapse state (keyed by "ID::PROGRAM")
   const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
 
   const user = useMemo(() => {
@@ -2744,6 +2787,90 @@ if (isGE) {
                 onChange={(v: string) => setProgramCode(v)}
                 options={["All Programs", ...(data?.filters.programs || []).map((p) => p.program_code)]}
               />
+
+              {showCurrImportModal && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4">
+                  <div className="w-full max-w-2xl overflow-hidden rounded-2xl bg-white shadow-xl">
+                    <div className="p-6">
+                      <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-full border border-emerald-600 text-emerald-700">
+                        <Upload className="h-7 w-7" />
+                      </div>
+
+                      <h3 className="text-center text-xl font-semibold">
+                        Import List of Courses CSV
+                      </h3>
+
+                      <p className="mt-1 text-center text-sm text-slate-600">
+                        This will create or update curriculum rows for{" "}
+                        <span className="font-semibold">
+                          {(curr?.campus?.campus_name ?? data?.campus?.campus_name ?? "your campus")}
+                        </span>{" "}
+                        across multiple terms, based on <span className="font-semibold">Academic Year</span>{" "}
+                        and <span className="font-semibold">Term Number</span>.
+                      </p>
+
+                      <div className="mt-5 rounded-lg border border-emerald-200 bg-emerald-50 p-4 text-sm text-slate-700">
+                        <div className="mb-2 font-semibold text-emerald-800">CSV format</div>
+                        <ul className="list-disc space-y-1 pl-5">
+                          <li>
+                            Required columns: <span className="font-semibold">Batch, Program Level, Program, Term Number, Academic Year, Campus, Course 1...</span>
+                          </li>
+                          <li>
+                            Campus must match the selected campus shown above.
+                          </li>
+                          <li>
+                            Each row becomes one curriculum row for that batch/program in that term.
+                          </li>
+                        </ul>
+
+                        <button
+                          type="button"
+                          className="mt-3 inline-flex items-center gap-2 rounded-md border border-emerald-700 bg-white px-3 py-2 text-sm font-medium text-emerald-700 hover:bg-emerald-50"
+                          onClick={downloadCurriculumCsvTemplate}
+                          disabled={importBusy}
+                        >
+                          <Copy className="h-4 w-4" />
+                          Download CSV template
+                        </button>
+                        <div className="mt-1 text-xs text-slate-500">
+                          Use the template to avoid wrong columns / formatting.
+                        </div>
+                      </div>
+
+                      {currImportErr && (
+                        <div className="mt-4 whitespace-pre-line rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+                          {currImportErr}
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="flex items-center justify-end gap-2 border-t p-4">
+                      <button
+                        type="button"
+                        className="rounded-md border px-4 py-2 text-sm"
+                        onClick={() => {
+                          setShowCurrImportModal(false);
+                          setCurrImportErr(null);
+                          if (fileInputRef.current) fileInputRef.current.value = "";
+                        }}
+                        disabled={importBusy}
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="button"
+                        className="inline-flex items-center gap-2 rounded-md bg-emerald-700 px-4 py-2 text-sm font-medium text-white shadow-sm disabled:opacity-50"
+                        onClick={() => fileInputRef.current?.click()}
+                        disabled={importBusy}
+                      >
+                        <Upload className="h-4 w-4" />
+                        Choose File
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
             </>
           )}
           {/* Right side of toolbar */}
@@ -2791,7 +2918,10 @@ if (isGE) {
                   type="button"
                   className="inline-flex items-center gap-2 rounded-md border border-emerald-700 px-4 py-2 text-sm font-medium text-emerald-700 hover:bg-emerald-50 disabled:opacity-50"
                   disabled={importBusy}
-                  onClick={() => fileInputRef.current?.click()}
+                  onClick={() => {
+                    setCurrImportErr(null);
+                    setShowCurrImportModal(true);
+                  }}
                   title="Import curriculum (IDs / flowcharts) from CSV"
                 >
                   <Plus className="h-4 w-4" />
@@ -2830,6 +2960,7 @@ if (isGE) {
                   if (!file || !user?.userId) return;
 
                   setImportBusy(true);
+                  setCurrImportErr(null);
 
                   //Papa.parse<any>(file, {
                    Papa.parse(file, {
@@ -2850,13 +2981,118 @@ if (isGE) {
                             termId,
                             campusName,
                           });
-                          alert(
+                          setCurrImportErr(
                             "Cannot import CSV: missing term or campus for this curriculum."
                           );
                           return;
                         }
 
-                              const response = await importCurriculumCsv(user.userId, {
+                              
+                        // ---------- Validate headers + rows (client-side) ----------
+                        const normalize = (v: any) => String(v ?? "").trim();
+                        const campusCol = (raw: any) => normalize(raw?.Campus || raw?.campus);
+                        const batchCol = (raw: any) => normalize(raw?.Batch || raw?.batch);
+                        const progCol = (raw: any) =>
+                          normalize(raw?.Program || raw?.["Program Code"] || raw?.program || raw?.program_code);
+                        const termNoCol = (raw: any) => normalize(raw?.["Term Number"] || raw?.TermNumber || raw?.term_number);
+                        const ayCol = (raw: any) => normalize(raw?.["Academic Year"] || raw?.AY || raw?.acad_year_start);
+
+                        const courseKeys = (result?.meta?.fields || []).filter((f: string) =>
+                          /^course\s*\d+$/i.test(String(f || "").trim())
+                        );
+
+                        const headerAliases: Record<string, string[]> = {
+                          "Batch": ["Batch", "batch"],
+                          "Program Level": ["Program Level", "ProgramLevel"],
+                          "Program": ["Program", "Program Code", "program", "program_code"],
+                          "Term Number": ["Term Number", "TermNumber", "term_number"],
+                          "Academic Year": ["Academic Year", "AY", "acad_year_start"],
+                          "Campus": ["Campus", "campus"],
+                        };
+
+                        const fields = (result?.meta?.fields || []).map((f: any) => String(f || "").trim());
+                        const missingHeaders = Object.entries(headerAliases)
+                          .filter(([, aliases]) => !aliases.some((a) => fields.includes(a)))
+                          .map(([canon]) => canon);
+                        const rowErrors: string[] = [];
+
+                        if (missingHeaders.length) {
+                          rowErrors.push(
+                            `Missing required column(s): ${missingHeaders.join(", ")}`
+                          );
+                        }
+                        if (!courseKeys.length) {
+                          rowErrors.push(
+                            "Missing course columns. Include at least 'Course 1' (and Course 2, Course 3, ... as needed)."
+                          );
+                        }
+
+                        const targetCampus = (campusName || "").trim().toLowerCase();
+
+                        const seen = new Set<string>();
+                        (rows || []).forEach((r: any, i: number) => {
+                          if (!r) return;
+                          const rowNo = i + 2; // CSV header is row 1
+                          const batch = batchCol(r);
+                          const prog = progCol(r);
+                          const tno = termNoCol(r);
+                          const ay = ayCol(r);
+                          const cpn = campusCol(r);
+
+                          // skip fully blank rows
+                          const anyVal =
+                            batch || prog || tno || ay || cpn || courseKeys.some((k: string) => normalize(r[k]));
+                          if (!anyVal) return;
+
+                          const errs: string[] = [];
+                          if (!batch) errs.push("Batch is required");
+                          if (!prog) errs.push("Program is required");
+                          if (!tno) errs.push("Term Number is required");
+                          if (!ay) errs.push("Academic Year is required");
+                          if (!cpn) errs.push("Campus is required");
+
+                          const tnoInt = parseInt(tno, 10);
+                          if (tno && (!Number.isFinite(tnoInt) || tnoInt < 1 || tnoInt > 3)) {
+                            errs.push("Term Number must be 1, 2, or 3");
+                          }
+
+                          const ayMatch = ay.match(/\d{4}/);
+                          if (ay && !ayMatch) {
+                            errs.push("Academic Year must include a 4-digit start year (e.g., 2027)");
+                          }
+
+                          if (cpn && targetCampus && cpn.toLowerCase() !== targetCampus) {
+                            errs.push(`Campus must be ${campusName} (you are importing for ${campusName})`);
+                          }
+
+                          const courseVals = courseKeys
+                            .map((k: string) => normalize(r[k]))
+                            .filter(Boolean);
+                          if (!courseVals.length) {
+                            errs.push("At least one course code is required (Course 1, Course 2, ...)");
+                          }
+
+                          const dedupeKey = [batch, prog, ayMatch?.[0] || ay, String(tnoInt || tno)].join("|").toLowerCase();
+                          if (batch && prog && ay && tno && seen.has(dedupeKey)) {
+                            errs.push("Duplicate row for the same Batch + Program + Academic Year + Term Number");
+                          } else if (batch && prog && ay && tno) {
+                            seen.add(dedupeKey);
+                          }
+
+                          if (errs.length) {
+                            rowErrors.push(`Row ${rowNo}: ${errs.join("; ")}`);
+                          }
+                        });
+
+                        if (rowErrors.length) {
+                          setCurrImportErr(
+                            `Invalid Curriculum CSV file for ${String(campusName || "campus").toUpperCase()}. Nothing was saved.\n` +
+                              rowErrors.map((e) => `- ${e}`).join("\n")
+                          );
+                          return;
+                        }
+                        // ---------- end validation ----------
+const response = await importCurriculumCsv(user.userId, {
                       rows,
                       term_id: termId,
                       campus_name: campusName,
@@ -2883,7 +3119,7 @@ if (isGE) {
                         }
                       } catch (err: any) {
                         console.error("CSV import failed:", err);
-                        alert(err.message || "CSV import failed");
+                        setCurrImportErr(err?.message || "CSV import failed");
                       } finally {
                         setImportBusy(false);
                         if (fileInputRef.current) fileInputRef.current.value = "";
@@ -2892,13 +3128,97 @@ if (isGE) {
                     //error: (err) => {
                     error: (err: unknown) => {
                       console.error("CSV parse error:", err);
-                      alert("Failed to parse CSV file. Please check the format.");
+                      setCurrImportErr("Failed to parse CSV file. Please check the format.");
                       setImportBusy(false);
                       input.value = "";
                     },
                   });
                 }}
               />
+
+              {showCurrImportModal && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4">
+                  <div className="w-full max-w-2xl overflow-hidden rounded-2xl bg-white shadow-xl">
+                    <div className="p-6">
+                      <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-full border border-emerald-600 text-emerald-700">
+                        <Upload className="h-7 w-7" />
+                      </div>
+
+                      <h3 className="text-center text-xl font-semibold">
+                        Import List of Courses CSV
+                      </h3>
+
+                      <p className="mt-1 text-center text-sm text-slate-600">
+                        This will create or update curriculum rows for{" "}
+                        <span className="font-semibold">
+                          {(curr?.campus?.campus_name ?? data?.campus?.campus_name ?? "your campus")}
+                        </span>{" "}
+                        across multiple terms, based on <span className="font-semibold">Academic Year</span>{" "}
+                        and <span className="font-semibold">Term Number</span>.
+                      </p>
+
+                      <div className="mt-5 rounded-lg border border-emerald-200 bg-emerald-50 p-4 text-sm text-slate-700">
+                        <div className="mb-2 font-semibold text-emerald-800">CSV format</div>
+                        <ul className="list-disc space-y-1 pl-5">
+                          <li>
+                            Required columns: <span className="font-semibold">Batch, Program Level, Program, Term Number, Academic Year, Campus, Course 1...</span>
+                          </li>
+                          <li>
+                            Campus must match the selected campus shown above.
+                          </li>
+                          <li>
+                            Each row becomes one curriculum row for that batch/program in that term.
+                          </li>
+                        </ul>
+
+                        <button
+                          type="button"
+                          className="mt-3 inline-flex items-center gap-2 rounded-md border border-emerald-700 bg-white px-3 py-2 text-sm font-medium text-emerald-700 hover:bg-emerald-50"
+                          onClick={downloadCurriculumCsvTemplate}
+                          disabled={importBusy}
+                        >
+                          <Copy className="h-4 w-4" />
+                          Download CSV template
+                        </button>
+                        <div className="mt-1 text-xs text-slate-500">
+                          Use the template to avoid wrong columns / formatting.
+                        </div>
+                      </div>
+
+                      {currImportErr && (
+                        <div className="mt-4 whitespace-pre-line rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+                          {currImportErr}
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="flex items-center justify-end gap-2 border-t p-4">
+                      <button
+                        type="button"
+                        className="rounded-md border px-4 py-2 text-sm"
+                        onClick={() => {
+                          setShowCurrImportModal(false);
+                          setCurrImportErr(null);
+                          if (fileInputRef.current) fileInputRef.current.value = "";
+                        }}
+                        disabled={importBusy}
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="button"
+                        className="inline-flex items-center gap-2 rounded-md bg-emerald-700 px-4 py-2 text-sm font-medium text-white shadow-sm disabled:opacity-50"
+                        onClick={() => fileInputRef.current?.click()}
+                        disabled={importBusy}
+                      >
+                        <Upload className="h-4 w-4" />
+                        Choose File
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
             </>
           )}
         </div>
