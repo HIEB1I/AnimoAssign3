@@ -1790,7 +1790,9 @@ async def respond_load_assignment_rfc(
         locked = True
         extra["closed_at"] = now
 
-        # ✅ Reject only finalizes the matching subject row (not all rows)
+        # ✅ Reject behavior (hybrid):
+        # - If RFC is tied to a specific section (section_id provided), finalize ONLY that row.
+        # - If RFC is schedule-wide (no section_id), treat it as terminal and lock/finalize the whole schedule.
         if section_id:
             try:
                 await db[COL_LOAD_PROPOSALS].update_one(
@@ -1800,24 +1802,44 @@ async def respond_load_assignment_rfc(
                 )
             except Exception:
                 pass
+        else:
+            try:
+                await db[COL_LOAD_PROPOSALS].update_one(
+                    {"faculty_id": faculty_id, "term_id": term_id},
+                    {
+                        "$set": {
+                            "status": "approved",
+                            "locked": True,
+                            "rows.$[].finalized": True,
+                            "updated_at": now,
+                        },
+                        "$setOnInsert": {"created_at": now},
+                    },
+                    upsert=True,
+                )
+            except Exception:
+                pass
 
     rfc_id = rfc.get("rfc_id")
 
     # ✅ Update only this RFC thread (qkey includes section_id when present)
     await db[COL_LOAD_RFC].update_one(
         qkey,
-        {"$set": {
-            "rfc_id": rfc_id,
-            "faculty_id": faculty_id,
-            "term_id": term_id,
-            "section_id": section_id or rfc.get("section_id"),
-            "status": new_status,
-            "locked": locked,
-            "messages": msgs,
-            "updated_at": now,
-            **extra,
-        }},
-        upsert=False,
+        {
+            "$set": {
+                "rfc_id": rfc_id,
+                "faculty_id": faculty_id,
+                "term_id": term_id,
+                "section_id": section_id or rfc.get("section_id"),
+                "status": new_status,
+                "locked": locked,
+                "messages": msgs,
+                "updated_at": now,
+                **extra,
+            },
+            "$setOnInsert": {"created_at": now},
+        },
+        upsert=True,
     )
 
     # notify faculty

@@ -1112,7 +1112,7 @@ function ChangeRequestModal({
                   term_id: (term as any)?.term_id || (term as any)?._id || (term as any)?.id,
                   message: msg,
                   course_code: context.item.code,
-                  section: context.item.sec,
+                  section_id: context.item.sec,
                 });
                 window.location.reload();
                const sectionId =

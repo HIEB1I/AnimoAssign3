@@ -814,6 +814,11 @@ async def _get_previous_term() -> Optional[Dict[str, Any]]:
     t["term_label"] = _term_label(t)
     return t
 
+async def _send_email_via_user_gmail(*args, **kwargs):
+    # Email integration not implemented / not configured in this project.
+    return False, "Email sending not configured"
+
+
 @router.get("/load-assignment/rfc")
 async def faculty_get_load_rfc(userId: str = Query(...), term_id: Optional[str] = Query(None)):
     faculty = await db[COL_FACULTY].find_one({"user_id": userId}, {"_id": 0, "faculty_id": 1, "first_name": 1, "last_name": 1})
