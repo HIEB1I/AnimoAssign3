@@ -1,6 +1,6 @@
 // frontend/src/pages/CHAIR/CHAIR_FacultyService.tsx
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { Send, ChevronDown, X, CheckCircle2, AlertCircle, Info } from "lucide-react";
+import { Send, Check, ChevronDown, X, CheckCircle2, AlertCircle, Info } from "lucide-react";
 import {
   getFSOptions,
   listFacultyService,
@@ -13,6 +13,7 @@ import {
   type DayShort,
   getChairHeader,
 } from "@/api";
+import Tabs from "../../component/Tabs";
 
 /* ---------------- tiny utils ---------------- */
 const cls = (...s: (string | false | undefined)[]) => s.filter(Boolean).join(" ");
@@ -349,6 +350,16 @@ const END_BY_BEGIN: Record<(typeof BEGIN_OPTIONS)[number], string> = {
   "19:45": "21:00",
 };
 
+// Use only M/T/W for the first day, and auto-pair Day2
+const DAY1_OPTIONS: DayShort[] = ["M", "T", "W"];
+
+const DAY2_BY_DAY1: Partial<Record<DayShort, DayShort>> = {
+  M: "H", // MH
+  T: "F", // TF
+  W: "S", // WS
+};
+
+
 /** full receiver layout (13 columns) */
 const COLS_14 = [
   "38ch", // Course Code & Title
@@ -366,14 +377,6 @@ const COLS_14 = [
   "22ch", // Action
 ];
 
-// Use only M/T/W for the first day, and auto-pair Day2
-const DAY1_OPTIONS: DayShort[] = ["M", "T", "W"];
-
-const DAY2_BY_DAY1: Partial<Record<DayShort, DayShort>> = {
-  M: "H", // MH
-  T: "F", // TF
-  W: "S", // WS
-};
 
 function ColGroup14() {
   return (
@@ -790,11 +793,15 @@ export default function CHAIR_FacultyService({ chairDepartmentName }: ChairFacul
     [sentRows, activeDeptName]
   );
 
-  /* ---------------- UI ---------------- */
+  const [tab, setTab] = useState<"Create Request" | "Received Requests" | "Accepted Requests">("Create Request");
+
+  
+/* ---------------- UI ---------------- */
   return (
-    <div className="min-h-screen w-full bg-gray-50 text-slate-900 px-8 py-8">
+    <div className="min-h-screen w-full bg-gray-50 text-slate-900">
       <ToastViewport items={toasts} onClose={closeToast} />
-      <header className="mb-6">
+
+      <header className="px-8 pt-8 mb-2">
         <h1 className="text-2xl font-bold">Faculty Service</h1>
         <p className="text-sm text-gray-600">
           Create faculty service requests from your department, track sent requests, and respond to requests addressed to
@@ -803,323 +810,139 @@ export default function CHAIR_FacultyService({ chairDepartmentName }: ChairFacul
         </p>
       </header>
 
-      {/* 1) CREATE REQUEST (From = activeDeptName) */}
-      <div className={cls(PLANTILLA_TABLE_WRAP, "overflow-y-visible mb-8")}>
-        <div className={cls(PLANTILLA_SECTION_TITLE, "w-full")}>Create Request</div>
+      {/* Menu tabs (imitates Faculty UI) */}
+      <Tabs
+        mode="state"
+        activeTab={tab}
+        onTabChange={(t) => setTab(t as any)}
+        items={[
+          { label: "Create Request" },
+          { label: "Received Requests" },
+          { label: "Accepted Requests" },
+        ]}
+      />
+
+      <main className="w-full px-8 pb-24">
+        {/* 1) CREATE REQUEST (From = activeDeptName) */}
+        {tab === "Create Request" && (
+          <>
+          <div className={cls(PLANTILLA_TABLE_WRAP, "overflow-y-visible mb-8")}> 
+            <div className={cls(PLANTILLA_SECTION_TITLE, "w-full")}>Create Request</div>
 
             <div className="overflow-x-auto">
               <table className={PLANTILLA_TABLE}>
-              <ColGroupReq />
-              <thead className={PLANTILLA_THEAD}>
-                <tr className={PLANTILLA_HEAD_TR}>
-                  <th className={PLANTILLA_TH}>Course Code</th>
-                  <th className={PLANTILLA_TH}>Course Title</th>
-                  <th className={PLANTILLA_TH}>Units</th>
-                  <th className={PLANTILLA_TH}>From</th>
-                  <th className={PLANTILLA_TH}>To</th>
-                  <th className={PLANTILLA_TH}>Action</th>
-                </tr>
-              </thead>
-
-              <tbody className="text-gray-800">
-                <tr className={PLANTILLA_ROW}>
-                  {/* Course Code */}
-                  <td className={cls(PLANTILLA_TD, "align-middle")}>
-                    <div className="relative">
-                      <Dropdown
-                        value={draft.course_code}
-                        onChange={(code) => {
-                          const hit = courseSuggestions.find((c) => c.code === code);
-                          setDraft((d) => ({
-                            ...d,
-                            course_code: code,
-                            course_title: hit?.title ?? d.course_title,
-                            units: hit?.units ?? d.units,
-                          }));
-                          setCourseTerm("");
-                        }}
-                        options={codeOptions}
-                        placeholder="Select code…"
-                        searchable
-                        className="min-w-[10rem] [&>button]:h-9 [&>button]:px-2"
-                        onOpen={() => setCourseTerm("")}
-                      />
-                    </div>
-                  </td>
-
-                  {/* Course Title (readonly) */}
-                  <td className={cls(PLANTILLA_TD, "align-middle")}>
-                    <span className="inline-block max-w-full truncate leading-6 px-1">
-                      {draft.course_title || "\u00A0"}
-                    </span>
-                  </td>
-
-                  {/* Units (readonly) */}
-                  <td className={cls(PLANTILLA_TD, "align-middle tabular-nums")}>
-                    <span className="inline-block leading-6">{draft.units ?? "\u00A0"}</span>
-                  </td>
-
-                  {/* From */}
-                  <td className={cls(PLANTILLA_TD, "align-middle")}>
-                    <span className="inline-block leading-6" title={activeDeptName}>
-                      {activeDeptName}
-                    </span>
-                  </td>
-
-                  {/* To */}
-                  <td className={cls(PLANTILLA_TD, "align-middle")}>
-                    <Dropdown
-                      value={draft.to_department}
-                      onChange={(v) => setDraft((d) => ({ ...d, to_department: v as ToDept }))}
-                      options={toDepts}
-                      placeholder="Select department…"
-                      className="[&>button]:h-9 [&>button]:px-2"
-                    />
-                  </td>
-
-                  {/* Action */}
-                  <td className={cls(PLANTILLA_TD, "align-middle")}>
-                    <button
-                      className={cls(
-                        "inline-flex h-9 w-full items-center justify-center gap-1.5 rounded-md px-2 text-[13px] font-medium shadow-sm",
-                        canSend
-                          ? "bg-[#008e4e] text-white hover:brightness-110"
-                          : "bg-neutral-200 text-neutral-500 cursor-not-allowed"
-                      )}
-                      disabled={!canSend}
-                      onClick={handleCreateAndSend}
-                      title="Send request"
-                    >
-                      <Send className="h-4 w-4" />
-                      Send
-                    </button>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-	      </div>
-
-      </div>
-
-      {/* 2) SENT REQUESTS (from my department) */}
-      <div className={cls(PLANTILLA_TABLE_WRAP, "mt-3 flex-1 min-h-[320px]")}>
-          <div className="overflow-x-auto">
-            <div className={cls(PLANTILLA_SECTION_TITLE, "w-full")}>Sent Requests</div>
-
-            <table className={PLANTILLA_TABLE}>
-
-              <ColGroupSent />
-              <thead className={PLANTILLA_THEAD}>
-                <tr className={PLANTILLA_HEAD_TR}>
-                  <th className={PLANTILLA_TH}>Course Code &amp; Title</th>
-                  <th className={PLANTILLA_TH}>Units</th>
-                  <th className={PLANTILLA_TH}>From</th>
-                  <th className={PLANTILLA_TH}>To</th>
-                  <th className={PLANTILLA_TH}>Status</th>
-                </tr>
-              </thead>
-
-              <tbody className="text-gray-800">
-                {sentRows.map((r) => (
-                  <tr key={r.fs_id} className={PLANTILLA_ROW}>
-                    <td className={cls(PLANTILLA_TD, "text-left")}>
-                      <div className="font-semibold text-emerald-700">{r.course_code}</div>
-                      <div className="text-[12px] text-neutral-600 leading-tight">{r.course_title}</div>
-                    </td>
-
-                    <td className={cls(PLANTILLA_TD, "tabular-nums")}>{r.units ?? ""}</td>
-
-                    <td className={cls(PLANTILLA_TD, "truncate")} title={r.from_department}>
-                      {r.from_department}
-                    </td>
-
-                    <td className={cls(PLANTILLA_TD, "truncate")} title={r.to_department}>
-                      {r.to_department}
-                    </td>
-
-                    <td className={PLANTILLA_TD}>
-                      <span
-                        className={cls(
-                          "inline-block rounded-full px-2 py-[2px] text-[12px]",
-                          r.status === "responded"
-                            ? "bg-emerald-100 text-emerald-700"
-                            : r.status === "rejected"
-                            ? "bg-red-100 text-red-700"
-                            : "bg-amber-100 text-amber-700"
-                        )}
-                      >
-                        {r.status === "responded" ? "Responded" : r.status === "rejected" ? "Rejected" : "Sent"}
-                      </span>
-                    </td>
-                  </tr>
-                ))}
-
-                {sentRows.length === 0 && !loadingList && (
-                  <tr className={PLANTILLA_ROW}>
-                    <td className={cls(PLANTILLA_TD, "py-6 text-sm text-gray-500")} colSpan={5}>
-                      No sent requests yet.
-                    </td>
-                  </tr>
-                )}
-
-                {loadingList && (
-                  <tr className={PLANTILLA_ROW}>
-                    <td className={cls(PLANTILLA_TD, "py-6 text-sm text-gray-500")} colSpan={5}>
-                      Loading…
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-      </div>
-
-      {/* 3) ACCEPTED / RESPONDED REQUESTS (subset of Sent) */}
-      <div className={cls(PLANTILLA_TABLE_WRAP, "mt-8 overflow-y-visible")}>
-          <div className="overflow-x-auto">
-            <div className={cls(PLANTILLA_SECTION_TITLE, "w-full border-b border-emerald-800/10")}>
-              <div className="relative flex items-center justify-center">
-                <span>Accepted Requests</span>
-                <span className="absolute right-0 rounded-full bg-white/20 px-2.5 py-1 text-[11px] font-medium text-white">
-                  {acceptedRows.length} accepted
-                </span>
-              </div>
-            </div>
-
-            <div className="max-h-[420px] overflow-y-auto">
-              <table className={PLANTILLA_TABLE}>
-
-                <ColGroupAccepted />
+                <ColGroupReq />
                 <thead className={PLANTILLA_THEAD}>
                   <tr className={PLANTILLA_HEAD_TR}>
-                    <th className={cls(PLANTILLA_TH, "text-left")}>Course</th>
+                    <th className={PLANTILLA_TH}>Course Code</th>
+                    <th className={PLANTILLA_TH}>Course Title</th>
                     <th className={PLANTILLA_TH}>Units</th>
-                    <th className={PLANTILLA_TH}>From Department</th>
-                    <th className={PLANTILLA_TH}>Faculty</th>
-                    <th className={PLANTILLA_TH}>Schedule</th>
-                    <th className={PLANTILLA_TH}>Status</th>
-                    <th className={PLANTILLA_TH}>Remarks</th>
+                    <th className={PLANTILLA_TH}>From</th>
+                    <th className={PLANTILLA_TH}>To</th>
+                    <th className={PLANTILLA_TH}>Action</th>
                   </tr>
                 </thead>
 
-                <tbody>
-                  {!loadingList && acceptedRows.length === 0 && (
-                    <tr className={PLANTILLA_ROW}>
-                      <td className={cls(PLANTILLA_TD, "py-6 text-sm text-gray-500")} colSpan={7}>
-                        No accepted requests yet.
-                      </td>
-                    </tr>
-                  )}
+                <tbody className="text-gray-800">
+                  <tr className={PLANTILLA_ROW}>
+                    {/* Course Code */}
+                    <td className={cls(PLANTILLA_TD, "align-middle")}> 
+                      <div className="relative">
+                        <Dropdown
+                          value={draft.course_code}
+                          onChange={(code) => {
+                            const hit = courseSuggestions.find((c) => c.code === code);
+                            setDraft((d) => ({
+                              ...d,
+                              course_code: code,
+                              course_title: hit?.title ?? d.course_title,
+                              units: hit?.units ?? d.units,
+                            }));
+                            setCourseTerm("");
+                          }}
+                          options={codeOptions}
+                          placeholder="Select code…"
+                          searchable
+                          className="min-w-[10rem] [&>button]:h-9 [&>button]:px-2"
+                          onOpen={() => setCourseTerm("")}
+                        />
+                      </div>
+                    </td>
 
-                  {acceptedRows.map((r) => (
-                    <tr key={r.fs_id || r.id} className={PLANTILLA_ROW}>
-                      {/* Course */}
-                      <td className={cls(PLANTILLA_TD, "text-left")}>
-                        <div className="font-semibold text-emerald-700">{r.course_code}</div>
-                        <div className="text-[12px] text-neutral-600 leading-tight">{r.course_title}</div>
-                      </td>
+                    {/* Course Title (readonly) */}
+                    <td className={cls(PLANTILLA_TD, "align-middle")}> 
+                      <span className="inline-block max-w-full truncate leading-6 px-1">
+                        {draft.course_title || " "}
+                      </span>
+                    </td>
 
-                      {/* Units */}
-                      <td className={cls(PLANTILLA_TD, "tabular-nums")}>{r.units ?? "—"}</td>
+                    {/* Units (readonly) */}
+                    <td className={cls(PLANTILLA_TD, "align-middle tabular-nums")}> 
+                      <span className="inline-block leading-6">{draft.units ?? " "}</span>
+                    </td>
 
-                      {/* From Department */}
-                      <td className={PLANTILLA_TD}>{r.from_department}</td>
+                    {/* From */}
+                    <td className={cls(PLANTILLA_TD, "align-middle")}> 
+                      <span className="inline-block leading-6" title={activeDeptName}>
+                        {activeDeptName}
+                      </span>
+                    </td>
 
-                      {/* Faculty */}
-                      <td className={cls(PLANTILLA_TD, "align-middle")}>
-                        {r.faculty?.last_name || r.faculty?.first_name ? (
-                          <div className="space-y-0.5">
-                            <p className="text-xs font-medium text-neutral-800">
-                              {[r.faculty?.last_name, r.faculty?.first_name].filter(Boolean).join(", ")}
-                            </p>
-                            {r.faculty?.email && <p className="text-[11px] text-neutral-500">{r.faculty.email}</p>}
-                          </div>
-                        ) : (
-                          <span className="text-xs italic text-neutral-400">Not set</span>
+                    {/* To */}
+                    <td className={cls(PLANTILLA_TD, "align-middle")}> 
+                      <Dropdown
+                        value={draft.to_department}
+                        onChange={(v) => setDraft((d) => ({ ...d, to_department: v as ToDept }))}
+                        options={toDepts}
+                        placeholder="Select department…"
+                        className="[&>button]:h-9 [&>button]:px-2"
+                      />
+                    </td>
+
+                    {/* Action */}
+                    <td className={cls(PLANTILLA_TD, "align-middle")}> 
+                      <button
+                        className={cls(
+                          "inline-flex h-9 w-full items-center justify-center gap-1.5 rounded-md px-2 text-[13px] font-medium shadow-sm",
+                          canSend
+                            ? "bg-[#008e4e] text-white hover:brightness-110"
+                            : "bg-neutral-200 text-neutral-500 cursor-not-allowed"
                         )}
-                      </td>
-
-                      {/* Schedule */}
-                      <td className={cls(PLANTILLA_TD, "align-middle")}>
-                        <div className="space-y-0.5">
-                          {(r.day1 || r.begin1 || r.end1) && (
-                            <div>
-                              <span className="font-medium">{r.day1 || "—"}</span>{" "}
-                              <span className="tabular-nums">
-                                {r.begin1 || "—"}–{r.end1 || "—"}
-                              </span>
-                            </div>
-                          )}
-                          {(r.day2 || r.begin2 || r.end2) && (
-                            <div className="text-neutral-500">
-                              <span className="font-medium">{r.day2 || "—"}</span>{" "}
-                              <span className="tabular-nums">
-                                {r.begin2 || "—"}–{r.end2 || "—"}
-                              </span>
-                            </div>
-                          )}
-                          {!r.day1 && !r.begin1 && !r.end1 && !r.day2 && !r.begin2 && !r.end2 && (
-                            <span className="text-xs italic text-neutral-400">No schedule set</span>
-                          )}
-                        </div>
-                      </td>
-
-                      {/* Status */}
-                      <td className={cls(PLANTILLA_TD, "align-middle")}>
-                        <span className="inline-flex items-center justify-center rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700">
-                          Responded
-                        </span>
-                      </td>
-
-                      {/* Remarks */}
-                      <td className={cls(PLANTILLA_TD, "align-middle")}>
-                        {r.remarks || <span className="italic text-neutral-400">No remarks</span>}
-                      </td>
-                    </tr>
-                  ))}
+                        disabled={!canSend}
+                        onClick={handleCreateAndSend}
+                        title="Send request"
+                      >
+                        <Send className="h-4 w-4" />
+                        Send
+                      </button>
+                    </td>
+                  </tr>
                 </tbody>
               </table>
             </div>
           </div>
-      </div>
 
-      {/* 4) RECEIVED REQUESTS (editable, full; to my department) */}
-      <div className={cls(PLANTILLA_TABLE_WRAP, "mt-8 flex-1 min-h-[320px] overflow-y-auto")}>
-        <div className={cls(PLANTILLA_SECTION_TITLE, "w-full")}>Received Requests</div>
-
+          {/* Sent Requests (below Create Request) */}
+          <div className={cls(PLANTILLA_TABLE_WRAP, "mt-3 flex-1 min-h-[320px]")}> 
             <div className="overflow-x-auto">
+              <div className={cls(PLANTILLA_SECTION_TITLE, "w-full")}>Sent Requests</div>
+
               <table className={PLANTILLA_TABLE}>
+                <ColGroupSent />
+                <thead className={PLANTILLA_THEAD}>
+                  <tr className={PLANTILLA_HEAD_TR}>
+                    <th className={PLANTILLA_TH}>Course Code &amp; Title</th>
+                    <th className={PLANTILLA_TH}>Units</th>
+                    <th className={PLANTILLA_TH}>From</th>
+                    <th className={PLANTILLA_TH}>To</th>
+                    <th className={PLANTILLA_TH}>Status</th>
+                  </tr>
+                </thead>
 
-              <ColGroup14 />
-              <thead className={PLANTILLA_THEAD}>
-                <tr className={PLANTILLA_HEAD_TR}>
-                  <th className={cls(PLANTILLA_TH, "text-left")}>Course Code &amp; Title</th>
-                  <th className={PLANTILLA_TH}>Units</th>
-                  <th className={PLANTILLA_TH}>From</th>
-                  <th className={PLANTILLA_TH}>To</th>
-                  <th className={PLANTILLA_TH}>Faculty</th>
-                  <th className={PLANTILLA_TH}>Day1</th>
-                  <th className={PLANTILLA_TH}>Begin1</th>
-                  <th className={PLANTILLA_TH}>End1</th>
-                  <th className={PLANTILLA_TH}>Day2</th>
-                  <th className={PLANTILLA_TH}>Begin2</th>
-                  <th className={PLANTILLA_TH}>End2</th>
-                  <th className={PLANTILLA_TH}>Remarks</th>
-                  <th className={PLANTILLA_TH}>Action</th>
-                </tr>
-              </thead>
-
-              <tbody className="text-gray-800">
-                {receivedRows.map((r) => {
-                  const fsid = r.fs_id!;
-                  const dept = r.to_department || "";
-                  const e = getEdit(fsid);
-                  const facultyOptions = facultyCache[dept] || [];
-                  const isClosed = r.status === "responded" || r.status === "rejected";
-
-                  return (
-                    <tr key={fsid} className={PLANTILLA_ROW} onMouseEnter={() => ensureFacultyForDept(dept)}>
-                      <td className={cls(PLANTILLA_TD, "text-left")}>
+                <tbody className="text-gray-800">
+                  {sentRows.map((r) => (
+                    <tr key={r.fs_id} className={PLANTILLA_ROW}>
+                      <td className={cls(PLANTILLA_TD, "text-left")}> 
                         <div className="font-semibold text-emerald-700">{r.course_code}</div>
                         <div className="text-[12px] text-neutral-600 leading-tight">{r.course_title}</div>
                       </td>
@@ -1134,236 +957,447 @@ export default function CHAIR_FacultyService({ chairDepartmentName }: ChairFacul
                         {r.to_department}
                       </td>
 
-                      {/* Faculty */}
-                      <td className={cls(PLANTILLA_TD, "align-middle")}>
-                        {!isClosed ? (
-                          <Dropdown
-                            value={
-                              e.faculty?.faculty_id
-                                ? facultyOptions.find((f) => f.faculty_id === e.faculty?.faculty_id)?.label || ""
-                                : facultyLabel(e.faculty)
-                            }
-                            onChange={(label) => {
-                              const match = facultyOptions.find((f) => f.label === label);
-                              if (match) {
-                                patchEdit(fsid, {
-                                  faculty: {
-                                    faculty_id: match.faculty_id,
-                                    first_name: match.first_name,
-                                    last_name: match.last_name,
-                                    email: match.email,
-                                  },
-                                });
-                              }
-                            }}
-                            options={facultyOptions.map((f) => f.label).filter(Boolean)}
-                            placeholder={facultyOptions.length ? "Select faculty…" : "Loading…"}
-                            searchable
-                          />
-                        ) : (
-                          <span className="block truncate text-center" title={facultyLabel(r.faculty as any)}>
-                            {facultyLabel(r.faculty as any) || "—"}
-                          </span>
-                        )}
-                      </td>
-
-                      {/* Day1 */}
-                      <td className={cls(PLANTILLA_TD, "align-middle")}>
-                        {!isClosed ? (
-                          <Dropdown
-                            value={e.day1 || ""}
-                            onChange={(val) => {
-                              const d1 = val as DayShort | "";
-                              patchEdit(fsid, {
-                                day1: d1,
-                                day2: d1 ? (DAY2_BY_DAY1[d1 as DayShort] as DayShort) : "",
-                              });
-                            }}
-                            options={[...DAY1_OPTIONS]}
-                            placeholder=""
-                            className="max-w-[90px] mx-auto"
-                            searchable={false}
-                          />
-                        ) : (
-                          r.day1 || "—"
-                        )}
-                      </td>
-
-                      {/* Begin1 */}
-                      <td className={cls(PLANTILLA_TD, "align-middle")}>
-                        {!isClosed ? (
-                          <Dropdown
-                            value={e.begin1 || ""}
-                            onChange={(val) => {
-                              const v = val;
-                              patchEdit(fsid, {
-                                begin1: v,
-                                end1: v ? END_BY_BEGIN[v as keyof typeof END_BY_BEGIN] : "",
-                              });
-                            }}
-                            options={timeBegins}
-                            placeholder=""
-                            className="max-w-[90px] mx-auto"
-                            searchable={false}
-                          />
-                        ) : (
-                          r.begin1 || "—"
-                        )}
-                      </td>
-
-                      {/* End1 */}
-                      <td className={cls(PLANTILLA_TD, "align-middle")}>
-                        {!isClosed ? (
-                          <Dropdown
-                            value={e.end1 || ""}
-                            onChange={(v) => patchEdit(fsid, { end1: v })}
-                            options={timeBegins}
-                            placeholder="—"
-                            className="max-w-[90px] mx-auto"
-                            searchable={false}
-                          />
-                        ) : (
-                          r.end1 || "—"
-                        )}
-                      </td>
-
-                      {/* Day2 */}
-                      <td className={cls(PLANTILLA_TD, "align-middle")}>
-                        {!isClosed ? (
-                          <Dropdown
-                            value={e.day2 || ""}
-                            onChange={(v) => patchEdit(fsid, { day2: v as DayShort | "" })}
-                            options={[...DAY1_OPTIONS, "H", "F", "S"]}
-                            placeholder="—"
-                            className="max-w-[90px] mx-auto"
-                            searchable={false}
-                          />
-                        ) : (
-                          r.day2 || "—"
-                        )}
-                      </td>
-
-                      {/* Begin2 */}
-                      <td className={cls(PLANTILLA_TD, "align-middle")}>
-                        {!isClosed ? (
-                          <Dropdown
-                            value={e.begin2 || ""}
-                            onChange={(val) => {
-                              const v = val;
-                              patchEdit(fsid, {
-                                begin2: v,
-                                end2: v ? END_BY_BEGIN[v as keyof typeof END_BY_BEGIN] : "",
-                              });
-                            }}
-                            options={timeBegins}
-                            placeholder=""
-                            className="max-w-[90px] mx-auto"
-                            searchable={false}
-                          />
-                        ) : (
-                          r.begin2 || "—"
-                        )}
-                      </td>
-
-                      {/* End2 */}
-                      <td className={cls(PLANTILLA_TD, "align-middle")}>
-                        {!isClosed ? (
-                          <Dropdown
-                            value={e.end2 || ""}
-                            onChange={(v) => patchEdit(fsid, { end2: v })}
-                            options={timeBegins}
-                            placeholder="—"
-                            className="max-w-[90px] mx-auto"
-                            searchable={false}
-                          />
-                        ) : (
-                          r.end2 || "—"
-                        )}
-                      </td>
-
-                      {/* Remarks */}
-                      <td className={cls(PLANTILLA_TD, "align-middle")}>
-                        {!isClosed ? (
-                          <input
-                            value={e.remarks}
-                            onChange={(ev) => patchEdit(fsid, { remarks: ev.target.value })}
-                            placeholder="Enter remarks…"
-                            className={CONTROL}
-                          />
-                        ) : (
-                          <span className="block whitespace-normal break-words" title={r.remarks || ""}>
-                            {r.remarks || "—"}
-                          </span>
-                        )}
-                      </td>
-
-                      {/* Action */}
-                      <td className={cls(PLANTILLA_TD, "align-middle")}>
-                        {!isClosed ? (
-                          <div className="flex flex-row items-center justify-center gap-2">
-                            {(() => {
-                              const canRespond = !!(e.faculty?.faculty_id || e.faculty?.email);
-                              return (
-                                <button
-                                  className={cls(
-                                    "inline-flex h-9 items-center justify-center gap-1.5 rounded-md px-2 text-[12px] font-medium shadow-sm",
-                                    canRespond
-                                      ? "bg-[#008e4e] text-white hover:brightness-110"
-                                      : "bg-neutral-200 text-neutral-500 cursor-not-allowed"
-                                  )}
-                                  disabled={!canRespond}
-                                  onClick={() => handleSendBack(fsid, dept)}
-                                  title="Send"
-                                >
-                                  <Send className="h-4 w-4" />
-                                  Send
-                                </button>
-                              );
-                            })()}
-
-                            <button
-                              className="inline-flex h-9 items-center justify-center gap-1.5 rounded-md bg-red-600 px-2 text-[12px] font-medium text-white shadow-sm hover:brightness-110"
-                              onClick={() => handleReject(fsid)}
-                              title="Reject"
-                            >
-                              <X className="h-4 w-4" />
-                              Reject
-                            </button>
-                          </div>
-                        ) : (
-                          <span
-                            className={cls(
-                              "inline-block rounded-full px-2 py-[2px] text-[12px]",
-                              r.status === "responded" ? "bg-emerald-100 text-emerald-700" : "bg-red-100 text-red-700"
-                            )}
-                          >
-                            {r.status === "responded" ? "Responded" : "Rejected"}
-                          </span>
-                        )}
+                      <td className={PLANTILLA_TD}>
+                        <span
+                          className={cls(
+                            "inline-block rounded-full px-2 py-[2px] text-[12px]",
+                            r.status === "responded"
+                              ? "bg-emerald-100 text-emerald-700"
+                              : r.status === "rejected"
+                              ? "bg-red-100 text-red-700"
+                              : "bg-amber-100 text-amber-700"
+                          )}
+                        >
+                          {r.status === "responded" ? "Responded" : r.status === "rejected" ? "Rejected" : "Sent"}
+                        </span>
                       </td>
                     </tr>
-                  );
-                })}
+                  ))}
 
-                {receivedRows.length === 0 && !loadingList && (
-                  <tr className={PLANTILLA_ROW}>
-                    <td className={cls(PLANTILLA_TD, "py-6 text-sm text-gray-500")} colSpan={14}>
-                      No received requests for your department.
-                    </td>
-                  </tr>
-                )}
+                  {sentRows.length == 0 && !loadingList && (
+                    <tr className={PLANTILLA_ROW}>
+                      <td className={cls(PLANTILLA_TD, "py-6 text-sm text-gray-500")} colSpan={5}>
+                        No sent requests yet.
+                      </td>
+                    </tr>
+                  )}
 
-                {loadingList && (
-                  <tr className={PLANTILLA_ROW}>
-                    <td className={cls(PLANTILLA_TD, "py-6 text-sm text-gray-500")} colSpan={14}>
-                      Loading…
-                    </td>
+                  {loadingList && (
+                    <tr className={PLANTILLA_ROW}>
+                      <td className={cls(PLANTILLA_TD, "py-6 text-sm text-gray-500")} colSpan={5}>
+                        Loading…
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+          </>
+        )}
+
+        {/* 2) SENT REQUESTS (from my department) */}
+        {/* 3) RECEIVED REQUESTS (editable, full; to my department) */}
+        {tab === "Received Requests" && (
+          <div className={cls(PLANTILLA_TABLE_WRAP, "mt-3 flex-1 min-h-[320px] overflow-y-auto")}>
+            <div className={cls(PLANTILLA_SECTION_TITLE, "w-full")}>Received Requests</div>
+
+            <div className="overflow-x-auto">
+              <table className={PLANTILLA_TABLE}>
+                <ColGroup14 />
+                <thead className={PLANTILLA_THEAD}>
+                  <tr className={PLANTILLA_HEAD_TR}>
+                    <th className={cls(PLANTILLA_TH, "text-left")}>Course Code &amp; Title</th>
+                    <th className={PLANTILLA_TH}>Units</th>
+                    <th className={PLANTILLA_TH}>From</th>
+                    <th className={PLANTILLA_TH}>To</th>
+                    <th className={PLANTILLA_TH}>Faculty</th>
+                    <th className={PLANTILLA_TH}>Day1</th>
+                    <th className={PLANTILLA_TH}>Begin1</th>
+                    <th className={PLANTILLA_TH}>End1</th>
+                    <th className={PLANTILLA_TH}>Day2</th>
+                    <th className={PLANTILLA_TH}>Begin2</th>
+                    <th className={PLANTILLA_TH}>End2</th>
+                    <th className={PLANTILLA_TH}>Remarks</th>
+                    <th className={PLANTILLA_TH}>Action</th>
                   </tr>
-                )}
-              </tbody>
-            </table>
+                </thead>
+
+                <tbody className="text-gray-800">
+                  {receivedRows.map((r) => {
+                    const fsid = r.fs_id!;
+                    const dept = r.to_department || "";
+                    const e = getEdit(fsid);
+                    const facultyOptions = facultyCache[dept] || [];
+                    const isClosed = r.status === "responded" || r.status === "rejected";
+
+                    return (
+                      <tr key={fsid} className={PLANTILLA_ROW} onMouseEnter={() => ensureFacultyForDept(dept)}>
+                        {/* Course */}
+                        <td className={cls(PLANTILLA_TD, "text-left")}>
+                          <div className="font-semibold text-emerald-700">{r.course_code}</div>
+                          <div className="text-[12px] text-neutral-600 leading-tight">{r.course_title}</div>
+                        </td>
+
+                        {/* Units */}
+                        <td className={cls(PLANTILLA_TD, "tabular-nums")}>{r.units ?? ""}</td>
+
+                        {/* From */}
+                        <td className={cls(PLANTILLA_TD, "truncate")} title={r.from_department}>
+                          {r.from_department}
+                        </td>
+
+                        {/* To */}
+                        <td className={cls(PLANTILLA_TD, "truncate")} title={r.to_department}>
+                          {r.to_department}
+                        </td>
+
+                        {/* Faculty */}
+                        <td className={cls(PLANTILLA_TD, "align-middle")}>
+                          {!isClosed ? (
+                            <Dropdown
+                              value={
+                                e.faculty?.faculty_id
+                                  ? facultyOptions.find((f) => f.faculty_id === e.faculty?.faculty_id)?.label || ""
+                                  : facultyLabel(e.faculty)
+                              }
+                              onChange={(label) => {
+                                const match = facultyOptions.find((f) => f.label === label);
+                                if (match) {
+                                  patchEdit(fsid, {
+                                    faculty: {
+                                      faculty_id: match.faculty_id,
+                                      first_name: match.first_name,
+                                      last_name: match.last_name,
+                                      email: match.email,
+                                    },
+                                  });
+                                }
+                              }}
+                              options={facultyOptions.map((f) => f.label).filter(Boolean)}
+                              placeholder={facultyOptions.length ? "Select faculty…" : "Loading…"}
+                              searchable
+                            />
+                          ) : (
+                            <span className="block truncate text-center" title={facultyLabel(r.faculty as any)}>
+                              {facultyLabel(r.faculty as any) || "—"}
+                            </span>
+                          )}
+                        </td>
+
+                        {/* Day1 */}
+                        <td className={cls(PLANTILLA_TD, "align-middle")}>
+                          {!isClosed ? (
+                            <Dropdown
+                              value={e.day1 || ""}
+                              onChange={(val) => {
+                                const d1 = val as DayShort | "";
+                                patchEdit(fsid, {
+                                  day1: d1,
+                                  day2: d1 ? (DAY2_BY_DAY1[d1 as DayShort] as DayShort) : "",
+                                });
+                              }}
+                              options={[...DAY1_OPTIONS]}
+                              placeholder=""
+                              className="max-w-[90px] mx-auto"
+                              searchable={false}
+                            />
+                          ) : (
+                            r.day1 || "—"
+                          )}
+                        </td>
+
+                        {/* Begin1 */}
+                        <td className={cls(PLANTILLA_TD, "align-middle")}>
+                          {!isClosed ? (
+                            <Dropdown
+                              value={e.begin1 || ""}
+                              onChange={(val) => {
+                                const v = val;
+                                patchEdit(fsid, {
+                                  begin1: v,
+                                  end1: v ? END_BY_BEGIN[v as keyof typeof END_BY_BEGIN] : "",
+                                });
+                              }}
+                              options={timeBegins}
+                              placeholder=""
+                              className="max-w-[90px] mx-auto"
+                              searchable={false}
+                            />
+                          ) : (
+                            r.begin1 || "—"
+                          )}
+                        </td>
+
+                        {/* End1 */}
+                        <td className={cls(PLANTILLA_TD, "align-middle")}>
+                          {!isClosed ? (
+                            <Dropdown
+                              value={e.end1 || ""}
+                              onChange={(v) => patchEdit(fsid, { end1: v })}
+                              options={timeBegins}
+                              placeholder="—"
+                              className="max-w-[90px] mx-auto"
+                              searchable={false}
+                            />
+                          ) : (
+                            r.end1 || "—"
+                          )}
+                        </td>
+
+                        {/* Day2 */}
+                        <td className={cls(PLANTILLA_TD, "align-middle")}>
+                          {!isClosed ? (
+                            <Dropdown
+                              value={e.day2 || ""}
+                              onChange={(v) => patchEdit(fsid, { day2: v as DayShort | "" })}
+                              options={[...DAY1_OPTIONS, "H", "F", "S"]}
+                              placeholder="—"
+                              className="max-w-[90px] mx-auto"
+                              searchable={false}
+                            />
+                          ) : (
+                            r.day2 || "—"
+                          )}
+                        </td>
+
+                        {/* Begin2 */}
+                        <td className={cls(PLANTILLA_TD, "align-middle")}>
+                          {!isClosed ? (
+                            <Dropdown
+                              value={e.begin2 || ""}
+                              onChange={(val) => {
+                                const v = val;
+                                patchEdit(fsid, {
+                                  begin2: v,
+                                  end2: v ? END_BY_BEGIN[v as keyof typeof END_BY_BEGIN] : "",
+                                });
+                              }}
+                              options={timeBegins}
+                              placeholder=""
+                              className="max-w-[90px] mx-auto"
+                              searchable={false}
+                            />
+                          ) : (
+                            r.begin2 || "—"
+                          )}
+                        </td>
+
+                        {/* End2 */}
+                        <td className={cls(PLANTILLA_TD, "align-middle")}>
+                          {!isClosed ? (
+                            <Dropdown
+                              value={e.end2 || ""}
+                              onChange={(v) => patchEdit(fsid, { end2: v })}
+                              options={timeBegins}
+                              placeholder="—"
+                              className="max-w-[90px] mx-auto"
+                              searchable={false}
+                            />
+                          ) : (
+                            r.end2 || "—"
+                          )}
+                        </td>
+
+                        {/* Remarks */}
+                        <td className={cls(PLANTILLA_TD, "align-middle")}>
+                          {!isClosed ? (
+                            <input
+                              value={e.remarks}
+                              onChange={(ev) => patchEdit(fsid, { remarks: ev.target.value })}
+                              placeholder="Enter remarks…"
+                              className={CONTROL}
+                            />
+                          ) : (
+                            <span className="block whitespace-normal break-words" title={r.remarks || ""}>
+                              {r.remarks || "—"}
+                            </span>
+                          )}
+                        </td>
+
+                        {/* Action */}
+                        <td className={cls(PLANTILLA_TD, "align-middle")}>
+                          {!isClosed ? (
+                            <div className="flex flex-row items-center justify-center gap-2">
+                              {(() => {
+                                const canRespond = !!(e.faculty?.faculty_id || e.faculty?.email);
+                                return (
+                                  <button
+                                    className={cls(
+                                      "inline-flex h-9 items-center justify-center gap-1.5 rounded-md px-2 text-[12px] font-medium shadow-sm",
+                                      canRespond
+                                        ? "bg-[#008e4e] text-white hover:brightness-110"
+                                        : "bg-neutral-200 text-neutral-500 cursor-not-allowed"
+                                    )}
+                                    disabled={!canRespond}
+                                    onClick={() => handleSendBack(fsid, dept)}
+                                    title="Send"
+                                  >
+                                    <Check className="h-4 w-4" />
+                                    Approve
+                                  </button>
+                                );
+                              })()}
+
+                              <button
+                                className="inline-flex h-9 items-center justify-center gap-1.5 rounded-md bg-red-600 px-2 text-[12px] font-medium text-white shadow-sm hover:brightness-110"
+                                onClick={() => handleReject(fsid)}
+                                title="Reject"
+                              >
+                                <X className="h-4 w-4" />
+                                Reject
+                              </button>
+                            </div>
+                          ) : (
+                            <span
+                              className={cls(
+                                "inline-block rounded-full px-2 py-[2px] text-[12px]",
+                                r.status === "responded"
+                                  ? "bg-emerald-100 text-emerald-700"
+                                  : "bg-red-100 text-red-700"
+                              )}
+                            >
+                              {r.status === "responded" ? "Responded" : "Rejected"}
+                            </span>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+
+                  {receivedRows.length === 0 && !loadingList && (
+                    <tr className={PLANTILLA_ROW}>
+                      <td className={cls(PLANTILLA_TD, "py-6 text-sm text-gray-500")} colSpan={14}>
+                        No received requests for your department.
+                      </td>
+                    </tr>
+                  )}
+
+                  {loadingList && (
+                    <tr className={PLANTILLA_ROW}>
+                      <td className={cls(PLANTILLA_TD, "py-6 text-sm text-gray-500")} colSpan={14}>
+                        Loading…
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {/* 4) ACCEPTED / RESPONDED REQUESTS (subset of Sent) */}
+        {tab === "Accepted Requests" && (
+          <div className={cls(PLANTILLA_TABLE_WRAP, "mt-3 overflow-y-visible")}> 
+            <div className="overflow-x-auto">
+              <div className={cls(PLANTILLA_SECTION_TITLE, "w-full border-b border-emerald-800/10")}>
+                <div className="relative flex items-center justify-center">
+                  <span>Accepted Requests</span>
+                  <span className="absolute right-0 rounded-full bg-white/20 px-2.5 py-1 text-[11px] font-medium text-white">
+                    {acceptedRows.length} accepted
+                  </span>
+                </div>
               </div>
-      </div>
+
+              <div className="max-h-[420px] overflow-y-auto">
+                <table className={PLANTILLA_TABLE}>
+                  <ColGroupAccepted />
+                  <thead className={PLANTILLA_THEAD}>
+                    <tr className={PLANTILLA_HEAD_TR}>
+                      <th className={cls(PLANTILLA_TH, "text-left")}>Course</th>
+                      <th className={PLANTILLA_TH}>Units</th>
+                      <th className={PLANTILLA_TH}>From Department</th>
+                      <th className={PLANTILLA_TH}>Faculty</th>
+                      <th className={PLANTILLA_TH}>Schedule</th>
+                      <th className={PLANTILLA_TH}>Status</th>
+                      <th className={PLANTILLA_TH}>Remarks</th>
+                    </tr>
+                  </thead>
+
+                  <tbody>
+                    {!loadingList && acceptedRows.length === 0 && (
+                      <tr className={PLANTILLA_ROW}>
+                        <td className={cls(PLANTILLA_TD, "py-6 text-sm text-gray-500")} colSpan={7}>
+                          No accepted requests yet.
+                        </td>
+                      </tr>
+                    )}
+
+                    {acceptedRows.map((r) => (
+                      <tr key={r.fs_id || r.id} className={PLANTILLA_ROW}>
+                        {/* Course */}
+                        <td className={cls(PLANTILLA_TD, "text-left")}> 
+                          <div className="font-semibold text-emerald-700">{r.course_code}</div>
+                          <div className="text-[12px] text-neutral-600 leading-tight">{r.course_title}</div>
+                        </td>
+
+                        {/* Units */}
+                        <td className={cls(PLANTILLA_TD, "tabular-nums")}>{r.units ?? "—"}</td>
+
+                        {/* From Department */}
+                        <td className={PLANTILLA_TD}>{r.from_department}</td>
+
+                        {/* Faculty */}
+                        <td className={cls(PLANTILLA_TD, "align-middle")}> 
+                          {r.faculty?.last_name || r.faculty?.first_name ? (
+                            <div className="space-y-0.5">
+                              <p className="text-xs font-medium text-neutral-800">
+                                {[r.faculty?.last_name, r.faculty?.first_name].filter(Boolean).join(", ")}
+                              </p>
+                              {r.faculty?.email && <p className="text-[11px] text-neutral-500">{r.faculty.email}</p>}
+                            </div>
+                          ) : (
+                            <span className="text-xs italic text-neutral-400">Not set</span>
+                          )}
+                        </td>
+
+                        {/* Schedule */}
+                        <td className={cls(PLANTILLA_TD, "align-middle")}> 
+                          <div className="space-y-0.5">
+                            {(r.day1 || r.begin1 || r.end1) && (
+                              <div>
+                                <span className="font-medium">{r.day1 || "—"}</span>{" "}
+                                <span className="tabular-nums">
+                                  {r.begin1 || "—"}–{r.end1 || "—"}
+                                </span>
+                              </div>
+                            )}
+                            {(r.day2 || r.begin2 || r.end2) && (
+                              <div className="text-neutral-500">
+                                <span className="font-medium">{r.day2 || "—"}</span>{" "}
+                                <span className="tabular-nums">
+                                  {r.begin2 || "—"}–{r.end2 || "—"}
+                                </span>
+                              </div>
+                            )}
+                            {!r.day1 && !r.begin1 && !r.end1 && !r.day2 && !r.begin2 && !r.end2 && (
+                              <span className="text-xs italic text-neutral-400">No schedule set</span>
+                            )}
+                          </div>
+                        </td>
+
+                        {/* Status */}
+                        <td className={cls(PLANTILLA_TD, "align-middle")}>
+                          <span className="inline-flex items-center justify-center rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700">
+                            Responded
+                          </span>
+                        </td>
+
+
+                        {/* Remarks */}
+                        <td className={cls(PLANTILLA_TD, "align-middle")}> 
+                          {r.remarks || <span className="italic text-neutral-400">No remarks</span>}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        )}
+      </main>
     </div>
   );
 }
+``
