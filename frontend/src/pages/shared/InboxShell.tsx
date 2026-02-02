@@ -1,6 +1,6 @@
 // frontend/src/pages/shared/InboxShell.tsx
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Search, Plus } from "lucide-react";
+import { MessageSquare, Plus, Search, Send } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { getSocket } from "@/realtime/socket";
 import { emitAck } from "@/realtime/ack";
@@ -26,6 +26,52 @@ const initials = (name: string) =>
     .slice(0, 2)
     .join("")
     .toUpperCase();
+
+type SessionUser = {
+  userId?: string;
+  user_id?: string;
+  id?: string;
+  email?: string;
+  gmail?: string;
+  fullName?: string;
+  full_name?: string;
+};
+
+function getSessionUser(): SessionUser | null {
+  try {
+    const raw = localStorage.getItem("animo.user");
+    return raw ? (JSON.parse(raw) as SessionUser) : null;
+  } catch {
+    return null;
+  }
+}
+
+type ChatMessage = {
+  key: string;
+  sender: string;
+  text: string;
+  mine: boolean;
+};
+
+function parseTranscript(transcript: string, me: { userId: string; fullName: string }): ChatMessage[] {
+  const blocks = String(transcript || "")
+    .split(/\n\n+/)
+    .map((x) => x.trim())
+    .filter(Boolean);
+
+  return blocks.map((block, i) => {
+    const idx = block.indexOf(":");
+    const sender = idx >= 0 ? block.slice(0, idx).trim() : "";
+    const text = idx >= 0 ? block.slice(idx + 1).trimStart() : block;
+    const mine = !!sender && (sender === me.fullName || sender === me.userId);
+    return {
+      key: `${i}-${sender}-${text.slice(0, 18)}`,
+      sender: sender || "User",
+      text,
+      mine,
+    };
+  });
+}
 
 export type Mail = {
   id: number;
@@ -88,7 +134,41 @@ export default function InboxShell({
   // Throttle mark_read spam when messages arrive while reading
   const markReadTimerRef = useRef<number | null>(null);
 
+  // Message list scroll container (bubble chat)
+  const messagesScrollRef = useRef<HTMLDivElement | null>(null);
+
+  // Make the inbox panel auto-fit whatever space the page layout provides.
+  // (Pure UI; does not touch inbox/socket logic.)
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const [panelHeight, setPanelHeight] = useState<number | null>(null);
+
+  useEffect(() => {
+    const calc = () => {
+      const el = panelRef.current;
+      if (!el) return;
+
+      const top = Math.max(0, el.getBoundingClientRect().top);
+      const paddingBottom = 18;
+      const next = Math.max(520, Math.floor(window.innerHeight - top - paddingBottom));
+      setPanelHeight(next);
+    };
+
+    calc();
+    window.addEventListener("resize", calc);
+    return () => window.removeEventListener("resize", calc);
+  }, []);
+
   const navigate = useNavigate();
+
+  const me = useMemo(() => {
+    const u = getSessionUser();
+    const userId = String(u?.userId || u?.user_id || u?.id || "").trim();
+    const fullName = String(u?.fullName || u?.full_name || "").trim();
+    return {
+      userId: userId || fullName || "me",
+      fullName: fullName || userId || "me",
+    };
+  }, []);
 
   const handleBack = () => {
     if (window.history.length > 1) {
@@ -435,6 +515,19 @@ export default function InboxShell({
       .sort((a, b) => b.receivedAt.getTime() - a.receivedAt.getTime());
   }, [query, mails]);
 
+  const chatMessages = useMemo(() => {
+    if (mode !== "read" || !selected) return [] as ChatMessage[];
+    return parseTranscript(selected.body || "", me);
+  }, [mode, selected, me]);
+
+  // Auto-scroll to bottom when thread updates
+  useEffect(() => {
+    if (mode !== "read") return;
+    const el = messagesScrollRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+  }, [mode, selected?.conversationId, selected?.body]);
+
   const openCompose = () => {
     setMode("compose");
     modeRef.current = "compose";
@@ -602,10 +695,14 @@ export default function InboxShell({
   };
 
   return (
-    <section className="mx-auto w-full max-w-screen-2xl px-4">
-      <div className="rounded-xl border border-gray-200 bg-white p-5">
-        {/* Header */}
-        <div className="mb-4 flex items-center justify-between">
+    <section className="w-full px-3 sm:px-6">
+      <div
+        ref={panelRef}
+        style={panelHeight ? { height: panelHeight } : undefined}
+        className="mx-auto mt-4 flex w-full max-w-7xl flex-col overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-sm min-h-[520px]"
+      >
+        {/* Page Header */}
+        <div className="flex items-center justify-between border-b border-gray-200 px-5 py-4">
           <div>
             <h3 className="text-lg font-bold text-gray-900">{title}</h3>
             {subtitle ? <p className="text-sm text-gray-500">{subtitle}</p> : null}
@@ -618,215 +715,334 @@ export default function InboxShell({
           </button>
         </div>
 
-        {/* Actions / Search */}
-        <div className="mb-4 flex items-start gap-3">
-          <div className="relative flex-1">
-            <div className="relative rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm shadow-sm">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-500" />
-              <input
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                className="w-full bg-transparent outline-none pl-7"
-                placeholder="Search messages..."
-              />
-            </div>
-          </div>
+        {/* Chat Layout */}
+        <div className="grid flex-1 min-h-0 grid-cols-1 lg:grid-cols-[340px_1fr]">
+          {/* Left: conversation list */}
+          <aside className={cls(
+            "bg-white lg:border-r border-gray-200",
+            mode === "default" ? "flex flex-col" : "hidden lg:flex lg:flex-col"
+          )}>
+            <div className="border-b border-gray-200 bg-white px-4 py-4">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <div className="text-xs font-semibold uppercase tracking-wide text-gray-500">Messages</div>
+                  <div className="mt-0.5 text-[11px] text-gray-400">{filtered.length} conversations</div>
+                </div>
 
-          <button
-            onClick={openCompose}
-            disabled={mode === "compose"}
-            className={cls(
-              "inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium",
-              mode === "compose"
-                ? "bg-gray-300 text-gray-600 cursor-not-allowed"
-                : "bg-emerald-700 text-white hover:bg-emerald-700"
-            )}
-          >
-            <Plus className="h-4 w-4" /> Compose
-          </button>
-        </div>
-
-        {/* Two-column layout */}
-        <div className="grid grid-cols-1 gap-6 lg:grid-cols-[360px_1fr]">
-          {/* List */}
-          <aside className="space-y-3">
-            <div className="text-sm font-semibold text-gray-700">Messages</div>
-            <div className="space-y-3">
-              {filtered.map((m) => (
                 <button
-                  key={m.conversationId}
-                  onClick={() => openRead(m)}
+                  onClick={openCompose}
+                  disabled={mode === "compose"}
                   className={cls(
-                    "w-full rounded-xl border bg-white p-4 text-left shadow-sm hover:shadow",
-                    selected?.conversationId === m.conversationId
-                      ? "border-emerald-400 ring-1 ring-emerald-200"
-                      : "border-gray-200"
+                    "inline-flex items-center gap-2 rounded-xl px-3 py-2 text-sm font-semibold shadow-sm",
+                    mode === "compose"
+                      ? "cursor-not-allowed bg-gray-200 text-gray-500"
+                      : "bg-emerald-700 text-white hover:bg-emerald-800"
                   )}
+                  title="New message"
                 >
-                  <div className="flex items-start gap-3">
-                    <span className="grid h-9 w-9 place-items-center rounded-full bg-emerald-100 text-[11px] font-bold text-emerald-700">
-                      {initials(m.from)}
-                    </span>
+                  <Plus className="h-4 w-4" />
+                  <span>New message</span>
+                </button>
+              </div>
 
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center justify-between">
-                        <div className="text-sm font-semibold">{m.from}</div>
+              <div className="relative mt-3">
+                <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-500" />
+                <input
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  className="w-full rounded-xl border border-gray-200 bg-white py-2.5 pl-9 pr-3 text-sm outline-none shadow-sm focus:ring-2 focus:ring-emerald-500/20"
+                  placeholder="Search conversations"
+                />
+              </div>
+            </div>
 
-                        <div className="flex items-center gap-2">
+            <div className="flex-1 min-h-0 overflow-y-auto px-2 pb-3">
+              {filtered.map((m) => {
+                const active = selected?.conversationId === m.conversationId && mode === "read";
+                return (
+                  <button
+                    key={m.conversationId}
+                    onClick={() => openRead(m)}
+                    className={cls(
+                      "group w-full rounded-xl px-3 py-3 text-left transition",
+                      active
+                        ? "bg-emerald-50 shadow-sm ring-1 ring-emerald-200"
+                        : "hover:bg-gray-50"
+                    )}
+                  >
+                    <div className="flex items-center gap-3">
+                      <span
+                        className={cls(
+                          "grid h-10 w-10 place-items-center rounded-full text-[11px] font-bold",
+                          active
+                            ? "bg-emerald-100 text-emerald-700"
+                            : "bg-white text-gray-700 border border-gray-200"
+                        )}
+                      >
+                        {initials(m.from)}
+                      </span>
+
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="truncate text-sm font-semibold text-gray-900">
+                            {m.from}
+                          </div>
+                          <div className="shrink-0 text-[11px] text-gray-500">
+                            {timeAgo(m.receivedAt)}
+                          </div>
+                        </div>
+
+                        <div className="mt-0.5 flex items-center justify-between gap-2">
+                          <div className="min-w-0 flex-1 truncate text-xs text-gray-500">
+                            {m.preview || "—"}
+                          </div>
                           {m.unread > 0 && (
-                            <span className="min-w-[22px] rounded-full bg-emerald-700 px-2 py-0.5 text-center text-[11px] font-semibold text-white">
+                            <span className="shrink-0 rounded-full bg-emerald-700 px-2 py-0.5 text-[11px] font-semibold text-white">
                               {m.unread}
                             </span>
                           )}
-                          <div className="text-[11px] text-gray-400">{timeAgo(m.receivedAt)}</div>
                         </div>
                       </div>
-
-                      <div className="text-sm">{m.subject}</div>
-                      <div className="mt-1 line-clamp-1 text-xs text-gray-500">{m.preview}</div>
                     </div>
-                  </div>
-                </button>
-              ))}
+                  </button>
+                );
+              })}
 
               {filtered.length === 0 && (
-                <div className="rounded-xl border border-dashed border-gray-300 p-6 text-center text-sm text-gray-500">
+                <div className="mx-2 rounded-xl border border-dashed border-gray-300 bg-white p-6 text-center text-sm text-gray-500">
                   No messages found.
                 </div>
               )}
             </div>
           </aside>
 
-          {/* Reader / Composer */}
-          <section className="min-h-[520px] rounded-xl border border-gray-200 bg-white p-5">
+          {/* Right: bubble chat */}
+          <section className="flex min-h-0 flex-col">
             {mode === "default" && (
-              <div className="grid h-full place-items-center text-center text-gray-500">
+              <div className="grid flex-1 place-items-center bg-gradient-to-b from-gray-50 to-white px-6 text-center text-gray-500">
                 <div>
-                  <div className="mx-auto mb-4 grid h-16 w-20 place-items-center rounded-lg border border-gray-300">
-                    <div className="h-6 w-10 rounded border border-gray-400" />
+                  <div className="mx-auto mb-4 grid h-16 w-16 place-items-center rounded-2xl border border-gray-200 bg-gray-50">
+                    <MessageSquare className="h-7 w-7 text-gray-500" />
                   </div>
-                  <div className="font-semibold text-gray-700">Select a Message</div>
-                  <div className="text-sm">Choose a message to view its content</div>
+                  <div className="font-semibold text-gray-700">Select a conversation</div>
+                  <div className="mt-1 text-sm">Choose a thread to start chatting.</div>
                 </div>
               </div>
             )}
 
             {mode === "compose" && (
-              <div className="space-y-4">
-                <div className="relative">
-                  <label className="mb-1 block text-sm font-medium">To:</label>
-                  <input
-                    value={composeTo}
-                    onChange={(e) => {
-                      setComposeTo(e.target.value);
-                      setPickedUser(null);
-                    }}
-                    className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-emerald-500/30"
-                    placeholder="Search user by name/email..."
-                  />
+              <>
+                {/* Compose Header */}
+                <div className="border-b border-gray-200 bg-white px-5 py-4">
+                  <div className="flex items-center gap-3">
+                    <button
+                      onClick={backToDefault}
+                      className="lg:hidden rounded-lg border border-gray-300 px-3 py-1.5 text-xs hover:bg-gray-50"
+                    >
+                      Back
+                    </button>
+                    <div className="text-sm font-semibold text-gray-900">New message</div>
+                    <button
+                      onClick={backToDefault}
+                      className="ml-auto rounded-lg border border-gray-300 px-3 py-1.5 text-xs hover:bg-gray-50"
+                    >
+                      Cancel
+                    </button>
+                  </div>
 
-                  {searchResults.length > 0 && !pickedUser && (
-                    <div className="absolute z-10 mt-2 w-full rounded-lg border border-gray-200 bg-white p-2 shadow">
-                      {searchResults.map((u: any) => (
-                        <button
-                          key={u.userId}
-                          type="button"
-                          onClick={() => pickRecipient(u)}
-                          className="w-full rounded-md px-3 py-2 text-left text-sm hover:bg-gray-50"
-                        >
-                          <div className="font-medium">{u.fullName}</div>
-                          <div className="text-xs text-gray-500">{u.email || u.userId}</div>
-                        </button>
-                      ))}
+                  <div className="relative mt-3">
+                    <label className="mb-1 block text-xs font-semibold text-gray-600">To</label>
+                    <input
+                      value={composeTo}
+                      onChange={(e) => {
+                        setComposeTo(e.target.value);
+                        setPickedUser(null);
+                      }}
+                      className="w-full rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm outline-none shadow-sm focus:ring-2 focus:ring-emerald-500/20"
+                      placeholder="Search user by name/email..."
+                    />
+
+                    {searchResults.length > 0 && !pickedUser && (
+                      <div className="absolute z-10 mt-2 w-full overflow-hidden rounded-xl border border-gray-200 bg-white shadow">
+                        {searchResults.map((u: any) => (
+                          <button
+                            key={u.userId}
+                            type="button"
+                            onClick={() => pickRecipient(u)}
+                            className="w-full px-4 py-3 text-left text-sm hover:bg-gray-50"
+                          >
+                            <div className="font-semibold text-gray-900">{u.fullName}</div>
+                            <div className="text-xs text-gray-500">{u.email || u.userId}</div>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Compose Messages Area */}
+                <div className="flex-1 min-h-0 overflow-y-auto bg-gradient-to-b from-gray-50 to-white px-4 sm:px-6 lg:px-10 py-6">
+                  <div className="text-sm text-gray-500">Type a message below to start the conversation.</div>
+                </div>
+
+                {/* Compose Input */}
+                <div className="border-t border-gray-200 bg-white px-4 py-3">
+                  <div className="flex items-end gap-2">
+                    <textarea
+                      value={composeBody}
+                      onChange={(e) => setComposeBody(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && !e.shiftKey) {
+                          e.preventDefault();
+                          void sendCompose();
+                        }
+                      }}
+                      rows={1}
+                      className="min-h-[42px] max-h-32 flex-1 resize-none rounded-2xl border border-gray-200 bg-gray-50 px-4 py-2.5 text-sm outline-none focus:ring-2 focus:ring-emerald-500/20"
+                      placeholder={pickedUser ? `Message ${composeTo}...` : "Select a recipient first..."}
+                    />
+                    <button
+                      onClick={sendCompose}
+                      disabled={!pickedUser || !composeBody.trim()}
+                      className={cls(
+                        "inline-flex h-10 w-10 items-center justify-center rounded-full text-white shadow-sm",
+                        pickedUser && composeBody.trim()
+                          ? "bg-emerald-700 hover:bg-emerald-700"
+                          : "bg-gray-300 cursor-not-allowed"
+                      )}
+                      title="Send"
+                    >
+                      <Send className="h-4 w-4" />
+                    </button>
+                  </div>
+                  <div className="mt-2 text-[11px] text-gray-400">Press Enter to send, Shift+Enter for a new line.</div>
+                </div>
+              </>
+            )}
+
+            {mode === "read" && selected && (
+              <>
+                {/* Thread Header */}
+                <div className="border-b border-gray-200 bg-white px-5 py-4">
+                  <div className="flex items-center gap-3">
+                    <button
+                      onClick={backToDefault}
+                      className="lg:hidden rounded-lg border border-gray-300 px-3 py-1.5 text-xs hover:bg-gray-50"
+                    >
+                      Back
+                    </button>
+                    <span className="grid h-10 w-10 place-items-center rounded-full bg-emerald-100 text-[12px] font-bold text-emerald-700">
+                      {initials(selected.from)}
+                    </span>
+
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate text-sm font-semibold text-gray-900">To: {selected.from}</div>
+                      <div className="truncate text-xs text-gray-500">{selected.email || selected.peerUserId || ""}</div>
+                    </div>
+
+                    <div className="flex items-center gap-3">
+                      <div className="hidden text-xs text-gray-400 sm:block">{timeAgo(selected.receivedAt)}</div>
+                      <button
+                        onClick={backToDefault}
+                        className="rounded-lg border border-gray-300 px-3 py-1.5 text-xs hover:bg-gray-50"
+                      >
+                        Close
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Messages */}
+                <div
+                  ref={messagesScrollRef}
+                  className="flex-1 min-h-0 overflow-y-auto bg-gradient-to-b from-gray-50 to-white px-4 sm:px-6 lg:px-10 py-6"
+                >
+                  {chatMessages.length === 0 ? (
+                    <div className="text-sm text-gray-500">No messages yet.</div>
+                  ) : (
+                    <div className="min-h-full flex flex-col justify-end gap-2">
+                      {chatMessages.map((msg, idx) => {
+                        const prev = chatMessages[idx - 1];
+                        const showSender = !msg.mine && (!prev || prev.sender !== msg.sender);
+                        const showAvatar = showSender;
+                        return (
+                          <div
+                            key={msg.key}
+                            className={cls(
+                              "flex w-full items-end gap-3",
+                              msg.mine ? "justify-end" : "justify-start"
+                            )}
+                          >
+                            {!msg.mine ? (
+                              <div className="w-9 shrink-0">
+                                {showAvatar ? (
+                                  <div className="grid h-8 w-8 place-items-center rounded-full border border-gray-200 bg-white text-[11px] font-bold text-gray-700">
+                                    {initials(msg.sender)}
+                                  </div>
+                                ) : null}
+                              </div>
+                            ) : null}
+
+                            <div
+                              className={cls(
+                                "flex min-w-0 flex-1 flex-col",
+                                msg.mine ? "items-end" : "items-start"
+                              )}
+                            >
+                              {showSender ? (
+                                <div className="mb-1 text-[11px] font-semibold text-gray-500">
+                                  {msg.sender}
+                                </div>
+                              ) : null}
+
+                              <div
+                                className={cls(
+                                  "w-fit max-w-[88%] sm:max-w-[80%] lg:max-w-[72%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed shadow-sm",
+                                  msg.mine
+                                    ? "bg-emerald-700 text-white rounded-br-md"
+                                    : "bg-white text-gray-900 border border-gray-200 rounded-bl-md"
+                                )}
+                              >
+                                <div className="whitespace-pre-wrap break-words">{msg.text}</div>
+                              </div>
+                            </div>
+                          </div>
+                        );})}
                     </div>
                   )}
                 </div>
 
-                <div>
-                  <label className="mb-1 block text-sm font-medium">Message:</label>
-                  <textarea
-                    value={composeBody}
-                    onChange={(e) => setComposeBody(e.target.value)}
-                    className="h-64 w-full resize-none rounded-lg border border-gray-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-emerald-500/30"
-                    placeholder="Type your message..."
-                  />
-                </div>
-
-                <div className="flex justify-end gap-2">
-                  <button
-                    onClick={backToDefault}
-                    className="rounded-lg border border-gray-300 px-4 py-2 text-sm hover:bg-gray-50"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    onClick={sendCompose}
-                    disabled={!pickedUser || !composeBody.trim()}
-                    className={cls(
-                      "rounded-lg px-4 py-2 text-sm font-medium text-white",
-                      pickedUser && composeBody.trim()
-                        ? "bg-emerald-700 hover:bg-emerald-700"
-                        : "bg-gray-300 cursor-not-allowed"
-                    )}
-                  >
-                    Send
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {mode === "read" && selected && (
-              <div className="space-y-5">
-                <div className="flex items-start gap-3">
-                  <span className="grid h-10 w-10 place-items-center rounded-full bg-emerald-100 text-[12px] font-bold text-emerald-700">
-                    {initials(selected.from)}
-                  </span>
-                  <div className="min-w-0 flex-1">
-                    <div className="text-lg font-semibold">{selected.subject}</div>
-                    <div className="text-sm text-gray-600">
-                      <span className="font-medium">From:</span> {selected.from}
-                      <br />
-                      <span className="font-medium">Email:</span> {selected.email}
-                      <br />
-                      <span className="text-gray-400">{timeAgo(selected.receivedAt)}</span>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="whitespace-pre-wrap rounded-lg border border-gray-200 bg-gray-50 p-4 text-sm text-gray-800">
-                  {selected.body || "(no messages)"}
-                </div>
-
-                <div className="space-y-2">
-                  <div className="text-sm font-semibold">Reply</div>
-                  <textarea
-                    value={replyText}
-                    onChange={(e) => setReplyText(e.target.value)}
-                    className="h-40 w-full resize-none rounded-lg border border-gray-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-emerald-500/30"
-                    placeholder={`Reply to ${selected.from}...`}
-                  />
-                  <div className="flex justify-end gap-2">
-                    <button
-                      onClick={backToDefault}
-                      className="rounded-lg border border-gray-300 px-4 py-2 text-sm hover:bg-gray-50"
-                    >
-                      Cancel
-                    </button>
+                {/* Reply Input */}
+                <div className="border-t border-gray-200 bg-white px-4 py-3">
+                  <div className="flex items-end gap-2">
+                    <textarea
+                      value={replyText}
+                      onChange={(e) => setReplyText(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && !e.shiftKey) {
+                          e.preventDefault();
+                          void sendReply();
+                        }
+                      }}
+                      rows={1}
+                      className="min-h-[42px] max-h-32 flex-1 resize-none rounded-2xl border border-gray-200 bg-gray-50 px-4 py-2.5 text-sm outline-none focus:ring-2 focus:ring-emerald-500/20"
+                      placeholder={`Message ${selected.from}...`}
+                    />
                     <button
                       onClick={sendReply}
                       disabled={!replyText.trim()}
                       className={cls(
-                        "rounded-lg px-4 py-2 text-sm font-medium text-white",
-                        replyText.trim()
-                          ? "bg-emerald-700 hover:bg-emerald-700"
-                          : "bg-gray-300 cursor-not-allowed"
+                        "inline-flex h-10 w-10 items-center justify-center rounded-full text-white shadow-sm",
+                        replyText.trim() ? "bg-emerald-700 hover:bg-emerald-700" : "bg-gray-300 cursor-not-allowed"
                       )}
+                      title="Send"
                     >
-                      Reply
+                      <Send className="h-4 w-4" />
                     </button>
                   </div>
+                  <div className="mt-2 text-[11px] text-gray-400">Press Enter to send, Shift+Enter for a new line.</div>
                 </div>
-              </div>
+              </>
             )}
           </section>
         </div>
