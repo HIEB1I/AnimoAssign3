@@ -457,11 +457,31 @@ export default function CHAIR_Plantilla() {
               ? displayName
               : serverFull || displayName || prev.profileName || " ";
 
+            const dept = String(
+              (hdr as any).dept_label ??
+                (hdr as any).dept_name ??
+                (hdr as any).department ??
+                ""
+            ).trim();
+
+            // Mirror OM TopBar behavior: ensure subtitle includes "Role | Dept" exactly once
+            const baseSub = String((hdr as any).profileSubtitle ?? prev.profileSubtitle ?? "").trim();
+            let nextSub = baseSub;
+            if (dept) {
+              const subLower = nextSub.toLowerCase();
+              const deptLower = dept.toLowerCase();
+              if (!subLower.includes(deptLower)) {
+                nextSub = nextSub ? `${nextSub} | ${dept}` : dept;
+              }
+            }
+
             return {
               ...prev,
               ...hdr,
               profileName: bestName,
+              profileSubtitle: nextSub || prev.profileSubtitle,
             };
+
           });
         }
       } catch {
