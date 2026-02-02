@@ -85,13 +85,23 @@ export default function FAC_Overview() {
         if (!list?.ok) throw new Error(list?.detail || "Failed to load list.");
         if (!profile?.ok) throw new Error(profile?.detail || "Failed to load profile.");
 
+        const teachingLoadNormalized = (list?.teaching_load || []).map((x: any) => ({
+        ...x,
+        // normalize section_id no matter what the backend sends
+        section_id:
+          x.section_id ||
+          x.sectionId ||
+          x.section?.section_id ||
+          x.section?.id ||
+          "",
+      }));
         // Compose into the same shape the page already renders
         setData({
           ok: true,
           faculty: profile.faculty,
           term: list.term,
           summary: list.summary,
-          teaching_load: list.teaching_load,
+          teaching_load: teachingLoadNormalized,
           notifications: profile.notifications || [],
           // Load assignment workflow flags (backwards-compatible)
           is_proposed: (list as any).is_proposed,
@@ -1098,30 +1108,32 @@ function ChangeRequestModal({
           <button
             disabled={disabled}
             onClick={async () => {
-              // Hook into your backend here if needed
-              try {
-                const raw = JSON.parse(localStorage.getItem("animo.user") || "{}");
-                const userId = raw.userId || raw.user_id || raw.id || "";
-                const parts: string[] = [];
-                if (choices.includes("Change class time") && selTime) parts.push(`Change time to ${selTime}`);
-                if (choices.includes("Change class day") && selDay) parts.push(`Change day to ${selDay}`);
-                if (choices.includes("Other") && otherText.trim()) parts.push(otherText.trim());
-                const changeSummary = parts.join("; ");
-                const msg = `${context.item.code} ${context.item.sec} • ${context.day} • ${context.item.time}\n${changeSummary}\n\nRemarks: ${remarks.trim()}`;
-                await sendFacultyLoadAssignmentRfcMessage(userId, {
-                  term_id: (term as any)?.term_id || (term as any)?._id || (term as any)?.id,
-                  message: msg,
-                  course_code: context.item.code,
-                  section: context.item.sec,
-                });
-                window.location.reload();
-               const sectionId =
-                (context.item.originalItem as any)?.section_id ||
-                (context.item.originalItem as any)?.sectionId ||
+            try {
+              const raw = JSON.parse(localStorage.getItem("animo.user") || "{}");
+              const userId = raw.userId || raw.user_id || raw.id || "";
+
+              const parts: string[] = [];
+              if (choices.includes("Change class time") && selTime) parts.push(`Change time to ${selTime}`);
+              if (choices.includes("Change class day") && selDay) parts.push(`Change day to ${selDay}`);
+              if (choices.includes("Other") && otherText.trim()) parts.push(otherText.trim());
+
+              const changeSummary = parts.join("; ");
+              const msg =
+                `${context.item.code} ${context.item.sec} • ${context.day} • ${context.item.time}\n` +
+                `${changeSummary}\n\nRemarks: ${remarks.trim()}`;
+
+              const oi: any = (context?.item?.originalItem ?? context?.item ?? {});
+              const sectionId =
+                oi.section_id ||
+                oi.id ||
+                oi.sectionId ||
+                oi.section?.section_id ||
+                oi.section?.id ||
                 "";
 
               if (!sectionId) {
-                console.error("Missing section_id for this course row. Backend must return section_id in teaching_load.");
+                console.error("RFC send blocked: missing section_id on row", oi);
+                alert("Cannot send RFC: missing section_id for this assigned course row.");
                 return;
               }
 
@@ -1131,20 +1143,19 @@ function ChangeRequestModal({
                 message: msg,
               });
 
-
               // Optional: show a useful message if Gmail isn't connected
               if (resp && resp.email_sent === false && resp.email_error) {
                 console.warn("RFC saved but email was not sent:", resp.email_error);
               }
 
               window.location.reload();
+            } catch (e) {
+              console.error(e);
+            } finally {
+              onClose();
+            }
+          }}
 
-              } catch (e) {
-                console.error(e);
-              } finally {
-                onClose();
-              }
-            }}
             className={cls(
               "inline-flex h-9 items-center gap-2 rounded-xl px-4 text-sm text-white shadow",
               "bg-[#1F7A49] hover:brightness-[1.06] active:translate-y-[0.5px] focus:outline-none focus:ring-2 focus:ring-emerald-600/40",
