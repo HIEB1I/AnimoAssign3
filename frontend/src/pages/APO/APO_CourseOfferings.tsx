@@ -7,6 +7,7 @@ import {
   Search,
   X,
   Send,
+  Download,
   Plus,
   ChevronDown,
   AlertTriangle,
@@ -37,6 +38,8 @@ import {
   editCatalogCourse,  
   getSpecialClassData,
   updateApoSpecialClassRow,
+  downloadBlob,
+  exportOMSC_Pdf,
   type ApiConflict,
   type CreateCoursePayload,  
   type CourseCatalogItem           
@@ -886,6 +889,10 @@ export default function CourseOfferingsPage() {
   const [scLoading, setScLoading] = useState(false);
   const [scErr, setScErr] = useState<string | null>(null);
 
+  const [scSelectedIds, setScSelectedIds] = useState<Record<string, boolean>>({});
+  const [scExporting, setScExporting] = useState(false);
+  const [scExportErr, setScExportErr] = useState<string>("");
+
   /** ------------------ Editing state ------------------ */
   const [scEditingId, setScEditingId] = useState<string | null>(null);
   const [scEditRemarks, setScEditRemarks] = useState<string>("");
@@ -1161,6 +1168,64 @@ const [currImportErr, setCurrImportErr] = useState<string | null>(null);
   }, [scRows, apoCampus, scData?.campus?.campus_name, data?.campus?.campus_name]);
 
 
+  const scSelectedList = useMemo(
+    () => scRowsForCampus.filter((r) => !!scSelectedIds[String((r as any)?.special_id)]).map((r) => String((r as any)?.special_id)),
+    [scRowsForCampus, scSelectedIds]
+  );
+
+  const toggleAllSpecialClassVisible = (checked: boolean) => {
+    setScSelectedIds((prev) => {
+      const next = { ...prev };
+      scRowsForCampus.forEach((r) => {
+        const id = String((r as any)?.special_id ?? "").trim();
+        if (!id) return;
+        if (checked) next[id] = true;
+        else delete next[id];
+      });
+      return next;
+    });
+  };
+
+  const toggleOneSpecialClass = (id: string, checked: boolean) => {
+    const sid = String(id ?? "").trim();
+    if (!sid) return;
+    setScSelectedIds((prev) => {
+      const next = { ...prev };
+      if (checked) next[sid] = true;
+      else delete next[sid];
+      return next;
+    });
+  };
+
+  const exportSelectedSpecialClassPdf = async () => {
+    try {
+      setScExportErr("");
+      if (scSelectedList.length === 0) {
+        setScExportErr("Select 1 row to export.");
+        return;
+      }
+      if (scSelectedList.length !== 1) {
+        setScExportErr("Select only 1 row to export.");
+        return;
+      }
+      const exportId = scSelectedList[0];
+
+      setScExporting(true);
+      const blob = await exportOMSC_Pdf({
+        termId: scData?.term_id,
+        specialId: exportId,
+      });
+
+      const fname = `SpecialClass_${exportId}_${new Date().toISOString().slice(0, 10)}.pdf`;
+      downloadBlob(blob, fname);
+    } catch (e: any) {
+      setScExportErr(e?.response?.data?.detail || e?.message || "Failed to export PDF.");
+    } finally {
+      setScExporting(false);
+    }
+  };
+
+
   // --- Electives: per-placeholder fetch helper ---
   async function ensureElectiveOptionsFor(placeholderId?: string) {
     if (!user?.userId || !placeholderId) return;
@@ -1304,6 +1369,9 @@ const loadOfferings = async () => {
 
       setScData(data);
       setScRows(data.rows || []);
+    
+      setScSelectedIds({});
+      setScExportErr("");
     } catch (e: any) {
       setScErr(
         e?.message ? `Failed to load special class data: ${e.message}` : "Failed to load special class data"
@@ -2900,7 +2968,7 @@ const promptSaveEdit = () => {
             </div>
             {isElectiveFlow && addAnchorSectionId && (
               <div className="mt-2 text-xs text-slate-500">
-                Tip: You can change this again later from the same placeholder row.
+                You can change this again later from the same placeholder row.
               </div>
             )}
           </div>
@@ -3301,15 +3369,38 @@ const promptSaveEdit = () => {
             </div>
           )}
 
-          <div className="relative min-w-[220px] flex-1">
-            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-500" />
-            <input
-              value={view === "offerings" ? search : currSearch}
-              onChange={(e) => (view === "offerings" ? setSearch(e.target.value) : setCurrSearch(e.target.value))}
-              placeholder={searchPlaceholder}
-              className="w-full rounded-lg border px-9 py-2 text-sm"
-            />
-          </div>
+          <div className="min-w-[220px] flex-1 flex items-center gap-2">
+  <div className="relative flex-1">
+    <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-500" />
+    <input
+      value={view === "offerings" ? search : currSearch}
+      onChange={(e) => (view === "offerings" ? setSearch(e.target.value) : setCurrSearch(e.target.value))}
+      placeholder={searchPlaceholder}
+      className="w-full rounded-lg border px-9 py-2 text-sm"
+    />
+  </div>
+
+  {/* Special Class: Export PDF (select 1 row) */}
+  {view === "specialclass" && (
+    <button
+      onClick={exportSelectedSpecialClassPdf}
+      disabled={scExporting || scSelectedList.length !== 1}
+      className={cls(
+        "inline-flex items-center gap-2 rounded-md border border-emerald-700/30 bg-emerald-50 px-3 py-2 text-sm font-medium text-emerald-800",
+        "hover:bg-emerald-100",
+        (scExporting || scSelectedList.length !== 1) && "opacity-60 cursor-not-allowed"
+      )}
+      title={
+        scSelectedList.length !== 1
+          ? "Select exactly 1 row in Special Class to export"
+          : "Export selected Special Class row as PDF"
+      }
+    >
+      <Download className="h-4 w-4" />
+      {scExporting ? "Exporting…" : "Export PDF"}
+    </button>
+  )}
+</div>
 
           {/* Offerings filters */}
           {view === "offerings" && (
@@ -5032,14 +5123,18 @@ const response = await importCurriculumCsv(user.userId, {
           {/* ------------------------------ Special Class ------------------------------ */}
           {view === "specialclass" && (
             <div className="rounded-xl border border-gray-300 bg-white shadow-sm overflow-hidden">
-              <div className="bg-emerald-700 text-white px-4 py-3 text-center font-semibold">
-                Special Class
+              <div className="bg-emerald-700 text-white px-4 py-3 flex items-center justify-between">
+                <div className="font-semibold">Special Class</div>
               </div>
 
               <div className="p-3">
                 {scErr && <div className="mb-2 text-sm text-red-600">{scErr}</div>}
+                {scExportErr && <div className="mb-2 text-sm text-red-600">{scExportErr}</div>}
+                <div className="mb-2 text-xs text-neutral-500">
+                  Select 1 row, then click <span className="font-medium">Export PDF</span>.
+                </div>
 
-                {scLoading ? (
+{scLoading ? (
                   <div className="text-sm text-neutral-500">Loading…</div>
                 ) : scErr ? (
                   <div className="text-sm text-red-600">Failed to load special class: {scErr}</div>
@@ -5050,27 +5145,34 @@ const response = await importCurriculumCsv(user.userId, {
                     <table className="w-full text-sm border-collapse">
                       <thead className="bg-gray-50 text-emerald-800">
                         <tr className="text-[13px] font-semibold">
-                          {[
-                            "Student",
-                            "Course",
-                            "Section",
-                            "Faculty",
-                            "Day 1",
-                            "Begin 1",
-                            "End 1",
-                            "Room 1",
-                            "Day 2",
-                            "Begin 2",
-                            "End 2",
-                            "Room 2",
-                            "Remarks",
-                            "Actions",
-                          ].map((h) => (
-                            <th key={h} className="px-3 py-2 text-left border border-gray-300">
-                              {h}
-                            </th>
-                          ))}
-                        </tr>
+
+<th className="px-3 py-2 text-left border border-gray-300 w-10">
+  <input
+    type="checkbox"
+    className="h-4 w-4 accent-emerald-700"
+    checked={
+      scRowsForCampus.length > 0 &&
+      scRowsForCampus.every((r) => !!scSelectedIds[String((r as any)?.special_id)])
+    }
+    onChange={(e) => toggleAllSpecialClassVisible(e.target.checked)}
+    aria-label="Select all visible special class rows"
+  />
+</th>
+                        <th className="px-3 py-2 text-left border border-gray-300">Student</th>
+                        <th className="px-3 py-2 text-left border border-gray-300">Course</th>
+                        <th className="px-3 py-2 text-left border border-gray-300">Section</th>
+                        <th className="px-3 py-2 text-left border border-gray-300">Faculty</th>
+                        <th className="px-3 py-2 text-left border border-gray-300">Day 1</th>
+                        <th className="px-3 py-2 text-left border border-gray-300">Begin 1</th>
+                        <th className="px-3 py-2 text-left border border-gray-300">End 1</th>
+                        <th className="px-3 py-2 text-left border border-gray-300">Room 1</th>
+                        <th className="px-3 py-2 text-left border border-gray-300">Day 2</th>
+                        <th className="px-3 py-2 text-left border border-gray-300">Begin 2</th>
+                        <th className="px-3 py-2 text-left border border-gray-300">End 2</th>
+                        <th className="px-3 py-2 text-left border border-gray-300">Room 2</th>
+                        <th className="px-3 py-2 text-left border border-gray-300">Remarks</th>
+                        <th className="px-3 py-2 text-left border border-gray-300">Actions</th>
+                      </tr>
                       </thead>
 
                       <tbody>
@@ -5148,6 +5250,16 @@ const response = await importCurriculumCsv(user.userId, {
                           return (
                             <tr key={String(row.special_id)} className="hover:bg-neutral-50">
                               <td className="px-3 py-2 border border-gray-300">
+                                <input
+                                  type="checkbox"
+                                  className="h-4 w-4 accent-emerald-700"
+                                  checked={!!scSelectedIds[String(row.special_id)]}
+                                  onChange={(e) => toggleOneSpecialClass(String(row.special_id), e.target.checked)}
+                                  aria-label={`Select special class ${String(row.special_id)}`}
+                                />
+                              </td>
+
+<td className="px-3 py-2 border border-gray-300">
                                 <div className="font-medium">{student_name || "—"}</div>
                                 <div className="text-xs text-gray-500">{student_number || "—"}</div>
                               </td>
@@ -5844,7 +5956,7 @@ const SubmitModal: React.FC<{
               </div>
 
               <div className="mt-2 text-xs text-slate-500">
-                Tip: Click an edited row to expand details.
+                Click an edited row to expand details.
               </div>
             </div>
 
@@ -6003,7 +6115,7 @@ const PlanReviewModal: React.FC<{
               </span>
             )}
             <span className="ml-auto text-xs text-amber-900">
-              Tip: review the list below, then click <span className="font-semibold">Approve updates</span>.
+              Review the list below, then click <span className="font-semibold">Approve updates</span>.
             </span>
           </div>
         </div>

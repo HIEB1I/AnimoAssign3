@@ -2250,7 +2250,7 @@ def _distribute_sections_round_robin(
 async def ensure_sections_from_demand(
     *, term_id: str, campus_id: str, campus_prefix: str, course_id: str, base_per_program: int, capacity: int = DEFAULT_CAP
 ) -> None:
-    q: Dict[str, Any] = {"term_id": term_id, "$or": [{"course_id": course_id}, {"fulfilled_placeholder_course_id": course_id}]}
+    q: Dict[str, Any] = {"term_id": term_id, "campus_id": campus_id, "status": {"$ne": "archived"}, "$or": [{"course_id": course_id}, {"fulfilled_placeholder_course_id": course_id}]}
     if campus_prefix:
         q["section_code"] = {"$regex": f"^{campus_prefix}", "$options": "i"}
     existing = await db[COL_SECTIONS].count_documents(q)
@@ -2324,8 +2324,21 @@ async def _create_sections(
             made += 1
     return made
 
-async def reduce_sections_if_excess(*, term_id: str, campus_prefix: str, course_id: str, target_count: int) -> int:
-    q: Dict[str, Any] = {"term_id": term_id, "$or": [{"course_id": course_id}, {"fulfilled_placeholder_course_id": course_id}]}
+async def reduce_sections_if_excess(
+    *, term_id: str, campus_id: str, campus_prefix: str, course_id: str, target_count: int
+) -> int:
+    """
+    Reduce (hard-delete) excess sections for a course when planning updates are approved.
+
+    Placeholder schedules (all None) and placeholder faculty assignments (no user/faculty)
+    should NOT block reduction.
+    """
+    q: Dict[str, Any] = {
+        "term_id": term_id,
+        "campus_id": campus_id,
+        "status": {"$ne": "archived"},
+        "$or": [{"course_id": course_id}, {"fulfilled_placeholder_course_id": course_id}],
+    }
     if campus_prefix:
         q["section_code"] = {"$regex": f"^{campus_prefix}", "$options": "i"}
 
@@ -2339,12 +2352,36 @@ async def reduce_sections_if_excess(*, term_id: str, campus_prefix: str, course_
     if cur_count <= target_count:
         return 0
 
+    async def _has_real_schedule(section_id: str) -> bool:
+        async for sch in db[COL_SCHEDS].find(
+            {"section_id": section_id},
+            {"_id": 0, "day": 1, "start_time": 1, "end_time": 1, "room_id": 1},
+        ):
+            day = sch.get("day")
+            st = sch.get("start_time")
+            en = sch.get("end_time")
+            rid = sch.get("room_id")
+            if day or st or en or rid:
+                return True
+        return False
+
+    async def _has_real_faculty(section_id: str) -> bool:
+        async for a in db[COL_FAC_ASSIGN].find(
+            {"section_id": section_id, "is_archived": {"$ne": True}},
+            {"_id": 0, "user_id": 1, "faculty_id": 1, "faculty_name": 1, "load_id": 1},
+        ):
+            if (a.get("user_id") not in ["", None]) or (a.get("faculty_id") not in ["", None]):
+                return True
+            if (a.get("faculty_name") or "").strip():
+                return True
+            if a.get("load_id") not in ["", None]:
+                return True
+        return False
+
     removable: List[Dict[str, Any]] = []
     for s in secs:
         sid = s["section_id"]
-        has_sched = await db[COL_SCHEDS].find_one({"section_id": sid}) is not None
-        has_fac = await db[COL_FAC_ASSIGN].find_one({"section_id": sid, "is_archived": {"$ne": True}}) is not None
-        if not has_sched and not has_fac:
+        if not await _has_real_schedule(sid) and not await _has_real_faculty(sid):
             removable.append(s)
 
     to_delete = min(cur_count - target_count, len(removable))
@@ -2353,10 +2390,15 @@ async def reduce_sections_if_excess(*, term_id: str, campus_prefix: str, course_
         sid = s["section_id"]
         await db[COL_SECTIONS].delete_one({"section_id": sid})
         await db[COL_SCHEDS].delete_many({"section_id": sid})
-        await db[COL_FAC_ASSIGN].update_many({"section_id": sid}, {"$set": {"is_archived": True, "updated_at": now()}})
+        await db[COL_FAC_ASSIGN].update_many(
+            {"section_id": sid},
+            {"$set": {"is_archived": True, "updated_at": now()}},
+        )
         deleted += 1
     return deleted
 
+
+# ---------- planning snapshots & diffs ----------
 # ---------- planning snapshots & diffs ----------
 async def _preen_snapshot(term_id: str, campus_id: str) -> Dict[str, int]:
     """
@@ -5263,7 +5305,7 @@ async def post_course_offerings(
 
             lvl = (await db[COL_COURSES].find_one({"course_id": cid}, {"_id":0,"program_level":1}) or {}).get("program_level")
             pref_pat = prefix_pattern_for_level(campus.get("campus_name",""), lvl) or prefix_default
-            sec_q = {"term_id": term_id, "$or": [{"course_id": cid}, {"fulfilled_placeholder_course_id": cid}]}
+            sec_q = {"term_id": term_id, "campus_id": campus_id, "status": {"$ne": "archived"}, "$or": [{"course_id": cid}, {"fulfilled_placeholder_course_id": cid}]}
             if pref_pat:
                 sec_q["section_code"] = {"$regex": f"^{pref_pat}", "$options": "i"}
             existing = await db[COL_SECTIONS].count_documents(sec_q)
@@ -5313,7 +5355,7 @@ async def post_course_offerings(
                     target = max(base, ceil((est["plan"] or 0) / eff_cap) or 1)
 
                 await reduce_sections_if_excess(
-                    term_id=term_id, campus_prefix=pref_pat,
+                    term_id=term_id, campus_id=campus_id, campus_prefix=pref_pat,
                     course_id=cid, target_count=target
                 )
 
