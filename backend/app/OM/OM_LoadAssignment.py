@@ -724,6 +724,56 @@ async def _fetch_rows(user_id: str, term_id: str, db) -> Dict[str, Any]:
 
     _flag_faculty_conflicts(rows, resolve_conflicts=False)
 
+    # --- Overlay finalized + faculty-approved status from proposals (best-effort) ---
+    # This ensures:
+    #   1) Auto-assign won't "move" finalized schedules (frontend disables actions too)
+    #   2) Status column shows "Approved" once faculty has approved AND the row is finalized
+    try:
+        proposals = await db[COL_LOAD_PROPOSALS].find(
+            {"term_id": term_id},
+            {"_id": 0, "faculty_id": 1, "status": 1, "locked": 1, "rows": 1},
+        ).to_list(None)
+
+        # faculty_id -> proposal status
+        proposal_status_by_fid: dict[str, str] = {}
+        # (faculty_id, course_code, section_code) keys finalized or locked
+        finalized_keys: set[tuple[str, str, str]] = set()
+
+        for p in proposals or []:
+            fid = str(p.get("faculty_id") or "").strip()
+            if not fid:
+                continue
+            st = str(p.get("status") or "").strip().lower()
+            proposal_status_by_fid[fid] = st
+            locked_all = bool(p.get("locked"))
+
+            for rr in (p.get("rows") or []):
+                if not isinstance(rr, dict):
+                    continue
+                course = str(rr.get("course") or rr.get("course_code") or "").strip()
+                section = str(rr.get("section") or "").strip()
+                if not course or not section:
+                    continue
+                if locked_all or bool(rr.get("finalized")):
+                    finalized_keys.add((fid, course, section))
+
+        for r in rows:
+            if not isinstance(r, dict):
+                continue
+            fid = str(r.get("faculty_id") or "").strip()
+            course = str(r.get("course") or "").strip()
+            section = str(r.get("section") or "").strip()
+
+            if fid and course and section and (fid, course, section) in finalized_keys:
+                r["finalized"] = True
+
+                # Only flip Pending -> Approved when faculty has actually approved/accepted
+                st = proposal_status_by_fid.get(fid, "")
+                if st in ("approved", "accepted"):
+                    r["status"] = "Approved"
+    except Exception:
+        pass
+
     return {"rows": rows}
 
 async def _apply_mode_and_rooms_to_rows(rows: list[dict], db):
@@ -834,11 +884,19 @@ def _term_label(t: dict) -> str:
 
 def _row_is_locked(r: dict) -> bool:
     """
-    Treat a row as 'locked' if it already has a concrete manual load:
-      - faculty_id is set
-      - and at least one full day/begin/end slot is filled.
+    Treat a row as 'locked' if it should not be altered by auto-assign.
+
+    Locked when:
+      - Row was explicitly finalized by OM (row['finalized'] truthy), OR
+      - Row already has a concrete manual load:
+          * faculty_id is set
+          * and at least one full day/begin/end slot is filled.
+
     These rows will be preserved when running auto-assign.
     """
+    if bool(r.get("finalized")):
+        return True
+
     fid = (r.get("faculty_id") or "").strip()
     if not fid:
         return False

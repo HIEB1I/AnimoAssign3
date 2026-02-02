@@ -8,7 +8,7 @@ import {
   sendOmLoadAssignmentsToFaculty,
   getOmLoadAssignmentRfc,
   respondOmLoadAssignmentRfc,
-  finalizeOmLoadAssignmentCourse,
+
 } from "../../api.ts";
 
 import {
@@ -31,14 +31,13 @@ import {
   CheckCheck,
   Plus,
   MessageSquareText,
-  Check,
-  Trash2,
+  Copy,
+
   Undo2,
   Redo2,
   X,
-  Copy,
-  Upload,
-} from "lucide-react";
+
+  Upload,} from "lucide-react";
 import { InboxContent as OMInboxContent } from "./OM_Inbox";
 
 export type FlagSeverity = "warning" | "error";
@@ -473,7 +472,7 @@ type Row = {
   room2: string;
   capacity: number | "";
   mode?: string;
-  status?: "" | "Confirmed" | "Pending" | "Unassigned" | "Conflict";
+  status?: "" | "Confirmed" | "Approved" | "Pending" | "Unassigned" | "Conflict";
   pending_rfc?: boolean;
   conflictNote?: string;
   editable?: boolean;
@@ -958,7 +957,7 @@ const StatusChip = ({ r }: { r: Row }) => {
 
   if (!r.status) return <span className="inline-block w-24 h-6" />;
   const tone =
-    r.status === "Confirmed"
+    (r.status === "Confirmed" || r.status === "Approved")
       ? "bg-green-100 text-green-700"
       : r.status === "Pending"
       ? "bg-yellow-100 text-yellow-700"
@@ -1006,48 +1005,6 @@ const StatusChip = ({ r }: { r: Row }) => {
     </span>
   );
 };
-
-const ApproveModal = ({
-  open,
-  onClose,
-  onApprove,
-}: {
-  open: boolean;
-  onClose: () => void;
-  onApprove: () => void;
-}) =>
-  !open ? null : (
-    <div className="fixed inset-0 z-[120] grid place-items-center bg-black/40 p-4">
-      <div className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-2xl">
-        <div className="mx-auto mb-4 grid h-16 w-16 place-items-center rounded-full border-2 border-emerald-600 text-emerald-700">
-          <Check className="h-8 w-8" strokeWidth={2.5} />
-        </div>
-        <h3 className="mb-2 text-center text-2xl font-semibold">
-          Are you sure?
-        </h3>
-        <p className="mx-auto mb-6 max-w-md text-center text-sm text-neutral-600">
-          Please confirm that this is the final{" "}
-          <span className="font-semibold">Faculty Load Assignment.</span>Once
-          submitted, this action cannot be undone and the button will be
-          disabled.
-        </p>
-        <div className="flex justify-end gap-2">
-          <button
-            onClick={onClose}
-            className="rounded-lg border border-neutral-300 bg-neutral-100 px-4 py-2 text-sm hover:bg-neutral-200"
-          >
-            Cancel
-          </button>
-          <button
-            onClick={onApprove}
-            className="rounded-lg bg-emerald-700 px-4 py-2 text-sm font-medium text-white hover:brightness-110"
-          >
-            Yes, I Approve
-          </button>
-        </div>
-      </div>
-    </div>
-  );
 
 const SendModal = ({
   open,
@@ -1678,7 +1635,7 @@ function Toast({
       : "Info";
 
   return (
-    <div className="fixed bottom-4 left-1/2 z-[1200] w-[92vw] max-w-md -translate-x-1/2">
+    <div className="fixed top-16 right-6 z-[1200] w-[92vw] max-w-md sm:w-[360px]">
       <div className={`rounded-xl border px-4 py-3 text-sm shadow-lg ${tone}`}>
         <div className="flex items-start justify-between gap-3">
           <div className="leading-snug">
@@ -1724,7 +1681,55 @@ function useToast() {
 }
 /* ---------------- Main ---------------- */
 export default function OM_LoadAssignment() {
+
   const [copiedRowId, setCopiedRowId] = useState<string | null>(null);
+
+  const formatRowForClipboard = (row: Row) =>
+    [
+      "Course",
+      "Section",
+      "Faculty",
+      "Day 1",
+      "Begin 1",
+      "End 1",
+      "Room 1",
+      "Day 2",
+      "Begin 2",
+      "End 2",
+      "Room 2",
+      "Status",
+    ].join("\t") +
+    "\n" +
+    [
+      row.course ?? "",
+      row.section ?? "",
+      row.faculty ?? "",
+      row.day1 ?? "",
+      row.begin1 ?? "",
+      row.end1 ?? "",
+      row.room1 ?? "",
+      row.day2 ?? "",
+      row.begin2 ?? "",
+      row.end2 ?? "",
+      row.room2 ?? "",
+      (row.status as any) ?? "",
+    ].join("\t");
+
+  const handleCopyRow = async (row: Row) => {
+    const textToCopy = formatRowForClipboard(row);
+    try {
+      await navigator.clipboard.writeText(textToCopy);
+    } catch {
+      const textarea = document.createElement("textarea");
+      textarea.value = textToCopy;
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand("copy");
+      document.body.removeChild(textarea);
+    }
+    setCopiedRowId(row.id);
+    window.setTimeout(() => setCopiedRowId(null), 1200);
+  };
 
   // In-app toast (styled to match Faculty pages)
   const { toast, show: showToast, clear: clearToast } = useToast();
@@ -1748,53 +1753,6 @@ export default function OM_LoadAssignment() {
 
     // allow selecting the same file again
     e.target.value = "";
-  };
-
-  const formatRowForClipboard = (row: any) =>
-    [
-      "Course",
-      "Section",
-      "Faculty",
-      "Day 1",
-      "Begin 1",
-      "End 1",
-      "Room 1",
-      "Day 2",
-      "Begin 2",
-      "End 2",
-      "Room 2",
-      "Status",
-    ].join("\t") +
-    "\n" +
-    [
-      row.course,
-      row.section,
-      row.faculty,
-      row.day1,
-      row.begin1,
-      row.end1,
-      row.room1,
-      row.day2,
-      row.begin2,
-      row.end2,
-      row.room2,
-      row.status,
-    ].join("\t");
-
-  const handleCopyRow = async (row: any) => {
-    const text = formatRowForClipboard(row);
-    try {
-      await navigator.clipboard.writeText(text);
-    } catch {
-      const textarea = document.createElement("textarea");
-      textarea.value = text;
-      document.body.appendChild(textarea);
-      textarea.select();
-      document.execCommand("copy");
-      document.body.removeChild(textarea);
-    }
-    setCopiedRowId(row.id);
-    setTimeout(() => setCopiedRowId(null), 1200);
   };
 
   // Session (same pattern as APO: localStorage["animo.user"])
@@ -1841,7 +1799,31 @@ export default function OM_LoadAssignment() {
       console.log("DEBUG from run:", debug);
       console.log("Preferred map:", prefMap);
 
-      setRows(Array.isArray(res?.rows) ? res.rows : []);
+      // Preserve already-finalized rows: auto-assign should not "move" them or clear their RFC indicators
+      const existingFinalized = new Map<string, Row>(
+        rows.filter((rr) => !!rr.finalized).map((rr) => [rr.id, rr])
+      );
+
+      let nextRows: Row[] = Array.isArray(res?.rows) ? (res.rows as Row[]) : [];
+      if (existingFinalized.size) {
+        const seen = new Set<string>();
+        nextRows = nextRows.map((nr) => {
+          const id = String((nr as any)?.id || "");
+          const fr = existingFinalized.get(id);
+          if (fr) {
+            seen.add(id);
+            // Prefer the existing finalized row to avoid overwriting faculty/times/status
+            return { ...(nr as any), ...(fr as any), finalized: true } as Row;
+          }
+          return nr;
+        });
+        // If backend did not return a finalized row, keep it in the table
+        for (const [id, fr] of existingFinalized.entries()) {
+          if (!seen.has(id)) nextRows.unshift(fr);
+        }
+      }
+
+      setRows(nextRows);
       setTerm(typeof res?.term === "string" ? res.term : "");
       setMode("run");
       setApproved(false);
@@ -1962,7 +1944,6 @@ export default function OM_LoadAssignment() {
   const isRunning = mode !== "idle";
   const isRun = mode === "run";
   const hasReco = isRunning && rows.length > 0;
-  const [showApprove, setShowApprove] = useState(false);
   const [approved, setApproved] = useState(false);
   const [showSend, setShowSend] = useState(false);
   const [sendRowsPreview, setSendRowsPreview] = useState<Row[]>([]);
@@ -2246,6 +2227,22 @@ export default function OM_LoadAssignment() {
     resetHistory();
   };
 
+  const handleForwardToChair = async () => {
+    if (!userId) return;
+    try {
+      const res = await submitOmLoadAssignment(userId, { rows }, "approve");
+      await notifyChairLoadRecommendation(userId, {
+        kind: (res as any)?.kind,
+        reco_id: (res as any)?.reco_id,
+      });
+      showToast("Forwarded to Chair.", "success");
+      await loadFromServer();
+      setApproved(true);
+    } catch (e: any) {
+      showToast(e?.message || "Failed to forward to Chair.", "error");
+    }
+  };
+
   useEffect(() => {
     if (initialLoaded) return; // prevent double loading
     setInitialLoaded(true);
@@ -2400,8 +2397,8 @@ export default function OM_LoadAssignment() {
 
   const hasAnyErrors = useMemo(
     () =>
-      Object.values(rowFlags).some((flags) =>
-        flags.some((f) => f.severity === "error")
+      Object.values(rowFlags as RowFlagsById).some((flags: RowFlag[]) =>
+        flags.some((f: RowFlag) => f.severity === "error")
       ),
     [rowFlags]
   );
@@ -3075,7 +3072,7 @@ useEffect(() => {
                       if (!proceed) return;
                     }
 
-                    setShowApprove(true);
+                    void handleForwardToChair();
                   }}
                   >
                     <CheckCheck className="h-4 w-4" />
@@ -3624,71 +3621,16 @@ useEffect(() => {
                                   </button>
 
                                   <button
-                                    disabled={!!r.finalized}
-                                    className={cls(
-                                      "flex h-7 w-7 items-center justify-center rounded-full border-2 border-emerald-700 text-emerald-700 hover:bg-emerald-50",
-                                      !!r.finalized && "opacity-40 cursor-not-allowed hover:bg-transparent"
-                                    )}
-                                    title="Approve"
-                                    onClick={async () => {
-                                      if (!userId) return;
-                                      if (!r.faculty_id) {
-                                        showToast("This row has no assigned faculty yet.", "error");
-                                        return;
-                                      }
-                                      try {
-                                        await finalizeOmLoadAssignmentCourse(userId, {
-                                          term_id: termId || undefined,
-                                          faculty_id: r.faculty_id,
-                                          course_code: r.course,
-                                          section: r.section,
-                                        });
-                                        // lock actions for this row immediately (backend persists too)
-                                        setCell(r.id, "finalized", true as any);
-                                        showToast(
-                                          `Notified ${r.faculty || "faculty"} that ${r.course} – ${r.section} was added to their final schedule.`,
-                                          "success"
-                                        );
-                                      } catch (e: any) {
-                                        showToast(e?.message || "Failed to notify faculty.", "error");
-                                      }
-                                    }}
-                                  >
-                                    <Check
-                                      className="h-4 w-4"
-                                      strokeWidth={2.5}
-                                    />
-                                  </button>
-
-                                  <button
-                                    type="button"
-                                    onClick={() => handleCopyRow(r)}
+                                    className="relative hover:brightness-110"
                                     title={copiedRowId === r.id ? "Copied!" : "Copy"}
-                                    className="flex h-7 w-7 items-center justify-center rounded-full border-2 border-gray-300 text-gray-600 hover:bg-gray-50"
+                                    onClick={() => handleCopyRow(r)}
                                   >
                                     {copiedRowId === r.id ? (
-                                      <Check
-                                        className="h-4 w-4 text-emerald-600"
-                                        strokeWidth={2.5}
-                                      />
+                                      <span className="text-xs font-semibold text-emerald-700">✓</span>
                                     ) : (
                                       <Copy className="h-4 w-4" />
                                     )}
                                   </button>
-
-                                  {String(r.id).startsWith("manual-") && (
-                                    <button
-                                      className="flex h-7 w-7 items-center justify-center rounded-full border-2 border-red-600 text-red-600 hover:bg-red-50"
-                                      title="Remove this line"
-                                      onClick={() =>
-                                        commitRows(
-                                          rows.filter((row) => row.id !== r.id)
-                                        )
-                                      }
-                                    >
-                                      <Trash2 className="h-4 w-4" />
-                                    </button>
-                                  )}
                                 </div>
                               )}
                             </td>
@@ -4240,34 +4182,6 @@ useEffect(() => {
         </>
       )}
 
-      <ApproveModal
-        open={showApprove}
-        onClose={() => setShowApprove(false)}
-        onApprove={() => {
-        (async () => {
-          try {
-            if (userId) {
-              const res = await submitOmLoadAssignment(userId, { rows }, "approve");
-
-              await notifyChairLoadRecommendation(userId, {
-                kind: (res as any)?.kind,
-                reco_id: (res as any)?.reco_id,
-              });
-
-              showToast("Forwarded to Chair.", "success");
-            }
-
-            await loadFromServer();
-            setApproved(true);
-          } catch (e: any) {
-            showToast(e?.message || "Failed to forward to Chair.", "error");
-          } finally {
-            setShowApprove(false);
-          }
-        })();
-      }}
-
-      />
 
       <SendModal
         open={showSend}

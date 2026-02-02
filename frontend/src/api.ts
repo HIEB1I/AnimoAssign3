@@ -2867,7 +2867,7 @@ export type OmLoadRow = {
   room2: string;
   capacity: number | "";
   mode?: string;
-  status?: "" | "Confirmed" | "Pending" | "Unassigned" | "Conflict";
+  status?: "" | "Confirmed" | "Pending" | "Approved" | "Unassigned" | "Conflict";
   conflictNote?: string;
   editable?: boolean;
 };
