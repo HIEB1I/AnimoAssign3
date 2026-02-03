@@ -2857,6 +2857,8 @@ export type OmLoadRow = {
   section: string;
   faculty: string;
   faculty_id?: string;
+  /** True when this row has already been sent to the faculty (proposal exists). */
+  forwarded_to_faculty?: boolean;
   day1: string;
   begin1: string;
   end1: string;
@@ -2870,6 +2872,8 @@ export type OmLoadRow = {
   status?: "" | "Confirmed" | "Pending" | "Approved" | "Unassigned" | "Conflict";
   conflictNote?: string;
   editable?: boolean;
+  finalized?: boolean;
+  pending_rfc?: boolean;
 };
 
 // export async function getOmLoadAssignmentList(userId: string) {
@@ -2965,12 +2969,33 @@ export async function getOmFacultyDeloadings(params: { faculty_id: string; term_
 }
 
 /** List all sections for the current term (no algorithm) */
-export async function getOmLoadAssignmentList(user_id: string) {
+export async function getOmLoadAssignmentList(user_id: string, term_id?: string) {
   const base = (typeof API_BASE !== "undefined" ? API_BASE : "").replace(/\/+$/, "");
-  const url = `${base}/om/load-assignment/list?user_id=${encodeURIComponent(user_id)}`;
+  const qs = new URLSearchParams({ user_id });
+  if (term_id) qs.set("term_id", term_id);
+  const url = `${base}/om/load-assignment/list?${qs.toString()}`;
   const r = await fetch(url, { method: "GET" });
   if (!r.ok) throw new Error(await r.text());
-  return r.json() as Promise<{ term: string; term_id?: string; rows: OmLoadRow[] }>;
+  return r.json() as Promise<{
+    term: string;
+    term_id?: string;
+    rows: OmLoadRow[];
+    forwarded_to_chair?: boolean;
+    [k: string]: any;
+  }>;
+}
+
+/** List available terms for archived load viewing */
+export async function getOmLoadAssignmentTerms() {
+  const base = (typeof API_BASE !== "undefined" ? API_BASE : "").replace(/\/+$/, "");
+  const url = `${base}/om/load-assignment/terms`;
+  const r = await fetch(url, { method: "GET" });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json() as Promise<{
+    ok: boolean;
+    active_term_id?: string | null;
+    terms: { term_id: string; label: string; is_active?: boolean; is_current?: boolean }[];
+  }>;
 }
 
 /** Auto-assign algorithm run (fill faculty/day/time/room) */

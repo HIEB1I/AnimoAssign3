@@ -736,7 +736,10 @@ async def _fetch_rows(user_id: str, term_id: str, db) -> Dict[str, Any]:
 
         # faculty_id -> proposal status
         proposal_status_by_fid: dict[str, str] = {}
-        # (faculty_id, course_code, section_code) keys finalized or locked
+        # (faculty_id, course_code, section_code) keys
+        # - forwarded_keys: row exists in an OM->Faculty proposal (already sent to faculty)
+        # - finalized_keys: row is locked/finalized (cannot be edited further)
+        forwarded_keys: set[tuple[str, str, str]] = set()
         finalized_keys: set[tuple[str, str, str]] = set()
 
         for p in proposals or []:
@@ -754,6 +757,7 @@ async def _fetch_rows(user_id: str, term_id: str, db) -> Dict[str, Any]:
                 section = str(rr.get("section") or "").strip()
                 if not course or not section:
                     continue
+                forwarded_keys.add((fid, course, section))
                 if locked_all or bool(rr.get("finalized")):
                     finalized_keys.add((fid, course, section))
 
@@ -771,6 +775,10 @@ async def _fetch_rows(user_id: str, term_id: str, db) -> Dict[str, Any]:
                 st = proposal_status_by_fid.get(fid, "")
                 if st in ("approved", "accepted"):
                     r["status"] = "Approved"
+
+            # Highlight rows already forwarded to faculty (proposal exists)
+            if fid and course and section and (fid, course, section) in forwarded_keys:
+                r["forwarded_to_faculty"] = True
     except Exception:
         pass
 
@@ -1091,6 +1099,13 @@ async def loadassignment_handler(
         # So "updated vs submitted" should be based on forwarded_to_chair, not existence alone.
         was_forwarded_before = bool((existing_header or {}).get("forwarded_to_chair"))
 
+        # Forwarding to the Chair is a final act and cannot happen again.
+        if was_forwarded_before:
+            raise HTTPException(
+                status_code=409,
+                detail="Already forwarded to Chair. Forwarding is final and cannot be undone.",
+            )
+
         # 1) persist the final assignments/schedules
         await _approve_and_persist(active["term_id"], rows, db)
 
@@ -1369,11 +1384,68 @@ async def om_faculty_deloadings(
                 "rfc_id": None
 , "rows": rows}
 
-@router.get("/load-assignment/list")
-async def get_om_load_assignment_list(user_id: str, db=Depends(get_db)):
+@router.get("/load-assignment/terms")
+async def om_load_assignment_terms(db=Depends(get_db)):
+    """List terms for archived load viewing.
+
+    Returns terms sorted from most recent to oldest, along with the OM "active" term id
+    (the same term used by the Load Assignment screen by default).
+    """
     active = await _active_term()
+    active_term_id = (active or {}).get("term_id")
+
+    docs = await db[COL_TERMS].find(
+        {},
+        {"_id": 0, "term_id": 1, "acad_year_start": 1, "term_number": 1, "is_current": 1},
+    ).sort([("acad_year_start", -1), ("term_number", -1)]).to_list(None)
+
+    terms = []
+    for t in docs or []:
+        tid = (t.get("term_id") or "").strip()
+        if not tid:
+            continue
+        terms.append(
+            {
+                "term_id": tid,
+                "label": _term_label(t),
+                "is_current": bool(t.get("is_current")),
+                "is_active": bool(active_term_id and tid == active_term_id),
+            }
+        )
+
+    return {"ok": True, "active_term_id": active_term_id, "terms": terms}
+
+
+@router.get("/load-assignment/list")
+async def get_om_load_assignment_list(user_id: str, term_id: Optional[str] = None, db=Depends(get_db)):
+    # Default behavior remains: if no term_id is provided, use the OM active term.
+    if term_id:
+        active = await db[COL_TERMS].find_one(
+            {"term_id": term_id},
+            {"_id": 0, "term_id": 1, "acad_year_start": 1, "term_number": 1},
+        )
+        if not active:
+            raise HTTPException(status_code=404, detail="term_id not found")
+    else:
+        active = await _active_term()
+
+    # Whether this term's load recommendation has already been forwarded to the Chair.
+    # Forwarding is a final act and should remain disabled across refresh/auto-assign.
+    forwarded_to_chair = False
+    try:
+        dept_id_header = "DEPT0001"  # keep existing header behavior used in /om/loadassignment approve
+        hdr = await db[COL_FACULTY_LOADS].find_one(
+            {"term_id": (active or {}).get("term_id"), "department_id": dept_id_header},
+            {"_id": 0, "forwarded_to_chair": 1},
+        ) or {}
+        forwarded_to_chair = bool(hdr.get("forwarded_to_chair"))
+    except Exception:
+        forwarded_to_chair = False
 
     # Fetch table rows
+    if not (active or {}).get("term_id"):
+        raise HTTPException(status_code=409, detail="No active/upcoming term found")
+
     base = await _fetch_rows(user_id, term_id=active["term_id"], db=db)
     rows = base["rows"]
 
@@ -1613,7 +1685,10 @@ async def get_om_load_assignment_list(user_id: str, db=Depends(get_db)):
     # --- NEW: pending RFC indicator per faculty (for red dot in Actions) ---
     open_rfc_faculty_ids = set()
     try:
-        cur = db[COL_LOAD_RFC].find({"term_id": active.get("term_id"), "status": {"$in": ["NEEDS_OM", "open"]}}, {"_id": 0, "faculty_id": 1})
+        cur = db[COL_LOAD_RFC].find(
+            {"term_id": active.get("term_id"), "status": {"$in": ["NEEDS_OM", "open"]}},
+            {"_id": 0, "faculty_id": 1},
+        )
         async for d in cur:
             fid = d.get("faculty_id")
             if fid:
@@ -1629,6 +1704,7 @@ async def get_om_load_assignment_list(user_id: str, db=Depends(get_db)):
         "term": _term_label(active),
         "term_id": active.get("term_id"),
         "rows": rows,
+        "forwarded_to_chair": forwarded_to_chair,
         "preferred_units_by_faculty": preferred_units_by_faculty,
         "courseToKac": course_kac_simple,
         "facultyToKacs": faculty_to_kacs,
