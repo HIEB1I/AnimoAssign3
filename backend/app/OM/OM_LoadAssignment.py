@@ -724,6 +724,64 @@ async def _fetch_rows(user_id: str, term_id: str, db) -> Dict[str, Any]:
 
     _flag_faculty_conflicts(rows, resolve_conflicts=False)
 
+    # --- Overlay finalized + faculty-approved status from proposals (best-effort) ---
+    # This ensures:
+    #   1) Auto-assign won't "move" finalized schedules (frontend disables actions too)
+    #   2) Status column shows "Approved" once faculty has approved AND the row is finalized
+    try:
+        proposals = await db[COL_LOAD_PROPOSALS].find(
+            {"term_id": term_id},
+            {"_id": 0, "faculty_id": 1, "status": 1, "locked": 1, "rows": 1},
+        ).to_list(None)
+
+        # faculty_id -> proposal status
+        proposal_status_by_fid: dict[str, str] = {}
+        # (faculty_id, course_code, section_code) keys
+        # - forwarded_keys: row exists in an OM->Faculty proposal (already sent to faculty)
+        # - finalized_keys: row is locked/finalized (cannot be edited further)
+        forwarded_keys: set[tuple[str, str, str]] = set()
+        finalized_keys: set[tuple[str, str, str]] = set()
+
+        for p in proposals or []:
+            fid = str(p.get("faculty_id") or "").strip()
+            if not fid:
+                continue
+            st = str(p.get("status") or "").strip().lower()
+            proposal_status_by_fid[fid] = st
+            locked_all = bool(p.get("locked"))
+
+            for rr in (p.get("rows") or []):
+                if not isinstance(rr, dict):
+                    continue
+                course = str(rr.get("course") or rr.get("course_code") or "").strip()
+                section = str(rr.get("section") or "").strip()
+                if not course or not section:
+                    continue
+                forwarded_keys.add((fid, course, section))
+                if locked_all or bool(rr.get("finalized")):
+                    finalized_keys.add((fid, course, section))
+
+        for r in rows:
+            if not isinstance(r, dict):
+                continue
+            fid = str(r.get("faculty_id") or "").strip()
+            course = str(r.get("course") or "").strip()
+            section = str(r.get("section") or "").strip()
+
+            if fid and course and section and (fid, course, section) in finalized_keys:
+                r["finalized"] = True
+
+                # Only flip Pending -> Approved when faculty has actually approved/accepted
+                st = proposal_status_by_fid.get(fid, "")
+                if st in ("approved", "accepted"):
+                    r["status"] = "Approved"
+
+            # Highlight rows already forwarded to faculty (proposal exists)
+            if fid and course and section and (fid, course, section) in forwarded_keys:
+                r["forwarded_to_faculty"] = True
+    except Exception:
+        pass
+
     return {"rows": rows}
 
 async def _apply_mode_and_rooms_to_rows(rows: list[dict], db):
@@ -834,11 +892,19 @@ def _term_label(t: dict) -> str:
 
 def _row_is_locked(r: dict) -> bool:
     """
-    Treat a row as 'locked' if it already has a concrete manual load:
-      - faculty_id is set
-      - and at least one full day/begin/end slot is filled.
+    Treat a row as 'locked' if it should not be altered by auto-assign.
+
+    Locked when:
+      - Row was explicitly finalized by OM (row['finalized'] truthy), OR
+      - Row already has a concrete manual load:
+          * faculty_id is set
+          * and at least one full day/begin/end slot is filled.
+
     These rows will be preserved when running auto-assign.
     """
+    if bool(r.get("finalized")):
+        return True
+
     fid = (r.get("faculty_id") or "").strip()
     if not fid:
         return False
@@ -1043,36 +1109,6 @@ async def loadassignment_handler(
             department_id=dept_id_header,  # existing behavior
             user_id=userId,            # query param from the route
         )
-
-        # 3) notify the department chair(s) so their CHAIR Plantilla alerts updates
-        try:
-            recipients = await _chair_user_ids_for_department_id(dept_id_notif, db)
-            dept_name = await _dept_name_by_id(dept_id_notif, db)
-
-            is_update = bool(existing_header)
-            title = "Load Recommendation Updated" if is_update else "Load Recommendation Forwarded"
-            details = (
-                f"OM {'updated' if is_update else 'forwarded'} the load recommendation"
-                f" for {dept_name or dept_id_notif} ({_term_label(active)})."
-            )
-            meta = {
-                "route": "/chair/plantilla",
-                "kind": "om_load_updated" if is_update else "om_load_forwarded",
-                "term_id": active.get("term_id"),
-                "department_id": dept_id_notif,
-                "load_id": (existing_header or {}).get("load_id"),
-            }
-
-            for uid in recipients:
-                await create_notification(
-                    user_id=uid,
-                    title=title,
-                    details=details,
-                    meta=meta,
-                )
-        except Exception:
-            # Never break approval due to notification failure
-            pass
 
         # fetch header again to get reco_id after upsert
         header_after = await db[COL_FACULTY_LOADS].find_one(
@@ -1311,11 +1347,68 @@ async def om_faculty_deloadings(
                 "rfc_id": None
 , "rows": rows}
 
-@router.get("/load-assignment/list")
-async def get_om_load_assignment_list(user_id: str, db=Depends(get_db)):
+@router.get("/load-assignment/terms")
+async def om_load_assignment_terms(db=Depends(get_db)):
+    """List terms for archived load viewing.
+
+    Returns terms sorted from most recent to oldest, along with the OM "active" term id
+    (the same term used by the Load Assignment screen by default).
+    """
     active = await _active_term()
+    active_term_id = (active or {}).get("term_id")
+
+    docs = await db[COL_TERMS].find(
+        {},
+        {"_id": 0, "term_id": 1, "acad_year_start": 1, "term_number": 1, "is_current": 1},
+    ).sort([("acad_year_start", -1), ("term_number", -1)]).to_list(None)
+
+    terms = []
+    for t in docs or []:
+        tid = (t.get("term_id") or "").strip()
+        if not tid:
+            continue
+        terms.append(
+            {
+                "term_id": tid,
+                "label": _term_label(t),
+                "is_current": bool(t.get("is_current")),
+                "is_active": bool(active_term_id and tid == active_term_id),
+            }
+        )
+
+    return {"ok": True, "active_term_id": active_term_id, "terms": terms}
+
+
+@router.get("/load-assignment/list")
+async def get_om_load_assignment_list(user_id: str, term_id: Optional[str] = None, db=Depends(get_db)):
+    # Default behavior remains: if no term_id is provided, use the OM active term.
+    if term_id:
+        active = await db[COL_TERMS].find_one(
+            {"term_id": term_id},
+            {"_id": 0, "term_id": 1, "acad_year_start": 1, "term_number": 1},
+        )
+        if not active:
+            raise HTTPException(status_code=404, detail="term_id not found")
+    else:
+        active = await _active_term()
+
+    # Whether this term's load recommendation has already been forwarded to the Chair.
+    # Forwarding is a final act and should remain disabled across refresh/auto-assign.
+    forwarded_to_chair = False
+    try:
+        dept_id_header = "DEPT0001"  # keep existing header behavior used in /om/loadassignment approve
+        hdr = await db[COL_FACULTY_LOADS].find_one(
+            {"term_id": (active or {}).get("term_id"), "department_id": dept_id_header},
+            {"_id": 0, "forwarded_to_chair": 1},
+        ) or {}
+        forwarded_to_chair = bool(hdr.get("forwarded_to_chair"))
+    except Exception:
+        forwarded_to_chair = False
 
     # Fetch table rows
+    if not (active or {}).get("term_id"):
+        raise HTTPException(status_code=409, detail="No active/upcoming term found")
+
     base = await _fetch_rows(user_id, term_id=active["term_id"], db=db)
     rows = base["rows"]
 
@@ -1555,7 +1648,10 @@ async def get_om_load_assignment_list(user_id: str, db=Depends(get_db)):
     # --- NEW: pending RFC indicator per faculty (for red dot in Actions) ---
     open_rfc_faculty_ids = set()
     try:
-        cur = db[COL_LOAD_RFC].find({"term_id": active.get("term_id"), "status": {"$in": ["NEEDS_OM", "open"]}}, {"_id": 0, "faculty_id": 1})
+        cur = db[COL_LOAD_RFC].find(
+            {"term_id": active.get("term_id"), "status": {"$in": ["NEEDS_OM", "open"]}},
+            {"_id": 0, "faculty_id": 1},
+        )
         async for d in cur:
             fid = d.get("faculty_id")
             if fid:
@@ -1571,6 +1667,7 @@ async def get_om_load_assignment_list(user_id: str, db=Depends(get_db)):
         "term": _term_label(active),
         "term_id": active.get("term_id"),
         "rows": rows,
+        "forwarded_to_chair": forwarded_to_chair,
         "preferred_units_by_faculty": preferred_units_by_faculty,
         "courseToKac": course_kac_simple,
         "facultyToKacs": faculty_to_kacs,
@@ -1790,7 +1887,9 @@ async def respond_load_assignment_rfc(
         locked = True
         extra["closed_at"] = now
 
-        # ✅ Reject only finalizes the matching subject row (not all rows)
+        # ✅ Reject behavior (hybrid):
+        # - If RFC is tied to a specific section (section_id provided), finalize ONLY that row.
+        # - If RFC is schedule-wide (no section_id), treat it as terminal and lock/finalize the whole schedule.
         if section_id:
             try:
                 await db[COL_LOAD_PROPOSALS].update_one(
@@ -1800,24 +1899,44 @@ async def respond_load_assignment_rfc(
                 )
             except Exception:
                 pass
+        else:
+            try:
+                await db[COL_LOAD_PROPOSALS].update_one(
+                    {"faculty_id": faculty_id, "term_id": term_id},
+                    {
+                        "$set": {
+                            "status": "approved",
+                            "locked": True,
+                            "rows.$[].finalized": True,
+                            "updated_at": now,
+                        },
+                        "$setOnInsert": {"created_at": now},
+                    },
+                    upsert=True,
+                )
+            except Exception:
+                pass
 
     rfc_id = rfc.get("rfc_id")
 
     # ✅ Update only this RFC thread (qkey includes section_id when present)
     await db[COL_LOAD_RFC].update_one(
         qkey,
-        {"$set": {
-            "rfc_id": rfc_id,
-            "faculty_id": faculty_id,
-            "term_id": term_id,
-            "section_id": section_id or rfc.get("section_id"),
-            "status": new_status,
-            "locked": locked,
-            "messages": msgs,
-            "updated_at": now,
-            **extra,
-        }},
-        upsert=False,
+        {
+            "$set": {
+                "rfc_id": rfc_id,
+                "faculty_id": faculty_id,
+                "term_id": term_id,
+                "section_id": section_id or rfc.get("section_id"),
+                "status": new_status,
+                "locked": locked,
+                "messages": msgs,
+                "updated_at": now,
+                **extra,
+            },
+            "$setOnInsert": {"created_at": now},
+        },
+        upsert=True,
     )
 
     # notify faculty
@@ -6089,7 +6208,7 @@ async def _upsert_faculty_load_header(
 
                 # NEW: ensure it's marked forwarded; preserve first forwarded timestamp if it exists
                 "forwarded_to_chair": True,
-                "forwarded_to_chair_at": existing.get("forwarded_to_chair_at") or now,
+                "forwarded_to_chair_at": now,
             }
             },
         )

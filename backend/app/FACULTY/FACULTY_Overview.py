@@ -15,7 +15,10 @@ import httpx
 
 _GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 _GMAIL_SEND_URL = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send"
-_RFC_EMAIL_TO = "johntario27@gmail.com"
+# RFC email recipient fallback.
+# Prefer sending to the OM user's email (resolved at runtime) if available.
+# Otherwise fall back to env RFC_EMAIL_TO, then this hardcoded value.
+_RFC_EMAIL_TO = os.getenv("RFC_EMAIL_TO") or "johntario27@gmail.com"
 
 router = APIRouter(prefix="/faculty", tags=["faculty"])
 
@@ -968,7 +971,11 @@ async def _get_previous_term() -> Optional[Dict[str, Any]]:
     t["term_label"] = _term_label(t)
     return t
 
-# NEW BLOCK
+async def _send_email_via_user_gmail(*args, **kwargs):
+    # Email integration not implemented / not configured in this project.
+    return False, "Email sending not configured"
+
+
 @router.get("/load-assignment/rfc")
 async def faculty_get_load_rfc(
     userId: str = Query(...),
@@ -1124,12 +1131,26 @@ async def faculty_send_load_rfc_message(userId: str = Query(...), payload: Dict[
         f"\n\n[AnimoAssign]"
     )
 
+    # Prefer emailing the OM user (proposal.om_user_id) if we can resolve an address.
+    to_email = _RFC_EMAIL_TO
+    if om_uid:
+        om_user = await db["users"].find_one(
+            {"user_id": om_uid},
+            {"_id": 0, "email": 1, "google_email": 1, "gmail": 1},
+        ) or {}
+        to_email = (
+            (om_user.get("email") or "").strip()
+            or (om_user.get("google_email") or "").strip()
+            or (om_user.get("gmail") or "").strip()
+            or to_email
+        )
+
     email_sent = False
     email_error: Optional[str] = None
     try:
         email_sent, email_error = await _send_email_via_user_gmail(
             user_id=userId,
-            to_email=_RFC_EMAIL_TO,
+            to_email=to_email,
             subject=subject,
             body=email_body,
         )

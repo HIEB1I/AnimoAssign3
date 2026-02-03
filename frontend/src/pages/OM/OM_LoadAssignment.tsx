@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Outlet, useLocation } from "react-router-dom";
 import AppShell from "../../base/AppShell";
 import { runOmAutoAssign } from "../../api.ts";
@@ -8,11 +8,12 @@ import {
   sendOmLoadAssignmentsToFaculty,
   getOmLoadAssignmentRfc,
   respondOmLoadAssignmentRfc,
-  finalizeOmLoadAssignmentCourse,
+
 } from "../../api.ts";
 
 import {
   getOmLoadAssignmentList,
+  getOmLoadAssignmentTerms,
   getOmLoadAssignmentProfile,
   getAllFaculty,
   getOmFacultyWithDeloadings,
@@ -31,14 +32,15 @@ import {
   CheckCheck,
   Plus,
   MessageSquareText,
-  Check,
-  Trash2,
+  Copy,
+
+  Archive,
+
   Undo2,
   Redo2,
   X,
-  Copy,
-  Upload,
-} from "lucide-react";
+
+  Upload,} from "lucide-react";
 import { InboxContent as OMInboxContent } from "./OM_Inbox";
 
 export type FlagSeverity = "warning" | "error";
@@ -99,12 +101,15 @@ function SelectBox({
   options,
   placeholder = "— Select —",
   className = "",
+  buttonClassName = "",
 }: {
   value: string;
   onChange: (v: string) => void;
   options: SelectOption[]; // Updated to support objects
   placeholder?: string;
   className?: string;
+  /** Optional: override/extend the button styling (useful to match other dropdowns) */
+  buttonClassName?: string;
 }) {
   const [open, setOpen] = useState(false);
 
@@ -138,7 +143,7 @@ function SelectBox({
 
   // Find the label of the currently selected value for the button display
   const selectedOption = options.find((o) => getValue(o) === value);
-  const displayLabel = selectedOption ? getValue(selectedOption) : null;
+  const displayLabel = selectedOption ? getLabel(selectedOption) : null;
 
   return (
     <div className={cls("relative min-w-[120px]", className)}>
@@ -149,7 +154,8 @@ function SelectBox({
         className={cls(
           "w-full rounded-md border border-gray-300 bg-white",
           "px-1.5 py-1 text-center text-[13px] leading-tight",
-          "shadow-sm focus:ring-2 focus:ring-emerald-500/30"
+          "shadow-sm focus:ring-2 focus:ring-emerald-500/30",
+          buttonClassName
         )}
       >
         {displayLabel || <span className="text-gray-400">{placeholder}</span>}
@@ -463,6 +469,8 @@ type Row = {
   section: string;
   faculty: string;
   faculty_id?: string;
+  /** True when this row has already been sent/forwarded to the faculty (proposal created). */
+  forwarded_to_faculty?: boolean;
   day1: string;
   begin1: string;
   end1: string;
@@ -473,7 +481,7 @@ type Row = {
   room2: string;
   capacity: number | "";
   mode?: string;
-  status?: "" | "Confirmed" | "Pending" | "Unassigned" | "Conflict";
+  status?: "" | "Confirmed" | "Approved" | "Pending" | "Unassigned" | "Conflict";
   pending_rfc?: boolean;
   conflictNote?: string;
   editable?: boolean;
@@ -481,6 +489,179 @@ type Row = {
   /** When OM has already finalized this course for the faculty */
   finalized?: boolean;
 };
+
+function ArchivedLoadsSummary({
+  rows,
+  termLabel,
+}: {
+  rows: Row[];
+  termLabel: string;
+}) {
+  const summary = useMemo(() => {
+    const groups = new Map<
+      string,
+      { faculty: string; sections: number; units: number; courses: Set<string> }
+    >();
+
+    let totalSections = 0;
+    let totalUnits = 0;
+    let assignedSections = 0;
+    let unassignedSections = 0;
+
+    for (const r of rows) {
+      totalSections += 1;
+
+      const units = typeof r.units === "number" ? r.units : 0;
+      totalUnits += units;
+
+      const facultyName = (r.faculty || "").trim() || "Unassigned";
+      const isUnassigned = facultyName === "Unassigned";
+      if (isUnassigned) unassignedSections += 1;
+      else assignedSections += 1;
+
+      const key = r.faculty_id || facultyName;
+
+      const g =
+        groups.get(key) || {
+          faculty: facultyName,
+          sections: 0,
+          units: 0,
+          courses: new Set<string>(),
+        };
+
+      g.sections += 1;
+      g.units += units;
+      if (r.course) g.courses.add(r.course);
+
+      groups.set(key, g);
+    }
+
+    const items = Array.from(groups.values()).sort((a, b) => {
+      if (a.faculty === "Unassigned" && b.faculty !== "Unassigned") return 1;
+      if (b.faculty === "Unassigned" && a.faculty !== "Unassigned") return -1;
+      return a.faculty.localeCompare(b.faculty);
+    });
+
+    return {
+      items,
+      totalSections,
+      totalUnits,
+      assignedSections,
+      unassignedSections,
+    };
+  }, [rows]);
+
+  return (
+    <div className="mt-3 rounded-xl border border-gray-300 bg-white shadow-sm">
+      <div className="flex flex-wrap items-start justify-between gap-2 border-b border-gray-200 px-4 py-3">
+        <div>
+          <div className="text-sm font-semibold text-gray-900">
+            Archived Load Summary
+          </div>
+          <div className="text-xs text-gray-600">
+            {termLabel || "Archived term"}
+          </div>
+        </div>
+
+        <div className="flex flex-wrap gap-2 text-xs">
+          <span className="rounded-full bg-gray-100 px-2 py-1 text-gray-700">
+            Sections: {summary.totalSections}
+          </span>
+          <span className="rounded-full bg-gray-100 px-2 py-1 text-gray-700">
+            Units: {summary.totalUnits}
+          </span>
+          <span className="rounded-full bg-emerald-50 px-2 py-1 text-emerald-800">
+            Assigned: {summary.assignedSections}
+          </span>
+          <span className="rounded-full bg-amber-50 px-2 py-1 text-amber-900">
+            Unassigned: {summary.unassignedSections}
+          </span>
+        </div>
+      </div>
+
+      <div className="max-h-[58vh] overflow-x-auto overflow-y-auto">
+        <table className="min-w-full text-sm table-fixed border-collapse">
+          {/* Evenly distribute columns in archived load summary table */}
+          <colgroup>
+            <col className="w-1/4" />
+            <col className="w-1/4" />
+            <col className="w-1/4" />
+            <col className="w-1/4" />
+          </colgroup>
+
+          <thead className="bg-gray-50 text-emerald-800 sticky top-0 z-10">
+            <tr>
+              <th className="border-b border-gray-200 px-3 py-2 text-left font-semibold">
+                Faculty
+              </th>
+              <th className="border-b border-gray-200 px-3 py-2 text-right font-semibold">
+                Sections
+              </th>
+              <th className="border-b border-gray-200 px-3 py-2 text-right font-semibold">
+                Units
+              </th>
+              <th className="border-b border-gray-200 px-3 py-2 text-left font-semibold">
+                Courses
+              </th>
+            </tr>
+          </thead>
+
+          <tbody>
+            {summary.items.length === 0 ? (
+              <tr>
+                <td
+                  colSpan={4}
+                  className="border-b border-gray-100 px-3 py-6 text-center text-gray-500"
+                >
+                  No archived loads found for this term.
+                </td>
+              </tr>
+            ) : (
+              summary.items.map((g, i) => {
+                const courseList = Array.from(g.courses);
+                const preview = courseList.slice(0, 4).join(", ");
+                const more =
+                  courseList.length > 4 ? ` +${courseList.length - 4} more` : "";
+
+                return (
+                  <tr key={`${g.faculty}-${i}`} className="hover:bg-gray-50">
+                    <td className="border-b border-gray-100 px-3 py-2 text-gray-900">
+                      {g.faculty}
+                    </td>
+                    <td className="border-b border-gray-100 px-3 py-2 text-right text-gray-900">
+                      {g.sections}
+                    </td>
+                    <td className="border-b border-gray-100 px-3 py-2 text-right text-gray-900">
+                      {g.units}
+                    </td>
+                    <td className="border-b border-gray-100 px-3 py-2 text-gray-700">
+                      <div className="text-xs">
+                        <span className="font-medium">{courseList.length}</span>{" "}
+                        <span className="text-gray-500">course(s)</span>
+                      </div>
+                      {courseList.length > 0 && (
+                        <div
+                          className="mt-0.5 truncate text-[11px] text-gray-500"
+                          title={courseList.join(", ")}
+                        >
+                          {preview}
+                          {more}
+                        </div>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+// Used for hard validation before sending proposals to faculty
+export type MissingFieldRow = { course: string; section: string; faculty: string; fields: string[] };
 
 // --- Validation helpers & engine (row-level flags) ---
 
@@ -955,7 +1136,7 @@ const StatusChip = ({ r }: { r: Row }) => {
 
   if (!r.status) return <span className="inline-block w-24 h-6" />;
   const tone =
-    r.status === "Confirmed"
+    (r.status === "Confirmed" || r.status === "Approved")
       ? "bg-green-100 text-green-700"
       : r.status === "Pending"
       ? "bg-yellow-100 text-yellow-700"
@@ -1004,60 +1185,20 @@ const StatusChip = ({ r }: { r: Row }) => {
   );
 };
 
-const ApproveModal = ({
-  open,
-  onClose,
-  onApprove,
-}: {
-  open: boolean;
-  onClose: () => void;
-  onApprove: () => void;
-}) =>
-  !open ? null : (
-    <div className="fixed inset-0 z-[120] grid place-items-center bg-black/40 p-4">
-      <div className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-2xl">
-        <div className="mx-auto mb-4 grid h-16 w-16 place-items-center rounded-full border-2 border-emerald-600 text-emerald-700">
-          <Check className="h-8 w-8" strokeWidth={2.5} />
-        </div>
-        <h3 className="mb-2 text-center text-2xl font-semibold">
-          Are you sure?
-        </h3>
-        <p className="mx-auto mb-6 max-w-md text-center text-sm text-neutral-600">
-          Please confirm that this is the final{" "}
-          <span className="font-semibold">Faculty Load Assignment.</span>Once
-          submitted, this action cannot be undone and the button will be
-          disabled.
-        </p>
-        <div className="flex justify-end gap-2">
-          <button
-            onClick={onClose}
-            className="rounded-lg border border-neutral-300 bg-neutral-100 px-4 py-2 text-sm hover:bg-neutral-200"
-          >
-            Cancel
-          </button>
-          <button
-            onClick={onApprove}
-            className="rounded-lg bg-emerald-700 px-4 py-2 text-sm font-medium text-white hover:brightness-110"
-          >
-            Yes, I Approve
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-
 const SendModal = ({
   open,
   onClose,
   rows,
   termLabel,
   onSend,
+  onToast,
 }: {
   open: boolean;
   onClose: () => void;
   rows: Row[];
   termLabel?: string;
   onSend: (rows: Row[]) => Promise<void>;
+  onToast?: (message: string, kind?: "success" | "error") => void;
 }) => {
   const [sending, setSending] = useState(false);
   if (!open) return null;
@@ -1111,9 +1252,9 @@ const SendModal = ({
                   <th className="px-4 py-3 text-center font-semibold">
                     Course Title
                   </th>
-                  <th className="px-4 py-3 text-left font-semibold">Section</th>
+                  <th className="px-4 py-3 text-left font-semibold">Section <span className="text-red-600" aria-hidden="true">*</span></th>
                   <th className="px-4 py-3 text-left font-semibold">Units</th>
-                  <th className="px-4 py-3 text-left font-semibold">Mode</th>
+                  <th className="px-4 py-3 text-left font-semibold">Mode <span className="text-red-600" aria-hidden="true">*</span></th>
                   <th className="px-4 py-3 text-left font-semibold">Day</th>
                   <th className="px-4 py-3 text-left font-semibold">Room</th>
                   <th className="px-4 py-3 text-center font-semibold">Time</th>
@@ -1196,8 +1337,9 @@ const SendModal = ({
                 await onSend(rows);
                 onClose();
               } catch (e: any) {
-                alert(e?.message || "Failed to send to faculty.");
-              } finally {
+                onToast?.(e?.message || "Failed to send to faculty.", "error");
+              }
+              finally {
                 setSending(false);
               }
             }}
@@ -1216,6 +1358,72 @@ const SendModal = ({
 };
 
 
+const SendBlockedModal = ({
+  open,
+  onClose,
+  missing,
+}: {
+  open: boolean;
+  onClose: () => void;
+  missing: MissingFieldRow[];
+}) => {
+  if (!open) return null;
+
+  const total = missing.length;
+  const show = missing.slice(0, 12);
+
+  return (
+    <div className="fixed inset-0 z-[140] grid place-items-center bg-black/40 p-4">
+      <div className="w-full max-w-3xl rounded-2xl bg-white p-6 shadow-2xl">
+        <div className="mb-2 flex items-start gap-3">
+          <div className="mt-0.5 grid h-10 w-10 place-items-center rounded-full bg-amber-50 text-amber-700 border border-amber-200">
+            <MessageSquareText className="h-5 w-5" />
+          </div>
+          <div className="min-w-0">
+            <h3 className="text-lg font-semibold text-gray-900">
+              Cannot send to Faculty yet
+            </h3>
+            <p className="mt-0.5 text-sm text-gray-600">
+              Please complete all <span className="font-semibold">required</span> fields for the selected faculty’s load recommendation rows before clicking <span className="font-semibold">To Faculty</span>.
+            </p>
+          </div>
+        </div>
+
+        <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+          <div className="font-semibold">What’s missing:</div>
+          <ul className="mt-2 list-disc space-y-1 pl-5">
+            {show.map((m, i) => (
+              <li key={`${m.course}-${m.section}-${i}`}>
+                <span className="font-medium">{m.course}</span> – {m.section}{" "}
+                <span className="text-amber-900/80">({m.faculty})</span>:{" "}
+                <span className="font-medium">{m.fields.join(", ")}</span>
+              </li>
+            ))}
+          </ul>
+          {total > show.length && (
+            <div className="mt-2 text-xs text-amber-900/80">
+              …plus {total - show.length} more row(s).
+            </div>
+          )}
+        </div>
+
+        <div className="mt-5 flex items-center justify-between gap-3">
+          <div className="text-xs text-gray-500">
+            Tip: Required columns are marked with a{" "}
+            <span className="text-red-600 font-bold">*</span> in the table header.
+          </div>
+
+          <button
+            onClick={onClose}
+            className="rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:brightness-110"
+          >
+            Got it
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
 
 const RequestChangeModal = ({
   open,
@@ -1225,6 +1433,7 @@ const RequestChangeModal = ({
   termId,
   rows,
   onAfterUpdate,
+  onToast,
 }: {
   open: boolean;
   from?: string;
@@ -1233,6 +1442,7 @@ const RequestChangeModal = ({
   termId: string;
   rows: Row[];
   onAfterUpdate: () => Promise<void> | void;
+  onToast?: (message: string, kind?: "success" | "error") => void;
 }) => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -1295,15 +1505,15 @@ const RequestChangeModal = ({
 
   const respond = async (decision: "reply" | "approve" | "reject") => {
     if (!userId || !termId || !facultyId) {
-      alert("Missing context.");
+      onToast?.("Missing context.", "error");
       return;
     }
     if (isTerminal) {
-      alert("RFC is already locked.");
+      onToast?.("RFC is already locked.", "error");
       return;
     }
     if (decision === "reply" && !reply.trim()) {
-      alert("Please type a reply message.");
+      onToast?.("Please type a reply message.", "error");
       return;
     }
 
@@ -1317,9 +1527,16 @@ const RequestChangeModal = ({
       });
 
       await onAfterUpdate();
+      const msg =
+        decision === "reply"
+          ? "Reply sent to faculty."
+          : decision === "approve"
+          ? "RFC approved. Schedule is now locked."
+          : "RFC rejected. Schedule is now locked.";
+      onToast?.(msg, "success");
       onClose();
     } catch (e: any) {
-      alert(e?.message || "Failed to send response.");
+      onToast?.(e?.message || "Failed to send response.", "error");
     } finally {
       setLoading(false);
     }
@@ -1427,6 +1644,7 @@ const NewSectionModal = ({
   onClose,
   onSave,
   courseOptions,
+  onToast,
 }: {
   open: boolean;
   onClose: () => void;
@@ -1437,6 +1655,7 @@ const NewSectionModal = ({
     campus_id: string;
   }) => void;
   courseOptions: { code: string; title: string }[];
+  onToast?: (message: string, kind?: "success" | "error") => void;
 }) => {
   const [course, setCourse] = useState("");
   const [section, setSection] = useState("");
@@ -1458,10 +1677,11 @@ const NewSectionModal = ({
     courseOptions.find((c) => c.code === course)?.title || "";
 
   const handleSave = () => {
-    if (!course || !section) {
-      alert("Please fill at least course code and section code.");
-      return;
-    }
+  if (!course || !section) {
+    onToast?.("Please fill at least Course Code and Section Code.", "error");
+    return;
+  }
+
     onSave({
       course,
       section,
@@ -1558,24 +1778,140 @@ const NewSectionModal = ({
   );
 };
 
+
+
+type ToastKind = "success" | "error" | "warning" | "info";
+
+function Toast({
+  open,
+  kind = "info",
+  message,
+  onClose,
+}: {
+  open: boolean;
+  kind?: ToastKind;
+  message: string;
+  onClose: () => void;
+}) {
+  if (!open) return null;
+
+  const tone =
+    kind === "success"
+      ? "border-emerald-200 bg-emerald-50 text-emerald-900"
+      : kind === "error"
+      ? "border-red-200 bg-red-50 text-red-900"
+      : kind === "warning"
+      ? "border-yellow-200 bg-yellow-50 text-yellow-900"
+      : "border-neutral-200 bg-white text-neutral-900";
+
+  const label =
+    kind === "success"
+      ? "Success"
+      : kind === "error"
+      ? "Error"
+      : kind === "warning"
+      ? "Warning"
+      : "Info";
+
+  return (
+    <div className="fixed top-16 right-6 z-[1200] w-[92vw] max-w-md sm:w-[360px]">
+      <div className={`rounded-xl border px-4 py-3 text-sm shadow-lg ${tone}`}>
+        <div className="flex items-start justify-between gap-3">
+          <div className="leading-snug">
+            <span className="font-semibold">{label}:</span> {message}
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-md px-2 py-1 text-xs hover:bg-black/5"
+            aria-label="Close message"
+            title="Close"
+          >
+            ✕
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function useToast() {
+  const [toast, setToast] = useState<{ kind: ToastKind; message: string } | null>(null);
+  const timerRef = useRef<number | null>(null);
+
+  const clear = useCallback(() => {
+    if (timerRef.current) window.clearTimeout(timerRef.current);
+    timerRef.current = null;
+    setToast(null);
+  }, []);
+
+  const show = useCallback((message: string, kind: ToastKind = "info", ms = 2500) => {
+    if (timerRef.current) window.clearTimeout(timerRef.current);
+    setToast({ kind, message });
+    timerRef.current = window.setTimeout(() => {
+      setToast(null);
+      timerRef.current = null;
+    }, ms);
+  }, []);
+
+  useEffect(() => () => clear(), [clear]);
+
+  return { toast, show, clear };
+}
 /* ---------------- Main ---------------- */
 export default function OM_LoadAssignment() {
+
   const [copiedRowId, setCopiedRowId] = useState<string | null>(null);
 
-  // Lightweight in-app toast (used for "Notified faculty…" success messages)
-  const [uiToast, setUiToast] = useState<{ open: boolean; message: string; kind: "success" | "error" }>({
-    open: false,
-    message: "",
-    kind: "success",
-  });
-  const toastTimerRef = useRef<number | null>(null);
-  const showToast = (message: string, kind: "success" | "error" = "success") => {
-    if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
-    setUiToast({ open: true, message, kind });
-    toastTimerRef.current = window.setTimeout(() => {
-      setUiToast((prev) => ({ ...prev, open: false }));
-    }, 3500);
+  const formatRowForClipboard = (row: Row) =>
+    [
+      "Course",
+      "Section",
+      "Faculty",
+      "Day 1",
+      "Begin 1",
+      "End 1",
+      "Room 1",
+      "Day 2",
+      "Begin 2",
+      "End 2",
+      "Room 2",
+      "Status",
+    ].join("\t") +
+    "\n" +
+    [
+      row.course ?? "",
+      row.section ?? "",
+      row.faculty ?? "",
+      row.day1 ?? "",
+      row.begin1 ?? "",
+      row.end1 ?? "",
+      row.room1 ?? "",
+      row.day2 ?? "",
+      row.begin2 ?? "",
+      row.end2 ?? "",
+      row.room2 ?? "",
+      (row.status as any) ?? "",
+    ].join("\t");
+
+  const handleCopyRow = async (row: Row) => {
+    const textToCopy = formatRowForClipboard(row);
+    try {
+      await navigator.clipboard.writeText(textToCopy);
+    } catch {
+      const textarea = document.createElement("textarea");
+      textarea.value = textToCopy;
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand("copy");
+      document.body.removeChild(textarea);
+    }
+    setCopiedRowId(row.id);
+    window.setTimeout(() => setCopiedRowId(null), 1200);
   };
+
+  // In-app toast (styled to match Faculty pages)
+  const { toast, show: showToast, clear: clearToast } = useToast();
 
   // Import SHS file
   const shsFileInputRef = useRef<HTMLInputElement>(null);
@@ -1596,53 +1932,6 @@ export default function OM_LoadAssignment() {
 
     // allow selecting the same file again
     e.target.value = "";
-  };
-
-  const formatRowForClipboard = (row: any) =>
-    [
-      "Course",
-      "Section",
-      "Faculty",
-      "Day 1",
-      "Begin 1",
-      "End 1",
-      "Room 1",
-      "Day 2",
-      "Begin 2",
-      "End 2",
-      "Room 2",
-      "Status",
-    ].join("\t") +
-    "\n" +
-    [
-      row.course,
-      row.section,
-      row.faculty,
-      row.day1,
-      row.begin1,
-      row.end1,
-      row.room1,
-      row.day2,
-      row.begin2,
-      row.end2,
-      row.room2,
-      row.status,
-    ].join("\t");
-
-  const handleCopyRow = async (row: any) => {
-    const text = formatRowForClipboard(row);
-    try {
-      await navigator.clipboard.writeText(text);
-    } catch {
-      const textarea = document.createElement("textarea");
-      textarea.value = text;
-      document.body.appendChild(textarea);
-      textarea.select();
-      document.execCommand("copy");
-      document.body.removeChild(textarea);
-    }
-    setCopiedRowId(row.id);
-    setTimeout(() => setCopiedRowId(null), 1200);
   };
 
   // Session (same pattern as APO: localStorage["animo.user"])
@@ -1670,8 +1959,9 @@ export default function OM_LoadAssignment() {
 
     // FRONTEND GUARD: block auto-assign while there are unsaved edits
     if (hasLocalEdits) {
-      alert(
-        "Auto-assign is disabled while you have manual edits.\n\nPlease save/discard your changes or refresh the list before running Auto-assign."
+      showToast(
+        "Auto-assign is disabled while you have manual edits. Save/discard your changes or refresh first.",
+        "error"
       );
       return;
     }
@@ -1688,15 +1978,41 @@ export default function OM_LoadAssignment() {
       console.log("DEBUG from run:", debug);
       console.log("Preferred map:", prefMap);
 
-      setRows(Array.isArray(res?.rows) ? res.rows : []);
+      // Preserve already-finalized rows: auto-assign should not "move" them or clear their RFC indicators
+      const existingFinalized = new Map<string, Row>(
+        rows.filter((rr) => !!rr.finalized).map((rr) => [rr.id, rr])
+      );
+
+      let nextRows: Row[] = Array.isArray(res?.rows) ? (res.rows as Row[]) : [];
+      if (existingFinalized.size) {
+        const seen = new Set<string>();
+        nextRows = nextRows.map((nr) => {
+          const id = String((nr as any)?.id || "");
+          const fr = existingFinalized.get(id);
+          if (fr) {
+            seen.add(id);
+            // Prefer the existing finalized row to avoid overwriting faculty/times/status
+            return { ...(nr as any), ...(fr as any), finalized: true } as Row;
+          }
+          return nr;
+        });
+        // If backend did not return a finalized row, keep it in the table
+        for (const [id, fr] of existingFinalized.entries()) {
+          if (!seen.has(id)) nextRows.unshift(fr);
+        }
+      }
+
+      setRows(nextRows);
       setTerm(typeof res?.term === "string" ? res.term : "");
       setMode("run");
-      setApproved(false);
+      // Preserve the "Forward to Chair" final-state across auto-assign.
+      setApproved((prev) => prev);
       setHasLocalEdits(false); // result from algorithm is the new clean baseline
       resetHistory();
+      showToast("Auto-assign completed.", "success");
     } catch (e) {
       console.error(e);
-      alert(`Auto-assign failed: ${String(e)}`);
+      showToast(`Auto-assign failed: ${String(e)}`, "error");
     } finally {
       setIsAssigning(false);
     }
@@ -1737,6 +2053,42 @@ export default function OM_LoadAssignment() {
   // Term label from backend (no hardcoding)
   const [term, setTerm] = useState<string>("");
   const [termId, setTermId] = useState<string>("");
+  /** Track the default (active) term id so we can detect archive viewing */
+  const [activeTermId, setActiveTermId] = useState<string>("");
+
+  /** Archived view UI */
+  const [archiveOpen, setArchiveOpen] = useState(false);
+  const [archiveTerms, setArchiveTerms] = useState<
+    { term_id: string; label: string; is_active?: boolean; is_current?: boolean }[]
+  >([]);
+  const [archiveTermId, setArchiveTermId] = useState<string>("");
+  const isArchiveView = !!activeTermId && !!termId && termId !== activeTermId;
+
+  useEffect(() => {
+    if (!archiveOpen || !userId) return;
+    if (archiveTerms.length > 0) return;
+
+    (async () => {
+      try {
+        const res = await getOmLoadAssignmentTerms();
+        const terms = Array.isArray((res as any)?.terms) ? (res as any).terms : [];
+        setArchiveTerms(terms);
+
+        const apiActive = typeof (res as any)?.active_term_id === "string" ? (res as any).active_term_id : "";
+        // Keep activeTermId in sync if the page hasn't yet loaded its default list.
+        if (apiActive && !activeTermId) setActiveTermId(apiActive);
+
+        const defaultPick =
+          terms.find((t: any) => (t?.term_id || "") !== (termId || ""))?.term_id ||
+          terms[0]?.term_id ||
+          "";
+        setArchiveTermId(defaultPick);
+      } catch (e: any) {
+        showToast(e?.message || "Failed to load terms.", "error");
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [archiveOpen, userId]);
 
   useEffect(() => {
     (async () => {
@@ -1808,10 +2160,11 @@ export default function OM_LoadAssignment() {
   const isRunning = mode !== "idle";
   const isRun = mode === "run";
   const hasReco = isRunning && rows.length > 0;
-  const [showApprove, setShowApprove] = useState(false);
   const [approved, setApproved] = useState(false);
   const [showSend, setShowSend] = useState(false);
   const [sendRowsPreview, setSendRowsPreview] = useState<Row[]>([]);
+  const [sendBlocked, setSendBlocked] = useState<{ open: boolean; missing: MissingFieldRow[] }>({ open: false, missing: [] });
+
   const [reqChange, setReqChange] = useState<{ open: boolean; from?: string }>({
     open: false,
   });
@@ -1971,6 +2324,50 @@ export default function OM_LoadAssignment() {
     // If any row is selected for a faculty, send ALL rows for that faculty (not per subject)
     return rows.filter((r) => selectedKeys.has(key(r)));
   };
+/**
+   * Before forwarding to faculty, require that the rows being sent are complete.
+   * This prevents faculty from receiving half-filled / unusable schedules.
+   */
+  const validateRowsCompleteForSend = (rowsToSend: Row[]) => {
+    const missing: MissingFieldRow[] = [];
+
+    const isBlank = (v: any) =>
+      v === null || v === undefined || String(v).trim() === "";
+
+    const hasAnySecondMeeting = (r: Row) =>
+      !isBlank(r.day2) || !isBlank(r.begin2) || !isBlank(r.end2);
+
+    for (const r of rowsToSend) {
+      const fields: string[] = [];
+
+      // Required for sending a usable proposal
+      if (isBlank(r.course)) fields.push("Course");
+      if (isBlank(r.section)) fields.push("Section");
+      if (isBlank(r.faculty_id) && isBlank(r.faculty)) fields.push("Faculty");
+      if (isBlank(r.day1)) fields.push("Day 1");
+      if (isBlank(r.begin1)) fields.push("Begin 1");
+      if (isBlank(r.end1)) fields.push("End 1");
+      if (isBlank(r.mode)) fields.push("Mode");
+
+      // Second meeting is optional, but if any part exists, require the time/day parts only
+      if (hasAnySecondMeeting(r)) {
+        if (isBlank(r.day2)) fields.push("Day 2");
+        if (isBlank(r.begin2)) fields.push("Begin 2");
+        if (isBlank(r.end2)) fields.push("End 2");
+        // Room 2 is NOT required
+      }
+      if (fields.length) {
+        missing.push({
+          course: r.course || "—",
+          section: r.section || "—",
+          faculty: r.faculty || r.faculty_id || "—",
+          fields,
+        });
+      }
+    }
+
+    return missing;
+  };
   
   const handleSendToFaculty = async (rowsToSend: Row[]) => {
     if (!userId) throw new Error("Missing userId");
@@ -1992,6 +2389,15 @@ export default function OM_LoadAssignment() {
     setSendRowsPreview([]);
     await loadFromServer();
     setHasLocalEdits(false);
+    const uniqueFaculty = new Set(
+      rowsToSend.map((r) => (r.faculty || r.faculty_id || "").toString().trim()).filter(Boolean)
+    );
+    showToast(
+      uniqueFaculty.size <= 1
+        ? "Sent proposal to faculty."
+        : `Sent proposal to ${uniqueFaculty.size} faculty member(s).`,
+      "success"
+    );
   };
 
   // Derived: scoped history availability (re-rendered via historyVersion)
@@ -2001,9 +2407,9 @@ export default function OM_LoadAssignment() {
   const canRedo =
     isRunning && historyVersion >= 0 && redoStackRef.current.length > 0;
 
-  const loadFromServer = async () => {
+  const loadFromServer = async (overrideTermId?: string) => {
     if (!userId) return;
-    const res = await getOmLoadAssignmentList(userId);
+    const res = await getOmLoadAssignmentList(userId, overrideTermId);
 
     const prefMap = (res as any)?.preferred_units_by_faculty || {};
     setPreferredByFaculty(prefMap);
@@ -2029,12 +2435,34 @@ export default function OM_LoadAssignment() {
     );
 
     setRows(Array.isArray(res?.rows) ? res.rows : []);
+    const nextTermId = typeof (res as any)?.term_id === "string" ? (res as any).term_id : "";
     setTerm(typeof res?.term === "string" ? res.term : "");
-    setTermId(typeof (res as any)?.term_id === "string" ? (res as any).term_id : "");
+    setTermId(nextTermId);
+    // Capture the default active term id on normal loads so we can detect archive view.
+    if (!overrideTermId && nextTermId) {
+      setActiveTermId(nextTermId);
+    }
     setMode("run");
-    setApproved(false);
+    // Once forwarded to Chair, it is a final act and must remain disabled across refresh/auto-assign.
+    setApproved(Boolean((res as any)?.forwarded_to_chair));
     setHasLocalEdits(false);
     resetHistory();
+  };
+
+  const handleForwardToChair = async () => {
+    if (!userId) return;
+    try {
+      const res = await submitOmLoadAssignment(userId, { rows }, "approve");
+      await notifyChairLoadRecommendation(userId, {
+        kind: (res as any)?.kind,
+        reco_id: (res as any)?.reco_id,
+      });
+      showToast("Forwarded to Chair.", "success");
+      await loadFromServer();
+      setApproved(true);
+    } catch (e: any) {
+      showToast(e?.message || "Failed to forward to Chair.", "error");
+    }
   };
 
   useEffect(() => {
@@ -2048,6 +2476,28 @@ export default function OM_LoadAssignment() {
   };
 
   const getEditFlags = (r: Row) => {
+    // Once a row is finalized/approved, it must be locked from any further edits.
+    const isLocked = !!r.finalized || r.status === "Approved";
+    if (isLocked) {
+      return {
+        course: false,
+        title: false,
+        units: false,
+        section: false,
+        faculty: false,
+        day1: false,
+        begin1: false,
+        end1: false,
+        room1: false,
+        day2: false,
+        begin2: false,
+        end2: false,
+        room2: false,
+        capacity: false,
+        mode: false,
+      } as const;
+    }
+
     const editAll = !!r.editable;
     const editSchedule = editAll || isRun;
     return {
@@ -2107,9 +2557,10 @@ export default function OM_LoadAssignment() {
       await submitOmLoadAssignment(userId, { rows }, "save");
       await loadFromServer(); // pull fresh rows from DB
       setHasLocalEdits(false); // grid now matches DB
+      showToast("Draft saved.", "success");
     } catch (e) {
       console.error(e);
-      alert(`Save draft failed: ${String(e)}`);
+      showToast(`Save draft failed: ${String(e)}`, "error");
     }
   }
 
@@ -2190,8 +2641,8 @@ export default function OM_LoadAssignment() {
 
   const hasAnyErrors = useMemo(
     () =>
-      Object.values(rowFlags).some((flags) =>
-        flags.some((f) => f.severity === "error")
+      Object.values(rowFlags as RowFlagsById).some((flags: RowFlag[]) =>
+        flags.some((f: RowFlag) => f.severity === "error")
       ),
     [rowFlags]
   );
@@ -2793,28 +3244,57 @@ useEffect(() => {
               </header>
 
               <div className="mb-6 flex flex-wrap items-center gap-3 rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
+                <button
+                  type="button"
+                  onClick={() => setArchiveOpen(true)}
+                  className={cls(
+                    "inline-flex h-10 min-w-[160px] items-center justify-center gap-2 rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 shadow-sm",
+                    "hover:bg-gray-50"
+                  )}
+                  title="Display faculty loads from past terms"
+                >
+                  <Archive className="h-4 w-4" />
+                  Archived Loads
+                </button>
+
                 <div className="relative flex-1 min-w-[260px]">
                   <SearchIcon className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-500" />
                   <input
                     value={search}
                     onChange={(e) => setSearch(e.target.value)}
                     placeholder="Search by course, section, or faculty..."
-                    className="w-full rounded-lg border border-gray-300 px-9 py-2 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30"
+                    className="w-full rounded-lg border border-gray-300 px-9 pr-10 py-2 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30"
                   />
+
+                  {/* Clear (X) button */}
+                  {search.trim().length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setSearch("")}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-neutral-500 hover:text-neutral-700"
+                      title="Clear search"
+                    >
+                      <X className="h-4 w-4" />
+                    </button>
+                  )}
                 </div>
 
                 <div className="ml-auto flex items-center gap-2">
                   <button
-                    disabled={!hasReco}
+                    disabled={!hasReco || isArchiveView}
                     onClick={handleSaveDraft}
                     className={cls(
-                      "inline-flex items-center gap-2 rounded-md px-3.5 py-2 text-sm font-medium shadow-sm",
+                      "inline-flex h-10 min-w-[140px] items-center justify-center gap-2 rounded-md px-4 py-2 text-sm font-medium shadow-sm",
                       hasReco
-                        ? "bg-gray-800 text-white hover:brightness-110"
+                        ? isArchiveView
+                          ? "bg-gray-200 text-gray-500 cursor-not-allowed"
+                          : "bg-gray-800 text-white hover:brightness-110"
                         : "bg-gray-200 text-gray-500 cursor-not-allowed"
                     )}
                     title={
-                      !hasReco
+                      isArchiveView
+                        ? "Archived view: saving is disabled"
+                        : !hasReco
                         ? "No recommendations to save yet"
                         : "Save current assignments to the database"
                     }
@@ -2823,30 +3303,42 @@ useEffect(() => {
                     Save Draft
                   </button>
                   <button
-                    disabled={!hasReco || approved}
+                    disabled={!hasReco || isArchiveView}
                     className={cls(
                       "rounded-lg px-4 py-2 font-semibold shadow-sm flex items-center gap-2",
-                      !(!hasReco || approved)
+                      !(!hasReco || isArchiveView)
                         ? "bg-emerald-600 text-white hover:bg-emerald-700" // enabled (GREEN)
                         : "bg-gray-200 text-gray-400 cursor-not-allowed" // disabled
                     )}
                     onClick={() => {
-                      if (hasAnyErrors) {
-                        const proceed = window.confirm(
-                          [
-                            "There are validation errors (e.g., KAC mismatch, mode mismatch, or schedule conflicts).",
-                            "",
-                            "Do you still want to proceed with approval?",
-                          ].join("\n")
-                        );
-                        if (!proceed) return;
-                      }
+                    if (isArchiveView) return;
+                    //HARD BLOCK: required fields must be complete before forwarding
+                    const incomplete = rows.filter(isRowIncompleteForApproval);
+                    if (incomplete.length > 0) {
+                      showToast(
+                        `Cannot forward to Chair yet. Please complete all required fields (including Mode) for ${incomplete.length} row(s).`,
+                        "error"
+                      );
+                      return;
+                    }
 
-                      setShowApprove(true);
-                    }}
+                    // Existing behavior: warn about other validation errors, but allow override
+                    if (hasAnyErrors) {
+                      const proceed = window.confirm(
+                        [
+                          "There are validation errors (e.g., KAC mismatch, mode mismatch, or schedule conflicts).",
+                          "",
+                          "Do you still want to proceed with approval?",
+                        ].join("\n")
+                      );
+                      if (!proceed) return;
+                    }
+
+                    void handleForwardToChair();
+                  }}
                   >
                     <CheckCheck className="h-4 w-4" />
-                    Forward to Chair
+                    {approved ? "Re-forward to Chair" : "Forward to Chair"}
                   </button>
                 </div>
               </div>
@@ -2857,7 +3349,7 @@ useEffect(() => {
                       Load Recommendations
                     </h2>
 
-                    <div className="flex items-center gap-1">
+                    <div className="flex flex-wrap items-center gap-2">
                       <button
                         onClick={handleUndo}
                         disabled={!canUndo || isAssigning}
@@ -2898,14 +3390,17 @@ useEffect(() => {
                       <button
                         type="button"
                         onClick={handlePickShsFile}
-                        disabled={!isRunning || isAssigning}
+                        disabled={!isRunning || isAssigning || isArchiveView}
                         className={cls(
-                          "inline-flex items-center gap-2 rounded-md border border-gray-300 bg-white px-2.5 py-1.5 text-[13px] text-gray-700 shadow-sm",
+                          "inline-flex h-10 min-w-[140px] items-center justify-center gap-2 rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 shadow-sm",
                           "hover:bg-gray-50",
-                          (!isRunning || isAssigning) &&
+                          (!isRunning || isAssigning || isArchiveView) &&
                             "opacity-50 cursor-not-allowed hover:bg-white"
                         )}
                         title={
+                          isArchiveView
+                            ? "Archived view: importing is disabled"
+                            :
                           !isRunning
                             ? "Run Auto-assign or load data first"
                             : shsFile
@@ -2928,13 +3423,16 @@ useEffect(() => {
                   </div>
 
                   {/* --- MODIFIED SECTION START --- */}
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
                     {/* New/Moved Auto-assign button */}
                     <button
                       onClick={runAutoAssign}
-                      disabled={isAssigning || hasLocalEdits}
-                      className="inline-flex items-center gap-2 rounded-md bg-emerald-700 px-3.5 py-2 text-sm font-medium text-white shadow-sm hover:brightness-110 disabled:opacity-60"
+                      disabled={isAssigning || hasLocalEdits || isArchiveView}
+                      className="inline-flex h-10 min-w-[140px] items-center justify-center gap-2 rounded-md bg-emerald-700 px-4 py-2 text-sm font-medium text-white shadow-sm hover:brightness-110 disabled:opacity-60"
                       title={
+                        isArchiveView
+                          ? "Archived view: auto-assign is disabled"
+                          :
                         hasLocalEdits
                           ? "Auto-assign is disabled while you have manual edits. Save or refresh first."
                           : "Run auto-assignment algorithm"
@@ -2947,34 +3445,47 @@ useEffect(() => {
                     {/* Refresh button (always visible if running) */}
                       {isRunning && (
                         <button
-                          onClick={loadFromServer}
-                          className="inline-flex items-center gap-2 rounded-md border border-gray-300 bg-white px-3.5 py-2 text-sm font-medium hover:bg-gray-50"
+                          onClick={() => loadFromServer()}
+                          className="inline-flex h-10 min-w-[140px] items-center justify-center gap-2 rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium hover:bg-gray-50"
                         >
                           <RefreshCcw className="h-4 w-4" />
                           Refresh
                         </button>
+
                       )}
 
                       {/* To Faculty button moved here (beside Refresh) */}
                       <button
-                        disabled={!anySelected || !isRunning}
+                        disabled={!anySelected || !isRunning || isArchiveView}
                         onClick={() => {
+                          if (isArchiveView) return;
                           const preview = buildSendRowsForPreview();
                           if (!preview.length) {
-                            alert("Select at least one row with an assigned faculty.");
+                            showToast("Select at least one row with an assigned faculty.", "error");
                             return;
                           }
+
+                          const missing = validateRowsCompleteForSend(preview);
+                          if (missing.length) {
+                            // Hard validation: block sending until required fields are filled
+                            setSendBlocked({ open: true, missing });
+                            showToast("Cannot send to faculty: please complete all required fields in the selected faculty’s rows.", "error");
+                            return;
+                          }
+
                           setSendRowsPreview(preview);
                           setShowSend(true);
                         }}
                         className={cls(
-                          "inline-flex items-center gap-2 rounded-md px-3.5 py-2 text-sm font-medium shadow-sm",
-                          anySelected && isRunning
+                          "inline-flex h-10 min-w-[140px] items-center justify-center gap-2 rounded-md px-4 py-2 text-sm font-medium shadow-sm",
+                          anySelected && isRunning && !isArchiveView
                             ? "bg-blue-600 text-white hover:brightness-110"
                             : "bg-gray-200 text-gray-500 cursor-not-allowed"
                         )}
                         title={
-                          anySelected
+                          isArchiveView
+                            ? "Archived view: sending is disabled"
+                            : anySelected
                             ? "Send to selected faculty"
                             : "Select at least one row"
                         }
@@ -3005,7 +3516,10 @@ useEffect(() => {
                 </div>
 
                 {/* Match APO_CourseOfferings table styling (sticky header, bordered cells, emerald header text) */}
-                <div className="mt-3 max-h-[58vh] overflow-x-auto overflow-y-auto rounded-xl border border-gray-300 bg-white shadow-sm">
+                {isArchiveView ? (
+                  <ArchivedLoadsSummary rows={rows} termLabel={term} />
+                ) : (
+                  <div className="mt-3 max-h-[58vh] overflow-x-auto overflow-y-auto rounded-xl border border-gray-300 bg-white shadow-sm">
                   <table className="min-w-full text-sm table-fixed border-collapse">
                     <colgroup>
                       <col className="w-[46px]" />
@@ -3043,7 +3557,7 @@ useEffect(() => {
                           )}
                         </th>
                         <th className="px-3 py-2 text-left border border-gray-300">
-                          Course & Title
+                          Course Code & Title<span className="text-red-600" aria-hidden="true">*</span>
                         </th>
                         <th className="px-3 py-2 text-center border border-gray-300">
                           Units
@@ -3052,28 +3566,28 @@ useEffect(() => {
                           Section
                         </th>
                         <th className="px-3 py-2 text-left border border-gray-300">
-                          Faculty
+                          Faculty <span className="text-red-600" aria-hidden="true">*</span>
                         </th>
                         <th className="px-3 py-2 text-center border border-gray-300">
-                          Day 1
+                          Day 1 <span className="text-red-600" aria-hidden="true">*</span>
                         </th>
                         <th className="px-3 py-2 text-center border border-gray-300">
-                          Begin 1
+                          Begin 1 <span className="text-red-600" aria-hidden="true">*</span>
                         </th>
                         <th className="px-3 py-2 text-center border border-gray-300">
-                          End 1
+                          End 1 <span className="text-red-600" aria-hidden="true">*</span>
                         </th>
                         <th className="px-3 py-2 text-center border border-gray-300">
                           Room 1
                         </th>
                         <th className="px-3 py-2 text-center border border-gray-300">
-                          Day 2
+                          Day 2 <span className="text-red-600" aria-hidden="true">*</span>
                         </th>
                         <th className="px-3 py-2 text-center border border-gray-300">
-                          Begin 2
+                          Begin 2 <span className="text-red-600" aria-hidden="true">*</span>
                         </th>
                         <th className="px-3 py-2 text-center border border-gray-300">
-                          End 2
+                          End 2 <span className="text-red-600" aria-hidden="true">*</span>
                         </th>
                         <th className="px-3 py-2 text-center border border-gray-300">
                           Room 2
@@ -3082,7 +3596,7 @@ useEffect(() => {
                           Capacity
                         </th>
                         <th className="px-3 py-2 text-center border border-gray-300">
-                          Mode
+                          Mode <span className="text-red-600" aria-hidden="true">*</span>
                         </th>
                         <th className="px-3 py-2 text-center border border-gray-300">
                           Status
@@ -3096,25 +3610,32 @@ useEffect(() => {
                     <tbody>
                       {filtered.map((r, idx) => {
                         const e = getEditFlags(r);
+                        const isLocked = !!r.finalized || r.status === "Approved";
+                        const isForwardedToFaculty = !!r.forwarded_to_faculty;
                         // Show the red dot only when there is a pending RFC AND the row is still actionable.
                         // Once the schedule is approved/finalized, the message icon is disabled; the dot should disappear.
                         const unread = !!(r as any).pending_rfc && !r.finalized;
                         return (
                           <tr
                             key={r.id}
-                            className="hover:bg-gray-50 whitespace-nowrap [&>td]:border [&>td]:border-gray-200"
+                            className={cls(
+                              "whitespace-nowrap [&>td]:border [&>td]:border-gray-200",
+                              isLocked
+                                ? "bg-gray-100 text-gray-500 hover:bg-gray-100"
+                                : isForwardedToFaculty
+                                ? "bg-sky-50 hover:bg-sky-100/40"
+                                : "hover:bg-gray-50"
+                            )}
                           >
                             <td className="px-3 py-2 text-center">
                               {isRunning && (
                                 <input
                                   type="checkbox"
                                   checked={!!r.selected}
+                                  disabled={isLocked}
                                   onChange={(ev) =>
-                                    setCell(
-                                      r.id,
-                                      "selected",
-                                      ev.target.checked as any
-                                    )
+                                    !isLocked &&
+                                    setCell(r.id, "selected", ev.target.checked as any)
                                   }
                                   className="rounded border-gray-300 text-emerald-600 focus:ring-emerald-500"
                                   title={`Select row ${idx + 1}`}
@@ -3382,71 +3903,16 @@ useEffect(() => {
                                   </button>
 
                                   <button
-                                    disabled={!!r.finalized}
-                                    className={cls(
-                                      "flex h-7 w-7 items-center justify-center rounded-full border-2 border-emerald-700 text-emerald-700 hover:bg-emerald-50",
-                                      !!r.finalized && "opacity-40 cursor-not-allowed hover:bg-transparent"
-                                    )}
-                                    title="Approve"
-                                  onClick={async () => {
-                                      if (!userId) return;
-                                      if (!r.faculty_id) {
-                                        alert('This row has no assigned faculty yet.');
-                                        return;
-                                      }
-                                      try {
-                                        await finalizeOmLoadAssignmentCourse(userId, {
-                                          term_id: termId || undefined,
-                                          faculty_id: r.faculty_id,
-                                          course_code: r.course,
-                                          section: r.section,
-                                        });
-                                        // lock actions for this row immediately (backend persists too)
-                                        setCell(r.id, "finalized", true as any);
-                                        showToast(
-                                          `Notified ${r.faculty || "faculty"} that ${r.course} – ${r.section} was added to their final schedule.`,
-                                          "success"
-                                        );
-                                      } catch (e: any) {
-                                        showToast(e?.message || "Failed to notify faculty.", "error");
-                                      }
-                                    }}
-                                  >
-                                    <Check
-                                      className="h-4 w-4"
-                                      strokeWidth={2.5}
-                                    />
-                                  </button>
-
-                                  <button
-                                    type="button"
-                                    onClick={() => handleCopyRow(r)}
+                                    className="relative hover:brightness-110"
                                     title={copiedRowId === r.id ? "Copied!" : "Copy"}
-                                    className="flex h-7 w-7 items-center justify-center rounded-full border-2 border-gray-300 text-gray-600 hover:bg-gray-50"
+                                    onClick={() => handleCopyRow(r)}
                                   >
                                     {copiedRowId === r.id ? (
-                                      <Check
-                                        className="h-4 w-4 text-emerald-600"
-                                        strokeWidth={2.5}
-                                      />
+                                      <span className="text-xs font-semibold text-emerald-700">✓</span>
                                     ) : (
                                       <Copy className="h-4 w-4" />
                                     )}
                                   </button>
-
-                                  {String(r.id).startsWith("manual-") && (
-                                    <button
-                                      className="flex h-7 w-7 items-center justify-center rounded-full border-2 border-red-600 text-red-600 hover:bg-red-50"
-                                      title="Remove this line"
-                                      onClick={() =>
-                                        commitRows(
-                                          rows.filter((row) => row.id !== r.id)
-                                        )
-                                      }
-                                    >
-                                      <Trash2 className="h-4 w-4" />
-                                    </button>
-                                  )}
                                 </div>
                               )}
                             </td>
@@ -3470,6 +3936,7 @@ useEffect(() => {
                     </tbody>
                   </table>
                 </div>
+                )}
 
                 <div className="border-t px-4 py-3">
                   <div className="flex items-center justify-between gap-3">
@@ -3805,11 +4272,6 @@ useEffect(() => {
                                   <div className="font-medium text-gray-900">
                                     {f.facultyName}
                                   </div>
-                                  {f.facultyId && (
-                                    <div className="text-[11px] text-gray-400">
-                                      {f.facultyId}
-                                    </div>
-                                  )}
                                 </td>
                                 <td className="px-3 py-2 text-right align-middle">
                                   {f.assignedUnits
@@ -3890,11 +4352,6 @@ useEffect(() => {
                                     <div className="font-medium text-gray-900">
                                       {a.facultyName || "—"}
                                     </div>
-                                    {a.facultyId && (
-                                      <div className="text-[10px] text-gray-400">
-                                        {a.facultyId}
-                                      </div>
-                                    )}
                                   </td>
                                   <td className="px-4 py-2 text-sm text-gray-600 text-center">
                                     {a.rowNumber ?? "—"}
@@ -3998,33 +4455,99 @@ useEffect(() => {
         </>
       )}
 
-      <ApproveModal
-        open={showApprove}
-        onClose={() => setShowApprove(false)}
-        onApprove={() => {
-        (async () => {
-          try {
-            if (userId) {
-              const res = await submitOmLoadAssignment(userId, { rows }, "approve");
 
-              // Create the chair notification (forward vs update is decided by backend;
-              // but if approve returns kind/reco_id, we pass it through for correctness)
-              await notifyChairLoadRecommendation(userId, {
-                kind: (res as any)?.kind,
-                reco_id: (res as any)?.reco_id,
-              });
-            }
+      {archiveOpen && (
+        <div className="fixed inset-0 z-[150] grid place-items-center bg-black/40 p-4">
+          <div className="w-full max-w-lg rounded-xl bg-white shadow-lg">
+            <div className="flex items-center justify-between border-b border-gray-200 px-5 py-4">
+              <div>
+                <h3 className="text-lg font-semibold text-gray-900">Archived Loads</h3>
+                <p className="mt-0.5 text-sm text-gray-600">
+                  Display faculty loads from past terms.
+                </p>
+              </div>
 
-            // pull fresh data so you see persisted faculty + any created schedules
-            await loadFromServer();
-            setApproved(true);
-          } finally {
-            setShowApprove(false);
-          }
-        })();
-      }}
+              <button
+                type="button"
+                onClick={() => setArchiveOpen(false)}
+                className="rounded-md p-1.5 text-gray-500 hover:bg-gray-100 hover:text-gray-700"
+                title="Close"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
 
-      />
+            <div className="px-5 py-4">
+              <label className="block text-sm font-medium text-gray-700">
+                Term
+              </label>
+              <div className="mt-1">
+                <SelectBox
+                  value={archiveTermId}
+                  onChange={(v) => setArchiveTermId(v)}
+                  options={archiveTerms.map((t) => ({
+                    value: t.term_id,
+                    label: `${t.label}${t.is_active ? " (Active)" : ""}`,
+                  }))}
+                  placeholder="— Select term —"
+                  className="w-full"
+                  buttonClassName={cls(
+                    // Match the Faculty column dropdown style
+                    "rounded-lg px-3 py-2 pr-8 text-left text-sm",
+                    "focus:ring-2 focus:ring-emerald-500/30"
+                  )}
+                />
+              </div>
+
+              {isArchiveView && (
+                <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+                  You’re currently viewing an archived term. Actions like Auto-assign, Import, Send, and Save are disabled.
+                </div>
+              )}
+            </div>
+
+            <div className="flex flex-wrap items-center justify-end gap-2 border-t border-gray-200 px-5 py-4">
+              {isArchiveView && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setArchiveOpen(false);
+                    void loadFromServer(undefined);
+                  }}
+                  className="inline-flex h-10 items-center justify-center rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 shadow-sm hover:bg-gray-50"
+                >
+                  Back to Active Term
+                </button>
+              )}
+
+              <button
+                type="button"
+                onClick={() => setArchiveOpen(false)}
+                className="inline-flex h-10 items-center justify-center rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 shadow-sm hover:bg-gray-50"
+              >
+                Cancel
+              </button>
+
+              <button
+                type="button"
+                disabled={!archiveTermId}
+                onClick={() => {
+                  const tid = archiveTermId;
+                  setArchiveOpen(false);
+                  if (tid) void loadFromServer(tid);
+                }}
+                className={cls(
+                  "inline-flex h-10 items-center justify-center rounded-md bg-emerald-700 px-4 py-2 text-sm font-medium text-white shadow-sm hover:brightness-110",
+                  !archiveTermId && "opacity-60 cursor-not-allowed"
+                )}
+              >
+                Load
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
 
       <SendModal
         open={showSend}
@@ -4032,6 +4555,13 @@ useEffect(() => {
         rows={sendRowsPreview}
         termLabel={term}
         onSend={handleSendToFaculty}
+        onToast={showToast}
+      />
+
+      <SendBlockedModal
+        open={sendBlocked.open}
+        missing={sendBlocked.missing}
+        onClose={() => setSendBlocked({ open: false, missing: [] })}
       />
 
       <RequestChangeModal
@@ -4042,12 +4572,14 @@ useEffect(() => {
         termId={termId || ""}
         rows={rows}
         onAfterUpdate={loadFromServer}
+        onToast={showToast}
       />
 
       <NewSectionModal
         open={showNewSectionModal}
         onClose={() => setShowNewSectionModal(false)}
         courseOptions={courseOptions}
+        onToast={showToast}
         onSave={({ course, section, units, campus_id }) => {
           // create a new manual row that behaves like other rows,
           // but with the extra campus_id attached
@@ -4087,30 +4619,12 @@ useEffect(() => {
       />
 
       {/* Global toast */}
-      {uiToast.open && (
-        <div className="fixed bottom-6 right-6 z-[250]">
-          <div
-            className={cls(
-              "max-w-md rounded-xl border p-4 shadow-lg",
-              uiToast.kind === "success"
-                ? "border-emerald-200 bg-emerald-50 text-emerald-900"
-                : "border-red-200 bg-red-50 text-red-900"
-            )}
-          >
-            <div className="flex items-start gap-3">
-              <div className="text-sm font-medium leading-snug">{uiToast.message}</div>
-              <button
-                type="button"
-                className="ml-auto rounded-md p-1 hover:bg-black/5"
-                aria-label="Close"
-                onClick={() => setUiToast((prev) => ({ ...prev, open: false }))}
-              >
-                <X className="h-4 w-4" />
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      <Toast
+        open={!!toast}
+        kind={toast?.kind}
+        message={toast?.message || ""}
+        onClose={clearToast}
+      />
 
     </AppShell>
   );

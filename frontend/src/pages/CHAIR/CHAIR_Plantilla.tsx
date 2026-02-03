@@ -274,7 +274,8 @@ const DepartmentPlantilla: React.FC<{
             <col className="w-[28rem]" />
           </colgroup>
 
-          <thead className="bg-gray-50 text-emerald-800 sticky top-0 z-10 text-xs">
+          {/* Keep sticky header below global overlays (e.g., topbar notifications) */}
+          <thead className="bg-gray-50 text-emerald-800 sticky top-0 z-[1] text-xs">
             <tr className="whitespace-nowrap text-[13px] font-semibold">
               <th rowSpan={2} className="px-3 py-2 text-center border border-gray-300">
                 Rank
@@ -457,11 +458,31 @@ export default function CHAIR_Plantilla() {
               ? displayName
               : serverFull || displayName || prev.profileName || " ";
 
+            const dept = String(
+              (hdr as any).dept_label ??
+                (hdr as any).dept_name ??
+                (hdr as any).department ??
+                ""
+            ).trim();
+
+            // Mirror OM TopBar behavior: ensure subtitle includes "Role | Dept" exactly once
+            const baseSub = String((hdr as any).profileSubtitle ?? prev.profileSubtitle ?? "").trim();
+            let nextSub = baseSub;
+            if (dept) {
+              const subLower = nextSub.toLowerCase();
+              const deptLower = dept.toLowerCase();
+              if (!subLower.includes(deptLower)) {
+                nextSub = nextSub ? `${nextSub} | ${dept}` : dept;
+              }
+            }
+
             return {
               ...prev,
               ...hdr,
               profileName: bestName,
+              profileSubtitle: nextSub || prev.profileSubtitle,
             };
+
           });
         }
       } catch {
