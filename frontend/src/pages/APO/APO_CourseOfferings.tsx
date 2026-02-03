@@ -3387,8 +3387,7 @@ const promptSaveEdit = () => {
       disabled={scExporting || scSelectedList.length !== 1}
       className={cls(
         "inline-flex items-center gap-2 rounded-md border border-emerald-700/30 bg-emerald-50 px-3 py-2 text-sm font-medium text-emerald-800",
-        "hover:bg-emerald-100",
-        (scExporting || scSelectedList.length !== 1) && "opacity-60 cursor-not-allowed"
+        "inline-flex items-center gap-2 rounded-md bg-emerald-700 px-4 py-2 text-sm font-medium text-white shadow-sm"
       )}
       title={
         scSelectedList.length !== 1
@@ -5904,22 +5903,19 @@ const SubmitModal: React.FC<{
                                   </div>
                                 </summary>
                                 <div className="px-3 pb-3 pt-1 text-sm text-slate-700">
-  {e.details.length ? (
-    <ul className="list-disc space-y-1 pl-5">
-      {e.details.map((d, idx) => (
-        <li key={idx}>
-          <span className="font-medium text-slate-800">{d.field}:</span>{' '}
-          <span className="text-slate-600">{d.from}</span>{' '}
-          <span className="text-slate-400">→</span>{' '}
-          <span className="text-slate-900">{d.to}</span>
-        </li>
-      ))}
-    </ul>
-  ) : null}
-  {e.otherChanged ? (
-    <div className="mt-2 text-xs text-slate-500">Other details were updated (faculty/schedule/capacity).</div>
-  ) : null}
-</div>
+                                  {e.details.length ? (
+                                    <ul className="list-disc space-y-1 pl-5">
+                                      {e.details.map((d, idx) => (
+                                        <li key={idx}>
+                                          <span className="font-medium text-slate-800">{d.field}:</span>{" "}
+                                          <span className="text-slate-600">{d.from}</span>{" "}
+                                          <span className="text-slate-400">→</span>{" "}
+                                          <span className="text-slate-900">{d.to}</span>
+                                        </li>
+                                      ))}
+                                    </ul>
+                                  ) : null}
+                                </div>
                               </details>
                             </li>
                           ))}
@@ -5977,7 +5973,7 @@ const SubmitModal: React.FC<{
                   userTouched.current = true;
                   setNote(e.target.value);
                 }}
-                placeholder="Example: Added CS201 A1. Edited CS102 B2 — Remarks: … Deleted GE3 C…"
+                placeholder=" "
               />
             </div>
           </>
