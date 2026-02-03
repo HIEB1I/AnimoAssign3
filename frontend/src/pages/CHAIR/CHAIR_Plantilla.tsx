@@ -274,7 +274,8 @@ const DepartmentPlantilla: React.FC<{
             <col className="w-[28rem]" />
           </colgroup>
 
-          <thead className="bg-gray-50 text-emerald-800 sticky top-0 z-10 text-xs">
+          {/* Keep sticky header below global overlays (e.g., topbar notifications) */}
+          <thead className="bg-gray-50 text-emerald-800 sticky top-0 z-[1] text-xs">
             <tr className="whitespace-nowrap text-[13px] font-semibold">
               <th rowSpan={2} className="px-3 py-2 text-center border border-gray-300">
                 Rank

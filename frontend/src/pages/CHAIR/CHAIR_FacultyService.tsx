@@ -9,7 +9,6 @@ import {
   respondFacultyService,
   rejectFacultyService,
   type FacultyServiceRow,
-  type ToDept,
   type DayShort,
   getChairHeader,
 } from "@/api";
@@ -61,7 +60,7 @@ function ToastViewport({
   return (
     <div
       className={cls(
-        "fixed z-[9999] right-4 top-4",
+        "fixed z-[100000] right-4 top-[72px]",
         "w-[360px] max-w-[calc(100vw-2rem)]",
         "space-y-3"
       )}
@@ -118,7 +117,8 @@ const PLANTILLA_TABLE_WRAP =
 const PLANTILLA_TABLE =
   "min-w-full w-full text-sm table-fixed border-collapse leading-snug [&_td]:align-top [&_td]:whitespace-normal [&_td]:break-words";
 
-const PLANTILLA_THEAD = "bg-gray-50 text-emerald-800 sticky top-0 z-10 text-xs";
+// NOTE: keep sticky headers *below* global overlays (e.g., topbar notifications)
+const PLANTILLA_THEAD = "bg-gray-50 text-emerald-800 sticky top-0 z-[1] text-xs";
 const PLANTILLA_HEAD_TR = "whitespace-nowrap text-[13px] font-semibold";
 
 const PLANTILLA_TH = "px-3 py-2 text-center border border-gray-300";
@@ -431,7 +431,7 @@ type FSCreate = {
   course_code: string;
   course_title: string;
   units: number | null;
-  to_department: ToDept | "";
+  to_department: string | "";
 };
 
 function facultyLabel(f?: { first_name?: string; last_name?: string; email?: string }) {
@@ -559,7 +559,7 @@ export default function CHAIR_FacultyService({ chairDepartmentName }: ChairFacul
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeDeptName]);
 
-  const [toDepts, setToDepts] = useState<ToDept[]>([]);
+  const [toDepts, setToDepts] = useState<string[]>([]);
   const [timeBegins] = useState<string[]>([...BEGIN_OPTIONS]);
   const [facultyCache, setFacultyCache] = useState<Record<string, FacultyOption[]>>({});
 
@@ -615,7 +615,7 @@ export default function CHAIR_FacultyService({ chairDepartmentName }: ChairFacul
       try {
         const o = await getFSOptions({ requesterDepartment: activeDeptName });
         if (o?.ok) {
-          setToDepts((o.departments || []).filter((d: string) => !eqDept(d, activeDeptName)) as ToDept[]);
+          setToDepts((o.departments || []).filter((d: string) => !eqDept(d, activeDeptName)) as string[]);
           updateTermLabelFromOptions(o);
           // If the current draft "to" becomes invalid (e.g., dept changed), clear it.
           setDraft((d) => (d.to_department && eqDept(d.to_department, activeDeptName) ? { ...d, to_department: "" } : d));
@@ -630,7 +630,7 @@ export default function CHAIR_FacultyService({ chairDepartmentName }: ChairFacul
   async function ensureFacultyForDept(dept: string) {
     if (!dept || facultyCache[dept]) return;
     try {
-      const o = await getFSOptions({ toDepartment: dept as ToDept });
+      const o = await getFSOptions({ toDepartment: dept as any });
       const list: FacultyOption[] =
         (o.facultyOptions || []).map((f: any) => ({
           faculty_id: f.faculty_id,
@@ -715,7 +715,7 @@ export default function CHAIR_FacultyService({ chairDepartmentName }: ChairFacul
         course_code: draft.course_code,
         course_title: draft.course_title,
         units: draft.units,
-        to_department: draft.to_department as ToDept,
+        to_department: draft.to_department as any,
         from_department: activeDeptName,
       });
       if (!crt?.ok || !crt.row?.fs_id) {
@@ -801,26 +801,29 @@ export default function CHAIR_FacultyService({ chairDepartmentName }: ChairFacul
     <div className="min-h-screen w-full bg-gray-50 text-slate-900">
       <ToastViewport items={toasts} onClose={closeToast} />
 
-      <header className="px-8 pt-8 mb-2">
-        <h1 className="text-2xl font-bold">Faculty Service</h1>
-        <p className="text-sm text-gray-600">
-          Create faculty service requests from your department, track sent requests, and respond to requests addressed to
-          your department.
-          {termLabel ? ` for ${termLabel}` : ""}
-        </p>
-      </header>
+<div className="sticky top-0 z-10 bg-white px-8 pt-8">
+  <header className="mb-2">
+    <h1 className="text-2xl font-bold">Faculty Service</h1>
+    <p className="text-sm text-gray-600">
+      Create faculty service requests from your department, track sent requests, and respond to requests addressed to
+      your department.
+      {termLabel ? ` for ${termLabel}` : ""}
+    </p>
+  </header>
 
-      {/* Menu tabs (imitates Faculty UI) */}
-      <Tabs
-        mode="state"
-        activeTab={tab}
-        onTabChange={(t) => setTab(t as any)}
-        items={[
-          { label: "Create Request" },
-          { label: "Received Requests" },
-          { label: "Accepted Requests" },
-        ]}
-      />
+ <Tabs
+          mode="state"
+          activeTab={tab}
+          onTabChange={(t) => setTab(t as any)}
+          items={[
+            { label: "Create Request" },
+            { label: "Received Requests" },
+            { label: "Accepted Requests" },
+          ]}/>
+</div>
+
+
+  
 
       <main className="w-full px-8 pb-24">
         {/* 1) CREATE REQUEST (From = activeDeptName) */}
@@ -892,7 +895,7 @@ export default function CHAIR_FacultyService({ chairDepartmentName }: ChairFacul
                     <td className={cls(PLANTILLA_TD, "align-middle")}> 
                       <Dropdown
                         value={draft.to_department}
-                        onChange={(v) => setDraft((d) => ({ ...d, to_department: v as ToDept }))}
+                        onChange={(v) => setDraft((d) => ({ ...d, to_department: v }))}
                         options={toDepts}
                         placeholder="Select department…"
                         className="[&>button]:h-9 [&>button]:px-2"
