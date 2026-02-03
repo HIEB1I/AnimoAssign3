@@ -19,6 +19,11 @@ const cls = (...s: (string | false | undefined)[]) => s.filter(Boolean).join(" "
 const norm = (s?: string) => (s || "").trim().replace(/\s+/g, " ").toLowerCase();
 const eqDept = (a?: string, b?: string) => norm(a) === norm(b);
 
+/* ---------------- received-tab new indicator (client-side) ----------------
+   We mark requests as "seen" once the chair opens the Received Requests tab.
+   Any unseen fs_id will trigger a red-dot indicator on the tab label.
+*/
+
 /* ---------------- Toasts (in-file, no external libs) ---------------- */
 type ToastType = "success" | "error" | "info";
 type ToastInput = { type: ToastType; title?: string; message: string };
@@ -608,6 +613,49 @@ export default function CHAIR_FacultyService({ chairDepartmentName }: ChairFacul
   const [receivedRows, setReceivedRows] = useState<FacultyServiceRow[]>([]);
   const [loadingList, setLoadingList] = useState(false);
 
+  /* --------- new-received indicator (persisted locally per chair+dept) --------- */
+  const [hasNewReceived, setHasNewReceived] = useState(false);
+  const seenReceivedRef = useRef<Set<string>>(new Set());
+
+  const receivedSeenKey = useMemo(() => {
+    let uid = "anon";
+    try {
+      const raw = localStorage.getItem("animo.user");
+      const u = raw ? JSON.parse(raw) : null;
+      uid = (u?.userId ?? u?.id ?? "anon") as string;
+    } catch {
+      // ignore
+    }
+    return `animo.fs.received.seen.${uid}.${norm(activeDeptName || "") || "unknown"}`;
+  }, [activeDeptName]);
+
+  const loadSeenReceived = () => {
+    try {
+      const raw = localStorage.getItem(receivedSeenKey);
+      const arr = raw ? (JSON.parse(raw) as unknown) : [];
+      const ids = Array.isArray(arr) ? (arr.filter((x) => typeof x === "string") as string[]) : [];
+      seenReceivedRef.current = new Set(ids);
+    } catch {
+      seenReceivedRef.current = new Set();
+    }
+  };
+
+  const saveSeenReceived = () => {
+    try {
+      const ids = Array.from(seenReceivedRef.current);
+      // keep it bounded
+      localStorage.setItem(receivedSeenKey, JSON.stringify(ids.slice(-500)));
+    } catch {
+      // ignore
+    }
+  };
+
+  useEffect(() => {
+    if (!activeDeptName) return;
+    loadSeenReceived();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [receivedSeenKey]);
+
   // Options for creating requests: departments list + working term.
   useEffect(() => {
     if (!activeDeptName) return;
@@ -658,8 +706,18 @@ export default function CHAIR_FacultyService({ chairDepartmentName }: ChairFacul
         listFacultyService({ dept: activeDeptName, box: "sent" }),
         listFacultyService({ dept: activeDeptName, box: "received" }),
       ]);
-      setSentRows((sent?.rows || []) as FacultyServiceRow[]);
-      setReceivedRows((received?.rows || []) as FacultyServiceRow[]);
+      const sentList = (sent?.rows || []) as FacultyServiceRow[];
+      const receivedList = (received?.rows || []) as FacultyServiceRow[];
+
+      setSentRows(sentList);
+      setReceivedRows(receivedList);
+
+      // Determine whether there are any unseen received requests (by fs_id)
+      const hasUnseen = receivedList.some((r) => {
+        const id = r?.fs_id || r?.id;
+        return !!id && !seenReceivedRef.current.has(String(id));
+      });
+      setHasNewReceived(hasUnseen);
     } finally {
       setLoadingList(false);
     }
@@ -795,6 +853,42 @@ export default function CHAIR_FacultyService({ chairDepartmentName }: ChairFacul
 
   const [tab, setTab] = useState<"Create Request" | "Received Requests" | "Accepted Requests">("Create Request");
 
+  // When the chair opens the "Received Requests" tab, mark currently fetched received requests as seen.
+  useEffect(() => {
+    if (tab !== "Received Requests") return;
+    const ids = (receivedRows || [])
+      .map((r) => r?.fs_id || r?.id)
+      .filter(Boolean)
+      .map((x) => String(x));
+
+    if (!ids.length) {
+      setHasNewReceived(false);
+      return;
+    }
+
+    let changed = false;
+    for (const id of ids) {
+      if (!seenReceivedRef.current.has(id)) {
+        seenReceivedRef.current.add(id);
+        changed = true;
+      }
+    }
+    if (changed) saveSeenReceived();
+    setHasNewReceived(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, receivedRows, receivedSeenKey]);
+
+  // Keep the tab labels stable for logic, but decorate the Received tab label when there are unseen rows.
+  const RECEIVED_BASE = "Received Requests";
+  const RECEIVED_LABEL = hasNewReceived ? `${RECEIVED_BASE} 🔴` : RECEIVED_BASE;
+  const activeTabLabel = tab === RECEIVED_BASE ? RECEIVED_LABEL : tab;
+  const onTabChangeSafe = (t: string) => {
+    if (t.startsWith(RECEIVED_BASE)) setTab(RECEIVED_BASE);
+    else if (t.startsWith("Create Request")) setTab("Create Request");
+    else if (t.startsWith("Accepted Requests")) setTab("Accepted Requests");
+    else setTab(t as any);
+  };
+
   
 /* ---------------- UI ---------------- */
   return (
@@ -813,11 +907,11 @@ export default function CHAIR_FacultyService({ chairDepartmentName }: ChairFacul
 
  <Tabs
           mode="state"
-          activeTab={tab}
-          onTabChange={(t) => setTab(t as any)}
+          activeTab={activeTabLabel}
+          onTabChange={(t) => onTabChangeSafe(t as any)}
           items={[
             { label: "Create Request" },
-            { label: "Received Requests" },
+            { label: RECEIVED_LABEL },
             { label: "Accepted Requests" },
           ]}/>
 </div>

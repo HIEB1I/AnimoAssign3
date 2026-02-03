@@ -1099,13 +1099,6 @@ async def loadassignment_handler(
         # So "updated vs submitted" should be based on forwarded_to_chair, not existence alone.
         was_forwarded_before = bool((existing_header or {}).get("forwarded_to_chair"))
 
-        # Forwarding to the Chair is a final act and cannot happen again.
-        if was_forwarded_before:
-            raise HTTPException(
-                status_code=409,
-                detail="Already forwarded to Chair. Forwarding is final and cannot be undone.",
-            )
-
         # 1) persist the final assignments/schedules
         await _approve_and_persist(active["term_id"], rows, db)
 
@@ -1116,36 +1109,6 @@ async def loadassignment_handler(
             department_id=dept_id_header,  # existing behavior
             user_id=userId,            # query param from the route
         )
-
-        # 3) notify the department chair(s) so their CHAIR Plantilla alerts updates
-        try:
-            recipients = await _chair_user_ids_for_department_id(dept_id_notif, db)
-            dept_name = await _dept_name_by_id(dept_id_notif, db)
-
-            is_update = bool(existing_header)
-            title = "Load Recommendation Updated" if is_update else "Load Recommendation Forwarded"
-            details = (
-                f"OM {'updated' if is_update else 'forwarded'} the load recommendation"
-                f" for {dept_name or dept_id_notif} ({_term_label(active)})."
-            )
-            meta = {
-                "route": "/chair/plantilla",
-                "kind": "om_load_updated" if is_update else "om_load_forwarded",
-                "term_id": active.get("term_id"),
-                "department_id": dept_id_notif,
-                "load_id": (existing_header or {}).get("load_id"),
-            }
-
-            for uid in recipients:
-                await create_notification(
-                    user_id=uid,
-                    title=title,
-                    details=details,
-                    meta=meta,
-                )
-        except Exception:
-            # Never break approval due to notification failure
-            pass
 
         # fetch header again to get reco_id after upsert
         header_after = await db[COL_FACULTY_LOADS].find_one(
@@ -6245,7 +6208,7 @@ async def _upsert_faculty_load_header(
 
                 # NEW: ensure it's marked forwarded; preserve first forwarded timestamp if it exists
                 "forwarded_to_chair": True,
-                "forwarded_to_chair_at": existing.get("forwarded_to_chair_at") or now,
+                "forwarded_to_chair_at": now,
             }
             },
         )

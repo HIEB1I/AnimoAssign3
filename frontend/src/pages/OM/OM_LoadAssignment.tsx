@@ -3303,10 +3303,10 @@ useEffect(() => {
                     Save Draft
                   </button>
                   <button
-                    disabled={!hasReco || approved || isArchiveView}
+                    disabled={!hasReco || isArchiveView}
                     className={cls(
                       "rounded-lg px-4 py-2 font-semibold shadow-sm flex items-center gap-2",
-                      !(!hasReco || approved || isArchiveView)
+                      !(!hasReco || isArchiveView)
                         ? "bg-emerald-600 text-white hover:bg-emerald-700" // enabled (GREEN)
                         : "bg-gray-200 text-gray-400 cursor-not-allowed" // disabled
                     )}
@@ -3338,7 +3338,7 @@ useEffect(() => {
                   }}
                   >
                     <CheckCheck className="h-4 w-4" />
-                    Forward to Chair
+                    {approved ? "Re-forward to Chair" : "Forward to Chair"}
                   </button>
                 </div>
               </div>
