@@ -210,7 +210,14 @@ async def _notify_planning_started(*, actor_user_id: str, planning_term_id: str)
             route = "/chair/plantilla"
 
         meta = {"route": route, "kind": "preenlistment_archived", "term_id": planning_term_id}
-        await create_notification(user_id=uid, title=title, details=details, meta=meta)
+        await create_notification(
+            user_id=uid,
+            title=title,
+            details=details,
+            meta=meta,
+            send_email=True,
+            email_from_user_id=actor_user_id,
+        )
         created += 1
 
     return {"created": created, "recipients": all_ids}

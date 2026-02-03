@@ -6131,7 +6131,14 @@ async def apo_forward_courseofferings_to_scheduling(
         }
 
         for uid in recipients:
-            await create_notification(user_id=uid, title=title, details=details, meta=meta)
+            await create_notification(
+                user_id=uid,
+                title=title,
+                details=details,
+                meta=meta,
+                send_email=True,
+                email_from_user_id=userId,
+            )
             created += 1
             notified.append(uid)
 
