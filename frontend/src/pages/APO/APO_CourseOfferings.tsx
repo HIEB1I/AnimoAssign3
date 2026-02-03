@@ -3105,7 +3105,7 @@ const promptSaveEdit = () => {
 
     openConfirm({
       title: "Delete this offering?",
-      description: "This removes the row from your plan. You can undo right after.",
+      description: "This removes the row from your plan.",
       confirmText: "Delete",
       cancelText: "Cancel",
       variant: "danger",
@@ -5130,9 +5130,6 @@ const response = await importCurriculumCsv(user.userId, {
               <div className="p-3">
                 {scErr && <div className="mb-2 text-sm text-red-600">{scErr}</div>}
                 {scExportErr && <div className="mb-2 text-sm text-red-600">{scExportErr}</div>}
-                <div className="mb-2 text-xs text-neutral-500">
-                  Select 1 row, then click <span className="font-medium">Export PDF</span>.
-                </div>
 
 {scLoading ? (
                   <div className="text-sm text-neutral-500">Loading…</div>
@@ -5954,10 +5951,6 @@ const SubmitModal: React.FC<{
                   </div>
                 )}
               </div>
-
-              <div className="mt-2 text-xs text-slate-500">
-                Click an edited row to expand details.
-              </div>
             </div>
 
             <div className="mb-4">
@@ -5986,9 +5979,6 @@ const SubmitModal: React.FC<{
                 }}
                 placeholder="Example: Added CS201 A1. Edited CS102 B2 — Remarks: … Deleted GE3 C…"
               />
-              <div className="mt-2 text-xs text-slate-500">
-                Keep it short—1–3 sentences is usually enough.
-              </div>
             </div>
           </>
         )}
