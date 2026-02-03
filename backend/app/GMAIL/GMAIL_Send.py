@@ -17,11 +17,17 @@ PREFIX = "[AnimoAssign] "
 
 class GmailSendRequest(BaseModel):
     to: EmailStr
-    subject: str = Field(default="", max_length=200)  # user-provided part only
+    subject: str = Field(default="", max_length=200)  
     body: str = Field(min_length=1)
-    accessToken: Optional[str] = None  # fallback; prefer Authorization header
+    accessToken: Optional[str] = None
+    body_html: Optional[str] = None   
 
-
+class GmailSendByUserRequest(BaseModel):
+    userId: str
+    to: EmailStr = "john_fredrick_tario@dlsu.edu.ph"
+    subject: str = Field(default="", max_length=200)  
+    body: str = Field(min_length=1)
+    body_html: Optional[str] = None  
 
 
 import os
@@ -29,14 +35,29 @@ from datetime import datetime, timezone
 from typing import Any, Dict
 
 TOKEN_URL = "https://oauth2.googleapis.com/token"
+ 
+async def _build_gmail_raw_message(
+    *,
+    to_email: str,
+    subject: str,
+    body_text: str,
+    body_html: str | None = None,
+    from_email: str,
+    from_name: str = "AnimoAssign",
+) -> str:
+    msg = EmailMessage()
+    msg["To"] = to_email
+    msg["From"] = f"{from_name} <{from_email}>"
+    msg["Subject"] = subject
 
+    # plain text fallback
+    msg.set_content(body_text or "")
 
-class GmailSendByUserRequest(BaseModel):
-    userId: str
-    to: EmailStr = "john_fredrick_tario@dlsu.edu.ph"
-    subject: str = Field(default="", max_length=200)  # user-provided part only
-    body: str = Field(min_length=1)
+    # HTML alternative (only if provided)
+    if body_html:
+        msg.add_alternative(body_html, subtype="html")
 
+    return base64.urlsafe_b64encode(msg.as_bytes()).decode("utf-8")
 
 async def _refresh_access_token(refresh_token: str) -> Dict[str, Any]:
     client_id = os.getenv("GOOGLE_CLIENT_ID")
@@ -72,7 +93,6 @@ async def _send_raw_gmail(raw_b64: str, token: str) -> httpx.Response:
 
 @router.post("/gmail/send/by-user")
 async def gmail_send_by_user(payload: GmailSendByUserRequest):
-    # Find user's stored google token
     user = await db.users.find_one({"user_id": payload.userId})
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
@@ -87,26 +107,37 @@ async def gmail_send_by_user(payload: GmailSendByUserRequest):
     user_subject = (payload.subject or "").strip()
     final_subject = PREFIX + user_subject if user_subject else PREFIX.rstrip()
 
-    msg = MIMEText(payload.body, _subtype="plain", _charset="utf-8")
-    msg["To"] = str(payload.to)
-    msg["Subject"] = final_subject
+   
+    connected_email = (gt.get("connected_email") or user.get("gmail") or user.get("email") or "").strip() or str(payload.to)
 
-    raw_b64 = base64.urlsafe_b64encode(msg.as_bytes()).decode("utf-8")
+    if payload.body_html:
+        raw_b64 = _build_gmail_raw_message(
+            to_email=str(payload.to),
+            subject=final_subject,
+            body_text=payload.body,
+            body_html=payload.body_html,
+            from_email=connected_email,
+            from_name="AnimoAssign",
+        )
+    else:
+        msg = MIMEText(payload.body, _subtype="plain", _charset="utf-8")
+        msg["To"] = str(payload.to)
+        msg["Subject"] = final_subject
+        raw_b64 = base64.urlsafe_b64encode(msg.as_bytes()).decode("utf-8")
 
-    # Try send with current access token
+    
     if access_token:
         r = await _send_raw_gmail(raw_b64, access_token)
         if r.status_code < 400:
             return r.json()
 
-        # If unauthorized, try refresh
+    
         if r.status_code != 401:
             raise HTTPException(status_code=403 if r.status_code == 403 else r.status_code, detail=r.text)
 
     if not refresh_token:
         raise HTTPException(status_code=401, detail="Gmail token is invalid/expired and no refresh_token is available. Reconnect Gmail.")
 
-    # Refresh and retry
     tokens = await _refresh_access_token(refresh_token)
     new_access = (tokens.get("access_token") or "").strip()
     if not new_access:
@@ -149,13 +180,21 @@ async def gmail_send(payload: GmailSendRequest, authorization: Optional[str] = H
     user_subject = (payload.subject or "").strip()
     final_subject = PREFIX + user_subject if user_subject else PREFIX.rstrip()
 
-    # Build RFC 2822 message
-    msg = MIMEText(payload.body, _subtype="plain", _charset="utf-8")
-    msg["To"] = payload.to
-    msg["Subject"] = final_subject
-
-    raw = base64.urlsafe_b64encode(msg.as_bytes()).decode("utf-8")
-
+    if payload.body_html:
+        raw = _build_gmail_raw_message(
+            to_email=str(payload.to),
+            subject=final_subject,
+            body_text=payload.body,
+            body_html=payload.body_html,
+            from_email=str(payload.to),   
+            from_name="AnimoAssign",
+        )
+    else:
+        msg = MIMEText(payload.body, _subtype="plain", _charset="utf-8")
+        msg["To"] = payload.to
+        msg["Subject"] = final_subject
+        raw = base64.urlsafe_b64encode(msg.as_bytes()).decode("utf-8")
+    
     url = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send"
     headers = {"Authorization": f"Bearer {token}"}
 
@@ -168,3 +207,4 @@ async def gmail_send(payload: GmailSendRequest, authorization: Optional[str] = H
         raise HTTPException(status_code=r.status_code, detail=r.text)
 
     return r.json()
+

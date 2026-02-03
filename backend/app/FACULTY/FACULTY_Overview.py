@@ -971,10 +971,6 @@ async def _get_previous_term() -> Optional[Dict[str, Any]]:
     t["term_label"] = _term_label(t)
     return t
 
-async def _send_email_via_user_gmail(*args, **kwargs):
-    # Email integration not implemented / not configured in this project.
-    return False, "Email sending not configured"
-
 
 @router.get("/load-assignment/rfc")
 async def faculty_get_load_rfc(
@@ -1168,9 +1164,86 @@ async def faculty_send_load_rfc_message(userId: str = Query(...), payload: Dict[
 
 # END NEW BLOCK
 
+
+
+
+def _format_time(t: str | None) -> str:
+    return (t or "TBA").strip() or "TBA"
+
+def _build_acceptance_email(term_label: str, rows: list[dict], recipient_email: str):
+    subject = f"[DST] Teaching Load Assignments for {term_label}"
+
+    lines = [
+        f"Dear Faculty,",
+        "",
+        f"You have accepted your teaching load for {term_label}.",
+        "",
+        "Summary:",
+    ]
+    for r in rows:
+        lines.append(
+            f"- {r.get('course_code','')} {r.get('section','')} | "
+            f"{r.get('day1','')} {_format_time(r.get('time1'))} ({r.get('room1','')})"
+        )
+    body_text = "\n".join(lines)
+
+    def td(x): 
+        return ("" if x is None else str(x))
+
+    table_rows_html = ""
+    for r in rows:
+        table_rows_html += f"""
+        <tr>
+          <td>{td(r.get("course_code",""))}</td>
+          <td style="text-align:center;">{td(r.get("units",""))}</td>
+          <td>{td(r.get("faculty_name",""))}</td>
+          <td style="text-align:center;">{td(r.get("day1",""))}</td>
+          <td style="text-align:center;">{td(r.get("start1","") or r.get("time1",""))}</td>
+          <td style="text-align:center;">{td(r.get("end1","") or "")}</td>
+          <td>{td(r.get("room1",""))}</td>
+          <td style="text-align:center;">{td(r.get("day2","") or "")}</td>
+          <td style="text-align:center;">{td(r.get("start2","") or r.get("time2","") or "")}</td>
+          <td style="text-align:center;">{td(r.get("end2","") or "")}</td>
+          <td>{td(r.get("room2","") or "")}</td>
+        </tr>
+        """
+
+    body_html = f"""
+    <div style="font-family:Arial,sans-serif;font-size:13px;color:#111;">
+      <p>Dear Faculty,</p>
+      <p>This confirms you have <b>accepted</b> your teaching load for <b>{term_label}</b>.</p>
+
+      <table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse;width:100%;font-size:12px;">
+        <thead style="background:#f3f4f6;">
+          <tr>
+            <th>Course</th>
+            <th>Units</th>
+            <th>Faculty</th>
+            <th>Day 1</th>
+            <th>Time 1</th>
+            <th></th>
+            <th>Room 1</th>
+            <th>Day 2</th>
+            <th>Time 2</th>
+            <th></th>
+            <th>Room 2</th>
+          </tr>
+        </thead>
+        <tbody>
+          {table_rows_html}
+        </tbody>
+      </table>
+
+      <p style="margin-top:16px;">Thank you.<br/>AnimoAssign</p>
+      <p>Log in here: <a href="http://localhost:5173/login">http://localhost:5173/login</a></p>
+    </div>
+    """
+    return subject, body_text, body_html
+
 @router.post("/load-assignment/accept")
 async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[str, Any] = Body({})):
     faculty = await db[COL_FACULTY].find_one({"user_id": userId}, {"_id": 0})
+    user = await db["users"].find_one({"user_id": userId}, {"_id": 0, "email": 1, "gmail": 1, "google_token": 1})
     if not faculty:
         raise HTTPException(status_code=404, detail="Faculty not found")
 
@@ -1187,30 +1260,28 @@ async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[s
     if not proposal:
         return {"ok": True, "message": "No proposal to accept."}
 
+    proposal_rows = proposal.get("rows", []) or []
 
-    # --- NEW: do not allow "Accept Schedule" if there is a pending RFC thread ---
     pending_rfc = await db[COL_LOAD_RFC].find_one({"faculty_id": fid, "term_id": term_id}, {"_id": 0}) or None
     if pending_rfc:
         existing_norm = _normalize_rfc_doc(pending_rfc)
         st = str(existing_norm.get("status") or "").upper()
         if st and st not in RFC_TERMINAL:
-            raise HTTPException(status_code=409, detail="You have a pending RFC. Please wait for OM to respond before accepting the schedule.")
+            raise HTTPException(
+                status_code=409,
+                detail="You have a pending RFC. Please wait for OM to respond before accepting the schedule."
+            )
 
     await db[COL_LOAD_PROPOSALS].update_one(
         {"faculty_id": fid, "term_id": term_id},
-        {
-            "$set": {
-                "status": "approved",
-                "locked": True,
-                "accepted_at": _now_utc(),
-                "updated_at": _now_utc(),
-            },
-            # mark all proposed rows as finalized so OM & Faculty UIs become read-only
-            "$setOnInsert": {"created_at": _now_utc()},
-        },
+        {"$set": {
+            "status": "approved",
+            "locked": True,
+            "accepted_at": _now_utc(),
+            "updated_at": _now_utc(),
+        }},
     )
 
-    # Best-effort: finalize all rows (schema-compatible)
     try:
         await db[COL_LOAD_PROPOSALS].update_one(
             {"faculty_id": fid, "term_id": term_id},
@@ -1219,15 +1290,72 @@ async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[s
     except Exception:
         pass
 
-    # lock ALL RFC threads for this faculty+term (RFC is per-course now)
     now = _now_utc()
-
     await db[COL_LOAD_RFC].update_many(
         {"faculty_id": fid, "term_id": term_id},
         {"$set": {"status": "ACCEPTED", "locked": True, "updated_at": now}},
     )
 
-    # optional rfc_id for notif (latest one)
+    recipient_email = (
+        ((user or {}).get("google_token") or {}).get("connected_email")
+        or (user or {}).get("gmail")
+        or (user or {}).get("email")
+        or ""
+    )
+
+    term_doc = await db[COL_TERMS].find_one({"term_id": term_id}, {"_id": 0}) or {}
+    term_label = _term_label(term_doc) if term_doc else term_id
+
+    header = "Course | Section | Day/Time | Room | Mode | Units"
+    sep = "-" * len(header)
+    lines = [header, sep]
+
+    for r in proposal_rows:
+        course = (r.get("course_code") or "").strip()
+        sec = (r.get("section") or r.get("section_code") or "").strip()
+        mode = (r.get("mode") or "").strip()
+        units = str(r.get("units") or "")
+
+        d1 = (r.get("day1") or "TBA").strip()
+        t1 = (r.get("time1") or "TBA").strip()
+        rm1 = (r.get("room1") or "Online").strip()
+
+        d2 = (r.get("day2") or "").strip()
+        t2 = (r.get("time2") or "").strip()
+        rm2 = (r.get("room2") or "").strip()
+
+        day_time = f"{d1} {t1}" + (f" / {d2} {t2}" if d2 and t2 else "")
+        room = rm1 + (f" / {rm2}" if rm2 else "")
+
+        lines.append(f"{course} | {sec} | {day_time} | {room} | {mode} | {units}")
+
+    subject = f"[AnimoAssign] Schedule Accepted - {term_label}"
+    body = (
+        f"Your teaching load schedule has been ACCEPTED.\n\n"
+        f"Term: {term_label}\n"
+        f"Accepted At: {now.isoformat()}\n\n"
+        + "\n".join(lines) +
+        "\n\n[AnimoAssign]"
+    )
+
+    email_sent = False
+    email_error: Optional[str] = None
+
+    if recipient_email:
+        try:
+            email_sent, email_error = await _send_email_via_user_gmail(
+                user_id=userId,
+                to_email=recipient_email,
+                subject=subject,
+                body=body,
+            )
+        except Exception as e:
+            email_sent = False
+            email_error = str(e)
+    else:
+        email_sent = False
+        email_error = "No recipient email found for this user."
+
     rfc_id = None
     lst = await db[COL_LOAD_RFC].find(
         {"faculty_id": fid, "term_id": term_id},
@@ -1251,5 +1379,4 @@ async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[s
             },
         )
 
-    return {"ok": True, "status": "ACCEPTED"}
-
+    return {"ok": True, "status": "ACCEPTED", "email_sent": email_sent, "email_error": email_error}
