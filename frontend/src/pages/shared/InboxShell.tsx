@@ -7,6 +7,20 @@ import { emitAck } from "@/realtime/ack";
 
 const cls = (...s: (string | false | undefined)[]) => s.filter(Boolean).join(" ");
 
+const PACIFIC_TZ = "America/Los_Angeles";
+const pacificFormatter = new Intl.DateTimeFormat("en-US", {
+  timeZone: PACIFIC_TZ,
+  month: "short",
+  day: "2-digit",
+  year: "numeric",
+  hour: "numeric",
+  minute: "2-digit",
+  hour12: true,
+  timeZoneName: "short",
+});
+
+const pacificTime = (d: Date) => pacificFormatter.format(d);
+
 const timeAgo = (d: Date) => {
   const s = Math.floor((Date.now() - d.getTime()) / 1000);
   if (s < 60) return `${s}s ago`;
@@ -788,7 +802,7 @@ export default function InboxShell({
                             {m.from}
                           </div>
                           <div className="shrink-0 text-[11px] text-gray-500">
-                            {timeAgo(m.receivedAt)}
+                            {pacificTime(m.receivedAt)}
                           </div>
                         </div>
 
@@ -941,7 +955,7 @@ export default function InboxShell({
                     </div>
 
                     <div className="flex items-center gap-3">
-                      <div className="hidden text-xs text-gray-400 sm:block">{timeAgo(selected.receivedAt)}</div>
+                      <div className="hidden text-xs text-gray-400 sm:block">{pacificTime(selected.receivedAt)}</div>
                       <button
                         onClick={backToDefault}
                         className="rounded-lg border border-gray-300 px-3 py-1.5 text-xs hover:bg-gray-50"

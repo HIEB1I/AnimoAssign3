@@ -1,6 +1,7 @@
 // src/base/Topbar.tsx
 import { useEffect, useRef, useState } from "react";
-import { useLocation, useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
+import { useInboxBadge } from "@/realtime/inboxBadge";
 
 import { useMemo } from "react";
 import {
@@ -84,7 +85,8 @@ export default function Topbar({
   const menuBtnRef = useRef<HTMLButtonElement>(null);
   const [menuPos, setMenuPos] = useState<{ top: number; right: number } | null>(null);
   const navigate = useNavigate();
-  const location = useLocation();
+  const { unreadTotal } = useInboxBadge();
+  const hasInboxUnread = unreadTotal > 0;
 
   const computeMenuPos = () => {
     const btn = menuBtnRef.current;
@@ -250,12 +252,17 @@ export default function Topbar({
         <div className="flex items-center gap-1">
           {/* Inbox */}
           <button
-            className="rounded-md p-2 hover:bg-gray-100 transition"
-            title="Messages"
-            onClick={() => navigate(inboxPath ?? inferredInboxPath)}
-          >
-            <Inbox size={18} />
-          </button>
+          className="relative rounded-md p-2 hover:bg-gray-100 transition"
+          title="Messages"
+          onClick={() => navigate(inboxPath ?? inferredInboxPath)}
+        >
+          <Inbox size={18} />
+
+          {hasInboxUnread && (
+            <span className="absolute -top-1 -left-1 h-3 w-3 rounded-full bg-red-500 ring-2 ring-white" />
+          )}
+        </button>
+
 
           {/* Notifications */}
           <div className="relative" ref={notifRef}>

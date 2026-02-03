@@ -1,5 +1,6 @@
 // frontend/src/realtime/socket.ts
 import { io, Socket } from "socket.io-client";
+import { attachInboxBadgeSocket, resetInboxBadgeSocket } from "./inboxBadge";
 
 type SessionUser = {
   userId?: string;
@@ -27,13 +28,8 @@ function normalizePath(p: string): string {
 }
 
 function resolveSocketTarget(): { url?: string; path: string } {
-  // Your project already uses this for REST calls
   const backend = (import.meta.env.VITE_BACKEND_URL as string | undefined) ?? "/api";
 
-  // backend can be:
-  // - "/api"
-  // - "/staging/api"
-  // - "http://localhost:8000/api"
   let basePath = backend;
   let absoluteOrigin: string | undefined;
 
@@ -43,17 +39,13 @@ function resolveSocketTarget(): { url?: string; path: string } {
     basePath = u.pathname || "/";
   }
 
-  const apiPath = normalizePath(basePath); // e.g. "/api" or "/staging/api"
-  const socketPath = `${apiPath}/socket.io`; // e.g. "/api/socket.io"
+  const apiPath = normalizePath(basePath);
+  const socketPath = `${apiPath}/socket.io`;
 
-  // DEV: connect directly to backend host (avoid Vite websocket proxy issues)
-  // PROD: use same-origin (no url), and only the path.
   const devOrigin =
     (import.meta.env.VITE_SOCKET_ORIGIN as string | undefined) || "http://localhost:8000";
 
-  const url =
-    absoluteOrigin ??
-    (import.meta.env.DEV ? devOrigin : undefined);
+  const url = absoluteOrigin ?? (import.meta.env.DEV ? devOrigin : undefined);
 
   return { url, path: socketPath };
 }
@@ -70,6 +62,7 @@ export function resetSocket() {
   }
   socket = null;
   socketUserId = null;
+  resetInboxBadgeSocket();
 }
 
 export function getSocket(): Socket | null {
@@ -77,17 +70,14 @@ export function getSocket(): Socket | null {
   const userId = (session?.userId || session?.user_id || session?.id || "").toString().trim();
   if (!userId) return null;
 
-  // If user changes (logout/login), recreate the socket cleanly
   if (socket && socketUserId && socketUserId !== userId) {
     resetSocket();
   }
 
   if (!socket) {
     const { url, path } = resolveSocketTarget();
-
     socketUserId = userId;
 
-    // If url is undefined, Socket.IO uses current origin (good for production same-domain)
     socket = url
       ? io(url, {
           path,
@@ -109,6 +99,9 @@ export function getSocket(): Socket | null {
           autoConnect: true,
           reconnection: true,
         });
+
+    // ✅ Attach inbox badge listeners once
+    attachInboxBadgeSocket(socket);
 
     socket.on("connect", () => console.log("[socket] connected", socket?.id));
     socket.on("disconnect", (reason) => console.log("[socket] disconnected", reason));

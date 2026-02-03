@@ -1,7 +1,9 @@
 // frontend/src/component/TopBar.tsx
 import { useState, useRef, useEffect } from "react";
-import { useLocation, useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 import { UserCircle, LogOut, Inbox, Bell } from "lucide-react";
+import { useInboxBadge } from "@/realtime/inboxBadge";
+
 
 interface TopBarProps {
   fullName: string;
@@ -35,7 +37,8 @@ export default function TopBar({
   inboxPath,
 }: TopBarProps) {
   const navigate = useNavigate();
-  const location = useLocation();
+  const { unreadTotal } = useInboxBadge();
+  const hasInboxUnread = unreadTotal > 0;
 
     const pathname =
     typeof window !== "undefined" && window.location?.pathname ? window.location.pathname : "";
@@ -227,12 +230,16 @@ export default function TopBar({
           <div className="flex items-center gap-2">
             <button
               onClick={handleInboxClick}
-              className="rounded-md p-2 hover:bg-white/15"
+              className="relative rounded-md p-2 hover:bg-white/15"
               title="Inbox"
               aria-label="Open Inbox"
               data-testid="topbar-inbox-btn"
             >
               <Inbox className="h-5 w-5" />
+
+              {hasInboxUnread && (
+                <span className="absolute -top-1 -left-1 h-3 w-3 rounded-full bg-red-500 ring-2 ring-emerald-800" />
+              )}
             </button>
 
             <div className="relative" ref={notifRef}>
