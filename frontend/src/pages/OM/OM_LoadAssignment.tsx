@@ -1427,20 +1427,22 @@ const SendBlockedModal = ({
 
 const RequestChangeModal = ({
   open,
-  from,
+  facultyName,
+  facultyId,
+  sectionId,
   onClose,
   userId,
   termId,
-  rows,
   onAfterUpdate,
   onToast,
 }: {
   open: boolean;
-  from?: string;
+  facultyName?: string;
+  facultyId?: string;
+  sectionId?: string;
   onClose: () => void;
   userId: string;
   termId: string;
-  rows: Row[];
   onAfterUpdate: () => Promise<void> | void;
   onToast?: (message: string, kind?: "success" | "error") => void;
 }) => {
@@ -1450,8 +1452,7 @@ const RequestChangeModal = ({
   const [status, setStatus] = useState<string | null>(null);
   const [reply, setReply] = useState("");
 
-  const facultyRow = rows.find((r) => (r.faculty || "") === (from || ""));
-  const facultyId = facultyRow?.faculty_id;
+  const displayFaculty = facultyName || "Faculty";
 
   const isTerminal = !!status && ["ACCEPTED", "APPROVED", "REJECTED"].includes(status);
   const needsOm = status === "NEEDS_OM" || status === "OPEN" || status === "open";
@@ -1481,6 +1482,7 @@ const RequestChangeModal = ({
         const res = await getOmLoadAssignmentRfc(userId, {
           term_id: termId,
           faculty_id: facultyId,
+          section_id: sectionId,
         });
 
         if (!res?.ok || !res?.rfc) {
@@ -1522,6 +1524,7 @@ const RequestChangeModal = ({
       await respondOmLoadAssignmentRfc(userId, {
         term_id: termId,
         faculty_id: facultyId,
+        section_id: sectionId,
         action: decision,
         message: reply.trim() || undefined,
       });
@@ -1555,7 +1558,7 @@ const RequestChangeModal = ({
 
         <h3 className="text-lg font-semibold text-emerald-700 mb-2">Request for Change</h3>
         <div className="text-sm text-gray-600 mb-1">
-          From: <span className="font-semibold">{from}</span>
+          From: <span className="font-semibold">{displayFaculty}</span>
         </div>
         <div className="text-[12px] text-gray-600 mb-4">
           Status:{" "}
@@ -1569,7 +1572,7 @@ const RequestChangeModal = ({
 
         {!loading && !error && !status && (
           <div className="mb-4 rounded-lg border border-gray-200 bg-gray-50 p-3 text-sm text-gray-700">
-            No RFC thread found for this faculty in this term.
+            No RFC thread found for this course.
           </div>
         )}
 
@@ -2165,9 +2168,12 @@ export default function OM_LoadAssignment() {
   const [sendRowsPreview, setSendRowsPreview] = useState<Row[]>([]);
   const [sendBlocked, setSendBlocked] = useState<{ open: boolean; missing: MissingFieldRow[] }>({ open: false, missing: [] });
 
-  const [reqChange, setReqChange] = useState<{ open: boolean; from?: string }>({
-    open: false,
-  });
+  const [reqChange, setReqChange] = useState<{
+    open: boolean;
+    facultyName?: string;
+    facultyId?: string;
+    sectionId?: string;
+  }>({ open: false });
 
   /** Track if there are unsaved/manual edits in the grid */
   const [hasLocalEdits, setHasLocalEdits] = useState(false);
@@ -2284,6 +2290,21 @@ export default function OM_LoadAssignment() {
     const markDirty = key !== ("selected" as K);
     const next = rows.map((r) => (r.id === id ? { ...r, [key]: val } : r));
     commitRows(next, { markDirty });
+  };
+
+  // Selection in the load recommendation table is by faculty (not per subject):
+  // if the OM selects any row for a faculty, we select *all* rows for that faculty.
+  const facultyKeyOf = (r: Row) => String((r.faculty_id || r.faculty || "")).trim();
+  const setFacultySelected = (refRow: Row, checked: boolean) => {
+    const k = facultyKeyOf(refRow);
+    if (!k) {
+      setCell(refRow.id, "selected", checked as any);
+      return;
+    }
+    const next = rows.map((r) =>
+      facultyKeyOf(r) === k ? { ...r, selected: checked } : r
+    );
+    commitRows(next, { markDirty: false });
   };
 
   const filtered = rows.filter((r) => {
@@ -3635,7 +3656,7 @@ useEffect(() => {
                                   disabled={isLocked}
                                   onChange={(ev) =>
                                     !isLocked &&
-                                    setCell(r.id, "selected", ev.target.checked as any)
+                                    setFacultySelected(r, ev.target.checked)
                                   }
                                   className="rounded border-gray-300 text-emerald-600 focus:ring-emerald-500"
                                   title={`Select row ${idx + 1}`}
@@ -3892,7 +3913,9 @@ useEffect(() => {
                                       if (r.finalized) return;
                                       setReqChange({
                                         open: true,
-                                        from: r.faculty || "Faculty",
+                                        facultyName: r.faculty || "Faculty",
+                                        facultyId: (r as any).faculty_id,
+                                        sectionId: (r as any).section_id || r.id,
                                       });
                                     }}
                                   >
@@ -4566,11 +4589,12 @@ useEffect(() => {
 
       <RequestChangeModal
         open={reqChange.open}
-        from={reqChange.from}
+        facultyName={reqChange.facultyName}
+        facultyId={reqChange.facultyId}
+        sectionId={reqChange.sectionId}
         onClose={() => setReqChange({ open: false })}
         userId={userId || ""}
         termId={termId || ""}
-        rows={rows}
         onAfterUpdate={loadFromServer}
         onToast={showToast}
       />
