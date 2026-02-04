@@ -6179,6 +6179,17 @@ const PlanReviewModal: React.FC<{
                 return code || key || "Unknown course";
               };
 
+              const codeForChange = (chAny: any) => {
+                const cc = chAny?.course_code;
+                const fromChange = Array.isArray(cc)
+                  ? String(cc[0] || "").trim()
+                  : typeof cc === "string"
+                  ? cc.trim()
+                  : "";
+                return (fromChange || codeForCourse(chAny?.course_id)).trim();
+              };
+
+
                 const TypeBadge = ({ text }: { text: string }) => (
                   <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] font-semibold text-emerald-700">
                     {text}
@@ -6195,7 +6206,7 @@ const PlanReviewModal: React.FC<{
                     title = "Add course to curriculum";
                     badge = "Add";
                     details = [
-                      { k: "Course code", v: codeForCourse(ch.course_id) },
+                      { k: "Course code", v: codeForChange(ch) },
                       { k: "Enlisted", v: ch.count ?? "—" },
                       ...(ch.target ? [{ k: "Target", v: String(ch.target) }] : []),
                     ];
@@ -6205,7 +6216,7 @@ const PlanReviewModal: React.FC<{
                     title = "Increase sections";
                     badge = "Increase";
                     details = [
-                      { k: "Course code", v: codeForCourse(ch.course_id) },
+                      { k: "Course code", v: codeForChange(ch) },
                       { k: "Sections +", v: typeof ch.by_sections === "number" ? ch.by_sections : "—" },
                     ];
                     break;
@@ -6214,7 +6225,7 @@ const PlanReviewModal: React.FC<{
                     title = "Reduce sections";
                     badge = "Reduce";
                     details = [
-                      { k: "Course code", v: codeForCourse(ch.course_id) },
+                      { k: "Course code", v: codeForChange(ch) },
                       { k: "Sections −", v: typeof ch.by_sections === "number" ? ch.by_sections : "—" },
                     ];
                     break;

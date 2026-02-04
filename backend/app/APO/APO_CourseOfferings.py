@@ -2604,6 +2604,26 @@ async def _pending_changes(
         elif existing > target:
             changes.append({"type": "sections_decrease", "course_id": cid, "by_sections": existing - target})
 
+
+    # Enrich pending changes with course_code/title so the UI can display codes
+    # even when the course is not yet part of the term's curriculum/offering options.
+    try:
+        change_course_ids = sorted({c.get("course_id") for c in changes if c.get("course_id")})
+        cmeta = await map_courses(change_course_ids)
+        for ch in changes:
+            cid = ch.get("course_id")
+            meta = cmeta.get(cid) if cid else None
+            if not meta:
+                continue
+            cc = meta.get("course_code")
+            if isinstance(cc, list):
+                cc = cc[0] if cc else ""
+            ch.setdefault("course_code", cc or "")
+            ch.setdefault("course_title", meta.get("course_title") or "")
+    except Exception:
+        # never block pending changes on metadata enrichment
+        pass
+
     return (False, changes, preen_hash, cohort_hash)
 
 async def _planning_flags(term_id: str, campus_id: str, campus_prefix: str):
@@ -4881,6 +4901,7 @@ async def post_course_offerings(
             pattern = ".*".join(re.escape(t) for t in tokens)
             rx = {"$regex": pattern, "$options": "i"}
             flt["$or"] = [
+                {"course_id": rx},       # allow searching by id (used by plan-review fallbacks)
                 {"course_code": rx},     # string form
                 {"course_code.0": rx},   # array[0] form
                 {"course_title": rx},
