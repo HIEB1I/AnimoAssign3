@@ -57,6 +57,16 @@ export async function login(email: string): Promise<LoginResponse> {
   return r.json();
 }
 
+export async function loginWithPassword(email: string, password: string): Promise<LoginResponse> {
+  const r = await fetch(join(API_BASE, "login/password"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, password }),
+  });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
 /* =========================================================
    ===============  LOGIN (Google Auth)  ===================
    ========================================================= */

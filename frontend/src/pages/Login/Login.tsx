@@ -2,7 +2,7 @@ import React from "react";
 import { useNavigate } from "react-router-dom";
 import { Eye, EyeOff, Mail, CheckCircle2 } from "lucide-react";
 import AA_Logo from "@/assets/Images/AA_Logo.png";
-import { login as apiLogin, type LoginResponse } from "@/api";
+import { login as apiLogin, loginWithPassword, type LoginResponse } from "@/api";
 import { useGoogleLogin } from "@react-oauth/google";
 
 const Login: React.FC = () => {
@@ -45,7 +45,7 @@ async function onSubmit(e: React.FormEvent) {
   setError(null);
 
   try {
-    const user: LoginResponse = await apiLogin(email.trim());
+    const user: LoginResponse = await loginWithPassword(email.trim(), password);
     finishLogin(user);
   } catch (err: any) {
     setError(err?.message || "Login failed");
@@ -114,7 +114,6 @@ const googleLogin = useGoogleLogin({
                   focus:outline-none focus:ring-2 focus:ring-emerald-500/30
                 "
               >
-                {/* ✅ TRANSPARENT ICON WRAPPER: no bg, no border */}
                 <span className="grid h-9 w-9 place-items-center rounded-lg bg-transparent">
                   <Mail className="h-5 w-5 text-slate-700 transition group-hover:text-white" />
                 </span>
@@ -138,7 +137,7 @@ const googleLogin = useGoogleLogin({
                       Email Address
                     </label>
                     <input
-                      type="email"
+                      type="text"
                       className="
                         w-full rounded-xl bg-gray-100 border border-gray-200
                         px-4 py-3 shadow-inner
@@ -167,6 +166,7 @@ const googleLogin = useGoogleLogin({
                         value={password}
                         onChange={(e) => setPassword(e.target.value)}
                         autoComplete="current-password"
+                        required
                       />
                       <button
                         type="button"
@@ -260,10 +260,14 @@ const googleLogin = useGoogleLogin({
                 <div className="mt-4 text-xs text-white/80">College of Computer Studies</div>
                 <button
                 type="button"
-                onClick={() => navigate("/gmail-connect")}
+                onClick={() => {
+                setShowForm(true);
+                setError(null);
+              }}
+              disabled={loading}
                 className="absolute bottom-4 left-4 px-4 py-2 rounded-lg bg-white/90 text-gray-900 shadow hover:bg-white"
               >
-                Connect Gmail
+                Connect Local
               </button>
               </div>
             </div>

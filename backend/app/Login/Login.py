@@ -1,6 +1,7 @@
 # app/Login/Login.py
 from __future__ import annotations
 
+import email
 import os
 from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any
@@ -10,6 +11,9 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, EmailStr
 
 from app.main import db
+
+import hashlib
+import hmac
 
 # NO /api here – mount it in main.py with prefix="/api"
 router = APIRouter(tags=["Login"])
@@ -21,12 +25,22 @@ router = APIRouter(tags=["Login"])
 class LoginRequest(BaseModel):
     email: EmailStr
 
+class PasswordLoginRequest(BaseModel):
+    email: str
+    password: str
 
 class LoginResponse(BaseModel):
     userId: str
     email: EmailStr
     fullName: str
     roles: List[str]  # normalized, lowercase
+
+class LoginResponseLoose(BaseModel):
+    userId: str
+    email: str      
+    fullName: str
+    roles: List[str]
+
 
 
 async def _roles_for_user(user_id: str) -> List[str]:
@@ -46,12 +60,31 @@ async def _roles_for_user(user_id: str) -> List[str]:
     raw = [doc["role_type"] for doc in await ur_cursor.to_list(None)]
     return [str(r).strip().lower() for r in raw if r]
 
+def _verify_password(user: Dict[str, Any], plain: str) -> bool:
+    plain = (plain or "").strip()
+    if not plain:
+        return False
+
+    stored = (user.get("password_hash") or "").strip()
+    if stored.startswith("sha256$"):
+        parts = stored.split("$")
+        if len(parts) == 3:
+            _, salt, expected = parts
+            actual = hashlib.sha256((salt + plain).encode("utf-8")).hexdigest()
+            return hmac.compare_digest(actual, expected)
+
+    stored_plain = (user.get("password") or "").strip()
+    if stored_plain:
+        return hmac.compare_digest(stored_plain, plain)
+
+    return False
 
 def _fullname(user: Dict[str, Any]) -> str:
     first = (user.get("first_name") or "").strip()
     last = (user.get("last_name") or "").strip()
     full = f"{first} {last}".strip()
     return full or (user.get("email") or user.get("gmail") or "").strip() or "User"
+
 
 
 @router.post("/login", response_model=LoginResponse)
@@ -65,6 +98,29 @@ async def login(payload: LoginRequest):
     return LoginResponse(
         userId=user["user_id"],
         email=user["email"],
+        fullName=_fullname(user),
+        roles=roles,
+    )
+
+@router.post("/login/password", response_model=LoginResponseLoose)
+async def login_with_password(payload: PasswordLoginRequest):
+    email = payload.email.strip().lower()
+
+    user = await db["users"].find_one(
+        {"$or": [{"email": email}, {"gmail": email}]},
+        {"_id": 0}
+    )
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    if not _verify_password(user, payload.password):
+        raise HTTPException(status_code=401, detail="Invalid password")
+
+    roles = await _roles_for_user(user["user_id"]) or ["user"]
+
+    return LoginResponseLoose(
+        userId=user["user_id"],
+        email=user.get("email") or email,
         fullName=_fullname(user),
         roles=roles,
     )
