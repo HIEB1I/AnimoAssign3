@@ -48,6 +48,14 @@ def _range_to_minutes(rng: str) -> Tuple[int, int]:
 def _overlaps(a_start: int, a_end: int, b_start: int, b_end: int) -> bool:
     return max(a_start, b_start) < min(a_end, b_end)
 
+def _term_label(t: Dict[str, Any]) -> str:
+    ay = int(t.get("acad_year_start") or 0)
+    tn = int(t.get("term_number") or 0)
+    if ay and tn:
+        return f"A.Y. {ay}-{ay+1} Term {tn}"
+    # fallback if fields missing
+    return str(t.get("term_id") or "")
+
 # Precompute canonical slot minute ranges
 SLOT_RANGES: List[Tuple[int, int]] = []
 for s in TIME_SLOTS:
@@ -101,17 +109,23 @@ async def build_faculty_availability_heatmap(
     db = get_db()
 
     cur = await _current_term(db)
+    terms = await _ordered_terms(db)
+    term_label_by_id = {t["term_id"]: _term_label(t) for t in terms if t.get("term_id")}
     if not cur:
         return {"warnings": ["No current term found."], "slots": {}, "total_faculty_considered": 0, "faculty_with_recent_pref": 0, "faculty_with_recent_history": 0, "most_supported_slot_count": 0}
-    curr_term_id = cur.get("term_id") or cur.get("_id")
+    curr_term_id = cur.get("term_id")
+    if not curr_term_id:
+        return {"warnings": ["Current term is missing term_id."], "slots": {}, "total_faculty_considered": 0,
+                "faculty_with_recent_pref": 0, "faculty_with_recent_history": 0, "most_supported_slot_count": 0}
     prev_term = curr_term_id  # use current term prefs (T) to forecast T+1
     hist_terms = await _prev_n_terms(db, curr_term_id, 3)
     weights = _recency_weights(hist_terms)
 
     warnings: List[str] = []
     if await db.faculty_preferences.count_documents({"term_id": curr_term_id}) == 0:
+        curr_label = term_label_by_id.get(curr_term_id, curr_term_id)
         warnings.append(
-            f"Pre-survey mode: expecting current-term preferences ({curr_term_id}) for next-term forecast; "
+            f"Pre-survey mode: expecting current-term preferences ({curr_label}) for next-term forecast; "
             "none found yet. Using assignment history only."
         )
 
@@ -290,11 +304,18 @@ async def build_faculty_availability_heatmap(
     for key in grid:
         most_supported_slot_count = max(most_supported_slot_count, grid[key]["count"])
 
+    prev_label = term_label_by_id.get(prev_term, prev_term)
+    hist_labels = [term_label_by_id.get(tid, tid) for tid in hist_terms]
+    term_label = term_label_by_id.get(cur["term_id"], cur["term_id"])
+
     slots = { f"{d}|{s}": grid[(d, s)] for d in DAY_CODES for s in TIME_SLOTS }
     return {
         "term_id": cur["term_id"],
+        "term_label": term_label,
         "previous_term_for_prefs": prev_term,
+        "previous_term_for_prefs_label": prev_label,
         "history_terms": hist_terms,
+        "history_terms_labels": hist_labels,
         "warnings": warnings,
         "total_faculty_considered": total_faculty_considered,
         "faculty_with_recent_pref": faculty_with_recent_pref,
