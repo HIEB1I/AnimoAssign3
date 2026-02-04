@@ -2418,7 +2418,13 @@ async def run_auto_assignment(
                 r["room2"] = dr2
 
         # Status / conflict overlay
-        r["status"] = a.get("status", r.get("status") or "Pending")
+        # NOTE: incoming rows may include an empty string status ("") which should
+        # NOT overwrite the computed/default status. Treat blank as "not provided".
+        incoming_status = (a.get("status") or "").strip()
+        if incoming_status:
+            r["status"] = incoming_status
+        else:
+            r["status"] = r.get("status") or "Pending"
         if a.get("conflictNote"):
             r["conflictNote"] = a["conflictNote"]
 
@@ -6044,12 +6050,26 @@ async def _persist_rows_no_auto(term_id: str, rows: list[dict], db):
         if fid:
             existing = await db[COL_ASSIGN].find_one(
                 {"section_id": sid},
-                {"_id": 0, "assignment_id": 1, "load_id": 1},
+                {"_id": 0, "assignment_id": 1, "load_id": 1, "status": 1},
             )
+
+            incoming_status = str(r.get("status") or "").strip()
+            existing_status = str((existing or {}).get("status") or "").strip()
+            terminal = {"Approved", "Confirmed"}
+
+            # Auto-status rule: once OM has set faculty (even before sending), treat as Pending
+            # unless a more specific/terminal status already exists.
+            if incoming_status:
+                next_status = incoming_status
+            elif existing_status in terminal:
+                next_status = existing_status
+            else:
+                next_status = "Pending"
 
             set_fields: dict[str, Any] = {
                 "section_id": sid,
                 "faculty_id": fid,
+                "status": next_status,
                 "created_at": _utcnow(),
                 "is_archived": False,
             }

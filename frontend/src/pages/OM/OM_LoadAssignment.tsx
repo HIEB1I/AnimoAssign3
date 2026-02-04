@@ -379,16 +379,20 @@ function ComboBox({
   options,
   placeholder = "— Select or type —",
   className = "",
+  clearable = true,
 }: {
   value?: string | null;
   onChange: (v: string) => void;
   options?: (string | null | undefined)[];
   placeholder?: string;
   className?: string;
+  /** Show an "x" button to clear the current selection/text. */
+  clearable?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState(value ?? "");
   const wrapRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => setQuery(value ?? ""), [value]);
 
@@ -418,7 +422,8 @@ function ComboBox({
   return (
     <div ref={wrapRef} className={cls("relative", className)}>
       <input
-        className="w-full rounded-lg border border-gray-300 px-3 py-2 pr-8 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30"
+        ref={inputRef}
+        className="w-full rounded-lg border border-gray-300 px-3 py-2 pr-14 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30"
         value={query ?? ""}
         onChange={(e) => {
           const v = e.target.value;
@@ -429,6 +434,28 @@ function ComboBox({
         onFocus={() => setOpen(true)}
         placeholder={placeholder}
       />
+
+      {clearable && (query ?? "").trim().length > 0 && (
+        <button
+          type="button"
+          aria-label="Clear faculty"
+          title="Clear"
+          className="absolute right-7 top-1/2 -translate-y-1/2 rounded p-0.5 text-gray-500 hover:bg-gray-100 hover:text-gray-700"
+          onMouseDown={(e) => {
+            // Prevent input blur when clicking the clear button.
+            e.preventDefault();
+          }}
+          onClick={() => {
+            setQuery("");
+            onChange("");
+            setOpen(true);
+            // Keep focus so the OM can immediately choose another faculty.
+            inputRef.current?.focus();
+          }}
+        >
+          <X className="h-4 w-4" />
+        </button>
+      )}
       <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-500" />
 
       {open && (
@@ -2195,6 +2222,55 @@ export default function OM_LoadAssignment() {
   };
 
   const commitRows = (nextRows: Row[], options?: { markDirty?: boolean }) => {
+    /**
+     * Auto-status rule:
+     * Once OM fills a row with the required details (even before sending to faculty),
+     * the row should already be marked as Pending.
+     *
+     * We only auto-promote when the row is "complete" and not in a terminal/locked state.
+     */
+    const applyAutoPendingStatus = (rowsIn: Row[]): Row[] => {
+      const isBlank = (v: any) => v === null || v === undefined || String(v).trim() === "";
+
+      const hasAnySecondMeeting = (r: Row) =>
+        !isBlank(r.day2) || !isBlank(r.begin2) || !isBlank(r.end2);
+
+      const isComplete = (r: Row) => {
+        // Mirror the same "complete enough" definition used before sending a proposal.
+        if (isBlank(r.course)) return false;
+        if (isBlank(r.section)) return false;
+        if (isBlank(r.faculty_id) && isBlank(r.faculty)) return false;
+        if (isBlank(r.day1)) return false;
+        if (isBlank(r.begin1)) return false;
+        if (isBlank(r.end1)) return false;
+        if (isBlank(r.mode)) return false;
+
+        if (hasAnySecondMeeting(r)) {
+          if (isBlank(r.day2)) return false;
+          if (isBlank(r.begin2)) return false;
+          if (isBlank(r.end2)) return false;
+        }
+        return true;
+      };
+
+      return rowsIn.map((r) => {
+        const locked = !!r.finalized || r.status === "Approved" || r.status === "Confirmed";
+        if (locked) return r;
+
+        // If OM has completed the row, ensure it's Pending (unless it is already a more specific status).
+        if (isComplete(r)) {
+          const current = String(r.status || "").trim();
+          if (!current || current === "Unassigned") {
+            return { ...r, status: "Pending" };
+          }
+        }
+
+        return r;
+      });
+    };
+
+    const nextRowsWithStatus = applyAutoPendingStatus(nextRows);
+
     // Push current snapshot to undo before applying the change
     undoStackRef.current.push({ rows, hasLocalEdits });
     if (undoStackRef.current.length > HISTORY_LIMIT) {
@@ -2203,7 +2279,7 @@ export default function OM_LoadAssignment() {
     // Any new action clears redo history
     redoStackRef.current = [];
 
-    setRows(nextRows);
+    setRows(nextRowsWithStatus);
 
     if (options?.markDirty !== false) {
       setHasLocalEdits(true);
