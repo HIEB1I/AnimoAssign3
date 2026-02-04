@@ -459,6 +459,7 @@ type OfferingRow = {
     program_id?: string;
     section_id?: string;
     elective_placeholder_course_id?: string;
+    fulfilled_placeholder_course_id?: string;
   };
 };
 
@@ -525,38 +526,40 @@ const slotToSnapshot = (slot?: OfferingRow["slot1"]): SnapshotSlot => {
   return { day, start, end, room };
 };
 
-const rowKeyOfSnapshot = (r: OfferingRow) =>
-  r.section.section_id
-    ? `sec:${r.section.section_id}`
-    : `combo:${r.batch.batch_id}|${r.program.program_id}|${r.course.course_id}`;
-
-const toSnapshotRow = (r: OfferingRow): SnapshotRow => ({
-  key: rowKeyOfSnapshot(r),
-  course_code: String(r.course.course_code || "").trim(),
-  course_title: String(r.course.course_title || "").trim(),
-  section_code: String(r.section.section_code || "").trim(),
-  program_code: String(r.program.program_code || "").trim(),
-  block_index: typeof r.block_index === "number" ? r.block_index : 1,
-  batch_code: String(r.batch.batch_code || "").trim(),
-  faculty_name: String(r.faculty.faculty_name || "UNASSIGNED").trim(),
-  enrollment_cap: r.section.enrollment_cap ?? null,
-  remarks: String(r.section.remarks || "").trim(),
-  slot1: slotToSnapshot(r.slot1),
-  slot2: slotToSnapshot(r.slot2),
-});
-
-const truncateRemark = (t: string, maxLen = 56) => {
-  const s = String(t ?? "").trim().replace(/\s+/g, " ");
-  if (!s) return "";
-  return s.length > maxLen ? s.slice(0, maxLen - 1) + "…" : s;
+const rowKeyOfSnapshot = (r: OfferingRow) => {
+  const sid = String((r as any)?.section?.section_id || "").trim();
+  return sid ? `sec:${sid}` : "";
 };
+
+// NOTE: Backend includes placeholder rows (empty section_id) for curriculum items
+// that currently have no actual sections yet. Those placeholders are *not* real
+// offerings, so we exclude them from submit change-tracking to avoid false
+// "added" entries when the last real section is deleted.
+const toSnapshotRow = (r: OfferingRow): SnapshotRow | null => {
+  const key = rowKeyOfSnapshot(r);
+  if (!key) return null;
+
+  return {
+    key,
+    course_code: String((r as any)?.course?.course_code || "").trim(),
+    course_title: String((r as any)?.course?.course_title || "").trim(),
+    section_code: String((r as any)?.section?.section_code || "").trim(),
+    program_code: String((r as any)?.program?.program_code || "").trim(),
+    block_index: typeof (r as any)?.block_index === "number" ? (r as any).block_index : 1,
+    batch_code: String((r as any)?.batch?.batch_code || "").trim(),
+    faculty_name: String((r as any)?.faculty?.faculty_name || "UNASSIGNED").trim(),
+    enrollment_cap: (r as any)?.section?.enrollment_cap ?? null,
+    remarks: String((r as any)?.section?.remarks || "").trim(),
+    slot1: slotToSnapshot((r as any)?.slot1),
+    slot2: slotToSnapshot((r as any)?.slot2),
+  };
+};
+
 
 const snapshotLabel = (s: SnapshotRow) => {
   const course = s.course_code || "COURSE";
   const sec = s.section_code ? ` ${s.section_code}` : "";
-  const rem = truncateRemark(s.remarks);
-  const remPart = rem ? ` — Remarks: ${rem}` : "";
-  return `${course}${sec}${remPart}`;
+  return `${course}${sec}`.trim();
 };
 
 const slotToText = (s: SnapshotSlot) => {
@@ -583,6 +586,12 @@ const computeDetectedChanges = (baseline: SnapshotRow[], current: SnapshotRow[])
     if (!bmap.has(k)) added.push({ key: k, label: snapshotLabel(cur) });
   }
 
+  const capTxt = (v: any) => (v === null || v === undefined || v === "" ? "—" : String(v));
+  const txt = (v: any) => {
+    const s = String(v ?? "").trim();
+    return s ? s : "—";
+  };
+
   for (const [k, base] of bmap.entries()) {
     const cur = cmap.get(k);
     if (!cur) {
@@ -590,25 +599,26 @@ const computeDetectedChanges = (baseline: SnapshotRow[], current: SnapshotRow[])
       continue;
     }
 
-    const remarksChanged = String(base.remarks || "") !== String(cur.remarks || "");
-    const otherChanged =
-      base.section_code !== cur.section_code ||
-      base.faculty_name !== cur.faculty_name ||
-      base.enrollment_cap !== cur.enrollment_cap ||
-      !slotEq(base.slot1, cur.slot1) ||
-      !slotEq(base.slot2, cur.slot2);
-
-    if (!remarksChanged && !otherChanged) continue;
-
     const details: ChangeField[] = [];
-    if (remarksChanged) {
-      details.push({
-        field: "Remarks",
-        from: (base.remarks || "—").toString() || "—",
-        to: (cur.remarks || "—").toString() || "—",
-      });
-    }
+    const push = (field: string, from: string, to: string) => {
+      if (String(from) === String(to)) return;
+      details.push({ field, from: from || "—", to: to || "—" });
+    };
 
+    // Electives: course_code can change even when section_id stays the same.
+    push("Course", txt(base.course_code), txt(cur.course_code));
+    push("Section", txt(base.section_code), txt(cur.section_code));
+    push("Faculty", txt(base.faculty_name || "UNASSIGNED"), txt(cur.faculty_name || "UNASSIGNED"));
+    push("Capacity", capTxt(base.enrollment_cap), capTxt(cur.enrollment_cap));
+
+    if (!slotEq(base.slot1, cur.slot1)) push("Schedule 1", slotToText(base.slot1), slotToText(cur.slot1));
+    if (!slotEq(base.slot2, cur.slot2)) push("Schedule 2", slotToText(base.slot2), slotToText(cur.slot2));
+
+    push("Remarks", txt(base.remarks), txt(cur.remarks));
+
+    if (!details.length) continue;
+
+    const otherChanged = details.some((d) => d.field !== "Remarks");
     edited.push({ key: k, label: snapshotLabel(cur), details, otherChanged });
   }
 
@@ -1698,7 +1708,8 @@ const loadOfferings = async () => {
     // Fetch unfiltered offerings to avoid missing changes that are hidden by filters.
     const resp: any = await getApoCourseOfferings(user.userId, { view: "offerings" } as any);
     const rr = (resp?.rows || []) as OfferingRow[];
-    return rr.map(toSnapshotRow);
+    const snap = rr.map(toSnapshotRow).filter((x): x is SnapshotRow => !!x);
+    return snap;
   };
 
   const persistBaselineSnapshot = async () => {
@@ -1723,7 +1734,8 @@ const loadOfferings = async () => {
     setSubmitPrep({ loading: true, changes: null, suggestedNote: "", error: null });
     try {
       const stored = safeJsonParse<{ rows: SnapshotRow[] }>(localStorage.getItem(baselineKey), { rows: [] });
-      const baselineRows = Array.isArray(stored?.rows) ? stored.rows : [];
+      const baselineRowsRaw = Array.isArray(stored?.rows) ? stored.rows : [];
+      const baselineRows = baselineRowsRaw.filter((r: any) => r && typeof r.key === "string" && String(r.key).startsWith("sec:"));
       const currentRows = await fetchAllOfferingsSnapshot();
       const changes = computeDetectedChanges(baselineRows, currentRows);
       const suggestedNote = buildSuggestedNote(changes);
@@ -2084,7 +2096,9 @@ const rowToAddPayload = (r: OfferingRow) => {
   const rowIsSpecific = isSpecificElectiveType(r.course.type_of_course || "");
 
   const electiveParentId =
-    r.links?.elective_placeholder_course_id ||
+    (r.links as any)?.elective_placeholder_course_id ||
+    (r.links as any)?.fulfilled_placeholder_course_id ||
+    (r as any)?.placeholder_course?.course_id ||
     (rowIsPlaceholder ? r.course.course_id : undefined);
 
   const payload: any = {
@@ -2131,7 +2145,9 @@ const rowToEditPayload = (r: OfferingRow) => {
   const rowIsSpecific = isSpecificElectiveType(r.course.type_of_course || "");
 
   const electiveParentId =
-    r.links?.elective_placeholder_course_id ||
+    (r.links as any)?.elective_placeholder_course_id ||
+    (r.links as any)?.fulfilled_placeholder_course_id ||
+    (r as any)?.placeholder_course?.course_id ||
     (rowIsPlaceholder ? r.course.course_id : undefined);
 
   const payload: any = {
@@ -2408,7 +2424,9 @@ useEffect(() => {
 
     // Prefer backend-provided parent id; else, if this row is a placeholder, the row's own id is the parent.
     const electiveParentId =
-      row.links?.elective_placeholder_course_id ||
+      (row.links as any)?.elective_placeholder_course_id ||
+      (row.links as any)?.fulfilled_placeholder_course_id ||
+      (row as any)?.placeholder_course?.course_id ||
       (rowIsPlaceholder ? row.course.course_id : undefined);
 
     // NEW: prefetch list for this specific placeholder (if any)
@@ -2672,6 +2690,33 @@ const promptSaveEdit = () => {
     if (String(from) === String(to)) return;
     changes.push({ field, from: from || "—", to: to || "—" });
   };
+
+  // Electives: selecting a specific elective changes the offered course even when the section_id stays the same.
+  const fromCourseId = String(editing.row.course.course_id || "").trim();
+  const toCourseId = String(editing.draft.specific_course_id || "").trim() || fromCourseId;
+
+  const courseCodeById: Record<string, string> = {};
+  Object.values(data?.course_options_by_group || {}).forEach((arr: any) => {
+    (arr || []).forEach((o: any) => {
+      const id = String(o?.course_id || "").trim();
+      if (!id) return;
+      const cc = codeText(o?.course_code);
+      if (cc) courseCodeById[id] = cc;
+    });
+  });
+  (data?.all_specific_electives || []).forEach((o: any) => {
+    const id = String(o?.course_id || "").trim();
+    if (!id) return;
+    const cc = codeText(o?.course_code);
+    if (cc) courseCodeById[id] = cc;
+  });
+
+  const codeForId = (id: string) => {
+    const cc = String(courseCodeById[id] || "").trim();
+    return cc || id || "—";
+  };
+
+  push("Course", codeForId(fromCourseId), codeForId(toCourseId));
 
   push("Section", currentCode || "—", nextSectionCode || "—");
 
@@ -4165,42 +4210,87 @@ const response = await importCurriculumCsv(user.userId, {
                                                 r.course.course_title
                                               );
                                               const isSpecific = isSpecificElectiveType(r.course.type_of_course || "");
-                                              const hasParent = !!(r.links?.elective_placeholder_course_id || (isPlaceholder ? r.course.course_id : ""));
+                                              const hasParent = !!(
+                                                (r.links as any)?.elective_placeholder_course_id ||
+                                                (r.links as any)?.fulfilled_placeholder_course_id ||
+                                                (r as any)?.placeholder_course?.course_id ||
+                                                (isPlaceholder ? r.course.course_id : "")
+                                              );
                                               const electiveEditable = isPlaceholder || isSpecific || hasParent;
 
                                               if (!electiveEditable) return null;
 
                                               // Prefer the server list if it exists and has items; else fallback to derived list
-                                              const preferServer =
-                                              Array.isArray(data?.all_specific_electives) && data!.all_specific_electives!.length > 0
-                                                ? data!.all_specific_electives!
-                                                : allSpecificElectives;
 
-                                            const parentId =
-                                              editing?.draft.for_placeholder_course_id ||
-                                              r.links?.elective_placeholder_course_id ||
-                                              (isPlaceholder ? r.course.course_id : "");
+                                              const preferServer: CourseOption[] =
 
-                                            // NEW: prefer per-placeholder cache, else the global list
-                                            const sourceList =
-                                              (parentId && electiveOptionsCache[parentId]) ||
-                                              preferServer;
+                                                Array.isArray(data?.all_specific_electives) && data!.all_specific_electives!.length > 0
 
-                                            const specificList = (sourceList || []).filter((o) =>
-                                              isSpecificElectiveType(o.type_of_course || "")
-                                            );
-                                            const placeholderLabel = "— Select specific elective —";
-                                            const specificOptions = specificList.map((opt) => ({
-                                              id: opt.course_id,
-                                              label: `${codeOf(opt.course_code)} • ${opt.course_title}`,
-                                            }));
+                                                  ? (data!.all_specific_electives as CourseOption[])
 
-                                            const currentSpecificId =
-                                              editing?.draft.specific_course_id || (isSpecific ? r.course.course_id : "");
-                                            const currentLabel =
-                                              currentSpecificId
-                                                ? specificOptions.find((o) => o.id === currentSpecificId)?.label || placeholderLabel
-                                                : placeholderLabel;
+                                                  : allSpecificElectives;
+
+
+                                              const parentIdRaw =
+
+                                                editing?.draft.for_placeholder_course_id ||
+
+                                                (r.links as any)?.elective_placeholder_course_id ||
+
+                                                (r.links as any)?.fulfilled_placeholder_course_id ||
+
+                                                (r as any)?.placeholder_course?.course_id ||
+
+                                                (isPlaceholder ? r.course.course_id : "");
+
+
+                                              const parentId = String(parentIdRaw || "").trim();
+
+                                              const parentKey = parentId ? parentId : undefined;
+
+
+                                              // Prefer per-placeholder cache, else the global list
+
+                                              const sourceList: CourseOption[] =
+
+                                                parentKey && Array.isArray(electiveOptionsCache[parentKey])
+
+                                                  ? electiveOptionsCache[parentKey]
+
+                                                  : preferServer;
+
+
+                                              const specificList: CourseOption[] = sourceList.filter((o: CourseOption) =>
+
+                                                isSpecificElectiveType(o.type_of_course || "")
+
+                                              );
+
+
+                                              type LabeledOption = { id: string; label: string };
+
+                                              const placeholderLabel = "— Select specific elective —";
+
+                                              const specificOptions: LabeledOption[] = specificList.map((opt: CourseOption) => ({
+
+                                                id: String(opt.course_id),
+
+                                                label: `${codeOf(opt.course_code)} • ${String(opt.course_title ?? "")}`,
+
+                                              }));
+
+
+                                              const currentSpecificId =
+
+                                                editing?.draft.specific_course_id || (isSpecific ? r.course.course_id : "");
+
+                                              const currentLabel =
+
+                                                currentSpecificId
+
+                                                  ? specificOptions.find((o: LabeledOption) => o.id === currentSpecificId)?.label || placeholderLabel
+
+                                                  : placeholderLabel;
 
                                             return (
                                               <div className="mt-2">
@@ -5892,30 +5982,25 @@ const SubmitModal: React.FC<{
                       {changes.edited.length ? (
                         <ul className="space-y-2">
                           {changes.edited.map((e) => (
-                            <li key={e.key}>
-                              <details className="group rounded-lg border border-slate-200 bg-white">
-                                <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-2 text-sm font-medium text-slate-900">
-                                  <span className="min-w-0 truncate">{e.label}</span>
-                                  <div className="flex items-center gap-2 text-xs text-slate-500">
-                                    <span>Details</span>
-                                    <ChevronDown className="h-4 w-4 transition-transform group-open:rotate-180" />
-                                  </div>
-                                </summary>
-                                <div className="px-3 pb-3 pt-1 text-sm text-slate-700">
-                                  {e.details.length ? (
-                                    <ul className="list-disc space-y-1 pl-5">
-                                      {e.details.map((d, idx) => (
-                                        <li key={idx}>
-                                          <span className="font-medium text-slate-800">{d.field}:</span>{" "}
-                                          <span className="text-slate-600">{d.from}</span>{" "}
-                                          <span className="text-slate-400">→</span>{" "}
-                                          <span className="text-slate-900">{d.to}</span>
-                                        </li>
-                                      ))}
-                                    </ul>
-                                  ) : null}
-                                </div>
-                              </details>
+                            <li
+                              key={e.key}
+                              className="rounded-lg border border-slate-200 bg-white px-3 py-2"
+                            >
+                              <div className="text-sm font-medium text-slate-900">{e.label}</div>
+                              {e.details.length ? (
+                                <ul className="mt-1 list-disc space-y-1 pl-5 text-sm text-slate-700">
+                                  {e.details.map((d, idx) => (
+                                    <li key={idx}>
+                                      <span className="font-medium text-slate-800">{d.field}:</span>{" "}
+                                      <span className="text-slate-600">{d.from}</span>{" "}
+                                      <span className="text-slate-400">→</span>{" "}
+                                      <span className="text-slate-900">{d.to}</span>
+                                    </li>
+                                  ))}
+                                </ul>
+                              ) : (
+                                <div className="mt-1 text-xs text-slate-500">Edited</div>
+                              )}
                             </li>
                           ))}
                         </ul>
