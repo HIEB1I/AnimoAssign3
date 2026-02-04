@@ -5408,7 +5408,7 @@ async def post_course_offerings(
         action=action, payload=payload, campus_name=campus.get("campus_name",""), term_id=term_id, campus_id=campus_id
     )
 
-    gating = [v for v in soft if v.get("code") in {"SEAT_DEFICIT"}]
+    gating = [v for v in soft if v.get("code") in {"SEAT_DEFICIT"} and action != "deleteRow"]
 
     if plan_warning:
         soft.append({

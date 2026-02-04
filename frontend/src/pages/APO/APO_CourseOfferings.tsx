@@ -918,6 +918,7 @@ export default function CourseOfferingsPage() {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
   const [conflict, setConflict] = useState<ConflictState | null>(null);
+  const [conflictBusy, setConflictBusy] = useState(false);
   const [globalElectives, setGlobalElectives] = useState<CourseOption[]>([]);
   const [electiveOptionsCache, setElectiveOptionsCache] = useState<Record<string, CourseOption[]>>({});
 // ---------- RoomSelectBox (SelectBox-powered) ----------
@@ -1663,7 +1664,7 @@ const loadOfferings = async () => {
     description?: string;
     confirmText?: string;
     cancelText?: string;
-    variant?: "default" | "danger";
+    variant?: "default" | "danger" | "warning";
     content?: React.ReactNode;
     onConfirm: () => Promise<void>;
   }) => {
@@ -1674,7 +1675,7 @@ const loadOfferings = async () => {
       description: opts.description,
       confirmText: opts.confirmText || "Confirm",
       cancelText: opts.cancelText || "Cancel",
-      variant: opts.variant || "default",
+      variant: (opts.variant === "danger" ? "danger" : "default"),
       content: opts.content,
       busy: false,
     });
@@ -2097,8 +2098,6 @@ const rowToAddPayload = (r: OfferingRow) => {
 
   const electiveParentId =
     (r.links as any)?.elective_placeholder_course_id ||
-    (r.links as any)?.fulfilled_placeholder_course_id ||
-    (r as any)?.placeholder_course?.course_id ||
     (rowIsPlaceholder ? r.course.course_id : undefined);
 
   const payload: any = {
@@ -2146,8 +2145,6 @@ const rowToEditPayload = (r: OfferingRow) => {
 
   const electiveParentId =
     (r.links as any)?.elective_placeholder_course_id ||
-    (r.links as any)?.fulfilled_placeholder_course_id ||
-    (r as any)?.placeholder_course?.course_id ||
     (rowIsPlaceholder ? r.course.course_id : undefined);
 
   const payload: any = {
@@ -2425,8 +2422,6 @@ useEffect(() => {
     // Prefer backend-provided parent id; else, if this row is a placeholder, the row's own id is the parent.
     const electiveParentId =
       (row.links as any)?.elective_placeholder_course_id ||
-      (row.links as any)?.fulfilled_placeholder_course_id ||
-      (row as any)?.placeholder_course?.course_id ||
       (rowIsPlaceholder ? row.course.course_id : undefined);
 
     // NEW: prefetch list for this specific placeholder (if any)
@@ -4212,8 +4207,6 @@ const response = await importCurriculumCsv(user.userId, {
                                               const isSpecific = isSpecificElectiveType(r.course.type_of_course || "");
                                               const hasParent = !!(
                                                 (r.links as any)?.elective_placeholder_course_id ||
-                                                (r.links as any)?.fulfilled_placeholder_course_id ||
-                                                (r as any)?.placeholder_course?.course_id ||
                                                 (isPlaceholder ? r.course.course_id : "")
                                               );
                                               const electiveEditable = isPlaceholder || isSpecific || hasParent;
@@ -4232,15 +4225,8 @@ const response = await importCurriculumCsv(user.userId, {
 
 
                                               const parentIdRaw =
-
                                                 editing?.draft.for_placeholder_course_id ||
-
                                                 (r.links as any)?.elective_placeholder_course_id ||
-
-                                                (r.links as any)?.fulfilled_placeholder_course_id ||
-
-                                                (r as any)?.placeholder_course?.course_id ||
-
                                                 (isPlaceholder ? r.course.course_id : "");
 
 
@@ -4637,11 +4623,18 @@ const response = await importCurriculumCsv(user.userId, {
                                                       ? data!.all_specific_electives!
                                                       : allSpecificElectives;
 
-                                                  specificElectives =
-                                                    (parentId && electiveOptionsCache[parentId]) ||
-                                                    specificElectives.length
-                                                      ? specificElectives
-                                                      : preferServer.filter((o) => isSpecificElectiveType(o.type_of_course || ""));
+                                                  const cachedSpecific =
+                                                    parentId && Array.isArray(electiveOptionsCache[parentId])
+                                                      ? electiveOptionsCache[parentId]
+                                                      : null;
+
+                                                  if (cachedSpecific && cachedSpecific.length) {
+                                                    specificElectives = cachedSpecific;
+                                                  } else if (!specificElectives.length) {
+                                                    specificElectives = preferServer.filter((o) =>
+                                                      isSpecificElectiveType(o.type_of_course || "")
+                                                    );
+                                                  }
 
 
                                                   const selectedType = codeToType[addCourseCode] || "";
@@ -5496,120 +5489,98 @@ const response = await importCurriculumCsv(user.userId, {
 
       {/* ----------------------------- Conflict Modal ----------------------------- */}
       {conflict && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-          <div className="w-full max-w-2xl rounded-xl bg-white shadow-xl border border-gray-200">
-            <div className="flex items-center gap-2 border-b px-4 py-3">
-              <AlertTriangle className="h-5 w-5 text-amber-600" />
-              <div className="font-semibold">Conflicts detected</div>
+        <ConfirmModal
+          open={!!conflict}
+          title="Planning warnings"
+          description="This change triggers one or more planning checks. You can proceed, or go back and adjust your entry."
+          confirmText="Proceed"
+          cancelText="Go Back"
+          variant="warning"
+          busy={conflictBusy}
+          onClose={() => {
+            if (conflictBusy) return;
+            setConflict(null);
+          }}
+          content={
+            <div className="rounded-lg border border-amber-200 bg-amber-50 p-3">
+              <ul className="list-disc pl-5 text-sm text-amber-900 space-y-1">
+                {conflict.violations.map((v, i) => (
+                  <li key={i}>
+                    <span className="font-medium">{v.code}</span>: {v.message}
+                  </li>
+                ))}
+              </ul>
             </div>
-            <div className="p-4 max-h-[70vh] overflow-auto space-y-3">
-              <div className="text-sm">
-                The system found some issues with your change. You can review the details below and choose to override if
-                appropriate.
-              </div>
-              <div className="rounded border border-amber-200 bg-amber-50 p-3">
-                <ul className="list-disc pl-5 text-sm text-amber-900 space-y-1">
-                  {conflict.violations.map((v, i) => (
-                    <li key={i}>
-                      <span className="font-medium">{v.code}</span>: {v.message}
-                    </li>
-                  ))}
-                </ul>
-              </div>
-              {conflict.preview && (
-                <div>
-                  <div className="text-xs font-semibold text-slate-700 mb-1">Preview of changes</div>
-                  <pre className="text-xs bg-slate-50 border rounded p-2 overflow-auto">
-                    {JSON.stringify(conflict.preview, null, 2)}
-                  </pre>
-                </div>
-              )}
-              <div>
-                <label className="text-xs font-semibold text-slate-700 mb-1 block">Override reason (optional)</label>
-                <input
-                  className="w-full rounded border px-3 py-2 text-sm"
-                  value={conflict.reason}
-                  onChange={(e) => setConflict({ ...conflict, reason: e.target.value })}
-                  placeholder="e.g., Proceed despite planning warnings"
-                />
-              </div>
-            </div>
-            <div className="flex items-center justify-end gap-2 border-t px-4 py-3">
-              <button
-                className="rounded-md border px-3 py-1.5 text-sm"
-                onClick={() => setConflict(null)}
-              >
-                Cancel
-              </button>
-              <button
-                className="rounded-md bg-emerald-700 px-3 py-1.5 text-sm font-medium text-white"
-                onClick={async () => {
-                  if (!conflict || !user?.userId) return;
-                  const ov = {
-                    override: true,
-                    override_token: conflict.token,
-                    override_reason: conflict.reason || "Proceed with override",
-                  } as any;
+          }
+          onConfirm={async () => {
+            if (!conflict || !user?.userId) return;
 
-                  try {
-                    if (conflict.action === "add") {
-                      const basePayload = { ...(conflict.original as any) };
-                      delete (basePayload as any).__undo_before;
-                      delete (basePayload as any).__undo_snapshot;
+            setConflictBusy(true);
+            const ov = {
+              override: true,
+              override_token: conflict.token,
+              override_reason: "Proceed with override",
+            } as any;
 
-                      const resp = await addApoOfferingRow(user.userId, { ...basePayload, ...ov } as any);
-                      if ("conflict" in (resp as any)) {
-                        // If still conflicting, keep the modal open with the latest details
-                        handleConflict("add", (resp as any).conflict, basePayload);
-                        return;
-                      }
+            try {
+              if (conflict.action === "add") {
+                const basePayload = { ...(conflict.original as any) };
+                delete (basePayload as any).__undo_before;
+                delete (basePayload as any).__undo_snapshot;
 
-                      const createdId = (resp as any).section_id as string;
-                      if (createdId) pushSrvOp(makeAddOp(basePayload, createdId));
-                    } else if (conflict.action === "edit") {
-                      const raw = { ...(conflict.original as any) };
-                      const before = (raw as any).__undo_before;
-                      delete (raw as any).__undo_before;
-                      delete (raw as any).__undo_snapshot;
+                const resp = await addApoOfferingRow(user.userId, { ...basePayload, ...ov } as any);
+                if ("conflict" in (resp as any)) {
+                  // Keep the modal open with the latest details
+                  handleConflict("add", (resp as any).conflict, basePayload);
+                  setConflictBusy(false);
+                  return;
+                }
 
-                      const resp = await editApoOfferingRow(user.userId, { ...raw, ...ov } as any);
-                      if ("conflict" in (resp as any)) {
-                        handleConflict("edit", (resp as any).conflict, { ...raw, __undo_before: before });
-                        return;
-                      }
+                const createdId = (resp as any).section_id as string;
+                if (createdId) pushSrvOp(makeAddOp(basePayload, createdId));
+              } else if (conflict.action === "edit") {
+                const raw = { ...(conflict.original as any) };
+                const before = (raw as any).__undo_before;
+                delete (raw as any).__undo_before;
+                delete (raw as any).__undo_snapshot;
 
-                      const sid = String((raw as any).section_id || "");
-                      if (before && sid) {
-                        const afterFull = { ...(before as any), ...(raw as any) };
-                        pushSrvOp(makeEditOp(sid, before, afterFull, `Edit ${sid}`));
-                      }
-                    } else if (conflict.action === "delete") {
-                      const raw = { ...(conflict.original as any) };
-                      const snap = (raw as any).__undo_snapshot;
-                      delete (raw as any).__undo_before;
-                      delete (raw as any).__undo_snapshot;
+                const resp = await editApoOfferingRow(user.userId, { ...raw, ...ov } as any);
+                if ("conflict" in (resp as any)) {
+                  handleConflict("edit", (resp as any).conflict, { ...raw, __undo_before: before });
+                  setConflictBusy(false);
+                  return;
+                }
 
-                      const resp = await deleteApoOfferingRow(user.userId, { ...raw, ...ov } as any);
-                      if ("conflict" in (resp as any)) {
-                        handleConflict("delete", (resp as any).conflict, { ...raw, __undo_snapshot: snap });
-                        return;
-                      }
+                const sid = String((raw as any).section_id || "");
+                if (before && sid) {
+                  const afterFull = { ...(before as any), ...(raw as any) };
+                  pushSrvOp(makeEditOp(sid, before, afterFull, `Edit ${sid}`));
+                }
+              } else if (conflict.action === "delete") {
+                const raw = { ...(conflict.original as any) };
+                const snap = (raw as any).__undo_snapshot;
+                delete (raw as any).__undo_before;
+                delete (raw as any).__undo_snapshot;
 
-                      if (snap) pushSrvOp(makeDeleteOp(snap));
-                    }
+                const resp = await deleteApoOfferingRow(user.userId, { ...raw, ...ov } as any);
+                if ("conflict" in (resp as any)) {
+                  handleConflict("delete", (resp as any).conflict, { ...raw, __undo_snapshot: snap });
+                  setConflictBusy(false);
+                  return;
+                }
 
-                    setConflict(null);
-                    await loadOfferings();
-                  } catch (e: any) {
-                    alert(e?.message || "Failed to apply override.");
-                  }
-                }}
-              >
-                Override &amp; Apply
-              </button>
-            </div>
-          </div>
-        </div>
+                if (snap) pushSrvOp(makeDeleteOp(snap));
+              }
+
+              setConflict(null);
+              await loadOfferings();
+            } catch (e: any) {
+              alert(e?.message || "Failed to proceed.");
+            } finally {
+              setConflictBusy(false);
+            }
+          }}
+        />
       )}
 
       {/* ----------------------------- Forward Modal ----------------------------- */}
@@ -5815,7 +5786,7 @@ const ConfirmModal: React.FC<{
   description?: string;
   confirmText: string;
   cancelText: string;
-  variant?: "default" | "danger";
+  variant?: "default" | "danger" | "warning";
   content?: React.ReactNode;
   busy?: boolean;
   onClose: () => void;
@@ -5834,6 +5805,7 @@ const ConfirmModal: React.FC<{
 }) => {
   if (!open) return null;
   const isDanger = variant === "danger";
+  const isWarning = variant === "warning";
 
   return (
     <div className="fixed inset-0 z-[120] grid place-items-center bg-black/40 p-4">
@@ -5841,7 +5813,7 @@ const ConfirmModal: React.FC<{
         <div
           className={cls(
             "mx-auto mb-4 grid h-16 w-16 place-items-center rounded-full border-2",
-            isDanger ? "border-rose-600 text-rose-700" : "border-emerald-600 text-emerald-700"
+            isDanger ? "border-rose-600 text-rose-700" : isWarning ? "border-amber-600 text-amber-700" : "border-emerald-600 text-emerald-700"
           )}
         >
           <AlertTriangle className="h-8 w-8" strokeWidth={2.5} />
@@ -5868,7 +5840,7 @@ const ConfirmModal: React.FC<{
             disabled={!!busy}
             className={cls(
               "rounded-lg px-4 py-2 text-sm font-medium text-white hover:brightness-110 disabled:opacity-50",
-              isDanger ? "bg-rose-700" : "bg-emerald-700"
+              isDanger ? "bg-rose-700" : isWarning ? "bg-amber-700" : "bg-emerald-700"
             )}
             onClick={onConfirm}
           >
