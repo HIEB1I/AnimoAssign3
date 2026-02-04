@@ -3030,11 +3030,12 @@ export async function sendOmLoadAssignmentsToFaculty(
 
 export async function getOmLoadAssignmentRfc(
   user_id: string,
-  params: { term_id?: string; faculty_id: string }
+  params: { term_id?: string; faculty_id: string; section_id?: string }
 ) {
   const base = (typeof API_BASE !== "undefined" ? API_BASE : "").replace(/\/+$/, "");
   const qs = new URLSearchParams({ user_id, faculty_id: params.faculty_id });
   if (params.term_id) qs.set("term_id", params.term_id);
+  if (params.section_id) qs.set("section_id", params.section_id);
   const url = `${base}/om/load-assignment/rfc?${qs.toString()}`;
   const r = await fetch(url, { method: "GET" });
   if (!r.ok) throw new Error(await r.text());
@@ -3046,6 +3047,7 @@ export async function respondOmLoadAssignmentRfc(
   payload: {
     term_id: string;
     faculty_id: string;
+    section_id?: string;
     action: "reply" | "approve" | "reject";
     message?: string;
   }

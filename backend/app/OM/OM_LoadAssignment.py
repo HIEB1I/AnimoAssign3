@@ -1645,23 +1645,27 @@ async def get_om_load_assignment_list(user_id: str, term_id: Optional[str] = Non
                     }
                 )
     
-    # --- NEW: pending RFC indicator per faculty (for red dot in Actions) ---
-    open_rfc_faculty_ids = set()
+    # --- NEW: pending RFC indicator per SECTION (for red dot in Actions) ---
+    # RFCs are keyed by (faculty_id + term_id + section_id). The old implementation only keyed by faculty_id,
+    # which caused *all* rows of that faculty to show the red dot even if the RFC was for only one section.
+    open_rfc_keys: set[tuple[str, str]] = set()
     try:
         cur = db[COL_LOAD_RFC].find(
-            {"term_id": active.get("term_id"), "status": {"$in": ["NEEDS_OM", "open"]}},
-            {"_id": 0, "faculty_id": 1},
+            {"term_id": active.get("term_id"), "status": {"$in": ["NEEDS_OM", "open", "OPEN"]}},
+            {"_id": 0, "faculty_id": 1, "section_id": 1},
         )
         async for d in cur:
-            fid = d.get("faculty_id")
-            if fid:
-                open_rfc_faculty_ids.add(str(fid))
+            fid = str(d.get("faculty_id") or "").strip()
+            sid = str(d.get("section_id") or "").strip()
+            if fid and sid:
+                open_rfc_keys.add((fid, sid))
     except Exception:
-        open_rfc_faculty_ids = set()
+        open_rfc_keys = set()
 
     for r in rows:
-        fid = r.get("faculty_id")
-        r["pending_rfc"] = bool(fid and str(fid) in open_rfc_faculty_ids)
+        fid = str(r.get("faculty_id") or "").strip()
+        sid = str(r.get("id") or r.get("section_id") or "").strip()
+        r["pending_rfc"] = bool(fid and sid and (fid, sid) in open_rfc_keys)
 
     return {
         "term": _term_label(active),
@@ -1965,7 +1969,9 @@ async def respond_load_assignment_rfc(
             title=title,
             details=details,
             meta={
-                "route": "/faculty/overview",
+                # Deep-link Faculty to the RFC thread (and the specific course row)
+                # so they don't need to hunt for it manually.
+                "route": f"/faculty/overview?open_rfc=1&term_id={term_id}&faculty_id={faculty_id}&section_id={section_id}&rfc_id={rfc_id}",
                 "kind": kind,
                 "term_id": term_id,
                 "faculty_id": faculty_id,
@@ -2412,7 +2418,13 @@ async def run_auto_assignment(
                 r["room2"] = dr2
 
         # Status / conflict overlay
-        r["status"] = a.get("status", r.get("status") or "Pending")
+        # NOTE: incoming rows may include an empty string status ("") which should
+        # NOT overwrite the computed/default status. Treat blank as "not provided".
+        incoming_status = (a.get("status") or "").strip()
+        if incoming_status:
+            r["status"] = incoming_status
+        else:
+            r["status"] = r.get("status") or "Pending"
         if a.get("conflictNote"):
             r["conflictNote"] = a["conflictNote"]
 
@@ -2756,20 +2768,27 @@ async def run_auto_assignment(
     # Run the conservative SHS refill pass (after conflicts)
     _shs_refill_after_conflicts()
 
-    # --- NEW: pending RFC indicator per faculty (for red dot in Actions) ---
-    open_rfc_faculty_ids = set()
+    # --- NEW: pending RFC indicator per SECTION (for red dot in Actions) ---
+    # RFCs are keyed by (faculty_id + term_id + section_id). The old implementation only keyed by faculty_id,
+    # which caused *all* rows of that faculty to show the red dot even if the RFC was for only one section.
+    open_rfc_keys: set[tuple[str, str]] = set()
     try:
-        cur = db[COL_LOAD_RFC].find({"term_id": active.get("term_id"), "status": {"$in": ["NEEDS_OM", "open"]}}, {"_id": 0, "faculty_id": 1})
+        cur = db[COL_LOAD_RFC].find(
+            {"term_id": active.get("term_id"), "status": {"$in": ["NEEDS_OM", "open", "OPEN"]}},
+            {"_id": 0, "faculty_id": 1, "section_id": 1},
+        )
         async for d in cur:
-            fid = d.get("faculty_id")
-            if fid:
-                open_rfc_faculty_ids.add(str(fid))
+            fid = str(d.get("faculty_id") or "").strip()
+            sid = str(d.get("section_id") or "").strip()
+            if fid and sid:
+                open_rfc_keys.add((fid, sid))
     except Exception:
-        open_rfc_faculty_ids = set()
+        open_rfc_keys = set()
 
     for r in rows:
-        fid = r.get("faculty_id")
-        r["pending_rfc"] = bool(fid and str(fid) in open_rfc_faculty_ids)
+        fid = str(r.get("faculty_id") or "").strip()
+        sid = str(r.get("id") or r.get("section_id") or "").strip()
+        r["pending_rfc"] = bool(fid and sid and (fid, sid) in open_rfc_keys)
 
     return {
         "term": _term_label(active),
@@ -6031,12 +6050,26 @@ async def _persist_rows_no_auto(term_id: str, rows: list[dict], db):
         if fid:
             existing = await db[COL_ASSIGN].find_one(
                 {"section_id": sid},
-                {"_id": 0, "assignment_id": 1, "load_id": 1},
+                {"_id": 0, "assignment_id": 1, "load_id": 1, "status": 1},
             )
+
+            incoming_status = str(r.get("status") or "").strip()
+            existing_status = str((existing or {}).get("status") or "").strip()
+            terminal = {"Approved", "Confirmed"}
+
+            # Auto-status rule: once OM has set faculty (even before sending), treat as Pending
+            # unless a more specific/terminal status already exists.
+            if incoming_status:
+                next_status = incoming_status
+            elif existing_status in terminal:
+                next_status = existing_status
+            else:
+                next_status = "Pending"
 
             set_fields: dict[str, Any] = {
                 "section_id": sid,
                 "faculty_id": fid,
+                "status": next_status,
                 "created_at": _utcnow(),
                 "is_archived": False,
             }

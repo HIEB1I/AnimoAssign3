@@ -379,16 +379,20 @@ function ComboBox({
   options,
   placeholder = "— Select or type —",
   className = "",
+  clearable = true,
 }: {
   value?: string | null;
   onChange: (v: string) => void;
   options?: (string | null | undefined)[];
   placeholder?: string;
   className?: string;
+  /** Show an "x" button to clear the current selection/text. */
+  clearable?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState(value ?? "");
   const wrapRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => setQuery(value ?? ""), [value]);
 
@@ -418,7 +422,8 @@ function ComboBox({
   return (
     <div ref={wrapRef} className={cls("relative", className)}>
       <input
-        className="w-full rounded-lg border border-gray-300 px-3 py-2 pr-8 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30"
+        ref={inputRef}
+        className="w-full rounded-lg border border-gray-300 px-3 py-2 pr-14 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30"
         value={query ?? ""}
         onChange={(e) => {
           const v = e.target.value;
@@ -429,6 +434,28 @@ function ComboBox({
         onFocus={() => setOpen(true)}
         placeholder={placeholder}
       />
+
+      {clearable && (query ?? "").trim().length > 0 && (
+        <button
+          type="button"
+          aria-label="Clear faculty"
+          title="Clear"
+          className="absolute right-7 top-1/2 -translate-y-1/2 rounded p-0.5 text-gray-500 hover:bg-gray-100 hover:text-gray-700"
+          onMouseDown={(e) => {
+            // Prevent input blur when clicking the clear button.
+            e.preventDefault();
+          }}
+          onClick={() => {
+            setQuery("");
+            onChange("");
+            setOpen(true);
+            // Keep focus so the OM can immediately choose another faculty.
+            inputRef.current?.focus();
+          }}
+        >
+          <X className="h-4 w-4" />
+        </button>
+      )}
       <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-500" />
 
       {open && (
@@ -1427,20 +1454,22 @@ const SendBlockedModal = ({
 
 const RequestChangeModal = ({
   open,
-  from,
+  facultyName,
+  facultyId,
+  sectionId,
   onClose,
   userId,
   termId,
-  rows,
   onAfterUpdate,
   onToast,
 }: {
   open: boolean;
-  from?: string;
+  facultyName?: string;
+  facultyId?: string;
+  sectionId?: string;
   onClose: () => void;
   userId: string;
   termId: string;
-  rows: Row[];
   onAfterUpdate: () => Promise<void> | void;
   onToast?: (message: string, kind?: "success" | "error") => void;
 }) => {
@@ -1450,8 +1479,7 @@ const RequestChangeModal = ({
   const [status, setStatus] = useState<string | null>(null);
   const [reply, setReply] = useState("");
 
-  const facultyRow = rows.find((r) => (r.faculty || "") === (from || ""));
-  const facultyId = facultyRow?.faculty_id;
+  const displayFaculty = facultyName || "Faculty";
 
   const isTerminal = !!status && ["ACCEPTED", "APPROVED", "REJECTED"].includes(status);
   const needsOm = status === "NEEDS_OM" || status === "OPEN" || status === "open";
@@ -1481,6 +1509,7 @@ const RequestChangeModal = ({
         const res = await getOmLoadAssignmentRfc(userId, {
           term_id: termId,
           faculty_id: facultyId,
+          section_id: sectionId,
         });
 
         if (!res?.ok || !res?.rfc) {
@@ -1522,6 +1551,7 @@ const RequestChangeModal = ({
       await respondOmLoadAssignmentRfc(userId, {
         term_id: termId,
         faculty_id: facultyId,
+        section_id: sectionId,
         action: decision,
         message: reply.trim() || undefined,
       });
@@ -1555,7 +1585,7 @@ const RequestChangeModal = ({
 
         <h3 className="text-lg font-semibold text-emerald-700 mb-2">Request for Change</h3>
         <div className="text-sm text-gray-600 mb-1">
-          From: <span className="font-semibold">{from}</span>
+          From: <span className="font-semibold">{displayFaculty}</span>
         </div>
         <div className="text-[12px] text-gray-600 mb-4">
           Status:{" "}
@@ -1569,7 +1599,7 @@ const RequestChangeModal = ({
 
         {!loading && !error && !status && (
           <div className="mb-4 rounded-lg border border-gray-200 bg-gray-50 p-3 text-sm text-gray-700">
-            No RFC thread found for this faculty in this term.
+            No RFC thread found for this course.
           </div>
         )}
 
@@ -2165,9 +2195,12 @@ export default function OM_LoadAssignment() {
   const [sendRowsPreview, setSendRowsPreview] = useState<Row[]>([]);
   const [sendBlocked, setSendBlocked] = useState<{ open: boolean; missing: MissingFieldRow[] }>({ open: false, missing: [] });
 
-  const [reqChange, setReqChange] = useState<{ open: boolean; from?: string }>({
-    open: false,
-  });
+  const [reqChange, setReqChange] = useState<{
+    open: boolean;
+    facultyName?: string;
+    facultyId?: string;
+    sectionId?: string;
+  }>({ open: false });
 
   /** Track if there are unsaved/manual edits in the grid */
   const [hasLocalEdits, setHasLocalEdits] = useState(false);
@@ -2189,6 +2222,55 @@ export default function OM_LoadAssignment() {
   };
 
   const commitRows = (nextRows: Row[], options?: { markDirty?: boolean }) => {
+    /**
+     * Auto-status rule:
+     * Once OM fills a row with the required details (even before sending to faculty),
+     * the row should already be marked as Pending.
+     *
+     * We only auto-promote when the row is "complete" and not in a terminal/locked state.
+     */
+    const applyAutoPendingStatus = (rowsIn: Row[]): Row[] => {
+      const isBlank = (v: any) => v === null || v === undefined || String(v).trim() === "";
+
+      const hasAnySecondMeeting = (r: Row) =>
+        !isBlank(r.day2) || !isBlank(r.begin2) || !isBlank(r.end2);
+
+      const isComplete = (r: Row) => {
+        // Mirror the same "complete enough" definition used before sending a proposal.
+        if (isBlank(r.course)) return false;
+        if (isBlank(r.section)) return false;
+        if (isBlank(r.faculty_id) && isBlank(r.faculty)) return false;
+        if (isBlank(r.day1)) return false;
+        if (isBlank(r.begin1)) return false;
+        if (isBlank(r.end1)) return false;
+        if (isBlank(r.mode)) return false;
+
+        if (hasAnySecondMeeting(r)) {
+          if (isBlank(r.day2)) return false;
+          if (isBlank(r.begin2)) return false;
+          if (isBlank(r.end2)) return false;
+        }
+        return true;
+      };
+
+      return rowsIn.map((r) => {
+        const locked = !!r.finalized || r.status === "Approved" || r.status === "Confirmed";
+        if (locked) return r;
+
+        // If OM has completed the row, ensure it's Pending (unless it is already a more specific status).
+        if (isComplete(r)) {
+          const current = String(r.status || "").trim();
+          if (!current || current === "Unassigned") {
+            return { ...r, status: "Pending" };
+          }
+        }
+
+        return r;
+      });
+    };
+
+    const nextRowsWithStatus = applyAutoPendingStatus(nextRows);
+
     // Push current snapshot to undo before applying the change
     undoStackRef.current.push({ rows, hasLocalEdits });
     if (undoStackRef.current.length > HISTORY_LIMIT) {
@@ -2197,7 +2279,7 @@ export default function OM_LoadAssignment() {
     // Any new action clears redo history
     redoStackRef.current = [];
 
-    setRows(nextRows);
+    setRows(nextRowsWithStatus);
 
     if (options?.markDirty !== false) {
       setHasLocalEdits(true);
@@ -2284,6 +2366,21 @@ export default function OM_LoadAssignment() {
     const markDirty = key !== ("selected" as K);
     const next = rows.map((r) => (r.id === id ? { ...r, [key]: val } : r));
     commitRows(next, { markDirty });
+  };
+
+  // Selection in the load recommendation table is by faculty (not per subject):
+  // if the OM selects any row for a faculty, we select *all* rows for that faculty.
+  const facultyKeyOf = (r: Row) => String((r.faculty_id || r.faculty || "")).trim();
+  const setFacultySelected = (refRow: Row, checked: boolean) => {
+    const k = facultyKeyOf(refRow);
+    if (!k) {
+      setCell(refRow.id, "selected", checked as any);
+      return;
+    }
+    const next = rows.map((r) =>
+      facultyKeyOf(r) === k ? { ...r, selected: checked } : r
+    );
+    commitRows(next, { markDirty: false });
   };
 
   const filtered = rows.filter((r) => {
@@ -3635,7 +3732,7 @@ useEffect(() => {
                                   disabled={isLocked}
                                   onChange={(ev) =>
                                     !isLocked &&
-                                    setCell(r.id, "selected", ev.target.checked as any)
+                                    setFacultySelected(r, ev.target.checked)
                                   }
                                   className="rounded border-gray-300 text-emerald-600 focus:ring-emerald-500"
                                   title={`Select row ${idx + 1}`}
@@ -3892,7 +3989,9 @@ useEffect(() => {
                                       if (r.finalized) return;
                                       setReqChange({
                                         open: true,
-                                        from: r.faculty || "Faculty",
+                                        facultyName: r.faculty || "Faculty",
+                                        facultyId: (r as any).faculty_id,
+                                        sectionId: (r as any).section_id || r.id,
                                       });
                                     }}
                                   >
@@ -4566,11 +4665,12 @@ useEffect(() => {
 
       <RequestChangeModal
         open={reqChange.open}
-        from={reqChange.from}
+        facultyName={reqChange.facultyName}
+        facultyId={reqChange.facultyId}
+        sectionId={reqChange.sectionId}
         onClose={() => setReqChange({ open: false })}
         userId={userId || ""}
         termId={termId || ""}
-        rows={rows}
         onAfterUpdate={loadFromServer}
         onToast={showToast}
       />
