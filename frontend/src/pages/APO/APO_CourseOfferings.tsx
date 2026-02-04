@@ -6430,16 +6430,16 @@ const GlobalCourseEditModal: React.FC<GlobalCourseEditModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-      <div className="w-full max-w-4xl rounded-xl bg-white shadow-xl border border-gray-200">
-        <div className="flex items-center justify-between border-b px-4 py-3">
-          <div className="font-semibold">Edit Global Course</div>
-          <button className="rounded-md border px-3 py-1.5 text-sm" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/40 p-4 sm:p-6 overflow-y-auto">
+      <div className="w-full max-w-4xl rounded-2xl bg-white shadow-xl border border-gray-200 my-8 overflow-hidden flex flex-col">
+        <div className="flex items-center justify-between border-b px-6 py-4">
+          <div className="font-semibold">Edit Course</div>
+          <button className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50" onClick={onClose}>
             Close
           </button>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 p-4">
+        <div className="flex-1 overflow-y-auto grid grid-cols-1 md:grid-cols-2 gap-4 p-6">
           {/* LEFT: search & pick a course */}
           <div className="rounded-lg border">
             <div className="px-3 py-2 bg-gray-50 font-semibold text-sm">Search course</div>
@@ -6573,8 +6573,8 @@ const GlobalCourseEditModal: React.FC<GlobalCourseEditModalProps> = ({
           </div>
         </div>
 
-        <div className="flex items-center justify-end gap-2 border-t px-4 py-3">
-          <button className="rounded-md border px-3 py-1.5 text-sm" onClick={onClose}>
+        <div className="flex items-center justify-end gap-2 border-t px-6 py-4 bg-white">
+          <button className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50" onClick={onClose}>
             Cancel
           </button>
           <button
@@ -6754,18 +6754,18 @@ const noMatches = query.trim().length >= 2 && list.length === 0;
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-      <div className="w-full max-w-5xl rounded-xl bg-white shadow-xl border border-gray-200">
-        <div className="flex items-center justify-between border-b px-4 py-3">
+    <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/40 p-4 sm:p-6 overflow-y-auto">
+      <div className="w-full max-w-5xl rounded-2xl bg-white shadow-xl border border-gray-200 my-8 overflow-hidden flex flex-col">
+        <div className="flex items-center justify-between border-b px-6 py-4">
           <div className="font-semibold">
             Edit Courses to Take — {programCode} • {base.batch_code || "ID"}
           </div>
-          <button className="rounded-md border px-3 py-1.5 text-sm" onClick={onClose}>
+          <button className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50" onClick={onClose}>
             Close
           </button>
         </div>
 
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 p-4">
+        <div className="flex-1 overflow-y-auto grid grid-cols-1 lg:grid-cols-2 gap-4 p-6">
           {/* Current courses */}
           <div className="rounded-lg border">
             <div className="px-3 py-2 bg-gray-50 font-semibold">Current courses</div>
@@ -6853,8 +6853,8 @@ const noMatches = query.trim().length >= 2 && list.length === 0;
           </div>
         </div>
 
-        <div className="flex items-center justify-end gap-2 border-t px-4 py-3">
-          <button className="rounded-md border px-3 py-1.5 text-sm" onClick={onClose}>
+        <div className="flex items-center justify-end gap-2 border-t px-6 py-4 bg-white">
+          <button className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50" onClick={onClose}>
             Cancel
           </button>
           <button
@@ -6949,16 +6949,16 @@ const CreateCourseModal: React.FC<{
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-      <div className="w-full max-w-2xl rounded-xl bg-white shadow-xl border border-gray-200">
-        <div className="flex items-center justify-between border-b px-4 py-3">
-          <div className="font-semibold">Add Course (Global Catalog)</div>
-          <button className="rounded-md border px-3 py-1.5 text-sm" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/40 p-4 sm:p-6 overflow-y-auto">
+      <div className="w-full max-w-2xl rounded-2xl bg-white shadow-xl border border-gray-200 my-8 overflow-hidden flex flex-col">
+        <div className="flex items-center justify-between border-b px-6 py-4">
+          <div className="font-semibold">Add Course</div>
+          <button className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50" onClick={onClose}>
             Close
           </button>
         </div>
 
-        <div className="p-4 grid grid-cols-1 md:grid-cols-2 gap-3">
+        <div className="flex-1 overflow-y-auto p-6 grid grid-cols-1 md:grid-cols-2 gap-3">
           {/* Department (SelectBox) */}
           <div className="md:col-span-1">
             <label className="text-xs font-medium text-slate-700 mb-1 block">Department</label>
@@ -7073,8 +7073,8 @@ const CreateCourseModal: React.FC<{
           </div>
         </div>
 
-        <div className="flex items-center justify-end gap-2 border-t px-4 py-3">
-          <button className="rounded-md border px-3 py-1.5 text-sm" onClick={onClose}>
+        <div className="flex items-center justify-end gap-2 border-t px-6 py-4 bg-white">
+          <button className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50" onClick={onClose}>
             Cancel
           </button>
           <button
