@@ -2091,6 +2091,49 @@ async def om_send_to_faculty(payload: Dict[str, Any] = Body(...), db=Depends(get
     if not isinstance(rows, list) or not rows:
         raise HTTPException(status_code=400, detail="rows[] is required")
 
+
+
+    # Normalize schedule fields so FACULTY side can reliably render calendar/list views.
+    # We KEEP the original OM fields (begin1/end1/etc.) but also populate the faculty-facing
+    # schema used by FACULTY_Overview (start/end/time1, start2/end2/time2, course_code/title).
+    def _hhmm_to_hm(v: Any) -> str:
+        s = ("" if v is None else str(v)).strip()
+        if re.fullmatch(r"\d{4}", s):
+            return f"{s[:2]}:{s[2:]}"
+        return s
+
+    def _norm_row_for_faculty(r: Dict[str, Any]) -> Dict[str, Any]:
+        rr = dict(r or {})
+        # course code/title
+        rr.setdefault("course_code", (rr.get("course") or rr.get("course_code") or "").strip())
+        rr.setdefault("course_title", (rr.get("title") or rr.get("course_title") or rr.get("courseTitle") or "").strip())
+
+        # meeting 1
+        b1_raw = rr.get("start") or rr.get("begin1") or rr.get("begin_1") or rr.get("begin")
+        e1_raw = rr.get("end") or rr.get("end1") or rr.get("end_1") or rr.get("end")
+        b1 = _hhmm_to_hm(b1_raw)
+        e1 = _hhmm_to_hm(e1_raw)
+        if not rr.get("start") and b1:
+            rr["start"] = b1
+        if not rr.get("end") and e1:
+            rr["end"] = e1
+        if not rr.get("time1") and b1 and e1:
+            rr["time1"] = f"{b1}–{e1}"
+
+        # meeting 2 (optional)
+        b2_raw = rr.get("start2") or rr.get("begin2") or rr.get("begin_2")
+        e2_raw = rr.get("end2") or rr.get("end2") or rr.get("end_2")
+        b2 = _hhmm_to_hm(b2_raw)
+        e2 = _hhmm_to_hm(e2_raw)
+        if not rr.get("start2") and b2:
+            rr["start2"] = b2
+        if not rr.get("end2") and e2:
+            rr["end2"] = e2
+        if not rr.get("time2") and b2 and e2:
+            rr["time2"] = f"{b2}–{e2}"
+
+        return rr
+
     # group by faculty_id
     by_fid: Dict[str, List[Dict[str, Any]]] = {}
     for r in rows:
@@ -2099,7 +2142,7 @@ async def om_send_to_faculty(payload: Dict[str, Any] = Body(...), db=Depends(get
         fid = (r.get("faculty_id") or "").strip()
         if not fid:
             continue
-        by_fid.setdefault(fid, []).append(r)
+        by_fid.setdefault(fid, []).append(_norm_row_for_faculty(r))
 
     if not by_fid:
         raise HTTPException(status_code=400, detail="No rows with faculty_id")

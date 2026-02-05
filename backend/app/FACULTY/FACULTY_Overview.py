@@ -6,7 +6,7 @@ from ..main import db
 from ..Notifications import create_notification
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
-
+import re
 
 import os
 import base64
@@ -175,10 +175,21 @@ async def _send_email_via_user_gmail(
 
 RFC_TERMINAL = {"ACCEPTED", "APPROVED", "REJECTED"}
 
-def _fmt_time_band(begin: str | None, end: str | None) -> str:
-    if not begin or not end:
+def _hhmm_to_hm(v: object | None) -> str:
+    """Convert 'HHMM' (e.g., '0730') to 'HH:MM'. Leaves other formats untouched."""
+    if v is None:
         return ""
-    return f"{begin}–{end}"
+    s = str(v).strip()
+    if re.fullmatch(r"\d{4}", s):
+        return f"{s[:2]}:{s[2:]}"
+    return s
+
+def _fmt_time_band(begin: str | None, end: str | None) -> str:
+    b = _hhmm_to_hm(begin)
+    e = _hhmm_to_hm(end)
+    if not b or not e:
+        return ""
+    return f"{b}–{e}"
 
 def _as_code_str(v: object) -> str:
     if v is None:
@@ -652,10 +663,20 @@ async def overview_handler(
         if (is_proposed or is_final) and isinstance(proposal.get("rows"), list):
             for rr in proposal.get("rows", []):
                 sec_id = (rr.get("section_id") or rr.get("id") or "").strip()
-                t1 = _fmt_time_band(rr.get("start"), rr.get("end")) or "TBA"
-                t2 = _fmt_time_band(rr.get("start2"), rr.get("end2")) if rr.get("start2") or rr.get("end2") else None
+
+                # OM rows may come in multiple shapes depending on when/where they were created.
+                # Prefer the faculty schema (start/end/time1), but gracefully fall back to OM schema (begin1/end1).
+                b1 = rr.get("start") or rr.get("begin1") or rr.get("begin_1") or rr.get("begin")
+                e1 = rr.get("end") or rr.get("end1") or rr.get("end_1") or rr.get("end")
+                b2 = rr.get("start2") or rr.get("begin2") or rr.get("begin_2")
+                e2 = rr.get("end2") or rr.get("end2") or rr.get("end_2")
+
+                t1 = (rr.get("time1") or _fmt_time_band(b1, e1) or "TBA")
+                t2 = (rr.get("time2") or _fmt_time_band(b2, e2)) if (b2 or e2 or rr.get("time2")) else None
+
                 proposed_load.append({
                     "course_code": _as_code_str(rr.get("course") or rr.get("course_code")),
+                    "course_title": _as_code_str(rr.get("course_title") or rr.get("title") or rr.get("courseTitle")),
                     "section": rr.get("section") or "",
                     "section_id": sec_id,   # <-- ADD THIS
                     "units": rr.get("units") or 0,
@@ -1311,18 +1332,25 @@ async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[s
     lines = [header, sep]
 
     for r in proposal_rows:
-        course = (r.get("course_code") or "").strip()
+        course = (r.get("course_code") or r.get("course") or "").strip()
         sec = (r.get("section") or r.get("section_code") or "").strip()
         mode = (r.get("mode") or "").strip()
         units = str(r.get("units") or "")
 
         d1 = (r.get("day1") or "TBA").strip()
-        t1 = (r.get("time1") or "TBA").strip()
+        t1 = (r.get("time1") or _fmt_time_band(
+            r.get("start") or r.get("begin1") or r.get("begin_1"),
+            r.get("end") or r.get("end1") or r.get("end_1"),
+        ) or "TBA").strip()
         rm1 = (r.get("room1") or "Online").strip()
 
         d2 = (r.get("day2") or "").strip()
-        t2 = (r.get("time2") or "").strip()
+        t2 = (r.get("time2") or _fmt_time_band(
+            r.get("start2") or r.get("begin2") or r.get("begin_2"),
+            r.get("end2") or r.get("end2") or r.get("end_2"),
+        ) or "").strip()
         rm2 = (r.get("room2") or "").strip()
+
 
         day_time = f"{d1} {t1}" + (f" / {d2} {t2}" if d2 and t2 else "")
         room = rm1 + (f" / {rm2}" if rm2 else "")

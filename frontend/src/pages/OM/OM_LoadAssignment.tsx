@@ -1064,19 +1064,7 @@ function validateAllRows(rows: Row[], ctx: ValidationContext): RowFlagsById {
   return flags;
 }
 
-const toPrettyTime = (t?: string) => {
-  if (!t) return "";
-  const s = t.trim();
-  if (!/^\d{3,4}$/.test(s)) return t;
-  const hh = s.length === 3 ? s.slice(0, 1) : s.slice(0, 2);
-  const mm = s.slice(-2);
-  return `${parseInt(hh, 10)}:${mm}`;
-};
-const timeRange = (begin?: string, end?: string) => {
-  const b = toPrettyTime(begin);
-  const e = toPrettyTime(end);
-  return b && e ? `${b}–${e}` : b || e || "—";
-};
+
 
 const DAY_OPTIONS = [
   { value: "M", label: "Monday" },
@@ -1102,16 +1090,16 @@ const TIME_BEGIN_OPTIONS = [
 ];
 
 const TIME_END_OPTIONS = [
-  // Same menu labels as TIME_BEGIN_OPTIONS (full band label),
-  // while the selected value remains HHMM.
-  { value: "0900", label: "07:30 - 09:00" },
-  { value: "1045", label: "09:15 - 10:45" },
-  { value: "1230", label: "11:00 - 12:30" },
-  { value: "1415", label: "12:45 - 14:15" },
-  { value: "1600", label: "14:30 - 16:00" },
-  { value: "1745", label: "16:15 - 17:45" },
-  { value: "1930", label: "18:00 - 19:30" },
-  { value: "2100", label: "19:45 - 21:00" },
+  // End-time dropdown should show only the end time (not the full band).
+  // Stored/selected value remains HHMM.
+  { value: "0900", label: "09:00" },
+  { value: "1045", label: "10:45" },
+  { value: "1230", label: "12:30" },
+  { value: "1415", label: "14:15" },
+  { value: "1600", label: "16:00" },
+  { value: "1745", label: "17:45" },
+  { value: "1930", label: "19:30" },
+  { value: "2100", label: "21:00" },
 ];
 
 // --- NEW UTILITY FUNCTION FOR AUTO-FILL ---
@@ -1263,29 +1251,33 @@ const SendModal = ({
           <div className="rounded-xl border border-gray-200 overflow-hidden">
             <table className="w-full table-fixed text-[13px]">
               <colgroup>
-              <col className="w-[140px]" />
-              <col />
-              <col className="w-[90px]" />
-              <col className="w-[72px]" />
-              <col className="w-[110px]" />
-              <col className="w-[70px]" />
-              <col className="w-[120px]" />
-              <col className="w-[120px]" />
-            </colgroup>
+                <col className="w-[240px]" />
+                <col className="w-[92px]" />
+                <col className="w-[82px]" />
+                <col className="w-[92px]" />
+                <col className="w-[92px]" />
+                <col className="w-[110px]" />
+                <col className="w-[82px]" />
+                <col className="w-[92px]" />
+                <col className="w-[92px]" />
+                <col className="w-[110px]" />
+                <col className="w-[96px]" />
+              </colgroup>
               <thead className="bg-gray-50 text-gray-700">
                 <tr className="[&>th]:border-b [&>th]:border-gray-200">
                   <th className="px-4 py-3 text-left font-semibold">
-                    Course Code
+                    Course Code &amp; Title
                   </th>
-                  <th className="px-4 py-3 text-center font-semibold">
-                    Course Title
-                  </th>
-                  <th className="px-4 py-3 text-left font-semibold">Section <span className="text-red-600" aria-hidden="true">*</span></th>
-                  <th className="px-4 py-3 text-left font-semibold">Units</th>
-                  <th className="px-4 py-3 text-left font-semibold">Mode <span className="text-red-600" aria-hidden="true">*</span></th>
-                  <th className="px-4 py-3 text-left font-semibold">Day</th>
-                  <th className="px-4 py-3 text-left font-semibold">Room</th>
-                  <th className="px-4 py-3 text-center font-semibold">Time</th>
+                  <th className="px-4 py-3 text-left font-semibold">Section</th>
+                  <th className="px-4 py-3 text-left font-semibold">Day 1</th>
+                  <th className="px-4 py-3 text-left font-semibold">Begin 1</th>
+                  <th className="px-4 py-3 text-left font-semibold">End 1</th>
+                  <th className="px-4 py-3 text-left font-semibold">Room 1</th>
+                  <th className="px-4 py-3 text-left font-semibold">Day 2</th>
+                  <th className="px-4 py-3 text-left font-semibold">Begin 2</th>
+                  <th className="px-4 py-3 text-left font-semibold">End 2</th>
+                  <th className="px-4 py-3 text-left font-semibold">Room 2</th>
+                  <th className="px-4 py-3 text-left font-semibold">Mode</th>
                 </tr>
               </thead>
               <tbody className="text-gray-900">
@@ -1294,7 +1286,7 @@ const SendModal = ({
                     {manyGroups && (
                       <tr className="bg-white">
                         <td
-                          colSpan={8}
+                          colSpan={11}
                           className="px-4 pt-5 pb-2 text-[12px] font-semibold text-gray-900"
                         >
                           {faculty}
@@ -1310,26 +1302,22 @@ const SendModal = ({
                         )}
                       >
                         <td className="px-4 py-3 align-middle">
-                          {r.course || "—"}
+                          <div className="leading-tight">
+                            <div className="font-semibold text-gray-900">{r.course || "—"}</div>
+                            <div className="mt-0.5 text-[12px] text-gray-600">{r.title || "—"}</div>
+                          </div>
                         </td>
-                        <td className="px-4 py-3 align-middle truncate">
-                          {r.title || "—"}
-                        </td>
-                        <td className="px-4 py-3 align-middle">
-                          {r.section || "—"}
-                        </td>
-                        <td className="px-4 py-3 align-middle">
-                          {r.units !== "" ? String(r.units) : "—"}
-                        </td>
-                        <td className="px-4 py-3 align-middle text-gray-800">{r.mode || (r as any).room_type || "—"}</td>
-                        <td className="px-4 py-3 align-middle">
-                          {r.day1 || "—"}
-                        </td>
-                        <td className="px-4 py-3 align-middle">
-                          {r.room1 || "—"}
-                        </td>
-                        <td className="px-4 py-3 align-middle">
-                          {timeRange(r.begin1, r.end1)}
+                        <td className="px-4 py-3 align-middle">{r.section || "—"}</td>
+                        <td className="px-4 py-3 align-middle">{r.day1 || "—"}</td>
+                        <td className="px-4 py-3 align-middle">{r.begin1 || "—"}</td>
+                        <td className="px-4 py-3 align-middle">{r.end1 || "—"}</td>
+                        <td className="px-4 py-3 align-middle">{r.room1 || "—"}</td>
+                        <td className="px-4 py-3 align-middle">{r.day2 || "—"}</td>
+                        <td className="px-4 py-3 align-middle">{r.begin2 || "—"}</td>
+                        <td className="px-4 py-3 align-middle">{r.end2 || "—"}</td>
+                        <td className="px-4 py-3 align-middle">{r.room2 || "—"}</td>
+                        <td className="px-4 py-3 align-middle text-gray-800">
+                          {r.mode || (r as any).room_type || "—"}
                         </td>
                       </tr>
                     ))}
@@ -1338,7 +1326,7 @@ const SendModal = ({
                 {rows.length === 0 && (
                   <tr>
                     <td
-                      colSpan={9}
+                      colSpan={11}
                       className="px-4 py-8 text-center text-sm text-gray-500"
                     >
                       No rows selected.
@@ -2490,12 +2478,26 @@ export default function OM_LoadAssignment() {
     if (!userId) throw new Error("Missing userId");
     if (!rowsToSend?.length) throw new Error("No rows to send");
 
+	    // Defensive: ensure faculty_id exists (backend groups strictly by faculty_id).
+	    // This also prevents schedule fields from being wiped on refresh for rows whose faculty was
+	    // selected by display name only.
+	    const normalizedRowsToSend: Row[] = rowsToSend
+	      .map((r) => {
+	        const fid = (r.faculty_id || "").trim() || (facultyNameToId[r.faculty] || "");
+	        return fid ? ({ ...r, faculty_id: fid } as Row) : r;
+	      })
+	      .filter((r) => !!(r.faculty_id || "").trim());
+
+	    if (!normalizedRowsToSend.length) {
+	      throw new Error("No rows with faculty_id");
+	    }
+
     const term_id = termId || undefined;
 
     // 1️⃣ Send selected rows to faculty (proposal + notification)
     await sendOmLoadAssignmentsToFaculty(userId, {
       term_id,
-      rows: rowsToSend,
+	      rows: normalizedRowsToSend,
     });
 
     // 2️⃣ Persist the FULL OM table so refresh doesn't revert changes
@@ -2506,8 +2508,10 @@ export default function OM_LoadAssignment() {
     setSendRowsPreview([]);
     await loadFromServer();
     setHasLocalEdits(false);
-    const uniqueFaculty = new Set(
-      rowsToSend.map((r) => (r.faculty || r.faculty_id || "").toString().trim()).filter(Boolean)
+	    const uniqueFaculty = new Set(
+	      normalizedRowsToSend
+	        .map((r) => (r.faculty || r.faculty_id || "").toString().trim())
+	        .filter(Boolean)
     );
     showToast(
       uniqueFaculty.size <= 1
@@ -3590,7 +3594,7 @@ useEffect(() => {
                             return;
                           }
 
-                          setSendRowsPreview(preview);
+                          setSendRowsPreview(preview.map((r) => ({ ...r })));
                           setShowSend(true);
                         }}
                         className={cls(
