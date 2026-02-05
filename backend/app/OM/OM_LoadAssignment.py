@@ -2042,6 +2042,28 @@ async def get_om_load_assignment_list(user_id: str, term_id: Optional[str] = Non
         sid = str(r.get("id") or r.get("section_id") or "").strip()
         r["pending_rfc"] = bool(fid and sid and (fid, sid) in open_rfc_keys)
 
+    blocked_ge_cmps2: list[dict[str, Any]] = []
+    try:
+        idx_to_day = {1: "M", 2: "T", 3: "W", 4: "H", 5: "F", 6: "S"}
+        campus_map = getattr(ctx, "campus_blocked", {}) or {}
+        for di, items in (campus_map.get("CMPS0002") or {}).items():
+            for (st_min, en_min, section_id, course_id, section_code) in (items or []):
+                cinfo = (courses or {}).get(course_id) or {}
+                blocked_ge_cmps2.append(
+                    {
+                        "campus_id": "CMPS0002",
+                        "course_id": course_id,
+                        "course_code": cinfo.get("course_code") or cinfo.get("code"),
+                        "section_id": section_id,
+                        "section_code": section_code,
+                        "day": idx_to_day.get(int(di), str(di)),
+                        "begin": _mm_to_hhmm(int(st_min)),
+                        "end": _mm_to_hhmm(int(en_min)),
+                    }
+                )
+    except Exception:
+        blocked_ge_cmps2 = []
+
     return {
         "term": _term_label(active),
         "term_id": active.get("term_id"),
@@ -2057,6 +2079,7 @@ async def get_om_load_assignment_list(user_id: str, term_id: Optional[str] = Non
         "sectionCampus": section_campus,
         "sectionCourse": section_course,
         "courseTypeOfCourse": course_type_of_course,
+        "blockedGeCmps2": blocked_ge_cmps2,
     }
 
 
@@ -3718,7 +3741,15 @@ async def phase0_load(term_id: str, db, department_id: str | None = None) -> Con
     campus_blocked: dict[str, dict[int, list[tuple[int, int, str, str, str]]]] = {}
 
     # Day → index helper
-    day_to_idx = {"M": 1, "T": 2, "W": 3, "H": 4, "F": 5, "S": 6}
+    # Day → index helper (accept both single-letter codes and DB-friendly strings like "Mon", "Thu")
+    day_to_idx = {
+        "M": 1, "MON": 1, "MONDAY": 1,
+        "T": 2, "TUE": 2, "TUES": 2, "TUESDAY": 2,
+        "W": 3, "WED": 3, "WEDNESDAY": 3,
+        "H": 4, "TH": 4, "THU": 4, "THUR": 4, "THURS": 4, "THURSDAY": 4,
+        "F": 5, "FRI": 5, "FRIDAY": 5,
+        "S": 6, "SAT": 6, "SATURDAY": 6,
+    }
 
     sections = ctx.sections or []
     courses = ctx.courses or {}
@@ -3755,7 +3786,7 @@ async def phase0_load(term_id: str, db, department_id: str | None = None) -> Con
             d = (sch.get("day") or "").strip().upper()
             if d not in day_to_idx:
                 continue
-            st = _to_min(sch.get("begin_time"))
+            st = _to_min(sch.get("begin_time") or sch.get("start_time"))
             en = _to_min(sch.get("end_time"))
             if st is None or en is None or en <= st:
                 continue
