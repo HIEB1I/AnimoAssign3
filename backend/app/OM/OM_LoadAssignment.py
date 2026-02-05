@@ -5709,7 +5709,7 @@ def run_pass_rescue_non_shs(ctx, assignments: list[dict]) -> list[dict]:
 async def run_milestone_e_phase7(term_id: str, db, department_id: str | None = None) -> dict:
     """
     Builds on Phase 6B results.
-    - Keep SHS sections' schedules as-is (soft-locked).
+    - Treat SHS sections the same as other sections (no soft-lock).
     - For sections with no schedule, propose day/time based on faculty prefs.
       (We do not persist; we only surface proposed times in the assignment payload.)
     """
@@ -6032,12 +6032,6 @@ async def run_milestone_e_phase7(term_id: str, db, department_id: str | None = N
             debug_no_time_phase7[sid] = {"reason": "has_existing_schedule"}
             continue
 
-        if _course_is_shs(cid):
-            kept.append(a)
-            # NEW: SHS sections are soft-locked (DEBUG)
-            debug_no_time_phase7[sid] = {"reason": "SHS_soft_lock"}
-            continue
-
         # Use STRICT slot pool: only precomputed faculty slots, no grid.
         fp = fac_prefs.get(fid)
         if not fp:
@@ -6253,11 +6247,8 @@ async def _approve_and_persist(term_id: str, rows: list[dict], db):
                 upsert=True,
             )
 
-        # ---------- 2) section_schedules upsert (non-SHS only) ----------
+        # ---------- 2) section_schedules upsert ----------
         if not cid:
-            continue
-        if _course_is_shs(cid):
-            # keep SHS schedule as-is (soft-locked)
             continue
 
         # pull proposed times from the row (already normalized in UI/run)
@@ -6302,7 +6293,7 @@ async def _persist_rows_no_auto(term_id: str, rows: list[dict], db):
     - Only persists what is explicitly present in the incoming rows:
       * sections.mode (from row['mode'], if any)
       * faculty_assignments (only if row['faculty_id'] is set)
-      * section_schedules (non-SHS only, from row day/begin/end + room1/room2)
+      * section_schedules (from row day/begin/end + room1/room2)
     """
     # Load context once (course types, existing schedules, section→course map, etc.)
     ctx = await phase0_load(term_id, db, department_id=None)
@@ -6511,10 +6502,6 @@ async def _persist_rows_no_auto(term_id: str, rows: list[dict], db):
         if not cid:
             # should not happen now, but guard anyway
             print(f"[SAVE] skip schedules; missing cid for sid={sid!r}")
-            continue
-        if _course_is_shs(cid):
-            # For SHS, keep schedules as-is (soft-locked) even on save draft.
-            print(f"[SAVE] skip schedules for SHS course cid={cid!r} sid={sid!r}")
             continue
 
         # pull proposed times from the row (already normalized in UI/run)
