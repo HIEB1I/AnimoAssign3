@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import re
 from typing import Any, Dict, Optional, List, Tuple
 
 from fastapi import APIRouter, HTTPException, Query, Body
@@ -126,10 +127,13 @@ async def _get_department_by_name(name: str) -> Optional[Dict[str, Any]]:
 async def _get_program_by_code(program_code: str) -> Optional[Dict[str, Any]]:
     if not program_code:
         return None
+    code = program_code.strip()
+    # Be tolerant to case differences.
     return await db[COL_PROGRAMS].find_one(
-        {"program_code": program_code.strip()},
+        {"program_code": {"$regex": f"^{re.escape(code)}$", "$options": "i"}},
         {"_id": 0, "program_id": 1, "program_code": 1},
     )
+
 
 ALLOWED_PROGRAM_CODES = [
     "BSCS-ST", "BSCS-NIS", "BSCS-CSE", "BSMS-CS",
@@ -675,15 +679,16 @@ async def special_class_handler(
         cfg = await _get_special_config()
         dept_names = ALLOWED_DEPARTMENTS[:]
 
-        progs = [p async for p in db[COL_PROGRAMS].find(
-            {"program_code": {"$in": ALLOWED_PROGRAM_CODES}},
-            {"_id": 0, "program_id": 1, "program_code": 1},
-        )]
-        prog_codes_db = {p.get("program_code") for p in progs if p.get("program_code")}
-        programs_out = progs[:]
-        for code in ALLOWED_PROGRAM_CODES:
-            if code not in prog_codes_db:
-                programs_out.append({"program_id": "", "program_code": code})
+        # Programs dropdown should come only from real DB programs (like Student Petition).
+        # No placeholder/allowed-code injection here—frontend should never be offered a value
+        # that later fails validation.
+        programs_out = [
+            p async for p in db[COL_PROGRAMS].find(
+                {},
+                {"_id": 0, "program_id": 1, "program_code": 1},
+            )
+        ]
+        programs_out.sort(key=lambda x: (x.get("program_code") or ""))
 
         dept_docs = [d async for d in db[COL_DEPARTMENTS].find(
             {"$or": [{"department_name": {"$in": ALLOWED_DEPARTMENTS}},
@@ -755,8 +760,6 @@ async def special_class_handler(
             raise HTTPException(status_code=400, detail="You must agree to the Terms and Conditions.")
 
         degree = str(payload["degree"]).strip()
-        if degree not in set(ALLOWED_PROGRAM_CODES):
-            raise HTTPException(status_code=400, detail="Invalid degree program.")
         prog = await _get_program_by_code(degree)
         if not prog:
             raise HTTPException(status_code=400, detail="Selected program not found.")
