@@ -1,5 +1,5 @@
 // frontend/src/pages/FACULTY/FAC_Overview.tsx
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { Send as SendIcon, X, BookOpen as SyllabusIcon } from "lucide-react";
 
 import TopBar from "../../component/TopBar";
@@ -26,6 +26,62 @@ import {
 } from "../../api.ts";
 import { useNavigate } from "react-router-dom";
 
+/* =========================================
+   Toast (Faculty)
+   - Lightweight in-file toast stack (no extra deps)
+   - Upper-right, beneath TopBar
+   ========================================= */
+type ToastKind = "success" | "error" | "info";
+type ToastItem = { id: string; kind: ToastKind; title?: string; message: string };
+
+function ToastViewport({
+  items,
+  onDismiss,
+}: {
+  items: ToastItem[];
+  onDismiss: (id: string) => void;
+}) {
+  if (!items.length) return null;
+
+  const tone = (k: ToastKind) => {
+    if (k === "success") return "border-emerald-200 bg-emerald-50 text-emerald-900";
+    if (k === "error") return "border-red-200 bg-red-50 text-red-900";
+    return "border-slate-200 bg-white text-slate-900";
+  };
+
+  return (
+    <div className="pointer-events-none fixed right-6 top-[72px] z-[1200] flex w-[360px] max-w-[90vw] flex-col gap-2">
+      {items.map((t) => (
+        <div
+          key={t.id}
+          className={cls(
+            "pointer-events-auto rounded-xl border px-4 py-3 shadow-lg",
+            "backdrop-blur supports-[backdrop-filter]:bg-white/90",
+            tone(t.kind)
+          )}
+          role="status"
+          aria-live="polite"
+        >
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              {t.title && <div className="text-sm font-semibold">{t.title}</div>}
+              <div className="mt-0.5 break-words text-sm">{t.message}</div>
+            </div>
+            <button
+              type="button"
+              className="rounded-md p-1 hover:bg-black/5"
+              onClick={() => onDismiss(t.id)}
+              aria-label="Dismiss toast"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 
 /* =========================================
    0) Page
@@ -35,6 +91,23 @@ export default function FAC_Overview() {
   const [showInbox, setShowInbox] = useState(false); // NEW
   const [data, setData] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
+
+const toastSeq = useRef(0);
+const [toasts, setToasts] = useState<ToastItem[]>([]);
+
+const dismissToast = useCallback((id: string) => {
+  setToasts((prev) => prev.filter((t) => t.id !== id));
+}, []);
+
+const pushToast = useCallback(
+  (kind: ToastKind, message: string, title?: string) => {
+    const id = String(++toastSeq.current);
+    setToasts((prev) => [...prev, { id, kind, title, message }]);
+    window.setTimeout(() => dismissToast(id), 3800);
+  },
+  [dismissToast]
+);
+
 
   const navigate = useNavigate();
 
@@ -68,52 +141,56 @@ export default function FAC_Overview() {
   const raw = JSON.parse(localStorage.getItem("animo.user") || "{}");
   const userId = raw.userId || raw.user_id || raw.id;
 
-  useEffect(() => {
-    if (!userId) {
-      setError("Missing userId in local storage.");
-      return;
-    }
-    (async () => {
-      try {
-        // Parallel loads (pattern parity with Student Petition)
-        const [list, profile] = await Promise.all([
-          getFacultyOverviewList(userId),
-          getFacultyOverviewProfile(userId),
-          // getFacultyOverviewOptions(userId) // not needed by this page; stub is available
-        ]);
+  const loadOverview = useCallback(async () => {
+  if (!userId) {
+    setError("Missing userId in local storage.");
+    return;
+  }
+  try {
+    // Parallel loads (pattern parity with Student Petition)
+    const [list, profile] = await Promise.all([
+      getFacultyOverviewList(userId),
+      getFacultyOverviewProfile(userId),
+      // getFacultyOverviewOptions(userId) // not needed by this page; stub is available
+    ]);
 
-        if (!list?.ok) throw new Error(list?.detail || "Failed to load list.");
-        if (!profile?.ok) throw new Error(profile?.detail || "Failed to load profile.");
+    if (!list?.ok) throw new Error(list?.detail || "Failed to load list.");
+    if (!profile?.ok) throw new Error(profile?.detail || "Failed to load profile.");
 
-        const teachingLoadNormalized = (list?.teaching_load || []).map((x: any) => ({
-        ...x,
-        // normalize section_id no matter what the backend sends
-        section_id:
-          x.section_id ||
-          x.sectionId ||
-          x.section?.section_id ||
-          x.section?.id ||
-          "",
-      }));
-        // Compose into the same shape the page already renders
-        setData({
-          ok: true,
-          faculty: profile.faculty,
-          term: list.term,
-          summary: list.summary,
-          teaching_load: teachingLoadNormalized,
-          notifications: profile.notifications || [],
-          // Load assignment workflow flags (backwards-compatible)
-          is_proposed: (list as any).is_proposed,
-          proposal_status: (list as any).proposal_status,
-          rfc: (list as any).rfc,
-          schedule_final: (list as any).schedule_final,
-        });
-      } catch (e: any) {
-        setError(e?.response?.data?.detail || e?.message || "Failed to load faculty overview.");
-      }
-    })();
-  }, [userId]);
+    const teachingLoadNormalized = (list?.teaching_load || []).map((x: any) => ({
+      ...x,
+      // normalize section_id no matter what the backend sends
+      section_id:
+        x.section_id ||
+        x.sectionId ||
+        x.section?.section_id ||
+        x.section?.id ||
+        "",
+    }));
+
+    // Compose into the same shape the page already renders
+    setData({
+      ok: true,
+      faculty: profile.faculty,
+      term: list.term,
+      summary: list.summary,
+      teaching_load: teachingLoadNormalized,
+      notifications: profile.notifications || [],
+      // Load assignment workflow flags (backwards-compatible)
+      is_proposed: (list as any).is_proposed,
+      proposal_status: (list as any).proposal_status,
+      rfc: (list as any).rfc,
+      schedule_final: (list as any).schedule_final,
+    });
+    setError(null);
+  } catch (e: any) {
+    setError(e?.response?.data?.detail || e?.message || "Failed to load faculty overview.");
+  }
+}, [userId]);
+
+useEffect(() => {
+  loadOverview();
+}, [loadOverview]);
 
 
   if (error) return <div className="p-10 text-red-600">{error}</div>;
@@ -133,6 +210,8 @@ export default function FAC_Overview() {
         notifications={data.notifications}
         /* No need to pass handlers; we use window events */
       />
+
+      <ToastViewport items={toasts} onDismiss={dismissToast} />
 
       {canReturnToChair && (
         <button
@@ -173,6 +252,8 @@ export default function FAC_Overview() {
                   teachingLoad={data.teaching_load}
                   term={data.term}
                   workflow={data}
+                  onToast={pushToast}
+                  onRefresh={loadOverview}
                 />
               </>
             )}
@@ -458,6 +539,8 @@ type TeachingLoadEnhancedProps = {
     proposal_status?: string | null;
     rfc?: { status?: string | null } | null;
   };
+  onToast?: (kind: ToastKind, message: string, title?: string) => void;
+  onRefresh?: () => Promise<void> | void;
 };
 
 
@@ -474,7 +557,7 @@ const LIST_HEADERS = [
   "Syllabus",
 ];
 
-function TeachingLoadEnhanced({ teachingLoad, term, workflow }: TeachingLoadEnhancedProps) {
+function TeachingLoadEnhanced({ teachingLoad, term, workflow, onToast, onRefresh }: TeachingLoadEnhancedProps) {
   const [view, setView] = useState<"Calendar" | "List">("Calendar");
   const [modal, setModal] = useState<{ day: DayLong; item: TLItemForCalendar } | null>(null);
   const [isAccepted, setIsAccepted] = useState(false);
@@ -590,19 +673,25 @@ const scheduleFinalLabel = (() => {
                   e?.response?.data?.detail ||
                   e?.message ||
                   "Calendar insert failed. Check backend logs.";
-                alert(msg);
+                onToast?.("error", msg, "Calendar insert failed");
                 console.error("Accepted schedule, but calendar insert failed:", e);
                 return; // ✅ do NOT reload; let user retry
               }
             } else {
-              alert("No sched items to add to calendar (all TBA / missing day-time).");
+              onToast?.("info", "No sched items to add to calendar (all TBA / missing day-time).", "Nothing to add");
               return;
             }
 
             setIsAccepted(true);
-            window.location.reload();
+            onToast?.("success", "Schedule accepted and added to your Google Calendar.", "Success");
+            await onRefresh?.();
 
-            } catch (e) {
+            } catch (e: any) {
+              const msg =
+                e?.response?.data?.detail ||
+                e?.message ||
+                "Failed to accept schedule.";
+              onToast?.("error", msg, "Action failed");
               console.error(e);
             }
           }}
@@ -814,7 +903,7 @@ const scheduleFinalLabel = (() => {
         </div>
       )}
 
-      <ChangeRequestModal open={!!modal} onClose={() => setModal(null)} context={modal} term={term} scheduleFinal={scheduleFinal} />
+      <ChangeRequestModal open={!!modal} onClose={() => setModal(null)} context={modal} term={term} scheduleFinal={scheduleFinal} onToast={onToast} onRefresh={onRefresh} />
     </section>
   );
 }
@@ -931,12 +1020,16 @@ function ChangeRequestModal({
   context,
   term,
   scheduleFinal,
+  onToast,
+  onRefresh,
 }: {
   open: boolean;
   onClose: () => void;
   context: { day: DayLong; item: TLItemForCalendar } | null; // <-- MODIFIED
   term: any;
   scheduleFinal: boolean;
+  onToast?: (kind: ToastKind, message: string, title?: string) => void;
+  onRefresh?: () => Promise<void> | void;
 }) {
   const TIME_SLOTS = [
     "07:30 – 09:00",
@@ -1133,7 +1226,7 @@ function ChangeRequestModal({
 
               if (!sectionId) {
                 console.error("RFC send blocked: missing section_id on row", oi);
-                alert("Cannot send RFC: missing section_id for this assigned course row.");
+                onToast?.("error", "Cannot send RFC: missing section_id for this assigned course row.", "RFC not sent");
                 return;
               }
 
@@ -1146,10 +1239,17 @@ function ChangeRequestModal({
               // Optional: show a useful message if Gmail isn't connected
               if (resp && resp.email_sent === false && resp.email_error) {
                 console.warn("RFC saved but email was not sent:", resp.email_error);
+                onToast?.("info", "RFC saved, but email was not sent. Please connect Gmail in your profile if you want email notifications.", "Email not sent");
               }
 
-              window.location.reload();
-            } catch (e) {
+              onToast?.("success", "RFC sent successfully.", "Success");
+              await onRefresh?.();
+            } catch (e: any) {
+              const msg =
+                e?.response?.data?.detail ||
+                e?.message ||
+                "Failed to send RFC.";
+              onToast?.("error", msg, "RFC not sent");
               console.error(e);
             } finally {
               onClose();
@@ -1175,6 +1275,51 @@ function ChangeRequestModal({
 function RfcThreadView({ term, sectionId }: { term: any; sectionId: string }) {
   const [thread, setThread] = useState<any | null>(null);
   const [loading, setLoading] = useState(false);
+
+  const formatRfcStatus = useCallback(
+    (rawStatus: string, isLocked: boolean) => {
+      const key = String(rawStatus || "").toUpperCase();
+
+      // Friendly, professional labels (avoid code-like statuses)
+      const map: Record<string, string> = {
+        OPEN: "Open",
+        IN_PROGRESS: "In Progress",
+        PENDING: "Pending",
+        NEEDS_OM: "Pending OM Review",
+        NEEDS_CHAIR: "Pending Chair Review",
+        NEEDS_FACULTY: "Awaiting Faculty Response",
+        APPROVED: "Approved",
+        ACCEPTED: "Accepted",
+        REJECTED: "Rejected",
+        CLOSED: "Closed",
+        LOCKED: "Closed",
+      };
+
+      if (map[key]) return map[key];
+      if (isLocked) return "Closed";
+
+      // Fallback: Title Case (e.g., NEEDS_OM -> Needs Om)
+      return key
+        ? key
+            .toLowerCase()
+            .split(/[_\s]+/)
+            .filter(Boolean)
+            .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+            .join(" ")
+        : "Open";
+    },
+    []
+  );
+
+  const statusTone = useCallback((rawStatus: string, isLocked: boolean) => {
+    const key = String(rawStatus || "").toUpperCase();
+    if (isLocked) return "bg-neutral-200 text-neutral-700";
+    if (key === "NEEDS_OM" || key === "NEEDS_CHAIR" || key === "PENDING") {
+      return "bg-yellow-100 text-yellow-800";
+    }
+    if (key === "REJECTED") return "bg-red-100 text-red-800";
+    return "bg-emerald-100 text-emerald-800";
+  }, []);
 
   useEffect(() => {
     let alive = true;
@@ -1219,6 +1364,7 @@ function RfcThreadView({ term, sectionId }: { term: any; sectionId: string }) {
 
   const status = String(thread.status || "").toUpperCase();
   const locked = Boolean(thread.locked) || ["ACCEPTED", "APPROVED", "REJECTED"].includes(status);
+  const statusLabel = formatRfcStatus(status, locked);
 
   return (
     <div className="rounded-xl border border-neutral-200 bg-white p-3">
@@ -1227,10 +1373,10 @@ function RfcThreadView({ term, sectionId }: { term: any; sectionId: string }) {
         <div
           className={cls(
             "rounded-full px-2 py-0.5 text-xs font-medium",
-            locked ? "bg-neutral-200 text-neutral-700" : status === "NEEDS_OM" ? "bg-yellow-100 text-yellow-800" : "bg-emerald-100 text-emerald-800"
+            statusTone(status, locked)
           )}
         >
-          {locked ? status || "LOCKED" : status || "OPEN"}
+          {statusLabel}
         </div>
       </div>
 
@@ -1258,4 +1404,3 @@ function RfcThreadView({ term, sectionId }: { term: any; sectionId: string }) {
     </div>
   );
 }
-

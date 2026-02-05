@@ -459,6 +459,7 @@ type OfferingRow = {
     program_id?: string;
     section_id?: string;
     elective_placeholder_course_id?: string;
+    fulfilled_placeholder_course_id?: string;
   };
 };
 
@@ -525,38 +526,40 @@ const slotToSnapshot = (slot?: OfferingRow["slot1"]): SnapshotSlot => {
   return { day, start, end, room };
 };
 
-const rowKeyOfSnapshot = (r: OfferingRow) =>
-  r.section.section_id
-    ? `sec:${r.section.section_id}`
-    : `combo:${r.batch.batch_id}|${r.program.program_id}|${r.course.course_id}`;
-
-const toSnapshotRow = (r: OfferingRow): SnapshotRow => ({
-  key: rowKeyOfSnapshot(r),
-  course_code: String(r.course.course_code || "").trim(),
-  course_title: String(r.course.course_title || "").trim(),
-  section_code: String(r.section.section_code || "").trim(),
-  program_code: String(r.program.program_code || "").trim(),
-  block_index: typeof r.block_index === "number" ? r.block_index : 1,
-  batch_code: String(r.batch.batch_code || "").trim(),
-  faculty_name: String(r.faculty.faculty_name || "UNASSIGNED").trim(),
-  enrollment_cap: r.section.enrollment_cap ?? null,
-  remarks: String(r.section.remarks || "").trim(),
-  slot1: slotToSnapshot(r.slot1),
-  slot2: slotToSnapshot(r.slot2),
-});
-
-const truncateRemark = (t: string, maxLen = 56) => {
-  const s = String(t ?? "").trim().replace(/\s+/g, " ");
-  if (!s) return "";
-  return s.length > maxLen ? s.slice(0, maxLen - 1) + "…" : s;
+const rowKeyOfSnapshot = (r: OfferingRow) => {
+  const sid = String((r as any)?.section?.section_id || "").trim();
+  return sid ? `sec:${sid}` : "";
 };
+
+// NOTE: Backend includes placeholder rows (empty section_id) for curriculum items
+// that currently have no actual sections yet. Those placeholders are *not* real
+// offerings, so we exclude them from submit change-tracking to avoid false
+// "added" entries when the last real section is deleted.
+const toSnapshotRow = (r: OfferingRow): SnapshotRow | null => {
+  const key = rowKeyOfSnapshot(r);
+  if (!key) return null;
+
+  return {
+    key,
+    course_code: String((r as any)?.course?.course_code || "").trim(),
+    course_title: String((r as any)?.course?.course_title || "").trim(),
+    section_code: String((r as any)?.section?.section_code || "").trim(),
+    program_code: String((r as any)?.program?.program_code || "").trim(),
+    block_index: typeof (r as any)?.block_index === "number" ? (r as any).block_index : 1,
+    batch_code: String((r as any)?.batch?.batch_code || "").trim(),
+    faculty_name: String((r as any)?.faculty?.faculty_name || "UNASSIGNED").trim(),
+    enrollment_cap: (r as any)?.section?.enrollment_cap ?? null,
+    remarks: String((r as any)?.section?.remarks || "").trim(),
+    slot1: slotToSnapshot((r as any)?.slot1),
+    slot2: slotToSnapshot((r as any)?.slot2),
+  };
+};
+
 
 const snapshotLabel = (s: SnapshotRow) => {
   const course = s.course_code || "COURSE";
   const sec = s.section_code ? ` ${s.section_code}` : "";
-  const rem = truncateRemark(s.remarks);
-  const remPart = rem ? ` — Remarks: ${rem}` : "";
-  return `${course}${sec}${remPart}`;
+  return `${course}${sec}`.trim();
 };
 
 const slotToText = (s: SnapshotSlot) => {
@@ -583,6 +586,12 @@ const computeDetectedChanges = (baseline: SnapshotRow[], current: SnapshotRow[])
     if (!bmap.has(k)) added.push({ key: k, label: snapshotLabel(cur) });
   }
 
+  const capTxt = (v: any) => (v === null || v === undefined || v === "" ? "—" : String(v));
+  const txt = (v: any) => {
+    const s = String(v ?? "").trim();
+    return s ? s : "—";
+  };
+
   for (const [k, base] of bmap.entries()) {
     const cur = cmap.get(k);
     if (!cur) {
@@ -590,25 +599,26 @@ const computeDetectedChanges = (baseline: SnapshotRow[], current: SnapshotRow[])
       continue;
     }
 
-    const remarksChanged = String(base.remarks || "") !== String(cur.remarks || "");
-    const otherChanged =
-      base.section_code !== cur.section_code ||
-      base.faculty_name !== cur.faculty_name ||
-      base.enrollment_cap !== cur.enrollment_cap ||
-      !slotEq(base.slot1, cur.slot1) ||
-      !slotEq(base.slot2, cur.slot2);
-
-    if (!remarksChanged && !otherChanged) continue;
-
     const details: ChangeField[] = [];
-    if (remarksChanged) {
-      details.push({
-        field: "Remarks",
-        from: (base.remarks || "—").toString() || "—",
-        to: (cur.remarks || "—").toString() || "—",
-      });
-    }
+    const push = (field: string, from: string, to: string) => {
+      if (String(from) === String(to)) return;
+      details.push({ field, from: from || "—", to: to || "—" });
+    };
 
+    // Electives: course_code can change even when section_id stays the same.
+    push("Course", txt(base.course_code), txt(cur.course_code));
+    push("Section", txt(base.section_code), txt(cur.section_code));
+    push("Faculty", txt(base.faculty_name || "UNASSIGNED"), txt(cur.faculty_name || "UNASSIGNED"));
+    push("Capacity", capTxt(base.enrollment_cap), capTxt(cur.enrollment_cap));
+
+    if (!slotEq(base.slot1, cur.slot1)) push("Schedule 1", slotToText(base.slot1), slotToText(cur.slot1));
+    if (!slotEq(base.slot2, cur.slot2)) push("Schedule 2", slotToText(base.slot2), slotToText(cur.slot2));
+
+    push("Remarks", txt(base.remarks), txt(cur.remarks));
+
+    if (!details.length) continue;
+
+    const otherChanged = details.some((d) => d.field !== "Remarks");
     edited.push({ key: k, label: snapshotLabel(cur), details, otherChanged });
   }
 
@@ -908,6 +918,7 @@ export default function CourseOfferingsPage() {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
   const [conflict, setConflict] = useState<ConflictState | null>(null);
+  const [conflictBusy, setConflictBusy] = useState(false);
   const [globalElectives, setGlobalElectives] = useState<CourseOption[]>([]);
   const [electiveOptionsCache, setElectiveOptionsCache] = useState<Record<string, CourseOption[]>>({});
 // ---------- RoomSelectBox (SelectBox-powered) ----------
@@ -1653,7 +1664,7 @@ const loadOfferings = async () => {
     description?: string;
     confirmText?: string;
     cancelText?: string;
-    variant?: "default" | "danger";
+    variant?: "default" | "danger" | "warning";
     content?: React.ReactNode;
     onConfirm: () => Promise<void>;
   }) => {
@@ -1664,7 +1675,7 @@ const loadOfferings = async () => {
       description: opts.description,
       confirmText: opts.confirmText || "Confirm",
       cancelText: opts.cancelText || "Cancel",
-      variant: opts.variant || "default",
+      variant: (opts.variant === "danger" ? "danger" : "default"),
       content: opts.content,
       busy: false,
     });
@@ -1698,7 +1709,8 @@ const loadOfferings = async () => {
     // Fetch unfiltered offerings to avoid missing changes that are hidden by filters.
     const resp: any = await getApoCourseOfferings(user.userId, { view: "offerings" } as any);
     const rr = (resp?.rows || []) as OfferingRow[];
-    return rr.map(toSnapshotRow);
+    const snap = rr.map(toSnapshotRow).filter((x): x is SnapshotRow => !!x);
+    return snap;
   };
 
   const persistBaselineSnapshot = async () => {
@@ -1723,7 +1735,8 @@ const loadOfferings = async () => {
     setSubmitPrep({ loading: true, changes: null, suggestedNote: "", error: null });
     try {
       const stored = safeJsonParse<{ rows: SnapshotRow[] }>(localStorage.getItem(baselineKey), { rows: [] });
-      const baselineRows = Array.isArray(stored?.rows) ? stored.rows : [];
+      const baselineRowsRaw = Array.isArray(stored?.rows) ? stored.rows : [];
+      const baselineRows = baselineRowsRaw.filter((r: any) => r && typeof r.key === "string" && String(r.key).startsWith("sec:"));
       const currentRows = await fetchAllOfferingsSnapshot();
       const changes = computeDetectedChanges(baselineRows, currentRows);
       const suggestedNote = buildSuggestedNote(changes);
@@ -2084,7 +2097,7 @@ const rowToAddPayload = (r: OfferingRow) => {
   const rowIsSpecific = isSpecificElectiveType(r.course.type_of_course || "");
 
   const electiveParentId =
-    r.links?.elective_placeholder_course_id ||
+    (r.links as any)?.elective_placeholder_course_id ||
     (rowIsPlaceholder ? r.course.course_id : undefined);
 
   const payload: any = {
@@ -2131,7 +2144,7 @@ const rowToEditPayload = (r: OfferingRow) => {
   const rowIsSpecific = isSpecificElectiveType(r.course.type_of_course || "");
 
   const electiveParentId =
-    r.links?.elective_placeholder_course_id ||
+    (r.links as any)?.elective_placeholder_course_id ||
     (rowIsPlaceholder ? r.course.course_id : undefined);
 
   const payload: any = {
@@ -2408,7 +2421,7 @@ useEffect(() => {
 
     // Prefer backend-provided parent id; else, if this row is a placeholder, the row's own id is the parent.
     const electiveParentId =
-      row.links?.elective_placeholder_course_id ||
+      (row.links as any)?.elective_placeholder_course_id ||
       (rowIsPlaceholder ? row.course.course_id : undefined);
 
     // NEW: prefetch list for this specific placeholder (if any)
@@ -2672,6 +2685,33 @@ const promptSaveEdit = () => {
     if (String(from) === String(to)) return;
     changes.push({ field, from: from || "—", to: to || "—" });
   };
+
+  // Electives: selecting a specific elective changes the offered course even when the section_id stays the same.
+  const fromCourseId = String(editing.row.course.course_id || "").trim();
+  const toCourseId = String(editing.draft.specific_course_id || "").trim() || fromCourseId;
+
+  const courseCodeById: Record<string, string> = {};
+  Object.values(data?.course_options_by_group || {}).forEach((arr: any) => {
+    (arr || []).forEach((o: any) => {
+      const id = String(o?.course_id || "").trim();
+      if (!id) return;
+      const cc = codeText(o?.course_code);
+      if (cc) courseCodeById[id] = cc;
+    });
+  });
+  (data?.all_specific_electives || []).forEach((o: any) => {
+    const id = String(o?.course_id || "").trim();
+    if (!id) return;
+    const cc = codeText(o?.course_code);
+    if (cc) courseCodeById[id] = cc;
+  });
+
+  const codeForId = (id: string) => {
+    const cc = String(courseCodeById[id] || "").trim();
+    return cc || id || "—";
+  };
+
+  push("Course", codeForId(fromCourseId), codeForId(toCourseId));
 
   push("Section", currentCode || "—", nextSectionCode || "—");
 
@@ -3386,9 +3426,7 @@ const promptSaveEdit = () => {
       onClick={exportSelectedSpecialClassPdf}
       disabled={scExporting || scSelectedList.length !== 1}
       className={cls(
-        "inline-flex items-center gap-2 rounded-md border border-emerald-700/30 bg-emerald-50 px-3 py-2 text-sm font-medium text-emerald-800",
-        "hover:bg-emerald-100",
-        (scExporting || scSelectedList.length !== 1) && "opacity-60 cursor-not-allowed"
+        "inline-flex items-center gap-2 rounded-md bg-emerald-700 px-4 py-2 text-sm font-medium text-white shadow-sm"
       )}
       title={
         scSelectedList.length !== 1
@@ -4167,42 +4205,78 @@ const response = await importCurriculumCsv(user.userId, {
                                                 r.course.course_title
                                               );
                                               const isSpecific = isSpecificElectiveType(r.course.type_of_course || "");
-                                              const hasParent = !!(r.links?.elective_placeholder_course_id || (isPlaceholder ? r.course.course_id : ""));
+                                              const hasParent = !!(
+                                                (r.links as any)?.elective_placeholder_course_id ||
+                                                (isPlaceholder ? r.course.course_id : "")
+                                              );
                                               const electiveEditable = isPlaceholder || isSpecific || hasParent;
 
                                               if (!electiveEditable) return null;
 
                                               // Prefer the server list if it exists and has items; else fallback to derived list
-                                              const preferServer =
-                                              Array.isArray(data?.all_specific_electives) && data!.all_specific_electives!.length > 0
-                                                ? data!.all_specific_electives!
-                                                : allSpecificElectives;
 
-                                            const parentId =
-                                              editing?.draft.for_placeholder_course_id ||
-                                              r.links?.elective_placeholder_course_id ||
-                                              (isPlaceholder ? r.course.course_id : "");
+                                              const preferServer: CourseOption[] =
 
-                                            // NEW: prefer per-placeholder cache, else the global list
-                                            const sourceList =
-                                              (parentId && electiveOptionsCache[parentId]) ||
-                                              preferServer;
+                                                Array.isArray(data?.all_specific_electives) && data!.all_specific_electives!.length > 0
 
-                                            const specificList = (sourceList || []).filter((o) =>
-                                              isSpecificElectiveType(o.type_of_course || "")
-                                            );
-                                            const placeholderLabel = "— Select specific elective —";
-                                            const specificOptions = specificList.map((opt) => ({
-                                              id: opt.course_id,
-                                              label: `${codeOf(opt.course_code)} • ${opt.course_title}`,
-                                            }));
+                                                  ? (data!.all_specific_electives as CourseOption[])
 
-                                            const currentSpecificId =
-                                              editing?.draft.specific_course_id || (isSpecific ? r.course.course_id : "");
-                                            const currentLabel =
-                                              currentSpecificId
-                                                ? specificOptions.find((o) => o.id === currentSpecificId)?.label || placeholderLabel
-                                                : placeholderLabel;
+                                                  : allSpecificElectives;
+
+
+                                              const parentIdRaw =
+                                                editing?.draft.for_placeholder_course_id ||
+                                                (r.links as any)?.elective_placeholder_course_id ||
+                                                (isPlaceholder ? r.course.course_id : "");
+
+
+                                              const parentId = String(parentIdRaw || "").trim();
+
+                                              const parentKey = parentId ? parentId : undefined;
+
+
+                                              // Prefer per-placeholder cache, else the global list
+
+                                              const sourceList: CourseOption[] =
+
+                                                parentKey && Array.isArray(electiveOptionsCache[parentKey])
+
+                                                  ? electiveOptionsCache[parentKey]
+
+                                                  : preferServer;
+
+
+                                              const specificList: CourseOption[] = sourceList.filter((o: CourseOption) =>
+
+                                                isSpecificElectiveType(o.type_of_course || "")
+
+                                              );
+
+
+                                              type LabeledOption = { id: string; label: string };
+
+                                              const placeholderLabel = "— Select specific elective —";
+
+                                              const specificOptions: LabeledOption[] = specificList.map((opt: CourseOption) => ({
+
+                                                id: String(opt.course_id),
+
+                                                label: `${codeOf(opt.course_code)} • ${String(opt.course_title ?? "")}`,
+
+                                              }));
+
+
+                                              const currentSpecificId =
+
+                                                editing?.draft.specific_course_id || (isSpecific ? r.course.course_id : "");
+
+                                              const currentLabel =
+
+                                                currentSpecificId
+
+                                                  ? specificOptions.find((o: LabeledOption) => o.id === currentSpecificId)?.label || placeholderLabel
+
+                                                  : placeholderLabel;
 
                                             return (
                                               <div className="mt-2">
@@ -4549,11 +4623,18 @@ const response = await importCurriculumCsv(user.userId, {
                                                       ? data!.all_specific_electives!
                                                       : allSpecificElectives;
 
-                                                  specificElectives =
-                                                    (parentId && electiveOptionsCache[parentId]) ||
-                                                    specificElectives.length
-                                                      ? specificElectives
-                                                      : preferServer.filter((o) => isSpecificElectiveType(o.type_of_course || ""));
+                                                  const cachedSpecific =
+                                                    parentId && Array.isArray(electiveOptionsCache[parentId])
+                                                      ? electiveOptionsCache[parentId]
+                                                      : null;
+
+                                                  if (cachedSpecific && cachedSpecific.length) {
+                                                    specificElectives = cachedSpecific;
+                                                  } else if (!specificElectives.length) {
+                                                    specificElectives = preferServer.filter((o) =>
+                                                      isSpecificElectiveType(o.type_of_course || "")
+                                                    );
+                                                  }
 
 
                                                   const selectedType = codeToType[addCourseCode] || "";
@@ -5408,120 +5489,98 @@ const response = await importCurriculumCsv(user.userId, {
 
       {/* ----------------------------- Conflict Modal ----------------------------- */}
       {conflict && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-          <div className="w-full max-w-2xl rounded-xl bg-white shadow-xl border border-gray-200">
-            <div className="flex items-center gap-2 border-b px-4 py-3">
-              <AlertTriangle className="h-5 w-5 text-amber-600" />
-              <div className="font-semibold">Conflicts detected</div>
+        <ConfirmModal
+          open={!!conflict}
+          title="Planning warnings"
+          description="This change triggers one or more planning checks. You can proceed, or go back and adjust your entry."
+          confirmText="Proceed"
+          cancelText="Go Back"
+          variant="warning"
+          busy={conflictBusy}
+          onClose={() => {
+            if (conflictBusy) return;
+            setConflict(null);
+          }}
+          content={
+            <div className="rounded-lg border border-amber-200 bg-amber-50 p-3">
+              <ul className="list-disc pl-5 text-sm text-amber-900 space-y-1">
+                {conflict.violations.map((v, i) => (
+                  <li key={i}>
+                    <span className="font-medium">{v.code}</span>: {v.message}
+                  </li>
+                ))}
+              </ul>
             </div>
-            <div className="p-4 max-h-[70vh] overflow-auto space-y-3">
-              <div className="text-sm">
-                The system found some issues with your change. You can review the details below and choose to override if
-                appropriate.
-              </div>
-              <div className="rounded border border-amber-200 bg-amber-50 p-3">
-                <ul className="list-disc pl-5 text-sm text-amber-900 space-y-1">
-                  {conflict.violations.map((v, i) => (
-                    <li key={i}>
-                      <span className="font-medium">{v.code}</span>: {v.message}
-                    </li>
-                  ))}
-                </ul>
-              </div>
-              {conflict.preview && (
-                <div>
-                  <div className="text-xs font-semibold text-slate-700 mb-1">Preview of changes</div>
-                  <pre className="text-xs bg-slate-50 border rounded p-2 overflow-auto">
-                    {JSON.stringify(conflict.preview, null, 2)}
-                  </pre>
-                </div>
-              )}
-              <div>
-                <label className="text-xs font-semibold text-slate-700 mb-1 block">Override reason (optional)</label>
-                <input
-                  className="w-full rounded border px-3 py-2 text-sm"
-                  value={conflict.reason}
-                  onChange={(e) => setConflict({ ...conflict, reason: e.target.value })}
-                  placeholder="e.g., Proceed despite planning warnings"
-                />
-              </div>
-            </div>
-            <div className="flex items-center justify-end gap-2 border-t px-4 py-3">
-              <button
-                className="rounded-md border px-3 py-1.5 text-sm"
-                onClick={() => setConflict(null)}
-              >
-                Cancel
-              </button>
-              <button
-                className="rounded-md bg-emerald-700 px-3 py-1.5 text-sm font-medium text-white"
-                onClick={async () => {
-                  if (!conflict || !user?.userId) return;
-                  const ov = {
-                    override: true,
-                    override_token: conflict.token,
-                    override_reason: conflict.reason || "Proceed with override",
-                  } as any;
+          }
+          onConfirm={async () => {
+            if (!conflict || !user?.userId) return;
 
-                  try {
-                    if (conflict.action === "add") {
-                      const basePayload = { ...(conflict.original as any) };
-                      delete (basePayload as any).__undo_before;
-                      delete (basePayload as any).__undo_snapshot;
+            setConflictBusy(true);
+            const ov = {
+              override: true,
+              override_token: conflict.token,
+              override_reason: "Proceed with override",
+            } as any;
 
-                      const resp = await addApoOfferingRow(user.userId, { ...basePayload, ...ov } as any);
-                      if ("conflict" in (resp as any)) {
-                        // If still conflicting, keep the modal open with the latest details
-                        handleConflict("add", (resp as any).conflict, basePayload);
-                        return;
-                      }
+            try {
+              if (conflict.action === "add") {
+                const basePayload = { ...(conflict.original as any) };
+                delete (basePayload as any).__undo_before;
+                delete (basePayload as any).__undo_snapshot;
 
-                      const createdId = (resp as any).section_id as string;
-                      if (createdId) pushSrvOp(makeAddOp(basePayload, createdId));
-                    } else if (conflict.action === "edit") {
-                      const raw = { ...(conflict.original as any) };
-                      const before = (raw as any).__undo_before;
-                      delete (raw as any).__undo_before;
-                      delete (raw as any).__undo_snapshot;
+                const resp = await addApoOfferingRow(user.userId, { ...basePayload, ...ov } as any);
+                if ("conflict" in (resp as any)) {
+                  // Keep the modal open with the latest details
+                  handleConflict("add", (resp as any).conflict, basePayload);
+                  setConflictBusy(false);
+                  return;
+                }
 
-                      const resp = await editApoOfferingRow(user.userId, { ...raw, ...ov } as any);
-                      if ("conflict" in (resp as any)) {
-                        handleConflict("edit", (resp as any).conflict, { ...raw, __undo_before: before });
-                        return;
-                      }
+                const createdId = (resp as any).section_id as string;
+                if (createdId) pushSrvOp(makeAddOp(basePayload, createdId));
+              } else if (conflict.action === "edit") {
+                const raw = { ...(conflict.original as any) };
+                const before = (raw as any).__undo_before;
+                delete (raw as any).__undo_before;
+                delete (raw as any).__undo_snapshot;
 
-                      const sid = String((raw as any).section_id || "");
-                      if (before && sid) {
-                        const afterFull = { ...(before as any), ...(raw as any) };
-                        pushSrvOp(makeEditOp(sid, before, afterFull, `Edit ${sid}`));
-                      }
-                    } else if (conflict.action === "delete") {
-                      const raw = { ...(conflict.original as any) };
-                      const snap = (raw as any).__undo_snapshot;
-                      delete (raw as any).__undo_before;
-                      delete (raw as any).__undo_snapshot;
+                const resp = await editApoOfferingRow(user.userId, { ...raw, ...ov } as any);
+                if ("conflict" in (resp as any)) {
+                  handleConflict("edit", (resp as any).conflict, { ...raw, __undo_before: before });
+                  setConflictBusy(false);
+                  return;
+                }
 
-                      const resp = await deleteApoOfferingRow(user.userId, { ...raw, ...ov } as any);
-                      if ("conflict" in (resp as any)) {
-                        handleConflict("delete", (resp as any).conflict, { ...raw, __undo_snapshot: snap });
-                        return;
-                      }
+                const sid = String((raw as any).section_id || "");
+                if (before && sid) {
+                  const afterFull = { ...(before as any), ...(raw as any) };
+                  pushSrvOp(makeEditOp(sid, before, afterFull, `Edit ${sid}`));
+                }
+              } else if (conflict.action === "delete") {
+                const raw = { ...(conflict.original as any) };
+                const snap = (raw as any).__undo_snapshot;
+                delete (raw as any).__undo_before;
+                delete (raw as any).__undo_snapshot;
 
-                      if (snap) pushSrvOp(makeDeleteOp(snap));
-                    }
+                const resp = await deleteApoOfferingRow(user.userId, { ...raw, ...ov } as any);
+                if ("conflict" in (resp as any)) {
+                  handleConflict("delete", (resp as any).conflict, { ...raw, __undo_snapshot: snap });
+                  setConflictBusy(false);
+                  return;
+                }
 
-                    setConflict(null);
-                    await loadOfferings();
-                  } catch (e: any) {
-                    alert(e?.message || "Failed to apply override.");
-                  }
-                }}
-              >
-                Override &amp; Apply
-              </button>
-            </div>
-          </div>
-        </div>
+                if (snap) pushSrvOp(makeDeleteOp(snap));
+              }
+
+              setConflict(null);
+              await loadOfferings();
+            } catch (e: any) {
+              alert(e?.message || "Failed to proceed.");
+            } finally {
+              setConflictBusy(false);
+            }
+          }}
+        />
       )}
 
       {/* ----------------------------- Forward Modal ----------------------------- */}
@@ -5727,7 +5786,7 @@ const ConfirmModal: React.FC<{
   description?: string;
   confirmText: string;
   cancelText: string;
-  variant?: "default" | "danger";
+  variant?: "default" | "danger" | "warning";
   content?: React.ReactNode;
   busy?: boolean;
   onClose: () => void;
@@ -5746,6 +5805,7 @@ const ConfirmModal: React.FC<{
 }) => {
   if (!open) return null;
   const isDanger = variant === "danger";
+  const isWarning = variant === "warning";
 
   return (
     <div className="fixed inset-0 z-[120] grid place-items-center bg-black/40 p-4">
@@ -5753,7 +5813,7 @@ const ConfirmModal: React.FC<{
         <div
           className={cls(
             "mx-auto mb-4 grid h-16 w-16 place-items-center rounded-full border-2",
-            isDanger ? "border-rose-600 text-rose-700" : "border-emerald-600 text-emerald-700"
+            isDanger ? "border-rose-600 text-rose-700" : isWarning ? "border-amber-600 text-amber-700" : "border-emerald-600 text-emerald-700"
           )}
         >
           <AlertTriangle className="h-8 w-8" strokeWidth={2.5} />
@@ -5780,7 +5840,7 @@ const ConfirmModal: React.FC<{
             disabled={!!busy}
             className={cls(
               "rounded-lg px-4 py-2 text-sm font-medium text-white hover:brightness-110 disabled:opacity-50",
-              isDanger ? "bg-rose-700" : "bg-emerald-700"
+              isDanger ? "bg-rose-700" : isWarning ? "bg-amber-700" : "bg-emerald-700"
             )}
             onClick={onConfirm}
           >
@@ -5894,33 +5954,25 @@ const SubmitModal: React.FC<{
                       {changes.edited.length ? (
                         <ul className="space-y-2">
                           {changes.edited.map((e) => (
-                            <li key={e.key}>
-                              <details className="group rounded-lg border border-slate-200 bg-white">
-                                <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-2 text-sm font-medium text-slate-900">
-                                  <span className="min-w-0 truncate">{e.label}</span>
-                                  <div className="flex items-center gap-2 text-xs text-slate-500">
-                                    <span>Details</span>
-                                    <ChevronDown className="h-4 w-4 transition-transform group-open:rotate-180" />
-                                  </div>
-                                </summary>
-                                <div className="px-3 pb-3 pt-1 text-sm text-slate-700">
-  {e.details.length ? (
-    <ul className="list-disc space-y-1 pl-5">
-      {e.details.map((d, idx) => (
-        <li key={idx}>
-          <span className="font-medium text-slate-800">{d.field}:</span>{' '}
-          <span className="text-slate-600">{d.from}</span>{' '}
-          <span className="text-slate-400">→</span>{' '}
-          <span className="text-slate-900">{d.to}</span>
-        </li>
-      ))}
-    </ul>
-  ) : null}
-  {e.otherChanged ? (
-    <div className="mt-2 text-xs text-slate-500">Other details were updated (faculty/schedule/capacity).</div>
-  ) : null}
-</div>
-                              </details>
+                            <li
+                              key={e.key}
+                              className="rounded-lg border border-slate-200 bg-white px-3 py-2"
+                            >
+                              <div className="text-sm font-medium text-slate-900">{e.label}</div>
+                              {e.details.length ? (
+                                <ul className="mt-1 list-disc space-y-1 pl-5 text-sm text-slate-700">
+                                  {e.details.map((d, idx) => (
+                                    <li key={idx}>
+                                      <span className="font-medium text-slate-800">{d.field}:</span>{" "}
+                                      <span className="text-slate-600">{d.from}</span>{" "}
+                                      <span className="text-slate-400">→</span>{" "}
+                                      <span className="text-slate-900">{d.to}</span>
+                                    </li>
+                                  ))}
+                                </ul>
+                              ) : (
+                                <div className="mt-1 text-xs text-slate-500">Edited</div>
+                              )}
                             </li>
                           ))}
                         </ul>
@@ -5977,7 +6029,7 @@ const SubmitModal: React.FC<{
                   userTouched.current = true;
                   setNote(e.target.value);
                 }}
-                placeholder="Example: Added CS201 A1. Edited CS102 B2 — Remarks: … Deleted GE3 C…"
+                placeholder=" "
               />
             </div>
           </>
@@ -6127,6 +6179,17 @@ const PlanReviewModal: React.FC<{
                 return code || key || "Unknown course";
               };
 
+              const codeForChange = (chAny: any) => {
+                const cc = chAny?.course_code;
+                const fromChange = Array.isArray(cc)
+                  ? String(cc[0] || "").trim()
+                  : typeof cc === "string"
+                  ? cc.trim()
+                  : "";
+                return (fromChange || codeForCourse(chAny?.course_id)).trim();
+              };
+
+
                 const TypeBadge = ({ text }: { text: string }) => (
                   <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] font-semibold text-emerald-700">
                     {text}
@@ -6143,7 +6206,7 @@ const PlanReviewModal: React.FC<{
                     title = "Add course to curriculum";
                     badge = "Add";
                     details = [
-                      { k: "Course code", v: codeForCourse(ch.course_id) },
+                      { k: "Course code", v: codeForChange(ch) },
                       { k: "Enlisted", v: ch.count ?? "—" },
                       ...(ch.target ? [{ k: "Target", v: String(ch.target) }] : []),
                     ];
@@ -6153,7 +6216,7 @@ const PlanReviewModal: React.FC<{
                     title = "Increase sections";
                     badge = "Increase";
                     details = [
-                      { k: "Course code", v: codeForCourse(ch.course_id) },
+                      { k: "Course code", v: codeForChange(ch) },
                       { k: "Sections +", v: typeof ch.by_sections === "number" ? ch.by_sections : "—" },
                     ];
                     break;
@@ -6162,7 +6225,7 @@ const PlanReviewModal: React.FC<{
                     title = "Reduce sections";
                     badge = "Reduce";
                     details = [
-                      { k: "Course code", v: codeForCourse(ch.course_id) },
+                      { k: "Course code", v: codeForChange(ch) },
                       { k: "Sections −", v: typeof ch.by_sections === "number" ? ch.by_sections : "—" },
                     ];
                     break;
@@ -6367,16 +6430,16 @@ const GlobalCourseEditModal: React.FC<GlobalCourseEditModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-      <div className="w-full max-w-4xl rounded-xl bg-white shadow-xl border border-gray-200">
-        <div className="flex items-center justify-between border-b px-4 py-3">
-          <div className="font-semibold">Edit Global Course</div>
-          <button className="rounded-md border px-3 py-1.5 text-sm" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/40 p-4 sm:p-6 overflow-y-auto">
+      <div className="w-full max-w-4xl rounded-2xl bg-white shadow-xl border border-gray-200 my-8 overflow-hidden flex flex-col">
+        <div className="flex items-center justify-between border-b px-6 py-4">
+          <div className="font-semibold">Edit Course</div>
+          <button className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50" onClick={onClose}>
             Close
           </button>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 p-4">
+        <div className="flex-1 overflow-y-auto grid grid-cols-1 md:grid-cols-2 gap-4 p-6">
           {/* LEFT: search & pick a course */}
           <div className="rounded-lg border">
             <div className="px-3 py-2 bg-gray-50 font-semibold text-sm">Search course</div>
@@ -6510,8 +6573,8 @@ const GlobalCourseEditModal: React.FC<GlobalCourseEditModalProps> = ({
           </div>
         </div>
 
-        <div className="flex items-center justify-end gap-2 border-t px-4 py-3">
-          <button className="rounded-md border px-3 py-1.5 text-sm" onClick={onClose}>
+        <div className="flex items-center justify-end gap-2 border-t px-6 py-4 bg-white">
+          <button className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50" onClick={onClose}>
             Cancel
           </button>
           <button
@@ -6691,18 +6754,18 @@ const noMatches = query.trim().length >= 2 && list.length === 0;
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-      <div className="w-full max-w-5xl rounded-xl bg-white shadow-xl border border-gray-200">
-        <div className="flex items-center justify-between border-b px-4 py-3">
+    <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/40 p-4 sm:p-6 overflow-y-auto">
+      <div className="w-full max-w-5xl rounded-2xl bg-white shadow-xl border border-gray-200 my-8 overflow-hidden flex flex-col">
+        <div className="flex items-center justify-between border-b px-6 py-4">
           <div className="font-semibold">
             Edit Courses to Take — {programCode} • {base.batch_code || "ID"}
           </div>
-          <button className="rounded-md border px-3 py-1.5 text-sm" onClick={onClose}>
+          <button className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50" onClick={onClose}>
             Close
           </button>
         </div>
 
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 p-4">
+        <div className="flex-1 overflow-y-auto grid grid-cols-1 lg:grid-cols-2 gap-4 p-6">
           {/* Current courses */}
           <div className="rounded-lg border">
             <div className="px-3 py-2 bg-gray-50 font-semibold">Current courses</div>
@@ -6790,8 +6853,8 @@ const noMatches = query.trim().length >= 2 && list.length === 0;
           </div>
         </div>
 
-        <div className="flex items-center justify-end gap-2 border-t px-4 py-3">
-          <button className="rounded-md border px-3 py-1.5 text-sm" onClick={onClose}>
+        <div className="flex items-center justify-end gap-2 border-t px-6 py-4 bg-white">
+          <button className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50" onClick={onClose}>
             Cancel
           </button>
           <button
@@ -6886,16 +6949,16 @@ const CreateCourseModal: React.FC<{
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-      <div className="w-full max-w-2xl rounded-xl bg-white shadow-xl border border-gray-200">
-        <div className="flex items-center justify-between border-b px-4 py-3">
-          <div className="font-semibold">Add Course (Global Catalog)</div>
-          <button className="rounded-md border px-3 py-1.5 text-sm" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/40 p-4 sm:p-6 overflow-y-auto">
+      <div className="w-full max-w-2xl rounded-2xl bg-white shadow-xl border border-gray-200 my-8 overflow-hidden flex flex-col">
+        <div className="flex items-center justify-between border-b px-6 py-4">
+          <div className="font-semibold">Add Course</div>
+          <button className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50" onClick={onClose}>
             Close
           </button>
         </div>
 
-        <div className="p-4 grid grid-cols-1 md:grid-cols-2 gap-3">
+        <div className="flex-1 overflow-y-auto p-6 grid grid-cols-1 md:grid-cols-2 gap-3">
           {/* Department (SelectBox) */}
           <div className="md:col-span-1">
             <label className="text-xs font-medium text-slate-700 mb-1 block">Department</label>
@@ -7010,8 +7073,8 @@ const CreateCourseModal: React.FC<{
           </div>
         </div>
 
-        <div className="flex items-center justify-end gap-2 border-t px-4 py-3">
-          <button className="rounded-md border px-3 py-1.5 text-sm" onClick={onClose}>
+        <div className="flex items-center justify-end gap-2 border-t px-6 py-4 bg-white">
+          <button className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50" onClick={onClose}>
             Cancel
           </button>
           <button

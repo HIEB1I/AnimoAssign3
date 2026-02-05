@@ -18,6 +18,7 @@ import {
   type ArchiveMetaItem,
   campusFromRoles,
   reactivateApoPreenlistment,
+  searchCourseCatalog,
 } from "../../api";
 
 const PREEN_TERM_KEY_PREFIX = "apo.preenTermId.";
@@ -60,6 +61,184 @@ function MiniFieldInput({
         type={type}
         className="w-full bg-transparent outline-none text-sm px-1"
       />
+    </div>
+  );
+}
+
+// NEW: Course Code combobox (type or select), powered by catalog search
+function careerToProgramLevel(career: string | undefined) {
+  // Backend expects UGS/GSM program_level; Pre-enlistment uses UGB/GSM.
+  if (!career) return undefined;
+  if (career === "UGB") return "UGS";
+  if (career === "GSM") return "GSM";
+  return undefined;
+}
+
+function MiniCourseCodeCombobox({
+  userId,
+  value,
+  onChange,
+  career,
+  placeholder = "Course Code",
+  className = "",
+}: {
+  userId?: string;
+  value: string;
+  onChange: (v: string) => void;
+  career?: string;
+  placeholder?: string;
+  className?: string;
+}) {
+  // If userId is missing (not logged in), fall back to simple input.
+  const [open, setOpen] = React.useState(false);
+  const [loading, setLoading] = React.useState(false);
+  const [options, setOptions] = React.useState<
+    Array<{ course_id: string; course_code: string; course_title: string }>
+  >([]);
+
+  const rootRef = React.useRef<HTMLDivElement | null>(null);
+  const lastQueryRef = React.useRef<string>("");
+  const timerRef = React.useRef<number | null>(null);
+
+  const normValue = (value || "").toUpperCase();
+
+  // Close only when clicking outside (so scrolling/clicking inside the dropdown won't collapse it)
+  React.useEffect(() => {
+    function onDocMouseDown(e: MouseEvent) {
+      const el = rootRef.current;
+      if (!el) return;
+      if (!el.contains(e.target as Node)) setOpen(false);
+    }
+    function onEsc(e: KeyboardEvent) {
+      if (e.key === "Escape") setOpen(false);
+    }
+    document.addEventListener("mousedown", onDocMouseDown);
+    document.addEventListener("keydown", onEsc);
+    return () => {
+      document.removeEventListener("mousedown", onDocMouseDown);
+      document.removeEventListener("keydown", onEsc);
+    };
+  }, []);
+
+  React.useEffect(() => {
+    if (!open) return;
+    if (!userId) return;
+
+    const q = normValue.trim();
+    // keep it light
+    if (q.length < 2) {
+      setOptions([]);
+      setLoading(false);
+      return;
+    }
+
+    if (timerRef.current) window.clearTimeout(timerRef.current);
+    timerRef.current = window.setTimeout(async () => {
+      const queryKey = `${q}__${career || ""}`;
+      lastQueryRef.current = queryKey;
+      setLoading(true);
+
+      try {
+        const res = await searchCourseCatalog(userId, {
+          q,
+          limit: 20,
+          program_level: careerToProgramLevel(career),
+        });
+
+        // api.ts returns { ok, results }
+        const list = (res as any)?.results || [];
+
+        // discard stale responses
+        if (lastQueryRef.current !== queryKey) return;
+
+        setOptions(
+          (Array.isArray(list) ? list : []).map((c: any) => ({
+            course_id: String(c.course_id || ""),
+            course_code: String(c.course_code || ""),
+            course_title: String(c.course_title || ""),
+          }))
+        );
+      } catch {
+        if (lastQueryRef.current !== `${q}__${career || ""}`) return;
+        setOptions([]);
+      } finally {
+        if (lastQueryRef.current === `${q}__${career || ""}`) setLoading(false);
+      }
+    }, 250);
+
+    return () => {
+      if (timerRef.current) window.clearTimeout(timerRef.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, normValue, userId, career]);
+
+  const renderCode = (cc: any) => {
+    if (Array.isArray(cc)) return String(cc[0] || "").toUpperCase();
+    return String(cc || "").toUpperCase();
+  };
+
+  if (!userId) {
+    return (
+      <MiniFieldInput
+        value={normValue}
+        onChange={(v: string) => onChange(v.toUpperCase())}
+        placeholder={placeholder}
+        className={className}
+      />
+    );
+  }
+
+  return (
+    <div ref={rootRef} className={`relative ${className}`}>
+      <div className={miniBase}>
+        <input
+          value={normValue}
+          onChange={(e) => {
+            onChange(e.target.value.toUpperCase());
+            setOpen(true);
+          }}
+          onFocus={() => setOpen(true)}
+          placeholder={placeholder}
+          className="w-full bg-transparent outline-none text-sm px-1"
+        />
+      </div>
+
+      {open && (loading || options.length > 0) && (
+        <div
+          className="absolute left-0 top-[calc(100%+6px)] z-50 w-full min-w-[260px]
+                     rounded-xl border-2 border-emerald-200 bg-white shadow-lg"
+        >
+          {loading && (
+            <div className="px-3 py-2 text-xs text-neutral-500">Searching…</div>
+          )}
+
+          {!loading && options.length === 0 && (
+            <div className="px-3 py-2 text-xs text-neutral-500">
+              No matches. You can still type and save (backend will validate).
+            </div>
+          )}
+
+          {!loading && options.length > 0 && (
+            <div className="max-h-64 overflow-y-auto overflow-x-hidden">
+              {options.map((c) => (
+                <button
+                  key={c.course_id}
+                  type="button"
+                  onMouseDown={(e) => e.preventDefault()} // keep focus stable
+                  onClick={() => {
+                    onChange(renderCode(c.course_code));
+                    setOpen(false);
+                  }}
+                  className="w-full px-3 py-2 text-left hover:bg-emerald-50"
+                >
+                  <div className="text-sm font-medium">{renderCode(c.course_code)}</div>
+                  <div className="text-xs text-neutral-500 truncate">{c.course_title}</div>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -1130,6 +1309,97 @@ const [archiveCountTotal, setArchiveCountTotal] = useState(0);
                     </tr>
                   </thead>
                   <tbody className="text-gray-700">
+                    {addingRow && (
+                      <tr className="bg-emerald-50/60 border-t">
+                        {/* No. */}
+                        <td className="py-2 px-2">—</td>
+
+                        {/* Code — required */}
+                        <td className="py-2 px-2">
+                          <MiniFieldInput
+                            value={newCode}
+                            onChange={(v) => setNewCode(v)}
+                            placeholder="Code"
+                            className="w-[90px]"
+                          />
+                        </td>
+
+                        {/* Career — compact select with matching style */}
+                        <td className="py-2 px-2">
+                          <MiniSelectMenu
+                            value={newCareer}
+                            onChange={(v) => setNewCareer((v as "UGB" | "GSM") || "UGB")}
+                            options={["UGB", "GSM"]}
+                            className="w-[110px]"
+                          />
+                        </td>
+
+                        {/* Acad Group — fixed pill */}
+                        <td className="py-2 px-2">
+                          <span className="inline-flex items-center rounded-full border border-neutral-300 bg-white px-2 py-0.5 text-xs text-neutral-700">
+                            CCS
+                          </span>
+                        </td>
+
+                        {/* Campus — fixed pill */}
+                        <td className="py-2 px-2">
+                          <span className="inline-flex items-center rounded-full border border-neutral-300 bg-white px-2 py-0.5 text-xs text-neutral-700">
+                            {activeMeta?.campus_label || (campusName === "MANILA" ? "Manila" : "Laguna")}
+                          </span>
+                        </td>
+
+                        {/* Course Code — compact input, no chevron */}
+                        <td className="py-2 px-2">
+                          <MiniCourseCodeCombobox
+                            userId={user?.userId}
+                            value={newCourseCode}
+                            onChange={(v: string) => setNewCourseCode(v.toUpperCase())}
+                            career={newCareer}
+                            placeholder="Course Code"
+                            className="w-[150px]"
+                          />
+                        </td>
+
+                        {/* Count — compact input, no chevron */}
+                        <td className="py-2 px-2">
+                          <MiniFieldInput
+                            value={newCount}
+                            onChange={(v) => setNewCount(v.replace(/[^\d]/g, ""))}
+                            placeholder="0"
+                            type="number"
+                            className="w-[80px]"
+                          />
+                        </td>
+
+                        {/* Actions — exact styles you provided */}
+                        <td className="py-2 px-2 text-center">
+                          <div className="flex items-center justify-center gap-2">
+                            <button
+                              onClick={saveNewCourseRow}
+                              className="flex h-8 w-8 items-center justify-center rounded-full border-2 border-green-600 text-green-600 hover:bg-green-50"
+                              title="Save"
+                            >
+                              <Check className="h-4 w-4" strokeWidth={2.5} />
+                            </button>
+                            <button
+                              onClick={() => {
+                                setAddingRow(false);
+                                setNewCode("");
+                                setNewCourseCode("");
+                                setNewCount("0");
+                                setNewCareer("UGB");
+                              }}
+                              className="flex h-8 w-8 items-center justify-center rounded-full border-2 border-red-600 text-red-600 hover:bg-red-50"
+                              title="Cancel"
+                            >
+                              <X className="h-4 w-4" strokeWidth={2.5} />
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                    
+
                     {enlistedCourses.map((row, i) => (
                       <tr key={i} className="border-b last:border-0 hover:bg-gray-50">
                         <td className="py-2 px-2">{i + 1}</td>
@@ -1177,93 +1447,6 @@ const [archiveCountTotal, setArchiveCountTotal] = useState(0);
                       </tr>
                     ))}
 
-                    {addingRow && (
-                      <tr className="bg-emerald-50/60 border-t">
-                        {/* No. */}
-                        <td className="py-2 px-2">—</td>
-
-                        {/* Code — required */}
-                        <td className="py-2 px-2">
-                          <MiniFieldInput
-                            value={newCode}
-                            onChange={(v) => setNewCode(v)}
-                            placeholder="Code"
-                            className="w-[90px]"
-                          />
-                        </td>
-
-                        {/* Career — compact select with matching style */}
-                        <td className="py-2 px-2">
-                          <MiniSelectMenu
-                            value={newCareer}
-                            onChange={(v) => setNewCareer((v as "UGB" | "GSM") || "UGB")}
-                            options={["UGB", "GSM"]}
-                            className="w-[110px]"
-                          />
-                        </td>
-
-                        {/* Acad Group — fixed pill */}
-                        <td className="py-2 px-2">
-                          <span className="inline-flex items-center rounded-full border border-neutral-300 bg-white px-2 py-0.5 text-xs text-neutral-700">
-                            CCS
-                          </span>
-                        </td>
-
-                        {/* Campus — fixed pill */}
-                        <td className="py-2 px-2">
-                          <span className="inline-flex items-center rounded-full border border-neutral-300 bg-white px-2 py-0.5 text-xs text-neutral-700">
-                            {activeMeta?.campus_label || (campusName === "MANILA" ? "Manila" : "Laguna")}
-                          </span>
-                        </td>
-
-                        {/* Course Code — compact input, no chevron */}
-                        <td className="py-2 px-2">
-                          <MiniFieldInput
-                            value={newCourseCode}
-                            onChange={(v) => setNewCourseCode(v.toUpperCase())}
-                            placeholder="Course Code"
-                            className="w-[150px]"
-                          />
-                        </td>
-
-                        {/* Count — compact input, no chevron */}
-                        <td className="py-2 px-2">
-                          <MiniFieldInput
-                            value={newCount}
-                            onChange={(v) => setNewCount(v.replace(/[^\d]/g, ""))}
-                            placeholder="0"
-                            type="number"
-                            className="w-[80px]"
-                          />
-                        </td>
-
-                        {/* Actions — exact styles you provided */}
-                        <td className="py-2 px-2 text-center">
-                          <div className="flex items-center justify-center gap-2">
-                            <button
-                              onClick={saveNewCourseRow}
-                              className="flex h-8 w-8 items-center justify-center rounded-full border-2 border-green-600 text-green-600 hover:bg-green-50"
-                              title="Save"
-                            >
-                              <Check className="h-4 w-4" strokeWidth={2.5} />
-                            </button>
-                            <button
-                              onClick={() => {
-                                setAddingRow(false);
-                                setNewCode("");
-                                setNewCourseCode("");
-                                setNewCount("0");
-                                setNewCareer("UGB");
-                              }}
-                              className="flex h-8 w-8 items-center justify-center rounded-full border-2 border-red-600 text-red-600 hover:bg-red-50"
-                              title="Cancel"
-                            >
-                              <X className="h-4 w-4" strokeWidth={2.5} />
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    )}
                     {enlistedCourses.length === 0 && !addingRow && (
                       <tr>
                         <td colSpan={8} className="py-8 text-center text-gray-500">
