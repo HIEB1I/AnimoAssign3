@@ -4,6 +4,7 @@ import AppShell from "../../base/AppShell";
 import { runOmAutoAssign } from "../../api.ts";
 import {
   submitOmLoadAssignment,
+  importOmShsCsv,
   notifyChairLoadRecommendation,
   sendOmLoadAssignmentsToFaculty,
   getOmLoadAssignmentRfc,
@@ -1943,6 +1944,22 @@ export default function OM_LoadAssignment() {
   // In-app toast (styled to match Faculty pages)
   const { toast, show: showToast, clear: clearToast } = useToast();
 
+  // Session (same pattern as APO: localStorage["animo.user"])
+  const session = useMemo(() => {
+    try {
+      const raw = localStorage.getItem("animo.user");
+      return raw ? (JSON.parse(raw) as any) : null;
+    } catch {
+      return null;
+    }
+  }, []);
+
+  const userId =
+    (session as any)?.userId ||
+    (session as any)?.user_id ||
+    (session as any)?.id ||
+    "";
+
   // Import SHS file
   const shsFileInputRef = useRef<HTMLInputElement>(null);
   const [shsFile, setShsFile] = useState<File | null>(null);
@@ -1956,25 +1973,28 @@ export default function OM_LoadAssignment() {
     if (!file) return;
     setShsFile(file);
 
-    // NOTE: Hook your actual import/parse logic here.
-    // Keeping this non-blocking so the UI change compiles cleanly.
-    console.log("Selected SHS file:", file);
+    (async () => {
+      try {
+        if (!userId) throw new Error("Missing user session.");
+        const text = await file.text();
+        const res = await importOmShsCsv(userId, text);
+        await loadFromServer();
+        showToast(
+          `Imported ${res.imported ?? 0} row(s) from SHS CSV.`,
+          "success"
+        );
+      } catch (err: any) {
+        const msg =
+          typeof err?.message === "string"
+            ? err.message
+            : "Failed to import SHS CSV.";
+        showToast(msg, "error");
+      }
+    })();
 
     // allow selecting the same file again
     e.target.value = "";
   };
-
-  // Session (same pattern as APO: localStorage["animo.user"])
-  const session = useMemo(() => {
-    try {
-      const raw = localStorage.getItem("animo.user");
-      return raw ? (JSON.parse(raw) as any) : null;
-    } catch {
-      return null;
-    }
-  }, []);
-
-  const userId = (session as any)?.userId || (session as any)?.user_id || (session as any)?.id || "";
 
   const [isAssigning, setIsAssigning] = useState(false);
 

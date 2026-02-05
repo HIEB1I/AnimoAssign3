@@ -12,6 +12,9 @@ from datetime import datetime, time
 from functools import lru_cache
 from motor.motor_asyncio import AsyncIOMotorClient
 from collections import defaultdict
+import csv
+import io
+import uuid
 
 from ..main import db
 
@@ -555,6 +558,129 @@ def _looks_like_room_id(v: str | None) -> bool:
     s = (v or "").strip().upper()
     return s.startswith("ROOM")
 
+
+def _parse_time_str(v: Any) -> str:
+    """Best-effort normalize time to HH:MM (24h). Leaves unknown formats untouched."""
+    s = str(v or "").strip()
+    if not s:
+        return ""
+
+    # common inputs: "08:00", "8:00", "8:00 AM", "8:00AM"
+    for fmt in ("%H:%M", "%H:%M:%S", "%I:%M %p", "%I:%M%p", "%I %p", "%I%p"):
+        try:
+            dt = datetime.strptime(s.upper().replace(" ", "" if "%p" in fmt and "% " not in fmt else " "), fmt)
+            return dt.strftime("%H:%M")
+        except Exception:
+            continue
+
+    # if it's already a short numeric like 800 or 0800
+    digits = re.sub(r"\D", "", s)
+    if len(digits) in (3, 4) and digits.isdigit():
+        try:
+            hh = int(digits[:-2])
+            mm = int(digits[-2:])
+            if 0 <= hh <= 23 and 0 <= mm <= 59:
+                return f"{hh:02d}:{mm:02d}"
+        except Exception:
+            pass
+
+    return s
+
+
+def _norm_header(h: str) -> str:
+    return re.sub(r"\s+", " ", str(h or "").strip()).lower()
+
+
+async def _next_seq_id(db, collection: str, field: str, prefix: str, width: int = 4, attempts: int = 50) -> str:
+    """Return next ID like 'SEC0001' / 'CRS0001'."""
+    last = await db[collection].find_one(
+        {field: {"$regex": rf"^{re.escape(prefix)}\d+$"}},
+        sort=[(field, -1)],
+    )
+    n = 0
+    if last and isinstance(last.get(field), str):
+        m = re.match(rf"^{re.escape(prefix)}(\d+)$", last[field])
+        if m:
+            n = int(m.group(1))
+    for _ in range(attempts):
+        n += 1
+        cand = f"{prefix}{n:0{width}d}"
+        exists = await db[collection].find_one({field: cand}, {"_id": 1})
+        if not exists:
+            return cand
+    # last resort: random
+    return f"{prefix}{uuid.uuid4().hex[:width].upper()}"
+
+
+def _sch_id_from_sec(section_id: str, slot: int = 1) -> str:
+    m = re.match(r"^SEC(\d+)$", (section_id or "").strip().upper())
+    if m:
+        return f"SCH{int(m.group(1)):04d}-{int(slot):02d}"
+    return f"SCH-{section_id}-{int(slot)}"
+
+
+def _asg_id_from_sec(section_id: str) -> str:
+    m = re.match(r"^SEC(\d+)$", (section_id or "").strip().upper())
+    if m:
+        return f"ASG{int(m.group(1)):04d}"
+    return f"ASG{uuid.uuid4().hex[:10].upper()}"
+
+
+async def _resolve_room_id(db, room_value: str) -> str | None:
+    v = (room_value or "").strip()
+    if not v:
+        return None
+    if _looks_like_room_id(v):
+        return v
+    # try match by room_number
+    doc = await db[COL_ROOMS].find_one(
+        {"room_number": {"$regex": rf"^{re.escape(v)}$", "$options": "i"}},
+        {"_id": 0, "room_id": 1},
+    )
+    return (doc or {}).get("room_id")
+
+
+async def _find_or_create_course_from_csv(db, course_code: str, course_title: str, units: Any) -> str:
+    """Return course_id. Creates a minimal SHS course if not found."""
+    cc = (course_code or "").strip()
+    if not cc:
+        # stable but unique
+        cc = f"SHS-{uuid.uuid4().hex[:6].upper()}"
+
+    # courses.course_code can be string or array
+    q = {
+        "$or": [
+            {"course_code": {"$regex": rf"^{re.escape(cc)}$", "$options": "i"}},
+            {"course_code": [cc]},
+            {"course_code": {"$elemMatch": {"$regex": rf"^{re.escape(cc)}$", "$options": "i"}}},
+        ]
+    }
+    existing = await db[COL_COURSES].find_one(q, {"_id": 0, "course_id": 1})
+    if existing and existing.get("course_id"):
+        return str(existing["course_id"])
+
+    cid = await _next_seq_id(db, COL_COURSES, "course_id", "CRS", 4)
+    # best-effort units
+    try:
+        u = float(units) if units not in (None, "") else 0.0
+        u = int(u) if float(u).is_integer() else u
+    except Exception:
+        u = units
+
+    await db[COL_COURSES].insert_one(
+        {
+            "course_id": cid,
+            "course_code": cc,
+            "course_title": (course_title or "").strip(),
+            "units": u,
+            "type_of_course": "SHS",
+            "type": "SHS",
+            "created_at": datetime.utcnow(),
+            "updated_at": datetime.utcnow(),
+        }
+    )
+    return cid
+
 def _preferred_cap_for(ctx, fid: str) -> int:
     pref = (getattr(ctx, "prefs_by_faculty", {}) or {}).get(fid, {}) or {}
     return int(pref.get("preferred_units") or pref.get("load_units") or 12)
@@ -706,17 +832,13 @@ async def _fetch_rows(user_id: str, term_id: str, db) -> Dict[str, Any]:
             "status": "Pending" if (d.get("asg") or {}).get("faculty_id") else "Unassigned",
         }
 
-        # If there is **no faculty assigned**, wipe schedule + mode so row is truly empty.
+        # If there is **no faculty assigned**, keep schedule/capacity/mode intact so OM can
+        # assign a faculty based on the offering details coming from APO/import.
+        # Only clear faculty display fields and keep status as "Unassigned".
         fid_str = (row.get("faculty_id") or "").strip()
         if not fid_str:
             row["faculty"] = ""
             row["status"] = "Unassigned"
-            for k in (
-                "day1", "begin1", "end1", "room1",
-                "day2", "begin2", "end2", "room2",
-                "mode", "room_type",
-            ):
-                row[k] = ""
 
         rows_by_sid[sid] = row
 
@@ -1152,6 +1274,259 @@ async def loadassignment_handler(
             "term": _term_label(active),
             "kind": kind,
             "reco_id": reco_id,
+        }
+
+    if action == "import_shs":
+        """Import SHS CSV into sections/section_schedules/faculty_assignments and expose rows in OM table.
+
+        Payload shape:
+          { csv: "..." }
+        The CSV must include columns:
+          Course Code & Title, Units, Section,
+          Day 1, Begin 1, End 1, Room 1,
+          Day 2, Begin 2, End 2, Room 2,
+          Capacity, Mode
+        """
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="Invalid payload; expected { csv: \"...\" }")
+
+        csv_text = payload.get("csv") or payload.get("content") or payload.get("text")
+        if not isinstance(csv_text, str) or not csv_text.strip():
+            raise HTTPException(status_code=400, detail="Missing csv content.")
+
+        active = await _active_term()
+        if not active:
+            raise HTTPException(409, "No upcoming term found (is_current anchor missing?)")
+
+        term_id = active.get("term_id")
+        ts = datetime.utcnow()
+
+        # Best-effort campus_id from staff profile (optional)
+        staff = await db[COL_STAFF].find_one({"user_id": userId}, {"_id": 0, "campus_id": 1}) or {}
+        campus_id = (staff.get("campus_id") or "").strip()
+
+        # Parse CSV
+        reader = csv.DictReader(io.StringIO(csv_text))
+        if not reader.fieldnames:
+            raise HTTPException(status_code=400, detail="CSV has no headers.")
+
+        # Build a flexible header map
+        hmap = { _norm_header(h): h for h in (reader.fieldnames or []) }
+
+        def col(*names: str) -> str | None:
+            for n in names:
+                k = _norm_header(n)
+                if k in hmap:
+                    return hmap[k]
+            return None
+
+        c_course = col("Course Code & Title", "Course", "Course Code", "Course Code and Title")
+        c_units = col("Units", "Unit")
+        c_section = col("Section")
+        c_day1 = col("Day 1", "Day1")
+        c_begin1 = col("Begin 1", "Start 1", "Begin1")
+        c_end1 = col("End 1", "End1")
+        c_room1 = col("Room 1", "Room1")
+        c_day2 = col("Day 2", "Day2")
+        c_begin2 = col("Begin 2", "Start 2", "Begin2")
+        c_end2 = col("End 2", "End2")
+        c_room2 = col("Room 2", "Room2")
+        c_cap = col("Capacity", "Cap")
+        c_mode = col("Mode")
+
+        missing = [
+            n for n, c in [
+                ("Course Code & Title", c_course),
+                ("Units", c_units),
+                ("Section", c_section),
+                ("Day 1", c_day1),
+                ("Begin 1", c_begin1),
+                ("End 1", c_end1),
+                ("Room 1", c_room1),
+                ("Day 2", c_day2),
+                ("Begin 2", c_begin2),
+                ("End 2", c_end2),
+                ("Room 2", c_room2),
+                ("Capacity", c_cap),
+                ("Mode", c_mode),
+            ] if not c
+        ]
+        if missing:
+            raise HTTPException(status_code=422, detail=f"Missing required columns: {', '.join(missing)}")
+
+        imported = 0
+        created_courses = 0
+        created_sections = 0
+
+        async def ensure_course(course_code: str, title: str, units_val: Any) -> str:
+            nonlocal created_courses
+            cc = (course_code or "").strip()
+            if not cc:
+                raise HTTPException(status_code=422, detail="Course code is required.")
+
+            q = {
+                "$or": [
+                    {"course_code": cc},
+                    {"course_code": {"$in": [cc]}},
+                    {"course_code": {"$elemMatch": {"$regex": rf"^{re.escape(cc)}$", "$options": "i"}}},
+                ]
+            }
+            doc = await db[COL_COURSES].find_one(q, {"_id": 0, "course_id": 1})
+            if doc and doc.get("course_id"):
+                return str(doc["course_id"]).strip()
+
+            cid = await _next_seq_id(db, COL_COURSES, "course_id", "CRS", 4)
+            try:
+                units = float(str(units_val or "").strip()) if str(units_val or "").strip() else 0.0
+            except Exception:
+                units = 0.0
+
+            await db[COL_COURSES].insert_one({
+                "course_id": cid,
+                "course_code": cc,
+                "course_title": (title or "").strip(),
+                "units": units,
+                "type_of_course": "SHS",
+                "type": "SHS",
+                "created_at": ts,
+                "updated_at": ts,
+            })
+            created_courses += 1
+            return cid
+
+        for raw in reader:
+            if not isinstance(raw, dict):
+                continue
+
+            # Parse course code + title
+            cct = str(raw.get(c_course) or "").strip()
+            if not cct:
+                continue
+            # allow formats: "CODE - Title" | "CODE: Title" | "CODE Title"
+            course_code = ""
+            course_title = ""
+            if " - " in cct:
+                course_code, course_title = cct.split(" - ", 1)
+            elif ":" in cct:
+                course_code, course_title = cct.split(":", 1)
+            else:
+                parts = cct.split()
+                course_code = parts[0] if parts else cct
+                course_title = " ".join(parts[1:])
+
+            units_val = raw.get(c_units)
+            section_code = str(raw.get(c_section) or "").strip()
+            if not section_code:
+                continue
+
+            # capacity
+            try:
+                cap = int(float(str(raw.get(c_cap) or "").strip()))
+            except Exception:
+                cap = 0
+
+            mode = str(raw.get(c_mode) or "").strip().upper()
+
+            course_id = await ensure_course(course_code, course_title, units_val)
+
+            # Create a new section_id. If the same section_code+course exists for term, upsert instead.
+            existing_sec = await db[COL_SECTIONS].find_one(
+                {"term_id": term_id, "course_id": course_id, "section_code": section_code},
+                {"_id": 0, "section_id": 1},
+            )
+            if existing_sec and existing_sec.get("section_id"):
+                section_id = str(existing_sec["section_id"]).strip()
+            else:
+                section_id = await _next_seq_id(db, COL_SECTIONS, "section_id", "SEC", 4)
+                created_sections += 1
+
+            sec_doc = {
+                "section_id": section_id,
+                "term_id": term_id,
+                "campus_id": campus_id,
+                "course_id": course_id,
+                "section_code": section_code,
+                "enrollment_cap": cap,
+                "mode": mode,
+                "status": "active",
+                "submitted_for_scheduling": True,
+                "submitted_at": ts,
+                "submitted_by": userId,
+                "updated_at": ts,
+            }
+
+            await db[COL_SECTIONS].update_one(
+                {"section_id": section_id},
+                {"$set": sec_doc, "$setOnInsert": {"created_at": ts}},
+                upsert=True,
+            )
+
+            # Mirror into submitted snapshot so it shows immediately on OM list
+            snap_doc = dict(sec_doc)
+            snap_doc["snapshot_at"] = ts
+            await db[COL_SECTIONS_SUBMITTED].update_one(
+                {"term_id": term_id, "campus_id": campus_id, "section_id": section_id},
+                {"$set": snap_doc, "$setOnInsert": {"created_at": ts}},
+                upsert=True,
+            )
+
+            # Schedules (two slots)
+            for slot, (cd, cb, ce, cr) in enumerate(
+                [
+                    (raw.get(c_day1), raw.get(c_begin1), raw.get(c_end1), raw.get(c_room1)),
+                    (raw.get(c_day2), raw.get(c_begin2), raw.get(c_end2), raw.get(c_room2)),
+                ],
+                start=1,
+            ):
+                day = str(cd or "").strip()
+                begin = _parse_time_str(cb)
+                end = _parse_time_str(ce)
+                room_val = str(cr or "").strip()
+                room_id = await _resolve_room_id(db, room_val) if room_val else None
+
+                sched_id = _sch_id_from_sec(section_id, slot)
+                await db[COL_SCHED].update_one(
+                    {"section_id": section_id, "schedule_id": sched_id},
+                    {
+                        "$set": {
+                            "schedule_id": sched_id,
+                            "section_id": section_id,
+                            "day": day or None,
+                            "start_time": begin or None,
+                            "end_time": end or None,
+                            "room_id": room_id,
+                            "updated_at": ts,
+                        },
+                        "$setOnInsert": {"created_at": ts},
+                    },
+                    upsert=True,
+                )
+
+            # Placeholder faculty assignment if none exists
+            existing_asg = await db[COL_ASSIGN].find_one(
+                {"section_id": section_id, "is_archived": {"$ne": True}},
+                {"_id": 0, "assignment_id": 1},
+            )
+            if not existing_asg:
+                await db[COL_ASSIGN].insert_one({
+                    "assignment_id": _asg_id_from_sec(section_id),
+                    "section_id": section_id,
+                    "faculty_id": "",
+                    "user_id": "",
+                    "is_archived": False,
+                    "created_at": ts,
+                    "updated_at": ts,
+                })
+
+            imported += 1
+
+        return {
+            "ok": True,
+            "imported": imported,
+            "created_courses": created_courses,
+            "created_sections": created_sections,
+            "term": _term_label(active),
+            "term_id": term_id,
         }
 
 
