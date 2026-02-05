@@ -3971,6 +3971,8 @@ const response = await importCurriculumCsv(user.userId, {
                     {Object.entries(byProgram).map(([progLabel, list]) => {
                       const key = `${idLabel}::${progLabel}`;
                       const isCollapsed = !!collapsedGroups[key];
+                      const geEditing =
+                        !!editing && isGEType(editing.row?.course?.type_of_course || "");
                       return (
                         <div key={key} className="border-t border-gray-200">
                           <button
@@ -3989,6 +3991,12 @@ const response = await importCurriculumCsv(user.userId, {
                           {!isCollapsed && (
                             <div className="p-0">
                             <div className="overflow-x-auto relative" style={{ overflowY: "visible" }}>
+                              {/*
+                                NOTE (GE editing): Begin columns must be wider because GE uses a single
+                                TimeBandInput (e.g. "07:30 - 09:00") in the Begin column.
+                                With table-fixed + narrow <col> widths, the input will visually overlap
+                                adjacent cells.
+                              */}
                               <table className="w-full text-sm border-collapse table-fixed">
                                   <colgroup>
                                     <col style={{ width: 96 }} />   {/* Program No. */}
@@ -3996,11 +4004,11 @@ const response = await importCurriculumCsv(user.userId, {
                                     <col style={{ width: 90 }} />   {/* Section */}
                                     <col style={{ width: 180 }} />  {/* Faculty */}
                                     <col style={{ width: 95 }} />   {/* Day 1 */}
-                                    <col style={{ width: 70 }} />   {/* Begin 1 */}
+                                    <col style={{ width: geEditing ? 170 : 70 }} />   {/* Begin 1 */}
                                     <col style={{ width: 70 }} />   {/* End 1 */}
                                     <col style={{ width: 120 }} />  {/* Room 1 */}
                                     <col style={{ width: 95 }} />   {/* Day 2 */}
-                                    <col style={{ width: 70 }} />   {/* Begin 2 */}
+                                    <col style={{ width: geEditing ? 170 : 70 }} />   {/* Begin 2 */}
                                     <col style={{ width: 70 }} />   {/* End 2 */}
                                     <col style={{ width: 120 }} />  {/* Room 2 */}
                                     <col style={{ width: 80 }} />   {/* Capacity */}
