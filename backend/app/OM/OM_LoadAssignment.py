@@ -6301,7 +6301,7 @@ async def _persist_rows_no_auto(term_id: str, rows: list[dict], db):
 
     # NEW: seed for auto-created section_ids, e.g. SEC0042, SEC0043, ...
     next_section_seq = _next_section_seq_from_ctx(ctx)
-    print("[SAVE] next_section_seq initial:", next_section_seq)
+    # next_section_seq computed from existing sections
 
     new_sections: set[str] = set()
 
@@ -6434,100 +6434,131 @@ async def _persist_rows_no_auto(term_id: str, rows: list[dict], db):
             section_to_course[sid] = cid
 
 
-        # --- 0) Keep sections.mode in sync with the row's mode (if present) ---
-        row_mode = str(r.get("mode") or "").strip().upper()
+        # --- 0) Keep section mode/campus in sync with the row (if present) ---
+        # IMPORTANT:
+        # The OM grid is primarily sourced from `sections_submitted` via _fetch_rows().
+        # If we only update `sections`, the Mode column can appear blank after a refresh/send.
+        # Therefore, we update BOTH collections.
+        row_mode = str(r.get("mode") or r.get("Mode") or "").strip().upper()
         if row_mode:
-            result = await db[COL_SECTIONS].update_one(
+            await db[COL_SECTIONS].update_one(
                 {"section_id": sid},
-                {"$set": {"mode": row_mode}},
+                {"$set": {"mode": row_mode, "updated_at": _utcnow()}},
                 upsert=False,
             )
-            print(
-                f"[SAVE] sections.update sid={sid!r} mode={row_mode!r} "
-                f"matched={result.matched_count} modified={result.modified_count}"
+
+            # Best-effort: ensure the submitted snapshot reflects the same mode.
+            # Use upsert so newly created sections (via SAVE) also become visible in the OM list.
+            now = _utcnow()
+            await db[COL_SECTIONS_SUBMITTED].update_one(
+                {"term_id": term_id, "section_id": sid},
+                {
+                    "$set": {"mode": row_mode, "updated_at": now, "snapshot_at": now},
+                    "$setOnInsert": {
+                        "term_id": term_id,
+                        "section_id": sid,
+                        "course_id": cid,
+                        "section_code": (r.get("section") or "").strip(),
+                        "created_at": now,
+                    },
+                },
+                upsert=True,
             )
 
         campus_id = (r.get("campus_id") or "").strip()
         if campus_id:
+            now = _utcnow()
             await db[COL_SECTIONS].update_one(
                 {"section_id": sid},
-                {"$set": {"campus_id": campus_id}},
+                {"$set": {"campus_id": campus_id, "updated_at": now}},
                 upsert=False,
             )
-
-        # ---------- 1) faculty_assignments upsert (only if faculty explicitly set) ----------
-        if fid:
-            existing = await db[COL_ASSIGN].find_one(
-                {"section_id": sid},
-                {"_id": 0, "assignment_id": 1, "load_id": 1, "status": 1},
+            await db[COL_SECTIONS_SUBMITTED].update_one(
+                {"term_id": term_id, "section_id": sid},
+                {"$set": {"campus_id": campus_id, "updated_at": now, "snapshot_at": now}},
+                upsert=True,
             )
 
-            incoming_status = str(r.get("status") or "").strip()
-            existing_status = str((existing or {}).get("status") or "").strip()
-            terminal = {"Approved", "Confirmed"}
+        # ---------- 1) faculty_assignments upsert (persist drafts even if faculty is blank) ----------
+        # We intentionally persist partial/blank inputs so drafts survive logout/login.
+        # Safeguard: do not accidentally clear terminal assignments.
+        fid_raw = (r.get("faculty_id") or "").strip()
+        existing = await db[COL_ASSIGN].find_one(
+            {"section_id": sid},
+            {"_id": 0, "assignment_id": 1, "load_id": 1, "status": 1},
+        ) or {}
 
-            # Auto-status rule: once OM has set faculty (even before sending), treat as Pending
-            # unless a more specific/terminal status already exists.
+        incoming_status = str(r.get("status") or "").strip()
+        existing_status = str(existing.get("status") or "").strip()
+        terminal = {"Approved", "Confirmed"}
+
+        should_update_assignment = not (existing_status in terminal and not fid_raw and not incoming_status)
+        if should_update_assignment:
             if incoming_status:
                 next_status = incoming_status
-            elif existing_status in terminal:
+            elif existing_status:
                 next_status = existing_status
             else:
                 next_status = "Pending"
 
             set_fields: dict[str, Any] = {
                 "section_id": sid,
-                "faculty_id": fid,
+                "faculty_id": fid_raw,  # may be ""
                 "status": next_status,
-                "created_at": _utcnow(),
                 "is_archived": False,
+                "updated_at": _utcnow(),
             }
-            if existing:
-                if existing.get("assignment_id"):
-                    set_fields["assignment_id"] = existing["assignment_id"]
-                if existing.get("load_id"):
-                    set_fields["load_id"] = existing["load_id"]
+            if existing.get("assignment_id"):
+                set_fields["assignment_id"] = existing["assignment_id"]
+            if existing.get("load_id"):
+                set_fields["load_id"] = existing["load_id"]
 
-            result = await db[COL_ASSIGN].update_one(
+            await db[COL_ASSIGN].update_one(
                 {"section_id": sid},
-                {"$set": set_fields},
+                {"$set": set_fields, "$setOnInsert": {"created_at": _utcnow()}},
                 upsert=True,
             )
-            print(
-                f"[SAVE] faculty_assignments.upsert sid={sid!r} fid={fid!r} "
-                f"matched={result.matched_count} upserted_id={result.upserted_id}"
-            )
 
-                # ---------- 2) section_schedules upsert / create ----------
+        # ---------- 2) section_schedules upsert / create (persist partial/blank inputs) ----------
         if not cid:
             # should not happen now, but guard anyway
-            print(f"[SAVE] skip schedules; missing cid for sid={sid!r}")
             continue
 
-        # pull proposed times from the row (already normalized in UI/run)
         pairs = [("day1", "begin1", "end1", 1), ("day2", "begin2", "end2", 2)]
         for dkey, bkey, ekey, ordn in pairs:
             day = (r.get(dkey) or "").strip().upper()
-            begin_hhmm = _norm_hhmm(r.get(bkey))
-            end_hhmm = _norm_hhmm(r.get(ekey))
-            if not day or not begin_hhmm or not end_hhmm:
-                continue
+            begin_hhmm = _norm_hhmm(r.get(bkey)) or ""
+            end_hhmm = _norm_hhmm(r.get(ekey)) or ""
 
-            # duplicate-slot check only if we actually know the faculty
-            if fid and _dup(fid, day, begin_hhmm, end_hhmm):
-                print(
-                    f"[SAVE] skip duplicate slot for fid={fid!r} "
-                    f"{day} {begin_hhmm}-{end_hhmm}"
-                )
+            # duplicate-slot check only when we have a complete slot
+            if fid_raw and day and begin_hhmm and end_hhmm and _dup(fid_raw, day, begin_hhmm, end_hhmm):
                 continue
 
             schedule_id = _sched_id(sid, ordn)
-            is_new_section = sid in new_sections
 
-            if is_new_section:
-                # NEW SECTIONS (add-new-line): create schedule docs with default room fields
+            def _compact_or_empty(hhmm: str) -> str:
+                return _to_compact_hhmm(hhmm) if hhmm else ""
+
+            # Try updating an existing schedule doc first (preserves room fields).
+            result = await db[COL_SCHED].update_one(
+                {"schedule_id": schedule_id},
+                {
+                    "$set": {
+                        "term_id": term_id,
+                        "section_id": sid,
+                        "day": day,
+                        "start_time": _compact_or_empty(begin_hhmm),
+                        "end_time": _compact_or_empty(end_hhmm),
+                        "updated_at": r.get("updated_at") or _utcnow(),
+                    }
+                },
+                upsert=False,
+            )
+
+            if result.matched_count == 0:
+                # No existing schedule doc; create one with safe defaults.
                 now = _utcnow()
-                result = await db[COL_SCHED].update_one(
+                await db[COL_SCHED].update_one(
                     {"schedule_id": schedule_id},
                     {
                         "$setOnInsert": {
@@ -6540,39 +6571,16 @@ async def _persist_rows_no_auto(term_id: str, rows: list[dict], db):
                         "$set": {
                             "term_id": term_id,
                             "day": day,
-                            "start_time": _to_compact_hhmm(begin_hhmm),
-                            "end_time": _to_compact_hhmm(end_hhmm),
+                            "start_time": _compact_or_empty(begin_hhmm),
+                            "end_time": _compact_or_empty(end_hhmm),
                             "updated_at": r.get("updated_at") or now,
                         },
                     },
                     upsert=True,
                 )
-                print(
-                    f"[SAVE] NEW section_schedules.upsert schedule_id={schedule_id!r} "
-                    f"matched={result.matched_count} upserted_id={result.upserted_id}"
-                )
-            else:
-                # EXISTING SECTIONS: only update existing docs, do NOT touch room fields, do NOT create
-                result = await db[COL_SCHED].update_one(
-                    {"schedule_id": schedule_id},
-                    {
-                        "$set": {
-                            "term_id": term_id,
-                            "section_id": sid,
-                            "day": day,
-                            "start_time": _to_compact_hhmm(begin_hhmm),
-                            "end_time": _to_compact_hhmm(end_hhmm),
-                            "updated_at": r.get("updated_at") or _utcnow(),
-                        }
-                    },
-                    upsert=False,
-                )
-                print(
-                    f"[SAVE] EXISTING section_schedules.update schedule_id={schedule_id!r} "
-                    f"matched={result.matched_count} modified={result.modified_count}"
-                )
 
-            _add_used(fid, day, begin_hhmm, end_hhmm)
+            if fid_raw and day and begin_hhmm and end_hhmm:
+                _add_used(fid_raw, day, begin_hhmm, end_hhmm)
 
 async def _upsert_faculty_load_header(
     term: dict,

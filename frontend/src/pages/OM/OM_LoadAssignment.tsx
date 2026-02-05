@@ -213,6 +213,16 @@ function normalizeTimeToHHMM(input: string): string {
   return d;
 }
 
+/**
+ * The backend can return times as "HH:MM" (or compact "HMM") while the OM UI stores
+ * dropdown values as 4-digit "HHMM". Normalize inbound server values so SelectBox values
+ * still match TIME_*_OPTIONS after refresh/save/send.
+ */
+function normalizeServerTimeToHHMM(input: any): string {
+  if (input === null || input === undefined) return "";
+  return normalizeTimeToHHMM(String(input));
+}
+
 function TimeBeginInput({
   value,
   onChange,
@@ -1102,6 +1112,51 @@ const TIME_END_OPTIONS = [
   { value: "2100", label: "21:00" },
 ];
 
+/**
+ * Display helper:
+ * - If the value exists in the provided option list (string or {value,label}), show its label.
+ * - Otherwise, fall back to a normalized HH:MM display for raw values like "1130" or "11:30".
+ */
+function displayTimeFromOptions(
+  value: string | null | undefined,
+  options: SelectOption[]
+): string {
+  if (!value) return "";
+
+  const raw = String(value).trim();
+  const match = options.find((o) =>
+    typeof o === "string" ? o === raw : o.value === raw
+  );
+  if (match) return typeof match === "string" ? match : match.label;
+
+  // Normalize common raw formats to HH:MM for display.
+  // Accept "HMM", "HHMM", "H:MM", "HH:MM".
+  const digits = raw.replace(/[^0-9]/g, "");
+  if (digits.length === 3) {
+    const hh = "0" + digits.slice(0, 1);
+    const mm = digits.slice(1);
+    return `${hh}:${mm}`;
+  }
+  if (digits.length === 4) {
+    const hh = digits.slice(0, 2);
+    const mm = digits.slice(2);
+    return `${hh}:${mm}`;
+  }
+
+  return raw;
+}
+
+/**
+ * "Begin" options may be labeled as a time band (e.g., "07:30 - 09:00").
+ * In confirmation/previews we want to show only the start time.
+ */
+function displayBeginTimeOnly(value: string | null | undefined): string {
+  const label = displayTimeFromOptions(value, TIME_BEGIN_OPTIONS);
+  if (!label) return "";
+  const [start] = label.split("-");
+  return (start || label).trim();
+}
+
 // --- NEW UTILITY FUNCTION FOR AUTO-FILL ---
 /**
  * Calculates the standard end time (90 minutes later) for a given start time in "HHMM" format.
@@ -1309,12 +1364,12 @@ const SendModal = ({
                         </td>
                         <td className="px-4 py-3 align-middle">{r.section || "—"}</td>
                         <td className="px-4 py-3 align-middle">{r.day1 || "—"}</td>
-                        <td className="px-4 py-3 align-middle">{r.begin1 || "—"}</td>
-                        <td className="px-4 py-3 align-middle">{r.end1 || "—"}</td>
+                        <td className="px-4 py-3 align-middle">{displayBeginTimeOnly(r.begin1) || "—"}</td>
+                        <td className="px-4 py-3 align-middle">{displayTimeFromOptions(r.end1, TIME_END_OPTIONS) || "—"}</td>
                         <td className="px-4 py-3 align-middle">{r.room1 || "—"}</td>
                         <td className="px-4 py-3 align-middle">{r.day2 || "—"}</td>
-                        <td className="px-4 py-3 align-middle">{r.begin2 || "—"}</td>
-                        <td className="px-4 py-3 align-middle">{r.end2 || "—"}</td>
+                        <td className="px-4 py-3 align-middle">{displayBeginTimeOnly(r.begin2) || "—"}</td>
+                        <td className="px-4 py-3 align-middle">{displayTimeFromOptions(r.end2, TIME_END_OPTIONS) || "—"}</td>
                         <td className="px-4 py-3 align-middle">{r.room2 || "—"}</td>
                         <td className="px-4 py-3 align-middle text-gray-800">
                           {r.mode || (r as any).room_type || "—"}
@@ -2501,7 +2556,14 @@ export default function OM_LoadAssignment() {
     });
 
     // 2️⃣ Persist the FULL OM table so refresh doesn't revert changes
-    await submitOmLoadAssignment(userId, { rows }, "save");
+    // IMPORTANT: normalize faculty_id for *all* rows before saving.
+    // The backend groups/updates rows by faculty_id; if OM selected a faculty by name only,
+    // saving without faculty_id can cause fields (including Mode) to be treated as blank on reload.
+    const normalizedAllRows: Row[] = rows.map((r) => {
+      const fid = (r.faculty_id || "").trim() || (facultyNameToId[r.faculty] || "");
+      return fid ? ({ ...r, faculty_id: fid } as Row) : r;
+    });
+    await submitOmLoadAssignment(userId, { rows: normalizedAllRows }, "save");
 
     // 3️⃣ Reset UI + reload from DB
     setShowSend(false);
@@ -2555,7 +2617,21 @@ export default function OM_LoadAssignment() {
         : []
     );
 
-    setRows(Array.isArray(res?.rows) ? res.rows : []);
+    // Normalize time values coming from the server (often "HH:MM" or "HMM")
+    // to 4-digit "HHMM" so SelectBox values still match TIME_*_OPTIONS.
+    const serverRows: Row[] = Array.isArray(res?.rows) ? (res.rows as any) : [];
+    const normalizedRows: Row[] = serverRows.map((r: any) => ({
+      // NOTE: some backends/serializers can attach non-enumerable properties.
+      // Spreading would drop them; explicitly copy `mode` so the Mode column
+      // remains populated after refresh/send.
+      ...r,
+      mode: (r as any)?.mode ?? (r as any)?.Mode ?? "",
+      begin1: normalizeServerTimeToHHMM(r?.begin1),
+      end1: normalizeServerTimeToHHMM(r?.end1),
+      begin2: normalizeServerTimeToHHMM(r?.begin2),
+      end2: normalizeServerTimeToHHMM(r?.end2),
+    }));
+    setRows(normalizedRows);
     const nextTermId = typeof (res as any)?.term_id === "string" ? (res as any).term_id : "";
     setTerm(typeof res?.term === "string" ? res.term : "");
     setTermId(nextTermId);
@@ -3879,7 +3955,7 @@ useEffect(() => {
                                   className="w-[120px] text-center"
                                 />
                               ) : (
-                                <span>{r.begin1 || "—"}</span>
+                                <span>{displayTimeFromOptions(r.begin1, TIME_BEGIN_OPTIONS) || "—"}</span>
                               )}
                             </td>
 
@@ -3892,7 +3968,7 @@ useEffect(() => {
                                   className="w-[70px] text-center"
                                 />
                               ) : (
-                                <span>{r.end1 || "—"}</span>
+                                <span>{displayTimeFromOptions(r.end1, TIME_END_OPTIONS) || "—"}</span>
                               )}
                             </td>
 
@@ -3938,7 +4014,7 @@ useEffect(() => {
                                   className="w-[120px] text-center"
                                 />
                               ) : (
-                                <span>{r.begin2 || "—"}</span>
+                                <span>{displayTimeFromOptions(r.begin2, TIME_BEGIN_OPTIONS) || "—"}</span>
                               )}
                             </td>
 
@@ -3951,7 +4027,7 @@ useEffect(() => {
                                   className="w-[70px] text-center"
                                 />
                               ) : (
-                                <span>{r.end2 || "—"}</span>
+                                <span>{displayTimeFromOptions(r.end2, TIME_END_OPTIONS) || "—"}</span>
                               )}
                             </td>
 
