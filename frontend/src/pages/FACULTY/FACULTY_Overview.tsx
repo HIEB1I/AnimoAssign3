@@ -544,18 +544,36 @@ type TeachingLoadEnhancedProps = {
 };
 
 
-// --- *** MODIFIED: Headers for the new list view *** ---
+// --- *** MODIFIED: Headers for the list view (match OM confirmation modal; plus Syllabus) *** ---
 const LIST_HEADERS = [
-  "Course Code",
-  // "Course Title", // Removed
+  "Course Code & Title",
   "Section",
-  "Units",
-  // "Mode", // Removed
-  "Day1 / Day2",
-  "Room1 / Room2",
-  "Time1 / Time2",
+  "Day 1",
+  "Begin 1",
+  "End 1",
+  "Room 1",
+  "Day 2",
+  "Begin 2",
+  "End 2",
+  "Room 2",
+  "Mode",
   "Syllabus",
 ];
+
+function splitBeginEnd(time?: string): { begin: string; end: string } {
+  const raw = (time || "").trim();
+  if (!raw || raw.toUpperCase() === "TBA") return { begin: "—", end: "—" };
+
+  // Accept a few common separators: en dash, em dash, hyphen
+  const parts = raw
+    .split(/\s*(?:–|—|-)\s*/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  if (parts.length >= 2) return { begin: parts[0], end: parts[1] };
+  // If only one time is present, keep it as begin and leave end blank.
+  return { begin: parts[0] || "—", end: "—" };
+}
 
 function TeachingLoadEnhanced({ teachingLoad, term, workflow, onToast, onRefresh }: TeachingLoadEnhancedProps) {
   const [view, setView] = useState<"Calendar" | "List">("Calendar");
@@ -789,74 +807,90 @@ const scheduleFinalLabel = (() => {
         ) : (
            // --- *** MODIFIED: New List View *** ---
           <div className="space-y-6">
-            <div className="overflow-x-auto rounded-xl border border-neutral-200">
-              <table className="min-w-full">
-                <thead>
-                  <tr className="text-xs text-neutral-500">
-                    {LIST_HEADERS.map((h) => (
-                      <th key={h} className="px-4 py-2 font-medium text-center">
-                        {h}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {teachingLoad.length === 0 ? (
-                    <tr>
-                      <td
-                        colSpan={LIST_HEADERS.length}
-                        className="px-4 py-6 text-center text-sm text-neutral-500"
-                      >
-                        No records.
-                      </td>
+            <div className="overflow-x-auto">
+              <div className="rounded-xl border border-gray-200 overflow-hidden bg-white">
+                <table className="w-full table-fixed text-[13px]">
+                  <colgroup>
+                    <col className="w-[240px]" />
+                    <col className="w-[92px]" />
+                    <col className="w-[82px]" />
+                    <col className="w-[92px]" />
+                    <col className="w-[92px]" />
+                    <col className="w-[110px]" />
+                    <col className="w-[82px]" />
+                    <col className="w-[92px]" />
+                    <col className="w-[92px]" />
+                    <col className="w-[110px]" />
+                    <col className="w-[96px]" />
+                    <col className="w-[76px]" />
+                  </colgroup>
+                  <thead className="bg-gray-50 text-gray-700">
+                    <tr className="[&>th]:border-b [&>th]:border-gray-200">
+                      {LIST_HEADERS.map((h) => (
+                        <th key={h} className="px-4 py-3 text-left font-semibold">
+                          {h}
+                        </th>
+                      ))}
                     </tr>
-                  ) : (
-                    teachingLoad.map((it, idx) => (
-                      <tr
-                      key={idx}
-                      className={cls(
-                        "text-sm text-neutral-800",
-                        idx % 2 === 0 ? "bg-white" : "bg-neutral-50"
-                      )}
-                    >
-                      <td className="px-4 py-2 text-center">{it.course_code}</td>
-                      {/* <td className="px-4 py-2 text-center">{it.course_title}</td> // Removed */}
-                      <td className="px-4 py-2 text-center">{it.section}</td>
-                      <td className="px-4 py-2 text-center">{it.units}</td>
-                      {/* <td className="px-4 py-2 text-center">{it.mode}</td> // Removed */}
-                      <td className="px-4 py-2 text-center">
-                        {it.day1 && it.day1 !== "TBA" ? it.day1 : '—'}
-                        {it.day2 && it.day2 !== "TBA" && ` / ${it.day2}`}
-                      </td>
-                      <td className="px-4 py-2 text-center">
-                         {it.room1 || '—'}
-                        {it.room2 && ` / ${it.room2}`}
-                      </td>
-                      <td className="px-4 py-2 text-center">
-                        {it.time1 && it.time1 !== "TBA" ? it.time1 : '—'}
-                        {it.time2 && it.time2 !== "TBA" && ` / ${it.time2}`}
-                      </td>
-                      <td className="px-4 py-2 text-center">
-                        <button
-                          type="button"
-                          onClick={() => openSyllabus(it)}
-                          className={cls(
-                            "inline-flex items-center justify-center rounded-md border px-2 py-1 text-xs",
-                            "border-emerald-200 bg-emerald-50 hover:bg-emerald-100 active:translate-y-[0.5px]",
-                            // --- *** FIX 3: Allow clicking even if no syllabus *** ---
-                            !it.syllabus && "opacity-60" 
-                          )}
-                          title={it.syllabus ? "View syllabus" : "No syllabus uploaded"}
-                          aria-label="View syllabus"
-                        >
-                          <SyllabusIcon className="h-4 w-4" />
-                        </button>
-                      </td>
-                    </tr>
-                    ))
-                  )}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody className="text-gray-900">
+                    {teachingLoad.length === 0 ? (
+                      <tr>
+                        <td colSpan={LIST_HEADERS.length} className="px-4 py-6 text-center text-sm text-neutral-500">
+                          No records.
+                        </td>
+                      </tr>
+                    ) : (
+                      teachingLoad.map((it, idx) => {
+                        const t1 = splitBeginEnd(it.time1);
+                        const t2 = splitBeginEnd(it.time2);
+                        const d1 = it.day1 && it.day1 !== "TBA" ? it.day1 : "—";
+                        const d2 = it.day2 && it.day2 !== "TBA" ? it.day2 : "—";
+
+                        return (
+                          <tr
+                            key={idx}
+                            className={cls("bg-white", "[&>td]:border-t [&>td]:border-gray-100")}
+                          >
+                            <td className="px-4 py-3 align-middle">
+                              <div className="leading-tight">
+                                <div className="font-semibold text-gray-900">{it.course_code || "—"}</div>
+                                <div className="mt-0.5 text-[12px] text-gray-600">{it.course_title || "—"}</div>
+                              </div>
+                            </td>
+                            <td className="px-4 py-3 align-middle">{it.section || "—"}</td>
+                            <td className="px-4 py-3 align-middle">{d1}</td>
+                            <td className="px-4 py-3 align-middle">{t1.begin}</td>
+                            <td className="px-4 py-3 align-middle">{t1.end}</td>
+                            <td className="px-4 py-3 align-middle">{it.room1 || "—"}</td>
+                            <td className="px-4 py-3 align-middle">{d2}</td>
+                            <td className="px-4 py-3 align-middle">{t2.begin}</td>
+                            <td className="px-4 py-3 align-middle">{t2.end}</td>
+                            <td className="px-4 py-3 align-middle">{it.room2 || "—"}</td>
+                            <td className="px-4 py-3 align-middle text-gray-800">{it.mode || "—"}</td>
+                            <td className="px-4 py-3 align-middle">
+                              <button
+                                type="button"
+                                onClick={() => openSyllabus(it)}
+                                className={cls(
+                                  "inline-flex items-center justify-center rounded-md border px-2 py-1 text-xs",
+                                  "border-emerald-200 bg-emerald-50 hover:bg-emerald-100 active:translate-y-[0.5px]",
+                                  // allow clicking even if no syllabus
+                                  !it.syllabus && "opacity-60"
+                                )}
+                                title={it.syllabus ? "View syllabus" : "No syllabus uploaded"}
+                                aria-label="View syllabus"
+                              >
+                                <SyllabusIcon className="h-4 w-4" />
+                              </button>
+                            </td>
+                          </tr>
+                        );
+                      })
+                    )}
+                  </tbody>
+                </table>
+              </div>
             </div>
           </div>
         )}

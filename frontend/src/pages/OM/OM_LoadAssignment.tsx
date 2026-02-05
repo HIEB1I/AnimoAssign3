@@ -4,6 +4,7 @@ import AppShell from "../../base/AppShell";
 import { runOmAutoAssign } from "../../api.ts";
 import {
   submitOmLoadAssignment,
+  importOmShsCsv,
   notifyChairLoadRecommendation,
   sendOmLoadAssignmentsToFaculty,
   getOmLoadAssignmentRfc,
@@ -210,6 +211,16 @@ function normalizeTimeToHHMM(input: string): string {
   if (hh < 0 || hh > 23) return "";
   if (mm < 0 || mm > 59) return "";
   return d;
+}
+
+/**
+ * The backend can return times as "HH:MM" (or compact "HMM") while the OM UI stores
+ * dropdown values as 4-digit "HHMM". Normalize inbound server values so SelectBox values
+ * still match TIME_*_OPTIONS after refresh/save/send.
+ */
+function normalizeServerTimeToHHMM(input: any): string {
+  if (input === null || input === undefined) return "";
+  return normalizeTimeToHHMM(String(input));
 }
 
 function TimeBeginInput({
@@ -1063,19 +1074,7 @@ function validateAllRows(rows: Row[], ctx: ValidationContext): RowFlagsById {
   return flags;
 }
 
-const toPrettyTime = (t?: string) => {
-  if (!t) return "";
-  const s = t.trim();
-  if (!/^\d{3,4}$/.test(s)) return t;
-  const hh = s.length === 3 ? s.slice(0, 1) : s.slice(0, 2);
-  const mm = s.slice(-2);
-  return `${parseInt(hh, 10)}:${mm}`;
-};
-const timeRange = (begin?: string, end?: string) => {
-  const b = toPrettyTime(begin);
-  const e = toPrettyTime(end);
-  return b && e ? `${b}–${e}` : b || e || "—";
-};
+
 
 const DAY_OPTIONS = [
   { value: "M", label: "Monday" },
@@ -1101,17 +1100,62 @@ const TIME_BEGIN_OPTIONS = [
 ];
 
 const TIME_END_OPTIONS = [
-  // Same menu labels as TIME_BEGIN_OPTIONS (full band label),
-  // while the selected value remains HHMM.
-  { value: "0900", label: "07:30 - 09:00" },
-  { value: "1045", label: "09:15 - 10:45" },
-  { value: "1230", label: "11:00 - 12:30" },
-  { value: "1415", label: "12:45 - 14:15" },
-  { value: "1600", label: "14:30 - 16:00" },
-  { value: "1745", label: "16:15 - 17:45" },
-  { value: "1930", label: "18:00 - 19:30" },
-  { value: "2100", label: "19:45 - 21:00" },
+  // End-time dropdown should show only the end time (not the full band).
+  // Stored/selected value remains HHMM.
+  { value: "0900", label: "09:00" },
+  { value: "1045", label: "10:45" },
+  { value: "1230", label: "12:30" },
+  { value: "1415", label: "14:15" },
+  { value: "1600", label: "16:00" },
+  { value: "1745", label: "17:45" },
+  { value: "1930", label: "19:30" },
+  { value: "2100", label: "21:00" },
 ];
+
+/**
+ * Display helper:
+ * - If the value exists in the provided option list (string or {value,label}), show its label.
+ * - Otherwise, fall back to a normalized HH:MM display for raw values like "1130" or "11:30".
+ */
+function displayTimeFromOptions(
+  value: string | null | undefined,
+  options: SelectOption[]
+): string {
+  if (!value) return "";
+
+  const raw = String(value).trim();
+  const match = options.find((o) =>
+    typeof o === "string" ? o === raw : o.value === raw
+  );
+  if (match) return typeof match === "string" ? match : match.label;
+
+  // Normalize common raw formats to HH:MM for display.
+  // Accept "HMM", "HHMM", "H:MM", "HH:MM".
+  const digits = raw.replace(/[^0-9]/g, "");
+  if (digits.length === 3) {
+    const hh = "0" + digits.slice(0, 1);
+    const mm = digits.slice(1);
+    return `${hh}:${mm}`;
+  }
+  if (digits.length === 4) {
+    const hh = digits.slice(0, 2);
+    const mm = digits.slice(2);
+    return `${hh}:${mm}`;
+  }
+
+  return raw;
+}
+
+/**
+ * "Begin" options may be labeled as a time band (e.g., "07:30 - 09:00").
+ * In confirmation/previews we want to show only the start time.
+ */
+function displayBeginTimeOnly(value: string | null | undefined): string {
+  const label = displayTimeFromOptions(value, TIME_BEGIN_OPTIONS);
+  if (!label) return "";
+  const [start] = label.split("-");
+  return (start || label).trim();
+}
 
 // --- NEW UTILITY FUNCTION FOR AUTO-FILL ---
 /**
@@ -1262,29 +1306,33 @@ const SendModal = ({
           <div className="rounded-xl border border-gray-200 overflow-hidden">
             <table className="w-full table-fixed text-[13px]">
               <colgroup>
-              <col className="w-[140px]" />
-              <col />
-              <col className="w-[90px]" />
-              <col className="w-[72px]" />
-              <col className="w-[110px]" />
-              <col className="w-[70px]" />
-              <col className="w-[120px]" />
-              <col className="w-[120px]" />
-            </colgroup>
+                <col className="w-[240px]" />
+                <col className="w-[92px]" />
+                <col className="w-[82px]" />
+                <col className="w-[92px]" />
+                <col className="w-[92px]" />
+                <col className="w-[110px]" />
+                <col className="w-[82px]" />
+                <col className="w-[92px]" />
+                <col className="w-[92px]" />
+                <col className="w-[110px]" />
+                <col className="w-[96px]" />
+              </colgroup>
               <thead className="bg-gray-50 text-gray-700">
                 <tr className="[&>th]:border-b [&>th]:border-gray-200">
                   <th className="px-4 py-3 text-left font-semibold">
-                    Course Code
+                    Course Code &amp; Title
                   </th>
-                  <th className="px-4 py-3 text-center font-semibold">
-                    Course Title
-                  </th>
-                  <th className="px-4 py-3 text-left font-semibold">Section <span className="text-red-600" aria-hidden="true">*</span></th>
-                  <th className="px-4 py-3 text-left font-semibold">Units</th>
-                  <th className="px-4 py-3 text-left font-semibold">Mode <span className="text-red-600" aria-hidden="true">*</span></th>
-                  <th className="px-4 py-3 text-left font-semibold">Day</th>
-                  <th className="px-4 py-3 text-left font-semibold">Room</th>
-                  <th className="px-4 py-3 text-center font-semibold">Time</th>
+                  <th className="px-4 py-3 text-left font-semibold">Section</th>
+                  <th className="px-4 py-3 text-left font-semibold">Day 1</th>
+                  <th className="px-4 py-3 text-left font-semibold">Begin 1</th>
+                  <th className="px-4 py-3 text-left font-semibold">End 1</th>
+                  <th className="px-4 py-3 text-left font-semibold">Room 1</th>
+                  <th className="px-4 py-3 text-left font-semibold">Day 2</th>
+                  <th className="px-4 py-3 text-left font-semibold">Begin 2</th>
+                  <th className="px-4 py-3 text-left font-semibold">End 2</th>
+                  <th className="px-4 py-3 text-left font-semibold">Room 2</th>
+                  <th className="px-4 py-3 text-left font-semibold">Mode</th>
                 </tr>
               </thead>
               <tbody className="text-gray-900">
@@ -1293,7 +1341,7 @@ const SendModal = ({
                     {manyGroups && (
                       <tr className="bg-white">
                         <td
-                          colSpan={8}
+                          colSpan={11}
                           className="px-4 pt-5 pb-2 text-[12px] font-semibold text-gray-900"
                         >
                           {faculty}
@@ -1309,26 +1357,22 @@ const SendModal = ({
                         )}
                       >
                         <td className="px-4 py-3 align-middle">
-                          {r.course || "—"}
+                          <div className="leading-tight">
+                            <div className="font-semibold text-gray-900">{r.course || "—"}</div>
+                            <div className="mt-0.5 text-[12px] text-gray-600">{r.title || "—"}</div>
+                          </div>
                         </td>
-                        <td className="px-4 py-3 align-middle truncate">
-                          {r.title || "—"}
-                        </td>
-                        <td className="px-4 py-3 align-middle">
-                          {r.section || "—"}
-                        </td>
-                        <td className="px-4 py-3 align-middle">
-                          {r.units !== "" ? String(r.units) : "—"}
-                        </td>
-                        <td className="px-4 py-3 align-middle text-gray-800">{r.mode || (r as any).room_type || "—"}</td>
-                        <td className="px-4 py-3 align-middle">
-                          {r.day1 || "—"}
-                        </td>
-                        <td className="px-4 py-3 align-middle">
-                          {r.room1 || "—"}
-                        </td>
-                        <td className="px-4 py-3 align-middle">
-                          {timeRange(r.begin1, r.end1)}
+                        <td className="px-4 py-3 align-middle">{r.section || "—"}</td>
+                        <td className="px-4 py-3 align-middle">{r.day1 || "—"}</td>
+                        <td className="px-4 py-3 align-middle">{displayBeginTimeOnly(r.begin1) || "—"}</td>
+                        <td className="px-4 py-3 align-middle">{displayTimeFromOptions(r.end1, TIME_END_OPTIONS) || "—"}</td>
+                        <td className="px-4 py-3 align-middle">{r.room1 || "—"}</td>
+                        <td className="px-4 py-3 align-middle">{r.day2 || "—"}</td>
+                        <td className="px-4 py-3 align-middle">{displayBeginTimeOnly(r.begin2) || "—"}</td>
+                        <td className="px-4 py-3 align-middle">{displayTimeFromOptions(r.end2, TIME_END_OPTIONS) || "—"}</td>
+                        <td className="px-4 py-3 align-middle">{r.room2 || "—"}</td>
+                        <td className="px-4 py-3 align-middle text-gray-800">
+                          {r.mode || (r as any).room_type || "—"}
                         </td>
                       </tr>
                     ))}
@@ -1337,7 +1381,7 @@ const SendModal = ({
                 {rows.length === 0 && (
                   <tr>
                     <td
-                      colSpan={9}
+                      colSpan={11}
                       className="px-4 py-8 text-center text-sm text-gray-500"
                     >
                       No rows selected.
@@ -1943,6 +1987,22 @@ export default function OM_LoadAssignment() {
   // In-app toast (styled to match Faculty pages)
   const { toast, show: showToast, clear: clearToast } = useToast();
 
+  // Session (same pattern as APO: localStorage["animo.user"])
+  const session = useMemo(() => {
+    try {
+      const raw = localStorage.getItem("animo.user");
+      return raw ? (JSON.parse(raw) as any) : null;
+    } catch {
+      return null;
+    }
+  }, []);
+
+  const userId =
+    (session as any)?.userId ||
+    (session as any)?.user_id ||
+    (session as any)?.id ||
+    "";
+
   // Import SHS file
   const shsFileInputRef = useRef<HTMLInputElement>(null);
   const [shsFile, setShsFile] = useState<File | null>(null);
@@ -1956,25 +2016,28 @@ export default function OM_LoadAssignment() {
     if (!file) return;
     setShsFile(file);
 
-    // NOTE: Hook your actual import/parse logic here.
-    // Keeping this non-blocking so the UI change compiles cleanly.
-    console.log("Selected SHS file:", file);
+    (async () => {
+      try {
+        if (!userId) throw new Error("Missing user session.");
+        const text = await file.text();
+        const res = await importOmShsCsv(userId, text);
+        await loadFromServer();
+        showToast(
+          `Imported ${res.imported ?? 0} row(s) from SHS CSV.`,
+          "success"
+        );
+      } catch (err: any) {
+        const msg =
+          typeof err?.message === "string"
+            ? err.message
+            : "Failed to import SHS CSV.";
+        showToast(msg, "error");
+      }
+    })();
 
     // allow selecting the same file again
     e.target.value = "";
   };
-
-  // Session (same pattern as APO: localStorage["animo.user"])
-  const session = useMemo(() => {
-    try {
-      const raw = localStorage.getItem("animo.user");
-      return raw ? (JSON.parse(raw) as any) : null;
-    } catch {
-      return null;
-    }
-  }, []);
-
-  const userId = (session as any)?.userId || (session as any)?.user_id || (session as any)?.id || "";
 
   const [isAssigning, setIsAssigning] = useState(false);
 
@@ -2470,24 +2533,47 @@ export default function OM_LoadAssignment() {
     if (!userId) throw new Error("Missing userId");
     if (!rowsToSend?.length) throw new Error("No rows to send");
 
+	    // Defensive: ensure faculty_id exists (backend groups strictly by faculty_id).
+	    // This also prevents schedule fields from being wiped on refresh for rows whose faculty was
+	    // selected by display name only.
+	    const normalizedRowsToSend: Row[] = rowsToSend
+	      .map((r) => {
+	        const fid = (r.faculty_id || "").trim() || (facultyNameToId[r.faculty] || "");
+	        return fid ? ({ ...r, faculty_id: fid } as Row) : r;
+	      })
+	      .filter((r) => !!(r.faculty_id || "").trim());
+
+	    if (!normalizedRowsToSend.length) {
+	      throw new Error("No rows with faculty_id");
+	    }
+
     const term_id = termId || undefined;
 
     // 1️⃣ Send selected rows to faculty (proposal + notification)
     await sendOmLoadAssignmentsToFaculty(userId, {
       term_id,
-      rows: rowsToSend,
+	      rows: normalizedRowsToSend,
     });
 
     // 2️⃣ Persist the FULL OM table so refresh doesn't revert changes
-    await submitOmLoadAssignment(userId, { rows }, "save");
+    // IMPORTANT: normalize faculty_id for *all* rows before saving.
+    // The backend groups/updates rows by faculty_id; if OM selected a faculty by name only,
+    // saving without faculty_id can cause fields (including Mode) to be treated as blank on reload.
+    const normalizedAllRows: Row[] = rows.map((r) => {
+      const fid = (r.faculty_id || "").trim() || (facultyNameToId[r.faculty] || "");
+      return fid ? ({ ...r, faculty_id: fid } as Row) : r;
+    });
+    await submitOmLoadAssignment(userId, { rows: normalizedAllRows }, "save");
 
     // 3️⃣ Reset UI + reload from DB
     setShowSend(false);
     setSendRowsPreview([]);
     await loadFromServer();
     setHasLocalEdits(false);
-    const uniqueFaculty = new Set(
-      rowsToSend.map((r) => (r.faculty || r.faculty_id || "").toString().trim()).filter(Boolean)
+	    const uniqueFaculty = new Set(
+	      normalizedRowsToSend
+	        .map((r) => (r.faculty || r.faculty_id || "").toString().trim())
+	        .filter(Boolean)
     );
     showToast(
       uniqueFaculty.size <= 1
@@ -2531,7 +2617,21 @@ export default function OM_LoadAssignment() {
         : []
     );
 
-    setRows(Array.isArray(res?.rows) ? res.rows : []);
+    // Normalize time values coming from the server (often "HH:MM" or "HMM")
+    // to 4-digit "HHMM" so SelectBox values still match TIME_*_OPTIONS.
+    const serverRows: Row[] = Array.isArray(res?.rows) ? (res.rows as any) : [];
+    const normalizedRows: Row[] = serverRows.map((r: any) => ({
+      // NOTE: some backends/serializers can attach non-enumerable properties.
+      // Spreading would drop them; explicitly copy `mode` so the Mode column
+      // remains populated after refresh/send.
+      ...r,
+      mode: (r as any)?.mode ?? (r as any)?.Mode ?? "",
+      begin1: normalizeServerTimeToHHMM(r?.begin1),
+      end1: normalizeServerTimeToHHMM(r?.end1),
+      begin2: normalizeServerTimeToHHMM(r?.begin2),
+      end2: normalizeServerTimeToHHMM(r?.end2),
+    }));
+    setRows(normalizedRows);
     const nextTermId = typeof (res as any)?.term_id === "string" ? (res as any).term_id : "";
     setTerm(typeof res?.term === "string" ? res.term : "");
     setTermId(nextTermId);
@@ -3570,7 +3670,7 @@ useEffect(() => {
                             return;
                           }
 
-                          setSendRowsPreview(preview);
+                          setSendRowsPreview(preview.map((r) => ({ ...r })));
                           setShowSend(true);
                         }}
                         className={cls(
@@ -3855,7 +3955,7 @@ useEffect(() => {
                                   className="w-[120px] text-center"
                                 />
                               ) : (
-                                <span>{r.begin1 || "—"}</span>
+                                <span>{displayTimeFromOptions(r.begin1, TIME_BEGIN_OPTIONS) || "—"}</span>
                               )}
                             </td>
 
@@ -3868,7 +3968,7 @@ useEffect(() => {
                                   className="w-[70px] text-center"
                                 />
                               ) : (
-                                <span>{r.end1 || "—"}</span>
+                                <span>{displayTimeFromOptions(r.end1, TIME_END_OPTIONS) || "—"}</span>
                               )}
                             </td>
 
@@ -3914,7 +4014,7 @@ useEffect(() => {
                                   className="w-[120px] text-center"
                                 />
                               ) : (
-                                <span>{r.begin2 || "—"}</span>
+                                <span>{displayTimeFromOptions(r.begin2, TIME_BEGIN_OPTIONS) || "—"}</span>
                               )}
                             </td>
 
@@ -3927,7 +4027,7 @@ useEffect(() => {
                                   className="w-[70px] text-center"
                                 />
                               ) : (
-                                <span>{r.end2 || "—"}</span>
+                                <span>{displayTimeFromOptions(r.end2, TIME_END_OPTIONS) || "—"}</span>
                               )}
                             </td>
 
