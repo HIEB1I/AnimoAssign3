@@ -4,6 +4,7 @@ import AppShell from "../../base/AppShell";
 import { runOmAutoAssign } from "../../api.ts";
 import {
   submitOmLoadAssignment,
+  saveOmSectionRemarks,
   importOmShsCsv,
   notifyChairLoadRecommendation,
   sendOmLoadAssignmentsToFaculty,
@@ -29,19 +30,17 @@ import {
   Play,
   RefreshCcw,
   Send,
-  Save,
   CheckCheck,
   Plus,
   MessageSquareText,
   Copy,
-
   Archive,
-
   Undo2,
   Redo2,
   X,
-
-  Upload,} from "lucide-react";
+  Upload,
+  Save,
+} from "lucide-react";
 import { InboxContent as OMInboxContent } from "./OM_Inbox";
 
 export type FlagSeverity = "warning" | "error";
@@ -2227,6 +2226,11 @@ export default function OM_LoadAssignment() {
 
   const [search, setSearch] = useState("");
   const [rows, setRows] = useState<Row[]>([]);
+
+  // Remarks are saved explicitly per-row (do NOT mix with load draft/undo stacks).
+  const [remarksDraftBySection, setRemarksDraftBySection] = useState<Record<string, string>>({});
+  const [remarksSavedBySection, setRemarksSavedBySection] = useState<Record<string, string>>({});
+  const [savingRemarkBySection, setSavingRemarkBySection] = useState<Record<string, boolean>>({});
   const [validationContext, setValidationContext] = useState<ValidationContext>(
     {
       courseToKac: {},
@@ -2632,6 +2636,15 @@ export default function OM_LoadAssignment() {
       end2: normalizeServerTimeToHHMM(r?.end2),
     }));
     setRows(normalizedRows);
+
+    // Initialize remarks state from DB values (sections.remarks) without affecting other save/undo behaviors.
+    const initRemarks: Record<string, string> = {};
+    for (const rr of normalizedRows) {
+      initRemarks[rr.id] = String((rr as any)?.remarks ?? "");
+    }
+    setRemarksDraftBySection(initRemarks);
+    setRemarksSavedBySection(initRemarks);
+
     const nextTermId = typeof (res as any)?.term_id === "string" ? (res as any).term_id : "";
     setTerm(typeof res?.term === "string" ? res.term : "");
     setTermId(nextTermId);
@@ -2644,6 +2657,90 @@ export default function OM_LoadAssignment() {
     setApproved(Boolean((res as any)?.forwarded_to_chair));
     setHasLocalEdits(false);
     resetHistory();
+  };
+
+  const getPrimaryScheduleId = (r: Row): string => {
+    const ids = (r as any)?.schedule_ids;
+    if (Array.isArray(ids)) {
+      const found = ids.find((x: any) => typeof x === "string" && x.trim());
+      if (found) return String(found);
+    }
+    const single = (r as any)?.schedule_id;
+    return typeof single === "string" ? single : "";
+  };
+
+  // --- Remarks autosave (per section) ---
+  // Debounce timers keyed by section row id.
+  const remarkAutosaveTimersRef = useRef<Record<string, number>>({});
+
+  const clearRemarkAutosaveTimer = (sectionId: string) => {
+    const t = remarkAutosaveTimersRef.current[sectionId];
+    if (t) {
+      window.clearTimeout(t);
+      delete remarkAutosaveTimersRef.current[sectionId];
+    }
+  };
+
+  useEffect(() => {
+    return () => {
+      // cleanup timers on unmount
+      for (const k of Object.keys(remarkAutosaveTimersRef.current)) {
+        window.clearTimeout(remarkAutosaveTimersRef.current[k]);
+      }
+      remarkAutosaveTimersRef.current = {};
+    };
+  }, []);
+
+  const handleSaveRemark = async (
+    r: Row,
+    options?: { silentSuccess?: boolean }
+  ) => {
+    if (!userId || isArchiveView) return;
+    const sectionId = r.id;
+    const scheduleId = getPrimaryScheduleId(r);
+    if (!scheduleId) {
+      showToast(
+        "Cannot save remarks for this row because a schedule identifier is missing.",
+        "error"
+      );
+      return;
+    }
+
+    const remarks = String(remarksDraftBySection[sectionId] ?? "");
+    const saved = String(remarksSavedBySection[sectionId] ?? "");
+    if (remarks === saved) return;
+    if (savingRemarkBySection[sectionId]) return;
+
+    setSavingRemarkBySection((p) => ({ ...p, [sectionId]: true }));
+    try {
+      await saveOmSectionRemarks(userId, { schedule_id: scheduleId, remarks });
+      setRemarksSavedBySection((p) => ({ ...p, [sectionId]: remarks }));
+      // Do not clobber a newer in-progress edit that happened while the save was in-flight.
+      setRemarksDraftBySection((p) =>
+        String(p[sectionId] ?? "") === remarks ? { ...p, [sectionId]: remarks } : p
+      );
+      if (!options?.silentSuccess) {
+        showToast("Remarks saved.", "success");
+      }
+    } catch (e: any) {
+      showToast(e?.message || "Failed to save remarks.", "error");
+    } finally {
+      setSavingRemarkBySection((p) => ({ ...p, [sectionId]: false }));
+    }
+  };
+
+  const queueAutosaveRemark = (r: Row, nextValue: string) => {
+    if (!userId || isArchiveView) return;
+    const sectionId = r.id;
+    // Update draft immediately.
+    setRemarksDraftBySection((p) => ({ ...p, [sectionId]: nextValue }));
+
+    // Debounced save.
+    clearRemarkAutosaveTimer(sectionId);
+    remarkAutosaveTimersRef.current[sectionId] = window.setTimeout(() => {
+      // Use the latest draft at save time.
+      void handleSaveRemark(r, { silentSuccess: true });
+    }, 700);
   };
 
   const handleForwardToChair = async () => {
@@ -3734,6 +3831,9 @@ useEffect(() => {
                       <col className="w-[96px]" />
                       <col className="w-[96px]" />
                       <col className="w-[80px]" />
+                      <col className="w-[80px]" />
+                      {/* Wider remarks column (may contain full sentences) */}
+                      <col className="w-[320px]" />
                       <col className="w-[100px]" />
                       <col className="w-[110px]" />
                     </colgroup>
@@ -3794,6 +3894,9 @@ useEffect(() => {
                         </th>
                         <th className="px-3 py-2 text-center border border-gray-300">
                           Mode <span className="text-red-600" aria-hidden="true">*</span>
+                        </th>
+                        <th className="px-3 py-2 text-left border border-gray-300">
+                          Remarks
                         </th>
                         <th className="px-3 py-2 text-center border border-gray-300">
                           Status
@@ -4071,6 +4174,27 @@ useEffect(() => {
                                 <span>{r.mode || "—"}</span>
                               )}
                             </td>
+
+                            <td className="px-2 py-2 align-top w-[280px] min-w-[280px]">
+                              <div className="flex w-full min-w-0 items-start gap-2">
+                                <textarea
+                                  value={remarksDraftBySection[r.id] ?? String((r as any)?.remarks ?? "")}
+                                  onChange={(ev) => queueAutosaveRemark(r, ev.target.value)}
+                                  onBlur={() => {
+                                    // Ensure the latest value is persisted when the user leaves the field.
+                                    clearRemarkAutosaveTimer(r.id);
+                                    void handleSaveRemark(r, { silentSuccess: true });
+                                  }}
+                                  disabled={isArchiveView}
+                                  placeholder="—"
+                                  className={cls(
+                                    "flex-1 min-w-0 min-h-[36px] resize-y rounded-md border border-gray-300 px-2 py-1 text-sm leading-snug shadow-sm focus:ring-2 focus:ring-emerald-500/30",
+                                    isArchiveView && "bg-gray-100 text-gray-500"
+                                  )}
+                                />
+                              </div>
+                            </td>
+
                             <td className="px-2 py-2 text-center">
                               <StatusChip r={r} />
                             </td>
@@ -4122,7 +4246,7 @@ useEffect(() => {
                       {filtered.length === 0 && (
                         <tr>
                           <td
-                            colSpan={17}
+                            colSpan={18}
                             className="px-4 py-10 text-center text-sm text-gray-500"
                           >
                             No data yet. Click{" "}

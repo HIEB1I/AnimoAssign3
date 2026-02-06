@@ -2913,6 +2913,17 @@ export async function submitOmLoadAssignment(
   };
 }
 
+/** Save OM remarks for a section (section is resolved via section_schedules.schedule_id). */
+export async function saveOmSectionRemarks(
+  userId: string,
+  payload: { schedule_id: string; remarks: string }
+) {
+  const { data } = await axios.post(`${API_BASE}/om/loadassignment`, payload, {
+    params: { userId, action: "save_remarks" },
+  });
+  return data as { ok: boolean; section_id?: string; remarks?: string };
+}
+
 /** Import SHS CSV file contents into OM Load Assignment (creates sections/schedules placeholders). */
 export async function importOmShsCsv(userId: string, csvText: string) {
   const { data } = await axios.post(

@@ -738,6 +738,26 @@ async def _fetch_rows(user_id: str, term_id: str, db) -> Dict[str, Any]:
 
     docs = [x async for x in db[COL_SECTIONS_SUBMITTED].aggregate(pipe)]
 
+    # Preload section remarks from the canonical `sections` collection.
+    # Remarks are stored in sections.remarks (not in sections_submitted).
+    section_ids_for_remarks = [
+        (d.get("section_id") or "").strip() for d in docs if (d.get("section_id") or "").strip()
+    ]
+    remarks_by_section_id: dict[str, str] = {}
+    if section_ids_for_remarks:
+        try:
+            sec_docs = await db["sections"].find(
+                {"section_id": {"$in": section_ids_for_remarks}},
+                {"_id": 0, "section_id": 1, "remarks": 1},
+            ).to_list(None)
+            remarks_by_section_id = {
+                (s.get("section_id") or "").strip(): str(s.get("remarks") or "")
+                for s in (sec_docs or [])
+                if (s.get("section_id") or "").strip()
+            }
+        except Exception:
+            remarks_by_section_id = {}
+
     # --- Preload rooms into a lookup: { room_id → room_number } ---
     room_docs = [
         x async for x in db[COL_ROOMS].find(
@@ -795,6 +815,13 @@ async def _fetch_rows(user_id: str, term_id: str, db) -> Dict[str, Any]:
         course_doc = (d.get("course") or {})
         scheds = (d.get("scheds") or [])
 
+        # Expose schedule_id(s) so the frontend can map back to the correct section via section_schedules.
+        schedule_ids = [
+            (s.get("schedule_id") or "").strip()
+            for s in (scheds[:2] if isinstance(scheds, list) else [])
+            if (s.get("schedule_id") or "").strip()
+        ]
+
         # --- Faculty preference mode for current term ---
         pref_mode = ""
         fid = (d.get("asg") or {}).get("faculty_id")
@@ -817,6 +844,9 @@ async def _fetch_rows(user_id: str, term_id: str, db) -> Dict[str, Any]:
 
         row = {
             "id": sid,
+            # Used by frontend for correct mapping when saving remarks.
+            # Backend resolves the section via section_schedules.schedule_id.
+            "schedule_ids": schedule_ids,
             # NEW: expose course_id for KAC checks
             "course_id": course_doc.get("course_id") or d.get("course_id") or "",
             "course": d.get("course_code_display") or "",
@@ -829,6 +859,7 @@ async def _fetch_rows(user_id: str, term_id: str, db) -> Dict[str, Any]:
             **pair,
             "capacity": d.get("enrollment_cap", "") or "",
             "mode": mode_display,
+            "remarks": remarks_by_section_id.get(sid, ""),
             "status": "Pending" if (d.get("asg") or {}).get("faculty_id") else "Unassigned",
         }
 
@@ -1158,6 +1189,35 @@ async def loadassignment_handler(
             "dept_name": dept_name,
             # keep any other fields you already return
         }
+
+    if action == "save_remarks":
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="Invalid payload; expected JSON object")
+
+        schedule_id = str(payload.get("schedule_id") or "").strip()
+        remarks = str(payload.get("remarks") or "")
+
+        if not schedule_id:
+            raise HTTPException(status_code=400, detail="schedule_id is required")
+
+        # Resolve section via section_schedules to avoid guessing/wrong section identifiers.
+        sched = await db[COL_SCHED].find_one(
+            {"schedule_id": schedule_id},
+            {"_id": 0, "section_id": 1},
+        )
+        if not sched or not (sched.get("section_id") or "").strip():
+            raise HTTPException(status_code=404, detail="Schedule not found")
+
+        section_id = str(sched.get("section_id") or "").strip()
+
+        res = await db["sections"].update_one(
+            {"section_id": section_id},
+            {"$set": {"remarks": remarks}},
+        )
+        if res.matched_count == 0:
+            raise HTTPException(status_code=404, detail="Section not found")
+
+        return {"ok": True, "section_id": section_id, "remarks": remarks}
 
     if action == "save":
         # same validation as approve
