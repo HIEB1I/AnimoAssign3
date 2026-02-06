@@ -921,17 +921,20 @@ async def _fetch_rows(user_id: str, term_id: str, db) -> Dict[str, Any]:
             course = str(r.get("course") or "").strip()
             section = str(r.get("section") or "").strip()
 
+            # Highlight rows already forwarded to faculty (proposal exists)
+            forwarded = bool(fid and course and section and (fid, course, section) in forwarded_keys)
+            if forwarded:
+                r["forwarded_to_faculty"] = True
+
+            # Finalized/locked rows stay protected from auto-assign and can be rendered as finalized.
             if fid and course and section and (fid, course, section) in finalized_keys:
                 r["finalized"] = True
 
-                # Only flip Pending -> Approved when faculty has actually approved/accepted
-                st = proposal_status_by_fid.get(fid, "")
-                if st in ("approved", "accepted"):
-                    r["status"] = "Approved"
-
-            # Highlight rows already forwarded to faculty (proposal exists)
-            if fid and course and section and (fid, course, section) in forwarded_keys:
-                r["forwarded_to_faculty"] = True
+            # Faculty "Accept Schedule" must NOT lock/finalize rows.
+            # However, OM should still see the row status as "Approved" once the faculty accepts.
+            st = proposal_status_by_fid.get(fid, "")
+            if forwarded and st in ("approved", "accepted"):
+                r["status"] = "Approved"
     except Exception:
         pass
 

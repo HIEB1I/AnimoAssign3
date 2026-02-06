@@ -579,9 +579,10 @@ function TeachingLoadEnhanced({ teachingLoad, term, workflow, onToast, onRefresh
   const [view, setView] = useState<"Calendar" | "List">("Calendar");
   const [modal, setModal] = useState<{ day: DayLong; item: TLItemForCalendar } | null>(null);
   const [isAccepted, setIsAccepted] = useState(false);
+  const [isAccepting, setIsAccepting] = useState(false);
 
-  // Schedule is finalized only when backend explicitly marks it so (e.g., faculty accepted).
-  // Approved schedules and terminal RFC outcomes remain editable; faculty can RFC again.
+  // Schedule is finalized only when backend explicitly marks it so (e.g., an admin lock).
+  // Faculty acceptance should NOT lock/finalize; OM can still edit/resend, and faculty can RFC/accept again.
   const scheduleFinal = Boolean(workflow?.schedule_final);
 
 
@@ -642,12 +643,14 @@ const scheduleFinalLabel = (() => {
             type="button"
             onClick={async () => {
             try {
+              if (isAccepting) return;
+              setIsAccepting(true);
               const raw = JSON.parse(localStorage.getItem("animo.user") || "{}");
               const userId = raw.userId || raw.user_id || raw.id || "";
 
               const termId = (term as any)?.term_id || (term as any)?._id || (term as any)?.id;
 
-              // 1) Accept proposal in backend
+              // 1) Accept proposal in backend (does NOT lock/finalize)
               await acceptFacultyLoadAssignment(userId, { term_id: termId });
 
               // 2) Create Google Calendar events using items already computed for calendar view
@@ -700,19 +703,28 @@ const scheduleFinalLabel = (() => {
                 "Failed to accept schedule.";
               onToast?.("error", msg, "Action failed");
               console.error(e);
+            } finally {
+              setIsAccepting(false);
             }
           }}
 
-            disabled={isAccepted}
+            // Accept should remain available even after acceptance.
+            disabled={isAccepting || scheduleFinal}
             className={cls(
               "inline-flex h-9 items-center justify-center rounded-lg px-4 text-sm font-medium shadow",
               "focus:outline-none focus:ring-2 focus:ring-emerald-600/40",
-              (isAccepted || scheduleFinal)
+              (isAccepting || scheduleFinal)
                 ? "bg-neutral-300 text-neutral-600 cursor-not-allowed"
                 : "bg-blue-700 text-white hover:bg-blue-800 active:translate-y-[0.5px]"
             )}
           >
-            {(isAccepted || scheduleFinal) ? "Finalized" : "Accept Schedule"}
+            {scheduleFinal
+              ? "Finalized"
+              : isAccepting
+              ? "Accepting…"
+              : isAccepted
+              ? "Accept Again"
+              : "Accept Schedule"}
           </button>
         </div>
       </div>

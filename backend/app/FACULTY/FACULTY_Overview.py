@@ -655,14 +655,27 @@ async def overview_handler(
         proposal_status = (proposal or {}).get("status")
         proposal_status_l = str(proposal_status or "").lower()
 
-        is_proposed = bool(proposal and proposal_status_l in ("proposed", "reply", "replied"))
-        # Keep "final" behavior only for explicit acceptance/locking.
-        # Approved schedules and terminal RFC statuses should remain editable.
-        is_final = bool(proposal and (bool((proposal or {}).get("locked")) or proposal_status_l in ("accepted",)))
+        # A schedule should be visible on the faculty side whenever OM has forwarded
+        # a proposal OR the faculty has already accepted it.
+        show_proposal = bool(
+            proposal
+            and proposal_status_l
+            in (
+                "proposed",
+                "reply",
+                "replied",
+                # Faculty acceptance marks proposal as "approved" on the OM side.
+                "approved",
+                "accepted",
+            )
+        )
+
+        # "Final" means *explicitly locked* only. Faculty acceptance must NOT lock/finalize.
+        is_final = bool(proposal and bool((proposal or {}).get("locked")))
         schedule_final = bool(is_final)
 
         proposed_load = []
-        if (is_proposed or is_final) and isinstance(proposal.get("rows"), list):
+        if show_proposal and isinstance(proposal.get("rows"), list):
             for rr in proposal.get("rows", []):
                 sec_id = (rr.get("section_id") or rr.get("id") or "").strip()
 
@@ -696,14 +709,24 @@ async def overview_handler(
 
             if proposed_load:
                 final_teaching_load = proposed_load
-                summary["load_status"] = "Approved" if is_final else "Proposed"
+
+                # Faculty-side label:
+                # - Locked -> Finalized
+                # - Accepted/approved -> Accepted
+                # - Otherwise -> Proposed
+                if schedule_final:
+                    summary["load_status"] = "Finalized"
+                elif proposal_status_l in ("approved", "accepted"):
+                    summary["load_status"] = "Accepted"
+                else:
+                    summary["load_status"] = "Proposed"
 
         return {
             "ok": True,
             "term": term,
             "summary": summary,
             "teaching_load": final_teaching_load,
-            "is_proposed": is_proposed,
+            "is_proposed": bool(proposal and proposal_status_l in ("proposed", "reply", "replied")),
             "proposal_status": proposal_status,
             "rfc": rfc_norm,
             "schedule_final": schedule_final,
@@ -1326,28 +1349,26 @@ async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[s
                 detail="You have a pending RFC. Please wait for OM to respond before accepting the schedule."
             )
 
+    # IMPORTANT: "Accept Schedule" should NOT lock/finalize anything.
+    # It simply marks the proposal as approved/accepted on the OM side.
+    now = _now_utc()
     await db[COL_LOAD_PROPOSALS].update_one(
         {"faculty_id": fid, "term_id": term_id},
         {"$set": {
+            # Keep OM-side status as "approved" once faculty accepts.
             "status": "approved",
-            "locked": True,
-            "accepted_at": _now_utc(),
-            "updated_at": _now_utc(),
+            # Do not lock; OM can still edit/add/resend schedules.
+            "locked": False,
+            "accepted_at": now,
+            "updated_at": now,
         }},
     )
 
-    try:
-        await db[COL_LOAD_PROPOSALS].update_one(
-            {"faculty_id": fid, "term_id": term_id},
-            {"$set": {"rows.$[].finalized": True}},
-        )
-    except Exception:
-        pass
-
-    now = _now_utc()
+    # Mark existing RFC threads as ACCEPTED (terminal) but do not lock them.
+    # Faculty can create a new RFC thread later; OM can still adjust proposals.
     await db[COL_LOAD_RFC].update_many(
         {"faculty_id": fid, "term_id": term_id},
-        {"$set": {"status": "ACCEPTED", "locked": True, "updated_at": now}},
+        {"$set": {"status": "ACCEPTED", "locked": False, "updated_at": now}},
     )
 
     recipient_email = (
