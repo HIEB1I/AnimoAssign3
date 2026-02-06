@@ -656,8 +656,10 @@ async def overview_handler(
         proposal_status_l = str(proposal_status or "").lower()
 
         is_proposed = bool(proposal and proposal_status_l in ("proposed", "reply", "replied"))
-        is_final = bool(proposal and (bool((proposal or {}).get("locked")) or proposal_status_l in ("accepted", "approved")))
-        schedule_final = bool(is_final or (rfc_norm and str((rfc_norm.get("status") or "")).upper() in RFC_TERMINAL))
+        # Keep "final" behavior only for explicit acceptance/locking.
+        # Approved schedules and terminal RFC statuses should remain editable.
+        is_final = bool(proposal and (bool((proposal or {}).get("locked")) or proposal_status_l in ("accepted",)))
+        schedule_final = bool(is_final)
 
         proposed_load = []
         if (is_proposed or is_final) and isinstance(proposal.get("rows"), list):
@@ -1069,10 +1071,40 @@ async def faculty_send_load_rfc_message(userId: str = Query(...), payload: Dict[
         "status": "OPEN",
     }
 
-    if (existing.get("status") or "").upper() in RFC_TERMINAL:
-        raise HTTPException(status_code=409, detail="RFC is locked")
-
     now = _now_utc()
+
+    # Allow RFC again even if the previous RFC thread was terminal.
+    # We archive the previous thread into `history` and start a fresh thread.
+    if (existing.get("status") or "").upper() in RFC_TERMINAL:
+        prev_status = str(existing.get("status") or "").upper()
+        hist = list(existing.get("history") or [])
+        hist.append({
+            "rfc_id": existing.get("rfc_id"),
+            "status": existing.get("status"),
+            "locked": bool(existing.get("locked")),
+            "messages": list(existing.get("messages") or []),
+            "closed_at": existing.get("closed_at") or existing.get("closed_at"),
+            "archived_at": now.isoformat(),
+        })
+        existing = {
+            "rfc_id": "RFC" + uuid.uuid4().hex[:10].upper(),
+            "faculty_id": fid,
+            "term_id": term_id,
+            "section_id": section_id,
+            "messages": [],
+            "status": "OPEN",
+            "history": hist,
+        }
+
+        # Add a lightweight tag in the new thread so the UI can display the context
+        # even if it does not render `history`.
+        existing["messages"].append({
+            "sender_role": "system",
+            "sender_user_id": "system",
+            "message": f"Previous RFC was {prev_status} (archived).",
+            "created_at": now.isoformat(),
+        })
+
     msgs = list(existing.get("messages") or [])
     msgs.append({
         "sender_role": "faculty",
@@ -1093,6 +1125,7 @@ async def faculty_send_load_rfc_message(userId: str = Query(...), payload: Dict[
             "status": "NEEDS_OM",
             "locked": False,
             "messages": msgs,
+            "history": list(existing.get("history") or []),
             "updated_at": now,
         }, "$setOnInsert": {"created_at": now}},
         upsert=True,

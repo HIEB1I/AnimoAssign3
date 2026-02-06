@@ -1520,11 +1520,13 @@ const RequestChangeModal = ({
   const [error, setError] = useState<string | null>(null);
   const [messages, setMessages] = useState<Array<any>>([]);
   const [status, setStatus] = useState<string | null>(null);
+  const [locked, setLocked] = useState<boolean>(false);
   const [reply, setReply] = useState("");
 
   const displayFaculty = facultyName || "Faculty";
 
-  const isTerminal = !!status && ["ACCEPTED", "APPROVED", "REJECTED"].includes(status);
+  // Terminal statuses are informational; only the explicit `locked` flag should prevent interaction.
+  const isTerminal = Boolean(locked);
   const needsOm = status === "NEEDS_OM" || status === "OPEN" || status === "open";
 
   useEffect(() => {
@@ -1533,6 +1535,7 @@ const RequestChangeModal = ({
       setError(null);
       setMessages([]);
       setStatus(null);
+      setLocked(false);
       setReply("");
       return;
     }
@@ -1563,6 +1566,7 @@ const RequestChangeModal = ({
 
         const rfc = res.rfc;
         setStatus(rfc.status || null);
+        setLocked(Boolean(rfc.locked));
         setMessages(rfc.messages || rfc.thread || []);
       } catch (e: any) {
         setError(e?.message || "Failed to load RFC.");
@@ -1604,8 +1608,8 @@ const RequestChangeModal = ({
         decision === "reply"
           ? "Reply sent to faculty."
           : decision === "approve"
-          ? "RFC approved. Schedule is now locked."
-          : "RFC rejected. Schedule is now locked.";
+          ? "RFC approved."
+          : "RFC rejected.";
       onToast?.(msg, "success");
       onClose();
     } catch (e: any) {
@@ -2344,7 +2348,7 @@ export default function OM_LoadAssignment() {
       };
 
       return rowsIn.map((r) => {
-        const locked = !!r.finalized || r.status === "Approved" || r.status === "Confirmed";
+        const locked = !!r.finalized || r.status === "Confirmed";
         if (locked) return r;
 
         // If OM has completed the row, ensure it's Pending (unless it is already a more specific status).
@@ -2794,7 +2798,7 @@ export default function OM_LoadAssignment() {
 
   const getEditFlags = (r: Row) => {
     // Once a row is finalized/approved, it must be locked from any further edits.
-    const isLocked = !!r.finalized || r.status === "Approved";
+    const isLocked = !!r.finalized;
     if (isLocked) {
       return {
         course: false,
@@ -3933,7 +3937,7 @@ useEffect(() => {
                     <tbody>
                       {filtered.map((r, idx) => {
                         const e = getEditFlags(r);
-                        const isLocked = !!r.finalized || r.status === "Approved";
+                        const isLocked = !!r.finalized;
                         const isForwardedToFaculty = !!r.forwarded_to_faculty;
                         // Show the red dot only when there is a pending RFC AND the row is still actionable.
                         // Once the schedule is approved/finalized, the message icon is disabled; the dot should disappear.

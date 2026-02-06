@@ -2212,15 +2212,8 @@ async def om_send_to_faculty(payload: Dict[str, Any] = Body(...), db=Depends(get
         fac = await db[COL_FACULTY].find_one({"faculty_id": fid}, {"_id": 0, "user_id": 1}) or {}
         fac_user_id = (fac.get("user_id") or "").strip()
 
-        # --- NEW: do not overwrite an already-finalized schedule ---
-        existing_prop = await db[COL_LOAD_PROPOSALS].find_one(
-            {"faculty_id": fid, "term_id": term_id},
-            {"_id": 0, "status": 1, "locked": 1},
-        ) or None
-        if existing_prop:
-            st = str((existing_prop.get("status") or "")).lower()
-            if bool(existing_prop.get("locked")) or st in ("accepted", "approved"):
-                raise HTTPException(status_code=409, detail="Schedule is already finalized. You can no longer send/overwrite the proposal for this faculty.")
+        # NOTE: Do not hard-block re-sending/overwriting a proposal even if it was previously
+        # marked approved/accepted/locked. OM must be able to send a schedule again.
 
         doc = {
             "faculty_id": fid,
@@ -2321,7 +2314,9 @@ async def respond_load_assignment_rfc(
         raise HTTPException(status_code=404, detail="No RFC found")
 
     rfc = _normalize_rfc_doc(rfc)
-    if (rfc.get("status") or "").upper() in RFC_TERMINAL:
+    # Only treat as locked when the explicit `locked` flag is set.
+    # Terminal statuses are informational and should not prevent continued edits/RFC.
+    if bool(rfc.get("locked")):
         raise HTTPException(status_code=409, detail="RFC is already locked")
 
     now = datetime.now(timezone.utc)
@@ -2344,18 +2339,19 @@ async def respond_load_assignment_rfc(
         locked = False
     elif action == "approve":
         new_status = "APPROVED"
-        locked = True
+        # Do NOT lock RFC/schedule on approval. Faculty and OM must be able to continue editing / RFC again.
+        locked = False
         extra["closed_at"] = now
 
-        # --- NEW: RFC APPROVED → schedule becomes FINAL/APPROVED and locked ---
+        # RFC APPROVED → mark schedule as approved BUT keep it editable (no proposal lock, no row finalization).
         try:
             await db[COL_LOAD_PROPOSALS].update_one(
                 {"faculty_id": faculty_id, "term_id": term_id},
                 {
                     "$set": {
                         "status": "approved",
-                        "locked": True,
-                        "rows.$[].finalized": True,
+                        "locked": False,
+                        "rows.$[].finalized": False,
                         "updated_at": now,
                     },
                     "$setOnInsert": {"created_at": now},
@@ -2366,7 +2362,8 @@ async def respond_load_assignment_rfc(
             pass
     else:
         new_status = "REJECTED"
-        locked = True
+        # Keep the RFC closed, but do not hard-lock the workflow.
+        locked = False
         extra["closed_at"] = now
 
         # ✅ Reject behavior (hybrid):
@@ -2382,14 +2379,14 @@ async def respond_load_assignment_rfc(
             except Exception:
                 pass
         else:
+            # Schedule-wide RFC reject should not freeze the whole schedule.
+            # Keep the proposal editable; OM can re-send and faculty can RFC again.
             try:
                 await db[COL_LOAD_PROPOSALS].update_one(
                     {"faculty_id": faculty_id, "term_id": term_id},
                     {
                         "$set": {
-                            "status": "approved",
-                            "locked": True,
-                            "rows.$[].finalized": True,
+                            "locked": False,
                             "updated_at": now,
                         },
                         "$setOnInsert": {"created_at": now},

@@ -580,24 +580,13 @@ function TeachingLoadEnhanced({ teachingLoad, term, workflow, onToast, onRefresh
   const [modal, setModal] = useState<{ day: DayLong; item: TLItemForCalendar } | null>(null);
   const [isAccepted, setIsAccepted] = useState(false);
 
-  // Schedule is finalized once: Faculty accepted OR OM approved/rejected an RFC.
-const scheduleFinal = Boolean(
-  workflow?.schedule_final ||
-    workflow?.proposal_status?.toString?.().toLowerCase?.() === "approved" ||
-    workflow?.proposal_status?.toString?.().toLowerCase?.() === "accepted" ||
-    (workflow?.rfc?.status &&
-      ["ACCEPTED", "APPROVED", "REJECTED"].includes(String(workflow.rfc.status).toUpperCase()))
-);
+  // Schedule is finalized only when backend explicitly marks it so (e.g., faculty accepted).
+  // Approved schedules and terminal RFC outcomes remain editable; faculty can RFC again.
+  const scheduleFinal = Boolean(workflow?.schedule_final);
 
 
 const scheduleFinalLabel = (() => {
-  const st = String(workflow?.rfc?.status || "").toUpperCase();
-  if (st === "REJECTED") return "Finalized (RFC Rejected)";
-  if (st === "APPROVED") return "Finalized (RFC Approved)";
-  if (st === "ACCEPTED") return "Finalized (Accepted)";
-
   const ps = String(workflow?.proposal_status || "").toLowerCase();
-  if (ps === "approved") return "Finalized (Approved)";
   if (ps === "accepted") return "Finalized (Accepted)";
   return "Finalized";
 })();
@@ -1601,7 +1590,8 @@ function RfcThreadView({ term, sectionId }: { term: any; sectionId: string }) {
   }
 
   const status = String(thread.status || "").toUpperCase();
-  const locked = Boolean(thread.locked) || ["ACCEPTED", "APPROVED", "REJECTED"].includes(status);
+  // RFC terminal statuses are informational; only the explicit `locked` flag should disable interactions.
+  const locked = Boolean(thread.locked);
   const statusLabel = formatRfcStatus(status, locked);
 
   return (
