@@ -2348,9 +2348,6 @@ export default function OM_LoadAssignment() {
       };
 
       return rowsIn.map((r) => {
-        const locked = !!r.finalized || r.status === "Confirmed";
-        if (locked) return r;
-
         // If OM has completed the row, ensure it's Pending (unless it is already a more specific status).
         if (isComplete(r)) {
           const current = String(r.status || "").trim();
@@ -2797,9 +2794,9 @@ export default function OM_LoadAssignment() {
   };
 
   const getEditFlags = (r: Row) => {
-    // Once a row is finalized/approved, it must be locked from any further edits.
-    const isLocked = !!r.finalized;
-    if (isLocked) {
+    // Archived terms are view-only.
+    // NOTE: Faculty acceptance/"Approved" schedules must remain editable by OM.
+    if (isArchiveView) {
       return {
         course: false,
         title: false,
@@ -3937,11 +3934,11 @@ useEffect(() => {
                     <tbody>
                       {filtered.map((r, idx) => {
                         const e = getEditFlags(r);
-                        const isLocked = !!r.finalized;
+                        const isLocked = isArchiveView;
                         const isForwardedToFaculty = !!r.forwarded_to_faculty;
                         // Show the red dot only when there is a pending RFC AND the row is still actionable.
                         // Once the schedule is approved/finalized, the message icon is disabled; the dot should disappear.
-                        const unread = !!(r as any).pending_rfc && !r.finalized;
+                        const unread = !!(r as any).pending_rfc;
                         return (
                           <tr
                             key={r.id}
@@ -4230,14 +4227,13 @@ useEffect(() => {
                               {isRunning && (
                                 <div className="relative flex items-center justify-center gap-3 text-emerald-700">
                                   <button
-                                    disabled={!!r.finalized}
                                     className={cls(
                                       "relative hover:brightness-110",
-                                      !!r.finalized && "opacity-40 cursor-not-allowed hover:brightness-100"
+                                      isArchiveView && "opacity-40 cursor-not-allowed hover:brightness-100"
                                     )}
                                     title="Message"
                                     onClick={() => {
-                                      if (r.finalized) return;
+                                      if (isArchiveView) return;
                                       setReqChange({
                                         open: true,
                                         facultyName: r.faculty || "Faculty",
