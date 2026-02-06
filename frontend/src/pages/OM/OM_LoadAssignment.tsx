@@ -4139,14 +4139,14 @@ useEffect(() => {
 
                 <div className="border-t px-4 py-3">
                   <div className="flex items-center justify-between gap-3">
-                    <button
+                    {/*<button
                       onClick={addRow}
                       className="inline-flex items-center gap-2 rounded-lg border border-gray-400 px-3 py-1.5 text-sm text-gray-800 hover:bg-gray-100"
                       title="Add new line"
                     >
                       <Plus className="h-4 w-4" />
                       Add new line
-                    </button>
+                    </button>*/}
 
                   </div>
                   {/* Right: Auto-assign (Run algorithm) - REMOVED from bottom */}
