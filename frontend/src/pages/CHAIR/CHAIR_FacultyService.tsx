@@ -1,6 +1,6 @@
 // frontend/src/pages/CHAIR/CHAIR_FacultyService.tsx
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { Send, Check, ChevronDown, X, CheckCircle2, AlertCircle, Info } from "lucide-react";
+import { Send, Check, ChevronDown, X, CheckCircle2, AlertCircle, Info, Undo2, Redo2 } from "lucide-react";
 import {
   getFSOptions,
   listFacultyService,
@@ -520,6 +520,11 @@ export default function CHAIR_FacultyService({ chairDepartmentName }: ChairFacul
   // Fallback to ST only if we truly can't derive a department.
   const [activeDeptName, setActiveDeptName] = useState<string>(chairDepartmentName || "");
 
+  // Tabs (declare early because other hooks reference it)
+  const [tab, setTab] = useState<"Create Request" | "Received Requests" | "Accepted Requests">(
+    "Create Request"
+  );
+
   // Build a header label from options.activeTerm
   const updateTermLabelFromOptions = (o: any) => {
     const ay = o?.activeTerm?.acad_year_start;
@@ -600,14 +605,127 @@ export default function CHAIR_FacultyService({ chairDepartmentName }: ChairFacul
   const [edits, setEdits] = useState<Record<string, ReceiverEdit>>({});
 
   const getEditFrom = (all: Record<string, ReceiverEdit>, id: string): ReceiverEdit => all[id] || EMPTY_EDIT;
-
   const getEdit = (id: string): ReceiverEdit => getEditFrom(edits, id);
 
-  const patchEdit = (id: string, patch: Partial<ReceiverEdit>) =>
-    setEdits((prev) => ({
-      ...prev,
-      [id]: { ...getEditFrom(prev, id), ...patch },
-    }));
+  /* -------------------- Undo / Redo (Received Requests edits) --------------------
+     - Ctrl/Cmd+Z => Undo
+     - Ctrl/Cmd+Y or Ctrl/Cmd+Shift+Z => Redo
+     - Does not override native undo/redo inside inputs/textareas/contenteditable
+  */
+
+  const editsRef = useRef<Record<string, ReceiverEdit>>({});
+  useEffect(() => {
+    editsRef.current = edits;
+  }, [edits]);
+
+  // Global (cross-row) undo/redo history. Tracks the sequence of edits the user makes.
+  const undoRef = useRef<Record<string, ReceiverEdit>[]>([]);
+  const redoRef = useRef<Record<string, ReceiverEdit>[]>([]);
+
+  // Used to re-render small UI controls (Undo/Redo buttons) that depend on ref-based history.
+  const [historyTick, setHistoryTick] = useState(0);
+  const bumpHistoryTick = () => setHistoryTick((t) => t + 1);
+
+  const cloneJson = <T,>(x: T): T => JSON.parse(JSON.stringify(x));
+
+  const pushHistory = (prevEdits: Record<string, ReceiverEdit>, nextEdits: Record<string, ReceiverEdit>) => {
+    // Skip no-op changes
+    try {
+      if (JSON.stringify(prevEdits) === JSON.stringify(nextEdits)) return;
+    } catch {
+      // continue
+    }
+
+    undoRef.current = [...undoRef.current, cloneJson(prevEdits)].slice(-120);
+    redoRef.current = []; // any new edit invalidates redo
+    bumpHistoryTick();
+  };
+
+  const undoEdit = () => {
+    const u = undoRef.current;
+    if (!u.length) return;
+
+    const prev = u[u.length - 1];
+    const cur = editsRef.current || {};
+
+    undoRef.current = u.slice(0, -1);
+    redoRef.current = [...redoRef.current, cloneJson(cur)].slice(-120);
+
+    setEdits(prev);
+    bumpHistoryTick();
+  };
+
+  const redoEdit = () => {
+    const r = redoRef.current;
+    if (!r.length) return;
+
+    const next = r[r.length - 1];
+    const cur = editsRef.current || {};
+
+    redoRef.current = r.slice(0, -1);
+    undoRef.current = [...undoRef.current, cloneJson(cur)].slice(-120);
+
+    setEdits(next);
+    bumpHistoryTick();
+  };
+
+  const patchEdit = (id: string, patch: Partial<ReceiverEdit>) => {
+    setEdits((prev) => {
+      const cur = getEditFrom(prev, id);
+      const next = { ...cur, ...patch };
+      const nextEdits = { ...prev, [id]: next };
+      pushHistory(prev, nextEdits);
+      return nextEdits;
+    });
+  };
+
+  useLayoutEffect(() => {
+    const isEditableTarget = (t: any) => {
+      const el = (t && (t as HTMLElement)) || null;
+      if (!el) return false;
+      const tag = (el.tagName || "").toLowerCase();
+      if (tag === "input" || tag === "textarea" || tag === "select") return true;
+      if ((el as any).isContentEditable) return true;
+      if (el.closest?.("[contenteditable='true']")) return true;
+      if (el.getAttribute?.("role") === "textbox") return true;
+      return false;
+    };
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.defaultPrevented) return;
+      if (e.altKey) return;
+
+      const mod = e.ctrlKey || e.metaKey;
+      if (!mod) return;
+
+      const key = String(e.key || "").toLowerCase();
+      if (key !== "z" && key !== "y") return;
+
+      // Let native undo/redo work inside inputs (remarks) or dropdown search.
+      if (isEditableTarget(e.target)) return;
+
+      // Only apply our shortcut in Received Requests tab
+      if (tab !== "Received Requests") return;
+
+      e.preventDefault();
+      e.stopPropagation();
+
+      // Ctrl/Cmd+Z => Undo
+      if (key === "z" && !e.shiftKey) {
+        undoEdit();
+        return;
+      }
+
+      // Ctrl/Cmd+Y or Ctrl/Cmd+Shift+Z => Redo
+      if (key === "y" || (key === "z" && e.shiftKey)) {
+        redoEdit();
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => window.removeEventListener("keydown", onKeyDown, true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab]);
 
   const [sentRows, setSentRows] = useState<FacultyServiceRow[]>([]);
   const [receivedRows, setReceivedRows] = useState<FacultyServiceRow[]>([]);
@@ -851,8 +969,6 @@ export default function CHAIR_FacultyService({ chairDepartmentName }: ChairFacul
     [sentRows, activeDeptName]
   );
 
-  const [tab, setTab] = useState<"Create Request" | "Received Requests" | "Accepted Requests">("Create Request");
-
   // When the chair opens the "Received Requests" tab, mark currently fetched received requests as seen.
   useEffect(() => {
     if (tab !== "Received Requests") return;
@@ -888,6 +1004,10 @@ export default function CHAIR_FacultyService({ chairDepartmentName }: ChairFacul
     else if (t.startsWith("Accepted Requests")) setTab("Accepted Requests");
     else setTab(t as any);
   };
+
+  // Undo/Redo button enablement (uses historyTick to keep lint happy and force rerenders)
+  const canUndoReceived = tab === "Received Requests" && historyTick >= 0 && undoRef.current.length > 0;
+  const canRedoReceived = tab === "Received Requests" && historyTick >= 0 && redoRef.current.length > 0;
 
   
 /* ---------------- UI ---------------- */
@@ -1097,7 +1217,46 @@ export default function CHAIR_FacultyService({ chairDepartmentName }: ChairFacul
         {/* 3) RECEIVED REQUESTS (editable, full; to my department) */}
         {tab === "Received Requests" && (
           <div className={cls(PLANTILLA_TABLE_WRAP, "mt-3 flex-1 min-h-[320px] overflow-y-auto")}>
-            <div className={cls(PLANTILLA_SECTION_TITLE, "w-full")}>Received Requests</div>
+            <div className={cls(PLANTILLA_SECTION_TITLE, "w-full flex items-center justify-between gap-3")}
+            >
+              <span>Received Requests</span>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    undoEdit();
+                  }}
+                  disabled={!canUndoReceived}
+                  className={cls(
+                    "inline-flex items-center justify-center rounded-md px-2 py-1",
+                    "border border-white/30",
+                    canUndoReceived ? "hover:bg-white/10" : "opacity-50 cursor-not-allowed"
+                  )}
+                  title="Undo (Ctrl/Cmd+Z)"
+                  aria-label="Undo"
+                >
+                  <Undo2 className="h-4 w-4" />
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    redoEdit();
+                  }}
+                  disabled={!canRedoReceived}
+                  className={cls(
+                    "inline-flex items-center justify-center rounded-md px-2 py-1",
+                    "border border-white/30",
+                    canRedoReceived ? "hover:bg-white/10" : "opacity-50 cursor-not-allowed"
+                  )}
+                  title="Redo (Ctrl/Cmd+Y or Ctrl/Cmd+Shift+Z)"
+                  aria-label="Redo"
+                >
+                  <Redo2 className="h-4 w-4" />
+                </button>
+              </div>
+            </div>
 
             <div className="overflow-x-auto">
               <table className={PLANTILLA_TABLE}>
@@ -1129,7 +1288,11 @@ export default function CHAIR_FacultyService({ chairDepartmentName }: ChairFacul
                     const isClosed = r.status === "responded" || r.status === "rejected";
 
                     return (
-                      <tr key={fsid} className={PLANTILLA_ROW} onMouseEnter={() => ensureFacultyForDept(dept)}>
+                      <tr
+                        key={fsid}
+                        className={PLANTILLA_ROW}
+                        onMouseEnter={() => ensureFacultyForDept(dept)}
+                      >
                         {/* Course */}
                         <td className={cls(PLANTILLA_TD, "text-left")}>
                           <div className="font-semibold text-emerald-700">{r.course_code}</div>

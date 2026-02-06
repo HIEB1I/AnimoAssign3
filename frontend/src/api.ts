@@ -3307,6 +3307,25 @@ export async function rejectFacultyService(fs_id: string, payload?: { remarks?: 
   return data as { ok: boolean; row: FacultyServiceRow };
 }
 
+// Restore/overwrite a faculty service row (used for Undo/Redo in CHAIR Faculty Service)
+export async function restoreFacultyService(
+  fs_id: string,
+  payload: Partial<Pick<FacultyServiceRow,
+    | "status"
+    | "faculty"
+    | "day1"
+    | "begin1"
+    | "end1"
+    | "day2"
+    | "begin2"
+    | "end2"
+    | "remarks"
+  >>
+) {
+  const { data } = await api.post(`/chair/faculty-service/restore/${encodeURIComponent(fs_id)}`, payload || {});
+  return data as { ok: boolean; row: FacultyServiceRow };
+}
+
 
 
 

@@ -737,3 +737,75 @@ async def fs_reject(fs_id: str, payload: Dict[str, Any] = Body(default={})):
         pass
     doc = await db.faculty_service.find_one({"fs_id": fs_id}, {"_id": 0})
     return {"ok": True, "row": doc}
+
+
+# --------------------------- RESTORE (Undo/Redo helper) ---------------------------
+
+@router.post("/restore/{fs_id}")
+async def fs_restore(fs_id: str, payload: Dict[str, Any] = Body(default={})):
+    """Restore/overwrite a subset of fields on a Faculty Service row.
+
+    This endpoint is intentionally narrow and is used by the UI to support
+    Undo/Redo of *committed* actions (e.g., Respond / Reject) by restoring the
+    previous row snapshot.
+
+    Allowed fields: status, faculty, day1/begin1/end1, day2/begin2/end2, remarks.
+    """
+
+    row = await db.faculty_service.find_one({"fs_id": fs_id})
+    if not row:
+        raise HTTPException(status_code=404, detail="Not found.")
+
+    allowed_status = {"sent", "responded", "rejected"}
+    status = (payload.get("status") or row.get("status") or "sent").strip()
+    if status not in allowed_status:
+        raise HTTPException(status_code=400, detail="Invalid status.")
+
+    faculty = payload.get("faculty") if isinstance(payload.get("faculty"), dict) else None
+    remarks = payload.get("remarks")
+
+    # schedule fields
+    day1 = payload.get("day1")
+    begin1 = payload.get("begin1")
+    end1 = payload.get("end1")
+    day2 = payload.get("day2")
+    begin2 = payload.get("begin2")
+    end2 = payload.get("end2")
+
+    # Normalize and compute end times if begin is present but end isn't.
+    if begin1 is not None and (end1 is None or end1 == ""):
+        end1 = END_BY_BEGIN.get(begin1, end1 or "")
+    if begin2 is not None and (end2 is None or end2 == ""):
+        end2 = END_BY_BEGIN.get(begin2, end2 or "")
+
+    update: Dict[str, Any] = {
+        "status": status,
+        "updated_at": _now_iso(),
+    }
+
+    if faculty is not None:
+        update["faculty"] = {
+            "faculty_id": faculty.get("faculty_id"),
+            "first_name": faculty.get("first_name"),
+            "last_name": faculty.get("last_name"),
+            "email": faculty.get("email"),
+        }
+
+    if day1 is not None:
+        update["day1"] = day1
+    if begin1 is not None:
+        update["begin1"] = begin1
+    if end1 is not None:
+        update["end1"] = end1
+    if day2 is not None:
+        update["day2"] = day2
+    if begin2 is not None:
+        update["begin2"] = begin2
+    if end2 is not None:
+        update["end2"] = end2
+    if remarks is not None:
+        update["remarks"] = str(remarks)
+
+    await db.faculty_service.update_one({"fs_id": fs_id}, {"$set": update})
+    doc = await db.faculty_service.find_one({"fs_id": fs_id}, {"_id": 0})
+    return {"ok": True, "row": doc}

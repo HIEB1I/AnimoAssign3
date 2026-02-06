@@ -2210,35 +2210,116 @@ async def om_send_to_faculty(payload: Dict[str, Any] = Body(...), db=Depends(get
     if not by_fid:
         raise HTTPException(status_code=400, detail="No rows with faculty_id")
 
+    def _row_key(rr: Dict[str, Any]) -> tuple[str, str, str]:
+        """Key used to identify a row inside a proposal doc.
+
+        Prefer section_id when present (most stable), otherwise fall back to (course_code, section).
+        """
+        section_id = str(rr.get("id") or rr.get("section_id") or "").strip()
+        course_code = str(rr.get("course_code") or rr.get("course") or "").strip()
+        section = str(rr.get("section") or "").strip()
+        return (section_id, course_code, section)
+
+    def _cmp_payload(rr: Dict[str, Any]) -> Dict[str, str]:
+        """A reduced, stable comparison view of a row.
+
+        We intentionally compare only schedule-relevant fields so we can detect
+        whether a row truly changed since it was last forwarded.
+        """
+        return {
+            "section_id": str(rr.get("id") or rr.get("section_id") or "").strip(),
+            "course_code": str(rr.get("course_code") or rr.get("course") or "").strip(),
+            "course_title": str(rr.get("course_title") or rr.get("title") or "").strip(),
+            "section": str(rr.get("section") or "").strip(),
+            "faculty_id": str(rr.get("faculty_id") or "").strip(),
+            "day1": str(rr.get("day1") or "").strip(),
+            "start": str(rr.get("start") or rr.get("begin1") or "").strip(),
+            "end": str(rr.get("end") or rr.get("end1") or "").strip(),
+            "room1": str(rr.get("room1") or "").strip(),
+            "day2": str(rr.get("day2") or "").strip(),
+            "start2": str(rr.get("start2") or rr.get("begin2") or "").strip(),
+            "end2": str(rr.get("end2") or rr.get("end2") or "").strip(),
+            "room2": str(rr.get("room2") or "").strip(),
+            "mode": str(rr.get("mode") or "").strip(),
+            "capacity": str(rr.get("capacity") or "").strip(),
+            "units": str(rr.get("units") or "").strip(),
+        }
+
     sent = 0
     for fid, fac_rows in by_fid.items():
         fac = await db[COL_FACULTY].find_one({"faculty_id": fid}, {"_id": 0, "user_id": 1}) or {}
         fac_user_id = (fac.get("user_id") or "").strip()
 
-        # NOTE: Do not hard-block re-sending/overwriting a proposal even if it was previously
-        # marked approved/accepted/locked. OM must be able to send a schedule again.
+        # Fetch existing proposal so we can append new rows without forcing previously forwarded rows
+        # to be re-sent (or re-accepted) unless they were edited.
+        existing = await db[COL_LOAD_PROPOSALS].find_one(
+            {"faculty_id": fid, "term_id": term_id},
+            {"_id": 0, "status": 1, "locked": 1, "rows": 1, "created_at": 1},
+        ) or {}
+
+        existing_rows = list(existing.get("rows") or []) if isinstance(existing.get("rows"), list) else []
+        existing_by_key: Dict[tuple[str, str, str], Dict[str, Any]] = {}
+        existing_index_by_key: Dict[tuple[str, str, str], int] = {}
+        for i, rr in enumerate(existing_rows):
+            if not isinstance(rr, dict):
+                continue
+            k = _row_key(rr)
+            existing_by_key[k] = rr
+            existing_index_by_key[k] = i
+
+        changed = False
+        merged_rows = list(existing_rows)
+        for rr in fac_rows:
+            if not isinstance(rr, dict):
+                continue
+            k = _row_key(rr)
+            prev = existing_by_key.get(k)
+
+            # If no previous row, this is new.
+            if not prev:
+                merged_rows.append(rr)
+                changed = True
+                continue
+
+            # If schedule-relevant payload differs, replace in-place.
+            if _cmp_payload(prev) != _cmp_payload(rr):
+                idx = existing_index_by_key.get(k)
+                if idx is not None and 0 <= idx < len(merged_rows):
+                    merged_rows[idx] = rr
+                else:
+                    merged_rows.append(rr)
+                changed = True
+
+        # If nothing new/changed for this faculty, do not touch the proposal doc or notify.
+        if not changed and existing_rows:
+            continue
+
+        now = datetime.now(timezone.utc)
+        prior_status = str(existing.get("status") or "").strip() or "proposed"
+        # Any new/changed rows requires faculty attention; set status back to proposed.
+        next_status = "proposed" if changed else prior_status
 
         doc = {
             "faculty_id": fid,
             "term_id": term_id,
-            "status": "proposed",
+            "status": next_status,
             "om_user_id": user_id,
-            "rows": fac_rows,
-            "updated_at": datetime.now(timezone.utc),
+            "rows": merged_rows,
+            "locked": False,
+            "updated_at": now,
         }
 
         await db[COL_LOAD_PROPOSALS].update_one(
             {"faculty_id": fid, "term_id": term_id},
-            {"$set": doc, "$setOnInsert": {"created_at": datetime.now(timezone.utc)}},
+            {"$set": doc, "$setOnInsert": {"created_at": now}},
             upsert=True,
         )
 
         if fac_user_id:
-            # Notify faculty that a proposed schedule is available
             await create_notification(
                 user_id=fac_user_id,
-                title="Load Assignment: Proposed schedule available",
-                details="The Office Manager sent a proposed schedule for you. You can accept it or request changes (RFC).",
+                title="Load Assignment: Proposed schedule updated",
+                details="The Office Manager sent additional or updated load rows for you. You can review them and accept or request changes (RFC).",
                 meta={
                     "route": "/faculty/overview",
                     "kind": "load_proposed",

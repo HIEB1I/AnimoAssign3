@@ -508,6 +508,8 @@ type Row = {
   faculty_id?: string;
   /** True when this row has already been sent/forwarded to the faculty (proposal created). */
   forwarded_to_faculty?: boolean;
+  /** True when a forwarded row was edited after it was last sent to faculty. */
+  reforward_needed?: boolean;
   day1: string;
   begin1: string;
   end1: string;
@@ -2316,6 +2318,51 @@ export default function OM_LoadAssignment() {
   };
 
   const commitRows = (nextRows: Row[], options?: { markDirty?: boolean }) => {
+    // If a row was already forwarded to faculty, any meaningful edit should make it eligible for re-forwarding.
+    // (Selection toggles should NOT trigger this.)
+    const prevById = new Map(rows.map((r) => [r.id, r] as const));
+
+    const meaningfulKeys: (keyof Row)[] = [
+      "course",
+      "title",
+      "units",
+      "section",
+      "faculty",
+      "faculty_id",
+      "day1",
+      "begin1",
+      "end1",
+      "room1",
+      "day2",
+      "begin2",
+      "end2",
+      "room2",
+      "capacity",
+      "mode",
+    ];
+
+    const isMeaningfullyChanged = (a: Row, b: Row) => {
+      for (const k of meaningfulKeys) {
+        const av = (a as any)[k];
+        const bv = (b as any)[k];
+        if (String(av ?? "") !== String(bv ?? "")) return true;
+      }
+      return false;
+    };
+
+    const nextRowsWithReforward: Row[] = nextRows.map((nr) => {
+      const pr = prevById.get(nr.id);
+      if (!pr) return nr;
+      if (!pr.forwarded_to_faculty) return nr;
+      if (pr.reforward_needed) return nr;
+
+      // Only flag if something meaningful (not selection) changed.
+      if (isMeaningfullyChanged(pr, nr)) {
+        return { ...nr, reforward_needed: true };
+      }
+      return nr;
+    });
+
     /**
      * Auto-status rule:
      * Once OM fills a row with the required details (even before sending to faculty),
@@ -2360,7 +2407,7 @@ export default function OM_LoadAssignment() {
       });
     };
 
-    const nextRowsWithStatus = applyAutoPendingStatus(nextRows);
+    const nextRowsWithStatus = applyAutoPendingStatus(nextRowsWithReforward);
 
     // Push current snapshot to undo before applying the change
     undoStackRef.current.push({ rows, hasLocalEdits });
@@ -2404,6 +2451,74 @@ export default function OM_LoadAssignment() {
     setHasLocalEdits(next.hasLocalEdits);
     bumpHistory();
   };
+
+  /* ---------------------- Keyboard shortcuts (Ctrl/Cmd) ---------------------- */
+  // NOTE: We intentionally do NOT override native undo/redo inside text inputs.
+  const shortcutFnsRef = useRef<{ undo: () => void; redo: () => void }>({
+    undo: () => {},
+    redo: () => {},
+  });
+  const isRunningRef = useRef(false);
+  useEffect(() => {
+    isRunningRef.current = isRunning;
+  }, [isRunning]);
+
+  useEffect(() => {
+    shortcutFnsRef.current = {
+      undo: handleUndo,
+      redo: handleRedo,
+    };
+  }, [handleUndo, handleRedo]);
+
+  useEffect(() => {
+    const isEditableTarget = (t: EventTarget | null) => {
+      const el = t as HTMLElement | null;
+      if (!el) return false;
+
+      const tag = (el as any).tagName ? String((el as any).tagName).toLowerCase() : "";
+      if (tag === "input" || tag === "textarea" || tag === "select") return true;
+
+      if ((el as any).isContentEditable) return true;
+      if (el.closest?.("[contenteditable='true']")) return true;
+      if (el.getAttribute?.("role") === "textbox") return true;
+      return false;
+    };
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.defaultPrevented) return;
+      if (e.altKey) return;
+
+      const mod = e.ctrlKey || e.metaKey; // Ctrl (Win/Linux) / Cmd (Mac)
+      if (!mod) return;
+
+      const key = String(e.key || "").toLowerCase();
+      if (key !== "z" && key !== "y") return;
+
+      if (!isRunningRef.current) return;
+
+      // Don’t intercept while the user is typing in an editable control
+      if (isEditableTarget(e.target)) return;
+
+      e.preventDefault();
+      e.stopPropagation();
+
+      const fns = shortcutFnsRef.current;
+
+      // Ctrl/Cmd+Z => Undo
+      if (key === "z" && !e.shiftKey) {
+        fns.undo();
+        return;
+      }
+
+      // Ctrl/Cmd+Y or Ctrl/Cmd+Shift+Z => Redo
+      if (key === "y" || (key === "z" && e.shiftKey)) {
+        fns.redo();
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => window.removeEventListener("keydown", onKeyDown, true);
+  }, []);
 
   const [facultyList, setFacultyList] = useState<Faculty[]>([]);
   // Faculty Deloading (per-faculty)
@@ -2504,13 +2619,22 @@ export default function OM_LoadAssignment() {
     const key = (r: Row) => String((r.faculty_id || r.faculty || "")).trim();
     const selectedKeys = new Set(selectedRows.map(key).filter(Boolean));
 
+    const isEligible = (r: Row) => {
+      // Never include rows without a faculty
+      if (!key(r)) return false;
+
+      // Do NOT re-send rows that were already forwarded unless they've been edited since.
+      if (r.forwarded_to_faculty && !r.reforward_needed) return false;
+      return true;
+    };
+
     if (all) {
-      // Send all rows that are assigned to a faculty
-      return rows.filter((r) => !!key(r));
+      // Send all eligible rows that are assigned to a faculty
+      return rows.filter(isEligible);
     }
 
     // If any row is selected for a faculty, send ALL rows for that faculty (not per subject)
-    return rows.filter((r) => selectedKeys.has(key(r)));
+    return rows.filter((r) => selectedKeys.has(key(r)) && isEligible(r));
   };
 /**
    * Before forwarding to faculty, require that the rows being sent are complete.
@@ -3779,7 +3903,10 @@ useEffect(() => {
                           if (isArchiveView) return;
                           const preview = buildSendRowsForPreview();
                           if (!preview.length) {
-                            showToast("Select at least one row with an assigned faculty.", "error");
+                            showToast(
+                              "No new or edited rows to send for the selected faculty. (Previously sent rows are excluded unless edited.)",
+                              "error"
+                            );
                             return;
                           }
 
