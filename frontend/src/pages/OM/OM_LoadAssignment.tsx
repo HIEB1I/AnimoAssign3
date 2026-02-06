@@ -1650,12 +1650,35 @@ const RequestChangeModal = ({
           {messages.length ? (
             <div className="space-y-2">
               {messages.map((m: any, idx: number) => {
-                const who = (m.sender_role || m.from || "").toString().toUpperCase();
+                const whoRaw = (m.sender_role || m.from || "").toString();
+                const who = whoRaw.toUpperCase();
                 const ts = m.created_at ? new Date(m.created_at).toLocaleString() : "";
+                const isFaculty = /FACULTY/i.test(whoRaw) || who === "F";
+                const bubble = m.message || m.text || "";
+
                 return (
-                  <div key={idx} className="text-sm">
-                    <div className="text-[11px] text-gray-500">{who} {ts ? `• ${ts}` : ""}</div>
-                    <div className="whitespace-pre-wrap text-gray-800">{m.message || m.text || ""}</div>
+                  <div
+                    key={idx}
+                    className={cls(
+                      "flex",
+                      isFaculty ? "justify-start" : "justify-end"
+                    )}
+                  >
+                    <div className={cls("max-w-[85%]", isFaculty ? "text-left" : "text-right")}>
+                      <div className={cls("mb-1 text-[11px] text-gray-500", isFaculty ? "pl-1" : "pr-1")}>
+                        {who || (isFaculty ? displayFaculty.toUpperCase() : "OM")}{ts ? ` • ${ts}` : ""}
+                      </div>
+                      <div
+                        className={cls(
+                          "inline-block rounded-2xl px-3 py-2 text-sm whitespace-pre-wrap",
+                          isFaculty
+                            ? "bg-white text-gray-800 border border-gray-200"
+                            : "bg-emerald-600 text-white"
+                        )}
+                      >
+                        {bubble}
+                      </div>
+                    </div>
                   </div>
                 );
               })}
