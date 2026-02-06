@@ -1,200 +1,13 @@
 import React from "react";
 import { useNavigate } from "react-router-dom";
-import { Eye, EyeOff, Mail, CheckCircle2, X } from "lucide-react";
+import { Eye, EyeOff, Mail, CheckCircle2 } from "lucide-react";
 import AA_Logo from "@/assets/Images/AA_Logo.png";
-import { login as apiLogin, type LoginResponse } from "@/api";
-
-function PrivacyPolicyModal({
-  open,
-  onClose,
-}: {
-  open: boolean;
-  onClose: () => void;
-}) {
-  // Close on ESC (optional, doesn't affect login logic)
-  React.useEffect(() => {
-    if (!open) return;
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [open, onClose]);
-
-  if (!open) return null;
-
-  return (
-    <div
-      className="fixed inset-0 z-[999] flex items-center justify-center px-4 py-6"
-      role="dialog"
-      aria-modal="true"
-      aria-label="Privacy Policy"
-    >
-      {/* Backdrop */}
-      <button
-        type="button"
-        onClick={onClose}
-        className="absolute inset-0 bg-black/50"
-        aria-label="Close privacy policy"
-      />
-
-      {/* Modal */}
-      <div className="relative w-full max-w-3xl overflow-hidden rounded-2xl bg-white shadow-[0_20px_60px_rgba(0,0,0,0.25)]">
-        {/* Header */}
-        <div className="flex items-center justify-between gap-3 border-b border-neutral-200 px-6 py-4">
-          <div>
-            <div className="text-sm font-semibold text-emerald-800">AnimoAssign</div>
-            <h2 className="text-xl font-bold text-slate-900">Privacy Policy</h2>
-            <div className="mt-1 text-xs text-slate-500">Last updated: January 2026</div>
-          </div>
-          <button
-            type="button"
-            onClick={onClose}
-            className="inline-flex h-10 w-10 items-center justify-center rounded-xl border border-neutral-200 bg-white text-slate-700 hover:bg-neutral-50"
-            aria-label="Close"
-          >
-            <X className="h-5 w-5" />
-          </button>
-        </div>
-
-        {/* Body */}
-        <div className="max-h-[75vh] overflow-y-auto px-6 py-5">
-          <div className="rounded-xl border border-neutral-200 bg-neutral-50 px-4 py-3 text-sm text-slate-700">
-            AnimoAssign is a student-developed capstone web application for DLSU academic workflows
-            (course offerings, faculty preferences, petitions, special classes, and load assignment).
-            We take privacy seriously and handle personal data in accordance with the Data Privacy
-            Act of 2012 (RA 10173) and NPC guidance.
-          </div>
-
-          <div className="mt-6 space-y-6 text-sm text-slate-700 leading-relaxed">
-            <section>
-              <h3 className="text-base font-bold text-slate-900">1. Data Controller</h3>
-              <p className="mt-2">
-                <span className="font-semibold">AnimoAssign</span>{" "}
-                <br />
-                For privacy concerns, data access/correction, or deletion requests, contact:
-                <br />
-                <span className="font-semibold">Email:</span>{" "}
-                <span className="text-slate-600">animoassign@dlsu.edu.ph</span>
-              </p>
-            </section>
-
-            <section>
-              <h3 className="text-base font-bold text-slate-900">2. Information We Collect</h3>
-              <ul className="mt-2 list-disc pl-5 space-y-1">
-                <li>
-                  <span className="font-semibold">Account and identity:</span> name, DLSU email,
-                  system user ID, and role(s).
-                </li>
-                <li>
-                  <span className="font-semibold">Academic/organizational:</span> department/college,
-                  program assignment (if applicable), and course/section data needed to support
-                  academic workflows.
-                </li>
-                <li>
-                  <span className="font-semibold">Workflow inputs:</span> faculty preferences and
-                  availability, course offering updates, petition/special class details, and related
-                  remarks/status.
-                </li>
-                <li>
-                  <span className="font-semibold">Technical data:</span> basic logs (e.g., timestamps
-                  of requests, diagnostics) to help secure and maintain the service.
-                </li>
-              </ul>
-              <p className="mt-2 text-slate-600">
-                We do not request or store your email password.
-              </p>
-            </section>
-
-            <section>
-              <h3 className="text-base font-bold text-slate-900">3. Purpose of Processing</h3>
-              <ul className="mt-2 list-disc pl-5 space-y-1">
-                <li>Authentication and role-based access control</li>
-                <li>Managing academic workflows: offerings, preferences, petitions, special classes</li>
-                <li>Maintaining data integrity, auditability, and troubleshooting</li>
-                <li>Security monitoring and prevention of misuse</li>
-                <li>Responding to user support requests (non-marketing)</li>
-              </ul>
-            </section>
-
-            <section>
-              <h3 className="text-base font-bold text-slate-900">4. Legal Basis</h3>
-              <p className="mt-2">
-                We process personal data based on consent when you use the system, legitimate
-                interests in maintaining a secure and functional academic platform, and other lawful
-                bases applicable to the deployment context.
-              </p>
-            </section>
-
-            <section>
-              <h3 className="text-base font-bold text-slate-900">5. Data Sharing</h3>
-              <p className="mt-2">
-                We do not sell or rent personal data. Data is only shared:
-              </p>
-              <ul className="mt-2 list-disc pl-5 space-y-1">
-                <li>Within the system according to role-based permissions</li>
-                <li>With necessary service providers (hosting/database) operating on our behalf</li>
-                <li>When required by law or lawful order</li>
-              </ul>
-            </section>
-
-            <section>
-              <h3 className="text-base font-bold text-slate-900">6. Storage & Retention</h3>
-              <p className="mt-2">
-                Data is retained only as long as needed for system operations and academic workflow
-                continuity, or until deletion/anonymization is requested where feasible, subject to
-                operational and academic requirements.
-              </p>
-            </section>
-
-            <section>
-              <h3 className="text-base font-bold text-slate-900">7. Security</h3>
-              <p className="mt-2">
-                We apply reasonable safeguards such as access controls, role restrictions, and secure
-                configurations. No system is 100% secure; if a security incident occurs, we will take
-                reasonable steps to investigate and mitigate and follow applicable notification
-                guidelines.
-              </p>
-            </section>
-
-            <section>
-              <h3 className="text-base font-bold text-slate-900">8. Your Rights</h3>
-              <p className="mt-2">
-                Under the Data Privacy Act, you may request access, correction, deletion/blocking
-                (where applicable), or raise concerns/complaints. Contact:{" "}
-                <span className="font-semibold">animoassign@dlsu.edu.ph</span>
-              </p>
-            </section>
-
-            <section>
-              <h3 className="text-base font-bold text-slate-900">9. Policy Updates</h3>
-              <p className="mt-2">
-                We may update this policy as features or integrations change. Updates will be posted
-                within the application, and significant changes may be communicated when feasible.
-              </p>
-            </section>
-          </div>
-        </div>
-
-        {/* Footer */}
-        <div className="flex items-center justify-end gap-2 border-t border-neutral-200 px-6 py-4">
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded-xl border border-neutral-300 bg-white px-4 py-2 text-sm font-semibold text-slate-800 hover:bg-neutral-50"
-          >
-            Close
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
+import { login as apiLogin, loginWithPassword, type LoginResponse } from "@/api";
+import { useGoogleLogin } from "@react-oauth/google";
 
 const Login: React.FC = () => {
   const [showPw, setShowPw] = React.useState(false);
   const [showForm, setShowForm] = React.useState(false);
-  const [showPrivacy, setShowPrivacy] = React.useState(false);
 
   const [email, setEmail] = React.useState("");
   const [password, setPassword] = React.useState(""); // UI only
@@ -203,44 +16,80 @@ const Login: React.FC = () => {
 
   const navigate = useNavigate();
 
-  async function onSubmit(e: React.FormEvent) {
-    e.preventDefault();
+function finishLogin(user: LoginResponse) {
+  const roles = (user.roles || []).map((r) => (r || "").toLowerCase());
+
+  let dest: string | null = null;
+  if (roles.includes("apo")) dest = "/apo/preenlistment";
+  else if (roles.includes("office manager") || roles.includes("gs coordinator"))
+    dest = "/om/load-assignment";
+  else if (roles.includes("department chair") || roles.includes("deparment chair"))
+    dest = "/chair";
+  else if (roles.includes("faculty")) dest = "/faculty/overview";
+  else if (roles.includes("student")) dest = "/student/petition";
+  else if (roles.includes("admin")) dest = "/admin";
+  else if (roles.includes("dean")) dest = null;
+
+  if (!dest) {
+    setError("Your account has no valid role configured. Please contact the administrator.");
+    return;
+  }
+
+  localStorage.setItem("animo.user", JSON.stringify(user));
+  navigate(dest, { replace: true });
+}
+
+async function onSubmit(e: React.FormEvent) {
+  e.preventDefault();
+  setLoading(true);
+  setError(null);
+
+  try {
+    const user: LoginResponse = await loginWithPassword(email.trim(), password);
+    finishLogin(user);
+  } catch (err: any) {
+    setError(err?.message || "Login failed");
+  } finally {
+    setLoading(false);
+  }
+}
+
+const googleLogin = useGoogleLogin({
+  flow: "auth-code",
+  scope: [
+    "openid",
+    "email",
+    "profile",
+    "https://www.googleapis.com/auth/gmail.send",
+    "https://www.googleapis.com/auth/calendar.events",
+  ].join(" "),
+  onSuccess: async (codeResponse) => {
     setLoading(true);
     setError(null);
 
     try {
-      const user: LoginResponse = await apiLogin(email.trim());
-      const roles = (user.roles || []).map((r) => r.toLowerCase());
+      const res = await fetch("/api/auth/google/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code: codeResponse.code }),
+      });
 
-      let dest: string | null = null;
-      if (roles.includes("apo")) dest = "/apo/preenlistment";
-      else if (roles.includes("office manager") || roles.includes("gs coordinator"))
-        dest = "/om/load-assignment";
-      else if (roles.includes("department chair") || roles.includes("deparment chair"))
-        dest = "/chair";
-      else if (roles.includes("faculty")) dest = "/faculty/overview";
-      else if (roles.includes("student")) dest = "/student/courseofferings";
-      else if (roles.includes("admin")) dest = "/admin";
-      else if (roles.includes("dean")) dest = null;
+      if (!res.ok) throw new Error(await res.text());
 
-      if (dest) {
-        localStorage.setItem("animo.user", JSON.stringify(user));
-        navigate(dest, { replace: true });
-      } else {
-        setError("Your account has no valid role configured. Please contact the administrator.");
-      }
-    } catch (err: any) {
-      setError(err?.message || "Login failed");
+      const user: LoginResponse = await res.json();
+      finishLogin(user);
+    } catch (e: any) {
+      setError(e?.message || "Google login failed.");
     } finally {
       setLoading(false);
     }
-  }
+  },
+  onError: () => setError("Google sign-in failed. Please try again."),
+});
+
 
   return (
     <div className="min-h-screen w-full bg-[#f5f6f7] grid place-items-center px-4 py-10">
-      {/* Privacy Policy Modal (UI only; does not affect login logic) */}
-      <PrivacyPolicyModal open={showPrivacy} onClose={() => setShowPrivacy(false)} />
-
       <div className="w-full max-w-6xl overflow-hidden rounded-2xl bg-white shadow-[0_10px_30px_rgba(0,0,0,0.12)]">
         <div className="grid grid-cols-1 lg:grid-cols-2">
           {/* LEFT PANEL */}
@@ -250,14 +99,12 @@ const Login: React.FC = () => {
               Use your DLSU email address to continue with AnimoAssign.
             </p>
 
-            {/* LEFT-ALIGNED BUTTON */}
+            {/* ✅ LEFT-ALIGNED BUTTON (no centering) */}
             <div className="mt-7">
               <button
                 type="button"
-                onClick={() => {
-                  setShowForm(true);
-                  setError(null);
-                }}
+                onClick={() => googleLogin()}
+                disabled={loading}
                 className="
                   group inline-flex w-full max-w-xl items-center justify-center gap-3
                   rounded-xl border border-neutral-300 bg-white px-6 py-3
@@ -277,23 +124,8 @@ const Login: React.FC = () => {
 
             <p className="mt-4 text-[11px] leading-relaxed text-slate-500">
               By using AnimoAssign, you agree to follow the guidelines outlined in the{" "}
-              <a
-                href="https://www.dlsu.edu.ph/wp-content/uploads/pdf/osa/student-handbook.pdf"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="underline hover:text-slate-700"
-              >
-                DLSU Student Handbook
-              </a>{" "}
-              and{" "}
-              <button
-                type="button"
-                onClick={() => setShowPrivacy(true)}
-                className="underline hover:text-slate-700"
-              >
-                Privacy Policy
-              </button>{" "}
-              of AnimoAssign.
+              <span className="underline">DLSU Student Handbook</span> and{" "}
+              <span className="underline">Privacy Policy</span> of AnimoAssign.
             </p>
 
             {/* Reveal Email/Password AFTER clicking */}
@@ -305,7 +137,7 @@ const Login: React.FC = () => {
                       Email Address
                     </label>
                     <input
-                      type="email"
+                      type="text"
                       className="
                         w-full rounded-xl bg-gray-100 border border-gray-200
                         px-4 py-3 shadow-inner
@@ -334,12 +166,12 @@ const Login: React.FC = () => {
                         value={password}
                         onChange={(e) => setPassword(e.target.value)}
                         autoComplete="current-password"
+                        required
                       />
                       <button
                         type="button"
                         onClick={() => setShowPw((s) => !s)}
                         className="absolute inset-y-0 right-0 pr-3 flex items-center"
-                        aria-label="Toggle password visibility"
                       >
                         {showPw ? (
                           <Eye className="h-5 w-5 text-gray-500" />
@@ -426,6 +258,17 @@ const Login: React.FC = () => {
               <div className="mt-10 w-full max-w-md">
                 <div className="h-px w-full bg-white/20" />
                 <div className="mt-4 text-xs text-white/80">College of Computer Studies</div>
+                <button
+                type="button"
+                onClick={() => {
+                setShowForm(true);
+                setError(null);
+              }}
+              disabled={loading}
+                className="absolute bottom-4 left-4 px-4 py-2 rounded-lg bg-white/90 text-gray-900 shadow hover:bg-white"
+              >
+                Connect Local
+              </button>
               </div>
             </div>
           </div>
@@ -433,6 +276,7 @@ const Login: React.FC = () => {
         </div>
       </div>
     </div>
+    
   );
 };
 

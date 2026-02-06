@@ -458,6 +458,31 @@ async def _demand_sections_sections_first(
 
     return max(0, round(est))
 
+# ======================== Departments helper endpoint (Phase 0) ========================
+@router.get("/departments")
+async def list_departments():
+    """
+    Returns departments for dropdown selection.
+    Uses department_id internally, shows dept_name in UI.
+    """
+    db = get_db()
+    items: list[dict[str, str]] = []
+
+
+    async for dep in db.departments.find(
+        {},
+        projection={"department_id": 1, "dept_name": 1}
+    ).sort("dept_name", 1):
+        did = dep.get("department_id")
+        name = dep.get("dept_name") or did
+        if did:
+            items.append({
+            "department_id": did,
+            "department_name": name, # normalized key for frontend
+            })
+
+    return {"departments": items}
+
 # ======================== Router endpoint ========================
 
 @router.get("/pt-risk")

@@ -11,7 +11,7 @@ services:
     command: ["--bind_ip_all"]
     volumes:
       - mongo_data_dev:/data/db
-      - ./db/seed/init-dev.js:/docker-entrypoint-initdb.d/01-init-dev.js:ro
+      - ./db/dev-seed/init-dev.js:/docker-entrypoint-initdb.d/01-init-dev.js:ro
     ports:
       - "27019:27017"         # Compass will use this
     restart: unless-stopped
@@ -25,6 +25,9 @@ services:
       MONGODB_URI: ${BACKEND_MONGODB_URI}
       BACKEND_MONGODB_URI: ${BACKEND_MONGODB_URI}
       BACKEND_ANALYTICS_URL: http://analytics-dev:8000
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET}
+      GOOGLE_REDIRECT_URI: ${GOOGLE_REDIRECT_URI}
     volumes:
       - ../backend:/app       # hot reload code
     command: ["python", "-m", "app"]

@@ -1,5 +1,6 @@
 # app/routes/apo.py
 from datetime import datetime
+import re
 from typing import Any, Dict, List, Optional, Tuple, Literal, Set
 from fastapi import APIRouter, HTTPException, Query, Body
 from ..main import db
@@ -80,37 +81,84 @@ def default_open_days_for_campus(campus_name: str) -> List[str]:
 def now() -> datetime:
     return datetime.utcnow()
 
-def fmt_pair(t) -> str:
+def _t4(t: Any) -> str:
     """
-    Format 'HHMM' -> 'HH:MM'. If t is blank/None/malformed, return ''.
+    Normalize a time value into 'HHMM' (4 digits).
+    Accepts:
+      - '0730'
+      - '07:30'
+      - '07:30:00'
+      - 730
+      - '073000'
+    Returns '' if malformed.
     """
-    s = "".join(ch for ch in str(t) if ch.isdigit())
-    if len(s) != 4:
+    digits = "".join(ch for ch in str(t) if ch.isdigit())
+    if not digits:
         return ""
-    h, m = s[:2], s[2:]
+    if len(digits) >= 4:
+        digits = digits[:4]
+    elif len(digits) == 3:
+        digits = "0" + digits
+    else:
+        return ""
+
     try:
-        return f"{int(h):02d}:{m}"
+        hh = int(digits[:2])
+        mm = int(digits[2:])
+        if not (0 <= hh <= 23 and 0 <= mm <= 59):
+            return ""
     except Exception:
         return ""
 
+    return f"{hh:02d}{mm:02d}"
+
+def fmt_pair(t) -> str:
+    """Format a time value into 'HH:MM'. Returns '' if malformed."""
+    s = _t4(t)
+    return f"{s[:2]}:{s[2:]}" if s else ""
+
 def band_of(start, end) -> str:
-    """
-    Return 'HH:MM – HH:MM' or '' if either side is missing.
-    """
+    """Return 'HH:MM – HH:MM' or '' if invalid."""
     a, b = fmt_pair(start), fmt_pair(end)
     return f"{a} – {b}" if (a and b) else ""
 
+_BAND_SPLIT_RE = re.compile(r"\s*[-–—]\s*")
+
 def parse_band(band: str) -> Tuple[str, str]:
-    try:
-        a, b = [x.strip() for x in band.split("–")]
-        sh, sm = [int(x) for x in a.split(":")]
-        eh, em = [int(x) for x in b.split(":")]
-        # Always return zero-padded HHMM to match DB ("0730", "0900")
-        st = f"{sh:02d}{sm:02d}"
-        et = f"{eh:02d}{em:02d}"
-        return (st, et)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid time band (use HH:MM – HH:MM).")
+    """
+    Parse a time-band string and return ('HHMM','HHMM').
+    Accepts:
+      - 'HH:MM – HH:MM'
+      - 'HH:MM - HH:MM'
+      - 'HHMM-HHMM'
+      - 'HHMMHHMM'
+    """
+    raw = (band or "").strip()
+    if not raw:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid time band (use HH:MM – HH:MM, HH:MM - HH:MM, HHMM-HHMM, or HHMMHHMM).",
+        )
+
+    parts = _BAND_SPLIT_RE.split(raw)
+    st = et = ""
+
+    if len(parts) >= 2:
+        st = _t4(parts[0])
+        et = _t4(parts[1])
+    else:
+        digits = "".join(ch for ch in raw if ch.isdigit())
+        if len(digits) == 8:
+            st = _t4(digits[:4])
+            et = _t4(digits[4:])
+
+    if not (st and et):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid time band (use HH:MM – HH:MM, HH:MM - HH:MM, HHMM-HHMM, or HHMMHHMM).",
+        )
+
+    return (st, et)
 
 def normalize_day(d: Any) -> str:
     if not d:
@@ -131,11 +179,20 @@ def day_aliases(day_full: str) -> List[str]:
     return DAY_ALIASES.get(day_full, [day_full])
 
 def normalize_room_type(rt: str) -> str:
+    """Normalize physical room types.
+
+    Returns '' for non-physical delivery modes (e.g., 'Online'), so callers can treat
+    it as "no constraint".
+    """
     u = (rt or "").strip().lower().replace(" ", "")
     if u in {"classroom", "class", "cr"}:
         return "Classroom"
     if u in {"comlab", "lab", "computerlab", "laboratory"}:
         return "ComLab"
+    # delivery modes / not-a-room requirements
+    if u in {"online", "onl", "virtual", "remote", "async", "asynch", "asynchronous",
+             "sync", "synchronous", "hybrid", "blended", "tba", "na", "n/a", "none"}:
+        return ""
     return (rt or "").strip()
 
 def campus_section_prefix(campus_name: str) -> Optional[tuple[str, ...] | str]:
@@ -254,8 +311,15 @@ async def faculty_by_section_first(sec_ids: List[str], term_id: str) -> Dict[str
         "is_archived": {"$ne": True},
     }
     # Only enforce load_id filter if we actually found loads for the term.
+    # IMPORTANT: some planning rows in faculty_assignments may not yet have a load_id (or have it blank),
+    # so we must not accidentally drop valid faculty_id links.
     if load_ids:
-        fa_cond["load_id"] = {"$in": load_ids}
+        fa_cond["$or"] = [
+            {"load_id": {"$in": load_ids}},
+            {"load_id": {"$exists": False}},
+            {"load_id": None},
+            {"load_id": ""},
+        ]
 
     fa_rows = [x async for x in db[COL_FAC_ASSIGN].find(
         fa_cond, {"_id": 0, "section_id": 1, "faculty_id": 1}
@@ -491,14 +555,16 @@ async def get_room_allocation(
                                  for d in DOW for tb in TIME_BANDS}
 
     # mark assigned (both scoped + out-of-scope)
-    seen_keys = set()
     for s in section_scheds_for_grid:
         rid = s.get("room_id")
+        tb = (s.get("time_band") or "").strip()
         if not rid or rid not in schedule_by_room:
             continue
-        key = (s["day"], s["time_band"])
-        seen_keys.add((rid, key))
+        if tb not in TIME_BANDS:
+            continue
+        key = (s["day"], tb)
         schedule_by_room[rid][key] = {"day": key[0], "time_band": key[1], "section_id": s.get("section_id")}
+
 
     # campus default open days
     default_open_days = default_open_days_for_campus(campus.get("campus_name", ""))
@@ -524,11 +590,6 @@ async def get_room_allocation(
                 for tb in TIME_BANDS:
                     allowed_keys.add((d, tb))
 
-        # Helper: convert "HH:MM – HH:MM" to ("HHMM","HHMM")
-        def _band_to_times(band: str) -> Tuple[str, str]:
-            st, et = parse_band(band)
-            return (st, et)
-
         # Build a fast view over in-scope section schedules (not yet room-assigned)
         scheds_open = [
             s for s in section_scheds_scoped
@@ -544,26 +605,16 @@ async def get_room_allocation(
             except Exception:
                 return 0
 
-        def _rtype_for_section(sid: str) -> str:
-            """
-            Determine the required room_type for a section:
-            1) Prefer room_type stored on section_schedules (per-slot requirement).
-            2) Fallback to the course's room_type (from courses collection).
-            """
-            # 1) check any open schedule row for this section
-            for row in scheds_open:
-                if row.get("section_id") == sid and row.get("room_type"):
-                    return normalize_room_type(row.get("room_type") or "")
-            # 2) fallback: derive from course metadata
+        def _fallback_course_room_type(sid: str) -> str:
+            """Fallback required room_type from the section's course metadata."""
             cid = sec_meta.get(sid, {}).get("course_id", "")
-            return (course_room_type.get(cid, "") or "").strip()
+            return normalize_room_type(course_room_type.get(cid, "") or "")
 
         out = []
         for k, cell in schedule_by_room[rid].items():
             if k not in allowed_keys:
                 continue
             day, band = k
-            st, et = _band_to_times(band)
 
             # Compute eligible sections for this room cell
             eligible: List[str] = []
@@ -583,7 +634,8 @@ async def get_room_allocation(
                 # capacity & type fit
                 if r_cap and _cap(sid) and r_cap < _cap(sid):
                     continue
-                need_type = _rtype_for_section(sid)
+                # IMPORTANT: room_type is per-slot; prefer this schedule row's room_type
+                need_type = normalize_room_type(s.get("room_type") or "") or _fallback_course_room_type(sid)
                 if need_type and r_type and (need_type != r_type):
                     continue
                 eligible.append(sid)
@@ -724,44 +776,61 @@ async def post_room_allocation(
         for tb in sel_bands:
             if tb not in TIME_BANDS:
                 raise HTTPException(status_code=400, detail="Only standard time slots are allowed.")
-        st_pairs = {parse_band(tb) for tb in sel_bands}
+        st_pairs: Set[Tuple[str, str]] = {parse_band(tb) for tb in sel_bands}
 
-        existing_cur = db[COL_SCHEDS].find(
-            {
-                "room_id": room_id,
-                "section_id": {"$exists": False},
-                "day": {"$in": day_aliases(day_full)},
-            },
-            {"_id": 0, "start_time": 1, "end_time": 1},
-        )
-        existing_pairs = {(e["start_time"], e["end_time"]) for e in [x async for x in existing_cur]}
+        existing_docs = [
+            x async for x in db[COL_SCHEDS].find(
+                {
+                    "room_id": room_id,
+                    "section_id": {"$exists": False},
+                    "day": {"$in": day_aliases(day_full)},
+                },
+                {"_id": 0, "schedule_id": 1, "start_time": 1, "end_time": 1},
+            )
+        ]
 
-        to_add = st_pairs - existing_pairs
-        add_docs = []
+        existing_norm: Set[Tuple[str, str]] = set()
+        ids_by_norm: Dict[Tuple[str, str], List[str]] = {}
+        for e_doc in existing_docs:
+            st0 = _t4(e_doc.get("start_time"))
+            et0 = _t4(e_doc.get("end_time"))
+            if st0 and et0:
+                key = (st0, et0)
+                existing_norm.add(key)
+                sid0 = e_doc.get("schedule_id")
+                if sid0:
+                    ids_by_norm.setdefault(key, []).append(sid0)
+
+        selected_norm = set(st_pairs)
+
+        # Add newly-selected bands that don't exist yet (store canonical HHMM)
+        to_add = selected_norm - existing_norm
+        add_docs: List[Dict[str, Any]] = []
         day_code = denormalize_day(day_full)
         for (st, et) in to_add:
-            add_docs.append({
-                "schedule_id": f"AVAIL-{room_id}-{day_code}-{st}-{et}",
-                "day": day_code,
-                "start_time": st,
-                "end_time": et,
-                "room_id": room_id,
-                "created_at": now(),
-                "updated_at": now(),
-            })
+            add_docs.append(
+                {
+                    "schedule_id": f"AVAIL-{room_id}-{day_code}-{st}-{et}",
+                    "day": day_code,
+                    "start_time": st,
+                    "end_time": et,
+                    "room_id": room_id,
+                    "created_at": now(),
+                    "updated_at": now(),
+                }
+            )
         if add_docs:
             await db[COL_SCHEDS].insert_many(add_docs)
 
-        to_remove = existing_pairs - st_pairs
-        if to_remove:
-            cond = [{"start_time": st, "end_time": et} for (st, et) in to_remove]
-            await db[COL_SCHEDS].delete_many({
-                "room_id": room_id,
-                "section_id": {"$exists": False},
-                "day": {"$in": day_aliases(day_full)},
-                "$or": cond
-            })
-        return {"ok": True, "added": len(to_add), "removed": len(to_remove)}
+        # Remove bands that were unselected (delete by schedule_id so legacy time formats still delete)
+        to_remove = existing_norm - selected_norm
+        remove_ids: List[str] = []
+        for key in to_remove:
+            remove_ids += ids_by_norm.get(key, [])
+        if remove_ids:
+            await db[COL_SCHEDS].delete_many({"schedule_id": {"$in": remove_ids}})
+
+        return {"ok": True, "added": len(to_add), "removed": len(remove_ids)}
 
     if action == "assign":
         room_id = (payload.get("room_id") or "").strip()
@@ -814,18 +883,36 @@ async def post_room_allocation(
         if college_id and course and course.get("college_id") and course["college_id"] != college_id:
             raise HTTPException(status_code=403, detail="Section not in your college scope.")
 
-        # must have a schedule at that slot
-        sched = await db[COL_SCHEDS].find_one(
-            {
-                "section_id": section_id,
-                "day": {"$in": day_aliases(day_full)},
-                "start_time": st,
-                "end_time": et,
-            },
-            {"_id": 0, "schedule_id": 1, "room_type": 1},
-        )
+        # must have a schedule at that slot (normalize time values)
+        sched = None
+        async for cand in db[COL_SCHEDS].find(
+            {"section_id": section_id, "day": {"$in": day_aliases(day_full)}},
+            {"_id": 0, "schedule_id": 1, "day": 1, "start_time": 1, "end_time": 1, "room_type": 1},
+        ):
+            if _t4(cand.get("start_time")) == st and _t4(cand.get("end_time")) == et:
+                sched = cand
+                break
         if not sched:
             raise HTTPException(status_code=404, detail="Section has no schedule at this day/time.")
+
+        # --- enforce room availability rules (same as Course Offerings eligibleRooms) ---
+        avail_pairs: Set[Tuple[str, str]] = set()
+        async for a in db[COL_SCHEDS].find(
+            {"room_id": room_id, "section_id": {"$exists": False}, "day": {"$in": day_aliases(day_full)}},
+            {"_id": 0, "start_time": 1, "end_time": 1},
+        ):
+            st0 = _t4(a.get("start_time"))
+            et0 = _t4(a.get("end_time"))
+            if st0 and et0:
+                avail_pairs.add((st0, et0))
+
+        default_days = default_open_days_for_campus(campus.get("campus_name", ""))
+        if avail_pairs:
+            if (st, et) not in avail_pairs:
+                raise HTTPException(status_code=400, detail="Room is not available for this day/time.")
+        else:
+            if day_full not in default_days:
+                raise HTTPException(status_code=400, detail="Room is not available for this day/time.")
 
         # --- enforce capacity & room_type compatibility ---
 
@@ -865,40 +952,37 @@ async def post_room_allocation(
                 detail="Room type is not compatible with the section's required room type.",
             )
 
-        # prevent double-booking of the room, but only against sections
+                # prevent double-booking of the room (OVERLAP logic), but only against sections
         # that belong to the SAME term we are planning for
-        potential_conflicts = [
-            x
-            async for x in db[COL_SCHEDS].find(
-                {
-                    "section_id": {"$ne": section_id},
-                    "day": {"$in": day_aliases(day_full)},
-                    "start_time": st,
-                    "end_time": et,
-                    "room_id": room_id,
-                },
-                {"_id": 0, "section_id": 1},
-            )
-        ]
+        overlaps: List[str] = []
+        async for x in db[COL_SCHEDS].find(
+            {
+                "room_id": room_id,
+                "section_id": {"$exists": True},
+                "day": {"$in": day_aliases(day_full)},
+            },
+            {"_id": 0, "schedule_id": 1, "section_id": 1, "start_time": 1, "end_time": 1},
+        ):
+            other_sid = (x.get("section_id") or "").strip()
+            if not other_sid or other_sid == section_id:
+                continue
+            if x.get("schedule_id") == sched.get("schedule_id"):
+                continue
+            st0 = _t4(x.get("start_time"))
+            et0 = _t4(x.get("end_time"))
+            if not (st0 and et0):
+                continue
+            if int(st0) < int(et) and int(et0) > int(st):
+                overlaps.append(other_sid)
 
-        if potential_conflicts:
-            other_sec_ids = [
-                c.get("section_id") for c in potential_conflicts if c.get("section_id")
-            ]
-            if other_sec_ids:
-                # any of these sections in the *current planning term*?
-                in_same_term = await db[COL_SECTIONS].find_one(
-                    {
-                        "section_id": {"$in": other_sec_ids},
-                        "term_id": term_id,
-                    },
-                    {"_id": 1},
-                )
-                if in_same_term:
-                    raise HTTPException(
-                        status_code=400,
-                        detail="Room already assigned at this day/time.",
-                    )
+        if overlaps:
+            other_sec_ids = sorted(list(set(overlaps)))
+            in_same_term = await db[COL_SECTIONS].find_one(
+                {"section_id": {"$in": other_sec_ids}, "term_id": term_id},
+                {"_id": 1},
+            )
+            if in_same_term:
+                raise HTTPException(status_code=400, detail="Room already assigned at this day/time.")
 
         await db[COL_SCHEDS].update_one(
             {"schedule_id": sched["schedule_id"]}, {"$set": {"room_id": room_id, "updated_at": now()}}
@@ -918,10 +1002,15 @@ async def post_room_allocation(
             raise HTTPException(status_code=400, detail="Time band must be one of the standard slots.")
 
         st, et = parse_band(time_band)
-        sched = await db[COL_SCHEDS].find_one(
-            {"section_id": section_id, "day": {"$in": day_aliases(day_full)}, "start_time": st, "end_time": et, "room_id": room_id},
-            {"_id": 0, "schedule_id": 1},
-        )
+
+        sched = None
+        async for cand in db[COL_SCHEDS].find(
+            {"section_id": section_id, "room_id": room_id, "day": {"$in": day_aliases(day_full)}},
+            {"_id": 0, "schedule_id": 1, "start_time": 1, "end_time": 1},
+        ):
+            if _t4(cand.get("start_time")) == st and _t4(cand.get("end_time")) == et:
+                sched = cand
+                break
         if not sched:
             raise HTTPException(status_code=404, detail="Assigned schedule not found.")
 

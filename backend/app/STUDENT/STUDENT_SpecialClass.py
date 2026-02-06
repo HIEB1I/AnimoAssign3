@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import re
 from typing import Any, Dict, Optional, List, Tuple
 
 from fastapi import APIRouter, HTTPException, Query, Body
@@ -26,6 +27,18 @@ COL_FAC_PROFILES = "faculty_profiles"
 COL_ROOMS = "rooms"
 
 # ---------------- helpers ----------------
+
+def _upper_name(first: str, last: str) -> str:
+    """Return "LAST, FIRST" in upper-case, with sensible fallbacks."""
+    first = (first or "").strip()
+    last = (last or "").strip()
+    if first and last:
+        return f"{last.upper()}, {first.upper()}"
+    if last:
+        return last.upper()
+    if first:
+        return first.upper()
+    return ""
 
 def _now_dt() -> datetime:
     return datetime.now(timezone.utc)
@@ -114,10 +127,13 @@ async def _get_department_by_name(name: str) -> Optional[Dict[str, Any]]:
 async def _get_program_by_code(program_code: str) -> Optional[Dict[str, Any]]:
     if not program_code:
         return None
+    code = program_code.strip()
+    # Be tolerant to case differences.
     return await db[COL_PROGRAMS].find_one(
-        {"program_code": program_code.strip()},
+        {"program_code": {"$regex": f"^{re.escape(code)}$", "$options": "i"}},
         {"_id": 0, "program_id": 1, "program_code": 1},
     )
+
 
 ALLOWED_PROGRAM_CODES = [
     "BSCS-ST", "BSCS-NIS", "BSCS-CSE", "BSMS-CS",
@@ -243,33 +259,106 @@ async def _bulk_assignment_info(section_ids: List[str]) -> Dict[str, Dict[str, A
     sec_cap_map = {d["section_id"]: int(d.get("enrollment_cap") or 0) for d in sec_docs if d.get("section_id")}
     sec_enrolled_map = {d["section_id"]: int(d.get("enrolled") or 0) for d in sec_docs if d.get("section_id")}
 
-    # faculty assignments
+    # faculty assignments (pick latest non-archived per section)
     fac_asg = await db[COL_FAC_ASSIGN].find(
-        {"section_id": {"$in": sids}},
-        {"_id": 0, "section_id": 1, "faculty_id": 1},
-    ).to_list(20000)
+        {"section_id": {"$in": sids}, "is_archived": {"$ne": True}},
+        {"_id": 0, "section_id": 1, "faculty_id": 1, "faculty_name": 1, "created_at": 1},
+    ).sort([("section_id", 1), ("created_at", -1)]).to_list(50000)
 
-    sec_to_fac: Dict[str, str] = {}
+    sec_to_fac: Dict[str, Dict[str, str]] = {}  # section_id -> {faculty_id, faculty_name}
     fac_ids: List[str] = []
+
     for fa in fac_asg:
         sid = (fa.get("section_id") or "").strip()
+        if not sid or sid in sec_to_fac:
+            continue  # already captured latest
+
         fid = (fa.get("faculty_id") or "").strip()
-        if sid and fid and sid not in sec_to_fac:
-            sec_to_fac[sid] = fid
+        fnm = (fa.get("faculty_name") or "").strip()
+
+        sec_to_fac[sid] = {"faculty_id": fid, "faculty_name": fnm}
+        if fid:
             fac_ids.append(fid)
 
     fac_ids = sorted({x for x in fac_ids if x})
+
+    # faculty_id -> display name, derived like OM/APO: faculty_profiles -> users
     fac_name_by_id: Dict[str, str] = {}
+    fac_user_id_by_fac_id: Dict[str, str] = {}
+
     if fac_ids:
         profs = await db[COL_FAC_PROFILES].find(
             {"faculty_id": {"$in": fac_ids}},
-            {"_id": 0, "faculty_id": 1, "faculty_name": 1},
+            {"_id": 0, "faculty_id": 1, "user_id": 1, "faculty_name": 1, "first_name": 1, "last_name": 1},
         ).to_list(20000)
+
+        user_ids: List[str] = []
         for p in profs:
             fid = (p.get("faculty_id") or "").strip()
+            if not fid:
+                continue
+
+            # 1) direct faculty_name on profile (if present)
             nm = (p.get("faculty_name") or "").strip()
-            if fid and nm:
+            if nm:
                 fac_name_by_id[fid] = nm
+
+            # 2) profile may have names directly
+            if fid not in fac_name_by_id:
+                fn = (p.get("first_name") or "").strip()
+                ln = (p.get("last_name") or "").strip()
+                nm2 = _upper_name(fn, ln)
+                if nm2:
+                    fac_name_by_id[fid] = nm2
+
+            # 3) map to users
+            uid = (p.get("user_id") or "").strip()
+            if uid:
+                fac_user_id_by_fac_id[fid] = uid
+                user_ids.append(uid)
+
+        user_ids = sorted({u for u in user_ids if u})
+        if user_ids:
+            users = await db[COL_USERS].find(
+                {"$or": [{"user_id": {"$in": user_ids}}, {"userId": {"$in": user_ids}}]},
+                {"_id": 0, "user_id": 1, "userId": 1, "first_name": 1, "last_name": 1, "firstName": 1, "lastName": 1},
+            ).to_list(20000)
+
+            user_map: Dict[str, Dict[str, Any]] = {}
+            for u in users:
+                uid = (u.get("user_id") or u.get("userId") or "").strip()
+                if uid:
+                    user_map[uid] = u
+
+            for fid, uid in fac_user_id_by_fac_id.items():
+                if fid in fac_name_by_id:
+                    continue
+                u = user_map.get(uid)
+                if not u:
+                    continue
+                fn = (u.get("first_name") or u.get("firstName") or "").strip()
+                ln = (u.get("last_name") or u.get("lastName") or "").strip()
+                nm = _upper_name(fn, ln)
+                if nm:
+                    fac_name_by_id[fid] = nm
+
+    # fallback: sometimes faculty_id is actually a user_id
+    # (rare, but helps legacy data)
+    missing_fac_ids = [fid for fid in fac_ids if fid and fid not in fac_name_by_id]
+    if missing_fac_ids:
+        users = await db[COL_USERS].find(
+            {"$or": [{"user_id": {"$in": missing_fac_ids}}, {"userId": {"$in": missing_fac_ids}}]},
+            {"_id": 0, "user_id": 1, "userId": 1, "first_name": 1, "last_name": 1, "firstName": 1, "lastName": 1},
+        ).to_list(20000)
+        for u in users:
+            uid = (u.get("user_id") or u.get("userId") or "").strip()
+            if not uid or uid in fac_name_by_id:
+                continue
+            fn = (u.get("first_name") or u.get("firstName") or "").strip()
+            ln = (u.get("last_name") or u.get("lastName") or "").strip()
+            nm = _upper_name(fn, ln)
+            if nm:
+                fac_name_by_id[uid] = nm
 
     # section schedules with room/remarks
     sched_docs = await db[COL_SECTION_SCHEDULES].find(
@@ -312,13 +401,13 @@ async def _bulk_assignment_info(section_ids: List[str]) -> Dict[str, Dict[str, A
     if room_ids:
         room_docs = await db[COL_ROOMS].find(
             {"room_id": {"$in": room_ids}},
-            {"_id": 0, "room_id": 1, "room_code": 1, "room_name": 1},
+            {"_id": 0, "room_id": 1, "room_code": 1, "room_number": 1, "room_name": 1},
         ).to_list(20000)
         for rm in room_docs:
             rid = (rm.get("room_id") or "").strip()
             if not rid:
                 continue
-            code = (rm.get("room_code") or rm.get("room_name") or "").strip()
+            code = (rm.get("room_code") or rm.get("room_number") or rm.get("room_name") or "").strip()
             if code:
                 room_code_by_id[rid] = code
 
@@ -347,8 +436,9 @@ async def _bulk_assignment_info(section_ids: List[str]) -> Dict[str, Dict[str, A
     out_map: Dict[str, Dict[str, Any]] = {}
     for sid in sids:
         scode = sec_code_map.get(sid, "")
-        fid = sec_to_fac.get(sid, "")
-        facn = fac_name_by_id.get(fid, "") if fid else ""
+        fac_info = sec_to_fac.get(sid, {})
+        fid = (fac_info.get("faculty_id") or "").strip()
+        facn = (fac_info.get("faculty_name") or "").strip() or (fac_name_by_id.get(fid, "") if fid else "")
         sch = sched_map.get(sid, {
             "day1": "", "begin1": "", "end1": "", "room1": "",
             "day2": "", "begin2": "", "end2": "", "room2": "",
@@ -589,15 +679,16 @@ async def special_class_handler(
         cfg = await _get_special_config()
         dept_names = ALLOWED_DEPARTMENTS[:]
 
-        progs = [p async for p in db[COL_PROGRAMS].find(
-            {"program_code": {"$in": ALLOWED_PROGRAM_CODES}},
-            {"_id": 0, "program_id": 1, "program_code": 1},
-        )]
-        prog_codes_db = {p.get("program_code") for p in progs if p.get("program_code")}
-        programs_out = progs[:]
-        for code in ALLOWED_PROGRAM_CODES:
-            if code not in prog_codes_db:
-                programs_out.append({"program_id": "", "program_code": code})
+        # Programs dropdown should come only from real DB programs (like Student Petition).
+        # No placeholder/allowed-code injection here—frontend should never be offered a value
+        # that later fails validation.
+        programs_out = [
+            p async for p in db[COL_PROGRAMS].find(
+                {},
+                {"_id": 0, "program_id": 1, "program_code": 1},
+            )
+        ]
+        programs_out.sort(key=lambda x: (x.get("program_code") or ""))
 
         dept_docs = [d async for d in db[COL_DEPARTMENTS].find(
             {"$or": [{"department_name": {"$in": ALLOWED_DEPARTMENTS}},
@@ -669,8 +760,6 @@ async def special_class_handler(
             raise HTTPException(status_code=400, detail="You must agree to the Terms and Conditions.")
 
         degree = str(payload["degree"]).strip()
-        if degree not in set(ALLOWED_PROGRAM_CODES):
-            raise HTTPException(status_code=400, detail="Invalid degree program.")
         prog = await _get_program_by_code(degree)
         if not prog:
             raise HTTPException(status_code=400, detail="Selected program not found.")

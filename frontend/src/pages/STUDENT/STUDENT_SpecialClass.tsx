@@ -289,53 +289,19 @@ function formatDateShort(dt?: string) {
   return d.toLocaleDateString();
 }
 
+function formatHHMM(v?: string) {
+  const raw = String(v || "").trim();
+  if (!raw) return "";
+  const s = raw.replace(":", "");
+  if (s.length === 4 && /^\d{4}$/.test(s)) return `${s.slice(0, 2)}:${s.slice(2)}`;
+  return raw;
+}
+
 /**
  * Returns a compact "Day/s" + "Time" display without duplicating the same time below the table.
  * - If both slots share the same time range: Day/s = "M, H", Time = "0730 - 0900"
  * - If times differ: Day/s = "M / H", Time = "0730 - 0900; 1000 - 1200"
  */
-function compactDaysAndTime(a: StudentSpecialClassView) {
-  const d1 = String(a.day1 || "").trim();
-  const d2 = String(a.day2 || "").trim();
-  const r1 = a.begin1 && a.end1 ? `${a.begin1}-${a.end1}` : "";
-  const r2 = a.begin2 && a.end2 ? `${a.begin2}-${a.end2}` : "";
-
-  const has1 = Boolean(d1 && r1);
-  const has2 = Boolean(d2 && r2);
-
-  if (!has1 && !has2) {
-    const st = String(a.schedule_text || "").trim();
-    if (!st) return { daysLabel: "—", timeLabel: "—" };
-    // Try to split "M 07:30-09:00; F 07:30-09:00" but keep it compact if unknown
-    return { daysLabel: "—", timeLabel: st };
-  }
-
-  if (has1 && has2 && r1 === r2) {
-    return {
-      daysLabel: [d1, d2].filter(Boolean).join( "/"),
-      timeLabel: `${a.begin1} - ${a.end1}`,
-    };
-  }
-
-  // Different times or only one slot
-  const daysParts: string[] = [];
-  const timeParts: string[] = [];
-
-  if (has1) {
-    daysParts.push(d1);
-    timeParts.push(`${a.begin1} - ${a.end1}`);
-  }
-  if (has2) {
-    daysParts.push(d2);
-    timeParts.push(`${a.begin2} - ${a.end2}`);
-  }
-
-  return {
-    daysLabel: daysParts.join(" / ") || "—",
-    timeLabel: timeParts.join("; ") || "—",
-  };
-}
-
 /* ---------------- Extend view type for schedule details (optional fields) ---------------- */
 type StudentSpecialClassView = SpecialClassView & {
   section_code?: string;
@@ -345,15 +311,12 @@ type StudentSpecialClassView = SpecialClassView & {
   day1?: string;
   begin1?: string;
   end1?: string;
+  room1?: string;
   day2?: string;
   begin2?: string;
   end2?: string;
+  room2?: string;
   schedule_text?: string;
-
-  // offering info (if backend provides)
-  room?: string;
-  enrollment_cap?: number;
-  enrolled?: number;
 };
 
 /* ---------------- Status Card (clean, non-redundant) ---------------- */
@@ -375,30 +338,22 @@ function StatusCard({ a }: { a: StudentSpecialClassView }) {
     return Number.isFinite(n) ? `AY ${n}-${n + 1}` : "AY —";
   })();
 
-  // compact schedule labels
-  const { daysLabel, timeLabel } = compactDaysAndTime(a);
-
-  // table values (no TS errors; all optional)
   const course = String(a.course_code || "").trim() || "—";
   const section = String(a.section_code || "").trim() || "—";
-  const room = String(a.room || "").trim() || "—";
-  const cap =
-    typeof a.enrollment_cap === "number"
-      ? a.enrollment_cap
-      : typeof (a as any).enrl_cap === "number"
-      ? (a as any).enrl_cap
-      : "—";
-  const enrolled =
-    typeof a.enrolled === "number"
-      ? a.enrolled
-      : typeof (a as any).enrolled === "number"
-      ? (a as any).enrolled
-      : "—";
+  const faculty = String((a as any).faculty_name || (a as any).facultyName || "").trim() || "UNASSIGNED";
 
-  // ✅ Remarks column must show APPLICATION remarks (no duplicate "application remarks")
+  const d1 = String(a.day1 || "").trim() || "—";
+  const b1 = formatHHMM(String(a.begin1 || "").trim()) || "—";
+  const e1 = formatHHMM(String(a.end1 || "").trim()) || "—";
+  const r1 = String((a as any).room1 || "").trim() || "—";
+
+  const d2 = String(a.day2 || "").trim() || "—";
+  const b2 = formatHHMM(String(a.begin2 || "").trim()) || "—";
+  const e2 = formatHHMM(String(a.end2 || "").trim()) || "—";
+  const r2 = String((a as any).room2 || "").trim() || "—";
+
+  // ✅ Remarks column shows APPLICATION remarks
   const remarksCell = String(a.remarks || "").trim() || "—";
-
-  const faculty = String(a.faculty_name || "").trim() || "UNASSIGNED";
 
   return (
     <div className="rounded-2xl border border-gray-200 bg-white shadow-sm overflow-hidden mb-5">
@@ -434,30 +389,18 @@ function StatusCard({ a }: { a: StudentSpecialClassView }) {
           <table className="w-full table-fixed border-collapse">
             <thead>
               <tr className="bg-emerald-50 text-emerald-900">
-                <th className="border border-emerald-200 px-3 py-2 text-xs font-semibold text-left w-[120px]">
-                  Course
-                </th>
-                <th className="border border-emerald-200 px-3 py-2 text-xs font-semibold text-left w-[90px]">
-                  Section
-                </th>
-                <th className="border border-emerald-200 px-3 py-2 text-xs font-semibold text-left w-[90px]">
-                  Day/s
-                </th>
-                <th className="border border-emerald-200 px-3 py-2 text-xs font-semibold text-left w-[140px]">
-                  Time
-                </th>
-                <th className="border border-emerald-200 px-3 py-2 text-xs font-semibold text-left w-[120px]">
-                  Room
-                </th>
-                <th className="border border-emerald-200 px-3 py-2 text-xs font-semibold text-left w-[90px]">
-                  Enrl Cap
-                </th>
-                <th className="border border-emerald-200 px-3 py-2 text-xs font-semibold text-left w-[90px]">
-                  Enrolled
-                </th>
-                <th className="border border-emerald-200 px-3 py-2 text-xs font-semibold text-left w-[180px]">
-                  Remarks
-                </th>
+                <th className="border border-emerald-200 px-3 py-2 text-xs font-semibold text-left w-[110px]">Course</th>
+                <th className="border border-emerald-200 px-3 py-2 text-xs font-semibold text-left w-[90px]">Section</th>
+                <th className="border border-emerald-200 px-3 py-2 text-xs font-semibold text-left w-[200px]">Faculty</th>
+                <th className="border border-emerald-200 px-3 py-2 text-xs font-semibold text-left w-[70px]">Day 1</th>
+                <th className="border border-emerald-200 px-3 py-2 text-xs font-semibold text-left w-[90px]">Begin 1</th>
+                <th className="border border-emerald-200 px-3 py-2 text-xs font-semibold text-left w-[90px]">End 1</th>
+                <th className="border border-emerald-200 px-3 py-2 text-xs font-semibold text-left w-[120px]">Room 1</th>
+                <th className="border border-emerald-200 px-3 py-2 text-xs font-semibold text-left w-[70px]">Day 2</th>
+                <th className="border border-emerald-200 px-3 py-2 text-xs font-semibold text-left w-[90px]">Begin 2</th>
+                <th className="border border-emerald-200 px-3 py-2 text-xs font-semibold text-left w-[90px]">End 2</th>
+                <th className="border border-emerald-200 px-3 py-2 text-xs font-semibold text-left w-[120px]">Room 2</th>
+                <th className="border border-emerald-200 px-3 py-2 text-xs font-semibold text-left w-[180px]">Remarks</th>
               </tr>
             </thead>
 
@@ -470,31 +413,22 @@ function StatusCard({ a }: { a: StudentSpecialClassView }) {
                   {section}
                 </td>
                 <td className="border border-emerald-200 px-3 py-2 text-sm text-gray-900">
-                  {daysLabel}
+                  {faculty}
                 </td>
-                <td className="border border-emerald-200 px-3 py-2 text-sm text-gray-900">
-                  {timeLabel}
-                </td>
-                <td className="border border-emerald-200 px-3 py-2 text-sm text-gray-900">
-                  {room}
-                </td>
-                <td className="border border-emerald-200 px-3 py-2 text-sm text-gray-900">
-                  {cap as any}
-                </td>
-                <td className="border border-emerald-200 px-3 py-2 text-sm text-gray-900">
-                  {enrolled as any}
-                </td>
+                <td className="border border-emerald-200 px-3 py-2 text-sm text-gray-900">{d1}</td>
+                <td className="border border-emerald-200 px-3 py-2 text-sm text-gray-900">{b1}</td>
+                <td className="border border-emerald-200 px-3 py-2 text-sm text-gray-900">{e1}</td>
+                <td className="border border-emerald-200 px-3 py-2 text-sm text-gray-900">{r1}</td>
+                <td className="border border-emerald-200 px-3 py-2 text-sm text-gray-900">{d2}</td>
+                <td className="border border-emerald-200 px-3 py-2 text-sm text-gray-900">{b2}</td>
+                <td className="border border-emerald-200 px-3 py-2 text-sm text-gray-900">{e2}</td>
+                <td className="border border-emerald-200 px-3 py-2 text-sm text-gray-900">{r2}</td>
                 <td className="border border-emerald-200 px-3 py-2 text-sm text-gray-900">
                   {remarksCell}
                 </td>
               </tr>
             </tbody>
           </table>
-        </div>
-
-        {/* Faculty (single line only, not cluttered) */}
-        <div className="mt-3 text-sm text-gray-800">
-          <span className="font-semibold">Faculty:</span> {faculty}
         </div>
       </div>
     </div>

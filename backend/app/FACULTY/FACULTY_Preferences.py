@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 from datetime import datetime, timezone, timedelta
+import re
 
 from fastapi import APIRouter, Body, HTTPException, Query, Request
 from pydantic import BaseModel, Field
@@ -9,11 +10,20 @@ from pymongo import ReturnDocument
 
 from ..main import db  # shared Motor client from main.py
 
+# In-app bell notifications (reference pattern used in OM workflows)
+from ..Notifications import create_notification
+
 COL_PREFS_WINDOWS = "faculty_prefs_windows"
 COL_TERMS = "terms"
 COL_PREEN_COUNT = "preenlistment_count"
-COL_LEAVES = "leaves" 
+COL_LEAVES = "leaves"
 
+# For OM recipient resolution
+COL_USERS = "users"
+COL_STAFF = "staff_profiles"
+COL_ROLE_ASSIGN = "role_assignments"
+COL_USER_ROLES = "user_roles"
+COL_FACULTY = "faculty_profiles"
 
 router = APIRouter(prefix="/faculty/preferences", tags=["FACULTY: Preferences"])
 
@@ -57,6 +67,140 @@ class SubmitPayload(BaseModel):
 
 
 # ---------- Helpers ----------
+
+def _term_label(term_doc: Dict[str, Any] | None) -> str:
+    t = term_doc or {}
+    # best-effort label (matches UI patterns elsewhere)
+    ay_start = t.get("acad_year_start")
+    ay_end = t.get("acad_year_end")
+    term_no = t.get("term_number")
+    if ay_start and ay_end and term_no:
+        return f"AY {ay_start}-{ay_end} Term {term_no}"
+    if ay_start and term_no:
+        return f"AY {ay_start} Term {term_no}"
+    return (t.get("term_id") or "").strip()
+
+
+async def _faculty_display_name(faculty_user_id: str) -> str:
+    u = await db[COL_USERS].find_one(
+        {"user_id": faculty_user_id},
+        {"_id": 0, "first_name": 1, "last_name": 1},
+    ) or {}
+    first = (u.get("first_name") or "").strip()
+    last = (u.get("last_name") or "").strip()
+    if first or last:
+        return (" ".join([p for p in [first, last] if p])).strip()
+    # fallback if users missing
+    prof = await db[COL_FACULTY].find_one(
+        {"user_id": faculty_user_id},
+        {"_id": 0, "first_name": 1, "last_name": 1},
+    ) or {}
+    first = (prof.get("first_name") or "").strip()
+    last = (prof.get("last_name") or "").strip()
+    return (" ".join([p for p in [first, last] if p])).strip() or faculty_user_id
+
+
+async def _om_user_ids_for_department_id(department_id: Optional[str]) -> List[str]:
+    """
+    Best-effort OM recipient resolution:
+    1) Prefer OM staff_profiles in same department (if department_id exists)
+    2) Then role_assignments scoped to the same department (if parseable)
+    3) Then any OM-like users systemwide (so notif isn't silently dropped)
+    """
+    recipients: List[str] = []
+    seen = set()
+
+    def _add(u: str):
+        u = (u or "").strip()
+        if u and u not in seen:
+            seen.add(u)
+            recipients.append(u)
+
+    # 1) staff_profiles (most direct)
+    try:
+        staff_q: Dict[str, Any] = {
+            "position_title": {"$regex": r"(office\s*manager|\bom\b)", "$options": "i"}
+        }
+        if department_id:
+            staff_q["department_id"] = department_id
+        staff_docs = await db[COL_STAFF].find(staff_q, {"_id": 0, "user_id": 1}).to_list(None)
+        for s in staff_docs or []:
+            _add(s.get("user_id"))
+    except Exception:
+        pass
+
+    # 2) role_assignments (scope parsing; best-effort)
+    if department_id and not recipients:
+        try:
+            ra_docs = await db[COL_ROLE_ASSIGN].find(
+                {},
+                {"_id": 0, "user_id": 1, "scope": 1, "role_id": 1},
+            ).to_list(None)
+
+            def _scope_matches_dept(scope_val: Any) -> bool:
+                if not scope_val:
+                    return False
+                scopes = []
+                if isinstance(scope_val, dict):
+                    scopes = [scope_val]
+                elif isinstance(scope_val, list):
+                    scopes = [x for x in scope_val if isinstance(x, dict)]
+                for sc in scopes:
+                    # many datasets vary in naming; check common keys
+                    dept = (
+                        sc.get("department_id")
+                        or sc.get("dept_id")
+                        or sc.get("id")
+                        or sc.get("scope_id")
+                    )
+                    typ = (sc.get("type") or sc.get("scope_type") or "").lower()
+                    if dept == department_id and (not typ or "dept" in typ or "department" in typ):
+                        return True
+                return False
+
+            for ra in ra_docs or []:
+                if _scope_matches_dept(ra.get("scope")):
+                    _add(ra.get("user_id"))
+        except Exception:
+            pass
+
+    # 3) fallback: OM-like roles (user_roles or users.role)
+    if not recipients:
+        # user_roles collection (if present)
+        try:
+            ur_docs = await db[COL_USER_ROLES].find(
+                {
+                    "$or": [
+                        {"role": {"$regex": r"(office\s*manager|\bom\b)", "$options": "i"}},
+                        {"role_name": {"$regex": r"(office\s*manager|\bom\b)", "$options": "i"}},
+                        {"name": {"$regex": r"(office\s*manager|\bom\b)", "$options": "i"}},
+                    ]
+                },
+                {"_id": 0, "user_id": 1},
+            ).to_list(None)
+            for ur in ur_docs or []:
+                _add(ur.get("user_id"))
+        except Exception:
+            pass
+
+    if not recipients:
+        # users collection fallback
+        try:
+            u_docs = await db[COL_USERS].find(
+                {
+                    "$or": [
+                        {"role": {"$regex": r"(office\s*manager|\bom\b)", "$options": "i"}},
+                        {"user_type": {"$regex": r"(office\s*manager|\bom\b)", "$options": "i"}},
+                    ]
+                },
+                {"_id": 0, "user_id": 1},
+            ).to_list(None)
+            for u in u_docs or []:
+                _add(u.get("user_id"))
+        except Exception:
+            pass
+
+    return recipients
 
 async def _active_term_doc() -> dict:
     """
@@ -504,10 +648,14 @@ async def preferences_root(
       if not payload:
           raise HTTPException(status_code=400, detail="Missing payload")
 
-      fac = await db.faculty_profiles.find_one({"user_id": userId}, {"_id": 0, "faculty_id": 1})
+      fac = await db.faculty_profiles.find_one(
+          {"user_id": userId},
+          {"_id": 0, "faculty_id": 1, "department_id": 1},
+      )
       if not fac:
           raise HTTPException(status_code=400, detail="Faculty profile not found for user.")
       faculty_id = fac["faculty_id"]
+      faculty_dept_id = (fac.get("department_id") or "").strip() or None
 
       term_doc = await _active_term_doc()
       if not term_doc:
@@ -644,7 +792,6 @@ async def preferences_root(
           "submitted_at": _utcnow(),
           "updated_at": _utcnow(),
       }
-
       try:
           doc_set = {**doc}
           doc_set.pop("pref_id", None)
@@ -667,12 +814,44 @@ async def preferences_root(
           )
           if not saved:
               return {"ok": True, "preference": {}}
+
           saved = await _enrich_pref(saved)
           saved = await _expand_kac_names(saved)
+
+          # ------------------------------
+          # Notify OM: Faculty Preference Submitted (best-effort; do not block submit)
+          # ------------------------------
+          try:
+              om_recipients = await _om_user_ids_for_department_id(faculty_dept_id)
+              fac_name = await _faculty_display_name(userId)
+              tlabel = _term_label(term_doc) or term_id
+
+              title = "Faculty Preference Submitted"
+              details = f"{fac_name} submitted faculty preferences for {tlabel}."
+
+              meta = {
+                  "route": "/om/home/load-assignment",
+                  "kind": "faculty_pref_submitted",
+                  "faculty_user_id": userId,
+                  "faculty_id": faculty_id,
+                  "term_id": term_id,
+                  "pref_id": pref_id,
+              }
+
+              for om_uid in om_recipients:
+                  await create_notification(
+                      user_id=om_uid,
+                      title=title,
+                      details=details,
+                      meta=meta,
+                  )
+          except Exception:
+              # best-effort only; never block faculty submission on notification issues
+              pass
+
           return {"ok": True, "preference": saved}
       except HTTPException:
           raise
       except Exception as e:
           raise HTTPException(status_code=400, detail=f"Failed to save preferences: {e}")
-
   raise HTTPException(status_code=400, detail=f"Unknown action: {action}")

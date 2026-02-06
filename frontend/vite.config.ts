@@ -22,6 +22,7 @@ export default defineConfig(({ mode }) => {
         "/api": {
           target: "http://localhost:8000",
           changeOrigin: true,
+          ws: true,
         },
         "/analytics": {
           target: "http://localhost:8100",
