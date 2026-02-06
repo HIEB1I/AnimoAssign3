@@ -21,17 +21,6 @@ const pacificFormatter = new Intl.DateTimeFormat("en-US", {
 
 const pacificTime = (d: Date) => pacificFormatter.format(d);
 
-const timeAgo = (d: Date) => {
-  const s = Math.floor((Date.now() - d.getTime()) / 1000);
-  if (s < 60) return `${s}s ago`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m} minutes ago`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h} hours ago`;
-  const dd = Math.floor(h / 24);
-  return `${dd} day${dd > 1 ? "s" : ""} ago`;
-};
-
 const initials = (name: string) =>
   name
     .split(" ")
