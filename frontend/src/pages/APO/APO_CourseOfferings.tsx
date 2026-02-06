@@ -365,12 +365,25 @@ const compactSlotGE = (
   return Object.keys(out).length ? out : undefined;
 };
 
-const normCode = (s?: string) =>
-  (s || "")
+// Normalize batch codes/labels (used by the "All ID" filter).
+// Backend data can contain variations like "ID122", "ID  122", "ID-122", or even digits-only "122".
+// We normalize all of them to "ID <digits>" so the dropdown de-dupes correctly.
+const normCode = (s?: string) => {
+  const t = (s || "")
+    .replace(/\u00A0/g, " ") // non‑breaking spaces
     .trim()
     .toUpperCase()
-    .replace(/\s+/g, " ")
-    .replace(/^ID\s*(\d+)$/, "ID $1");
+    .replace(/\s+/g, " ");
+
+  // digits-only: "122" -> "ID 122"
+  if (/^\d+$/.test(t)) return `ID ${t}`;
+
+  // "ID122", "ID 122", "ID-122" -> "ID 122"
+  const m = t.match(/^ID[\s-]*(\d+)$/);
+  if (m) return `ID ${m[1]}`;
+
+  return t;
+};
 
 const isGEType = (t?: string) => {
   const s = String(t || "").trim().toLowerCase();
@@ -1862,10 +1875,14 @@ useEffect(() => {
   }, [data?.filters.levels, data?.campus?.campus_name]);
 
   const idOptions = useMemo(() => {
+    // De-dupe by normalized label.
+    // Backend data can contain the same ID repeated under different raw strings ("122", "ID122", "ID 122")
+    // or duplicated rows. We only want one visible option per ID label.
     const seen = new Set<string>();
     const arr: string[] = ["All ID"];
     (data?.filters.ids || []).forEach((b) => {
       const label = normCode(b.batch_code);
+      if (!label) return;
       if (!seen.has(label)) {
         seen.add(label);
         arr.push(label);
@@ -3179,9 +3196,25 @@ const promptSaveEdit = () => {
     return arr.filter((x, idx) => arr.findIndex((a) => a.id === x.id) === idx);
   }, [curr?.items]);
 
-  const currBatches = useMemo(() => {
-    const arr = (curr?.items || []).map((i) => ({ id: i.batch_id, code: i.batch_code }));
-    return arr.filter((x, idx) => arr.findIndex((a) => a.id === x.id) === idx);
+
+  const currIdOptions = useMemo(() => {
+    const seen = new Set<string>();
+    const out: string[] = ["All ID"];
+
+    for (const it of curr?.items || []) {
+      const label = normCode(it.batch_code);
+      if (!label || label === "ALL ID") continue;
+      if (seen.has(label)) continue;
+      seen.add(label);
+      out.push(label);
+    }
+
+    // Sort IDs numerically when possible (keep "All ID" at top)
+    const head = out[0];
+    const rest = out
+      .slice(1)
+      .sort((a, b) => parseBatchNumber(a) - parseBatchNumber(b) || a.localeCompare(b));
+    return [head, ...rest];
   }, [curr?.items]);
 
   const selectedProgramId = useMemo(() => {
@@ -3189,10 +3222,10 @@ const promptSaveEdit = () => {
     return currPrograms.find((p) => p.code === programCode)?.id;
   }, [programCode, currPrograms]);
 
-  const selectedBatchId = useMemo(() => {
+  const selectedBatchLabel = useMemo(() => {
     if (batchCode === "All ID") return undefined;
-    return currBatches.find((b) => normCode(b.code) === normCode(batchCode))?.id;
-  }, [batchCode, currBatches]);
+    return normCode(batchCode);
+  }, [batchCode]);
 
   const optionsByProgram: Record<string, DeptCourseOption[]> = curr?.course_options_by_program || {};
 
@@ -3207,7 +3240,7 @@ const promptSaveEdit = () => {
     const map: Record<string, BatchGroup> = {};
     for (const it of curr?.items || []) {
       if (selectedProgramId && it.program_id !== selectedProgramId) continue;
-      if (selectedBatchId && it.batch_id !== selectedBatchId) continue;
+      if (selectedBatchLabel && normCode(it.batch_code) !== selectedBatchLabel) continue;
 
       const bkey = normCode(it.batch_code);
       if (!map[bkey]) {
@@ -3238,26 +3271,30 @@ const promptSaveEdit = () => {
     // turn into ordered array
     const arr = Object.values(map).sort((a, b) => a.batch_number - b.batch_number);
     return arr;
-  }, [curr?.items, selectedProgramId, selectedBatchId]);
+  }, [curr?.items, selectedProgramId, selectedBatchLabel]);
 
   // For "single-batch" view we still need per-program map + consistent order
   const singleBatchPrograms = useMemo(() => {
-    if (!selectedBatchId) return {};
+    if (!selectedBatchLabel) return {};
     const map: Record<string, CurriculumItem> = {};
     for (const i of curr?.items || []) {
-      if (i.batch_id !== selectedBatchId) continue;
+      if (normCode(i.batch_code) !== selectedBatchLabel) continue;
       if (selectedProgramId && i.program_id !== selectedProgramId) continue;
+
+      // For a given (program, batch_code) pair, batch_id should be stable; keep the first we see.
       if (!map[i.program_id]) map[i.program_id] = { ...i, courses: [...i.courses] };
       else map[i.program_id].courses = [...map[i.program_id].courses, ...i.courses];
     }
+
     Object.keys(map).forEach((pid) => {
       const seen = new Set<string>();
       map[pid].courses = map[pid].courses
         .filter((c) => (seen.has(c.course_id) ? false : (seen.add(c.course_id), true)))
         .sort((a, b) => a.code.localeCompare(b.code));
     });
+
     return map;
-  }, [curr?.items, selectedBatchId, selectedProgramId]);
+  }, [curr?.items, selectedBatchLabel, selectedProgramId]);
 
   const eligibleCourseIdsByProgram = useMemo(() => {
     const m: Record<string, Set<string>> = {};
@@ -3269,24 +3306,6 @@ const promptSaveEdit = () => {
   }, [curr?.items]);
 
   /* ------------------------------ curriculum CRUD ----------------------------- */
-
-  const handleCurrAdd = async (program_id: string, batch_id: string, course_id: string) => {
-    if (!user?.userId || !course_id) return;
-    await curriculumAddCourse(user.userId, { program_id, batch_id, course_id } as any);
-    setCurrAddSel((p) => ({ ...p, [program_id]: "" }));
-    await loadCurriculum();
-  };
-
-  const handleCurrAddCustom = async (
-    program_id: string,
-    batch_id: string,
-    newCourse: { course_code: string; course_title: string; department_id: string; program_level: string; units?: number }
-  ) => {
-    if (!user?.userId) return;
-    await curriculumAddCourse(user.userId, { program_id, batch_id, new_course: newCourse } as any);
-    setCurrAddSel((p) => ({ ...p, [program_id]: "" }));
-    await loadCurriculum();
-  };
 
   const handleCurrEditUnits = async (program_id: string, batch_id: string, course_id: string, units: number | null) => {
     if (!user?.userId) return;
@@ -3588,7 +3607,7 @@ const promptSaveEdit = () => {
                   setBatchCode(v);
                   setCurrAddSel({});
                 }}
-                options={["All ID", ...currBatches.map((b) => b.code)]}
+                options={currIdOptions}
               />
 
               {/* Right-side actions: Import CSV + Add Course + Edit Course */}
@@ -3971,8 +3990,6 @@ const response = await importCurriculumCsv(user.userId, {
                     {Object.entries(byProgram).map(([progLabel, list]) => {
                       const key = `${idLabel}::${progLabel}`;
                       const isCollapsed = !!collapsedGroups[key];
-                      const geEditing =
-                        !!editing && isGEType(editing.row?.course?.type_of_course || "");
                       return (
                         <div key={key} className="border-t border-gray-200">
                           <button
@@ -3991,12 +4008,6 @@ const response = await importCurriculumCsv(user.userId, {
                           {!isCollapsed && (
                             <div className="p-0">
                             <div className="overflow-x-auto relative" style={{ overflowY: "visible" }}>
-                              {/*
-                                NOTE (GE editing): Begin columns must be wider because GE uses a single
-                                TimeBandInput (e.g. "07:30 - 09:00") in the Begin column.
-                                With table-fixed + narrow <col> widths, the input will visually overlap
-                                adjacent cells.
-                              */}
                               <table className="w-full text-sm border-collapse table-fixed">
                                   <colgroup>
                                     <col style={{ width: 96 }} />   {/* Program No. */}
@@ -4004,11 +4015,11 @@ const response = await importCurriculumCsv(user.userId, {
                                     <col style={{ width: 90 }} />   {/* Section */}
                                     <col style={{ width: 180 }} />  {/* Faculty */}
                                     <col style={{ width: 95 }} />   {/* Day 1 */}
-                                    <col style={{ width: geEditing ? 170 : 70 }} />   {/* Begin 1 */}
+                                    <col style={{ width: 70 }} />   {/* Begin 1 */}
                                     <col style={{ width: 70 }} />   {/* End 1 */}
                                     <col style={{ width: 120 }} />  {/* Room 1 */}
                                     <col style={{ width: 95 }} />   {/* Day 2 */}
-                                    <col style={{ width: geEditing ? 170 : 70 }} />   {/* Begin 2 */}
+                                    <col style={{ width: 70 }} />   {/* Begin 2 */}
                                     <col style={{ width: 70 }} />   {/* End 2 */}
                                     <col style={{ width: 120 }} />  {/* Room 2 */}
                                     <col style={{ width: 80 }} />   {/* Capacity */}
@@ -4849,17 +4860,11 @@ const response = await importCurriculumCsv(user.userId, {
             <div className="rounded-xl border border-gray-300 bg-white shadow-sm overflow-visible">
               {/* Header follows selection state */}
               <div className="bg-emerald-700 text-white px-4 py-3 text-center font-semibold">
-                {selectedBatchId
-                  ? `ID ${
-                      (curr?.items || [])
-                        .find((i) => i.batch_id === selectedBatchId)
-                        ?.batch_code?.replace(/^ID\s*/i, "") || "—"
-                    }`
-                  : "List of Courses"}
+                {selectedBatchLabel ? selectedBatchLabel : "List of Courses"}
               </div>
 
               {/* Single ID view */}
-              {selectedBatchId ? (
+              {selectedBatchLabel ? (
                 <div className="p-3"> {/* remove overflow-x-auto so grid can wrap */}
                   <div
                     className="grid gap-4"
@@ -4881,23 +4886,17 @@ const response = await importCurriculumCsv(user.userId, {
                         if (!itm) return null;
 
                         const programCode = itm?.program_code || "—";
-                        const deptId = itm?.department_id || "";
-                        const canAdd = !!selectedBatchId;
                         const opts = optionsByProgram[pid] || [];
-                        const selectedId = currAddSel[pid] || "";
 
                         const allowedIds = eligibleCourseIdsByProgram[pid] || new Set<string>();
                         const filteredOpts = (opts || []).filter((o) => allowedIds.has(o.course_id));
 
-                        const codeOptions = filteredOpts.map((o) => o.course_code);
                         const codeToId: Record<string, string> = {};
                         const idToCode: Record<string, string> = {};
                         filteredOpts.forEach((o) => {
                           codeToId[o.course_code] = o.course_id;
                           idToCode[o.course_id] = o.course_code;
                         });
-
-                        const selectedLabel = selectedId ? idToCode[selectedId] || "— Add course —" : "— Add course —";
 
                         const filteredCourses = (itm?.courses || []).filter((c) => {
                           if (!currSearch.trim()) return true;
@@ -4920,61 +4919,14 @@ const response = await importCurriculumCsv(user.userId, {
 
                               {/* controls should not claim the whole row */}
                               <div className="flex items-center gap-2 flex-none min-w-[280px]" style={{ minWidth: 0 }}>
-                                <div className="w-full min-w-0">
-                                  <SelectBox
-                                    value={selectedLabel}
-                                    onChange={(label: string) => {
-                                      const cid = codeToId[label] || "";
-                                      setCurrAddSel((p) => ({ ...p, [pid]: cid }));
-                                    }}
-                                    options={["— Add course —", ...codeOptions]}
-                                  />
-                                </div>
-
-                                <button
-                                  className="inline-flex items-center gap-2 rounded-md bg-emerald-700 px-3 py-1.5 text-sm font-medium text-white shadow-sm"
-                                  disabled={!canAdd || !selectedId}
-                                  onClick={() => {
-                                    if (!selectedBatchId || !selectedId) return;
-                                    handleCurrAdd(pid, itm.batch_id, selectedId);
-                                  }}
-                                >
-                                  <Plus className="h-4 w-4" />
-                                  Add
-                                </button>
-
-                                <button
-                                  className="inline-flex items-center gap-2 rounded-md border border-emerald-700 px-3 py-1.5 text-sm font-medium text-emerald-700"
-                                  onClick={() => {
-                                    if (!selectedBatchId) return;
-                                    const code = prompt("New course code:")?.trim();
-                                    const title = code ? prompt("Course title:")?.trim() : "";
-                                    const level = title
-                                      ? prompt("Program level (Undergraduate or Graduate Studies):")?.trim()
-                                      : "";
-                                    const unitsStr = level ? prompt("Units (number):")?.trim() : "";
-                                    const unitsNum = unitsStr ? Number(unitsStr) : undefined;
-                                    if (!code || !title || !level) return;
-                                    handleCurrAddCustom(pid, selectedBatchId, {
-                                      course_code: normCode(code),
-                                      course_title: title!,
-                                      department_id: deptId,
-                                      program_level: level!,
-                                      units: isNaN(unitsNum as number) ? undefined : (unitsNum as number),
-                                    });
-                                  }}
-                                >
-                                  <Plus className="h-4 w-4" />
-                                  Custom
-                                </button>
-                                <button
+<button
                                   className="inline-flex items-center gap-2 rounded-md bg-emerald-700 px-3 py-1.5 text-sm font-medium text-white shadow-sm"
                                   onClick={() =>
                                     setEditorState({
                                       open: true,
                                       program_id: pid,
                                       program_code: programCode,
-                                      batch_id: selectedBatchId!,   // single-ID view
+                                      batch_id: itm.batch_id,   // single-ID view
                                     })
                                   }
                                   title="Edit program courses"
@@ -5018,18 +4970,18 @@ const response = await importCurriculumCsv(user.userId, {
                                           placeholder="units"
                                           className="h-9 w-16 rounded border px-2 text-sm text-center"
                                           onBlur={(e) => {
-                                            if (!selectedBatchId) return;
+                                            if (!selectedBatchLabel) return;
                                             const v = e.currentTarget.value.trim();
                                             const num = v === "" ? null : Number(v);
                                             if (v === "" || !isNaN(num!)) {
-                                              handleCurrEditUnits(pid, selectedBatchId, c.course_id, num);
+                                              handleCurrEditUnits(pid, itm.batch_id, c.course_id, num);
                                             }
                                           }}
                                         />
                                         <button
                                           className="text-red-500 hover:text-red-700"
                                           title="Remove"
-                                          onClick={() => selectedBatchId && handleCurrRemove(pid, selectedBatchId, c.course_id)}
+                                          onClick={() => handleCurrRemove(pid, itm.batch_id, c.course_id)}
                                         >
                                           <Trash2 className="h-4 w-4" />
                                         </button>
