@@ -31,7 +31,6 @@ import {
   Send,
   Save,
   CheckCheck,
-  Plus,
   MessageSquareText,
   Copy,
 
@@ -2667,10 +2666,6 @@ export default function OM_LoadAssignment() {
     setInitialLoaded(true);
     loadFromServer(); // auto-load on page open
   }, [initialLoaded]);
-
-  const addRow = () => {
-    setShowNewSectionModal(true);
-  };
 
   const getEditFlags = (r: Row) => {
     // Once a row is finalized/approved, it must be locked from any further edits.

@@ -1,6 +1,6 @@
 // frontend/src/pages/OM/OM_REPORTS_ANALYTICS/OM-RP_AvailabilityForecasting.tsx
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ChevronDown, ChevronLeft, CalendarCheck, Users, Clock, TrendingUp, AlertTriangle } from "lucide-react";
+import { ChevronDown, ChevronLeft, Users, Clock, AlertTriangle } from "lucide-react";
 import { fetchFacultyAvailabilityHeatmap } from "../../../api";
 import { Link } from "react-router-dom";
 
@@ -239,7 +239,7 @@ function SummaryCards({ data }: { data: AvailabilityHeatmap | null }) {
       if (merged.count <= 1) lowSupportCells += 1;
     }
   }
-  const prefLabel = data.previous_term_for_prefs_label || data.previous_term_for_prefs || "—";
+  // const prefLabel = data.previous_term_for_prefs_label || data.previous_term_for_prefs || "—";
   const histLabels = (data.history_terms_labels?.length ? data.history_terms_labels : data.history_terms);
   const cards = [
     {
@@ -298,7 +298,8 @@ function SummaryCards({ data }: { data: AvailabilityHeatmap | null }) {
 export default function OM_RP_AvailabilityForecasting() {
   // UI-only controls; inherited header/subtitle remain in the shell
   const [term, setTerm] = useState("2025 Term 1");
-  const [course, setCourse] = useState("");
+  // const [course, setCourse] = useState("");
+  const [course] = useState("");
 
   const [data, setData] = useState<AvailabilityHeatmap | null>(null);
   const [loading, setLoading] = useState(false);
