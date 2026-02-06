@@ -2,7 +2,7 @@ import React from "react";
 import { useNavigate } from "react-router-dom";
 import { Eye, EyeOff, Mail, CheckCircle2 } from "lucide-react";
 import AA_Logo from "@/assets/Images/AA_Logo.png";
-import { login as apiLogin, loginWithPassword, type LoginResponse } from "@/api";
+import { loginWithPassword, type LoginResponse } from "@/api";
 import { useGoogleLogin } from "@react-oauth/google";
 
 const Login: React.FC = () => {
