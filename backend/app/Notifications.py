@@ -48,7 +48,7 @@ def _user_email(user: Dict[str, Any]) -> str:
 
 
 def _build_notif_link(route: str) -> str:
-    base = (os.getenv("ANIMOASSIGN_WEB_URL") or "").strip() or "http://localhost:5173"
+    base = (os.getenv("ANIMOASSIGN_WEB_URL") or "").strip() or "http://ccscloud.dlsu.edu.ph:11160/"
     base = base.rstrip("/")
     route = (route or "").strip()
     if not route:

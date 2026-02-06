@@ -311,8 +311,15 @@ async def faculty_by_section_first(sec_ids: List[str], term_id: str) -> Dict[str
         "is_archived": {"$ne": True},
     }
     # Only enforce load_id filter if we actually found loads for the term.
+    # IMPORTANT: some planning rows in faculty_assignments may not yet have a load_id (or have it blank),
+    # so we must not accidentally drop valid faculty_id links.
     if load_ids:
-        fa_cond["load_id"] = {"$in": load_ids}
+        fa_cond["$or"] = [
+            {"load_id": {"$in": load_ids}},
+            {"load_id": {"$exists": False}},
+            {"load_id": None},
+            {"load_id": ""},
+        ]
 
     fa_rows = [x async for x in db[COL_FAC_ASSIGN].find(
         fa_cond, {"_id": 0, "section_id": 1, "faculty_id": 1}

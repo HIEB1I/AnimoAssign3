@@ -2923,6 +2923,23 @@ export async function submitOmLoadAssignment(
   };
 }
 
+/** Import SHS CSV file contents into OM Load Assignment (creates sections/schedules placeholders). */
+export async function importOmShsCsv(userId: string, csvText: string) {
+  const { data } = await axios.post(
+    `${API_BASE}/om/loadassignment`,
+    { csv: csvText },
+    { params: { userId, action: "import_shs" } }
+  );
+  return data as {
+    ok: boolean;
+    imported: number;
+    created_courses: number;
+    created_sections: number;
+    term?: string;
+    term_id?: string;
+  };
+}
+
 export async function notifyChairLoadRecommendation(
   userId: string,
   payload: {
