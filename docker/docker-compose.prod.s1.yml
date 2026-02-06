@@ -11,6 +11,8 @@ services:
       - /opt/secrets/animoassign/mongo-keyfile:/run/secrets/mongo-keyfile:ro
     ports:
       - "27017:27017"          # expose to host so S2 can reach it
+    env_file:
+      - .env
     networks: [animoassign]
     restart: unless-stopped
 
@@ -33,6 +35,8 @@ services:
         condition: service_started
     ports:
       - "18000:8000"
+    env_file:
+      - .env
     networks: [animoassign]
     restart: unless-stopped
 
@@ -53,6 +57,8 @@ services:
         condition: service_started
     ports:
       - "18100:8000"
+    env_file:
+      - .env
     networks: [animoassign]
     restart: unless-stopped
 
