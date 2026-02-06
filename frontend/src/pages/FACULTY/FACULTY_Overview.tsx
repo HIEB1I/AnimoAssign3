@@ -1119,21 +1119,26 @@ function ChangeRequestModal({
 
   return (
     <div className="fixed inset-0 z-80 grid place-items-center bg-black/30 p-3">
-      <div className="w-full max-w-3xl rounded-2xl bg-white p-6 shadow-2xl">
-        <div className="mb-4 flex items-start justify-between">
-          <div>
-            <h3 className="text-xl font-semibold text-emerald-700">Request for Change</h3>
-            <p className="text-sm text-neutral-500">
-              {/* --- MODIFIED: Use calendar item data --- */}
-              {context.item.code} {context.item.sec} • {context.day} • {context.item.time}
-            </p>
-          </div>
-          <button className="rounded-full p-1 hover:bg-neutral-100" onClick={onClose} aria-label="Close">
-            <X className="h-5 w-5" />
-          </button>
-        </div>
+	    <div className="w-full max-w-3xl rounded-2xl bg-white shadow-2xl max-h-[90vh] flex flex-col">
+	      {/* Header */}
+	      <div className="p-6 pb-0">
+	        <div className="mb-4 flex items-start justify-between">
+	          <div>
+	            <h3 className="text-xl font-semibold text-emerald-700">Request for Change</h3>
+	            <p className="text-sm text-neutral-500">
+	              {/* --- MODIFIED: Use calendar item data --- */}
+	              {context.item.code} {context.item.sec} • {context.day} • {context.item.time}
+	            </p>
+	          </div>
+	          <button className="rounded-full p-1 hover:bg-neutral-100" onClick={onClose} aria-label="Close">
+	            <X className="h-5 w-5" />
+	          </button>
+	        </div>
+	      </div>
 
-        <div className="space-y-3">
+	      {/* Body (scrollable when content is long) */}
+	      <div className="flex-1 min-h-0 overflow-y-auto p-6 pt-0">
+	        <div className="space-y-3">
 
           
           {scheduleFinal && (
@@ -1223,9 +1228,11 @@ function ChangeRequestModal({
               />
             </div>
           )}
-        </div>
+	        </div>
+	      </div>
 
-        <div className="mt-6 flex items-center justify-end gap-2.5">
+	      {/* Footer (always visible) */}
+	      <div className="p-6 pt-0 flex items-center justify-end gap-2.5">
           <button
             onClick={onClose}
             className="inline-flex h-9 items-center justify-center rounded-xl border border-neutral-200 bg-neutral-100 px-4 text-sm text-slate-900 shadow-sm hover:bg-neutral-200/70 active:translate-y-[0.5px]"
@@ -1300,7 +1307,7 @@ function ChangeRequestModal({
             <SendIcon className="h-4 w-4" strokeWidth={2.2} />
             Send
           </button>
-        </div>
+	      </div>
       </div>
     </div>
   );
