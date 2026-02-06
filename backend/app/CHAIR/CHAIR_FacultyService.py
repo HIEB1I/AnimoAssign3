@@ -37,21 +37,69 @@ END_BY_BEGIN = {
     "19:45": "21:00",
 }
 
-# Department directory (spec)
-DEPTS = [
+# Department directory
+# NOTE: Previously these were hardcoded (DEPTS/RECIPIENT). We now prefer the `departments`
+# collection/table as the source of truth, with a backwards-compatible fallback.
+DEFAULT_DEPTS = [
     "Department of Computer Technology",
     "Department of Information Technology",
     "Department of Literature",
     "Department of Software Technology",
 ]
 
-# Safe default recipients (email logging is optional; lack of mapping must NOT break send)
-RECIPIENT = {
-    "Department of Information Technology": ("Danny Cheng", "danny.cheng@dlsu.edu.ph"),
-    "Department of Computer Technology": ("Katrina Ysabel Solomon", "katrina.solomon@dlsu.edu.ph"),
-    "Department of Literature": ("Shirley Lua", "shirley.lua@dlsu.edu.ph"),
-    "Department of Software Technology": ("Neil Patrick Del Gallego", "neil.delgallego@dlsu.edu.ph"),
-}
+async def _list_departments() -> list[dict]:
+    """Return departments from DB (sorted by name).
+
+    Falls back to DEFAULT_DEPTS when the collection isn't available or empty.
+    """
+    try:
+        cur = db.departments.find(
+            {},
+            {"_id": 0, "department_id": 1, "dept_name": 1, "dept_code": 1},
+        ).sort([("dept_name", 1)])
+        rows = [d async for d in cur]
+        if rows:
+            return rows
+    except Exception:
+        pass
+
+    return [{"department_id": None, "dept_name": n, "dept_code": ""} for n in DEFAULT_DEPTS]
+
+async def _list_department_names() -> list[str]:
+    rows = await _list_departments()
+    names = [r.get("dept_name") for r in rows if r.get("dept_name")]
+    out: list[str] = []
+    seen = set()
+    for n in names:
+        if n not in seen:
+            seen.add(n)
+            out.append(n)
+    return out
+
+async def _canon_dept_name(name: str | None) -> str:
+    """Return the canonical department name.
+
+    - Prefers the `departments` collection/table (dept_name) when available.
+    - Falls back to DEFAULT_DEPTS (case/space tolerant).
+    - If no match is found, returns the stripped input (or empty string).
+    """
+    s = (name or "").strip()
+    if not s:
+        return ""
+
+    try:
+        d = await _find_department(s)
+        if d and d.get("dept_name"):
+            return d["dept_name"]
+    except Exception:
+        pass
+
+    s_norm = " ".join(s.lower().split())
+    for d in DEFAULT_DEPTS:
+        if " ".join(d.lower().split()) == s_norm:
+            return d
+
+    return s
 
 # ------------------------ helpers ------------------------
 
@@ -192,80 +240,109 @@ async def _find_department(query: str) -> Optional[Dict[str, Any]]:
     )
     return doc
 
-async def _chair_user_ids_for_dept(dept_name: Optional[str]) -> List[str]:
-    """Resolve chair user_id(s) for a given department name/code/id.
+async def _chair_user_ids_for_dept(dept_name: str | None) -> list[str]:
+    """Resolve department chair user_id(s) for a given department.
 
-    Priority:
-      1) staff_profiles where department matches and position_title contains 'chair'
-      2) role_assignments filtered by department and active
+    Replaces the old hardcoded RECIPIENT mapping.
+
+    Resolution strategy (most reliable first):
+      1) role_assignments scoped to the department, where role_type contains "chair"
+      2) staff_profiles where department matches and position_title contains "chair" (if present)
 
     Returns a de-duplicated list. If nothing matches, returns [].
     """
+
+    dept_name = await _canon_dept_name(dept_name)
     if not dept_name:
         return []
 
     dept = await _find_department(dept_name)
-    dep_id = (dept or {}).get('department_id')
-    if not dep_id:
-        return []
+    dep_id = (dept or {}).get("department_id")
+    dep_code = (dept or {}).get("dept_code")
 
-    ids: List[str] = []
+    ids: list[str] = []
 
-    # 1) staff_profiles (preferred)
+    # 1) role_assignments using scope (preferred)
     try:
-        cur = db.staff_profiles.find(
-            {
-                '$or': [{'department_id': dep_id}, {'dept_id': dep_id}],
-                'position_title': {'$regex': 'chair', '$options': 'i'},
-            },
-            {'_id': 0, 'user_id': 1},
+        chair_roles: list[str] = []
+        cur_roles = db.user_roles.find(
+            {"role_type": {"$regex": "chair", "$options": "i"}},
+            {"_id": 0, "role_id": 1},
         )
-        async for d in cur:
-            if d.get('user_id'):
-                ids.append(d['user_id'])
+        async for r in cur_roles:
+            if r.get("role_id"):
+                chair_roles.append(r["role_id"])
+
+        if chair_roles:
+            scope_or: list[dict] = []
+            if dep_id:
+                scope_or.append({"scope": {"$elemMatch": {"type": "department", "id": dep_id}}})
+            if dep_code:
+                scope_or.append({"scope": {"$elemMatch": {"type": "department", "id": dep_code}}})
+            scope_or.append({"scope": {"$elemMatch": {"type": "department", "id": dept_name}}})
+
+            q = {"role_id": {"$in": chair_roles}, "$or": scope_or}
+            cur_ra = db.role_assignments.find(q, {"_id": 0, "user_id": 1})
+            async for d in cur_ra:
+                if d.get("user_id"):
+                    ids.append(d["user_id"])
     except Exception:
-        # collection may not exist in some environments
         pass
 
-    # 2) role_assignments fallback
+    # 2) staff_profiles fallback (older schema)
     if not ids:
         try:
-            cur2 = db.role_assignments.find(
-                {
-                    '$or': [{'department_id': dep_id}, {'dept_id': dep_id}],
-                    'is_active': {'$in': [True, None]},
-                },
-                {'_id': 0, 'user_id': 1},
+            match_or: list[dict] = []
+            if dep_id:
+                match_or += [{"department_id": dep_id}, {"dept_id": dep_id}]
+            match_or += [
+                {"dept_name": {"$regex": f"^{dept_name}$", "$options": "i"}},
+                {"department": {"$regex": f"^{dept_name}$", "$options": "i"}},
+                {"department_name": {"$regex": f"^{dept_name}$", "$options": "i"}},
+            ]
+            cur = db.staff_profiles.find(
+                {"$or": match_or, "position_title": {"$regex": "chair", "$options": "i"}},
+                {"_id": 0, "user_id": 1},
             )
-            async for d in cur2:
-                if d.get('user_id'):
-                    ids.append(d['user_id'])
+            async for d in cur:
+                if d.get("user_id"):
+                    ids.append(d["user_id"])
         except Exception:
             pass
 
-    # 3) Fallback: use RECIPIENT directory email -> users.user_id
-    # This is the most reliable in your current app because RECIPIENT has known chair emails.
-    if not ids:
-        try:
-            rec = RECIPIENT.get(dept_name or "")
-            if rec:
-                _, email = rec
-                u = await db.users.find_one(
-                    {"email": {"$regex": f"^{email}$", "$options": "i"}},
-                    {"_id": 0, "user_id": 1},
-                )
-                if u and u.get("user_id"):
-                    ids.append(u["user_id"])
-        except Exception:
-            pass
-
-    # De-dupe
-    out: List[str] = []
+    # de-dupe while preserving order
+    out: list[str] = []
     seen = set()
     for uid in ids:
-        if uid not in seen:
+        if uid and uid not in seen:
             seen.add(uid)
             out.append(uid)
+    return out
+
+
+async def _chair_contacts_for_dept(dept_name: str | None) -> list[dict]:
+    """Return chair contacts (user_id, full_name, email) for a department."""
+    ids = await _chair_user_ids_for_dept(dept_name)
+    if not ids:
+        return []
+
+    out: list[dict] = []
+    try:
+        cur = db.users.find(
+            {"user_id": {"$in": ids}},
+            {"_id": 0, "user_id": 1, "first_name": 1, "last_name": 1, "email": 1},
+        )
+        users = [u async for u in cur]
+        by_id = {u.get("user_id"): u for u in users}
+        for uid in ids:
+            u = by_id.get(uid) or {}
+            fn = (u.get("first_name") or "").strip()
+            ln = (u.get("last_name") or "").strip()
+            full = (f"{fn} {ln}").strip() or uid
+            out.append({"user_id": uid, "full_name": full, "email": (u.get("email") or "").strip()})
+    except Exception:
+        out = [{"user_id": uid, "full_name": uid, "email": ""} for uid in ids]
+
     return out
 
 
@@ -374,7 +451,7 @@ async def fs_options(
     return {
         "ok": True,
         "courses": courses,
-        "departments": DEPTS,
+        "departments": await _list_department_names(),
         "timeBegins": BEGIN,
         "days": DAYS,
         "facultyOptions": faculty_opts,
@@ -421,10 +498,27 @@ async def fs_create(payload: Dict[str, Any] = Body(...)):
     course_title = (payload.get("course_title") or "").strip()
     from_department = (payload.get("from_department") or "").strip()
 
-    if to_department not in DEPTS:
-        raise HTTPException(status_code=400, detail="to_department must be one of the predefined departments.")
-    if from_department not in DEPTS:
-        raise HTTPException(status_code=400, detail="from_department must be one of the predefined departments.")
+    # Canonicalize departments (accept name/code/id, store dept_name)
+    to_department = await _canon_dept_name(to_department)
+    from_department = await _canon_dept_name(from_department)
+
+    if not to_department:
+        raise HTTPException(status_code=400, detail="to_department is required.")
+    if not from_department:
+        raise HTTPException(status_code=400, detail="from_department is required.")
+
+    to_known = await _find_department(to_department)
+    from_known = await _find_department(from_department)
+
+    def _in_default(x: str) -> bool:
+        xn = " ".join((x or "").lower().split())
+        return any(" ".join(d.lower().split()) == xn for d in DEFAULT_DEPTS)
+
+    if not (to_known or _in_default(to_department)):
+        raise HTTPException(status_code=400, detail="to_department must be a valid department.")
+    if not (from_known or _in_default(from_department)):
+        raise HTTPException(status_code=400, detail="from_department must be a valid department.")
+
     if to_department == from_department:
         raise HTTPException(status_code=400, detail="to_department cannot be the same as from_department.")
     if not course_code:
@@ -497,28 +591,34 @@ async def fs_send(fs_id: str):
         # notifications should not block the request flow
         pass
 
-    rec = RECIPIENT.get(to_dept or "")
-    if rec:
-        name, email = rec
-        subj = f"Faculty Service Request: {row.get('course_code','')} - {row.get('course_title','')}"
-        body = (
-            f"Requesting Dept: {row.get('from_department')}\n"
-            f"Requested Dept: {to_dept}\n"
-            f"Course: {row.get('course_code')} - {row.get('course_title')}\n"
-            f"Units: {row.get('units')}\n"
-            f"Request ID: {fs_id}\n"
-            f"Open in app: /chair/faculty-service?request={fs_id}\n"
-        )
-        await db.email_logs.insert_one({
-            "email_id": f"EM{uuid4().hex[:8].upper()}",
-            "to_name": name,
-            "to_email": email,
-            "subject": subj,
-            "body": body,
-            "created_at": _now_iso(),
-            "type": "faculty_service_send",
-            "fs_id": fs_id,
-        })
+    # Optional email log stub: pick the primary chair contact (if resolvable)
+    try:
+        contacts = await _chair_contacts_for_dept(to_dept or "")
+        primary = next((c for c in contacts if c.get("email")), None)
+        if primary:
+            name = primary.get("full_name") or ""
+            email = primary.get("email") or ""
+            subj = f"Faculty Service Request: {row.get('course_code','')} - {row.get('course_title','')}"
+            body = (
+                f"Requesting Dept: {row.get('from_department')}\n"
+                f"Requested Dept: {to_dept}\n"
+                f"Course: {row.get('course_code')} - {row.get('course_title')}\n"
+                f"Units: {row.get('units')}\n"
+                f"Request ID: {fs_id}\n"
+                f"Open in app: /chair/faculty-service?request={fs_id}\n"
+            )
+            await db.email_logs.insert_one({
+                "email_id": f"EM{uuid4().hex[:8].upper()}",
+                "to_name": name,
+                "to_email": email,
+                "subject": subj,
+                "body": body,
+                "created_at": _now_iso(),
+                "type": "faculty_service_send",
+                "fs_id": fs_id,
+            })
+    except Exception:
+        pass
 
     doc = await db.faculty_service.find_one({"fs_id": fs_id}, {"_id": 0})
     return {"ok": True, "row": doc}
@@ -609,18 +709,31 @@ async def fs_reject(fs_id: str, payload: Dict[str, Any] = Body(default={})):
         pass
     # optional log stub (requester could be notified if mapped to an email)
     from_dept = row.get("from_department", "")
-    rec = RECIPIENT.get(from_dept)
-    to_name, to_email = (rec[0], rec[1]) if rec else (from_dept, "")
 
-    await db.email_logs.insert_one({
-        "email_id": f"EM{uuid4().hex[:8].upper()}",
-        "to_name": to_name,
-        "to_email": to_email,
-        "subject": f"Faculty Service Request Rejected: {row.get('course_code','')}",
-        "body": f"Request {fs_id} has been rejected.\nRemarks: {remarks}",
-        "created_at": _now_iso(),
-        "type": "faculty_service_reject",
-        "fs_id": fs_id,
-    })
+    # Optional email log stub to the requesting department chair (if resolvable)
+    from_dept = row.get("from_department", "")
+    to_name, to_email = (from_dept, "")
+    try:
+        contacts = await _chair_contacts_for_dept(from_dept)
+        primary = next((c for c in contacts if c.get("email")), None)
+        if primary:
+            to_name = primary.get("full_name") or to_name
+            to_email = primary.get("email") or to_email
+    except Exception:
+        pass
+
+    try:
+        await db.email_logs.insert_one({
+            "email_id": f"EM{uuid4().hex[:8].upper()}",
+            "to_name": to_name,
+            "to_email": to_email,
+            "subject": f"Faculty Service Request Rejected: {row.get('course_code','')}",
+            "body": f"Request {fs_id} has been rejected.\nRemarks: {remarks}",
+            "created_at": _now_iso(),
+            "type": "faculty_service_reject",
+            "fs_id": fs_id,
+        })
+    except Exception:
+        pass
     doc = await db.faculty_service.find_one({"fs_id": fs_id}, {"_id": 0})
     return {"ok": True, "row": doc}

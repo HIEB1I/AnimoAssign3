@@ -745,9 +745,45 @@ function EditForm({
   }
 
   // toggles
+  const DAY_PAIR: Record<string, string> = {
+    Monday: "Thursday",
+    Thursday: "Monday",
+    Tuesday: "Friday",
+    Friday: "Tuesday",
+    Wednesday: "Saturday",
+    Saturday: "Wednesday",
+  };
+
   const toggleMulti = (key: "days" | "timeSlots", value: string) =>
     setForm((f) => {
-      const arr = f[key] as string[];
+      const arr = (f[key] as string[]) ?? [];
+
+      // Keep Preferred Teaching Days in paired sync (Mon<->Thu, Tue<->Fri, Wed<->Sat)
+      if (key === "days") {
+        const pair = DAY_PAIR[value];
+        const has = arr.includes(value);
+        const targetSelected = !has;
+
+        let next = [...arr];
+        const setSelected = (day: string | undefined, selected: boolean) => {
+          if (!day) return;
+          const inArr = next.includes(day);
+          if (selected && !inArr) next = [...next, day];
+          if (!selected && inArr) next = next.filter((v) => v !== day);
+        };
+
+        setSelected(value, targetSelected);
+        setSelected(pair, targetSelected);
+
+        // Keep stable ordering for nicer UI + consistent payload ordering
+        const order = (d: string) => {
+          const i = daysMaster.indexOf(d);
+          return i < 0 ? 999 : i;
+        };
+        next.sort((a, b) => order(a) - order(b));
+        return { ...f, days: next };
+      }
+
       const has = arr.includes(value);
       return { ...f, [key]: has ? arr.filter((v) => v !== value) : [...arr, value] };
     });
@@ -1278,41 +1314,61 @@ function EditForm({
                   </div>
 
                   {/* Days / Time Slots */}
-                  <div className="grid grid-cols-1 gap-6 sm:grid-cols-2">
-                    <div>
-                      <FieldLabel required>Preferred Teaching Days</FieldLabel>
-                      <div className="grid grid-cols-2 gap-2">
-                        {daysMaster.map((d) => (
-                          <label key={d} className="flex items-center gap-2 text-[15px]">
-                            <input
-                              type="checkbox"
-                              className="accent-emerald-700"
-                              checked={form.days.includes(d)}
-                              onChange={() => toggleMulti("days", d)}
-                            />
-                            {d}
-                          </label>
-                        ))}
-                      </div>
-                    </div>
+<div className="grid grid-cols-1 gap-6 sm:grid-cols-2">
+  {/* LEFT: Preferred Teaching Days */}
+  <div>
+    <FieldLabel required>Preferred Teaching Days</FieldLabel>
 
-                    <div>
-                      <FieldLabel required>Preferred Time Slots</FieldLabel>
-                      <div className="grid grid-cols-1 gap-1.5">
-                        {timeSlotsMaster.map((t) => (
-                          <label key={t} className="flex items-center gap-2 text-[15px]">
-                            <input
-                              type="checkbox"
-                              className="accent-emerald-700"
-                              checked={form.timeSlots.includes(t)}
-                              onChange={() => toggleMulti("timeSlots", t)}
-                            />
-                            {t}
-                          </label>
-                        ))}
-                      </div>
-                    </div>
-                  </div>
+    <div className="grid grid-cols-2 gap-2">
+      <div className="space-y-2">
+        {["Monday", "Tuesday", "Wednesday"].map((d) => (
+          <label key={d} className="flex items-center gap-2 text-[15px]">
+            <input
+              type="checkbox"
+              className="accent-emerald-700"
+              checked={form.days.includes(d)}
+              onChange={() => toggleMulti("days", d)}
+            />
+            {d}
+          </label>
+        ))}
+      </div>
+
+      <div className="space-y-2">
+        {["Thursday", "Friday", "Saturday"].map((d) => (
+          <label key={d} className="flex items-center gap-2 text-[15px]">
+            <input
+              type="checkbox"
+              className="accent-emerald-700"
+              checked={form.days.includes(d)}
+              onChange={() => toggleMulti("days", d)}
+            />
+            {d}
+          </label>
+        ))}
+      </div>
+    </div>
+  </div>
+
+  {/* RIGHT: Preferred Time Slots */}
+  <div>
+    <FieldLabel required>Preferred Time Slots</FieldLabel>
+    <div className="grid grid-cols-1 gap-1.5">
+      {timeSlotsMaster.map((t) => (
+        <label key={t} className="flex items-center gap-2 text-[15px]">
+          <input
+            type="checkbox"
+            className="accent-emerald-700"
+            checked={form.timeSlots.includes(t)}
+            onChange={() => toggleMulti("timeSlots", t)}
+          />
+          {t}
+        </label>
+      ))}
+    </div>
+  </div>
+</div>
+
 
                   {/* KAC */}
                   <div>
@@ -1652,17 +1708,21 @@ export default function FACULTY_Preferences() {
     };
   }
 
-  useEffect(() => {
-    (async () => {
-      try {
-        if (!userId) {
-          setLoading(false);
-          return;
-        }
-        const [profile, opts] = await Promise.all([
-          getFacultyPreferencesProfile(userId),
-          getFacultyPreferencesOptions(userId),
-        ]);
+useEffect(() => {
+  (async () => {
+    try {
+      if (!userId) {
+        setLoading(false);
+        return;
+      }
+
+      // NEW: trigger deadline reminder generation (safe to call repeatedly; backend dedupes)
+      fetch("/api/notifications/run-prefs-deadline-reminders", { method: "POST" }).catch(() => {});
+
+      const [profile, opts] = await Promise.all([
+        getFacultyPreferencesProfile(userId),
+        getFacultyPreferencesOptions(userId),
+      ]);
 
         setPrefsWindow({
           openISO: opts?.prefs_window?.openISO || "",

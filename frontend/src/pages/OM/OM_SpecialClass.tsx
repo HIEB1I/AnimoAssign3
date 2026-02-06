@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Search as SearchIcon, Edit, Check, ChevronDown, Eye, X, Download } from "lucide-react";
+import { Search as SearchIcon, Edit, Check, Eraser, ChevronDown, Eye, X, Download } from "lucide-react";
 import SelectBox from "../../component/SelectBox";
 import { cls } from "../../utilities/cls";
 import {
@@ -86,6 +86,8 @@ function formatDate(dt?: string) {
   return d.toLocaleString();
 }
 
+const CLEAR_SCHEDULE_LABEL = "Clear schedule";
+
 /** SelectBox-styled combo input (type + dropdown in ONE box) */
 function ComboSelect({
   value,
@@ -132,7 +134,7 @@ function ComboSelect({
           placeholder={placeholder}
           disabled={disabled}
           className={cls("w-full outline-none bg-transparent", disabled && "cursor-not-allowed")}
-          style={{ minWidth: '190px' }}  // Apply minWidth directly here
+          style={{ minWidth: "190px" }}
         />
         <ChevronDown className="h-4 w-4 text-gray-500 shrink-0" />
       </div>
@@ -169,6 +171,7 @@ function ComboSelect({
 const STATUS_PILL: Record<string, string> = {
   Submitted: "bg-gray-100 text-gray-700",
   "Under Review": "bg-yellow-100 text-yellow-800",
+  "Forwarded To Department": "bg-yellow-100 text-yellow-800",
   Approved: "bg-green-100 text-green-800",
   Rejected: "bg-red-100 text-red-800",
 };
@@ -207,6 +210,14 @@ export default function OM_SpecialClass() {
   const [facultyNames, setFacultyNames] = useState<string[]>(["UNASSIGNED"]);
   const [facultyNameToIdUpper, setFacultyNameToIdUpper] = useState<Record<string, string>>({});
 
+  // Rooms (read-only display)
+  const [roomIdToInfo, setRoomIdToInfo] = useState<
+    Record<
+      string,
+      { room_number: string; building?: string; capacity?: number; room_type?: string; campus_id?: string }
+    >
+  >({});
+
   // table
   const [rows, setRows] = useState<OMSpecialClassRow[]>([]);
   const [loading, setLoading] = useState(false);
@@ -222,13 +233,44 @@ export default function OM_SpecialClass() {
 
   // presets
   const [presets, setPresets] = useState<OMSCSchedulePreset[]>([]);
-  const [presetChoice, setPresetChoice] = useState<string>("CUSTOM"); // schedule_id or CUSTOM
+  const [presetChoice, setPresetChoice] = useState<string>("CUSTOM"); 
+  const [clearMode, setClearMode] = useState<"none" | "schedule" | "all">("none");
+  const [didClearAll, setDidClearAll] = useState(false);
 
   // view modal
   const [viewOpen, setViewOpen] = useState(false);
   const [viewLoading, setViewLoading] = useState(false);
   const [viewErr, setViewErr] = useState("");
   const [viewData, setViewData] = useState<OMSpecialClassDetail | null>(null);
+
+  const roomLabel = (r: Partial<OMSpecialClassRow>, slot: 1 | 2) => {
+    const direct = (slot === 1 ? r.room1 : r.room2) || "";
+    const directTrim = direct.trim();
+    if (directTrim) {
+      if (directTrim.toUpperCase() === "ONLINE") return "TBA";
+      return directTrim;
+    }
+
+    const rid = (slot === 1 ? r.room_id1 : r.room_id2) || "";
+    const ridTrim = rid.trim();
+    if (!ridTrim) return "TBA";
+    const info = roomIdToInfo[ridTrim];
+    if (!info?.room_number) return "TBA";
+    if (String(info.room_number).trim().toUpperCase() === "ONLINE") return "TBA";
+    return info.room_number;
+  };
+
+  const roomTitle = (r: Partial<OMSpecialClassRow>, slot: 1 | 2) => {
+    const rid = (slot === 1 ? r.room_id1 : r.room_id2) || "";
+    const info = rid ? roomIdToInfo[String(rid).trim()] : null;
+    if (!info) return undefined;
+    const parts = [
+      info.building ? info.building : null,
+      typeof info.capacity === "number" ? `Cap: ${info.capacity}` : null,
+      info.room_type ? info.room_type : null,
+    ].filter(Boolean);
+    return parts.length ? parts.join(" • ") : undefined;
+  };
 
   // load options
   useEffect(() => {
@@ -255,6 +297,22 @@ export default function OM_SpecialClass() {
 
         setFacultyNames(["UNASSIGNED", ...names]);
         setFacultyNameToIdUpper(mapUpper);
+
+        // rooms map for display-only columns
+        const rm: Record<string, any> = {};
+        (opt.roomOptions || []).forEach((x: any) => {
+          const rid = String(x?.room_id || "").trim();
+          const rn = String(x?.room_number || "").trim();
+          if (!rid) return;
+          rm[rid] = {
+            room_number: rn,
+            building: x?.building,
+            capacity: x?.capacity,
+            room_type: x?.room_type,
+            campus_id: x?.campus_id,
+          };
+        });
+        setRoomIdToInfo(rm);
       } catch (e: any) {
         setErr(e?.response?.data?.detail || e?.message || "Failed to load options.");
       }
@@ -345,7 +403,7 @@ export default function OM_SpecialClass() {
       const head = sec ? `${sec} · ${p.label}` : p.label;
       return `${head} · ${p.faculty_name || "UNASSIGNED"}`;
     });
-    return ["Custom", ...base];
+    return ["Custom", CLEAR_SCHEDULE_LABEL, ...base];
   }, [presets]);
 
   const presetLabelToId = useMemo(() => {
@@ -359,6 +417,8 @@ export default function OM_SpecialClass() {
   }, [presets]);
 
   const applyPreset = (scheduleId: string) => {
+    setDidClearAll(false);
+
     if (scheduleId === "CUSTOM") {
       setPresetChoice("CUSTOM");
       setDraft((d) => ({
@@ -391,6 +451,7 @@ export default function OM_SpecialClass() {
 
   const beginEdit = async (row: OMSpecialClassRow) => {
     setEditId(row.special_id);
+    setDidClearAll(false);
 
     setDraft({
       course_id: row.course_id,
@@ -415,7 +476,15 @@ export default function OM_SpecialClass() {
       const res = await getOMSC_SchedulePresets(row.course_id);
       setPresets(res.presets || []);
       const match = (res.presets || []).find((p) => p.section_id === row.section_id);
-      setPresetChoice(match ? match.schedule_id : "CUSTOM");
+
+      const rowHasNoSchedule =
+        !!row.section_id && !(row.day1 || row.begin1 || row.end1 || row.day2 || row.begin2 || row.end2);
+
+      if (rowHasNoSchedule) {
+        setPresetChoice("CLEAR_SCHEDULE");
+      } else {
+        setPresetChoice(match ? match.schedule_id : "CUSTOM");
+      }
     } catch {
       setPresets([]);
       setPresetChoice("CUSTOM");
@@ -439,6 +508,46 @@ export default function OM_SpecialClass() {
     }));
   };
 
+
+
+  const clearScheduleOnlyDraft = () => {
+    setDidClearAll(false);
+    setDraft((d) => ({
+      ...d,
+      day1: "" as any,
+      begin1: "",
+      end1: "",
+      day2: "" as any,
+      begin2: "",
+      end2: "",
+      schedule_id1: null,
+      schedule_id2: null,
+    }));
+  };
+
+  const clearAllDraft = () => {
+    // Clear EVERYTHING: faculty + section + schedule
+    setDidClearAll(true);
+    setPresetChoice("CUSTOM");
+
+    setDraft((d) => ({
+      ...d,
+      faculty_id: null,
+      section_id: null,
+      section_code: "",
+      day1: "" as any,
+      begin1: "",
+      end1: "",
+      day2: "" as any,
+      begin2: "",
+      end2: "",
+      schedule_id1: null,
+      schedule_id2: null,
+      assignment_id: null,
+    }));
+
+    setFacultyInput("");
+  };
   const saveEdit = async () => {
     if (!editId) return;
 
@@ -448,33 +557,52 @@ export default function OM_SpecialClass() {
 
       const isCustom = presetChoice === "CUSTOM";
 
-      let payloadFacultyId: string | null = null;
-      if (isCustom) {
-        const typedName = (facultyInput || "").trim();
-        const fid =
-          typedName && typedName.toUpperCase() !== "UNASSIGNED"
-            ? facultyNameToIdUpper[typedName.toUpperCase()] || ""
-            : "";
-        payloadFacultyId = fid ? fid : null;
-      }
-
-      const payload: Partial<OMSpecialClassRow> = {
+      // NOTE: rooms are DISPLAY ONLY (no edits)
+      const payload: any = {
         status: draft.status,
         remarks: draft.remarks,
-
-        section_id: isCustom ? null : draft.section_id || null,
-        section_code: isCustom ? draft.section_code || "" : "",
-
-        faculty_id: isCustom ? payloadFacultyId : undefined,
       };
 
-      if (isCustom) {
-        payload.day1 = (draft.day1 || "") as any;
-        payload.begin1 = draft.begin1 || "";
-        payload.end1 = draft.end1 || "";
-        payload.day2 = (draft.day2 || "") as any;
-        payload.begin2 = draft.begin2 || "";
-        payload.end2 = draft.end2 || "";
+      if (didClearAll) {
+        // Clear icon: clear EVERYTHING (faculty, section, schedule/day/time)
+        payload.section_id = ""; // backend interprets empty section_id as clear-all
+        payload.section_code = "";
+        payload.faculty_id = null;
+
+        payload.day1 = "";
+        payload.begin1 = "";
+        payload.end1 = "";
+        payload.day2 = "";
+        payload.begin2 = "";
+        payload.end2 = "";
+      } else {
+        let payloadFacultyId: string | null = null;
+        if (isCustom) {
+          const typedName = (facultyInput || "").trim();
+          const fid =
+            typedName && typedName.toUpperCase() !== "UNASSIGNED"
+              ? facultyNameToIdUpper[typedName.toUpperCase()] || ""
+              : "";
+          payloadFacultyId = fid ? fid : null;
+        }
+
+        payload.section_id = isCustom ? null : draft.section_id || null;
+        payload.section_code = isCustom ? draft.section_code || "" : "";
+        if (isCustom) payload.faculty_id = payloadFacultyId;
+
+        if (clearMode === "schedule") {
+          payload.clear_schedule_only = true;
+          payload.section_id = draft.section_id || payload.section_id;
+        }
+
+        if (isCustom) {
+          payload.day1 = (draft.day1 || "") as any;
+          payload.begin1 = draft.begin1 || "";
+          payload.end1 = draft.end1 || "";
+          payload.day2 = (draft.day2 || "") as any;
+          payload.begin2 = draft.begin2 || "";
+          payload.end2 = draft.end2 || "";
+        }
       }
 
       await updateOMSC(editId, payload);
@@ -484,6 +612,7 @@ export default function OM_SpecialClass() {
       setPresets([]);
       setPresetChoice("CUSTOM");
       setFacultyInput("");
+      setDidClearAll(false);
       await load();
     } catch (e: any) {
       setErr(e?.response?.data?.detail || e?.message || "Failed to update special class.");
@@ -556,347 +685,405 @@ export default function OM_SpecialClass() {
           <Download className="h-4 w-4" />
           Export PDF
         </button>
-
       </div>
 
       <div className="table-wrapper w-full overflow-hidden">
         <div className="border border-gray-200 bg-gray-50 shadow-sm overflow-auto rounded-xl">
           <table className="w-full text-sm table-auto">
-          <thead className="bg-gray-50 border-b text-gray-700">
-            <tr>
-              <th className="text-left px-3 py-2 whitespace-nowrap w-10">
-                <input
-                  type="checkbox"
-                  checked={allVisibleSelected}
-                  onChange={(e) => toggleAllVisible(e.target.checked)}
-                  className="h-4 w-4 accent-emerald-600"
-                  title="Select all visible"
-                />
-              </th>
-
-              <th className="text-left px-4 py-2 whitespace-nowrap">Student</th>
-              <th className="text-left px-4 py-2 whitespace-nowrap">Course</th>
-              <th className="text-left px-4 py-2 whitespace-nowrap">Section</th>
-              <th className="text-left px-4 py-2 whitespace-nowrap">Faculty</th>
-
-              <th className="text-left px-3 py-2 whitespace-nowrap w-fit">Day1</th>
-              <th className="text-left px-3 py-2 whitespace-nowrap w-fit">Begin1</th>
-              <th className="text-left px-3 py-2 whitespace-nowrap w-fit">End1</th>
-              <th className="text-left px-3 py-2 whitespace-nowrap w-fit">Day2</th>
-              <th className="text-left px-3 py-2 whitespace-nowrap w-fit">Begin2</th>
-              <th className="text-left px-3 py-2 whitespace-nowrap w-fit">End2</th>
-
-              <th className="text-center px-4 py-2 whitespace-nowrap">Status</th>
-              <th className="text-left px-4 py-2 whitespace-nowrap">Remarks</th>
-              <th className="w-20 px-4 py-2" />
-            </tr>
-          </thead>
-
-          <tbody className="divide-y">
-            {loading ? (
+            <thead className="bg-gray-50 border-b text-gray-700">
               <tr>
-                <td className="px-4 py-6 text-center text-gray-500" colSpan={14}>
-                  Loading…
-                </td>
+                <th className="text-left px-3 py-2 whitespace-nowrap w-10">
+                  <input
+                    type="checkbox"
+                    checked={allVisibleSelected}
+                    onChange={(e) => toggleAllVisible(e.target.checked)}
+                    className="h-4 w-4 accent-emerald-600"
+                    title="Select all visible"
+                  />
+                </th>
+
+                <th className="text-left px-4 py-2 whitespace-nowrap">Student</th>
+                <th className="text-left px-4 py-2 whitespace-nowrap">Course</th>
+                <th className="text-left px-4 py-2 whitespace-nowrap">Section</th>
+                <th className="text-left px-4 py-2 whitespace-nowrap">Faculty</th>
+
+                <th className="text-left px-3 py-2 whitespace-nowrap w-fit">Day1</th>
+                <th className="text-left px-3 py-2 whitespace-nowrap w-fit">Begin1</th>
+                <th className="text-left px-3 py-2 whitespace-nowrap w-fit">End1</th>
+                <th className="text-left px-3 py-2 whitespace-nowrap w-fit">Room1</th>
+
+                <th className="text-left px-3 py-2 whitespace-nowrap w-fit">Day2</th>
+                <th className="text-left px-3 py-2 whitespace-nowrap w-fit">Begin2</th>
+                <th className="text-left px-3 py-2 whitespace-nowrap w-fit">End2</th>
+                <th className="text-left px-3 py-2 whitespace-nowrap w-fit">Room2</th>
+
+                <th className="text-center px-4 py-2 whitespace-nowrap">Status</th>
+                <th className="text-left px-4 py-2 whitespace-nowrap">Remarks</th>
+                <th className="w-20 px-4 py-2" />
               </tr>
-            ) : rows.length === 0 ? (
-              <tr>
-                <td className="px-4 py-6 text-center text-gray-500" colSpan={14}>
-                  No results
-                </td>
-              </tr>
-            ) : (
-              rows.map((r) => {
-                const editing = editId === r.special_id;
-                const isCustom = presetChoice === "CUSTOM";
+            </thead>
 
-                return (
-                  <tr key={r.special_id} className="hover:bg-gray-50 align-top">
-                    <td className="px-3 py-3">
-                      <input
-                        type="checkbox"
-                        checked={!!selectedIds[r.special_id]}
-                        onChange={(e) => toggleOne(r.special_id, e.target.checked)}
-                        className="h-4 w-4 accent-emerald-600"
-                        disabled={loading}
-                      />
-                    </td>
+            <tbody className="divide-y">
+              {loading ? (
+                <tr>
+                  <td className="px-4 py-6 text-center text-gray-500" colSpan={16}>
+                    Loading…
+                  </td>
+                </tr>
+              ) : rows.length === 0 ? (
+                <tr>
+                  <td className="px-4 py-6 text-center text-gray-500" colSpan={16}>
+                    No results
+                  </td>
+                </tr>
+              ) : (
+                rows.map((r) => {
+                  const editing = editId === r.special_id;
+                  const isCustom = presetChoice === "CUSTOM";
 
-                    <td className="px-4 py-3 whitespace-nowrap">
-                      <div className="font-semibold">{r.student_name || "—"}</div>
-                      <div className="text-xs text-gray-500">{r.student_number || "—"}</div>
-                    </td>
+                  return (
+                    <tr key={r.special_id} className="hover:bg-gray-50 align-top">
+                      <td className="px-3 py-3">
+                        <input
+                          type="checkbox"
+                          checked={!!selectedIds[r.special_id]}
+                          onChange={(e) => toggleOne(r.special_id, e.target.checked)}
+                          className="h-4 w-4 accent-emerald-600"
+                          disabled={loading}
+                        />
+                      </td>
 
-                    <td className="px-4 py-3 whitespace-nowrap">
-                      <div className="font-semibold text-emerald-700">{r.course_code || "—"}</div>
-                      <div className="text-xs text-gray-500">{r.course_title || ""}</div>
-                    </td>
+                      <td className="px-4 py-3 whitespace-nowrap">
+                        <div className="font-semibold">{r.student_name || "—"}</div>
+                        <div className="text-xs text-gray-500">{r.student_number || "—"}</div>
+                      </td>
 
-                    <td className="px-4 py-3">
-                      {editing ? (
-                        isCustom ? (
-                          <input
-                            value={(draft.section_code || "") as string}
-                            onChange={(e) => setDraft((d) => ({ ...d, section_code: e.target.value }))}
-                            placeholder=" "
-                            className={cls(
-                              "w-full rounded-lg border border-gray-300 px-3 py-2 text-sm shadow-sm",
-                              "focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500 outline-none transition",
-                              "min-w-[60px]" // Adjusting the width for better display
-                            )}
+                      <td className="px-4 py-3 whitespace-nowrap">
+                        <div className="font-semibold text-emerald-700">{r.course_code || "—"}</div>
+                        <div className="text-xs text-gray-500">{r.course_title || ""}</div>
+                      </td>
+
+                      <td className="px-4 py-3">
+                        {editing ? (
+                          isCustom ? (
+                            <input
+                              value={(draft.section_code || "") as string}
+                              onChange={(e) => setDraft((d) => ({ ...d, section_code: e.target.value }))}
+                              placeholder=" "
+                              className={cls(
+                                "w-full rounded-lg border border-gray-300 px-3 py-2 text-sm shadow-sm",
+                                "focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500 outline-none transition",
+                                "min-w-[60px]"
+                              )}
+                            />
+                          ) : (
+                            <div className="rounded-lg border border-gray-200 bg-gray-100 px-3 py-2 text-sm text-gray-700">
+                              {(draft.section_code || r.section_code || "—") as string}
+                            </div>
+                          )
+                        ) : (
+                          <div className="font-medium">{r.section_code?.trim() ? r.section_code : "—"}</div>
+                        )}
+                      </td>
+
+                      <td className="px-4 py-3">
+                        {editing ? (
+                          <ComboSelect
+                            value={facultyInput?.trim() ? facultyInput : ""}
+                            onChange={(v) => {
+                              if (!isCustom) return;
+
+                              const t = (v || "").trim();
+
+                              if (t === "" || t.toUpperCase() === "UNASSIGNED") {
+                                setFacultyInput("");
+                                setDraft((d) => ({ ...d, faculty_id: null }));
+                                return;
+                              }
+
+                              setFacultyInput(t);
+                              const fid = facultyNameToIdUpper[t.toUpperCase()] || "";
+                              setDraft((d) => ({ ...d, faculty_id: fid ? fid : null }));
+                            }}
+                            options={["", "UNASSIGNED", ...facultyNames.filter((n) => n !== "UNASSIGNED")]}
+                            placeholder="Select Faculty"
+                            disabled={!isCustom}
                           />
                         ) : (
-                          <div className="rounded-lg border border-gray-200 bg-gray-100 px-3 py-2 text-sm text-gray-700">
-                            {(draft.section_code || r.section_code || "—") as string}
-                          </div>
-                        )
-                      ) : (
-                        <div className="font-medium">{r.section_code?.trim() ? r.section_code : "—"}</div>
-                      )}
-                    </td>
+                          <div className="font-medium">{r.faculty_name || "UNASSIGNED"}</div>
+                        )}
 
-                    <td className="px-4 py-3">
+                      </td>
+
+                      {/* Schedule columns */}
                       {editing ? (
-                      <ComboSelect
-                        value={facultyInput?.trim() ? facultyInput : ""} // Allow faculty to remain empty while editing
-                        onChange={(v) => {
-                          if (!isCustom) return;
-
-                          const t = (v || "").trim();
-
-                          // If the input is blank or "UNASSIGNED", clear faculty and don't set faculty_id
-                          if (t === "" || t.toUpperCase() === "UNASSIGNED") {
-                            setFacultyInput("");  // Allow faculty to remain blank
-                            setDraft((d) => ({ ...d, faculty_id: null })); // Set faculty_id to null if blank
-                            return;
-                          }
-
-                          setFacultyInput(t); // Set faculty input to the value entered
-                          const fid = facultyNameToIdUpper[t.toUpperCase()] || "";
-                          setDraft((d) => ({ ...d, faculty_id: fid ? fid : null })); // Set faculty_id if valid
-                        }}
-                        options={["", "UNASSIGNED", ...facultyNames.filter((n) => n !== "UNASSIGNED")]} // Add an empty option for faculty
-                        placeholder="Select Faculty"
-                        disabled={!isCustom}
-                      />
-
-                      ) : (
-                        <div className="font-medium">{r.faculty_name || "UNASSIGNED"}</div>
-                      )}
-
-                      {editing && !isCustom && (
-                        <div className="mt-1 text-xs text-gray-500">
-                          Faculty is derived from Faculty Assignments for the selected section.
-                        </div>
-                      )}
-                    </td>
-
-                    {/* Schedule columns */}
-                    {editing ? (
-                      <>
-                        {/* Day1/Begin1/End1 editor occupies 3 columns */}
-                        <td className="px-3 py-3 whitespace-nowrap" colSpan={3}>
-                          <div className="space-y-2 min-w-[520px]">
-                            <SelectBox
-                              value={
-                                presetChoice === "CUSTOM"
-                                  ? "Custom"
-                                  : (() => {
-                                      const p = presets.find((x) => x.schedule_id === presetChoice);
-                                      if (!p) return "Custom";
-                                      const sec = (p.section_code || "").trim();
-                                      const head = sec ? `${sec} · ${p.label}` : p.label;
-                                      return `${head} · ${p.faculty_name || "UNASSIGNED"}`;
-                                    })()
-                              }
-                              onChange={(label) => {
-                                if (label === "Custom") {
-                                  setPresetChoice("CUSTOM");
+                        <>
+                          {/* Editor cell occupies Day1/Begin1/End1 */}
+                          <td className="px-3 py-3 whitespace-nowrap" colSpan={3}>
+                            <div className="space-y-2 min-w-[520px]">
+                              <SelectBox
+                                value={
+                                  presetChoice === "CUSTOM"
+                                    ? "Custom"
+                                    : presetChoice === "CLEAR_SCHEDULE"
+                                    ? CLEAR_SCHEDULE_LABEL
+                                    : (() => {
+                                        const p = presets.find((x) => x.schedule_id === presetChoice);
+                                        if (!p) return "Custom";
+                                        const sec = (p.section_code || "").trim();
+                                        const head = sec ? `${sec} · ${p.label}` : p.label;
+                                        return `${head} · ${p.faculty_name || "UNASSIGNED"}`;
+                                      })()
+                                }
+                                onChange={(label) => {
+                                  // Any manual change cancels a pending "clear all" state
+                                  setDidClearAll(false);
+                                  if (label === "Clear schedule") {
+                                  setClearMode("schedule");
                                   setDraft((d) => ({
                                     ...d,
-                                    section_id: null,
-                                    section_code: d.section_code || "",
-                                    day1: (d.day1 as any) || "M",
-                                    day2: (d.day2 as any) || "M",
+                                    day1: "" as any,
+                                    begin1: "",
+                                    end1: "",
+                                    day2: "" as any,
+                                    begin2: "",
+                                    end2: "",
+                                    schedule_id1: null,
+                                    schedule_id2: null,
                                   }));
                                   return;
                                 }
-                                const sid = presetLabelToId[label] || "";
-                                if (sid) applyPreset(sid);
-                              }}
-                              options={presetOptions}
-                            />
 
-                            {presetChoice === "CUSTOM" ? (
-                              <div className="rounded-lg border border-gray-200 bg-white p-3">
-                                <div className="text-xs text-gray-600 mb-2">
-                                  Custom Schedule (max 2 entries). Begin uses preset time slots and auto-fills End.
-                                </div>
+                                  if (label === "Custom") {
+                                    setPresetChoice("CUSTOM");
+                                    setDraft((d) => ({
+                                      ...d,
+                                      section_id: null,
+                                      section_code: d.section_code || "",
+                                      day1: (d.day1 as any) || "M",
+                                      day2: (d.day2 as any) || "M",
+                                    }));
+                                    return;
+                                  }
 
-                                <div className="grid grid-cols-[minmax(180px,5px)_minmax(100px,1fr)_minmax(90px,120px)] gap-2 items-center mb-2 min-w-0">  {/* Adjusting grid layout for spacing */}
-                                  <SelectBox
-                                    value={draft.day1 ? DAY_LABELS[draft.day1 as DayCode] : "Monday"}
-                                    onChange={(lbl) =>
-                                      setDraft((d) => ({ ...d, day1: DAY_FROM_LABEL[lbl as DayLabel] || "M" }))
-                                    }
-                                    options={[...DAY_OPTS_LABELS]}
-                                  />
+                                  if (label === CLEAR_SCHEDULE_LABEL) {
+                                    setPresetChoice("CLEAR_SCHEDULE");
+                                    clearScheduleOnlyDraft();
+                                    return;
+                                  }
 
-                                  <SelectBox
-                                    value={(() => {
-                                      const b = (draft.begin1 || "").toString();
-                                      const e = (draft.end1 || "").toString();
-                                      const f = GE_TIME_SLOTS.find((x) => x.start === b && x.end === e);
-                                      return f?.label || "Select time…";
-                                    })()}
-                                    onChange={(band) => {
-                                      if (band === "Select time…") {
-                                        setSlotFromBand(1, "");
-                                        return;
+                                  const sid = presetLabelToId[label] || "";
+                                  if (sid) applyPreset(sid);
+                                }}
+                                options={presetOptions}
+                              />
+
+                              {presetChoice === "CUSTOM" ? (
+                                <div className="rounded-lg border border-gray-200 bg-white p-3">
+                                  <div className="text-xs text-gray-600 mb-2">
+                                    Custom Schedule (max 2 entries). Begin uses preset time slots and auto-fills End.
+                                  </div>
+
+                                  <div className="grid grid-cols-[minmax(180px,5px)_minmax(100px,1fr)_minmax(90px,120px)] gap-2 items-center mb-2 min-w-0">
+                                    <SelectBox
+                                      value={draft.day1 ? DAY_LABELS[draft.day1 as DayCode] : "Monday"}
+                                      onChange={(lbl) =>
+                                        setDraft((d) => ({ ...d, day1: DAY_FROM_LABEL[lbl as DayLabel] || "M" }))
                                       }
-                                      setSlotFromBand(1, band);
-                                    }}
-                                    options={["Select time…", ...GE_TIME_SLOTS.map((x) => x.label)]}
-                                  />
+                                      options={[...DAY_OPTS_LABELS]}
+                                    />
 
-                                  <input
-                                    value={prettyHHMM(draft.end1 || "")}
-                                    disabled
-                                    className={cls(
-                                      "w-full rounded-lg border border-gray-300 px-3 py-2 text-sm shadow-sm",
-                                      "bg-gray-100 text-gray-700 cursor-not-allowed"
-                                    )}
-                                  />
-                                </div>
+                                    <SelectBox
+                                      value={(() => {
+                                        const b = (draft.begin1 || "").toString();
+                                        const e = (draft.end1 || "").toString();
+                                        const f = GE_TIME_SLOTS.find((x) => x.start === b && x.end === e);
+                                        return f?.label || "Select time…";
+                                      })()}
+                                      onChange={(band) => {
+                                        if (band === "Select time…") {
+                                          setSlotFromBand(1, "");
+                                          return;
+                                        }
+                                        setSlotFromBand(1, band);
+                                      }}
+                                      options={["Select time…", ...GE_TIME_SLOTS.map((x) => x.label)]}
+                                    />
 
-                                <div className="grid grid-cols-[minmax(180px,5px)_minmax(100px,1fr)_minmax(90px,120px)] gap-2 items-center">
-                                  <SelectBox
-                                    value={draft.day2 ? DAY_LABELS[draft.day2 as DayCode] : "Monday"}
-                                    onChange={(lbl) =>
-                                      setDraft((d) => ({ ...d, day2: DAY_FROM_LABEL[lbl as DayLabel] || "M" }))
-                                    }
-                                    options={[...DAY_OPTS_LABELS]}
-                                  />
+                                    <input
+                                      value={prettyHHMM(draft.end1 || "")}
+                                      disabled
+                                      className={cls(
+                                        "w-full rounded-lg border border-gray-300 px-3 py-2 text-sm shadow-sm",
+                                        "bg-gray-100 text-gray-700 cursor-not-allowed"
+                                      )}
+                                    />
+                                  </div>
 
-                                  <SelectBox
-                                    value={(() => {
-                                      const b = (draft.begin2 || "").toString();
-                                      const e = (draft.end2 || "").toString();
-                                      const f = GE_TIME_SLOTS.find((x) => x.start === b && x.end === e);
-                                      return f?.label || "Select time…";
-                                    })()}
-                                    onChange={(band) => {
-                                      if (band === "Select time…") {
-                                        setSlotFromBand(2, "");
-                                        return;
+                                  <div className="grid grid-cols-[minmax(180px,5px)_minmax(100px,1fr)_minmax(90px,120px)] gap-2 items-center">
+                                    <SelectBox
+                                      value={draft.day2 ? DAY_LABELS[draft.day2 as DayCode] : "Monday"}
+                                      onChange={(lbl) =>
+                                        setDraft((d) => ({ ...d, day2: DAY_FROM_LABEL[lbl as DayLabel] || "M" }))
                                       }
-                                      setSlotFromBand(2, band);
-                                    }}
-                                    options={["Select time…", ...GE_TIME_SLOTS.map((x) => x.label)]}
-                                  />
+                                      options={[...DAY_OPTS_LABELS]}
+                                    />
 
-                                  <input
-                                    value={prettyHHMM(draft.end2 || "")}
-                                    disabled
-                                    className={cls(
-                                      "w-full rounded-lg border border-gray-300 px-3 py-2 text-sm shadow-sm",
-                                      "bg-gray-100 text-gray-700 cursor-not-allowed"
-                                    )}
-                                  />
+                                    <SelectBox
+                                      value={(() => {
+                                        const b = (draft.begin2 || "").toString();
+                                        const e = (draft.end2 || "").toString();
+                                        const f = GE_TIME_SLOTS.find((x) => x.start === b && x.end === e);
+                                        return f?.label || "Select time…";
+                                      })()}
+                                      onChange={(band) => {
+                                        if (band === "Select time…") {
+                                          setSlotFromBand(2, "");
+                                          return;
+                                        }
+                                        setSlotFromBand(2, band);
+                                      }}
+                                      options={["Select time…", ...GE_TIME_SLOTS.map((x) => x.label)]}
+                                    />
+
+                                    <input
+                                      value={prettyHHMM(draft.end2 || "")}
+                                      disabled
+                                      className={cls(
+                                        "w-full rounded-lg border border-gray-300 px-3 py-2 text-sm shadow-sm",
+                                        "bg-gray-100 text-gray-700 cursor-not-allowed"
+                                      )}
+                                    />
+                                  </div>
+
+                                  <div className="mt-2 text-xs text-gray-600">
+                                    Preview:{" "}
+                                    <span className="font-semibold">{scheduleTextFromRow(draft) || "—"}</span>
+                                  </div>
                                 </div>
+                              ) : null}
+                            </div>
+                          </td>
 
-                                <div className="mt-2 text-xs text-gray-600">
-                                  Preview: <span className="font-semibold">{scheduleTextFromRow(draft) || "—"}</span>
-                                </div>
-                              </div>
-                            ) : null}
-                          </div>
-                        </td>
+                          {/* Room1 (display-only) */}
+                          <td className="px-3 py-3 whitespace-nowrap w-fit">
+                            <span title={roomTitle(r, 1)} className="inline-block">
+                              {roomLabel(r, 1)}
+                            </span>
+                          </td>
 
-                        {/* Day2/Begin2/End2 columns show the actual values (NOT duplicated editor UI) */}
-                        <td className="px-3 py-3 whitespace-nowrap w-fit">{draft.day2 || "—"}</td>
-                        <td className="px-3 py-3 whitespace-nowrap w-fit">{prettyHHMM(draft.begin2 || "") || "—"}</td>
-                        <td className="px-3 py-3 whitespace-nowrap w-fit">{prettyHHMM(draft.end2 || "") || "—"}</td>
-                      </>
-                    ) : (
-                      <>
-                        <td className="px-3 py-3 whitespace-nowrap w-fit">{r.day1 || "—"}</td>
-                        <td className="px-3 py-3 whitespace-nowrap w-fit">{prettyHHMM(r.begin1 || "") || "—"}</td>
-                        <td className="px-3 py-3 whitespace-nowrap w-fit">{prettyHHMM(r.end1 || "") || "—"}</td>
-                        <td className="px-3 py-3 whitespace-nowrap w-fit">{r.day2 || "—"}</td>
-                        <td className="px-3 py-3 whitespace-nowrap w-fit">{prettyHHMM(r.begin2 || "") || "—"}</td>
-                        <td className="px-3 py-3 whitespace-nowrap w-fit">{prettyHHMM(r.end2 || "") || "—"}</td>
-                      </>
-                    )}
+                          {/* Day2/Begin2/End2 (read values) */}
+                          <td className="px-3 py-3 whitespace-nowrap w-fit">{draft.day2 || "—"}</td>
+                          <td className="px-3 py-3 whitespace-nowrap w-fit">{prettyHHMM(draft.begin2 || "") || "—"}</td>
+                          <td className="px-3 py-3 whitespace-nowrap w-fit">{prettyHHMM(draft.end2 || "") || "—"}</td>
 
-                    <td className="px-4 py-3 text-center whitespace-nowrap">
-                      {editing ? (
-                        <SelectBox
-                          value={(draft.status || r.status || "") as string}
-                          onChange={(v) => setDraft((d) => ({ ...d, status: v }))}
-                          options={statuses.filter((s) => s !== "All Status")}
-                        />
+                          {/* Room2 (display-only) */}
+                          <td className="px-3 py-3 whitespace-nowrap w-fit">
+                            <span title={roomTitle(r, 2)} className="inline-block">
+                              {roomLabel(r, 2)}
+                            </span>
+                          </td>
+                        </>
                       ) : (
-                        <span className={cls("inline-block rounded-full px-3 py-1 text-xs font-semibold", pillClass(r.status))}>
-                          {r.status || "—"}
-                        </span>
+                        <>
+                          <td className="px-3 py-3 whitespace-nowrap w-fit">{r.day1 || "—"}</td>
+                          <td className="px-3 py-3 whitespace-nowrap w-fit">{prettyHHMM(r.begin1 || "") || "—"}</td>
+                          <td className="px-3 py-3 whitespace-nowrap w-fit">{prettyHHMM(r.end1 || "") || "—"}</td>
+                          <td className="px-3 py-3 whitespace-nowrap w-fit">
+                            <span title={roomTitle(r, 1)} className="inline-block">
+                              {roomLabel(r, 1)}
+                            </span>
+                          </td>
+                          <td className="px-3 py-3 whitespace-nowrap w-fit">{r.day2 || "—"}</td>
+                          <td className="px-3 py-3 whitespace-nowrap w-fit">{prettyHHMM(r.begin2 || "") || "—"}</td>
+                          <td className="px-3 py-3 whitespace-nowrap w-fit">{prettyHHMM(r.end2 || "") || "—"}</td>
+                          <td className="px-3 py-3 whitespace-nowrap w-fit">
+                            <span title={roomTitle(r, 2)} className="inline-block">
+                              {roomLabel(r, 2)}
+                            </span>
+                          </td>
+                        </>
                       )}
-                    </td>
 
-                    <td className="px-4 py-3 text-left">
-                      {editing ? (
-                        <textarea
-                          value={(draft.remarks || "") as string}
-                          onChange={(e) => setDraft((d) => ({ ...d, remarks: e.target.value }))}
-                          rows={3}
-                          className={cls(
-                            "w-full min-w-[180px] rounded-lg border border-gray-300 px-3 py-2 text-sm shadow-sm resize-none", // Increased width
-                            "focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500 outline-none transition"
-                          )}
-                        />
-                      ) : (
-                        <span className="block whitespace-pre-wrap text-gray-700">
-                          {r.remarks || <span className="text-gray-400">—</span>}
-                        </span>
-                      )}
-                    </td>
-
-                    <td className="px-4 py-3">
-                      <div className="flex items-center justify-center gap-2">
+                      <td className="px-4 py-3 text-center whitespace-nowrap">
                         {editing ? (
-                          <button
-                            onClick={saveEdit}
-                            className="flex h-8 w-8 items-center justify-center rounded-full border-2 border-green-600 text-green-600 hover:bg-green-50"
-                            title="Save"
-                          >
-                            <Check className="h-4 w-4" />
-                          </button>
+                          <SelectBox
+                            value={(draft.status || r.status || "") as string}
+                            onChange={(v) => setDraft((d) => ({ ...d, status: v }))}
+                            options={statuses.filter((s) => s !== "All Status")}
+                          />
                         ) : (
-                          <>
-                            <button
-                              onClick={() => openView(r)}
-                              className="flex h-8 w-8 items-center justify-center rounded-full border border-gray-200 text-gray-700 hover:bg-gray-50"
-                              title="View Application"
-                            >
-                              <Eye className="h-4 w-4" />
-                            </button>
-
-                            <button
-                              onClick={() => beginEdit(r)}
-                              className="flex h-8 w-8 items-center justify-center rounded-full border border-emerald-200 text-emerald-700 hover:bg-emerald-50"
-                              title="Edit"
-                            >
-                              <Edit className="h-4 w-4" />
-                            </button>
-                          </>
+                          <span className={cls("inline-block rounded-full px-3 py-1 text-xs font-semibold", pillClass(r.status))}>
+                            {r.status || "—"}
+                          </span>
                         )}
-                      </div>
-                    </td>
-                  </tr>
-                );
-              })
-            )}
-          </tbody>
+                      </td>
+
+                      <td className="px-4 py-3 text-left">
+                        {editing ? (
+                          <textarea
+                            value={(draft.remarks || "") as string}
+                            onChange={(e) => setDraft((d) => ({ ...d, remarks: e.target.value }))}
+                            rows={3}
+                            className={cls(
+                              "w-full min-w-[180px] rounded-lg border border-gray-300 px-3 py-2 text-sm shadow-sm resize-none",
+                              "focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500 outline-none transition"
+                            )}
+                          />
+                        ) : (
+                          <span className="block whitespace-pre-wrap text-gray-700">
+                            {r.remarks || <span className="text-gray-400">—</span>}
+                          </span>
+                        )}
+                      </td>
+
+                      <td className="px-4 py-3">
+                        <div className="flex items-center justify-center gap-2">
+                          {editing ? (
+                            <>
+                              <button
+                                onClick={saveEdit}
+                                className="flex h-8 w-8 items-center justify-center rounded-full border-2 border-green-600 text-green-600 hover:bg-green-50"
+                                title="Save"
+                              >
+                                <Check className="h-4 w-4" />
+                              </button>
+
+                              <button
+                                type="button"
+                                onClick={clearAllDraft}
+                                className="flex h-8 w-8 items-center justify-center rounded-full border-2 border-red-600 text-red-600 hover:bg-red-50"
+                                title="Clear all fields"
+                              >
+                                <Eraser className="h-4 w-4" />
+                              </button>
+                            </>
+                          ) : (
+                            <>
+                              <button
+                                onClick={() => openView(r)}
+                                className="flex h-8 w-8 items-center justify-center rounded-full border border-gray-200 text-gray-700 hover:bg-gray-50"
+                                title="View Application"
+                              >
+                                <Eye className="h-4 w-4" />
+                              </button>
+
+                              <button
+                                onClick={() => beginEdit(r)}
+                                className="flex h-8 w-8 items-center justify-center rounded-full border border-emerald-200 text-emerald-700 hover:bg-emerald-50"
+                                title="Edit"
+                              >
+                                <Edit className="h-4 w-4" />
+                              </button>
+                            </>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
           </table>
         </div>
       </div>
@@ -935,7 +1122,6 @@ export default function OM_SpecialClass() {
                 <div className="py-10 text-center text-gray-500">No data</div>
               ) : (
                 <div className="space-y-5">
-
                   <div className="rounded-xl border border-gray-200 overflow-hidden">
                     <div className="px-4 py-3 bg-white border-b">
                       <div className="text-sm font-semibold text-gray-900">Student</div>
@@ -977,6 +1163,7 @@ export default function OM_SpecialClass() {
                     </div>
                     <div className="px-4">
                       <DetailRow label="Section" value={viewData.section_code || "—"} />
+
                       <DetailRow
                         label="Schedule 1"
                         value={
@@ -985,6 +1172,8 @@ export default function OM_SpecialClass() {
                             : "—"
                         }
                       />
+                      <DetailRow label="Room 1" value={roomLabel(viewData, 1)} />
+
                       <DetailRow
                         label="Schedule 2"
                         value={
@@ -993,6 +1182,8 @@ export default function OM_SpecialClass() {
                             : "—"
                         }
                       />
+                      <DetailRow label="Room 2" value={roomLabel(viewData, 2)} />
+
                       <DetailRow label="Section ID" value={viewData.section_id} />
                       <DetailRow label="Faculty" value={viewData.faculty_name || "UNASSIGNED"} />
                     </div>

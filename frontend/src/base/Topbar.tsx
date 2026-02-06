@@ -1,7 +1,9 @@
-// src/Topbar.tsx
-//used by OM & CHAIR screen
-import { useEffect, useMemo, useRef, useState } from "react";
-import { useLocation, useNavigate } from "react-router-dom";
+// src/base/Topbar.tsx
+import { useEffect, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
+import { useInboxBadge } from "@/realtime/inboxBadge";
+
+import { useMemo } from "react";
 import {
   Bell,
   PanelLeft,
@@ -55,7 +57,7 @@ export type TopbarProps = {
   onToggleSidebar?: () => void;
   profileName?: string;
   profileSubtitle?: string;
-  inboxPath?: string;
+  inboxPath?: string; // optional override
 };
 
 export default function Topbar({
@@ -83,7 +85,8 @@ export default function Topbar({
   const menuBtnRef = useRef<HTMLButtonElement>(null);
   const [menuPos, setMenuPos] = useState<{ top: number; right: number } | null>(null);
   const navigate = useNavigate();
-  const location = useLocation();
+  const { unreadTotal } = useInboxBadge();
+  const hasInboxUnread = unreadTotal > 0;
 
   const computeMenuPos = () => {
     const btn = menuBtnRef.current;
@@ -221,8 +224,16 @@ export default function Topbar({
 
   // Where the Inbox button should navigate if no explicit inboxPath is passed
   const inferredInboxPath =
-    typeof window !== "undefined" && window.location.pathname.startsWith("/chair")
+    pathname.startsWith("/admin")
+      ? "/admin/inbox"
+      : pathname.startsWith("/chair")
       ? "/chair/inbox"
+      : pathname.startsWith("/om")
+      ? "/om/inbox"
+      : pathname.startsWith("/apo")
+      ? "/apo/inbox"
+      : pathname.startsWith("/faculty")
+      ? "/faculty/inbox"
       : profileSubtitle?.toLowerCase().includes("office manager")
         ? "/om/home/inbox"
         : "/faculty/inbox";
@@ -232,7 +243,7 @@ export default function Topbar({
       <div className="flex h-14 w-full items-center justify-between px-3 sm:px-5 text-gray-800 border-b border-black">
         <button
           aria-label="Toggle sidebar"
-          onClick={onToggleSidebar}
+          onClick={() => onToggleSidebar?.()}
           className="flex h-8 w-8 items-center justify-center rounded-md border border-gray-200 bg-white hover:bg-gray-50 transition"
         >
           {open ? <PanelLeft size={18} /> : <PanelRight size={18} />}
@@ -241,16 +252,17 @@ export default function Topbar({
         <div className="flex items-center gap-1">
           {/* Inbox */}
           <button
-            className="rounded-md p-2 hover:bg-gray-100 transition"
-            title="Messages"
-            onClick={() =>
-              navigate(inboxPath || inferredInboxPath, {
-                state: { from: location.pathname },
-              })
-            }
-          >
-            <Inbox size={18} />
-          </button>
+          className="relative rounded-md p-2 hover:bg-gray-100 transition"
+          title="Messages"
+          onClick={() => navigate(inboxPath ?? inferredInboxPath)}
+        >
+          <Inbox size={18} />
+
+          {hasInboxUnread && (
+            <span className="absolute -top-1 -left-1 h-3 w-3 rounded-full bg-red-500 ring-2 ring-white" />
+          )}
+        </button>
+
 
           {/* Notifications */}
           <div className="relative" ref={notifRef}>

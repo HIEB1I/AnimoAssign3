@@ -1,5 +1,5 @@
 // frontend/src/pages/FACULTY/FAC_Overview.tsx
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { Send as SendIcon, X, BookOpen as SyllabusIcon } from "lucide-react";
 
 import TopBar from "../../component/TopBar";
@@ -8,6 +8,8 @@ import HistoryMain from "./FACULTY_History";
 import PreferencesContent from "./FACULTY_Preferences";
 import DeloadingsContent from "./FACULTY_Deloadings";
 import { InboxContent } from "./FACULTY_Inbox";
+import { acceptTeachingLoadToGcal } from "../../api"; 
+
 
 import {
   getFacultyOverviewList,
@@ -24,6 +26,62 @@ import {
 } from "../../api.ts";
 import { useNavigate } from "react-router-dom";
 
+/* =========================================
+   Toast (Faculty)
+   - Lightweight in-file toast stack (no extra deps)
+   - Upper-right, beneath TopBar
+   ========================================= */
+type ToastKind = "success" | "error" | "info";
+type ToastItem = { id: string; kind: ToastKind; title?: string; message: string };
+
+function ToastViewport({
+  items,
+  onDismiss,
+}: {
+  items: ToastItem[];
+  onDismiss: (id: string) => void;
+}) {
+  if (!items.length) return null;
+
+  const tone = (k: ToastKind) => {
+    if (k === "success") return "border-emerald-200 bg-emerald-50 text-emerald-900";
+    if (k === "error") return "border-red-200 bg-red-50 text-red-900";
+    return "border-slate-200 bg-white text-slate-900";
+  };
+
+  return (
+    <div className="pointer-events-none fixed right-6 top-[72px] z-[1200] flex w-[360px] max-w-[90vw] flex-col gap-2">
+      {items.map((t) => (
+        <div
+          key={t.id}
+          className={cls(
+            "pointer-events-auto rounded-xl border px-4 py-3 shadow-lg",
+            "backdrop-blur supports-[backdrop-filter]:bg-white/90",
+            tone(t.kind)
+          )}
+          role="status"
+          aria-live="polite"
+        >
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              {t.title && <div className="text-sm font-semibold">{t.title}</div>}
+              <div className="mt-0.5 break-words text-sm">{t.message}</div>
+            </div>
+            <button
+              type="button"
+              className="rounded-md p-1 hover:bg-black/5"
+              onClick={() => onDismiss(t.id)}
+              aria-label="Dismiss toast"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 
 /* =========================================
    0) Page
@@ -33,6 +91,23 @@ export default function FAC_Overview() {
   const [showInbox, setShowInbox] = useState(false); // NEW
   const [data, setData] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
+
+const toastSeq = useRef(0);
+const [toasts, setToasts] = useState<ToastItem[]>([]);
+
+const dismissToast = useCallback((id: string) => {
+  setToasts((prev) => prev.filter((t) => t.id !== id));
+}, []);
+
+const pushToast = useCallback(
+  (kind: ToastKind, message: string, title?: string) => {
+    const id = String(++toastSeq.current);
+    setToasts((prev) => [...prev, { id, kind, title, message }]);
+    window.setTimeout(() => dismissToast(id), 3800);
+  },
+  [dismissToast]
+);
+
 
   const navigate = useNavigate();
 
@@ -66,37 +141,56 @@ export default function FAC_Overview() {
   const raw = JSON.parse(localStorage.getItem("animo.user") || "{}");
   const userId = raw.userId || raw.user_id || raw.id;
 
-  useEffect(() => {
-    if (!userId) {
-      setError("Missing userId in local storage.");
-      return;
-    }
-    (async () => {
-      try {
-        // Parallel loads (pattern parity with Student Petition)
-        const [list, profile] = await Promise.all([
-          getFacultyOverviewList(userId),
-          getFacultyOverviewProfile(userId),
-          // getFacultyOverviewOptions(userId) // not needed by this page; stub is available
-        ]);
+  const loadOverview = useCallback(async () => {
+  if (!userId) {
+    setError("Missing userId in local storage.");
+    return;
+  }
+  try {
+    // Parallel loads (pattern parity with Student Petition)
+    const [list, profile] = await Promise.all([
+      getFacultyOverviewList(userId),
+      getFacultyOverviewProfile(userId),
+      // getFacultyOverviewOptions(userId) // not needed by this page; stub is available
+    ]);
 
-        if (!list?.ok) throw new Error(list?.detail || "Failed to load list.");
-        if (!profile?.ok) throw new Error(profile?.detail || "Failed to load profile.");
+    if (!list?.ok) throw new Error(list?.detail || "Failed to load list.");
+    if (!profile?.ok) throw new Error(profile?.detail || "Failed to load profile.");
 
-        // Compose into the same shape the page already renders
-        setData({
-          ok: true,
-          faculty: profile.faculty,
-          term: list.term,
-          summary: list.summary,
-          teaching_load: list.teaching_load,
-          notifications: profile.notifications || [],
-        });
-      } catch (e: any) {
-        setError(e?.response?.data?.detail || e?.message || "Failed to load faculty overview.");
-      }
-    })();
-  }, [userId]);
+    const teachingLoadNormalized = (list?.teaching_load || []).map((x: any) => ({
+      ...x,
+      // normalize section_id no matter what the backend sends
+      section_id:
+        x.section_id ||
+        x.sectionId ||
+        x.section?.section_id ||
+        x.section?.id ||
+        "",
+    }));
+
+    // Compose into the same shape the page already renders
+    setData({
+      ok: true,
+      faculty: profile.faculty,
+      term: list.term,
+      summary: list.summary,
+      teaching_load: teachingLoadNormalized,
+      notifications: profile.notifications || [],
+      // Load assignment workflow flags (backwards-compatible)
+      is_proposed: (list as any).is_proposed,
+      proposal_status: (list as any).proposal_status,
+      rfc: (list as any).rfc,
+      schedule_final: (list as any).schedule_final,
+    });
+    setError(null);
+  } catch (e: any) {
+    setError(e?.response?.data?.detail || e?.message || "Failed to load faculty overview.");
+  }
+}, [userId]);
+
+useEffect(() => {
+  loadOverview();
+}, [loadOverview]);
 
 
   if (error) return <div className="p-10 text-red-600">{error}</div>;
@@ -116,6 +210,8 @@ export default function FAC_Overview() {
         notifications={data.notifications}
         /* No need to pass handlers; we use window events */
       />
+
+      <ToastViewport items={toasts} onDismiss={dismissToast} />
 
       {canReturnToChair && (
         <button
@@ -152,7 +248,13 @@ export default function FAC_Overview() {
               <>
                 <StatCards summary={data.summary} />
                 <div className="my-6" />
-                <TeachingLoadEnhanced teachingLoad={data.teaching_load} term={data.term} />
+                <TeachingLoadEnhanced
+                  teachingLoad={data.teaching_load}
+                  term={data.term}
+                  workflow={data}
+                  onToast={pushToast}
+                  onRefresh={loadOverview}
+                />
               </>
             )}
             {tab === "History" && <HistoryMain />}
@@ -263,6 +365,7 @@ function normalizeDay(raw?: string): DayLong | null {
 
 // --- *** NEW: This type matches the backend (Python) output *** ---
 type TLItem = {
+  section_id: string;
   course_code: string;
   course_title: string;
   section: string;
@@ -276,6 +379,7 @@ type TLItem = {
   time2?: string;
   syllabus?: string;
 };
+
 
 // --- *** NEW: This type is for the Calendar items *** ---
 type TLItemForCalendar = {
@@ -428,27 +532,76 @@ const ClassBlock = ({ onClick, it }: { onClick?: () => void; it: TLItemForCalend
 );
 
 type TeachingLoadEnhancedProps = {
-  teachingLoad: TLItem[]; // <-- Use the new type
+  teachingLoad: TLItem[];
   term: any;
+  workflow?: {
+    schedule_final?: boolean;
+    proposal_status?: string | null;
+    rfc?: { status?: string | null } | null;
+  };
+  onToast?: (kind: ToastKind, message: string, title?: string) => void;
+  onRefresh?: () => Promise<void> | void;
 };
 
-// --- *** MODIFIED: Headers for the new list view *** ---
+
+// --- *** MODIFIED: Headers for the list view (match OM confirmation modal; plus Syllabus) *** ---
 const LIST_HEADERS = [
-  "Course Code",
-  // "Course Title", // Removed
+  "Course Code & Title",
   "Section",
-  "Units",
-  // "Mode", // Removed
-  "Day1 / Day2",
-  "Room1 / Room2",
-  "Time1 / Time2",
+  "Day 1",
+  "Begin 1",
+  "End 1",
+  "Room 1",
+  "Day 2",
+  "Begin 2",
+  "End 2",
+  "Room 2",
+  "Mode",
   "Syllabus",
 ];
 
-function TeachingLoadEnhanced({ teachingLoad, term }: TeachingLoadEnhancedProps) {
+function splitBeginEnd(time?: string): { begin: string; end: string } {
+  const raw = (time || "").trim();
+  if (!raw || raw.toUpperCase() === "TBA") return { begin: "—", end: "—" };
+
+  // Accept a few common separators: en dash, em dash, hyphen
+  const parts = raw
+    .split(/\s*(?:–|—|-)\s*/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  if (parts.length >= 2) return { begin: parts[0], end: parts[1] };
+  // If only one time is present, keep it as begin and leave end blank.
+  return { begin: parts[0] || "—", end: "—" };
+}
+
+function TeachingLoadEnhanced({ teachingLoad, term, workflow, onToast, onRefresh }: TeachingLoadEnhancedProps) {
   const [view, setView] = useState<"Calendar" | "List">("Calendar");
   const [modal, setModal] = useState<{ day: DayLong; item: TLItemForCalendar } | null>(null);
   const [isAccepted, setIsAccepted] = useState(false);
+
+  // Schedule is finalized once: Faculty accepted OR OM approved/rejected an RFC.
+const scheduleFinal = Boolean(
+  workflow?.schedule_final ||
+    workflow?.proposal_status?.toString?.().toLowerCase?.() === "approved" ||
+    workflow?.proposal_status?.toString?.().toLowerCase?.() === "accepted" ||
+    (workflow?.rfc?.status &&
+      ["ACCEPTED", "APPROVED", "REJECTED"].includes(String(workflow.rfc.status).toUpperCase()))
+);
+
+
+const scheduleFinalLabel = (() => {
+  const st = String(workflow?.rfc?.status || "").toUpperCase();
+  if (st === "REJECTED") return "Finalized (RFC Rejected)";
+  if (st === "APPROVED") return "Finalized (RFC Approved)";
+  if (st === "ACCEPTED") return "Finalized (Accepted)";
+
+  const ps = String(workflow?.proposal_status || "").toLowerCase();
+  if (ps === "approved") return "Finalized (Approved)";
+  if (ps === "accepted") return "Finalized (Accepted)";
+  return "Finalized";
+})();
+
 
   // --- *** MODIFIED: Remove TLData, pass teachingLoad to placeItems *** ---
   const placed = useMemo(() => placeItems(teachingLoad || []), [teachingLoad]);
@@ -499,29 +652,87 @@ function TeachingLoadEnhanced({ teachingLoad, term }: TeachingLoadEnhancedProps)
           <button
             type="button"
             onClick={async () => {
+            try {
+              const raw = JSON.parse(localStorage.getItem("animo.user") || "{}");
+              const userId = raw.userId || raw.user_id || raw.id || "";
+
+              const termId = (term as any)?.term_id || (term as any)?._id || (term as any)?.id;
+
+              // 1) Accept proposal in backend
+              await acceptFacultyLoadAssignment(userId, { term_id: termId });
+
+              // 2) Create Google Calendar events using items already computed for calendar view
+              const itemsForGcal = (placed || []).map((p) => ({
+                day: p.day, // "Monday".."Saturday"
+                code: p.data.code,
+                title: p.data.title,
+                section: p.data.sec,
+                mode: p.data.mode,
+                room: p.data.room,
+                time: p.data.time, // "7:30 – 9:00"
+              }));
+
+              // remove duplicates (same course/day/time/room)
+              const seen = new Set<string>();
+              const uniqueItems = itemsForGcal.filter((x) => {
+                const key = `${x.code}|${x.section}|${x.day}|${x.time}|${x.room}|${x.mode}`;
+                if (seen.has(key)) return false;
+                seen.add(key);
+                return true;
+              });
+
+              if (uniqueItems.length > 0) {
               try {
-                const raw = JSON.parse(localStorage.getItem("animo.user") || "{}");
-                const userId = raw.userId || raw.user_id || raw.id || "";
-                await acceptFacultyLoadAssignment(userId, { term_id: (term as any)?.term_id || (term as any)?._id || (term as any)?.id });
-                setIsAccepted(true);
-                window.location.reload();
-              } catch (e) {
-                console.error(e);
+                // include userId in body too (works even if backend expects it in body)
+                const resp = await acceptTeachingLoadToGcal(userId, { userId, items: uniqueItems, weeks: 5 });
+                console.log("GCAL insert resp:", resp);
+              } catch (e: any) {
+                const msg =
+                  e?.response?.data?.detail ||
+                  e?.message ||
+                  "Calendar insert failed. Check backend logs.";
+                onToast?.("error", msg, "Calendar insert failed");
+                console.error("Accepted schedule, but calendar insert failed:", e);
+                return; // ✅ do NOT reload; let user retry
               }
-            }}
+            } else {
+              onToast?.("info", "No sched items to add to calendar (all TBA / missing day-time).", "Nothing to add");
+              return;
+            }
+
+            setIsAccepted(true);
+            onToast?.("success", "Schedule accepted and added to your Google Calendar.", "Success");
+            await onRefresh?.();
+
+            } catch (e: any) {
+              const msg =
+                e?.response?.data?.detail ||
+                e?.message ||
+                "Failed to accept schedule.";
+              onToast?.("error", msg, "Action failed");
+              console.error(e);
+            }
+          }}
+
             disabled={isAccepted}
             className={cls(
               "inline-flex h-9 items-center justify-center rounded-lg px-4 text-sm font-medium shadow",
               "focus:outline-none focus:ring-2 focus:ring-emerald-600/40",
-              isAccepted
+              (isAccepted || scheduleFinal)
                 ? "bg-neutral-300 text-neutral-600 cursor-not-allowed"
                 : "bg-blue-700 text-white hover:bg-blue-800 active:translate-y-[0.5px]"
             )}
           >
-            {isAccepted ? "Accepted" : "Accept Schedule"}
+            {(isAccepted || scheduleFinal) ? "Finalized" : "Accept Schedule"}
           </button>
         </div>
       </div>
+
+      {scheduleFinal && (
+        <div className="mt-3 rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900">
+          <span className="font-semibold">Schedule Locked:</span> {scheduleFinalLabel}. You can no longer submit RFCs.
+        </div>
+      )}
 
         {view === "Calendar" ? (
           <div className="overflow-x-auto">
@@ -584,7 +795,7 @@ function TeachingLoadEnhanced({ teachingLoad, term }: TeachingLoadEnhancedProps)
                         <ClassBlock
                           key={j}
                           it={it}
-                          onClick={() => setModal({ day: g.day, item: it })}
+                          onClick={() => { if (scheduleFinal) return; setModal({ day: g.day, item: it }); }}
                         />
                       ))}
                     </div>
@@ -596,74 +807,90 @@ function TeachingLoadEnhanced({ teachingLoad, term }: TeachingLoadEnhancedProps)
         ) : (
            // --- *** MODIFIED: New List View *** ---
           <div className="space-y-6">
-            <div className="overflow-x-auto rounded-xl border border-neutral-200">
-              <table className="min-w-full">
-                <thead>
-                  <tr className="text-xs text-neutral-500">
-                    {LIST_HEADERS.map((h) => (
-                      <th key={h} className="px-4 py-2 font-medium text-center">
-                        {h}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {teachingLoad.length === 0 ? (
-                    <tr>
-                      <td
-                        colSpan={LIST_HEADERS.length}
-                        className="px-4 py-6 text-center text-sm text-neutral-500"
-                      >
-                        No records.
-                      </td>
+            <div className="overflow-x-auto">
+              <div className="rounded-xl border border-gray-200 overflow-hidden bg-white">
+                <table className="w-full table-fixed text-[13px]">
+                  <colgroup>
+                    <col className="w-[240px]" />
+                    <col className="w-[92px]" />
+                    <col className="w-[82px]" />
+                    <col className="w-[92px]" />
+                    <col className="w-[92px]" />
+                    <col className="w-[110px]" />
+                    <col className="w-[82px]" />
+                    <col className="w-[92px]" />
+                    <col className="w-[92px]" />
+                    <col className="w-[110px]" />
+                    <col className="w-[96px]" />
+                    <col className="w-[76px]" />
+                  </colgroup>
+                  <thead className="bg-gray-50 text-gray-700">
+                    <tr className="[&>th]:border-b [&>th]:border-gray-200">
+                      {LIST_HEADERS.map((h) => (
+                        <th key={h} className="px-4 py-3 text-left font-semibold">
+                          {h}
+                        </th>
+                      ))}
                     </tr>
-                  ) : (
-                    teachingLoad.map((it, idx) => (
-                      <tr
-                      key={idx}
-                      className={cls(
-                        "text-sm text-neutral-800",
-                        idx % 2 === 0 ? "bg-white" : "bg-neutral-50"
-                      )}
-                    >
-                      <td className="px-4 py-2 text-center">{it.course_code}</td>
-                      {/* <td className="px-4 py-2 text-center">{it.course_title}</td> // Removed */}
-                      <td className="px-4 py-2 text-center">{it.section}</td>
-                      <td className="px-4 py-2 text-center">{it.units}</td>
-                      {/* <td className="px-4 py-2 text-center">{it.mode}</td> // Removed */}
-                      <td className="px-4 py-2 text-center">
-                        {it.day1 && it.day1 !== "TBA" ? it.day1 : '—'}
-                        {it.day2 && it.day2 !== "TBA" && ` / ${it.day2}`}
-                      </td>
-                      <td className="px-4 py-2 text-center">
-                         {it.room1 || '—'}
-                        {it.room2 && ` / ${it.room2}`}
-                      </td>
-                      <td className="px-4 py-2 text-center">
-                        {it.time1 && it.time1 !== "TBA" ? it.time1 : '—'}
-                        {it.time2 && it.time2 !== "TBA" && ` / ${it.time2}`}
-                      </td>
-                      <td className="px-4 py-2 text-center">
-                        <button
-                          type="button"
-                          onClick={() => openSyllabus(it)}
-                          className={cls(
-                            "inline-flex items-center justify-center rounded-md border px-2 py-1 text-xs",
-                            "border-emerald-200 bg-emerald-50 hover:bg-emerald-100 active:translate-y-[0.5px]",
-                            // --- *** FIX 3: Allow clicking even if no syllabus *** ---
-                            !it.syllabus && "opacity-60" 
-                          )}
-                          title={it.syllabus ? "View syllabus" : "No syllabus uploaded"}
-                          aria-label="View syllabus"
-                        >
-                          <SyllabusIcon className="h-4 w-4" />
-                        </button>
-                      </td>
-                    </tr>
-                    ))
-                  )}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody className="text-gray-900">
+                    {teachingLoad.length === 0 ? (
+                      <tr>
+                        <td colSpan={LIST_HEADERS.length} className="px-4 py-6 text-center text-sm text-neutral-500">
+                          No records.
+                        </td>
+                      </tr>
+                    ) : (
+                      teachingLoad.map((it, idx) => {
+                        const t1 = splitBeginEnd(it.time1);
+                        const t2 = splitBeginEnd(it.time2);
+                        const d1 = it.day1 && it.day1 !== "TBA" ? it.day1 : "—";
+                        const d2 = it.day2 && it.day2 !== "TBA" ? it.day2 : "—";
+
+                        return (
+                          <tr
+                            key={idx}
+                            className={cls("bg-white", "[&>td]:border-t [&>td]:border-gray-100")}
+                          >
+                            <td className="px-4 py-3 align-middle">
+                              <div className="leading-tight">
+                                <div className="font-semibold text-gray-900">{it.course_code || "—"}</div>
+                                <div className="mt-0.5 text-[12px] text-gray-600">{it.course_title || "—"}</div>
+                              </div>
+                            </td>
+                            <td className="px-4 py-3 align-middle">{it.section || "—"}</td>
+                            <td className="px-4 py-3 align-middle">{d1}</td>
+                            <td className="px-4 py-3 align-middle">{t1.begin}</td>
+                            <td className="px-4 py-3 align-middle">{t1.end}</td>
+                            <td className="px-4 py-3 align-middle">{it.room1 || "—"}</td>
+                            <td className="px-4 py-3 align-middle">{d2}</td>
+                            <td className="px-4 py-3 align-middle">{t2.begin}</td>
+                            <td className="px-4 py-3 align-middle">{t2.end}</td>
+                            <td className="px-4 py-3 align-middle">{it.room2 || "—"}</td>
+                            <td className="px-4 py-3 align-middle text-gray-800">{it.mode || "—"}</td>
+                            <td className="px-4 py-3 align-middle">
+                              <button
+                                type="button"
+                                onClick={() => openSyllabus(it)}
+                                className={cls(
+                                  "inline-flex items-center justify-center rounded-md border px-2 py-1 text-xs",
+                                  "border-emerald-200 bg-emerald-50 hover:bg-emerald-100 active:translate-y-[0.5px]",
+                                  // allow clicking even if no syllabus
+                                  !it.syllabus && "opacity-60"
+                                )}
+                                title={it.syllabus ? "View syllabus" : "No syllabus uploaded"}
+                                aria-label="View syllabus"
+                              >
+                                <SyllabusIcon className="h-4 w-4" />
+                              </button>
+                            </td>
+                          </tr>
+                        );
+                      })
+                    )}
+                  </tbody>
+                </table>
+              </div>
             </div>
           </div>
         )}
@@ -710,7 +937,7 @@ function TeachingLoadEnhanced({ teachingLoad, term }: TeachingLoadEnhancedProps)
         </div>
       )}
 
-      <ChangeRequestModal open={!!modal} onClose={() => setModal(null)} context={modal} term={term} />
+      <ChangeRequestModal open={!!modal} onClose={() => setModal(null)} context={modal} term={term} scheduleFinal={scheduleFinal} onToast={onToast} onRefresh={onRefresh} />
     </section>
   );
 }
@@ -825,12 +1052,18 @@ function ChangeRequestModal({
   open,
   onClose,
   context,
-  term, 
+  term,
+  scheduleFinal,
+  onToast,
+  onRefresh,
 }: {
   open: boolean;
   onClose: () => void;
   context: { day: DayLong; item: TLItemForCalendar } | null; // <-- MODIFIED
-  term: any
+  term: any;
+  scheduleFinal: boolean;
+  onToast?: (kind: ToastKind, message: string, title?: string) => void;
+  onRefresh?: () => Promise<void> | void;
 }) {
   const TIME_SLOTS = [
     "07:30 – 09:00",
@@ -882,7 +1115,7 @@ function ChangeRequestModal({
   const mustTime = choices.includes("Change class time");
   const mustDay = choices.includes("Change class day");
   const isFinalized = Boolean((context?.item as any)?.finalized);
-  const disabled = isFinalized || choices.length === 0 || (mustTime && !selTime) || (mustDay && !selDay);
+  const disabled = scheduleFinal || isFinalized || choices.length === 0 || (mustTime && !selTime) || (mustDay && !selDay);
 
   return (
     <div className="fixed inset-0 z-80 grid place-items-center bg-black/30 p-3">
@@ -902,13 +1135,27 @@ function ChangeRequestModal({
 
         <div className="space-y-3">
 
+          
+          {scheduleFinal && (
+            <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900">
+              The schedule is already finalized and locked. RFC is disabled.
+            </div>
+          )}
+
           {isFinalized && (
             <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
               This course has already been finalized by the Office Manager. RFC is disabled for this course.
             </div>
           )}
 
-          <RfcThreadView term={term} />
+          <RfcThreadView
+            term={term}
+            sectionId={
+              (context.item.originalItem as any)?.section_id ||
+              (context.item.originalItem as any)?.sectionId ||
+              ""
+            }
+          />
 
           <label className="block text-sm font-medium text-neutral-700">Change</label>
           <div className="flex flex-wrap gap-2">
@@ -988,27 +1235,61 @@ function ChangeRequestModal({
           <button
             disabled={disabled}
             onClick={async () => {
-              // Hook into your backend here if needed
-              try {
-                const raw = JSON.parse(localStorage.getItem("animo.user") || "{}");
-                const userId = raw.userId || raw.user_id || raw.id || "";
-                const parts: string[] = [];
-                if (choices.includes("Change class time") && selTime) parts.push(`Change time to ${selTime}`);
-                if (choices.includes("Change class day") && selDay) parts.push(`Change day to ${selDay}`);
-                if (choices.includes("Other") && otherText.trim()) parts.push(otherText.trim());
-                const changeSummary = parts.join("; ");
-                const msg = `${context.item.code} ${context.item.sec} • ${context.day} • ${context.item.time}\n${changeSummary}\n\nRemarks: ${remarks.trim()}`;
-                await sendFacultyLoadAssignmentRfcMessage(userId, {
-                  term_id: (term as any)?.term_id || (term as any)?._id || (term as any)?.id,
-                  message: msg,
-                });
-                window.location.reload();
-              } catch (e) {
-                console.error(e);
-              } finally {
-                onClose();
+            try {
+              const raw = JSON.parse(localStorage.getItem("animo.user") || "{}");
+              const userId = raw.userId || raw.user_id || raw.id || "";
+
+              const parts: string[] = [];
+              if (choices.includes("Change class time") && selTime) parts.push(`Change time to ${selTime}`);
+              if (choices.includes("Change class day") && selDay) parts.push(`Change day to ${selDay}`);
+              if (choices.includes("Other") && otherText.trim()) parts.push(otherText.trim());
+
+              const changeSummary = parts.join("; ");
+              const msg =
+                `${context.item.code} ${context.item.sec} • ${context.day} • ${context.item.time}\n` +
+                `${changeSummary}\n\nRemarks: ${remarks.trim()}`;
+
+              const oi: any = (context?.item?.originalItem ?? context?.item ?? {});
+              const sectionId =
+                oi.section_id ||
+                oi.id ||
+                oi.sectionId ||
+                oi.section?.section_id ||
+                oi.section?.id ||
+                "";
+
+              if (!sectionId) {
+                console.error("RFC send blocked: missing section_id on row", oi);
+                onToast?.("error", "Cannot send RFC: missing section_id for this assigned course row.", "RFC not sent");
+                return;
               }
-            }}
+
+              const resp = await sendFacultyLoadAssignmentRfcMessage(userId, {
+                term_id: (term as any)?.term_id || (term as any)?._id || (term as any)?.id,
+                section_id: sectionId,
+                message: msg,
+              });
+
+              // Optional: show a useful message if Gmail isn't connected
+              if (resp && resp.email_sent === false && resp.email_error) {
+                console.warn("RFC saved but email was not sent:", resp.email_error);
+                onToast?.("info", "RFC saved, but email was not sent. Please connect Gmail in your profile if you want email notifications.", "Email not sent");
+              }
+
+              onToast?.("success", "RFC sent successfully.", "Success");
+              await onRefresh?.();
+            } catch (e: any) {
+              const msg =
+                e?.response?.data?.detail ||
+                e?.message ||
+                "Failed to send RFC.";
+              onToast?.("error", msg, "RFC not sent");
+              console.error(e);
+            } finally {
+              onClose();
+            }
+          }}
+
             className={cls(
               "inline-flex h-9 items-center gap-2 rounded-xl px-4 text-sm text-white shadow",
               "bg-[#1F7A49] hover:brightness-[1.06] active:translate-y-[0.5px] focus:outline-none focus:ring-2 focus:ring-emerald-600/40",
@@ -1025,9 +1306,54 @@ function ChangeRequestModal({
   );
 }
 
-function RfcThreadView({ term }: { term: any }) {
+function RfcThreadView({ term, sectionId }: { term: any; sectionId: string }) {
   const [thread, setThread] = useState<any | null>(null);
   const [loading, setLoading] = useState(false);
+
+  const formatRfcStatus = useCallback(
+    (rawStatus: string, isLocked: boolean) => {
+      const key = String(rawStatus || "").toUpperCase();
+
+      // Friendly, professional labels (avoid code-like statuses)
+      const map: Record<string, string> = {
+        OPEN: "Open",
+        IN_PROGRESS: "In Progress",
+        PENDING: "Pending",
+        NEEDS_OM: "Pending OM Review",
+        NEEDS_CHAIR: "Pending Chair Review",
+        NEEDS_FACULTY: "Awaiting Faculty Response",
+        APPROVED: "Approved",
+        ACCEPTED: "Accepted",
+        REJECTED: "Rejected",
+        CLOSED: "Closed",
+        LOCKED: "Closed",
+      };
+
+      if (map[key]) return map[key];
+      if (isLocked) return "Closed";
+
+      // Fallback: Title Case (e.g., NEEDS_OM -> Needs Om)
+      return key
+        ? key
+            .toLowerCase()
+            .split(/[_\s]+/)
+            .filter(Boolean)
+            .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+            .join(" ")
+        : "Open";
+    },
+    []
+  );
+
+  const statusTone = useCallback((rawStatus: string, isLocked: boolean) => {
+    const key = String(rawStatus || "").toUpperCase();
+    if (isLocked) return "bg-neutral-200 text-neutral-700";
+    if (key === "NEEDS_OM" || key === "NEEDS_CHAIR" || key === "PENDING") {
+      return "bg-yellow-100 text-yellow-800";
+    }
+    if (key === "REJECTED") return "bg-red-100 text-red-800";
+    return "bg-emerald-100 text-emerald-800";
+  }, []);
 
   useEffect(() => {
     let alive = true;
@@ -1038,6 +1364,7 @@ function RfcThreadView({ term }: { term: any }) {
         const userId = raw.userId || raw.user_id || raw.id || "";
         const resp = await getFacultyLoadAssignmentRfc(userId, {
           term_id: term?.term_id || term?._id || term?.id,
+          section_id: sectionId,
         });
         if (!alive) return;
         setThread(resp?.rfc || null);
@@ -1050,7 +1377,7 @@ function RfcThreadView({ term }: { term: any }) {
     return () => {
       alive = false;
     };
-  }, [term?.term_id, term?._id, term?.id]);
+  }, [term?.term_id, term?._id, term?.id, sectionId]);
 
   if (loading && !thread) {
     return (
@@ -1071,6 +1398,7 @@ function RfcThreadView({ term }: { term: any }) {
 
   const status = String(thread.status || "").toUpperCase();
   const locked = Boolean(thread.locked) || ["ACCEPTED", "APPROVED", "REJECTED"].includes(status);
+  const statusLabel = formatRfcStatus(status, locked);
 
   return (
     <div className="rounded-xl border border-neutral-200 bg-white p-3">
@@ -1079,10 +1407,10 @@ function RfcThreadView({ term }: { term: any }) {
         <div
           className={cls(
             "rounded-full px-2 py-0.5 text-xs font-medium",
-            locked ? "bg-neutral-200 text-neutral-700" : status === "NEEDS_OM" ? "bg-yellow-100 text-yellow-800" : "bg-emerald-100 text-emerald-800"
+            statusTone(status, locked)
           )}
         >
-          {locked ? status || "LOCKED" : status || "OPEN"}
+          {statusLabel}
         </div>
       </div>
 
@@ -1110,4 +1438,3 @@ function RfcThreadView({ term }: { term: any }) {
     </div>
   );
 }
-

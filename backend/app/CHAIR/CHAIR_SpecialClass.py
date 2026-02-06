@@ -29,17 +29,16 @@ COL_USERS = "users"
 COL_PROGRAMS = "programs"
 COL_DEPARTMENTS = "departments"
 COL_COURSES = "courses"
+COL_ROOMS = "rooms"
 
 COL_SECTIONS = "sections"
 COL_SECTION_SCHEDULES = "section_schedules"
 COL_FAC_ASSIGN = "faculty_assignments"
 COL_FAC_PROFILES = "faculty_profiles"
-COL_FAC_LOADS = "faculty_loads"  
+COL_FAC_LOADS = "faculty_loads"
 COL_PREEN_COUNT = "preenlistment_count"
 
-
 OM_ALLOWED_STATUSES = ["Forwarded To Department", "Approved", "Rejected"]
-
 
 # ---------------- indexes (safe) ----------------
 try:
@@ -262,6 +261,7 @@ async def _latest_faculty_assignment_for_section(section_id: str) -> Dict[str, O
         "assignment_id": r.get("assignment_id") or None,
     }
 
+
 async def _schedule_ids_for_section(section_id: str) -> Tuple[Optional[str], Optional[str]]:
     rows = (
         await db[COL_SECTION_SCHEDULES]
@@ -275,23 +275,66 @@ async def _schedule_ids_for_section(section_id: str) -> Tuple[Optional[str], Opt
     return sid1, sid2
 
 
+def _norm_room_id(v: Any) -> str:
+    s = ("" if v is None else str(v)).strip()
+    if not s:
+        return ""
+    if s.upper() == "ONLINE":
+        return ""
+    return s
+
+
+async def _room_lookup_cached(room_id: Optional[str], maps: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Returns room info resolved from room_id.
+    If missing/unknown -> returns TBA placeholders.
+    Uses a per-request cache stored inside maps["roommap"].
+    """
+    rid = _norm_room_id(room_id)
+    if not rid:
+        return {"room_id": None, "room_number": "TBA", "capacity": None, "building": "", "campus_id": "", "status": "", "room_type": ""}
+
+    cache = maps.setdefault("roommap", {})
+    if rid in cache:
+        return cache[rid] or {"room_id": rid, "room_number": "TBA", "capacity": None, "building": "", "campus_id": "", "status": "", "room_type": ""}
+
+    doc = await db[COL_ROOMS].find_one(
+        {"room_id": rid},
+        {"_id": 0, "room_id": 1, "room_number": 1, "capacity": 1, "building": 1, "campus_id": 1, "status": 1, "room_type": 1},
+    )
+    if not doc:
+        doc = {"room_id": rid, "room_number": "TBA", "capacity": None, "building": "", "campus_id": "", "status": "", "room_type": ""}
+
+    cache[rid] = doc
+    return doc
+
+
 async def _section_schedule_two_from_schedule_ids(
     schedule_id1: Optional[str],
     schedule_id2: Optional[str],
-) -> Dict[str, str]:
+) -> Dict[str, Any]:
     ids = [x for x in [schedule_id1, schedule_id2] if x]
     if not ids:
-        return {"day1": "", "begin1": "", "end1": "", "day2": "", "begin2": "", "end2": ""}
+        return {
+            "day1": "",
+            "begin1": "",
+            "end1": "",
+            "room_id1": None,
+            "day2": "",
+            "begin2": "",
+            "end2": "",
+            "room_id2": None,
+        }
 
     rows = await db[COL_SECTION_SCHEDULES].find(
         {"schedule_id": {"$in": ids}},
-        {"_id": 0, "schedule_id": 1, "day": 1, "start_time": 1, "end_time": 1},
+        {"_id": 0, "schedule_id": 1, "day": 1, "start_time": 1, "end_time": 1, "room_id": 1},
     ).to_list(10)
 
     # keep stable order by schedule_id
     rows.sort(key=lambda r: (r.get("schedule_id") or ""))
 
-    entries: List[Tuple[str, str, str]] = []
+    entries: List[Tuple[str, str, str, Optional[str]]] = []
     for r in rows:
         d = _normalize_day(r.get("day"))
         if d not in ALLOWED_DAYS:
@@ -302,13 +345,22 @@ async def _section_schedule_two_from_schedule_ids(
             continue
         if _mins(et) <= _mins(st):
             continue
-        entries.append((d, st, et))
+        entries.append((d, st, et, r.get("room_id")))
 
-    out = {"day1": "", "begin1": "", "end1": "", "day2": "", "begin2": "", "end2": ""}
+    out: Dict[str, Any] = {
+        "day1": "",
+        "begin1": "",
+        "end1": "",
+        "room_id1": None,
+        "day2": "",
+        "begin2": "",
+        "end2": "",
+        "room_id2": None,
+    }
     if len(entries) >= 1:
-        out["day1"], out["begin1"], out["end1"] = entries[0]
+        out["day1"], out["begin1"], out["end1"], out["room_id1"] = entries[0]
     if len(entries) >= 2:
-        out["day2"], out["begin2"], out["end2"] = entries[1]
+        out["day2"], out["begin2"], out["end2"], out["room_id2"] = entries[1]
     return out
 
 
@@ -477,13 +529,14 @@ async def _create_custom_section_bundle(
         "assignment_id": assignment_id,
     }
 
-async def _section_schedule_two(section_id: str) -> Dict[str, str]:
+
+async def _section_schedule_two(section_id: str) -> Dict[str, Any]:
     rows = await db[COL_SECTION_SCHEDULES].find(
         {"section_id": section_id},
-        {"_id": 0, "day": 1, "start_time": 1, "end_time": 1},
+        {"_id": 0, "day": 1, "start_time": 1, "end_time": 1, "room_id": 1},
     ).to_list(50)
 
-    entries: List[Tuple[str, str, str]] = []
+    entries: List[Tuple[str, str, str, Optional[str]]] = []
     for r in rows:
         d = _normalize_day(r.get("day"))
         if d not in ALLOWED_DAYS:
@@ -494,16 +547,25 @@ async def _section_schedule_two(section_id: str) -> Dict[str, str]:
             continue
         if _mins(et) <= _mins(st):
             continue
-        entries.append((d, st, et))
+        entries.append((d, st, et, r.get("room_id")))
 
     entries.sort(key=lambda x: (DAY_ORDER.get(x[0], 99), x[1]))
     entries = entries[:2]
 
-    out = {"day1": "", "begin1": "", "end1": "", "day2": "", "begin2": "", "end2": ""}
+    out: Dict[str, Any] = {
+        "day1": "",
+        "begin1": "",
+        "end1": "",
+        "room_id1": None,
+        "day2": "",
+        "begin2": "",
+        "end2": "",
+        "room_id2": None,
+    }
     if len(entries) >= 1:
-        out["day1"], out["begin1"], out["end1"] = entries[0]
+        out["day1"], out["begin1"], out["end1"], out["room_id1"] = entries[0]
     if len(entries) >= 2:
-        out["day2"], out["begin2"], out["end2"] = entries[1]
+        out["day2"], out["begin2"], out["end2"], out["room_id2"] = entries[1]
     return out
 
 
@@ -555,6 +617,24 @@ async def _build_faculty_options() -> List[Dict[str, Any]]:
     return out
 
 
+async def _build_room_options():
+    rooms = await db[COL_ROOMS].find(
+        {"is_archived": {"$ne": True}},
+        {
+            "_id": 0,
+            "room_id": 1,
+            "room_number": 1,
+            "capacity": 1,
+            "building": 1,
+            "campus_id": 1,
+            "status": 1,
+            "room_type": 1,
+        },
+    ).to_list(20000)
+    rooms.sort(key=lambda r: (r.get("room_number") or "", r.get("room_id") or ""))
+    return rooms
+
+
 async def _schedule_presets(term_id: str, course_id: str) -> List[Dict[str, Any]]:
     secs = await db[COL_SECTIONS].find(
         {"term_id": term_id, "course_id": course_id},
@@ -583,17 +663,14 @@ async def _schedule_presets(term_id: str, course_id: str) -> List[Dict[str, Any]
                 "label": label,
                 "faculty_id": fac_id,
                 "faculty_name": fac_name,
-
                 # ids to store on special_class (no day/begin fields stored there)
                 "schedule_id1": sid1,
                 "schedule_id2": sid2,
                 "assignment_id": fac.get("assignment_id"),
-
                 # still return display fields for UI
                 **df,
             }
         )
-
 
     out.sort(key=lambda x: (x.get("label") or "", x.get("section_code") or ""))
     return out
@@ -642,7 +719,8 @@ async def _bulk_maps_for_rows(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     cmap = {c["course_id"]: c for c in courses if c.get("course_id")}
     smap = {s["section_id"]: s for s in sections if s.get("section_id")}
 
-    return {"umap": umap, "pmap": pmap, "dmap": dmap, "cmap": cmap, "smap": smap}
+    # roommap is a per-request lazy cache (filled on-demand by _room_lookup_cached)
+    return {"umap": umap, "pmap": pmap, "dmap": dmap, "cmap": cmap, "smap": smap, "roommap": {}}
 
 
 async def _shape_row(r: Dict[str, Any], maps: Dict[str, Any]) -> Dict[str, Any]:
@@ -677,10 +755,24 @@ async def _shape_row(r: Dict[str, Any], maps: Dict[str, Any]) -> Dict[str, Any]:
     section_code = (s.get("section_code") or "").strip() if sid else ""
 
     # schedule is derived by IDs (schedule_id1/2) if present, else by section_id
+    # NOTE: When schedule_cleared is true, we intentionally show blank schedule even if section has schedules.
+    schedule_cleared = bool(r.get("schedule_cleared", False))
+
     schedule_id1 = (r.get("schedule_id1") or "").strip() or None
     schedule_id2 = (r.get("schedule_id2") or "").strip() or None
 
-    if schedule_id1 or schedule_id2:
+    if schedule_cleared:
+        df = {
+            "day1": "",
+            "begin1": "",
+            "end1": "",
+            "room_id1": None,
+            "day2": "",
+            "begin2": "",
+            "end2": "",
+            "room_id2": None,
+        }
+    elif schedule_id1 or schedule_id2:
         df = await _section_schedule_two_from_schedule_ids(schedule_id1, schedule_id2)
     elif sid:
         df = await _section_schedule_two(sid)
@@ -690,10 +782,18 @@ async def _shape_row(r: Dict[str, Any], maps: Dict[str, Any]) -> Dict[str, Any]:
             "day1": _normalize_day(r.get("day1")),
             "begin1": _to_hhmm(r.get("begin1")),
             "end1": _to_hhmm(r.get("end1")),
+            "room_id1": None,
             "day2": _normalize_day(r.get("day2")),
             "begin2": _to_hhmm(r.get("begin2")),
             "end2": _to_hhmm(r.get("end2")),
+            "room_id2": None,
         }
+
+    rid1 = df.get("room_id1")
+    rid2 = df.get("room_id2")
+
+    room1 = await _room_lookup_cached(rid1, maps)
+    room2 = await _room_lookup_cached(rid2, maps)
 
     # faculty derived by assignment_id first; fallback to latest assignment for section
     assignment_id = (r.get("assignment_id") or r.get("faculty_assignment_id") or "").strip() or None
@@ -716,7 +816,6 @@ async def _shape_row(r: Dict[str, Any], maps: Dict[str, Any]) -> Dict[str, Any]:
             faculty_id = fa.get("faculty_id")
 
         faculty_name = await _faculty_name_from_id(faculty_id)
-
 
     return {
         "special_id": r.get("special_id"),
@@ -744,6 +843,17 @@ async def _shape_row(r: Dict[str, Any], maps: Dict[str, Any]) -> Dict[str, Any]:
         "day2": df.get("day2") or "",
         "begin2": df.get("begin2") or "",
         "end2": df.get("end2") or "",
+        # NEW: room display fields (READ-ONLY; UI should display room_number, default TBA)
+        "room_id1": _norm_room_id(room1.get("room_id")),
+        "room1": room1.get("room_number") or "TBA",
+        "room1_building": room1.get("building") or "",
+        "room1_capacity": room1.get("capacity"),
+        "room1_room_type": room1.get("room_type") or "",
+        "room_id2": _norm_room_id(room2.get("room_id")),
+        "room2": room2.get("room_number") or "TBA",
+        "room2_building": room2.get("building") or "",
+        "room2_capacity": room2.get("capacity"),
+        "room2_room_type": room2.get("room_type") or "",
         "submitted_at": r.get("submitted_at"),
         "updated_at": r.get("updated_at"),
         "department_id": did,
@@ -1170,7 +1280,7 @@ def _render_one_application(c, r: Dict[str, Any], active_term: Dict[str, Any]):
 
     # right strip (ONLY for the top area where "3" lives)
     strip_w = max(52.0, right_w2 * 0.18)
-    sub_div_x = right_x1 - strip_w
+    sub_div_x = right_x1 - strip_w  # noqa: F841 (kept for layout parity / future tweaks)
 
     # main vertical divider across full approval body
     c.line(div_x, body_bottom, div_x, body_top)
@@ -1235,7 +1345,6 @@ def _render_one_application(c, r: Dict[str, Any], active_term: Dict[str, Any]):
     c.setFont("Helvetica-Bold", 10)
     c.drawCentredString(box1_x + nb / 2, box1_y + 5, "1")
 
-
     # Faculty signature line (top area; line only)
     fx = div_x + nb + 18
     if fx < div_x + 28:
@@ -1270,7 +1379,6 @@ def _render_one_application(c, r: Dict[str, Any], active_term: Dict[str, Any]):
     c.drawCentredString(box3_x + nb / 2, box3_y + 5, "3")
     c.setFont("Helvetica-Bold", 10)
     c.drawString(box3_x + nb + 8, body_top - 16, "(FACULTY)")
-
 
     # Box 2 (centered exactly at divider intersection)
     box2_x = div_x - nb
@@ -1335,6 +1443,7 @@ async def om_specialclass_get(
         active = await _active_term()
         statuses = await _get_allowed_statuses()
         faculty = await _build_faculty_options()
+        rooms = await _build_room_options()
         return {
             "ok": True,
             "statuses": statuses,
@@ -1344,6 +1453,8 @@ async def om_specialclass_get(
                 "term_number": active.get("term_number"),
             },
             "facultyOptions": faculty,
+            # note: rooms are returned but UI does NOT need to edit rooms; display comes from list rows
+            "roomOptions": rooms,
         }
 
     if action == "schedulePresets":
@@ -1442,6 +1553,7 @@ async def om_specialclass_post(
         # ---- schedule binding rules ----
         # [1] If section_id is provided (existing section): store ONLY ids from that section
         # [2] If section_id is null/empty AND custom schedule provided: create docs in 3 tables and store ONLY ids
+        # NOTE: rooms are READ-ONLY in OM_SpecialClass UI per your requirement (no room edits).
 
         req_section_id_raw = payload.get("section_id") if ("section_id" in payload) else None
         req_section_id = (str(req_section_id_raw).strip() if req_section_id_raw is not None else "")
@@ -1471,7 +1583,18 @@ async def om_specialclass_post(
             }
         )
 
-        if "section_id" in payload and req_section_id:
+        clear_schedule_only = bool(payload.get("clear_schedule_only", False))
+
+        if clear_schedule_only and req_section_id:
+            # Clear ONLY the schedule (day/time) while keeping section & faculty binding.
+            # We achieve this by clearing schedule_id1/2 and setting schedule_cleared=true so _shape_row
+            # does not re-derive schedule from the section.
+            updates_set["section_id"] = req_section_id
+            updates_set["schedule_id1"] = None
+            updates_set["schedule_id2"] = None
+            updates_set["schedule_cleared"] = True
+
+        elif "section_id" in payload and req_section_id:
             # ✅ EXISTING SECTION path
             sid = req_section_id
 
@@ -1483,6 +1606,8 @@ async def om_specialclass_post(
             updates_set["schedule_id1"] = sid1
             updates_set["schedule_id2"] = sid2
             updates_set["assignment_id"] = fa.get("assignment_id")
+
+            updates_set["schedule_cleared"] = False
 
         elif is_custom_request:
             # ✅ CUSTOM path: create docs in sections / section_schedules / faculty_assignments
@@ -1503,12 +1628,15 @@ async def om_specialclass_post(
             updates_set["schedule_id2"] = created.get("schedule_id2")
             updates_set["assignment_id"] = created.get("assignment_id")
 
+            updates_set["schedule_cleared"] = False
+
         elif "section_id" in payload and not req_section_id:
-            # clearing schedule selection with NO custom data
+            # clearing ALL binding (section/faculty/schedule) with NO custom data
             updates_set["section_id"] = None
             updates_set["schedule_id1"] = None
             updates_set["schedule_id2"] = None
             updates_set["assignment_id"] = None
+            updates_set["schedule_cleared"] = False
 
         if not updates_set and not updates_unset:
             return {"ok": False, "message": "Nothing to update."}
@@ -1518,18 +1646,6 @@ async def om_specialclass_post(
         res = await db[COL_SPECIAL].update_one(
             {"term_id": current_term_id, "special_id": specialId},
             {"$set": updates_set, "$unset": updates_unset},
-        )
-        return {"ok": True, "matched": res.matched_count, "modified": res.modified_count}
-
-
-        if not updates:
-            return {"ok": False, "message": "Nothing to update."}
-
-        updates["updated_at"] = datetime.utcnow()
-
-        res = await db[COL_SPECIAL].update_one(
-            {"term_id": current_term_id, "special_id": specialId},
-            {"$set": updates},
         )
         return {"ok": True, "matched": res.matched_count, "modified": res.modified_count}
 

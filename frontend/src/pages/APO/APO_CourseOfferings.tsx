@@ -7,9 +7,11 @@ import {
   Search,
   X,
   Send,
+  Download,
   Plus,
   ChevronDown,
   AlertTriangle,
+  Upload,
   Copy,
   Undo2,
   Redo2,
@@ -22,6 +24,7 @@ import {
   addApoOfferingRow,
   editApoOfferingRow,
   deleteApoOfferingRow,
+  restoreApoOfferingRow,
   forwardApoCourseOfferings,
   approveApoOfferingsPlan,
   curriculumAddCourse,
@@ -32,7 +35,11 @@ import {
   createCatalogCourse, 
   getEligibleRoomsForOffering,          
   importCurriculumCsv,    
-  editCatalogCourse,          
+  editCatalogCourse,  
+  getSpecialClassData,
+  updateApoSpecialClassRow,
+  downloadBlob,
+  exportOMSC_Pdf,
   type ApiConflict,
   type CreateCoursePayload,  
   type CourseCatalogItem           
@@ -452,6 +459,7 @@ type OfferingRow = {
     program_id?: string;
     section_id?: string;
     elective_placeholder_course_id?: string;
+    fulfilled_placeholder_course_id?: string;
   };
 };
 
@@ -464,6 +472,173 @@ type CourseOption = {
 
 const codeOf = (v: unknown) =>
   Array.isArray(v) ? String(v[0] ?? "") : String(v ?? "");
+
+/* ------------------------ submit change-tracking types ----------------------- */
+
+type SnapshotSlot = {
+  day: string; // abbreviations M/T/W/H/F/S
+  start: string; // HHMM
+  end: string;   // HHMM
+  room: string;  // room number or room id
+};
+
+type SnapshotRow = {
+  key: string;
+  course_code: string;
+  course_title: string;
+  section_code: string;
+  program_code: string;
+  block_index: number;
+  batch_code: string;
+  faculty_name: string;
+  enrollment_cap: number | null;
+  remarks: string;
+  slot1: SnapshotSlot;
+  slot2: SnapshotSlot;
+};
+
+type ChangeField = { field: string; from: string; to: string };
+type ChangeItem = { key: string; label: string };
+type EditedChangeItem = ChangeItem & { details: ChangeField[]; otherChanged: boolean };
+type DetectedChanges = {
+  added: ChangeItem[];
+  deleted: ChangeItem[];
+  edited: EditedChangeItem[];
+};
+
+const BASELINE_KEY = (userId: string, termId: string, campusId: string) =>
+  `apo:offerings:baseline:v1:${userId}:${termId}:${campusId}`;
+
+const safeJsonParse = <T,>(raw: string | null, fallback: T): T => {
+  if (!raw) return fallback;
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return fallback;
+  }
+};
+
+const slotToSnapshot = (slot?: OfferingRow["slot1"]): SnapshotSlot => {
+  const day = toAbbrevDay(slot?.day as any) || "";
+  const start = toHHMM(slot?.start_time || "");
+  const end = toHHMM(slot?.end_time || "");
+  const room = (slot?.room_number || slot?.room_id || "").toString();
+  return { day, start, end, room };
+};
+
+const rowKeyOfSnapshot = (r: OfferingRow) => {
+  const sid = String((r as any)?.section?.section_id || "").trim();
+  return sid ? `sec:${sid}` : "";
+};
+
+// NOTE: Backend includes placeholder rows (empty section_id) for curriculum items
+// that currently have no actual sections yet. Those placeholders are *not* real
+// offerings, so we exclude them from submit change-tracking to avoid false
+// "added" entries when the last real section is deleted.
+const toSnapshotRow = (r: OfferingRow): SnapshotRow | null => {
+  const key = rowKeyOfSnapshot(r);
+  if (!key) return null;
+
+  return {
+    key,
+    course_code: String((r as any)?.course?.course_code || "").trim(),
+    course_title: String((r as any)?.course?.course_title || "").trim(),
+    section_code: String((r as any)?.section?.section_code || "").trim(),
+    program_code: String((r as any)?.program?.program_code || "").trim(),
+    block_index: typeof (r as any)?.block_index === "number" ? (r as any).block_index : 1,
+    batch_code: String((r as any)?.batch?.batch_code || "").trim(),
+    faculty_name: String((r as any)?.faculty?.faculty_name || "UNASSIGNED").trim(),
+    enrollment_cap: (r as any)?.section?.enrollment_cap ?? null,
+    remarks: String((r as any)?.section?.remarks || "").trim(),
+    slot1: slotToSnapshot((r as any)?.slot1),
+    slot2: slotToSnapshot((r as any)?.slot2),
+  };
+};
+
+
+const snapshotLabel = (s: SnapshotRow) => {
+  const course = s.course_code || "COURSE";
+  const sec = s.section_code ? ` ${s.section_code}` : "";
+  return `${course}${sec}`.trim();
+};
+
+const slotToText = (s: SnapshotSlot) => {
+  if (!s.day && !s.start && !s.end && !s.room) return "—";
+  const day = s.day || "—";
+  const st = s.start ? fmtTime(s.start) : "—";
+  const en = s.end ? fmtTime(s.end) : "—";
+  const room = s.room || "—";
+  return `${day} ${st}-${en} @ ${room}`;
+};
+
+const computeDetectedChanges = (baseline: SnapshotRow[], current: SnapshotRow[]): DetectedChanges => {
+  const bmap = new Map(baseline.map((r) => [r.key, r]));
+  const cmap = new Map(current.map((r) => [r.key, r]));
+
+  const added: ChangeItem[] = [];
+  const deleted: ChangeItem[] = [];
+  const edited: EditedChangeItem[] = [];
+
+  const slotEq = (a: SnapshotSlot, b: SnapshotSlot) =>
+    a.day === b.day && a.start === b.start && a.end === b.end && a.room === b.room;
+
+  for (const [k, cur] of cmap.entries()) {
+    if (!bmap.has(k)) added.push({ key: k, label: snapshotLabel(cur) });
+  }
+
+  const capTxt = (v: any) => (v === null || v === undefined || v === "" ? "—" : String(v));
+  const txt = (v: any) => {
+    const s = String(v ?? "").trim();
+    return s ? s : "—";
+  };
+
+  for (const [k, base] of bmap.entries()) {
+    const cur = cmap.get(k);
+    if (!cur) {
+      deleted.push({ key: k, label: snapshotLabel(base) });
+      continue;
+    }
+
+    const details: ChangeField[] = [];
+    const push = (field: string, from: string, to: string) => {
+      if (String(from) === String(to)) return;
+      details.push({ field, from: from || "—", to: to || "—" });
+    };
+
+    // Electives: course_code can change even when section_id stays the same.
+    push("Course", txt(base.course_code), txt(cur.course_code));
+    push("Section", txt(base.section_code), txt(cur.section_code));
+    push("Faculty", txt(base.faculty_name || "UNASSIGNED"), txt(cur.faculty_name || "UNASSIGNED"));
+    push("Capacity", capTxt(base.enrollment_cap), capTxt(cur.enrollment_cap));
+
+    if (!slotEq(base.slot1, cur.slot1)) push("Schedule 1", slotToText(base.slot1), slotToText(cur.slot1));
+    if (!slotEq(base.slot2, cur.slot2)) push("Schedule 2", slotToText(base.slot2), slotToText(cur.slot2));
+
+    push("Remarks", txt(base.remarks), txt(cur.remarks));
+
+    if (!details.length) continue;
+
+    const otherChanged = details.some((d) => d.field !== "Remarks");
+    edited.push({ key: k, label: snapshotLabel(cur), details, otherChanged });
+  }
+
+  const byLabel = (a: ChangeItem, b: ChangeItem) => a.label.localeCompare(b.label);
+  added.sort(byLabel);
+  deleted.sort(byLabel);
+  edited.sort((a, b) => a.label.localeCompare(b.label));
+  return { added, deleted, edited };
+};
+
+const buildSuggestedNote = (c: DetectedChanges) => {
+  const total = c.added.length + c.deleted.length + c.edited.length;
+  if (!total) return "";
+  const lines: string[] = [];
+  lines.push("Changes since last submission:");
+  for (const a of c.added) lines.push(`- Added: ${a.label}`);
+  for (const e of c.edited) lines.push(`- Edited: ${e.label}`);
+  for (const d of c.deleted) lines.push(`- Deleted: ${d.label}`);
+  return lines.join("\n");
+};
 const titleOf = (v: unknown) => String(v ?? "");
 
 type PlanningChange =
@@ -480,6 +655,13 @@ type OfferingsResponse = {
   campus: { campus_id: string; campus_name: string };
   term_id: string;
   term_label: string;
+  submission?: {
+    has_prior_submit?: boolean;
+    submit_count?: number;
+    first_submitted_at?: any;
+    last_submitted_at?: any;
+    last_submitted_by?: string;
+  };
   filters: {
     levels: string[];
     departments: { department_id: string; department_name: string }[];
@@ -495,6 +677,40 @@ type OfferingsResponse = {
     approval_required: boolean;
     pending_changes?: PlanningChange[];
   };
+};
+
+type SpecialClassSlot = {
+  schedule_id?: string | null;
+  day?: string | null;          // M/T/W/H/F/S
+  start_time?: string | null;   // "0730"
+  end_time?: string | null;     // "0900"
+  room_id?: string | null;      // real room_id or "ONLINE"
+  room_type?: string | null;    // e.g. "LECTURE", "LAB", "ONLINE"
+  room_number?: string | null;  // resolved display label from backend
+};
+
+type SpecialClassRow = {
+  special_id: string;
+  campus_name?: string;
+  term_id?: string;
+  term_label?: string;
+  student?: { student_number?: string; student_name?: string };
+  course?: { course_code?: string; course_title?: string };
+  section?: { section_id?: string; section_code?: string; section_remarks?: string };
+  faculty?: { faculty_name?: string };
+  schedule_entries?: SpecialClassSlot[];
+  schedule_text?: string;
+  slot1?: SpecialClassSlot | null;
+  slot2?: SpecialClassSlot | null;
+  remarks?: string | null;
+  [k: string]: any; // Additional fields
+};
+
+type SpecialClassResponse = {
+  campus?: { campus_id?: string; campus_name?: string };
+  term_id?: string;
+  term_label?: string;
+  rows: SpecialClassRow[];
 };
 
 type CurriculumItem = {
@@ -678,9 +894,31 @@ export default function CourseOfferingsPage() {
 
   const [data, setData] = useState<OfferingsResponse | null>(null);
   const [rows, setRows] = useState<OfferingRow[]>([]);
+  const [scData, setScData] = useState<SpecialClassResponse | null>(null);
+  const [scRows, setScRows] = useState<SpecialClassRow[]>([]);
+  const [scLoading, setScLoading] = useState(false);
+  const [scErr, setScErr] = useState<string | null>(null);
+
+  const [scSelectedIds, setScSelectedIds] = useState<Record<string, boolean>>({});
+  const [scExporting, setScExporting] = useState(false);
+  const [scExportErr, setScExportErr] = useState<string>("");
+
+  /** ------------------ Editing state ------------------ */
+  const [scEditingId, setScEditingId] = useState<string | null>(null);
+  const [scEditRemarks, setScEditRemarks] = useState<string>("");
+
+  /** room edits (we store room_id because backend update wants room_id) */
+  const [scEditRoom1, setScEditRoom1] = useState<string>(""); // room_id or "ONLINE"
+  const [scEditRoom2, setScEditRoom2] = useState<string>("");
+
+  /** eligible rooms cache per slot key `${special_id}:1` or `${special_id}:2` */
+  const [scEligibleRooms, setScEligibleRooms] = useState<Record<string, any[]>>({});
+  const [scEligibleRoomsLoading, setScEligibleRoomsLoading] = useState<Record<string, boolean>>({});
+  const [scSaveLoadingId, setScSaveLoadingId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
   const [conflict, setConflict] = useState<ConflictState | null>(null);
+  const [conflictBusy, setConflictBusy] = useState(false);
   const [globalElectives, setGlobalElectives] = useState<CourseOption[]>([]);
   const [electiveOptionsCache, setElectiveOptionsCache] = useState<Record<string, CourseOption[]>>({});
 // ---------- RoomSelectBox (SelectBox-powered) ----------
@@ -704,21 +942,21 @@ const RoomSelectBox: React.FC<{
   const currentLabel = React.useMemo(() => {
     const currentId = (value ?? tbaId ?? "") as string;
     const hit = opts.find(o => o.id === currentId);
-    return hit ? hit.label : "—";
+    return hit ? hit.label : "TBA";
   }, [opts, value, tbaId]);
 
   return (
-    <div className={cls("relative z-20 w-full min-w-0 max-w-full overflow-hidden", className)}>
-    <SelectBox
-      value={currentLabel}
-      onChange={(label: string) => {
-        const match = opts.find(o => o.label === label);
-        onChange(match?.id ?? tbaId ?? null);
-      }}
-      options={opts.map(o => o.label)}
-      disabled={!!disabled}
-      className="!min-w-0 w-full max-w-full"
-    />
+    <div className={cls("relative z-50 w-full min-w-0 max-w-full overflow-visible", className)}>
+      <SelectBox
+        value={currentLabel}
+        onChange={(label: string) => {
+          const match = opts.find(o => o.label === label);
+          onChange(match?.id ?? tbaId ?? null);
+        }}
+        options={opts.map(o => o.label)}
+        disabled={!!disabled}
+        className="!min-w-0 w-full max-w-full"
+      />
     </div>
   );
 };
@@ -734,6 +972,9 @@ const EligibleRoomSelect: React.FC<{
     roomType?: string | null;
     capacity?: number | null;
     excludeScheduleIds?: string[];
+    // Optional context (especially useful for Special Class rows)
+    sectionId?: string | null;
+    scheduleId?: string | null;
   };
   fallbackRooms: RoomOption[];  // e.g., data.room_options (used when slot not ready)
   value: string | null | undefined;
@@ -750,39 +991,80 @@ const EligibleRoomSelect: React.FC<{
 
   useEffect(() => {
     let cancelled = false;
+
+    const pickTba = (): RoomOption => {
+      const hit =
+        fallbackRooms.find(
+          (r) =>
+            String(r.room_number || "")
+              .replace(/[-–—]/g, "")
+              .trim()
+              .toUpperCase() === "TBA"
+        ) ?? null;
+
+      return (
+        hit ??
+        ({
+          room_id: "",
+          room_number: "TBA",
+          capacity: null,
+          room_type: null,
+        } as any)
+      );
+    };
+
     (async () => {
+      const tbaOpt = pickTba();
+
       if (!ready || disabled) {
-        setOpts(filterRoomsByCap(fallbackRooms, spec.capacity));
+        const base = filterRoomsByCap(fallbackRooms, spec.capacity).filter(
+          (r) => String(r.room_id || "").toUpperCase() !== "ONLINE"
+        );
+        if (!cancelled) setOpts(base.length ? base : [tbaOpt]);
         return;
       }
+
       try {
+        // IMPORTANT: match backend query keys (handled by api.ts mapping too)
         const payload = {
-          campus_id: campusId,
+          // When present, these allow the backend to infer enrollment_cap/room_type even if
+          // Special Class rows lack those fields locally.
+          section_id: spec.sectionId || undefined,
+          schedule_id: spec.scheduleId || undefined,
           day: toAbbrevDay(spec.day || ""),
           start: toHHMM(spec.start || ""),
           end: toHHMM(spec.end || ""),
-          required_type: spec.roomType || undefined,
-          min_capacity: spec.capacity ?? undefined,
-          exclude_schedule_ids: spec.excludeScheduleIds || [],
+          room_type: spec.roomType || undefined,
+          capacity: spec.capacity ?? undefined,
+          exclude: spec.excludeScheduleIds || [],
         } as any;
 
         const res: any = await getEligibleRoomsForOffering(userId, payload);
-        const list: RoomOption[] = Array.isArray(res?.rooms) ? res.rooms : (res ?? []);
+        const list: RoomOption[] = Array.isArray(res?.rooms) ? res.rooms : res ?? [];
 
-        const filtered = filterRoomsByCap(list, spec.capacity).filter((r) => {
-          if (!spec.roomType) return true;
-          const a = String(r.room_type || "").toLowerCase();
-          const b = String(spec.roomType || "").toLowerCase();
-          return a === b;
-        });
+        const filtered = filterRoomsByCap(list, spec.capacity)
+          .filter((r) => {
+            if (!spec.roomType) return true;
+            const a = String(r.room_type || "").toLowerCase();
+            const b = String(spec.roomType || "").toLowerCase();
+            return a === b;
+          })
+          .filter((r) => String(r.room_id || "").toUpperCase() !== "ONLINE");
 
-        if (!cancelled) setOpts(filtered);
+        const merged: RoomOption[] = [
+          tbaOpt,
+          ...filtered.filter((r) => String(r.room_id || "") !== String(tbaOpt.room_id || "")),
+        ];
 
+        if (!cancelled) setOpts(merged);
       } catch {
-        if (!cancelled) setOpts([]);
+        if (!cancelled) setOpts([tbaOpt]);
       }
     })();
-    return () => { cancelled = true; };
+
+    return () => {
+      cancelled = true;
+    };
   }, [
     userId,
     campusId,
@@ -823,7 +1105,49 @@ const EligibleRoomSelect: React.FC<{
   const [showEditCourseModal, setShowEditCourseModal] = useState(false); // ← NEW
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [importBusy, setImportBusy] = useState(false);
-  // Offerings collapse state (keyed by "ID::PROGRAM")
+const [showCurrImportModal, setShowCurrImportModal] = useState(false);
+const [currImportErr, setCurrImportErr] = useState<string | null>(null);
+
+  const downloadCurriculumCsvTemplate = () => {
+    // CSV template for List of Courses (curriculum/flowchart import)
+    const headers = [
+      "Batch",
+      "Program Level",
+      "Program",
+      "Term Number",
+      "Academic Year",
+      "Campus",
+      "Course 1",
+      "Course 2",
+      "Course 3",
+      "Course 4",
+      "Course 5",
+    ];
+    const sample = [
+      "ID 126",
+      "Undergraduate",
+      "BSCS-ST",
+      "1",
+      String(new Date().getFullYear() + 1),
+      (curr?.campus?.campus_name ?? data?.campus?.campus_name ?? "Manila"),
+      "CCDSALG",
+      "CCPROG2",
+      "",
+      "",
+      "",
+    ];
+    const csv = headers.join(",") + "\n" + sample.join(",") + "\n";
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "apo_list_of_courses_template.csv";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  };
+// Offerings collapse state (keyed by "ID::PROGRAM")
   const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
 
   const user = useMemo(() => {
@@ -838,6 +1162,81 @@ const EligibleRoomSelect: React.FC<{
       : (user.roles[0] as string) || "User";
   }, [user]);
   const campusLabel = data?.campus?.campus_name || curr?.campus?.campus_name || "";
+  const apoCampus = String(user?.campus_name || user?.campus || user?.campusName || "").toUpperCase();
+
+  const scRowsForCampus = useMemo(() => {
+    const myCampus =
+      apoCampus ||
+      String(scData?.campus?.campus_name || "").toUpperCase() ||
+      String(data?.campus?.campus_name || "").toUpperCase();
+
+    if (!myCampus) return scRows;
+
+    return scRows.filter((r) => {
+      const rowCampus = String(r.campus_name || scData?.campus?.campus_name || "").toUpperCase();
+      return !rowCampus || rowCampus === myCampus;
+    });
+  }, [scRows, apoCampus, scData?.campus?.campus_name, data?.campus?.campus_name]);
+
+
+  const scSelectedList = useMemo(
+    () => scRowsForCampus.filter((r) => !!scSelectedIds[String((r as any)?.special_id)]).map((r) => String((r as any)?.special_id)),
+    [scRowsForCampus, scSelectedIds]
+  );
+
+  const toggleAllSpecialClassVisible = (checked: boolean) => {
+    setScSelectedIds((prev) => {
+      const next = { ...prev };
+      scRowsForCampus.forEach((r) => {
+        const id = String((r as any)?.special_id ?? "").trim();
+        if (!id) return;
+        if (checked) next[id] = true;
+        else delete next[id];
+      });
+      return next;
+    });
+  };
+
+  const toggleOneSpecialClass = (id: string, checked: boolean) => {
+    const sid = String(id ?? "").trim();
+    if (!sid) return;
+    setScSelectedIds((prev) => {
+      const next = { ...prev };
+      if (checked) next[sid] = true;
+      else delete next[sid];
+      return next;
+    });
+  };
+
+  const exportSelectedSpecialClassPdf = async () => {
+    try {
+      setScExportErr("");
+      if (scSelectedList.length === 0) {
+        setScExportErr("Select 1 row to export.");
+        return;
+      }
+      if (scSelectedList.length !== 1) {
+        setScExportErr("Select only 1 row to export.");
+        return;
+      }
+      const exportId = scSelectedList[0];
+
+      setScExporting(true);
+      const blob = await exportOMSC_Pdf({
+        termId: scData?.term_id,
+        specialId: exportId,
+      });
+
+      const fname = `SpecialClass_${exportId}_${new Date().toISOString().slice(0, 10)}.pdf`;
+      downloadBlob(blob, fname);
+    } catch (e: any) {
+      setScExportErr(e?.response?.data?.detail || e?.message || "Failed to export PDF.");
+    } finally {
+      setScExporting(false);
+    }
+  };
+
+
   // --- Electives: per-placeholder fetch helper ---
   async function ensureElectiveOptionsFor(placeholderId?: string) {
     if (!user?.userId || !placeholderId) return;
@@ -860,16 +1259,29 @@ const EligibleRoomSelect: React.FC<{
       departmentName === "All Departments"
         ? undefined
         : data?.filters.departments.find((d) => d.department_name === departmentName)?.department_id;
+
     const progId =
       programCode === "All Programs"
         ? undefined
         : (data?.filters.programs || []).find((p) => p.program_code === programCode)?.program_id;
-    const bId =
-      batchCode === "All ID"
-        ? undefined
-        : (data?.filters.ids || []).find((b) => normCode(b.batch_code) === normCode(batchCode))?.batch_id;
+
+    // IMPORTANT: "All ID" dropdown is by batch_code label, but backend filters by batch_id.
+    // Multiple batch_id can share the same batch_code. Send them ALL as CSV.
+    let bId: string | undefined = undefined;
+    if (batchCode !== "All ID") {
+      const want = normCode(batchCode);
+      const hits = (data?.filters.ids || [])
+        .filter((b) => normCode(b.batch_code) === want)
+        .map((b) => b.batch_id)
+        .filter(Boolean);
+
+      if (hits.length === 1) bId = hits[0];
+      else if (hits.length > 1) bId = hits.join(",");
+    }
+
     return { deptId, progId, bId };
   };
+
 
 const loadOfferings = async () => {
   if (!user?.userId) return;
@@ -911,7 +1323,6 @@ const loadOfferings = async () => {
   }
 };
 
-
   const loadCurriculum = async () => {
     if (!user?.userId) return;
     setLoading(true);
@@ -926,27 +1337,441 @@ const loadOfferings = async () => {
     }
   };
 
-  useEffect(() => {
-    if (view === "offerings" || view === "specialclass") loadOfferings();
-    else loadCurriculum();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [view]);
+  const [currentTermId, setCurrentTermId] = useState<string | null>(() =>
+    localStorage.getItem("currentTermId")
+  );
+
+  const loadCurrentTerm = async () => {
+    try {
+      const response = await fetch("/api/terms?is_current=true");
+      const data = await response.json();
+
+      if (data?.term_id) {
+        localStorage.setItem("currentTermId", data.term_id);
+        setCurrentTermId(data.term_id);
+      } else {
+        console.error("No current term found.");
+      }
+    } catch (error) {
+      console.error("Error fetching the current term:", error);
+    }
+  };
 
   useEffect(() => {
-    if (view === "offerings") loadOfferings();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [level, departmentName, programCode, batchCode]);
+    loadCurrentTerm();
+  }, []);
+
+
+  const loadSpecialClass = async (termId?: string) => {
+    setScLoading(true);
+    setScErr(null);
+
+    try {
+      const userId = user?.userId;
+      if (!userId) {
+        setScErr("User is not logged in");
+        return;
+      }
+
+      const data = await getSpecialClassData(userId, {
+        term_id: termId,
+        term_mode: "active",
+      });
+
+      setScData(data);
+      setScRows(data.rows || []);
+    
+      setScSelectedIds({});
+      setScExportErr("");
+    } catch (e: any) {
+      setScErr(
+        e?.message ? `Failed to load special class data: ${e.message}` : "Failed to load special class data"
+      );
+    } finally {
+      setScLoading(false);
+    }
+  };
+
+  /** ------------------ helpers for edit mode ------------------ */
+  const _slotFromRow = (row: any, idx: 1 | 2) => {
+    const se = Array.isArray(row?.schedule_entries) ? row.schedule_entries : [];
+    if (idx === 1) return row?.slot1 ?? se[0] ?? null;
+    return row?.slot2 ?? se[1] ?? null;
+  };
+
+  const _roomIdFromSlot = (slot: any): string => {
+    const rid = String(slot?.room_id ?? "").trim();
+    if (rid && rid.toUpperCase() !== "ONLINE") return rid;
+
+    const rn = String(slot?.room_number ?? "").trim().toUpperCase();
+    if (rn === "ONLINE") return ""; // treat ONLINE as TBA
+
+    return "";
+  };
+
+  const _scheduleIdsFromRow = (row: any): string[] => {
+    const se = Array.isArray(row?.schedule_entries) ? row.schedule_entries : [];
+    return se
+      .map((x: any) => String(x?.schedule_id ?? "").trim())
+      .filter(Boolean);
+  };
+
+  const _minCapacityFromRow = (row: any): number | undefined => {
+    // best-effort: only pass if it exists in data model
+    const v =
+      row?.min_capacity ??
+      row?.required_capacity ??
+      row?.capacity ??
+      row?.section?.min_capacity ??
+      row?.section?.capacity;
+
+    const n = typeof v === "number" ? v : Number(String(v ?? "").trim());
+    return Number.isFinite(n) && n > 0 ? n : undefined;
+  };
+
+  /** Load eligible rooms for a specific row+slot using the SAME room-filter endpoint used in offerings */
+  const ensureEligibleRoomsForSlot = async (row: SpecialClassRow, idx: 1 | 2) => {
+    const key = `${row.special_id}:${idx}`;
+    if (scEligibleRooms[key]) return;
+
+    const userId = user?.userId;
+    if (!userId) return;
+
+    const slot = _slotFromRow(row as any, idx);
+    const section_id = String((row as any)?.section_id ?? "").trim();
+    const schedule_id = String((slot as any)?.schedule_id ?? "").trim();
+    const day = String(slot?.day ?? "").trim();
+    const start = String(slot?.start_time ?? "").trim();
+    const end = String(slot?.end_time ?? "").trim();
+    if (!day || !start || !end) return;
+
+    const room_type = String(slot?.room_type ?? "").trim() || undefined;
+    const capacity = _minCapacityFromRow(row);
+    const exclude = _scheduleIdsFromRow(row);
+
+    setScEligibleRoomsLoading((p) => ({ ...p, [key]: true }));
+    try {
+      const rooms = await getEligibleRoomsForOffering(userId, {
+        section_id: section_id || undefined,
+        schedule_id: schedule_id || undefined,
+        day,
+        start_time: start,
+        end_time: end,
+        room_type,
+        capacity,
+        exclude,
+      });
+
+      // rooms shape can vary; we keep it generic and label it in UI
+      // rooms shape can vary; we keep it generic and label it in UI
+      setScEligibleRooms((p) => ({ ...p, [key]: Array.isArray(rooms) ? rooms : [] }));
+    } catch (e) {
+      // don’t block editing; just keep rooms empty and rely on current room display
+      setScEligibleRooms((p) => ({ ...p, [key]: [] }));
+    } finally {
+      setScEligibleRoomsLoading((p) => ({ ...p, [key]: false }));
+    }
+  };
+
+  const beginEditSpecialClassRow = async (row: SpecialClassRow) => {
+    setScEditingId(row.special_id);
+
+    // remarks edit (special class remarks)
+    setScEditRemarks(String(row.remarks ?? ""));
+
+    // room edits (we store room_id)
+    const s1 = _slotFromRow(row as any, 1);
+    const s2 = _slotFromRow(row as any, 2);
+    setScEditRoom1(_roomIdFromSlot(s1));
+    setScEditRoom2(_roomIdFromSlot(s2));
+
+    // preload eligible rooms for dropdowns (same logic as offerings)
+    await Promise.all([ensureEligibleRoomsForSlot(row, 1), ensureEligibleRoomsForSlot(row, 2)]);
+  };
+
+  const cancelEditSpecialClassRow = () => {
+    setScEditingId(null);
+    setScEditRemarks("");
+    setScEditRoom1("");
+    setScEditRoom2("");
+    setScSaveLoadingId(null);
+  };
+
+  const saveSpecialClassRowEdits = async (row: SpecialClassRow) => {
+    const userId = user?.userId;
+    if (!userId) {
+      setScErr("User is not logged in");
+      return;
+    }
+
+    setScSaveLoadingId(row.special_id);
+    setScErr(null);
+
+    try {
+      // build schedule_entries payload (keep day/start/end; update room_id only)
+      // IMPORTANT: some Special Class rows may not have schedule_entries populated,
+      // but do have slot1/slot2. Use those as fallback so room changes persist and
+      // immediately reflect in the table.
+      const seBase =
+        Array.isArray(row.schedule_entries) && row.schedule_entries.length > 0
+          ? row.schedule_entries
+          : [row.slot1, row.slot2].filter(Boolean);
+      const next = [...(seBase as any[])].map((x) => ({ ...x }));
+
+      if (next[0]) next[0].room_id = scEditRoom1 || null;
+      if (next[1]) next[1].room_id = scEditRoom2 || null;
+
+      await updateApoSpecialClassRow(userId, {
+        special_id: row.special_id,
+        term_id: row.term_id ?? scData?.term_id, // important for correct record
+        remarks: scEditRemarks,
+        schedule_entries: next.map((x) => ({
+          schedule_id: x?.schedule_id ?? null,
+          room_id: x?.room_id ?? null,
+        })),
+      });
+
+      // Update UI after successful save
+      setScRows((prev) =>
+        prev.map((r) =>
+          r.special_id !== row.special_id
+            ? r
+            : {
+                ...r,
+                remarks: scEditRemarks,
+                schedule_entries: next,
+                slot1: next[0] ?? r.slot1 ?? null,
+                slot2: next[1] ?? r.slot2 ?? null,
+              }
+        )
+      );
+
+      cancelEditSpecialClassRow();
+    } catch (e: any) {
+      setScErr(
+        e?.message
+          ? `Failed to save special class edits: ${e.message}`
+          : "Failed to save special class edits"
+      );
+      // keep edit mode open so user doesn’t lose input
+    } finally {
+      setScSaveLoadingId(null);
+    }
+  };
+
+  // View switching: specialclass + curriculum only
+  useEffect(() => {
+    if (view === "specialclass") {
+      const tid = currentTermId || data?.term_id || curr?.term_id || undefined;
+      loadSpecialClass(tid);
+      return;
+    }
+
+    if (view === "curriculum") loadCurriculum();
+  }, [view, currentTermId, data?.term_id, curr?.term_id]);
+
+  // Offerings: reload whenever dropdown filters change
+  useEffect(() => {
+    if (view !== "offerings") return;
+  if (blockedByImport) {
+    alert("You must import pre-enlistment data before making changes.");
+    return;
+  }
+  if (blockedByImport) {
+    alert("You must import pre-enlistment data before making changes.");
+    return;
+  }
+    if (!user?.userId) return;
+
+    // small debounce so rapid changes don't spam requests
+    const t = setTimeout(() => {
+      loadOfferings();
+    }, 150);
+
+    return () => clearTimeout(t);
+  }, [view, user?.userId, level, departmentName, batchCode, programCode]);
+
+
 
   /* -------------------------- planning banner only -------------------------- */
 
   const blockedByImport = view === "offerings" && !!data?.planning?.needs_import;
+  // Avoid showing the approval UI when there are no actionable updates.
+  const hasPlanUpdates = view === "offerings" && !!data?.planning?.pending_changes?.length;
   // Show banner, but do NOT block editing
-  const showApprovalBanner = view === "offerings" && !blockedByImport && !!data?.planning?.approval_required;
+  const showApprovalBanner = view === "offerings" && !blockedByImport && hasPlanUpdates && !!data?.planning?.approval_required;
 
   const [showForward, setShowForward] = useState(false);
   const [showPlanModal, setShowPlanModal] = useState(false);
-  
-  // Build a lookup so the modal can show "CODE — Title" instead of course_id
+  const didAutoOpenPlan = useRef(false);
+  // If backend requires a comment but UI didn't know yet, force showing the comment prompt
+  const [forceRequireNote, setForceRequireNote] = useState(false);
+  const [submitAck, setSubmitAck] = useState<{ open: boolean; title: string; details: string }>({ open: false, title: '', details: '' });
+
+  // Generic, styled dialogs (used for Add/Edit/Delete confirmations + friendly notices)
+  const confirmActionRef = useRef<null | (() => Promise<void>)>(null);
+  type ConfirmDlgState = {
+    open: boolean;
+    title: string;
+    description?: string;
+    confirmText: string;
+    cancelText: string;
+    variant: "default" | "danger";
+    content?: React.ReactNode;
+    busy: boolean;
+  };
+
+  const [confirmDlg, setConfirmDlg] = useState<ConfirmDlgState>({
+    open: false,
+    title: "",
+    description: undefined,
+    confirmText: "Confirm",
+    cancelText: "Cancel",
+    variant: "default",
+    content: undefined,
+    busy: false,
+  });
+  const [noticeDlg, setNoticeDlg] = useState<{ open: boolean; title: string; message: string }>({
+    open: false,
+    title: "",
+    message: "",
+  });
+  const [opAck, setOpAck] = useState<{ open: boolean; title: string; details: string }>({
+    open: false,
+    title: "",
+    details: "",
+  });
+
+  // Submit update: detect changes since last submission and suggest a note.
+  const [submitPrep, setSubmitPrep] = useState<{
+    loading: boolean;
+    changes: DetectedChanges | null;
+    suggestedNote: string;
+    error: string | null;
+  }>({ loading: false, changes: null, suggestedNote: "", error: null });
+  const hasPriorSubmit = useMemo(() => {
+    const s: any = (data as any)?.submission;
+    if (s && typeof s.has_prior_submit === "boolean") return !!s.has_prior_submit;
+    return (data?.rows || []).some((r: any) => !!r.submitted_for_scheduling);
+  }, [data]);
+
+  const openNotice = (title: string, message: string) => {
+    setNoticeDlg({ open: true, title, message });
+  };
+
+  const openConfirm = (opts: {
+    title: string;
+    description?: string;
+    confirmText?: string;
+    cancelText?: string;
+    variant?: "default" | "danger" | "warning";
+    content?: React.ReactNode;
+    onConfirm: () => Promise<void>;
+  }) => {
+    confirmActionRef.current = opts.onConfirm;
+    setConfirmDlg({
+      open: true,
+      title: opts.title,
+      description: opts.description,
+      confirmText: opts.confirmText || "Confirm",
+      cancelText: opts.cancelText || "Cancel",
+      variant: (opts.variant === "danger" ? "danger" : "default"),
+      content: opts.content,
+      busy: false,
+    });
+  };
+
+  const closeConfirm = () => {
+    confirmActionRef.current = null;
+    setConfirmDlg({
+      open: false,
+      title: "",
+      description: undefined,
+      confirmText: "Confirm",
+      cancelText: "Cancel",
+      variant: "default",
+      content: undefined,
+      busy: false,
+    });
+  };
+
+  // Baseline snapshot is stored per user + term + campus.
+  const baselineKey = useMemo(() => {
+    if (!user?.userId) return null;
+    const termId = String((data as any)?.term_id || "").trim();
+    const campusId = String((data as any)?.campus?.campus_id || "").trim();
+    if (!termId || !campusId) return null;
+    return BASELINE_KEY(user.userId, termId, campusId);
+  }, [user?.userId, (data as any)?.term_id, (data as any)?.campus?.campus_id]);
+
+  const fetchAllOfferingsSnapshot = async (): Promise<SnapshotRow[]> => {
+    if (!user?.userId) return [];
+    // Fetch unfiltered offerings to avoid missing changes that are hidden by filters.
+    const resp: any = await getApoCourseOfferings(user.userId, { view: "offerings" } as any);
+    const rr = (resp?.rows || []) as OfferingRow[];
+    const snap = rr.map(toSnapshotRow).filter((x): x is SnapshotRow => !!x);
+    return snap;
+  };
+
+  const persistBaselineSnapshot = async () => {
+    if (!baselineKey) return;
+    try {
+      const snapshot = await fetchAllOfferingsSnapshot();
+      localStorage.setItem(
+        baselineKey,
+        JSON.stringify({ saved_at: Date.now(), rows: snapshot })
+      );
+    } catch {
+      // Non-blocking: baseline snapshot is a UX helper only.
+    }
+  };
+
+  const prepareSubmitUpdate = async () => {
+    if (!baselineKey) {
+      setSubmitPrep({ loading: false, changes: null, suggestedNote: "", error: null });
+      return;
+    }
+
+    setSubmitPrep({ loading: true, changes: null, suggestedNote: "", error: null });
+    try {
+      const stored = safeJsonParse<{ rows: SnapshotRow[] }>(localStorage.getItem(baselineKey), { rows: [] });
+      const baselineRowsRaw = Array.isArray(stored?.rows) ? stored.rows : [];
+      const baselineRows = baselineRowsRaw.filter((r: any) => r && typeof r.key === "string" && String(r.key).startsWith("sec:"));
+      const currentRows = await fetchAllOfferingsSnapshot();
+      const changes = computeDetectedChanges(baselineRows, currentRows);
+      const suggestedNote = buildSuggestedNote(changes);
+      setSubmitPrep({ loading: false, changes, suggestedNote, error: null });
+    } catch (e: any) {
+      setSubmitPrep({
+        loading: false,
+        changes: null,
+        suggestedNote: "",
+        error: e?.message || "Failed to detect changes.",
+      });
+    }
+  };
+
+  // Make the approval step hard to miss: auto-open the planning review once per update cycle.
+  // (But never show it when there are no pending changes.)
+  useEffect(() => {
+    if (view !== "offerings") return;
+    if (!showApprovalBanner) return;
+    if (showPlanModal) return;
+    if (didAutoOpenPlan.current) return;
+    didAutoOpenPlan.current = true;
+    setShowPlanModal(true);
+  }, [view, showApprovalBanner, showPlanModal]);
+
+  // If updates disappear (approved or none), allow auto-open again when a new set appears later.
+  useEffect(() => {
+    if (!hasPlanUpdates) didAutoOpenPlan.current = false;
+  }, [hasPlanUpdates, data?.term_id]);
+
+  // If updates are no longer available (e.g., approved), ensure the modal is closed.
+  useEffect(() => {
+    if (showPlanModal && !hasPlanUpdates) setShowPlanModal(false);
+  }, [showPlanModal, hasPlanUpdates]);
+// Build a lookup so the modal can show "CODE — Title" instead of course_id
 const planCourseIndex = useMemo(() => {
   type Meta = { code: string; title: string };
   const m: Record<string, Meta> = {};
@@ -1106,6 +1931,23 @@ useEffect(() => {
 
   const [editing, setEditing] = useState<{ row: OfferingRow; draft: EditDraft } | null>(null);
 
+  /* ------------------------- Keyboard shortcut refs ------------------------- */
+  // Keep keydown listener stable (mounted once) while always calling the latest
+  // undo/redo handlers and reading the latest modal/edit state.
+  const editingRef = useRef<{ row: OfferingRow; draft: EditDraft } | null>(null);
+  const conflictRef = useRef<ConflictState | null>(null);
+  const shortcutFnsRef = useRef<{
+    undoEditDraft: () => void;
+    redoEditDraft: () => void;
+    undoServerChange: () => Promise<void>;
+    redoServerChange: () => Promise<void>;
+  }>({
+    undoEditDraft: () => {},
+    redoEditDraft: () => {},
+    undoServerChange: async () => {},
+    redoServerChange: async () => {},
+  });
+
 /* ------------------------- Undo / Redo (Edit Draft) ------------------------- */
 // History applies to the current editing.draft only (safe: does not touch saved server data)
 const [editUndo, setEditUndo] = useState<EditDraft[]>([]);
@@ -1186,6 +2028,386 @@ useEffect(() => {
   lastDraftSigRef.current = sig;
 }, [editing?.row?.section?.section_id, editing?.draft]);
 
+/* -------------------- Undo / Redo (Server mutations) -------------------- */
+// NOTE: This is for committed server changes (add/edit/delete/replace).
+// It intentionally does NOT attempt to undo plan approvals or submissions.
+type ServerOp = {
+  label: string;
+  undo: () => Promise<void>;
+  redo: () => Promise<void>;
+};
+
+const [srvUndo, setSrvUndo] = useState<ServerOp[]>([]);
+const [srvRedo, setSrvRedo] = useState<ServerOp[]>([]);
+const srvUndoRef = useRef<ServerOp[]>([]);
+const srvRedoRef = useRef<ServerOp[]>([]);
+const [srvBusy, setSrvBusy] = useState(false);
+
+const syncSrvStacks = (u: ServerOp[], r: ServerOp[]) => {
+  srvUndoRef.current = u;
+  srvRedoRef.current = r;
+  setSrvUndo(u);
+  setSrvRedo(r);
+};
+
+const pushSrvOp = (op: ServerOp) => {
+  // Any new server mutation invalidates the redo stack
+  syncSrvStacks([...srvUndoRef.current, op], []);
+};
+
+
+const cloneJson = <T,>(x: T): T => JSON.parse(JSON.stringify(x));
+
+const slotFromRow = (slot?: OfferingRow["slot1"]) => {
+  if (!slot) return undefined;
+
+  const day = toAbbrevDay(slot.day) || "";
+  const st = toHHMM(slot.start_time);
+  const en = toHHMM(slot.end_time);
+
+  // keep explicit nulls (clear room)
+  const roomId =
+    (slot as any).room_id === null ? null : ((slot as any).room_id || "").toString().trim();
+
+  const roomType = ((slot as any).room_type || "").toString().trim();
+
+  if (!day && !st && !en && !roomId) return undefined;
+
+  const out: any = {};
+  if (day) out.day = day;
+  if (st) out.start_time = st;
+  if (en) out.end_time = en;
+
+  if (roomId === null) out.room_id = null;
+  else if (roomId) out.room_id = roomId;
+
+  if (roomType) out.room_type = roomType;
+  return out;
+};
+
+const rowToAddPayload = (r: OfferingRow) => {
+  const courseType = r.course?.type_of_course || "";
+  const isGE = isGEType(courseType);
+
+  const rowIsPlaceholder = isElectivePlaceholderType(
+    r.course.type_of_course || "",
+    r.course.course_code,
+    r.course.course_title
+  );
+  const rowIsSpecific = isSpecificElectiveType(r.course.type_of_course || "");
+
+  const electiveParentId =
+    (r.links as any)?.elective_placeholder_course_id ||
+    (rowIsPlaceholder ? r.course.course_id : undefined);
+
+  const payload: any = {
+    batch_id: r.batch.batch_id,
+    program_id: r.program.program_id,
+    section_code: (r.section.section_code || "").toString(),
+    enrollment_cap: r.section.enrollment_cap ?? "",
+    remarks: r.section.remarks ?? "",
+    campus_id: data?.campus?.campus_id || undefined,
+    ...(isGE ? { auto_override: true } : {}),
+  };
+
+  if (rowIsSpecific && electiveParentId) {
+    payload.for_placeholder_course_id = electiveParentId;
+    payload.specific_course_id = r.course.course_id;
+  } else {
+    payload.course_id = r.course.course_id;
+  }
+
+  const s1 = slotFromRow(r.slot1);
+  const s2 = slotFromRow(r.slot2);
+  if (s1) payload.slot1 = s1;
+  if (s2) payload.slot2 = s2;
+
+  const fname = (r.faculty?.faculty_name || "").toString().trim();
+  if (fname) payload.faculty_name = fname;
+
+  // preserve ids if present (helpful for full-edit courses)
+  if (r.faculty && "user_id" in r.faculty) payload.faculty_user_id = r.faculty.user_id ?? null;
+  if (r.faculty && "faculty_id" in r.faculty) payload.faculty_id = r.faculty.faculty_id ?? null;
+
+  return payload;
+};
+
+const rowToEditPayload = (r: OfferingRow) => {
+  const courseType = r.course?.type_of_course || "";
+  const isGE = isGEType(courseType);
+
+  const rowIsPlaceholder = isElectivePlaceholderType(
+    r.course.type_of_course || "",
+    r.course.course_code,
+    r.course.course_title
+  );
+  const rowIsSpecific = isSpecificElectiveType(r.course.type_of_course || "");
+
+  const electiveParentId =
+    (r.links as any)?.elective_placeholder_course_id ||
+    (rowIsPlaceholder ? r.course.course_id : undefined);
+
+  const payload: any = {
+    section_id: r.section.section_id,
+    course_id: r.course.course_id,
+    section_code: (r.section.section_code || "").toString(),
+    enrollment_cap: r.section.enrollment_cap ?? "",
+    remarks: r.section.remarks ?? "",
+    ...(isGE ? { auto_override: true } : {}),
+  };
+
+  if (rowIsSpecific && electiveParentId) {
+    payload.for_placeholder_course_id = electiveParentId;
+    payload.specific_course_id = r.course.course_id;
+  } else if (rowIsPlaceholder) {
+    payload.for_placeholder_course_id = r.course.course_id; // placeholder is its own parent
+    payload.specific_course_id = undefined;
+  }
+
+  const s1 = slotFromRow(r.slot1);
+  const s2 = slotFromRow(r.slot2);
+  if (s1) payload.slot1 = s1;
+  if (s2) payload.slot2 = s2;
+
+  const fname = (r.faculty?.faculty_name || "").toString().trim();
+  if (fname) payload.faculty_name = fname;
+
+  if (r.faculty && "user_id" in r.faculty) payload.faculty_user_id = r.faculty.user_id ?? null;
+  if (r.faculty && "faculty_id" in r.faculty) payload.faculty_id = r.faculty.faculty_id ?? null;
+
+  return payload;
+};
+
+const runAddWithAutoOverride = async (payload: any, reason: string) => {
+  if (!user?.userId) throw new Error("Not logged in.");
+  const res = await addApoOfferingRow(user.userId, payload as any);
+  if ("conflict" in res) {
+    const res2 = await addApoOfferingRow(user.userId, {
+      ...payload,
+      override: true,
+      override_token: res.conflict.override_token,
+      override_reason: reason,
+    } as any);
+    if ("conflict" in res2) throw new Error("Action still has conflicts after override.");
+    return res2;
+  }
+  return res;
+};
+
+const runEditWithAutoOverride = async (payload: any, reason: string) => {
+  if (!user?.userId) throw new Error("Not logged in.");
+  const res = await editApoOfferingRow(user.userId, payload as any);
+  if ("conflict" in res) {
+    const res2 = await editApoOfferingRow(user.userId, {
+      ...payload,
+      override: true,
+      override_token: res.conflict.override_token,
+      override_reason: reason,
+    } as any);
+    if ("conflict" in res2) throw new Error("Action still has conflicts after override.");
+    return res2;
+  }
+  return res;
+};
+
+const runDeleteWithAutoOverride = async (payload: any, reason: string) => {
+  if (!user?.userId) throw new Error("Not logged in.");
+  const res = await deleteApoOfferingRow(user.userId, payload as any);
+  if ("conflict" in res) {
+    const res2 = await deleteApoOfferingRow(user.userId, {
+      ...payload,
+      override: true,
+      override_token: res.conflict.override_token,
+      override_reason: reason,
+    } as any);
+    if ("conflict" in res2) throw new Error("Action still has conflicts after override.");
+    return res2;
+  }
+  return res;
+};
+
+
+const runRestoreRow = async (section_id: string) => {
+  if (!user?.userId) throw new Error("Not logged in.");
+  return await restoreApoOfferingRow(user.userId, { section_id });
+};
+
+const makeAddOp = (basePayload: any, createdSectionId: string): ServerOp => {
+  let currentId = createdSectionId;
+  const label = `Add ${String(basePayload?.course_id || basePayload?.specific_course_id || "section")}`;
+
+  return {
+    label,
+    undo: async () => {
+      await runDeleteWithAutoOverride({ section_id: currentId }, "Undo add");
+    },
+    redo: async () => {
+      // If the prior undo was a SOFT delete (archived), restore in-place; otherwise re-add.
+      try {
+        await runRestoreRow(currentId);
+      } catch {
+        const r = await runAddWithAutoOverride(basePayload, "Redo add");
+        currentId = (r as any).section_id || currentId;
+      }
+    },
+  };
+};
+
+const makeEditOp = (sectionId: string, beforePayload: any, afterPayload: any, label?: string): ServerOp => {
+  return {
+    label: label || `Edit ${sectionId}`,
+    undo: async () => {
+      await runEditWithAutoOverride({ ...beforePayload, section_id: sectionId }, "Undo edit");
+    },
+    redo: async () => {
+      await runEditWithAutoOverride({ ...afterPayload, section_id: sectionId }, "Redo edit");
+    },
+  };
+};
+
+const makeDeleteOp = (snapshotRow: OfferingRow): ServerOp => {
+  const snap = cloneJson(snapshotRow);
+  let currentId = snap.section.section_id;
+
+  const label = `Delete ${String(snap.course?.course_code || snap.course?.course_id || "section")}`;
+
+  return {
+    label,
+    undo: async () => {
+      // If the delete was SOFT (archived), restore the original section_id; otherwise re-add from snapshot.
+      try {
+        await runRestoreRow(currentId);
+        return;
+      } catch {
+        // fall back to re-add
+      }
+      const payload = rowToAddPayload(snap);
+      const r = await runAddWithAutoOverride(payload, "Undo delete (re-add)");
+      currentId = (r as any).section_id || currentId;
+    },
+    redo: async () => {
+      await runDeleteWithAutoOverride({ section_id: currentId }, "Redo delete");
+    },
+  };
+};
+
+const undoServerChange = async () => {
+  if (srvBusy) return;
+  if (editing) return; // while editing, use draft undo/redo
+  if (view !== "offerings") return;
+  const stack = srvUndoRef.current;
+  if (!stack.length) return;
+
+  const op = stack[stack.length - 1];
+  setSrvBusy(true);
+  try {
+    await op.undo();
+    syncSrvStacks(stack.slice(0, -1), [...srvRedoRef.current, op]);
+    await loadOfferings();
+  } catch (e: any) {
+    alert(e?.message || `Failed to undo: ${op.label}`);
+  } finally {
+    setSrvBusy(false);
+  }
+};
+
+const redoServerChange = async () => {
+  if (srvBusy) return;
+  if (editing) return; // while editing, use draft undo/redo
+  if (view !== "offerings") return;
+  const stack = srvRedoRef.current;
+  if (!stack.length) return;
+
+  const op = stack[stack.length - 1];
+  setSrvBusy(true);
+  try {
+    await op.redo();
+    syncSrvStacks([...srvUndoRef.current, op], stack.slice(0, -1));
+    await loadOfferings();
+  } catch (e: any) {
+    alert(e?.message || `Failed to redo: ${op.label}`);
+  } finally {
+    setSrvBusy(false);
+  }
+};
+
+/* ---------------------- Keyboard shortcuts (Ctrl/Cmd) ---------------------- */
+// NOTE: We intentionally do NOT override native undo/redo inside text inputs.
+useEffect(() => {
+  editingRef.current = editing;
+}, [editing]);
+
+useEffect(() => {
+  conflictRef.current = conflict;
+}, [conflict]);
+
+useEffect(() => {
+  shortcutFnsRef.current = {
+    undoEditDraft,
+    redoEditDraft,
+    undoServerChange,
+    redoServerChange,
+  };
+}, [undoEditDraft, redoEditDraft, undoServerChange, redoServerChange]);
+
+useEffect(() => {
+  const isEditableTarget = (t: EventTarget | null) => {
+    const el = t as HTMLElement | null;
+    if (!el) return false;
+
+    // Native form fields
+    const tag = (el as any).tagName ? String((el as any).tagName).toLowerCase() : "";
+    if (tag === "input" || tag === "textarea" || tag === "select") return true;
+
+    // contenteditable / rich editors
+    if ((el as any).isContentEditable) return true;
+    if (el.closest?.("[contenteditable='true']")) return true;
+    if (el.getAttribute?.("role") === "textbox") return true;
+    return false;
+  };
+
+  const onKeyDown = (e: KeyboardEvent) => {
+    if (e.defaultPrevented) return;
+    if (e.altKey) return;
+
+    const mod = e.ctrlKey || e.metaKey; // Ctrl (Win/Linux) / Cmd (Mac)
+    if (!mod) return;
+
+    const key = String(e.key || "").toLowerCase();
+    if (key !== "z" && key !== "y") return;
+
+    // Don’t intercept while the user is typing in an editable control
+    if (isEditableTarget(e.target)) return;
+
+    // Avoid undo/redo while resolving conflicts (keeps UX predictable)
+    if (conflictRef.current) return;
+
+    // We will handle it
+    e.preventDefault();
+    e.stopPropagation();
+
+    const fns = shortcutFnsRef.current;
+    const isEditing = !!editingRef.current;
+
+    // Ctrl/Cmd+Z => Undo
+    if (key === "z" && !e.shiftKey) {
+      if (isEditing) fns.undoEditDraft();
+      else void fns.undoServerChange();
+      return;
+    }
+
+    // Ctrl/Cmd+Y or Ctrl/Cmd+Shift+Z => Redo
+    if (key === "y" || (key === "z" && e.shiftKey)) {
+      if (isEditing) fns.redoEditDraft();
+      else void fns.redoServerChange();
+    }
+  };
+
+  window.addEventListener("keydown", onKeyDown, true);
+  return () => window.removeEventListener("keydown", onKeyDown, true);
+}, []);
+
+
   const startEdit = (row: OfferingRow) => {
     if (blockedByImport) return; // only block when import not done
     if (!row.section.section_id) return;
@@ -1199,7 +2421,7 @@ useEffect(() => {
 
     // Prefer backend-provided parent id; else, if this row is a placeholder, the row's own id is the parent.
     const electiveParentId =
-      row.links?.elective_placeholder_course_id ||
+      (row.links as any)?.elective_placeholder_course_id ||
       (rowIsPlaceholder ? row.course.course_id : undefined);
 
     // NEW: prefetch list for this specific placeholder (if any)
@@ -1322,10 +2544,14 @@ const allSpecificElectives: CourseOption[] = useMemo(() => {
 }, [data?.all_specific_electives, data?.course_options_by_group, globalElectives]);
 
 
-const saveEdit = async () => {
+const saveEditNow = async () => {
   if (!editing || !user?.userId) return;
 
   const isGE = isGEType(editing.row?.course?.type_of_course || "");
+
+  // For Undo/Redo: capture the full "before" state (server payload shape)
+  const undoBeforePayload = rowToEditPayload(editing.row);
+
 
   // --- Grab current + draft codes ---
   const campusName = data?.campus?.campus_name || "";
@@ -1380,7 +2606,7 @@ if (isGE) {
     // conflict handling (+ override on second attempt)
     if ("conflict" in res) {
       if (!isGE) {
-        handleConflict("edit", res.conflict, payload);
+        handleConflict("edit", res.conflict, { ...payload, __undo_before: undoBeforePayload });
         return;
       }
       const ov = await editApoOfferingRow(user.userId, {
@@ -1390,17 +2616,177 @@ if (isGE) {
         override_reason: "GE edit – allow free-form section code, time, day, faculty",
       } as any);
       if ("conflict" in ov) {
-        handleConflict("edit", ov.conflict, payload);
+        handleConflict("edit", ov.conflict, { ...payload, __undo_before: undoBeforePayload });
         return;
       }
+    }
+
+    // For Undo/Redo: store a reversible server op
+    try {
+      const afterPayloadFull = { ...undoBeforePayload, ...payload };
+      pushSrvOp(
+        makeEditOp(
+          String(payload.section_id),
+          undoBeforePayload,
+          afterPayloadFull,
+          `Edit ${String(editing.row.course?.course_code || editing.row.course?.course_id || payload.section_id)}`
+        )
+      );
+    } catch {
+      // ignore history errors
     }
 
     setEditing(null);
     await loadOfferings();
   } catch (e: any) {
-    alert(e?.message || "Failed to save changes.");
-    setEditing(null);
+    openNotice("Couldn't save changes", e?.message || "Failed to save changes.");
+    // Keep edit mode open so the user doesn't lose what they typed.
   }
+};
+
+const promptSaveEdit = () => {
+  if (!editing) return;
+
+  const isGE = isGEType(editing.row?.course?.type_of_course || "");
+  const campusName = data?.campus?.campus_name || "";
+
+  const currentCode = (editing.row.section.section_code || "").toUpperCase().replace(/\s+/g, "");
+  const rawDraftCode = (editing.draft.section_code || "").trim().toUpperCase();
+
+  // Determine the effective (server) section code using the same rules as saveEditNow
+  let nextSectionCode = currentCode;
+  if (isGE) {
+    nextSectionCode = rawDraftCode !== "" ? rawDraftCode : currentCode;
+  } else {
+    const normalized = rawDraftCode
+      ? (normalizeSectionCodeInput(rawDraftCode, editing.row, campusName) || rawDraftCode)
+      : "";
+    nextSectionCode = normalized ? normalized : currentCode;
+  }
+
+  const roomNumById: Record<string, string> = {};
+  (data?.room_options || []).forEach((r: any) => {
+    const id = String(r?.room_id || "").trim();
+    if (!id) return;
+    roomNumById[id] = String(r?.room_number || id);
+  });
+
+  const slotFromDraft = (d?: EditDraft["slot1"], fallback?: OfferingRow["slot1"]): SnapshotSlot => {
+    const day = toAbbrevDay((d?.day ?? fallback?.day ?? "") as any) || "";
+    const start = toHHMM((d?.start_time ?? fallback?.start_time ?? "") as any);
+    const end = toHHMM((d?.end_time ?? fallback?.end_time ?? "") as any);
+    const rid = String(d?.room_id ?? fallback?.room_number ?? fallback?.room_id ?? "").trim();
+    const room = roomNumById[rid] || rid;
+    return { day, start, end, room };
+  };
+
+  const changes: ChangeField[] = [];
+  const push = (field: string, from: string, to: string) => {
+    if (String(from) === String(to)) return;
+    changes.push({ field, from: from || "—", to: to || "—" });
+  };
+
+  // Electives: selecting a specific elective changes the offered course even when the section_id stays the same.
+  const fromCourseId = String(editing.row.course.course_id || "").trim();
+  const toCourseId = String(editing.draft.specific_course_id || "").trim() || fromCourseId;
+
+  const courseCodeById: Record<string, string> = {};
+  Object.values(data?.course_options_by_group || {}).forEach((arr: any) => {
+    (arr || []).forEach((o: any) => {
+      const id = String(o?.course_id || "").trim();
+      if (!id) return;
+      const cc = codeText(o?.course_code);
+      if (cc) courseCodeById[id] = cc;
+    });
+  });
+  (data?.all_specific_electives || []).forEach((o: any) => {
+    const id = String(o?.course_id || "").trim();
+    if (!id) return;
+    const cc = codeText(o?.course_code);
+    if (cc) courseCodeById[id] = cc;
+  });
+
+  const codeForId = (id: string) => {
+    const cc = String(courseCodeById[id] || "").trim();
+    return cc || id || "—";
+  };
+
+  push("Course", codeForId(fromCourseId), codeForId(toCourseId));
+
+  push("Section", currentCode || "—", nextSectionCode || "—");
+
+  if (isGE) {
+    const fromFaculty = (editing.row.faculty?.faculty_name || "UNASSIGNED").trim();
+    const toFaculty = (editing.draft.faculty_name || fromFaculty || "UNASSIGNED").trim() || "UNASSIGNED";
+    push("Faculty", fromFaculty, toFaculty);
+  }
+
+  const fromCap = editing.row.section.enrollment_cap;
+  const toCap = editing.draft.enrollment_cap === "" ? null : (editing.draft.enrollment_cap ?? fromCap);
+  push("Capacity", fromCap === null || fromCap === undefined ? "—" : String(fromCap), toCap === null || toCap === undefined ? "—" : String(toCap));
+
+  push("Remarks", (editing.row.section.remarks || "").trim() || "—", (editing.draft.remarks || "").trim() || "—");
+
+  const fromS1 = slotToText(slotToSnapshot(editing.row.slot1));
+  const toS1 = slotToText(slotFromDraft(editing.draft.slot1, editing.row.slot1));
+  push("Schedule 1", fromS1, toS1);
+
+  const fromS2 = slotToText(slotToSnapshot(editing.row.slot2));
+  const toS2 = slotToText(slotFromDraft(editing.draft.slot2, editing.row.slot2));
+  push("Schedule 2", fromS2, toS2);
+
+  if (!changes.length) {
+    openNotice("Nothing to save", "You haven't made any changes to this row.");
+    return;
+  }
+
+  const label = `${editing.row.course.course_code}${editing.row.section.section_code ? ` ${editing.row.section.section_code}` : ""}`;
+
+  openConfirm({
+    title: "Save changes to this section?",
+    description: hasPriorSubmit
+      ? "Your edits will be saved now. To inform Scheduling/OM, submit an update after saving."
+      : "Your edits will be saved to the current plan.",
+    confirmText: "Save changes",
+    cancelText: "Cancel",
+    content: (
+      <div className="space-y-3">
+        <div className="text-sm text-slate-700">
+          <div className="font-semibold text-slate-900">{label}</div>
+          <div className="text-xs text-slate-500">Review what will change:</div>
+        </div>
+        <div className="max-h-[240px] overflow-auto rounded-lg border border-slate-200 bg-slate-50 p-3">
+          <ul className="space-y-2">
+            {changes.map((c, i) => (
+              <li key={i} className="text-sm">
+                <span className="font-medium text-slate-800">{c.field}:</span>{" "}
+                <span className="text-slate-600">{c.from}</span>{" "}
+                <span className="text-slate-400">→</span>{" "}
+                <span className="text-slate-900">{c.to}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      </div>
+    ),
+    onConfirm: async () => {
+      setConfirmDlg((p) => ({ ...p, busy: true }));
+      try {
+        await saveEditNow();
+        closeConfirm();
+        if (hasPriorSubmit) {
+          setOpAck({
+            open: true,
+            title: "Saved",
+            details: "Your changes were saved. Submit an update so Scheduling/OM sees the new details.",
+          });
+        }
+      } catch (e: any) {
+        openNotice("Couldn't save changes", e?.message || "Failed to save changes.");
+        setConfirmDlg((p) => ({ ...p, busy: false }));
+      }
+    },
+  });
 };
 
   /* ----------------------------- offerings: add row ----------------------------- */
@@ -1425,7 +2811,7 @@ if (isGE) {
   const [adding, setAdding] = useState(false);
   const [addAnchorSectionId, setAddAnchorSectionId] = useState<string | null>(null);
 
-  const doAdd = async () => {
+  const doAddNow = async () => {
     if (blockedByImport) return;
     if (!user?.userId) return;
 
@@ -1434,11 +2820,18 @@ if (isGE) {
 
     const isElectiveFlow = !!addDraft.for_placeholder_course_id;
     if (isElectiveFlow && !addDraft.specific_course_id) {
-      alert("Please choose the Specific Elective to offer.");
+      openNotice("Select a specific elective", "Please choose which specific elective you want to offer.");
       return;
     }
 
     setAdding(true);
+
+    // For Undo/Redo: if we are "replacing" an elective placeholder row, capture the before-state
+    const undoAnchorRow = addAnchorSectionId ? rows.find((r) => r.section.section_id === addAnchorSectionId) : undefined;
+    const undoBeforeAnchor = undoAnchorRow ? rowToEditPayload(undoAnchorRow) : null;
+
+    let didSucceed: "add" | "replace" | null = null;
+
     try {
       const courseType = addOptionsTypeById[effectiveCourseId] || "";
       const isGE = isGEType(courseType);
@@ -1461,10 +2854,29 @@ if (isGE) {
             override_reason: "Elective replacement",
           } as any);
           if ("conflict" in ov) {
-            handleConflict("edit", ov.conflict, editPayload);
+            handleConflict("edit", ov.conflict, { ...(editPayload as any), __undo_before: undoBeforeAnchor });
             return;
           }
         }
+
+        // For Undo/Redo: record the placeholder replacement as a reversible EDIT operation
+        try {
+          if (undoBeforeAnchor && addAnchorSectionId) {
+            const afterPayloadFull = { ...undoBeforeAnchor, ...(editPayload as any) };
+            pushSrvOp(
+              makeEditOp(
+                addAnchorSectionId,
+                undoBeforeAnchor,
+                afterPayloadFull,
+                `Replace elective on ${addAnchorSectionId}`
+              )
+            );
+          }
+        } catch {
+          // ignore history errors
+        }
+
+        didSucceed = "replace";
       } else {
         // normal, non-elective add flow
         const base: AddDraft = {
@@ -1473,10 +2885,14 @@ if (isGE) {
           auto_override: isGE,
           campus_id: data?.campus?.campus_id || undefined,
         };
+        let createdSectionId: string | null = null;
+
         const res = await addApoOfferingRow(user.userId, base as any);
+        if (!("conflict" in res)) createdSectionId = (res as any).section_id || null;
+
         if ("conflict" in res) {
-          const SAFE_AUTO_CODES = new Set(["NO_ROOM_SET","SEAT_DEFICIT","PREFIX_MISMATCH","CODE_WITHOUT_NUMBER","PLAN_NOT_APPROVED"]);
-          const canAuto = isGE || (res.conflict.violations || []).every((v) => SAFE_AUTO_CODES.has(v.code));
+          const SAFE_AUTO_CODES = new Set(["NO_ROOM_SET", "SEAT_DEFICIT", "PREFIX_MISMATCH", "CODE_WITHOUT_NUMBER", "PLAN_NOT_APPROVED"]);
+          const canAuto = isGE || (res.conflict.violations || []).every((v: any) => SAFE_AUTO_CODES.has(v.code));
           if (!canAuto) {
             handleConflict("add", res.conflict, base);
             return;
@@ -1487,11 +2903,23 @@ if (isGE) {
             override_token: res.conflict.override_token,
             override_reason: isGE ? "GE course – relax planning rules" : "Proceed despite planning warnings",
           } as any);
+          if (!("conflict" in ov)) createdSectionId = (ov as any).section_id || null;
           if ("conflict" in ov) {
             handleConflict("add", ov.conflict, base);
             return;
           }
         }
+
+        // For Undo/Redo: record ADD as reversible operation
+        if (createdSectionId) {
+          try {
+            pushSrvOp(makeAddOp(base, createdSectionId));
+          } catch {
+            // ignore history errors
+          }
+        }
+
+        didSucceed = "add";
       }
 
       await loadOfferings();
@@ -1508,9 +2936,95 @@ if (isGE) {
         slot1: { room_id: "" },
         slot2: { room_id: "" },
       });
+
+      if (didSucceed === "add") {
+        setOpAck({
+          open: true,
+          title: "Offering added",
+          details: "The new row is now part of your plan. You can edit it anytime before submitting for scheduling.",
+        });
+      } else if (didSucceed === "replace") {
+        setOpAck({
+          open: true,
+          title: "Elective updated",
+          details: "The placeholder elective was replaced with your selected specific elective.",
+        });
+      }
+    } catch (e: any) {
+      openNotice("Couldn't add this offering", e?.message || "Add failed.");
     } finally {
       setAdding(false);
     }
+  };
+
+  const promptAdd = () => {
+    if (blockedByImport) return;
+    if (adding) return;
+
+    const effectiveCourseId = addDraft.specific_course_id || addDraft.course_id;
+    if (!effectiveCourseId) {
+      openNotice("Select a course", "Choose a course first, then click Add.");
+      return;
+    }
+
+    const isElectiveFlow = !!addDraft.for_placeholder_course_id;
+    if (isElectiveFlow && !addDraft.specific_course_id) {
+      openNotice("Select a specific elective", "Please choose which specific elective you want to offer.");
+      return;
+    }
+
+    // Derive a friendly course label
+    let courseLabel = addCourseCode;
+    try {
+      const groups = (data?.course_options_by_group ?? {}) as Record<string, CourseOption[]>;
+      for (const arr of Object.values(groups)) {
+        const hit = (arr || []).find((o) => String(o?.course_id || "") === String(effectiveCourseId));
+        if (hit) {
+          courseLabel = `${codeText(hit.course_code)} — ${hit.course_title}`.trim();
+          break;
+        }
+      }
+    } catch {
+      // ignore
+    }
+
+    const cap = typeof addDraft.enrollment_cap === "number" ? addDraft.enrollment_cap : 20;
+    const remarks = (addDraft.remarks || "").trim();
+
+    openConfirm({
+      title: isElectiveFlow && addAnchorSectionId ? "Replace elective placeholder?" : "Add this course offering?",
+      description: isElectiveFlow && addAnchorSectionId
+        ? "This will update the placeholder row you selected." 
+        : "This will add a new row to your planned offerings.",
+      confirmText: isElectiveFlow && addAnchorSectionId ? "Replace elective" : "Add offering",
+      cancelText: "Cancel",
+      content: (
+        <div className="space-y-3">
+          <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm">
+            <div className="font-semibold text-slate-900">{courseLabel || "Selected course"}</div>
+            <div className="mt-1 text-slate-700">
+              <div><span className="font-medium">Capacity:</span> {cap}</div>
+              <div><span className="font-medium">Remarks:</span> {remarks || "—"}</div>
+            </div>
+            {isElectiveFlow && addAnchorSectionId && (
+              <div className="mt-2 text-xs text-slate-500">
+                You can change this again later from the same placeholder row.
+              </div>
+            )}
+          </div>
+        </div>
+      ),
+      onConfirm: async () => {
+        setConfirmDlg((p) => ({ ...p, busy: true }));
+        try {
+          await doAddNow();
+          closeConfirm();
+        } catch (e: any) {
+          openNotice("Couldn't add this offering", e?.message || "Add failed.");
+          setConfirmDlg((p) => ({ ...p, busy: false }));
+        }
+      },
+    });
   };
 
   const copyRow = async (r: OfferingRow) => {
@@ -1587,18 +3101,75 @@ if (isGE) {
     }
   };
 
-  const doDelete = async (row: OfferingRow) => {
+  const doDeleteNow = async (row: OfferingRow) => {
     if (blockedByImport) return;
     if (!user?.userId || !row.section.section_id) return;
-    if (!confirm("Delete this section? This cannot be undone.")) return;
-    setRows((prev) => prev.filter((r) => r.section.section_id !== row.section.section_id));
-    if (editing?.row.section.section_id === row.section.section_id) setEditing(null);
-    const res = await deleteApoOfferingRow(user.userId, { section_id: row.section.section_id } as any);
-    if ("conflict" in res) {
-      handleConflict("delete", res.conflict, { section_id: row.section.section_id });
-      return;
+
+    // For Undo/Redo: capture the row snapshot before deleting
+    const undoSnapshot = cloneJson(row);
+
+    try {
+      setRows((prev) => prev.filter((r) => r.section.section_id !== row.section.section_id));
+      if (editing?.row.section.section_id === row.section.section_id) setEditing(null);
+
+      const res = await deleteApoOfferingRow(user.userId, { section_id: row.section.section_id } as any);
+      if ("conflict" in res) {
+        handleConflict("delete", res.conflict, { section_id: row.section.section_id, __undo_snapshot: undoSnapshot });
+        return;
+      }
+
+    // For Undo/Redo: record DELETE as reversible operation
+    try {
+      pushSrvOp(makeDeleteOp(undoSnapshot));
+    } catch {
+      // ignore history errors
     }
-    await loadOfferings();
+
+      await loadOfferings();
+      setOpAck({
+        open: true,
+        title: "Offering deleted",
+        details: "The row was removed from your plan. You can undo this using the Undo button.",
+      });
+    } catch (e: any) {
+      openNotice("Couldn't delete this row", e?.message || "Delete failed.");
+      await loadOfferings();
+    }
+  };
+
+  const promptDelete = (row: OfferingRow) => {
+    if (blockedByImport) return;
+    if (!row?.section?.section_id) return;
+
+    const label = `${row.course?.course_code || "Course"}${row.section?.section_code ? ` ${row.section.section_code}` : ""}`;
+
+    openConfirm({
+      title: "Delete this offering?",
+      description: "This removes the row from your plan.",
+      confirmText: "Delete",
+      cancelText: "Cancel",
+      variant: "danger",
+      content: (
+        <div className="space-y-3">
+          <div className="rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-900">
+            <div className="font-semibold">{label}</div>
+            <div className="mt-1 text-rose-800">
+              You can bring it back using <span className="font-semibold">Undo</span> if you delete by mistake.
+            </div>
+          </div>
+        </div>
+      ),
+      onConfirm: async () => {
+        setConfirmDlg((p) => ({ ...p, busy: true }));
+        try {
+          await doDeleteNow(row);
+          closeConfirm();
+        } catch (e: any) {
+          openNotice("Couldn't delete this row", e?.message || "Delete failed.");
+          setConfirmDlg((p) => ({ ...p, busy: false }));
+        }
+      },
+    });
   };
   
   /* --------------------------- curriculum structures -------------------------- */
@@ -1734,24 +3305,16 @@ if (isGE) {
     await curriculumRemoveCourse(user.userId, { program_id, batch_id, course_id });
     await loadCurriculum();
   };
-  // treat either inline edit row or inline add row as "edit UI"
-    // treat either inline edit row or inline add row as "edit UI"
-  const inEditUI = !!editing || addAnchorKey !== null;
-
-  // NEW: give the table container extra bottom space while editing/adding
-  const [editPad, setEditPad] = useState(0);
-
-  useEffect(() => {
-    // When any dropdown-heavy UI is open, add space so menus won't be cut off
-    if (inEditUI) setEditPad(260);     // adjust if you want more/less space
-    else setEditPad(0);
-  }, [inEditUI]);
 
   /* ----------------------------------- UI ----------------------------------- */
 
   return (
     <div className="min-h-screen w-full bg-gray-50 text-slate-900">
-      <TopBar fullName={fullName} role={campusLabel ? `${roleName} | ${campusLabel}` : roleName} />
+      <TopBar
+        fullName={fullName}
+        role={campusLabel ? `${roleName} | ${campusLabel}` : roleName}
+        inboxPath="/apo/inbox"
+      />
       <Tabs
         mode="nav"
         items={[
@@ -1799,48 +3362,83 @@ if (isGE) {
       <main className="p-6 w-full">
         {/* toolbar */}
         <div className="flex flex-wrap items-center gap-3 rounded-xl border border-gray-200 bg-white p-4 shadow-sm mb-6">
-          {/* Undo / Redo (edit draft only) */}
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              title="Undo (edit draft)"
-              onClick={undoEditDraft}
-              disabled={!editing || editUndo.length === 0}
-              className={cls(
-                "inline-flex h-9 w-9 items-center justify-center rounded-md border",
-                (!editing || editUndo.length === 0)
-                  ? "opacity-40 cursor-not-allowed"
-                  : "hover:bg-gray-50"
-              )}
-            >
-              <Undo2 className="h-4 w-4 text-emerald-700" />
-            </button>
+          {/* Undo / Redo (Course Offerings tab only) */}
+          {view === "offerings" && (
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                title={
+                  editing
+                    ? "Undo (edit draft)"
+                    : srvUndo.length
+                    ? `Undo: ${srvUndo[srvUndo.length - 1].label}`
+                    : "Undo"
+                }
+                onClick={editing ? undoEditDraft : undoServerChange}
+                disabled={editing ? editUndo.length === 0 : srvBusy || srvUndo.length === 0}
+                className={cls(
+                  "inline-flex h-9 w-9 items-center justify-center rounded-md border",
+                  (editing ? editUndo.length === 0 : srvBusy || srvUndo.length === 0)
+                    ? "opacity-40 cursor-not-allowed"
+                    : "hover:bg-gray-50"
+                )}
+              >
+                <Undo2 className="h-4 w-4 text-emerald-700" />
+              </button>
 
-            <button
-              type="button"
-              title="Redo (edit draft)"
-              onClick={redoEditDraft}
-              disabled={!editing || editRedo.length === 0}
-              className={cls(
-                "inline-flex h-9 w-9 items-center justify-center rounded-md border",
-                (!editing || editRedo.length === 0)
-                  ? "opacity-40 cursor-not-allowed"
-                  : "hover:bg-gray-50"
-              )}
-            >
-              <Redo2 className="h-4 w-4 text-emerald-700" />
-            </button>
-          </div>
+              <button
+                type="button"
+                title={
+                  editing
+                    ? "Redo (edit draft)"
+                    : srvRedo.length
+                    ? `Redo: ${srvRedo[srvRedo.length - 1].label}`
+                    : "Redo"
+                }
+                onClick={editing ? redoEditDraft : redoServerChange}
+                disabled={editing ? editRedo.length === 0 : srvBusy || srvRedo.length === 0}
+                className={cls(
+                  "inline-flex h-9 w-9 items-center justify-center rounded-md border",
+                  (editing ? editRedo.length === 0 : srvBusy || srvRedo.length === 0)
+                    ? "opacity-40 cursor-not-allowed"
+                    : "hover:bg-gray-50"
+                )}
+              >
+                <Redo2 className="h-4 w-4 text-emerald-700" />
+              </button>
+            </div>
+          )}
 
-          <div className="relative min-w-[220px] flex-1">
-            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-500" />
-            <input
-              value={view === "offerings" ? search : currSearch}
-              onChange={(e) => (view === "offerings" ? setSearch(e.target.value) : setCurrSearch(e.target.value))}
-              placeholder={searchPlaceholder}
-              className="w-full rounded-lg border px-9 py-2 text-sm"
-            />
-          </div>
+          <div className="min-w-[220px] flex-1 flex items-center gap-2">
+  <div className="relative flex-1">
+    <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-500" />
+    <input
+      value={view === "offerings" ? search : currSearch}
+      onChange={(e) => (view === "offerings" ? setSearch(e.target.value) : setCurrSearch(e.target.value))}
+      placeholder={searchPlaceholder}
+      className="w-full rounded-lg border px-9 py-2 text-sm"
+    />
+  </div>
+
+  {/* Special Class: Export PDF (select 1 row) */}
+  {view === "specialclass" && (
+    <button
+      onClick={exportSelectedSpecialClassPdf}
+      disabled={scExporting || scSelectedList.length !== 1}
+      className={cls(
+        "inline-flex items-center gap-2 rounded-md bg-emerald-700 px-4 py-2 text-sm font-medium text-white shadow-sm"
+      )}
+      title={
+        scSelectedList.length !== 1
+          ? "Select exactly 1 row in Special Class to export"
+          : "Export selected Special Class row as PDF"
+      }
+    >
+      <Download className="h-4 w-4" />
+      {scExporting ? "Exporting…" : "Export PDF"}
+    </button>
+  )}
+</div>
 
           {/* Offerings filters */}
           {view === "offerings" && (
@@ -1851,27 +3449,128 @@ if (isGE) {
                 onChange={(v: string) => setDepartmentName(v)}
                 options={["All Departments", ...(data?.filters.departments || []).map((d) => d.department_name)]}
               />
-              <SelectBox value={batchCode} onChange={(v: string) => setBatchCode(v)} options={idOptions} />
+              <SelectBox
+                value={batchCode}
+                onChange={(v: string) => {
+                  setBatchCode(v);
+                  setProgramCode("All Programs"); // prevent stale program filter narrowing results
+                }}
+                options={idOptions}
+              />
+
               <SelectBox
                 value={programCode}
                 onChange={(v: string) => setProgramCode(v)}
                 options={["All Programs", ...(data?.filters.programs || []).map((p) => p.program_code)]}
               />
+
+              {showCurrImportModal && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4">
+                  <div className="w-full max-w-2xl overflow-hidden rounded-2xl bg-white shadow-xl">
+                    <div className="p-6">
+                      <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-full border border-emerald-600 text-emerald-700">
+                        <Upload className="h-7 w-7" />
+                      </div>
+
+                      <h3 className="text-center text-xl font-semibold">
+                        Import List of Courses CSV
+                      </h3>
+
+                      <p className="mt-1 text-center text-sm text-slate-600">
+                        This will create or update curriculum rows for{" "}
+                        <span className="font-semibold">
+                          {(curr?.campus?.campus_name ?? data?.campus?.campus_name ?? "your campus")}
+                        </span>{" "}
+                        across multiple terms, based on <span className="font-semibold">Academic Year</span>{" "}
+                        and <span className="font-semibold">Term Number</span>.
+                      </p>
+
+                      <div className="mt-5 rounded-lg border border-emerald-200 bg-emerald-50 p-4 text-sm text-slate-700">
+                        <div className="mb-2 font-semibold text-emerald-800">CSV format</div>
+                        <ul className="list-disc space-y-1 pl-5">
+                          <li>
+                            Required columns: <span className="font-semibold">Batch, Program Level, Program, Term Number, Academic Year, Campus, Course 1...</span>
+                          </li>
+                          <li>
+                            Campus must match the selected campus shown above.
+                          </li>
+                          <li>
+                            Each row becomes one curriculum row for that batch/program in that term.
+                          </li>
+                        </ul>
+
+                        <button
+                          type="button"
+                          className="mt-3 inline-flex items-center gap-2 rounded-md border border-emerald-700 bg-white px-3 py-2 text-sm font-medium text-emerald-700 hover:bg-emerald-50"
+                          onClick={downloadCurriculumCsvTemplate}
+                          disabled={importBusy}
+                        >
+                          <Copy className="h-4 w-4" />
+                          Download CSV template
+                        </button>
+                        <div className="mt-1 text-xs text-slate-500">
+                          Use the template to avoid wrong columns / formatting.
+                        </div>
+                      </div>
+
+                      {currImportErr && (
+                        <div className="mt-4 whitespace-pre-line rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+                          {currImportErr}
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="flex items-center justify-end gap-2 border-t p-4">
+                      <button
+                        type="button"
+                        className="rounded-md border px-4 py-2 text-sm"
+                        onClick={() => {
+                          setShowCurrImportModal(false);
+                          setCurrImportErr(null);
+                          if (fileInputRef.current) fileInputRef.current.value = "";
+                        }}
+                        disabled={importBusy}
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="button"
+                        className="inline-flex items-center gap-2 rounded-md bg-emerald-700 px-4 py-2 text-sm font-medium text-white shadow-sm disabled:opacity-50"
+                        onClick={() => fileInputRef.current?.click()}
+                        disabled={importBusy}
+                      >
+                        <Upload className="h-4 w-4" />
+                        Choose File
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
             </>
           )}
           {/* Right side of toolbar */}
           <div className="ml-auto flex items-center gap-3">
-            {view === "offerings" && (
-          <button
-            onClick={() => setShowForward(true)}
-            className="inline-flex items-center gap-2 rounded-md bg-emerald-700 px-4 py-2 text-sm font-medium text-white shadow-sm"
-          >
-            <Send className="h-4 w-4" />
-            Submit for Scheduling
-          </button>
-            )}
+          {view === "offerings" && (
+            <button
+              onClick={() => {
+                if (!user?.userId) return;
+                // Always show the same styled confirmation modal (like OM → Forward to Chair).
+                // For updates, the modal will require a comment.
+                setForceRequireNote(false);
+                setShowForward(true);
+                // Prepare auto-summary of changes for updates (UX helper)
+                setSubmitPrep({ loading: false, changes: null, suggestedNote: "", error: null });
+                if (hasPriorSubmit) void prepareSubmitUpdate();
+              }}
+              className="inline-flex items-center gap-2 rounded-md bg-emerald-700 px-4 py-2 text-sm font-medium text-white shadow-sm"
+            >
+              <Send className="h-4 w-4" />
+              Submit for Scheduling
+            </button>
+          )}
+
           </div>
-          {/* Curriculum filters */}
           {/* Curriculum filters */}
           {view === "curriculum" && (
             <>
@@ -1898,7 +3597,10 @@ if (isGE) {
                   type="button"
                   className="inline-flex items-center gap-2 rounded-md border border-emerald-700 px-4 py-2 text-sm font-medium text-emerald-700 hover:bg-emerald-50 disabled:opacity-50"
                   disabled={importBusy}
-                  onClick={() => fileInputRef.current?.click()}
+                  onClick={() => {
+                    setCurrImportErr(null);
+                    setShowCurrImportModal(true);
+                  }}
                   title="Import curriculum (IDs / flowcharts) from CSV"
                 >
                   <Plus className="h-4 w-4" />
@@ -1937,6 +3639,7 @@ if (isGE) {
                   if (!file || !user?.userId) return;
 
                   setImportBusy(true);
+                  setCurrImportErr(null);
 
                   //Papa.parse<any>(file, {
                    Papa.parse(file, {
@@ -1957,40 +3660,145 @@ if (isGE) {
                             termId,
                             campusName,
                           });
-                          alert(
+                          setCurrImportErr(
                             "Cannot import CSV: missing term or campus for this curriculum."
                           );
                           return;
                         }
 
-           const response = await importCurriculumCsv(user.userId, {
-  rows,
-  term_id: termId,
-  campus_name: campusName,
-});
+                              
+                        // ---------- Validate headers + rows (client-side) ----------
+                        const normalize = (v: any) => String(v ?? "").trim();
+                        const campusCol = (raw: any) => normalize(raw?.Campus || raw?.campus);
+                        const batchCol = (raw: any) => normalize(raw?.Batch || raw?.batch);
+                        const progCol = (raw: any) =>
+                          normalize(raw?.Program || raw?.["Program Code"] || raw?.program || raw?.program_code);
+                        const termNoCol = (raw: any) => normalize(raw?.["Term Number"] || raw?.TermNumber || raw?.term_number);
+                        const ayCol = (raw: any) => normalize(raw?.["Academic Year"] || raw?.AY || raw?.acad_year_start);
 
-console.log("CSV import response:", response);
+                        const courseKeys = (result?.meta?.fields || []).filter((f: string) =>
+                          /^course\s*\d+$/i.test(String(f || "").trim())
+                        );
 
-if (response.ok) {
-  const imported =
-    response.imported ?? response.curricula?.length ?? 0;
+                        const headerAliases: Record<string, string[]> = {
+                          "Batch": ["Batch", "batch"],
+                          "Program Level": ["Program Level", "ProgramLevel"],
+                          "Program": ["Program", "Program Code", "program", "program_code"],
+                          "Term Number": ["Term Number", "TermNumber", "term_number"],
+                          "Academic Year": ["Academic Year", "AY", "acad_year_start"],
+                          "Campus": ["Campus", "campus"],
+                        };
 
-  // NEW: always fall back to an empty array
-  const created = response.created_batches ?? [];
-  const createdText = created.length
-    ? `\nCreated batches: ${created.join(", ")}`
-    : "";
+                        const fields = (result?.meta?.fields || []).map((f: any) => String(f || "").trim());
+                        const missingHeaders = Object.entries(headerAliases)
+                          .filter(([, aliases]) => !aliases.some((a) => fields.includes(a)))
+                          .map(([canon]) => canon);
+                        const rowErrors: string[] = [];
 
-  alert(
-    `CSV import successful.\n` +
-      `Imported ${imported} row(s).` +
-      createdText
-  );
+                        if (missingHeaders.length) {
+                          rowErrors.push(
+                            `Missing required column(s): ${missingHeaders.join(", ")}`
+                          );
+                        }
+                        if (!courseKeys.length) {
+                          rowErrors.push(
+                            "Missing course columns. Include at least 'Course 1' (and Course 2, Course 3, ... as needed)."
+                          );
+                        }
+
+                        const targetCampus = (campusName || "").trim().toLowerCase();
+
+                        const seen = new Set<string>();
+                        (rows || []).forEach((r: any, i: number) => {
+                          if (!r) return;
+                          const rowNo = i + 2; // CSV header is row 1
+                          const batch = batchCol(r);
+                          const prog = progCol(r);
+                          const tno = termNoCol(r);
+                          const ay = ayCol(r);
+                          const cpn = campusCol(r);
+
+                          // skip fully blank rows
+                          const anyVal =
+                            batch || prog || tno || ay || cpn || courseKeys.some((k: string) => normalize(r[k]));
+                          if (!anyVal) return;
+
+                          const errs: string[] = [];
+                          if (!batch) errs.push("Batch is required");
+                          if (!prog) errs.push("Program is required");
+                          if (!tno) errs.push("Term Number is required");
+                          if (!ay) errs.push("Academic Year is required");
+                          if (!cpn) errs.push("Campus is required");
+
+                          const tnoInt = parseInt(tno, 10);
+                          if (tno && (!Number.isFinite(tnoInt) || tnoInt < 1 || tnoInt > 3)) {
+                            errs.push("Term Number must be 1, 2, or 3");
+                          }
+
+                          const ayMatch = ay.match(/\d{4}/);
+                          if (ay && !ayMatch) {
+                            errs.push("Academic Year must include a 4-digit start year (e.g., 2027)");
+                          }
+
+                          if (cpn && targetCampus && cpn.toLowerCase() !== targetCampus) {
+                            errs.push(`Campus must be ${campusName} (you are importing for ${campusName})`);
+                          }
+
+                          const courseVals = courseKeys
+                            .map((k: string) => normalize(r[k]))
+                            .filter(Boolean);
+                          if (!courseVals.length) {
+                            errs.push("At least one course code is required (Course 1, Course 2, ...)");
+                          }
+
+                          const dedupeKey = [batch, prog, ayMatch?.[0] || ay, String(tnoInt || tno)].join("|").toLowerCase();
+                          if (batch && prog && ay && tno && seen.has(dedupeKey)) {
+                            errs.push("Duplicate row for the same Batch + Program + Academic Year + Term Number");
+                          } else if (batch && prog && ay && tno) {
+                            seen.add(dedupeKey);
+                          }
+
+                          if (errs.length) {
+                            rowErrors.push(`Row ${rowNo}: ${errs.join("; ")}`);
+                          }
+                        });
+
+                        if (rowErrors.length) {
+                          setCurrImportErr(
+                            `Invalid Curriculum CSV file for ${String(campusName || "campus").toUpperCase()}. Nothing was saved.\n` +
+                              rowErrors.map((e) => `- ${e}`).join("\n")
+                          );
+                          return;
+                        }
+                        // ---------- end validation ----------
+const response = await importCurriculumCsv(user.userId, {
+                      rows,
+                      term_id: termId,
+                      campus_name: campusName,
+                    });
+
+                    console.log("CSV import response:", response);
+
+                    if (response.ok) {
+                      const imported =
+                        response.imported ?? response.curricula?.length ?? 0;
+
+                      // NEW: always fall back to an empty array
+                      const created = response.created_batches ?? [];
+                      const createdText = created.length
+                        ? `\nCreated batches: ${created.join(", ")}`
+                        : "";
+
+                      alert(
+                        `CSV import successful.\n` +
+                          `Imported ${imported} row(s).` +
+                          createdText
+                      );
 
                         }
                       } catch (err: any) {
                         console.error("CSV import failed:", err);
-                        alert(err.message || "CSV import failed");
+                        setCurrImportErr(err?.message || "CSV import failed");
                       } finally {
                         setImportBusy(false);
                         if (fileInputRef.current) fileInputRef.current.value = "";
@@ -1999,22 +3807,107 @@ if (response.ok) {
                     //error: (err) => {
                     error: (err: unknown) => {
                       console.error("CSV parse error:", err);
-                      alert("Failed to parse CSV file. Please check the format.");
+                      setCurrImportErr("Failed to parse CSV file. Please check the format.");
                       setImportBusy(false);
                       input.value = "";
                     },
                   });
                 }}
               />
+
+              {showCurrImportModal && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4">
+                  <div className="w-full max-w-2xl overflow-hidden rounded-2xl bg-white shadow-xl">
+                    <div className="p-6">
+                      <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-full border border-emerald-600 text-emerald-700">
+                        <Upload className="h-7 w-7" />
+                      </div>
+
+                      <h3 className="text-center text-xl font-semibold">
+                        Import List of Courses CSV
+                      </h3>
+
+                      <p className="mt-1 text-center text-sm text-slate-600">
+                        This will create or update curriculum rows for{" "}
+                        <span className="font-semibold">
+                          {(curr?.campus?.campus_name ?? data?.campus?.campus_name ?? "your campus")}
+                        </span>{" "}
+                        across multiple terms, based on <span className="font-semibold">Academic Year</span>{" "}
+                        and <span className="font-semibold">Term Number</span>.
+                      </p>
+
+                      <div className="mt-5 rounded-lg border border-emerald-200 bg-emerald-50 p-4 text-sm text-slate-700">
+                        <div className="mb-2 font-semibold text-emerald-800">CSV format</div>
+                        <ul className="list-disc space-y-1 pl-5">
+                          <li>
+                            Required columns: <span className="font-semibold">Batch, Program Level, Program, Term Number, Academic Year, Campus, Course 1...</span>
+                          </li>
+                          <li>
+                            Campus must match the selected campus shown above.
+                          </li>
+                          <li>
+                            Each row becomes one curriculum row for that batch/program in that term.
+                          </li>
+                        </ul>
+
+                        <button
+                          type="button"
+                          className="mt-3 inline-flex items-center gap-2 rounded-md border border-emerald-700 bg-white px-3 py-2 text-sm font-medium text-emerald-700 hover:bg-emerald-50"
+                          onClick={downloadCurriculumCsvTemplate}
+                          disabled={importBusy}
+                        >
+                          <Copy className="h-4 w-4" />
+                          Download CSV template
+                        </button>
+                        <div className="mt-1 text-xs text-slate-500">
+                          Use the template to avoid wrong columns / formatting.
+                        </div>
+                      </div>
+
+                      {currImportErr && (
+                        <div className="mt-4 whitespace-pre-line rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+                          {currImportErr}
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="flex items-center justify-end gap-2 border-t p-4">
+                      <button
+                        type="button"
+                        className="rounded-md border px-4 py-2 text-sm"
+                        onClick={() => {
+                          setShowCurrImportModal(false);
+                          setCurrImportErr(null);
+                          if (fileInputRef.current) fileInputRef.current.value = "";
+                        }}
+                        disabled={importBusy}
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="button"
+                        className="inline-flex items-center gap-2 rounded-md bg-emerald-700 px-4 py-2 text-sm font-medium text-white shadow-sm disabled:opacity-50"
+                        onClick={() => fileInputRef.current?.click()}
+                        disabled={importBusy}
+                      >
+                        <Upload className="h-4 w-4" />
+                        Choose File
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
             </>
           )}
         </div>
-
-        {/* card */}
         <div className="rounded-xl bg-white shadow-sm border border-gray-200 p-4 sm:p-6 w-full" data-course-offerings>
           <div className="flex items-center justify-between mb-3 sm:mb-4">
             <div>
-              <h2 className="text-lg font-bold">{view === "curriculum" ? "List of Courses" : "Course Offerings"}</h2>
+              <h2 className="text-lg font-bold">
+                {view === "curriculum" ? "List of Courses" :
+                view === "specialclass" ? "Special Class" : "Course Offerings"}
+              </h2>
               <p className="text-sm text-gray-500">{loading ? "Loading…" : data?.term_label || curr?.term_label || ""}</p>
               {err && <p className="text-sm text-red-600">{err}</p>}
             </div>
@@ -2024,15 +3917,31 @@ if (response.ok) {
           {view === "offerings" && data?.planning && (
             <>
               {showApprovalBanner && (
-                <div className="mb-4 rounded-lg border border-blue-300 bg-blue-50 px-3 py-2 text-blue-900">
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="font-medium">Planning updates are ready</div>
-                    <button
-                      className="rounded-md bg-emerald-700 px-3 py-1.5 text-sm font-medium text-white shadow-sm"
-                      onClick={() => setShowPlanModal(true)}
-                    >
-                      Review &amp; Approve
-                    </button>
+                <div className="mb-4 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-amber-950 shadow-sm">
+                  <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="flex items-start gap-3">
+                      <div className="mt-0.5 grid h-9 w-9 place-items-center rounded-full bg-amber-200 text-amber-900">
+                        <AlertTriangle className="h-5 w-5" />
+                      </div>
+                      <div>
+                        <div className="font-semibold text-amber-950">
+                          Action required: Approve planning updates
+                        </div>
+                        <div className="text-sm text-amber-900">
+                          {data?.planning?.pending_changes?.length || 0} change(s) are waiting for your approval.
+                          These are <span className="font-semibold">not applied</span> until you approve.
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center justify-end gap-2">
+                      <button
+                        className="rounded-lg bg-emerald-700 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:brightness-110"
+                        onClick={() => setShowPlanModal(true)}
+                      >
+                        Review &amp; Approve
+                      </button>
+                    </div>
                   </div>
                 </div>
               )}
@@ -2057,11 +3966,13 @@ if (response.ok) {
               ) : (
                 Object.entries(groups).map(([idLabel, byProgram]) => (
                   <div   key={idLabel}
-                    className="rounded-xl border border-gray-300 bg-white shadow-sm overflow-hidden mb-6">
+                    className="rounded-xl border border-gray-300 bg-white shadow-sm overflow-visible mb-6">
                     <div className="bg-[#21804A] text-white px-4 py-3 text-center font-semibold">{idLabel}</div>
                     {Object.entries(byProgram).map(([progLabel, list]) => {
                       const key = `${idLabel}::${progLabel}`;
                       const isCollapsed = !!collapsedGroups[key];
+                      const geEditing =
+                        !!editing && isGEType(editing.row?.course?.type_of_course || "");
                       return (
                         <div key={key} className="border-t border-gray-200">
                           <button
@@ -2079,22 +3990,25 @@ if (response.ok) {
 
                           {!isCollapsed && (
                             <div className="p-0">
-                            <div
-                                className="overflow-x-auto relative"
-                                style={{ overflowY: "visible", paddingBottom: editPad }}
-                              >
-                                <table className={`w-full text-sm border-collapse ${inEditUI ? "table-auto" : "table-fixed"}`}>
+                            <div className="overflow-x-auto relative" style={{ overflowY: "visible" }}>
+                              {/*
+                                NOTE (GE editing): Begin columns must be wider because GE uses a single
+                                TimeBandInput (e.g. "07:30 - 09:00") in the Begin column.
+                                With table-fixed + narrow <col> widths, the input will visually overlap
+                                adjacent cells.
+                              */}
+                              <table className="w-full text-sm border-collapse table-fixed">
                                   <colgroup>
                                     <col style={{ width: 96 }} />   {/* Program No. */}
                                     <col style={{ width: 230 }} />  {/* Course Code & Title */}
                                     <col style={{ width: 90 }} />   {/* Section */}
                                     <col style={{ width: 180 }} />  {/* Faculty */}
                                     <col style={{ width: 95 }} />   {/* Day 1 */}
-                                    <col style={{ width: 70 }} />   {/* Begin 1 */}
+                                    <col style={{ width: geEditing ? 170 : 70 }} />   {/* Begin 1 */}
                                     <col style={{ width: 70 }} />   {/* End 1 */}
                                     <col style={{ width: 120 }} />  {/* Room 1 */}
                                     <col style={{ width: 95 }} />   {/* Day 2 */}
-                                    <col style={{ width: 70 }} />   {/* Begin 2 */}
+                                    <col style={{ width: geEditing ? 170 : 70 }} />   {/* Begin 2 */}
                                     <col style={{ width: 70 }} />   {/* End 2 */}
                                     <col style={{ width: 120 }} />  {/* Room 2 */}
                                     <col style={{ width: 80 }} />   {/* Capacity */}
@@ -2232,7 +4146,7 @@ if (response.ok) {
                                                 <button
                                                   className="text-red-500 hover:text-red-700"
                                                   title="Delete"
-                                                  onClick={() => doDelete(r)}
+                                                  onClick={() => promptDelete(r)}
                                                 >
                                                   <Trash2 className="h-4 w-4" />
                                                 </button>
@@ -2299,42 +4213,78 @@ if (response.ok) {
                                                 r.course.course_title
                                               );
                                               const isSpecific = isSpecificElectiveType(r.course.type_of_course || "");
-                                              const hasParent = !!(r.links?.elective_placeholder_course_id || (isPlaceholder ? r.course.course_id : ""));
+                                              const hasParent = !!(
+                                                (r.links as any)?.elective_placeholder_course_id ||
+                                                (isPlaceholder ? r.course.course_id : "")
+                                              );
                                               const electiveEditable = isPlaceholder || isSpecific || hasParent;
 
                                               if (!electiveEditable) return null;
 
                                               // Prefer the server list if it exists and has items; else fallback to derived list
-                                              const preferServer =
-                                              Array.isArray(data?.all_specific_electives) && data!.all_specific_electives!.length > 0
-                                                ? data!.all_specific_electives!
-                                                : allSpecificElectives;
 
-                                            const parentId =
-                                              editing?.draft.for_placeholder_course_id ||
-                                              r.links?.elective_placeholder_course_id ||
-                                              (isPlaceholder ? r.course.course_id : "");
+                                              const preferServer: CourseOption[] =
 
-                                            // NEW: prefer per-placeholder cache, else the global list
-                                            const sourceList =
-                                              (parentId && electiveOptionsCache[parentId]) ||
-                                              preferServer;
+                                                Array.isArray(data?.all_specific_electives) && data!.all_specific_electives!.length > 0
 
-                                            const specificList = (sourceList || []).filter((o) =>
-                                              isSpecificElectiveType(o.type_of_course || "")
-                                            );
-                                            const placeholderLabel = "— Select specific elective —";
-                                            const specificOptions = specificList.map((opt) => ({
-                                              id: opt.course_id,
-                                              label: `${codeOf(opt.course_code)} • ${opt.course_title}`,
-                                            }));
+                                                  ? (data!.all_specific_electives as CourseOption[])
 
-                                            const currentSpecificId =
-                                              editing?.draft.specific_course_id || (isSpecific ? r.course.course_id : "");
-                                            const currentLabel =
-                                              currentSpecificId
-                                                ? specificOptions.find((o) => o.id === currentSpecificId)?.label || placeholderLabel
-                                                : placeholderLabel;
+                                                  : allSpecificElectives;
+
+
+                                              const parentIdRaw =
+                                                editing?.draft.for_placeholder_course_id ||
+                                                (r.links as any)?.elective_placeholder_course_id ||
+                                                (isPlaceholder ? r.course.course_id : "");
+
+
+                                              const parentId = String(parentIdRaw || "").trim();
+
+                                              const parentKey = parentId ? parentId : undefined;
+
+
+                                              // Prefer per-placeholder cache, else the global list
+
+                                              const sourceList: CourseOption[] =
+
+                                                parentKey && Array.isArray(electiveOptionsCache[parentKey])
+
+                                                  ? electiveOptionsCache[parentKey]
+
+                                                  : preferServer;
+
+
+                                              const specificList: CourseOption[] = sourceList.filter((o: CourseOption) =>
+
+                                                isSpecificElectiveType(o.type_of_course || "")
+
+                                              );
+
+
+                                              type LabeledOption = { id: string; label: string };
+
+                                              const placeholderLabel = "— Select specific elective —";
+
+                                              const specificOptions: LabeledOption[] = specificList.map((opt: CourseOption) => ({
+
+                                                id: String(opt.course_id),
+
+                                                label: `${codeOf(opt.course_code)} • ${String(opt.course_title ?? "")}`,
+
+                                              }));
+
+
+                                              const currentSpecificId =
+
+                                                editing?.draft.specific_course_id || (isSpecific ? r.course.course_id : "");
+
+                                              const currentLabel =
+
+                                                currentSpecificId
+
+                                                  ? specificOptions.find((o: LabeledOption) => o.id === currentSpecificId)?.label || placeholderLabel
+
+                                                  : placeholderLabel;
 
                                             return (
                                               <div className="mt-2">
@@ -2472,8 +4422,8 @@ if (response.ok) {
                                             fmtTime(r.slot1?.end_time)
                                           )}
                                           </td>
-                                          <td className="px-3 py-2 border border-gray-200 bg-white relative overflow-hidden">
-                                            <div className="w-full max-w-[120px] overflow-hidden">
+                                          <td className="px-3 py-2 border border-gray-200 bg-white relative overflow-visible">
+                                            <div className="w-full max-w-[120px] overflow-visible">
                                               <EligibleRoomSelect
                                               userId={user?.userId}
                                               campusId={data?.campus?.campus_id || ""}
@@ -2481,13 +4431,13 @@ if (response.ok) {
                                                 day: (editing?.draft.slot1?.day || r.slot1?.day || "") as string,
                                                 start: editing?.draft.slot1?.start_time || r.slot1?.start_time || "",
                                                 end: editing?.draft.slot1?.end_time || r.slot1?.end_time || "",
-                                                roomType: (r as any)?.course?.room_type || null,
+                                                roomType: (r as any)?.slot1?.room_type || (r as any)?.slot2?.room_type || null,
                                                 capacity: r.section.enrollment_cap ?? null,
                                                 excludeScheduleIds: [r.slot1?.schedule_id, r.slot2?.schedule_id].filter(Boolean) as string[],
                                               }}
                                               fallbackRooms={filterRoomsByCap(data?.room_options || [], r.section.enrollment_cap)}
                                               value={editing?.draft.slot1?.room_id || null}
-                                              disabled={!slotReady(editing?.draft.slot1) && !slotReady(r.slot1 as any)}
+                                              disabled={scEligibleRoomsLoading[editing?.draft.slot1?.room_id ?? ""] || !slotReady(editing?.draft.slot1) && !slotReady(r.slot1 as any)}
                                               onChange={(roomId) =>
                                                 setEditing(p => p && ({
                                                   ...p,
@@ -2549,8 +4499,8 @@ if (response.ok) {
                                             fmtTime(r.slot2?.end_time)
                                           )}
                                           </td>
-                                          <td className="px-3 py-2 border border-gray-200 bg-white relative overflow-hidden">
-                                            <div className="w-full max-w-[120px] overflow-hidden">
+                                          <td className="px-3 py-2 border border-gray-200 bg-white relative overflow-visible">
+                                            <div className="w-full max-w-[120px] overflow-visible">
                                               <EligibleRoomSelect
                                               userId={user?.userId}
                                               campusId={data?.campus?.campus_id || ""}
@@ -2564,7 +4514,7 @@ if (response.ok) {
                                               }}
                                               fallbackRooms={filterRoomsByCap(data?.room_options || [], r.section.enrollment_cap)}
                                               value={editing?.draft.slot2?.room_id || null}
-                                              disabled={!slotReady(editing?.draft.slot2) && !slotReady(r.slot2 as any)}
+                                              disabled={scEligibleRoomsLoading[editing?.draft.slot2?.room_id ?? ""] || !slotReady(editing?.draft.slot2) && !slotReady(r.slot2 as any)}
                                               onChange={(roomId) =>
                                                 setEditing(p => p && ({
                                                   ...p,
@@ -2610,7 +4560,7 @@ if (response.ok) {
                                           <td className="px-3 py-2 border border-gray-200 bg-white">
                                             <div className="flex items-center gap-2">
                                               <button
-                                                onClick={saveEdit}
+                                                onClick={promptSaveEdit}
                                                 className="flex h-8 w-8 items-center justify-center rounded-full border-2 border-green-600 text-green-600 hover:bg-green-50"
                                                 title="Save"
                                               >
@@ -2681,11 +4631,18 @@ if (response.ok) {
                                                       ? data!.all_specific_electives!
                                                       : allSpecificElectives;
 
-                                                  specificElectives =
-                                                    (parentId && electiveOptionsCache[parentId]) ||
-                                                    specificElectives.length
-                                                      ? specificElectives
-                                                      : preferServer.filter((o) => isSpecificElectiveType(o.type_of_course || ""));
+                                                  const cachedSpecific =
+                                                    parentId && Array.isArray(electiveOptionsCache[parentId])
+                                                      ? electiveOptionsCache[parentId]
+                                                      : null;
+
+                                                  if (cachedSpecific && cachedSpecific.length) {
+                                                    specificElectives = cachedSpecific;
+                                                  } else if (!specificElectives.length) {
+                                                    specificElectives = preferServer.filter((o) =>
+                                                      isSpecificElectiveType(o.type_of_course || "")
+                                                    );
+                                                  }
 
 
                                                   const selectedType = codeToType[addCourseCode] || "";
@@ -2793,12 +4750,12 @@ if (response.ok) {
                                             <td className="px-3 py-2 border border-gray-200 bg-white">—</td>
                                             <td className="px-3 py-2 border border-gray-200 bg-white">
                                               <RoomSelectBox
-                                                rooms={filterRoomsByCap(data?.room_options || [])}
-                                                value={addDraft.slot1?.room_id || null}
-                                                disabled={true}                         // stays disabled in Add Row
-                                                onChange={(roomId) =>
-                                                  setAddDraft(p => ({ ...p, slot1: { ...(p.slot1 || {}), room_id: roomId ?? "" } }))
-                                                }
+                                                rooms={filterRoomsByCap(data?.room_options || []).filter(
+                                                  (room) => String(room.room_id || "").toUpperCase() !== "ONLINE"
+                                                )}
+                                                value={addDraft.slot2?.room_id || null}
+                                                onChange={(roomId) => setAddDraft(p => ({ ...p, slot2: { ...(p.slot2 || {}), room_id: roomId ?? "" } }))}
+
                                                 className="opacity-60"
                                               />
                                             </td>
@@ -2808,12 +4765,12 @@ if (response.ok) {
                                             <td className="px-3 py-2 border border-gray-200 bg-white">—</td>
                                             <td className="px-3 py-2 border border-gray-200 bg-white">
                                               <RoomSelectBox
-                                                rooms={filterRoomsByCap(data?.room_options || [])}
-                                                value={addDraft.slot2?.room_id || null}
-                                                disabled={true}
-                                                onChange={(roomId) =>
-                                                  setAddDraft(p => ({ ...p, slot2: { ...(p.slot2 || {}), room_id: roomId ?? "" } }))
-                                                }
+                                                rooms={filterRoomsByCap(data?.room_options || []).filter(
+                                                  (room) => String(room.room_id || "").toUpperCase() !== "ONLINE"
+                                                )}
+                                                value={addDraft.slot1?.room_id || null}
+                                                onChange={(roomId) => setAddDraft(p => ({ ...p, slot1: { ...(p.slot1 || {}), room_id: roomId ?? "" } }))}
+
                                                 className="opacity-60"
                                               />
                                             </td>
@@ -2842,7 +4799,7 @@ if (response.ok) {
                                                       addDraft.course_id // non-elective
                                                     )
                                                   }
-                                                  onClick={doAdd}
+                                                  onClick={promptAdd}
                                                   className={cls(
                                                     "flex h-8 w-8 items-center justify-center rounded-full border-2",
                                                     "border-green-600 text-green-600 hover:bg-green-50 disabled:opacity-50"
@@ -2889,7 +4846,7 @@ if (response.ok) {
 
           {/* ------------------------------ Curriculum ----------------------------- */}
           {view === "curriculum" && (
-            <div className="rounded-xl border border-gray-300 bg-white shadow-sm overflow-hidden">
+            <div className="rounded-xl border border-gray-300 bg-white shadow-sm overflow-visible">
               {/* Header follows selection state */}
               <div className="bg-emerald-700 text-white px-4 py-3 text-center font-semibold">
                 {selectedBatchId
@@ -3252,108 +5209,499 @@ if (response.ok) {
               )}
             </div>
           )}
+          {/* ------------------------------ Special Class ------------------------------ */}
+          {view === "specialclass" && (
+            <div className="rounded-xl border border-gray-300 bg-white shadow-sm overflow-hidden">
+              <div className="bg-emerald-700 text-white px-4 py-3 flex items-center justify-between">
+                <div className="font-semibold">Special Class</div>
+              </div>
+
+              <div className="p-3">
+                {scErr && <div className="mb-2 text-sm text-red-600">{scErr}</div>}
+                {scExportErr && <div className="mb-2 text-sm text-red-600">{scExportErr}</div>}
+
+{scLoading ? (
+                  <div className="text-sm text-neutral-500">Loading…</div>
+                ) : scErr ? (
+                  <div className="text-sm text-red-600">Failed to load special class: {scErr}</div>
+                ) : scRowsForCampus.length === 0 ? (
+                  <div className="text-sm text-neutral-500">No special class records found.</div>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm border-collapse">
+                      <thead className="bg-gray-50 text-emerald-800">
+                        <tr className="text-[13px] font-semibold">
+
+<th className="px-3 py-2 text-left border border-gray-300 w-10">
+  <input
+    type="checkbox"
+    className="h-4 w-4 accent-emerald-700"
+    checked={
+      scRowsForCampus.length > 0 &&
+      scRowsForCampus.every((r) => !!scSelectedIds[String((r as any)?.special_id)])
+    }
+    onChange={(e) => toggleAllSpecialClassVisible(e.target.checked)}
+    aria-label="Select all visible special class rows"
+  />
+</th>
+                        <th className="px-3 py-2 text-left border border-gray-300">Student</th>
+                        <th className="px-3 py-2 text-left border border-gray-300">Course</th>
+                        <th className="px-3 py-2 text-left border border-gray-300">Section</th>
+                        <th className="px-3 py-2 text-left border border-gray-300">Faculty</th>
+                        <th className="px-3 py-2 text-left border border-gray-300">Day 1</th>
+                        <th className="px-3 py-2 text-left border border-gray-300">Begin 1</th>
+                        <th className="px-3 py-2 text-left border border-gray-300">End 1</th>
+                        <th className="px-3 py-2 text-left border border-gray-300">Room 1</th>
+                        <th className="px-3 py-2 text-left border border-gray-300">Day 2</th>
+                        <th className="px-3 py-2 text-left border border-gray-300">Begin 2</th>
+                        <th className="px-3 py-2 text-left border border-gray-300">End 2</th>
+                        <th className="px-3 py-2 text-left border border-gray-300">Room 2</th>
+                        <th className="px-3 py-2 text-left border border-gray-300">Remarks</th>
+                        <th className="px-3 py-2 text-left border border-gray-300">Actions</th>
+                      </tr>
+                      </thead>
+
+                      <tbody>
+                        {scRowsForCampus.map((raw) => {
+                          const row = raw as any;
+                          const isEditing = scEditingId === String(row.special_id);
+
+                          const student_name = row?.student?.student_name ?? row?.student_name ?? "—";
+                          const student_number = row?.student?.student_number ?? row?.student_number ?? "—";
+
+                          const course_code_raw = row?.course?.course_code ?? row?.course_code ?? "";
+                          const course_code = Array.isArray(course_code_raw)
+                            ? String(course_code_raw[0] ?? "—")
+                            : String(course_code_raw || "—");
+
+                          const course_title = row?.course?.course_title ?? row?.course_title ?? "—";
+
+                          const section_code = row?.section?.section_code ?? row?.section_code ?? "—";
+                          const faculty_name = row?.faculty?.faculty_name ?? row?.faculty_name ?? "—";
+
+                          const se = Array.isArray(row?.schedule_entries) ? row.schedule_entries : [];
+                          const slot1 = row?.slot1 ?? se[0] ?? null;
+                          const slot2 = row?.slot2 ?? se[1] ?? null;
+
+                          const slotDay = (s: any) => (s?.day || "—");
+
+                          const safeTime = (x: any) => {
+                            const digits = String(x ?? "").replace(/\D/g, "");
+                            if (!digits) return "—";
+                            const hhmm = digits.padStart(4, "0");
+                            return typeof fmtTime === "function" ? fmtTime(hhmm) : hhmm;
+                          };
+                          const slotStart = (s: any) => safeTime(s?.start_time);
+                          const slotEnd = (s: any) => safeTime(s?.end_time);
+
+                          const slotRoomLabel = (s: any) => {
+                          const rn = String(s?.room_number || s?.room_name || "").trim();
+                          const rid = String(s?.room_id || "").trim();
+
+                          // Treat ONLINE as "no physical room". If a room_id exists, display it even
+                          // if room_type was (incorrectly) stored as "Online" (delivery mode).
+                          const ridOrRn = String(rn || rid).trim().toUpperCase();
+                          if (ridOrRn === "ONLINE") return "TBA";
+                          if (!rn && !rid) return "TBA";
+                          return rn || rid || "TBA";
+
+                          };
+
+
+                          // Prefer row.remarks; fallback to section_remarks if backend sends it there
+                          const remarks =
+                            row?.remarks ?? row?.section?.section_remarks ?? row?.section_remarks ?? "—";
+
+                          const slotReadySC = (s: any) =>
+                            !!String(s?.day ?? "").trim() &&
+                            !!String(s?.start_time ?? "").trim() &&
+                            !!String(s?.end_time ?? "").trim();
+
+                          const campusId =
+                            scData?.campus?.campus_id ||
+                            (data as any)?.campus?.campus_id ||
+                            "";
+
+                          const minCap = typeof _minCapacityFromRow === "function" ? _minCapacityFromRow(row) : undefined;
+                          const excludeScheduleIds =
+                            typeof _scheduleIdsFromRow === "function" ? _scheduleIdsFromRow(row) : [];
+
+                          const fallbackRoomsBase = filterRoomsByCap(
+                            ((data as any)?.room_options || []) as any[],
+                            minCap
+                          );
+
+                          const fallbackRooms = fallbackRoomsBase;;
+
+                          return (
+                            <tr key={String(row.special_id)} className="hover:bg-neutral-50">
+                              <td className="px-3 py-2 border border-gray-300">
+                                <input
+                                  type="checkbox"
+                                  className="h-4 w-4 accent-emerald-700"
+                                  checked={!!scSelectedIds[String(row.special_id)]}
+                                  onChange={(e) => toggleOneSpecialClass(String(row.special_id), e.target.checked)}
+                                  aria-label={`Select special class ${String(row.special_id)}`}
+                                />
+                              </td>
+
+<td className="px-3 py-2 border border-gray-300">
+                                <div className="font-medium">{student_name || "—"}</div>
+                                <div className="text-xs text-gray-500">{student_number || "—"}</div>
+                              </td>
+
+                              <td className="px-3 py-2 border border-gray-300">
+                                <div className="font-semibold text-emerald-700">{course_code || "—"}</div>
+                                <div className="text-xs text-gray-500">{course_title || "—"}</div>
+                              </td>
+
+                              <td className="px-3 py-2 border border-gray-300">{section_code || "—"}</td>
+                              <td className="px-3 py-2 border border-gray-300">{faculty_name || "—"}</td>
+
+                              <td className="px-3 py-2 border border-gray-300">{slotDay(slot1)}</td>
+                              <td className="px-3 py-2 border border-gray-300">{slotStart(slot1)}</td>
+                              <td className="px-3 py-2 border border-gray-300">{slotEnd(slot1)}</td>
+                              <td className="px-3 py-2 border border-gray-300">
+                              {isEditing ? (
+                              <div className="w-full max-w-[160px] overflow-visible">
+                                <EligibleRoomSelect
+                                    userId={user?.userId}
+                                    campusId={campusId}
+                                    spec={{
+                                      day: String(slot1?.day ?? "").trim(),
+                                      start: String(slot1?.start_time ?? "").trim(),
+                                      end: String(slot1?.end_time ?? "").trim(),
+                                      roomType: String(slot1?.room_type ?? row?.course?.room_type ?? "").trim() || null,
+                                      capacity: minCap ?? null,
+                                      excludeScheduleIds,
+                                      // Let backend infer the correct section enrollment_cap from DB
+                                      sectionId: String(row?.section_id ?? row?.section?.section_id ?? "").trim() || null,
+                                      scheduleId: String(slot1?.schedule_id ?? "").trim() || null,
+                                    }}
+                                    fallbackRooms={fallbackRooms}
+                                    value={scEditRoom1 || null}
+                                    disabled={ 
+                                      !slotReadySC(slot1) || !user?.userId || !campusId || scEligibleRoomsLoading[slot1?.room_id ?? ""] || fallbackRooms.length === 0
+                                    }
+
+
+                                    onChange={(roomId) => setScEditRoom1(roomId ?? "")}
+                                  />
+                                </div>
+                              ) : (
+                                slotRoomLabel(slot1)
+                              )}
+                              </td>
+
+                              <td className="px-3 py-2 border border-gray-300">{slotDay(slot2)}</td>
+                              <td className="px-3 py-2 border border-gray-300">{slotStart(slot2)}</td>
+                              <td className="px-3 py-2 border border-gray-300">{slotEnd(slot2)}</td>
+                              <td className="px-3 py-2 border border-gray-300">
+                                {isEditing ? (
+                                <div className="w-full max-w-[160px] overflow-visible">
+                                  <EligibleRoomSelect
+                                      userId={user?.userId}
+                                      campusId={campusId}
+                                      spec={{
+                                        day: String(slot2?.day ?? "").trim(),
+                                        start: String(slot2?.start_time ?? "").trim(),
+                                        end: String(slot2?.end_time ?? "").trim(),
+                                        roomType:
+                                          String(slot2?.room_type ?? slot1?.room_type ?? row?.course?.room_type ?? "")
+                                            .trim() || null,
+                                        capacity: minCap ?? null,
+                                        excludeScheduleIds,
+                                        // Let backend infer the correct section enrollment_cap from DB
+                                        sectionId: String(row?.section_id ?? row?.section?.section_id ?? "").trim() || null,
+                                        scheduleId: String(slot2?.schedule_id ?? "").trim() || null,
+                                      }}
+                                      fallbackRooms={fallbackRooms}
+                                      value={scEditRoom2 || null}
+                                      disabled={!slotReadySC(slot2) || !user?.userId || !campusId}
+                                      onChange={(roomId) => setScEditRoom2(roomId ?? "")}
+                                    />
+                                  </div>
+                                ) : (
+                                  slotRoomLabel(slot2)
+                                )}
+                              </td>
+
+                              <td className="px-3 py-2 border border-gray-300">
+                                {isEditing ? (
+                                  <input
+                                    className={cls(SOFT_INPUT, "w-64")}
+                                    value={scEditRemarks}
+                                    onChange={(e) => setScEditRemarks(e.target.value)}
+                                    placeholder="Enter remarks…"
+                                  />
+                                ) : (
+                                  String(remarks || "—")
+                                )}
+                              </td>
+
+                              <td className="px-3 py-2 border border-gray-300">
+                                {isEditing ? (
+                                  <div className="flex items-center gap-2">
+                                    <button
+                                      onClick={() => saveSpecialClassRowEdits(row)}
+                                      disabled={scSaveLoadingId === String(row.special_id)}
+                                      className={cls(
+                                        "flex h-8 w-8 items-center justify-center rounded-full border-2",
+                                        "border-green-600 text-green-600 hover:bg-green-50",
+                                        scSaveLoadingId === String(row.special_id) && "opacity-50 cursor-not-allowed"
+                                      )}
+                                      title="Save"
+                                    >
+                                      <Check className="h-4 w-4" strokeWidth={2.5} />
+                                    </button>
+
+                                    <button
+                                      onClick={cancelEditSpecialClassRow}
+                                      disabled={scSaveLoadingId === String(row.special_id)}
+                                      className={cls(
+                                        "flex h-8 w-8 items-center justify-center rounded-full border-2",
+                                        "border-red-600 text-red-600 hover:bg-red-50",
+                                        scSaveLoadingId === String(row.special_id) && "opacity-50 cursor-not-allowed"
+                                      )}
+                                      title="Cancel"
+                                    >
+                                      <X className="h-4 w-4" strokeWidth={2.5} />
+                                    </button>
+
+                                    {scSaveLoadingId === String(row.special_id) && (
+                                      <span className="text-xs text-gray-500">Saving…</span>
+                                    )}
+                                  </div>
+                                ) : (
+                                  <button
+                                    className="text-emerald-700 hover:text-emerald-900"
+                                    title="Edit"
+                                    onClick={() => beginEditSpecialClassRow(row)}
+                                  >
+                                    <Edit className="h-4 w-4" />
+                                  </button>
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
         </div>
       </main>
 
       {/* ----------------------------- Conflict Modal ----------------------------- */}
       {conflict && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-          <div className="w-full max-w-2xl rounded-xl bg-white shadow-xl border border-gray-200">
-            <div className="flex items-center gap-2 border-b px-4 py-3">
-              <AlertTriangle className="h-5 w-5 text-amber-600" />
-              <div className="font-semibold">Conflicts detected</div>
+        <ConfirmModal
+          open={!!conflict}
+          title="Planning warnings"
+          description="This change triggers one or more planning checks. You can proceed, or go back and adjust your entry."
+          confirmText="Proceed"
+          cancelText="Go Back"
+          variant="warning"
+          busy={conflictBusy}
+          onClose={() => {
+            if (conflictBusy) return;
+            setConflict(null);
+          }}
+          content={
+            <div className="rounded-lg border border-amber-200 bg-amber-50 p-3">
+              <ul className="list-disc pl-5 text-sm text-amber-900 space-y-1">
+                {conflict.violations.map((v, i) => (
+                  <li key={i}>
+                    <span className="font-medium">{v.code}</span>: {v.message}
+                  </li>
+                ))}
+              </ul>
             </div>
-            <div className="p-4 max-h-[70vh] overflow-auto space-y-3">
-              <div className="text-sm">
-                The system found some issues with your change. You can review the details below and choose to override if
-                appropriate.
-              </div>
-              <div className="rounded border border-amber-200 bg-amber-50 p-3">
-                <ul className="list-disc pl-5 text-sm text-amber-900 space-y-1">
-                  {conflict.violations.map((v, i) => (
-                    <li key={i}>
-                      <span className="font-medium">{v.code}</span>: {v.message}
-                    </li>
-                  ))}
-                </ul>
-              </div>
-              {conflict.preview && (
-                <div>
-                  <div className="text-xs font-semibold text-slate-700 mb-1">Preview of changes</div>
-                  <pre className="text-xs bg-slate-50 border rounded p-2 overflow-auto">
-                    {JSON.stringify(conflict.preview, null, 2)}
-                  </pre>
-                </div>
-              )}
-              <div>
-                <label className="text-xs font-semibold text-slate-700 mb-1 block">Override reason (optional)</label>
-                <input
-                  className="w-full rounded border px-3 py-2 text-sm"
-                  value={conflict.reason}
-                  onChange={(e) => setConflict({ ...conflict, reason: e.target.value })}
-                  placeholder="e.g., Proceed despite planning warnings"
-                />
-              </div>
-            </div>
-            <div className="flex items-center justify-end gap-2 border-t px-4 py-3">
-              <button
-                className="rounded-md border px-3 py-1.5 text-sm"
-                onClick={() => setConflict(null)}
-              >
-                Cancel
-              </button>
-              <button
-                className="rounded-md bg-emerald-700 px-3 py-1.5 text-sm font-medium text-white"
-                onClick={async () => {
-                  if (!conflict || !user?.userId) return;
-                  const ov = {
-                    override: true,
-                    override_token: conflict.token,
-                    override_reason: conflict.reason || "Proceed with override",
-                  } as any;
+          }
+          onConfirm={async () => {
+            if (!conflict || !user?.userId) return;
 
-                  try {
-                    if (conflict.action === "add") {
-                      await addApoOfferingRow(user.userId, { ...(conflict.original as any), ...ov });
-                    } else if (conflict.action === "edit") {
-                      await editApoOfferingRow(user.userId, { ...(conflict.original as any), ...ov });
-                    } else if (conflict.action === "delete") {
-                      await deleteApoOfferingRow(user.userId, { ...(conflict.original as any), ...ov });
-                    }
-                    setConflict(null);
-                    await loadOfferings();
-                  } catch (e: any) {
-                    alert(e?.message || "Failed to apply override.");
-                  }
-                }}
-              >
-                Override &amp; Apply
-              </button>
-            </div>
-          </div>
-        </div>
+            setConflictBusy(true);
+            const ov = {
+              override: true,
+              override_token: conflict.token,
+              override_reason: "Proceed with override",
+            } as any;
+
+            try {
+              if (conflict.action === "add") {
+                const basePayload = { ...(conflict.original as any) };
+                delete (basePayload as any).__undo_before;
+                delete (basePayload as any).__undo_snapshot;
+
+                const resp = await addApoOfferingRow(user.userId, { ...basePayload, ...ov } as any);
+                if ("conflict" in (resp as any)) {
+                  // Keep the modal open with the latest details
+                  handleConflict("add", (resp as any).conflict, basePayload);
+                  setConflictBusy(false);
+                  return;
+                }
+
+                const createdId = (resp as any).section_id as string;
+                if (createdId) pushSrvOp(makeAddOp(basePayload, createdId));
+              } else if (conflict.action === "edit") {
+                const raw = { ...(conflict.original as any) };
+                const before = (raw as any).__undo_before;
+                delete (raw as any).__undo_before;
+                delete (raw as any).__undo_snapshot;
+
+                const resp = await editApoOfferingRow(user.userId, { ...raw, ...ov } as any);
+                if ("conflict" in (resp as any)) {
+                  handleConflict("edit", (resp as any).conflict, { ...raw, __undo_before: before });
+                  setConflictBusy(false);
+                  return;
+                }
+
+                const sid = String((raw as any).section_id || "");
+                if (before && sid) {
+                  const afterFull = { ...(before as any), ...(raw as any) };
+                  pushSrvOp(makeEditOp(sid, before, afterFull, `Edit ${sid}`));
+                }
+              } else if (conflict.action === "delete") {
+                const raw = { ...(conflict.original as any) };
+                const snap = (raw as any).__undo_snapshot;
+                delete (raw as any).__undo_before;
+                delete (raw as any).__undo_snapshot;
+
+                const resp = await deleteApoOfferingRow(user.userId, { ...raw, ...ov } as any);
+                if ("conflict" in (resp as any)) {
+                  handleConflict("delete", (resp as any).conflict, { ...raw, __undo_snapshot: snap });
+                  setConflictBusy(false);
+                  return;
+                }
+
+                if (snap) pushSrvOp(makeDeleteOp(snap));
+              }
+
+              setConflict(null);
+              await loadOfferings();
+            } catch (e: any) {
+              alert(e?.message || "Failed to proceed.");
+            } finally {
+              setConflictBusy(false);
+            }
+          }}
+        />
       )}
 
       {/* ----------------------------- Forward Modal ----------------------------- */}
-     {showForward && (
-      <SubmitModal
-        onClose={() => setShowForward(false)}
-        onSubmit={async (note) => {
-          if (!user?.userId) return;
-          await forwardApoCourseOfferings(user.userId, {
-            to: "scheduling",
-            subject: `Submit for Scheduling — ${data?.term_label || ""}`,
-            message: note,
-            exclude_conflicts: true,
-          });
-          setShowForward(false);
-          alert("Submitted to Scheduling. Conflicted sections remain visible on the APO side.");
-        }}
-      />
-    )}
+      {showForward && (
+        <SubmitModal
+          requireNote={hasPriorSubmit || forceRequireNote}
+          changes={submitPrep.changes}
+          suggestedNote={submitPrep.suggestedNote}
+          loadingChanges={submitPrep.loading}
+          changesError={submitPrep.error}
+          onClose={() => {
+            setShowForward(false);
+            setForceRequireNote(false);
+            setSubmitPrep({ loading: false, changes: null, suggestedNote: "", error: null });
+          }}
+          onSubmit={async (note) => {
+            if (!user?.userId) return;
+
+            const isUpdate = hasPriorSubmit || forceRequireNote;
+
+            try {
+              await forwardApoCourseOfferings(user.userId, {
+                to: "scheduling",
+                subject: `Submit for Scheduling — ${data?.term_label || ""}`,
+                // First submission: no comment box, so send empty note.
+                message: isUpdate ? (note || "") : "",
+                exclude_conflicts: true,
+              });
+
+              await loadOfferings();
+
+              // Save a baseline snapshot so the next update can auto-summarize changes
+              await persistBaselineSnapshot();
+
+              setForceRequireNote(false);
+              setShowForward(false);
+              setSubmitPrep({ loading: false, changes: null, suggestedNote: "", error: null });
+
+              setSubmitAck({
+                open: true,
+                title: isUpdate ? "Course Offerings Updated" : "Course Offerings Submitted",
+                details: isUpdate
+                  ? "Your updates were submitted for scheduling and the Office Manager will see the changes."
+                  : "Your course offerings were submitted for scheduling and the Office Manager can now review them.",
+              });
+            } catch (e: any) {
+              const detail = e?.response?.data?.detail;
+              const msg = detail || e?.message || "Submit failed.";
+
+              if (String(detail || "").toLowerCase().includes("comment is required")) {
+                setForceRequireNote(true);
+                // Prepare change summary now that the comment field will show
+                setSubmitPrep({ loading: false, changes: null, suggestedNote: "", error: null });
+                void prepareSubmitUpdate();
+                throw new Error("Please add a short comment about what changed, then submit again.");
+              }
+
+              throw new Error(msg);
+            }
+          }}
+        />
+      )}
+
+      {/* --------------------- Confirm / Notice / Ack modals -------------------- */}
+      {confirmDlg.open && (
+        <ConfirmModal
+          open={confirmDlg.open}
+          title={confirmDlg.title}
+          description={confirmDlg.description}
+          confirmText={confirmDlg.confirmText}
+          cancelText={confirmDlg.cancelText}
+          variant={confirmDlg.variant}
+          content={confirmDlg.content}
+          busy={confirmDlg.busy}
+          onClose={closeConfirm}
+          onConfirm={async () => {
+            // Action lives in a ref so we don't store functions in state.
+            if (!confirmActionRef.current) return;
+            await confirmActionRef.current();
+          }}
+        />
+      )}
+
+      {noticeDlg.open && (
+        <NoticeModal
+          open={noticeDlg.open}
+          title={noticeDlg.title}
+          message={noticeDlg.message}
+          onClose={() => setNoticeDlg({ open: false, title: "", message: "" })}
+        />
+      )}
+
+      {opAck.open && (
+        <AckModal
+          open={opAck.open}
+          title={opAck.title}
+          details={opAck.details}
+          onClose={() => setOpAck({ open: false, title: "", details: "" })}
+        />
+      )}
+
+      {/* --------------------------- Acknowledgement Modal --------------------------- */}
+      {submitAck.open && (
+        <AckModal
+          open={submitAck.open}
+          title={submitAck.title}
+          details={submitAck.details}
+          onClose={() => setSubmitAck({ open: false, title: "", details: "" })}
+        />
+      )}
 
       {/* --------------------------- Planning Review Modal --------------------------- */}
-      {showPlanModal && data?.planning && (
+      {showPlanModal && data?.planning && hasPlanUpdates && (
         <PlanReviewModal
           changes={data.planning.pending_changes || []}
           courseIndex={{ ...planCourseIndex, ...extraCourseIndex }}  // ⟵ merged
@@ -3411,39 +5759,315 @@ if (response.ok) {
 }
 
 /* --------------------------- Small helper components --------------------------- */
+
+const NoticeModal: React.FC<{
+  open: boolean;
+  title: string;
+  message: string;
+  onClose: () => void;
+}> = ({ open, title, message, onClose }) =>
+  !open ? null : (
+    <div className="fixed inset-0 z-[120] grid place-items-center bg-black/40 p-4">
+      <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl">
+        <div className="mx-auto mb-4 grid h-16 w-16 place-items-center rounded-full border-2 border-amber-600 text-amber-700">
+          <AlertTriangle className="h-8 w-8" strokeWidth={2.5} />
+        </div>
+        <h3 className="mb-2 text-center text-2xl font-semibold">{title}</h3>
+        <p className="mx-auto mb-6 max-w-sm whitespace-pre-line text-center text-sm text-neutral-600">
+          {message}
+        </p>
+        <div className="flex justify-end">
+          <button
+            onClick={onClose}
+            className="rounded-lg bg-emerald-700 px-4 py-2 text-sm font-medium text-white hover:brightness-110"
+          >
+            OK
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+
+const ConfirmModal: React.FC<{
+  open: boolean;
+  title: string;
+  description?: string;
+  confirmText: string;
+  cancelText: string;
+  variant?: "default" | "danger" | "warning";
+  content?: React.ReactNode;
+  busy?: boolean;
+  onClose: () => void;
+  onConfirm: () => void | Promise<void>;
+}> = ({
+  open,
+  title,
+  description,
+  confirmText,
+  cancelText,
+  variant = "default",
+  content,
+  busy,
+  onClose,
+  onConfirm,
+}) => {
+  if (!open) return null;
+  const isDanger = variant === "danger";
+  const isWarning = variant === "warning";
+
+  return (
+    <div className="fixed inset-0 z-[120] grid place-items-center bg-black/40 p-4">
+      <div className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-2xl">
+        <div
+          className={cls(
+            "mx-auto mb-4 grid h-16 w-16 place-items-center rounded-full border-2",
+            isDanger ? "border-rose-600 text-rose-700" : isWarning ? "border-amber-600 text-amber-700" : "border-emerald-600 text-emerald-700"
+          )}
+        >
+          <AlertTriangle className="h-8 w-8" strokeWidth={2.5} />
+        </div>
+
+        <h3 className="mb-2 text-center text-2xl font-semibold">{title}</h3>
+
+        {description && (
+          <p className="mx-auto mb-4 max-w-md text-center text-sm text-neutral-600">{description}</p>
+        )}
+
+        {content && <div className="mb-4">{content}</div>}
+
+        <div className="flex justify-end gap-2">
+          <button
+            onClick={onClose}
+            disabled={!!busy}
+            className="rounded-lg border border-neutral-300 bg-neutral-100 px-4 py-2 text-sm hover:bg-neutral-200 disabled:opacity-50"
+          >
+            {cancelText}
+          </button>
+
+          <button
+            disabled={!!busy}
+            className={cls(
+              "rounded-lg px-4 py-2 text-sm font-medium text-white hover:brightness-110 disabled:opacity-50",
+              isDanger ? "bg-rose-700" : isWarning ? "bg-amber-700" : "bg-emerald-700"
+            )}
+            onClick={onConfirm}
+          >
+            {busy ? "Working…" : confirmText}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const SubmitModal: React.FC<{
   onClose: () => void;
   onSubmit: (note: string) => void | Promise<void>;
-}> = ({ onClose, onSubmit }) => {
+  requireNote?: boolean;
+  changes?: DetectedChanges | null;
+  suggestedNote?: string;
+  loadingChanges?: boolean;
+  changesError?: string | null;
+}> = ({
+  onClose,
+  onSubmit,
+  requireNote = false,
+  changes,
+  suggestedNote,
+  loadingChanges,
+  changesError,
+}) => {
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string>("");
+
+  const didAutofill = useRef(false);
+  const userTouched = useRef(false);
+
+  useEffect(() => {
+    if (!requireNote) return;
+    if (!suggestedNote) return;
+    if (didAutofill.current) return;
+    if (userTouched.current) return;
+    // Only prefill when the textbox is still empty (recommended UX)
+    if (note.trim() !== "") return;
+    setNote(suggestedNote);
+    didAutofill.current = true;
+  }, [requireNote, suggestedNote]);
+
+  const canSubmit = !busy && (!requireNote || note.trim().length > 0);
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-      <div className="w-full max-w-lg rounded-xl bg-white shadow-xl border border-gray-200">
-        <div className="border-b px-4 py-3 font-semibold">Submit for Scheduling</div>
-        <div className="p-4 space-y-2">
-          <div className="text-sm text-slate-700">
-            This hands the plan to the Office Manager to assign faculty and schedules.
-            Conflicted sections are kept on your (APO) side and are not included in the submission.
-          </div>
-          <textarea
-            className="w-full rounded border px-3 py-2 text-sm min-h-[120px]"
-            value={note}
-            onChange={(e) => setNote(e.target.value)}
-            placeholder="Optional note…"
-          />
+    <div className="fixed inset-0 z-[120] grid place-items-center bg-black/40 p-4">
+      <div className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-2xl">
+        <div className="mx-auto mb-4 grid h-16 w-16 place-items-center rounded-full border-2 border-emerald-600 text-emerald-700">
+          <Send className="h-8 w-8" strokeWidth={2.5} />
         </div>
-        <div className="flex items-center justify-end gap-2 border-t px-4 py-3">
-          <button className="rounded-md border px-3 py-1.5 text-sm" onClick={onClose}>
+
+        <h3 className="mb-2 text-center text-2xl font-semibold">Submit for Scheduling?</h3>
+
+        <p className="mx-auto mb-4 max-w-md text-center text-sm text-neutral-600">
+          {requireNote ? (
+            <>
+              You're submitting an <span className="font-semibold">update</span>. Add a short note so the{' '}
+              <span className="font-semibold">Office Manager</span> can quickly spot what changed.
+            </>
+          ) : (
+            <>
+              This will send your current <span className="font-semibold">Course Offerings</span> to the Office Manager for scheduling.
+            </>
+          )}
+        </p>
+
+        {requireNote && (
+          <>
+            <div className="mb-4">
+              <div className="flex items-center justify-between gap-2">
+                <div className="text-sm font-semibold text-gray-700">Detected changes</div>
+                {loadingChanges ? (
+                  <div className="text-xs text-slate-500">Analyzing…</div>
+                ) : null}
+              </div>
+
+              <div className="mt-2 max-h-[240px] overflow-auto rounded-lg border border-slate-200 bg-slate-50 p-3">
+                {changesError ? (
+                  <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                    {changesError}
+                  </div>
+                ) : null}
+
+                {!loadingChanges && changes ? (
+                  <div className="space-y-4">
+                    {/* Added */}
+                    <div>
+                      <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                        Added ({changes.added.length})
+                      </div>
+                      {changes.added.length ? (
+                        <ul className="list-disc space-y-1 pl-5 text-sm text-slate-800">
+                          {changes.added.map((a) => (
+                            <li key={a.key}>{a.label}</li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <div className="text-sm text-slate-500">None</div>
+                      )}
+                    </div>
+
+                    {/* Edited */}
+                    <div>
+                      <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                        Edited ({changes.edited.length})
+                      </div>
+                      {changes.edited.length ? (
+                        <ul className="space-y-2">
+                          {changes.edited.map((e) => (
+                            <li
+                              key={e.key}
+                              className="rounded-lg border border-slate-200 bg-white px-3 py-2"
+                            >
+                              <div className="text-sm font-medium text-slate-900">{e.label}</div>
+                              {e.details.length ? (
+                                <ul className="mt-1 list-disc space-y-1 pl-5 text-sm text-slate-700">
+                                  {e.details.map((d, idx) => (
+                                    <li key={idx}>
+                                      <span className="font-medium text-slate-800">{d.field}:</span>{" "}
+                                      <span className="text-slate-600">{d.from}</span>{" "}
+                                      <span className="text-slate-400">→</span>{" "}
+                                      <span className="text-slate-900">{d.to}</span>
+                                    </li>
+                                  ))}
+                                </ul>
+                              ) : (
+                                <div className="mt-1 text-xs text-slate-500">Edited</div>
+                              )}
+                            </li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <div className="text-sm text-slate-500">None</div>
+                      )}
+                    </div>
+
+                    {/* Deleted */}
+                    <div>
+                      <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                        Deleted ({changes.deleted.length})
+                      </div>
+                      {changes.deleted.length ? (
+                        <ul className="list-disc space-y-1 pl-5 text-sm text-slate-800">
+                          {changes.deleted.map((d) => (
+                            <li key={d.key}>{d.label}</li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <div className="text-sm text-slate-500">None</div>
+                      )}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="text-sm text-slate-500">
+                    {loadingChanges ? "Analyzing changes…" : "No change summary available yet."}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="mb-4">
+              <div className="flex items-center justify-between gap-2">
+                <label className="block text-sm font-semibold text-gray-700">Comment (required)</label>
+                {suggestedNote ? (
+                  <button
+                    type="button"
+                    className="text-xs font-semibold text-emerald-700 hover:text-emerald-900"
+                    onClick={() => {
+                      userTouched.current = true;
+                      if (!note.trim()) setNote(suggestedNote);
+                      else setNote((prev) => `${prev.trimEnd()}\n\n${suggestedNote}`);
+                    }}
+                  >
+                    Insert suggested summary
+                  </button>
+                ) : null}
+              </div>
+              <textarea
+                className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm min-h-[120px] shadow-sm focus:ring-2 focus:ring-emerald-500/30"
+                value={note}
+                onChange={(e) => {
+                  userTouched.current = true;
+                  setNote(e.target.value);
+                }}
+                placeholder=" "
+              />
+            </div>
+          </>
+        )}
+
+        {error && (
+          <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+            {error}
+          </div>
+        )}
+
+        <div className="flex justify-end gap-2">
+          <button
+            onClick={onClose}
+            disabled={busy}
+            className="rounded-lg border border-neutral-300 bg-neutral-100 px-4 py-2 text-sm hover:bg-neutral-200 disabled:opacity-50"
+          >
             Cancel
           </button>
+
           <button
-            disabled={busy}
-            className="rounded-md bg-emerald-700 px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50"
+            disabled={!canSubmit}
+            className="rounded-lg bg-emerald-700 px-4 py-2 text-sm font-medium text-white hover:brightness-110 disabled:opacity-50"
             onClick={async () => {
               setBusy(true);
+              setError("");
               try {
                 await onSubmit(note);
+              } catch (e: any) {
+                setError(e?.message || "Submit failed.");
               } finally {
                 setBusy(false);
               }
@@ -3457,6 +6081,32 @@ const SubmitModal: React.FC<{
   );
 };
 
+const AckModal: React.FC<{
+  open: boolean;
+  title: string;
+  details: string;
+  onClose: () => void;
+}> = ({ open, title, details, onClose }) =>
+  !open ? null : (
+    <div className="fixed inset-0 z-[120] grid place-items-center bg-black/40 p-4">
+      <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl">
+        <div className="mx-auto mb-4 grid h-16 w-16 place-items-center rounded-full border-2 border-emerald-600 text-emerald-700">
+          <Check className="h-8 w-8" strokeWidth={2.5} />
+        </div>
+        <h3 className="mb-2 text-center text-2xl font-semibold">{title}</h3>
+        <p className="mx-auto mb-6 max-w-sm text-center text-sm text-neutral-600">{details}</p>
+        <div className="flex justify-end">
+          <button
+            onClick={onClose}
+            className="rounded-lg bg-emerald-700 px-4 py-2 text-sm font-medium text-white hover:brightness-110"
+          >
+            OK
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+
 const PlanReviewModal: React.FC<{
   changes: PlanningChange[];
   onClose: () => void;
@@ -3464,15 +6114,67 @@ const PlanReviewModal: React.FC<{
   courseIndex?: Record<string, { code: string; title: string }>;
 }> = ({ changes, onClose, onApprove, courseIndex = {} }) => {
   const [busy, setBusy] = useState(false);
+  const summary = useMemo(() => {
+    const s = { total: changes.length, add: 0, increase: 0, reduce: 0 };
+    for (const ch of changes as any[]) {
+      if (ch?.type === "add_course_to_curriculum") s.add += 1;
+      else if (ch?.type === "sections_increase") s.increase += 1;
+      else if (ch?.type === "sections_decrease") s.reduce += 1;
+    }
+    return s;
+  }, [changes]);
   return (
-  <div className="fixed inset-0 z-[9999] flex items-start justify-center bg-black/40 p-3 sm:p-4">
-    <div className="w-[92vw] max-w-[900px] max-h-[88vh] mt-6 rounded-2xl bg-white shadow-2xl border border-gray-200 flex flex-col">
-      <div className="sticky top-0 z-10 bg-white border-b border-gray-200 px-4 py-3 font-semibold">
-        Review Planning Updates
-      </div>
-        <div className="flex-1 min-h-0 p-4 overflow-auto">
+    <div className="fixed inset-0 z-[9999] flex items-start justify-center bg-black/50 p-3 sm:p-6">
+      <div className="w-[95vw] max-w-[980px] max-h-[90vh] mt-4 sm:mt-8 rounded-2xl bg-white shadow-2xl border border-gray-200 flex flex-col overflow-hidden">
+        {/* Header (high-visibility) */}
+        <div className="bg-amber-600 text-white px-5 py-4">
+          <div className="flex items-start gap-3">
+            <div className="mt-0.5 grid h-10 w-10 place-items-center rounded-full bg-white/15">
+              <AlertTriangle className="h-5 w-5" />
+            </div>
+            <div className="min-w-0">
+              <div className="text-base sm:text-lg font-extrabold tracking-tight">
+                Approval required — Planning updates are pending
+              </div>
+              <div className="mt-1 text-sm text-white/90">
+                These changes were generated from Pre‑Enlistment and <span className="font-semibold">will not be applied</span> until you approve.
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Summary */}
+        <div className="border-b border-amber-200 bg-amber-50 px-5 py-3">
+          <div className="flex flex-wrap items-center gap-2 text-sm text-amber-950">
+            <span className="inline-flex items-center rounded-full bg-amber-100 px-3 py-1 font-semibold">
+              Total: {summary.total}
+            </span>
+            {summary.add > 0 && (
+              <span className="inline-flex items-center rounded-full bg-emerald-100 px-3 py-1 font-semibold text-emerald-800">
+                Add: {summary.add}
+              </span>
+            )}
+            {summary.increase > 0 && (
+              <span className="inline-flex items-center rounded-full bg-blue-100 px-3 py-1 font-semibold text-blue-800">
+                Increase: {summary.increase}
+              </span>
+            )}
+            {summary.reduce > 0 && (
+              <span className="inline-flex items-center rounded-full bg-rose-100 px-3 py-1 font-semibold text-rose-800">
+                Reduce: {summary.reduce}
+              </span>
+            )}
+            <span className="ml-auto text-xs text-amber-900">
+              Review the list below, then click <span className="font-semibold">Approve updates</span>.
+            </span>
+          </div>
+        </div>
+
+        <div className="flex-1 min-h-0 p-4 sm:p-5 overflow-auto">
           {changes.length === 0 ? (
-            <div className="text-sm text-slate-700">No pending changes.</div>
+            <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm text-slate-700">
+              No pending changes.
+            </div>
           ) : (
             <ul className="space-y-3">
               {changes.map((ch: any, i: number) => {
@@ -3484,6 +6186,17 @@ const PlanReviewModal: React.FC<{
                 const code = (meta?.code || "").trim();
                 return code || key || "Unknown course";
               };
+
+              const codeForChange = (chAny: any) => {
+                const cc = chAny?.course_code;
+                const fromChange = Array.isArray(cc)
+                  ? String(cc[0] || "").trim()
+                  : typeof cc === "string"
+                  ? cc.trim()
+                  : "";
+                return (fromChange || codeForCourse(chAny?.course_id)).trim();
+              };
+
 
                 const TypeBadge = ({ text }: { text: string }) => (
                   <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] font-semibold text-emerald-700">
@@ -3501,7 +6214,7 @@ const PlanReviewModal: React.FC<{
                     title = "Add course to curriculum";
                     badge = "Add";
                     details = [
-                      { k: "Course code", v: codeForCourse(ch.course_id) },
+                      { k: "Course code", v: codeForChange(ch) },
                       { k: "Enlisted", v: ch.count ?? "—" },
                       ...(ch.target ? [{ k: "Target", v: String(ch.target) }] : []),
                     ];
@@ -3511,7 +6224,7 @@ const PlanReviewModal: React.FC<{
                     title = "Increase sections";
                     badge = "Increase";
                     details = [
-                      { k: "Course code", v: codeForCourse(ch.course_id) },
+                      { k: "Course code", v: codeForChange(ch) },
                       { k: "Sections +", v: typeof ch.by_sections === "number" ? ch.by_sections : "—" },
                     ];
                     break;
@@ -3520,7 +6233,7 @@ const PlanReviewModal: React.FC<{
                     title = "Reduce sections";
                     badge = "Reduce";
                     details = [
-                      { k: "Course code", v: codeForCourse(ch.course_id) },
+                      { k: "Course code", v: codeForChange(ch) },
                       { k: "Sections −", v: typeof ch.by_sections === "number" ? ch.by_sections : "—" },
                     ];
                     break;
@@ -3537,7 +6250,7 @@ const PlanReviewModal: React.FC<{
                 }
 
                 return (
-                  <li key={i} className="rounded-xl border border-gray-200 bg-gray-50 p-3 shadow-sm">
+                  <li key={i} className="rounded-xl border border-gray-200 bg-white p-3 shadow-sm">
                     <div className="flex items-center justify-between">
                       <div className="text-sm font-semibold text-slate-800">{title}</div>
                       <TypeBadge text={badge} />
@@ -3558,13 +6271,17 @@ const PlanReviewModal: React.FC<{
           )}
         </div>
 
-        <div className="flex items-center justify-end gap-2 border-t px-4 py-3">
-          <button className="rounded-md border px-3 py-1.5 text-sm" onClick={onClose}>
-            Close
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-end gap-2 border-t px-5 py-4">
+          <button
+            className="rounded-lg border border-neutral-300 bg-neutral-100 px-4 py-2 text-sm font-medium hover:bg-neutral-200"
+            onClick={onClose}
+            disabled={busy}
+          >
+            Not now
           </button>
           <button
             disabled={busy || changes.length === 0}
-            className="rounded-md bg-emerald-700 px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50"
+            className="rounded-lg bg-emerald-700 px-4 py-2 text-sm font-extrabold text-white shadow-sm hover:brightness-110 disabled:opacity-50"
             onClick={async () => {
               setBusy(true);
               try {
@@ -3575,7 +6292,7 @@ const PlanReviewModal: React.FC<{
             }}
           >
             <Check className="inline-block h-4 w-4 mr-1 align-[-2px]" />
-            Approve
+            Approve updates
           </button>
         </div>
       </div>
@@ -3721,16 +6438,16 @@ const GlobalCourseEditModal: React.FC<GlobalCourseEditModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-      <div className="w-full max-w-4xl rounded-xl bg-white shadow-xl border border-gray-200">
-        <div className="flex items-center justify-between border-b px-4 py-3">
-          <div className="font-semibold">Edit Global Course</div>
-          <button className="rounded-md border px-3 py-1.5 text-sm" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/40 p-4 sm:p-6 overflow-y-auto">
+      <div className="w-full max-w-4xl rounded-2xl bg-white shadow-xl border border-gray-200 my-8 overflow-hidden flex flex-col">
+        <div className="flex items-center justify-between border-b px-6 py-4">
+          <div className="font-semibold">Edit Course</div>
+          <button className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50" onClick={onClose}>
             Close
           </button>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 p-4">
+        <div className="flex-1 overflow-y-auto grid grid-cols-1 md:grid-cols-2 gap-4 p-6">
           {/* LEFT: search & pick a course */}
           <div className="rounded-lg border">
             <div className="px-3 py-2 bg-gray-50 font-semibold text-sm">Search course</div>
@@ -3864,8 +6581,8 @@ const GlobalCourseEditModal: React.FC<GlobalCourseEditModalProps> = ({
           </div>
         </div>
 
-        <div className="flex items-center justify-end gap-2 border-t px-4 py-3">
-          <button className="rounded-md border px-3 py-1.5 text-sm" onClick={onClose}>
+        <div className="flex items-center justify-end gap-2 border-t px-6 py-4 bg-white">
+          <button className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50" onClick={onClose}>
             Cancel
           </button>
           <button
@@ -4045,18 +6762,18 @@ const noMatches = query.trim().length >= 2 && list.length === 0;
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-      <div className="w-full max-w-5xl rounded-xl bg-white shadow-xl border border-gray-200">
-        <div className="flex items-center justify-between border-b px-4 py-3">
+    <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/40 p-4 sm:p-6 overflow-y-auto">
+      <div className="w-full max-w-5xl rounded-2xl bg-white shadow-xl border border-gray-200 my-8 overflow-hidden flex flex-col">
+        <div className="flex items-center justify-between border-b px-6 py-4">
           <div className="font-semibold">
             Edit Courses to Take — {programCode} • {base.batch_code || "ID"}
           </div>
-          <button className="rounded-md border px-3 py-1.5 text-sm" onClick={onClose}>
+          <button className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50" onClick={onClose}>
             Close
           </button>
         </div>
 
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 p-4">
+        <div className="flex-1 overflow-y-auto grid grid-cols-1 lg:grid-cols-2 gap-4 p-6">
           {/* Current courses */}
           <div className="rounded-lg border">
             <div className="px-3 py-2 bg-gray-50 font-semibold">Current courses</div>
@@ -4144,8 +6861,8 @@ const noMatches = query.trim().length >= 2 && list.length === 0;
           </div>
         </div>
 
-        <div className="flex items-center justify-end gap-2 border-t px-4 py-3">
-          <button className="rounded-md border px-3 py-1.5 text-sm" onClick={onClose}>
+        <div className="flex items-center justify-end gap-2 border-t px-6 py-4 bg-white">
+          <button className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50" onClick={onClose}>
             Cancel
           </button>
           <button
@@ -4240,16 +6957,16 @@ const CreateCourseModal: React.FC<{
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-      <div className="w-full max-w-2xl rounded-xl bg-white shadow-xl border border-gray-200">
-        <div className="flex items-center justify-between border-b px-4 py-3">
-          <div className="font-semibold">Add Course (Global Catalog)</div>
-          <button className="rounded-md border px-3 py-1.5 text-sm" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/40 p-4 sm:p-6 overflow-y-auto">
+      <div className="w-full max-w-2xl rounded-2xl bg-white shadow-xl border border-gray-200 my-8 overflow-hidden flex flex-col">
+        <div className="flex items-center justify-between border-b px-6 py-4">
+          <div className="font-semibold">Add Course</div>
+          <button className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50" onClick={onClose}>
             Close
           </button>
         </div>
 
-        <div className="p-4 grid grid-cols-1 md:grid-cols-2 gap-3">
+        <div className="flex-1 overflow-y-auto p-6 grid grid-cols-1 md:grid-cols-2 gap-3">
           {/* Department (SelectBox) */}
           <div className="md:col-span-1">
             <label className="text-xs font-medium text-slate-700 mb-1 block">Department</label>
@@ -4364,8 +7081,8 @@ const CreateCourseModal: React.FC<{
           </div>
         </div>
 
-        <div className="flex items-center justify-end gap-2 border-t px-4 py-3">
-          <button className="rounded-md border px-3 py-1.5 text-sm" onClick={onClose}>
+        <div className="flex items-center justify-end gap-2 border-t px-6 py-4 bg-white">
+          <button className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50" onClick={onClose}>
             Cancel
           </button>
           <button

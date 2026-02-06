@@ -110,10 +110,10 @@ async function getPlanningTermForCampus(
   try {
     const meta = await getApoPreenlistmentMeta(userId, campusParam);
 
-    // If your backend's planningTerm represents the same thing, you can keep this.
-    // Otherwise, activeTerm will usually be the safer choice.
-    if (meta?.activeTerm?.term_id) return meta.activeTerm.term_id;
+    // Prefer planningTerm so Room Allocation stays aligned with APO planning workflow.
+    // Fallback to activeTerm if planningTerm is missing.
     if (meta?.planningTerm?.term_id) return meta.planningTerm.term_id;
+    if (meta?.activeTerm?.term_id) return meta.activeTerm.term_id;
   } catch {
     // ignore and fall through to localStorage
   }
@@ -1148,7 +1148,11 @@ const refresh = async (): Promise<RoomAllocationResponse | null> => {
 
   return (
     <div className="min-h-screen w-full bg-gray-50 text-slate-900">
-      <TopBar fullName={fullName} role={campusName ? `${roleName} | ${campusName}` : roleName} />
+      <TopBar
+        fullName={fullName}
+        role={campusName ? `${roleName} | ${campusName}` : roleName}
+        inboxPath="/apo/inbox"
+      />
       <Tabs
         mode="nav"
         items={[
