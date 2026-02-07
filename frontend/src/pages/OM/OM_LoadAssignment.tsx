@@ -4,6 +4,7 @@ import AppShell from "../../base/AppShell";
 import { runOmAutoAssign } from "../../api.ts";
 import {
   submitOmLoadAssignment,
+  saveOmSectionRemarks,
   importOmShsCsv,
   notifyChairLoadRecommendation,
   sendOmLoadAssignmentsToFaculty,
@@ -29,19 +30,17 @@ import {
   Play,
   RefreshCcw,
   Send,
-  Save,
   CheckCheck,
   Plus,
   MessageSquareText,
   Copy,
-
   Archive,
-
   Undo2,
   Redo2,
   X,
-
-  Upload,} from "lucide-react";
+  Upload,
+  Save,
+} from "lucide-react";
 import { InboxContent as OMInboxContent } from "./OM_Inbox";
 
 export type FlagSeverity = "warning" | "error";
@@ -509,6 +508,8 @@ type Row = {
   faculty_id?: string;
   /** True when this row has already been sent/forwarded to the faculty (proposal created). */
   forwarded_to_faculty?: boolean;
+  /** True when a forwarded row was edited after it was last sent to faculty. */
+  reforward_needed?: boolean;
   day1: string;
   begin1: string;
   end1: string;
@@ -1521,11 +1522,13 @@ const RequestChangeModal = ({
   const [error, setError] = useState<string | null>(null);
   const [messages, setMessages] = useState<Array<any>>([]);
   const [status, setStatus] = useState<string | null>(null);
+  const [locked, setLocked] = useState<boolean>(false);
   const [reply, setReply] = useState("");
 
   const displayFaculty = facultyName || "Faculty";
 
-  const isTerminal = !!status && ["ACCEPTED", "APPROVED", "REJECTED"].includes(status);
+  // Terminal statuses are informational; only the explicit `locked` flag should prevent interaction.
+  const isTerminal = Boolean(locked);
   const needsOm = status === "NEEDS_OM" || status === "OPEN" || status === "open";
 
   useEffect(() => {
@@ -1534,6 +1537,7 @@ const RequestChangeModal = ({
       setError(null);
       setMessages([]);
       setStatus(null);
+      setLocked(false);
       setReply("");
       return;
     }
@@ -1564,6 +1568,7 @@ const RequestChangeModal = ({
 
         const rfc = res.rfc;
         setStatus(rfc.status || null);
+        setLocked(Boolean(rfc.locked));
         setMessages(rfc.messages || rfc.thread || []);
       } catch (e: any) {
         setError(e?.message || "Failed to load RFC.");
@@ -1605,8 +1610,8 @@ const RequestChangeModal = ({
         decision === "reply"
           ? "Reply sent to faculty."
           : decision === "approve"
-          ? "RFC approved. Schedule is now locked."
-          : "RFC rejected. Schedule is now locked.";
+          ? "RFC approved."
+          : "RFC rejected.";
       onToast?.(msg, "success");
       onClose();
     } catch (e: any) {
@@ -1651,12 +1656,35 @@ const RequestChangeModal = ({
           {messages.length ? (
             <div className="space-y-2">
               {messages.map((m: any, idx: number) => {
-                const who = (m.sender_role || m.from || "").toString().toUpperCase();
+                const whoRaw = (m.sender_role || m.from || "").toString();
+                const who = whoRaw.toUpperCase();
                 const ts = m.created_at ? new Date(m.created_at).toLocaleString() : "";
+                const isFaculty = /FACULTY/i.test(whoRaw) || who === "F";
+                const bubble = m.message || m.text || "";
+
                 return (
-                  <div key={idx} className="text-sm">
-                    <div className="text-[11px] text-gray-500">{who} {ts ? `• ${ts}` : ""}</div>
-                    <div className="whitespace-pre-wrap text-gray-800">{m.message || m.text || ""}</div>
+                  <div
+                    key={idx}
+                    className={cls(
+                      "flex",
+                      isFaculty ? "justify-start" : "justify-end"
+                    )}
+                  >
+                    <div className={cls("max-w-[85%]", isFaculty ? "text-left" : "text-right")}>
+                      <div className={cls("mb-1 text-[11px] text-gray-500", isFaculty ? "pl-1" : "pr-1")}>
+                        {who || (isFaculty ? displayFaculty.toUpperCase() : "OM")}{ts ? ` • ${ts}` : ""}
+                      </div>
+                      <div
+                        className={cls(
+                          "inline-block rounded-2xl px-3 py-2 text-sm whitespace-pre-wrap",
+                          isFaculty
+                            ? "bg-white text-gray-800 border border-gray-200"
+                            : "bg-emerald-600 text-white"
+                        )}
+                      >
+                        {bubble}
+                      </div>
+                    </div>
                   </div>
                 );
               })}
@@ -2227,6 +2255,11 @@ export default function OM_LoadAssignment() {
 
   const [search, setSearch] = useState("");
   const [rows, setRows] = useState<Row[]>([]);
+
+  // Remarks are saved explicitly per-row (do NOT mix with load draft/undo stacks).
+  const [remarksDraftBySection, setRemarksDraftBySection] = useState<Record<string, string>>({});
+  const [remarksSavedBySection, setRemarksSavedBySection] = useState<Record<string, string>>({});
+  const [savingRemarkBySection, setSavingRemarkBySection] = useState<Record<string, boolean>>({});
   const [validationContext, setValidationContext] = useState<ValidationContext>(
     {
       courseToKac: {},
@@ -2285,6 +2318,51 @@ export default function OM_LoadAssignment() {
   };
 
   const commitRows = (nextRows: Row[], options?: { markDirty?: boolean }) => {
+    // If a row was already forwarded to faculty, any meaningful edit should make it eligible for re-forwarding.
+    // (Selection toggles should NOT trigger this.)
+    const prevById = new Map(rows.map((r) => [r.id, r] as const));
+
+    const meaningfulKeys: (keyof Row)[] = [
+      "course",
+      "title",
+      "units",
+      "section",
+      "faculty",
+      "faculty_id",
+      "day1",
+      "begin1",
+      "end1",
+      "room1",
+      "day2",
+      "begin2",
+      "end2",
+      "room2",
+      "capacity",
+      "mode",
+    ];
+
+    const isMeaningfullyChanged = (a: Row, b: Row) => {
+      for (const k of meaningfulKeys) {
+        const av = (a as any)[k];
+        const bv = (b as any)[k];
+        if (String(av ?? "") !== String(bv ?? "")) return true;
+      }
+      return false;
+    };
+
+    const nextRowsWithReforward: Row[] = nextRows.map((nr) => {
+      const pr = prevById.get(nr.id);
+      if (!pr) return nr;
+      if (!pr.forwarded_to_faculty) return nr;
+      if (pr.reforward_needed) return nr;
+
+      // Only flag if something meaningful (not selection) changed.
+      if (isMeaningfullyChanged(pr, nr)) {
+        return { ...nr, reforward_needed: true };
+      }
+      return nr;
+    });
+
     /**
      * Auto-status rule:
      * Once OM fills a row with the required details (even before sending to faculty),
@@ -2317,9 +2395,6 @@ export default function OM_LoadAssignment() {
       };
 
       return rowsIn.map((r) => {
-        const locked = !!r.finalized || r.status === "Approved" || r.status === "Confirmed";
-        if (locked) return r;
-
         // If OM has completed the row, ensure it's Pending (unless it is already a more specific status).
         if (isComplete(r)) {
           const current = String(r.status || "").trim();
@@ -2332,7 +2407,7 @@ export default function OM_LoadAssignment() {
       });
     };
 
-    const nextRowsWithStatus = applyAutoPendingStatus(nextRows);
+    const nextRowsWithStatus = applyAutoPendingStatus(nextRowsWithReforward);
 
     // Push current snapshot to undo before applying the change
     undoStackRef.current.push({ rows, hasLocalEdits });
@@ -2376,6 +2451,74 @@ export default function OM_LoadAssignment() {
     setHasLocalEdits(next.hasLocalEdits);
     bumpHistory();
   };
+
+  /* ---------------------- Keyboard shortcuts (Ctrl/Cmd) ---------------------- */
+  // NOTE: We intentionally do NOT override native undo/redo inside text inputs.
+  const shortcutFnsRef = useRef<{ undo: () => void; redo: () => void }>({
+    undo: () => {},
+    redo: () => {},
+  });
+  const isRunningRef = useRef(false);
+  useEffect(() => {
+    isRunningRef.current = isRunning;
+  }, [isRunning]);
+
+  useEffect(() => {
+    shortcutFnsRef.current = {
+      undo: handleUndo,
+      redo: handleRedo,
+    };
+  }, [handleUndo, handleRedo]);
+
+  useEffect(() => {
+    const isEditableTarget = (t: EventTarget | null) => {
+      const el = t as HTMLElement | null;
+      if (!el) return false;
+
+      const tag = (el as any).tagName ? String((el as any).tagName).toLowerCase() : "";
+      if (tag === "input" || tag === "textarea" || tag === "select") return true;
+
+      if ((el as any).isContentEditable) return true;
+      if (el.closest?.("[contenteditable='true']")) return true;
+      if (el.getAttribute?.("role") === "textbox") return true;
+      return false;
+    };
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.defaultPrevented) return;
+      if (e.altKey) return;
+
+      const mod = e.ctrlKey || e.metaKey; // Ctrl (Win/Linux) / Cmd (Mac)
+      if (!mod) return;
+
+      const key = String(e.key || "").toLowerCase();
+      if (key !== "z" && key !== "y") return;
+
+      if (!isRunningRef.current) return;
+
+      // Don’t intercept while the user is typing in an editable control
+      if (isEditableTarget(e.target)) return;
+
+      e.preventDefault();
+      e.stopPropagation();
+
+      const fns = shortcutFnsRef.current;
+
+      // Ctrl/Cmd+Z => Undo
+      if (key === "z" && !e.shiftKey) {
+        fns.undo();
+        return;
+      }
+
+      // Ctrl/Cmd+Y or Ctrl/Cmd+Shift+Z => Redo
+      if (key === "y" || (key === "z" && e.shiftKey)) {
+        fns.redo();
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => window.removeEventListener("keydown", onKeyDown, true);
+  }, []);
 
   const [facultyList, setFacultyList] = useState<Faculty[]>([]);
   // Faculty Deloading (per-faculty)
@@ -2476,13 +2619,22 @@ export default function OM_LoadAssignment() {
     const key = (r: Row) => String((r.faculty_id || r.faculty || "")).trim();
     const selectedKeys = new Set(selectedRows.map(key).filter(Boolean));
 
+    const isEligible = (r: Row) => {
+      // Never include rows without a faculty
+      if (!key(r)) return false;
+
+      // Do NOT re-send rows that were already forwarded unless they've been edited since.
+      if (r.forwarded_to_faculty && !r.reforward_needed) return false;
+      return true;
+    };
+
     if (all) {
-      // Send all rows that are assigned to a faculty
-      return rows.filter((r) => !!key(r));
+      // Send all eligible rows that are assigned to a faculty
+      return rows.filter(isEligible);
     }
 
     // If any row is selected for a faculty, send ALL rows for that faculty (not per subject)
-    return rows.filter((r) => selectedKeys.has(key(r)));
+    return rows.filter((r) => selectedKeys.has(key(r)) && isEligible(r));
   };
 /**
    * Before forwarding to faculty, require that the rows being sent are complete.
@@ -2632,6 +2784,15 @@ export default function OM_LoadAssignment() {
       end2: normalizeServerTimeToHHMM(r?.end2),
     }));
     setRows(normalizedRows);
+
+    // Initialize remarks state from DB values (sections.remarks) without affecting other save/undo behaviors.
+    const initRemarks: Record<string, string> = {};
+    for (const rr of normalizedRows) {
+      initRemarks[rr.id] = String((rr as any)?.remarks ?? "");
+    }
+    setRemarksDraftBySection(initRemarks);
+    setRemarksSavedBySection(initRemarks);
+
     const nextTermId = typeof (res as any)?.term_id === "string" ? (res as any).term_id : "";
     setTerm(typeof res?.term === "string" ? res.term : "");
     setTermId(nextTermId);
@@ -2644,6 +2805,90 @@ export default function OM_LoadAssignment() {
     setApproved(Boolean((res as any)?.forwarded_to_chair));
     setHasLocalEdits(false);
     resetHistory();
+  };
+
+  const getPrimaryScheduleId = (r: Row): string => {
+    const ids = (r as any)?.schedule_ids;
+    if (Array.isArray(ids)) {
+      const found = ids.find((x: any) => typeof x === "string" && x.trim());
+      if (found) return String(found);
+    }
+    const single = (r as any)?.schedule_id;
+    return typeof single === "string" ? single : "";
+  };
+
+  // --- Remarks autosave (per section) ---
+  // Debounce timers keyed by section row id.
+  const remarkAutosaveTimersRef = useRef<Record<string, number>>({});
+
+  const clearRemarkAutosaveTimer = (sectionId: string) => {
+    const t = remarkAutosaveTimersRef.current[sectionId];
+    if (t) {
+      window.clearTimeout(t);
+      delete remarkAutosaveTimersRef.current[sectionId];
+    }
+  };
+
+  useEffect(() => {
+    return () => {
+      // cleanup timers on unmount
+      for (const k of Object.keys(remarkAutosaveTimersRef.current)) {
+        window.clearTimeout(remarkAutosaveTimersRef.current[k]);
+      }
+      remarkAutosaveTimersRef.current = {};
+    };
+  }, []);
+
+  const handleSaveRemark = async (
+    r: Row,
+    options?: { silentSuccess?: boolean }
+  ) => {
+    if (!userId || isArchiveView) return;
+    const sectionId = r.id;
+    const scheduleId = getPrimaryScheduleId(r);
+    if (!scheduleId) {
+      showToast(
+        "Cannot save remarks for this row because a schedule identifier is missing.",
+        "error"
+      );
+      return;
+    }
+
+    const remarks = String(remarksDraftBySection[sectionId] ?? "");
+    const saved = String(remarksSavedBySection[sectionId] ?? "");
+    if (remarks === saved) return;
+    if (savingRemarkBySection[sectionId]) return;
+
+    setSavingRemarkBySection((p) => ({ ...p, [sectionId]: true }));
+    try {
+      await saveOmSectionRemarks(userId, { schedule_id: scheduleId, remarks });
+      setRemarksSavedBySection((p) => ({ ...p, [sectionId]: remarks }));
+      // Do not clobber a newer in-progress edit that happened while the save was in-flight.
+      setRemarksDraftBySection((p) =>
+        String(p[sectionId] ?? "") === remarks ? { ...p, [sectionId]: remarks } : p
+      );
+      if (!options?.silentSuccess) {
+        showToast("Remarks saved.", "success");
+      }
+    } catch (e: any) {
+      showToast(e?.message || "Failed to save remarks.", "error");
+    } finally {
+      setSavingRemarkBySection((p) => ({ ...p, [sectionId]: false }));
+    }
+  };
+
+  const queueAutosaveRemark = (r: Row, nextValue: string) => {
+    if (!userId || isArchiveView) return;
+    const sectionId = r.id;
+    // Update draft immediately.
+    setRemarksDraftBySection((p) => ({ ...p, [sectionId]: nextValue }));
+
+    // Debounced save.
+    clearRemarkAutosaveTimer(sectionId);
+    remarkAutosaveTimersRef.current[sectionId] = window.setTimeout(() => {
+      // Use the latest draft at save time.
+      void handleSaveRemark(r, { silentSuccess: true });
+    }, 700);
   };
 
   const handleForwardToChair = async () => {
@@ -2673,9 +2918,9 @@ export default function OM_LoadAssignment() {
   };
 
   const getEditFlags = (r: Row) => {
-    // Once a row is finalized/approved, it must be locked from any further edits.
-    const isLocked = !!r.finalized || r.status === "Approved";
-    if (isLocked) {
+    // Archived terms are view-only.
+    // NOTE: Faculty acceptance/"Approved" schedules must remain editable by OM.
+    if (isArchiveView) {
       return {
         course: false,
         title: false,
@@ -3658,7 +3903,10 @@ useEffect(() => {
                           if (isArchiveView) return;
                           const preview = buildSendRowsForPreview();
                           if (!preview.length) {
-                            showToast("Select at least one row with an assigned faculty.", "error");
+                            showToast(
+                              "No new or edited rows to send for the selected faculty. (Previously sent rows are excluded unless edited.)",
+                              "error"
+                            );
                             return;
                           }
 
@@ -3734,6 +3982,9 @@ useEffect(() => {
                       <col className="w-[96px]" />
                       <col className="w-[96px]" />
                       <col className="w-[80px]" />
+                      <col className="w-[80px]" />
+                      {/* Wider remarks column (may contain full sentences) */}
+                      <col className="w-[320px]" />
                       <col className="w-[100px]" />
                       <col className="w-[110px]" />
                     </colgroup>
@@ -3795,6 +4046,9 @@ useEffect(() => {
                         <th className="px-3 py-2 text-center border border-gray-300">
                           Mode <span className="text-red-600" aria-hidden="true">*</span>
                         </th>
+                        <th className="px-3 py-2 text-left border border-gray-300">
+                          Remarks
+                        </th>
                         <th className="px-3 py-2 text-center border border-gray-300">
                           Status
                         </th>
@@ -3807,11 +4061,11 @@ useEffect(() => {
                     <tbody>
                       {filtered.map((r, idx) => {
                         const e = getEditFlags(r);
-                        const isLocked = !!r.finalized || r.status === "Approved";
+                        const isLocked = isArchiveView;
                         const isForwardedToFaculty = !!r.forwarded_to_faculty;
                         // Show the red dot only when there is a pending RFC AND the row is still actionable.
                         // Once the schedule is approved/finalized, the message icon is disabled; the dot should disappear.
-                        const unread = !!(r as any).pending_rfc && !r.finalized;
+                        const unread = !!(r as any).pending_rfc;
                         return (
                           <tr
                             key={r.id}
@@ -4071,6 +4325,27 @@ useEffect(() => {
                                 <span>{r.mode || "—"}</span>
                               )}
                             </td>
+
+                            <td className="px-2 py-2 align-top w-[280px] min-w-[280px]">
+                              <div className="flex w-full min-w-0 items-start gap-2">
+                                <textarea
+                                  value={remarksDraftBySection[r.id] ?? String((r as any)?.remarks ?? "")}
+                                  onChange={(ev) => queueAutosaveRemark(r, ev.target.value)}
+                                  onBlur={() => {
+                                    // Ensure the latest value is persisted when the user leaves the field.
+                                    clearRemarkAutosaveTimer(r.id);
+                                    void handleSaveRemark(r, { silentSuccess: true });
+                                  }}
+                                  disabled={isArchiveView}
+                                  placeholder="—"
+                                  className={cls(
+                                    "flex-1 min-w-0 min-h-[36px] resize-y rounded-md border border-gray-300 px-2 py-1 text-sm leading-snug shadow-sm focus:ring-2 focus:ring-emerald-500/30",
+                                    isArchiveView && "bg-gray-100 text-gray-500"
+                                  )}
+                                />
+                              </div>
+                            </td>
+
                             <td className="px-2 py-2 text-center">
                               <StatusChip r={r} />
                             </td>
@@ -4079,14 +4354,13 @@ useEffect(() => {
                               {isRunning && (
                                 <div className="relative flex items-center justify-center gap-3 text-emerald-700">
                                   <button
-                                    disabled={!!r.finalized}
                                     className={cls(
                                       "relative hover:brightness-110",
-                                      !!r.finalized && "opacity-40 cursor-not-allowed hover:brightness-100"
+                                      isArchiveView && "opacity-40 cursor-not-allowed hover:brightness-100"
                                     )}
                                     title="Message"
                                     onClick={() => {
-                                      if (r.finalized) return;
+                                      if (isArchiveView) return;
                                       setReqChange({
                                         open: true,
                                         facultyName: r.faculty || "Faculty",
@@ -4122,7 +4396,7 @@ useEffect(() => {
                       {filtered.length === 0 && (
                         <tr>
                           <td
-                            colSpan={17}
+                            colSpan={18}
                             className="px-4 py-10 text-center text-sm text-gray-500"
                           >
                             No data yet. Click{" "}

@@ -738,6 +738,26 @@ async def _fetch_rows(user_id: str, term_id: str, db) -> Dict[str, Any]:
 
     docs = [x async for x in db[COL_SECTIONS_SUBMITTED].aggregate(pipe)]
 
+    # Preload section remarks from the canonical `sections` collection.
+    # Remarks are stored in sections.remarks (not in sections_submitted).
+    section_ids_for_remarks = [
+        (d.get("section_id") or "").strip() for d in docs if (d.get("section_id") or "").strip()
+    ]
+    remarks_by_section_id: dict[str, str] = {}
+    if section_ids_for_remarks:
+        try:
+            sec_docs = await db["sections"].find(
+                {"section_id": {"$in": section_ids_for_remarks}},
+                {"_id": 0, "section_id": 1, "remarks": 1},
+            ).to_list(None)
+            remarks_by_section_id = {
+                (s.get("section_id") or "").strip(): str(s.get("remarks") or "")
+                for s in (sec_docs or [])
+                if (s.get("section_id") or "").strip()
+            }
+        except Exception:
+            remarks_by_section_id = {}
+
     # --- Preload rooms into a lookup: { room_id → room_number } ---
     room_docs = [
         x async for x in db[COL_ROOMS].find(
@@ -795,6 +815,13 @@ async def _fetch_rows(user_id: str, term_id: str, db) -> Dict[str, Any]:
         course_doc = (d.get("course") or {})
         scheds = (d.get("scheds") or [])
 
+        # Expose schedule_id(s) so the frontend can map back to the correct section via section_schedules.
+        schedule_ids = [
+            (s.get("schedule_id") or "").strip()
+            for s in (scheds[:2] if isinstance(scheds, list) else [])
+            if (s.get("schedule_id") or "").strip()
+        ]
+
         # --- Faculty preference mode for current term ---
         pref_mode = ""
         fid = (d.get("asg") or {}).get("faculty_id")
@@ -817,6 +844,9 @@ async def _fetch_rows(user_id: str, term_id: str, db) -> Dict[str, Any]:
 
         row = {
             "id": sid,
+            # Used by frontend for correct mapping when saving remarks.
+            # Backend resolves the section via section_schedules.schedule_id.
+            "schedule_ids": schedule_ids,
             # NEW: expose course_id for KAC checks
             "course_id": course_doc.get("course_id") or d.get("course_id") or "",
             "course": d.get("course_code_display") or "",
@@ -829,6 +859,7 @@ async def _fetch_rows(user_id: str, term_id: str, db) -> Dict[str, Any]:
             **pair,
             "capacity": d.get("enrollment_cap", "") or "",
             "mode": mode_display,
+            "remarks": remarks_by_section_id.get(sid, ""),
             "status": "Pending" if (d.get("asg") or {}).get("faculty_id") else "Unassigned",
         }
 
@@ -890,17 +921,20 @@ async def _fetch_rows(user_id: str, term_id: str, db) -> Dict[str, Any]:
             course = str(r.get("course") or "").strip()
             section = str(r.get("section") or "").strip()
 
+            # Highlight rows already forwarded to faculty (proposal exists)
+            forwarded = bool(fid and course and section and (fid, course, section) in forwarded_keys)
+            if forwarded:
+                r["forwarded_to_faculty"] = True
+
+            # Finalized/locked rows stay protected from auto-assign and can be rendered as finalized.
             if fid and course and section and (fid, course, section) in finalized_keys:
                 r["finalized"] = True
 
-                # Only flip Pending -> Approved when faculty has actually approved/accepted
-                st = proposal_status_by_fid.get(fid, "")
-                if st in ("approved", "accepted"):
-                    r["status"] = "Approved"
-
-            # Highlight rows already forwarded to faculty (proposal exists)
-            if fid and course and section and (fid, course, section) in forwarded_keys:
-                r["forwarded_to_faculty"] = True
+            # Faculty "Accept Schedule" must NOT lock/finalize rows.
+            # However, OM should still see the row status as "Approved" once the faculty accepts.
+            st = proposal_status_by_fid.get(fid, "")
+            if forwarded and st in ("approved", "accepted"):
+                r["status"] = "Approved"
     except Exception:
         pass
 
@@ -1158,6 +1192,35 @@ async def loadassignment_handler(
             "dept_name": dept_name,
             # keep any other fields you already return
         }
+
+    if action == "save_remarks":
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="Invalid payload; expected JSON object")
+
+        schedule_id = str(payload.get("schedule_id") or "").strip()
+        remarks = str(payload.get("remarks") or "")
+
+        if not schedule_id:
+            raise HTTPException(status_code=400, detail="schedule_id is required")
+
+        # Resolve section via section_schedules to avoid guessing/wrong section identifiers.
+        sched = await db[COL_SCHED].find_one(
+            {"schedule_id": schedule_id},
+            {"_id": 0, "section_id": 1},
+        )
+        if not sched or not (sched.get("section_id") or "").strip():
+            raise HTTPException(status_code=404, detail="Schedule not found")
+
+        section_id = str(sched.get("section_id") or "").strip()
+
+        res = await db["sections"].update_one(
+            {"section_id": section_id},
+            {"$set": {"remarks": remarks}},
+        )
+        if res.matched_count == 0:
+            raise HTTPException(status_code=404, detail="Section not found")
+
+        return {"ok": True, "section_id": section_id, "remarks": remarks}
 
     if action == "save":
         # same validation as approve
@@ -2170,42 +2233,116 @@ async def om_send_to_faculty(payload: Dict[str, Any] = Body(...), db=Depends(get
     if not by_fid:
         raise HTTPException(status_code=400, detail="No rows with faculty_id")
 
+    def _row_key(rr: Dict[str, Any]) -> tuple[str, str, str]:
+        """Key used to identify a row inside a proposal doc.
+
+        Prefer section_id when present (most stable), otherwise fall back to (course_code, section).
+        """
+        section_id = str(rr.get("id") or rr.get("section_id") or "").strip()
+        course_code = str(rr.get("course_code") or rr.get("course") or "").strip()
+        section = str(rr.get("section") or "").strip()
+        return (section_id, course_code, section)
+
+    def _cmp_payload(rr: Dict[str, Any]) -> Dict[str, str]:
+        """A reduced, stable comparison view of a row.
+
+        We intentionally compare only schedule-relevant fields so we can detect
+        whether a row truly changed since it was last forwarded.
+        """
+        return {
+            "section_id": str(rr.get("id") or rr.get("section_id") or "").strip(),
+            "course_code": str(rr.get("course_code") or rr.get("course") or "").strip(),
+            "course_title": str(rr.get("course_title") or rr.get("title") or "").strip(),
+            "section": str(rr.get("section") or "").strip(),
+            "faculty_id": str(rr.get("faculty_id") or "").strip(),
+            "day1": str(rr.get("day1") or "").strip(),
+            "start": str(rr.get("start") or rr.get("begin1") or "").strip(),
+            "end": str(rr.get("end") or rr.get("end1") or "").strip(),
+            "room1": str(rr.get("room1") or "").strip(),
+            "day2": str(rr.get("day2") or "").strip(),
+            "start2": str(rr.get("start2") or rr.get("begin2") or "").strip(),
+            "end2": str(rr.get("end2") or rr.get("end2") or "").strip(),
+            "room2": str(rr.get("room2") or "").strip(),
+            "mode": str(rr.get("mode") or "").strip(),
+            "capacity": str(rr.get("capacity") or "").strip(),
+            "units": str(rr.get("units") or "").strip(),
+        }
+
     sent = 0
     for fid, fac_rows in by_fid.items():
         fac = await db[COL_FACULTY].find_one({"faculty_id": fid}, {"_id": 0, "user_id": 1}) or {}
         fac_user_id = (fac.get("user_id") or "").strip()
 
-        # --- NEW: do not overwrite an already-finalized schedule ---
-        existing_prop = await db[COL_LOAD_PROPOSALS].find_one(
+        # Fetch existing proposal so we can append new rows without forcing previously forwarded rows
+        # to be re-sent (or re-accepted) unless they were edited.
+        existing = await db[COL_LOAD_PROPOSALS].find_one(
             {"faculty_id": fid, "term_id": term_id},
-            {"_id": 0, "status": 1, "locked": 1},
-        ) or None
-        if existing_prop:
-            st = str((existing_prop.get("status") or "")).lower()
-            if bool(existing_prop.get("locked")) or st in ("accepted", "approved"):
-                raise HTTPException(status_code=409, detail="Schedule is already finalized. You can no longer send/overwrite the proposal for this faculty.")
+            {"_id": 0, "status": 1, "locked": 1, "rows": 1, "created_at": 1},
+        ) or {}
+
+        existing_rows = list(existing.get("rows") or []) if isinstance(existing.get("rows"), list) else []
+        existing_by_key: Dict[tuple[str, str, str], Dict[str, Any]] = {}
+        existing_index_by_key: Dict[tuple[str, str, str], int] = {}
+        for i, rr in enumerate(existing_rows):
+            if not isinstance(rr, dict):
+                continue
+            k = _row_key(rr)
+            existing_by_key[k] = rr
+            existing_index_by_key[k] = i
+
+        changed = False
+        merged_rows = list(existing_rows)
+        for rr in fac_rows:
+            if not isinstance(rr, dict):
+                continue
+            k = _row_key(rr)
+            prev = existing_by_key.get(k)
+
+            # If no previous row, this is new.
+            if not prev:
+                merged_rows.append(rr)
+                changed = True
+                continue
+
+            # If schedule-relevant payload differs, replace in-place.
+            if _cmp_payload(prev) != _cmp_payload(rr):
+                idx = existing_index_by_key.get(k)
+                if idx is not None and 0 <= idx < len(merged_rows):
+                    merged_rows[idx] = rr
+                else:
+                    merged_rows.append(rr)
+                changed = True
+
+        # If nothing new/changed for this faculty, do not touch the proposal doc or notify.
+        if not changed and existing_rows:
+            continue
+
+        now = datetime.now(timezone.utc)
+        prior_status = str(existing.get("status") or "").strip() or "proposed"
+        # Any new/changed rows requires faculty attention; set status back to proposed.
+        next_status = "proposed" if changed else prior_status
 
         doc = {
             "faculty_id": fid,
             "term_id": term_id,
-            "status": "proposed",
+            "status": next_status,
             "om_user_id": user_id,
-            "rows": fac_rows,
-            "updated_at": datetime.now(timezone.utc),
+            "rows": merged_rows,
+            "locked": False,
+            "updated_at": now,
         }
 
         await db[COL_LOAD_PROPOSALS].update_one(
             {"faculty_id": fid, "term_id": term_id},
-            {"$set": doc, "$setOnInsert": {"created_at": datetime.now(timezone.utc)}},
+            {"$set": doc, "$setOnInsert": {"created_at": now}},
             upsert=True,
         )
 
         if fac_user_id:
-            # Notify faculty that a proposed schedule is available
             await create_notification(
                 user_id=fac_user_id,
-                title="Load Assignment: Proposed schedule available",
-                details="The Office Manager sent a proposed schedule for you. You can accept it or request changes (RFC).",
+                title="Load Assignment: Proposed schedule updated",
+                details="The Office Manager sent additional or updated load rows for you. You can review them and accept or request changes (RFC).",
                 meta={
                     "route": "/faculty/overview",
                     "kind": "load_proposed",
@@ -2284,7 +2421,9 @@ async def respond_load_assignment_rfc(
         raise HTTPException(status_code=404, detail="No RFC found")
 
     rfc = _normalize_rfc_doc(rfc)
-    if (rfc.get("status") or "").upper() in RFC_TERMINAL:
+    # Only treat as locked when the explicit `locked` flag is set.
+    # Terminal statuses are informational and should not prevent continued edits/RFC.
+    if bool(rfc.get("locked")):
         raise HTTPException(status_code=409, detail="RFC is already locked")
 
     now = datetime.now(timezone.utc)
@@ -2307,18 +2446,19 @@ async def respond_load_assignment_rfc(
         locked = False
     elif action == "approve":
         new_status = "APPROVED"
-        locked = True
+        # Do NOT lock RFC/schedule on approval. Faculty and OM must be able to continue editing / RFC again.
+        locked = False
         extra["closed_at"] = now
 
-        # --- NEW: RFC APPROVED → schedule becomes FINAL/APPROVED and locked ---
+        # RFC APPROVED → mark schedule as approved BUT keep it editable (no proposal lock, no row finalization).
         try:
             await db[COL_LOAD_PROPOSALS].update_one(
                 {"faculty_id": faculty_id, "term_id": term_id},
                 {
                     "$set": {
                         "status": "approved",
-                        "locked": True,
-                        "rows.$[].finalized": True,
+                        "locked": False,
+                        "rows.$[].finalized": False,
                         "updated_at": now,
                     },
                     "$setOnInsert": {"created_at": now},
@@ -2329,7 +2469,8 @@ async def respond_load_assignment_rfc(
             pass
     else:
         new_status = "REJECTED"
-        locked = True
+        # Keep the RFC closed, but do not hard-lock the workflow.
+        locked = False
         extra["closed_at"] = now
 
         # ✅ Reject behavior (hybrid):
@@ -2345,14 +2486,14 @@ async def respond_load_assignment_rfc(
             except Exception:
                 pass
         else:
+            # Schedule-wide RFC reject should not freeze the whole schedule.
+            # Keep the proposal editable; OM can re-send and faculty can RFC again.
             try:
                 await db[COL_LOAD_PROPOSALS].update_one(
                     {"faculty_id": faculty_id, "term_id": term_id},
                     {
                         "$set": {
-                            "status": "approved",
-                            "locked": True,
-                            "rows.$[].finalized": True,
+                            "locked": False,
                             "updated_at": now,
                         },
                         "$setOnInsert": {"created_at": now},

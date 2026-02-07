@@ -2923,6 +2923,17 @@ export async function submitOmLoadAssignment(
   };
 }
 
+/** Save OM remarks for a section (section is resolved via section_schedules.schedule_id). */
+export async function saveOmSectionRemarks(
+  userId: string,
+  payload: { schedule_id: string; remarks: string }
+) {
+  const { data } = await axios.post(`${API_BASE}/om/loadassignment`, payload, {
+    params: { userId, action: "save_remarks" },
+  });
+  return data as { ok: boolean; section_id?: string; remarks?: string };
+}
+
 /** Import SHS CSV file contents into OM Load Assignment (creates sections/schedules placeholders). */
 export async function importOmShsCsv(userId: string, csvText: string) {
   const { data } = await axios.post(
@@ -3303,6 +3314,25 @@ export async function respondFacultyService(fs_id: string, payload: {
 
 export async function rejectFacultyService(fs_id: string, payload?: { remarks?: string }) {
   const { data } = await api.post(`/chair/faculty-service/reject/${encodeURIComponent(fs_id)}`, payload || {});
+  return data as { ok: boolean; row: FacultyServiceRow };
+}
+
+// Restore/overwrite a faculty service row (used for Undo/Redo in CHAIR Faculty Service)
+export async function restoreFacultyService(
+  fs_id: string,
+  payload: Partial<Pick<FacultyServiceRow,
+    | "status"
+    | "faculty"
+    | "day1"
+    | "begin1"
+    | "end1"
+    | "day2"
+    | "begin2"
+    | "end2"
+    | "remarks"
+  >>
+) {
+  const { data } = await api.post(`/chair/faculty-service/restore/${encodeURIComponent(fs_id)}`, payload || {});
   return data as { ok: boolean; row: FacultyServiceRow };
 }
 

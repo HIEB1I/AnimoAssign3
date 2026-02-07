@@ -655,12 +655,27 @@ async def overview_handler(
         proposal_status = (proposal or {}).get("status")
         proposal_status_l = str(proposal_status or "").lower()
 
-        is_proposed = bool(proposal and proposal_status_l in ("proposed", "reply", "replied"))
-        is_final = bool(proposal and (bool((proposal or {}).get("locked")) or proposal_status_l in ("accepted", "approved")))
-        schedule_final = bool(is_final or (rfc_norm and str((rfc_norm.get("status") or "")).upper() in RFC_TERMINAL))
+        # A schedule should be visible on the faculty side whenever OM has forwarded
+        # a proposal OR the faculty has already accepted it.
+        show_proposal = bool(
+            proposal
+            and proposal_status_l
+            in (
+                "proposed",
+                "reply",
+                "replied",
+                # Faculty acceptance marks proposal as "approved" on the OM side.
+                "approved",
+                "accepted",
+            )
+        )
+
+        # "Final" means *explicitly locked* only. Faculty acceptance must NOT lock/finalize.
+        is_final = bool(proposal and bool((proposal or {}).get("locked")))
+        schedule_final = bool(is_final)
 
         proposed_load = []
-        if (is_proposed or is_final) and isinstance(proposal.get("rows"), list):
+        if show_proposal and isinstance(proposal.get("rows"), list):
             for rr in proposal.get("rows", []):
                 sec_id = (rr.get("section_id") or rr.get("id") or "").strip()
 
@@ -694,14 +709,24 @@ async def overview_handler(
 
             if proposed_load:
                 final_teaching_load = proposed_load
-                summary["load_status"] = "Approved" if is_final else "Proposed"
+
+                # Faculty-side label:
+                # - Locked -> Finalized
+                # - Accepted/approved -> Accepted
+                # - Otherwise -> Proposed
+                if schedule_final:
+                    summary["load_status"] = "Finalized"
+                elif proposal_status_l in ("approved", "accepted"):
+                    summary["load_status"] = "Accepted"
+                else:
+                    summary["load_status"] = "Proposed"
 
         return {
             "ok": True,
             "term": term,
             "summary": summary,
             "teaching_load": final_teaching_load,
-            "is_proposed": is_proposed,
+            "is_proposed": bool(proposal and proposal_status_l in ("proposed", "reply", "replied")),
             "proposal_status": proposal_status,
             "rfc": rfc_norm,
             "schedule_final": schedule_final,
@@ -1069,10 +1094,40 @@ async def faculty_send_load_rfc_message(userId: str = Query(...), payload: Dict[
         "status": "OPEN",
     }
 
-    if (existing.get("status") or "").upper() in RFC_TERMINAL:
-        raise HTTPException(status_code=409, detail="RFC is locked")
-
     now = _now_utc()
+
+    # Allow RFC again even if the previous RFC thread was terminal.
+    # We archive the previous thread into `history` and start a fresh thread.
+    if (existing.get("status") or "").upper() in RFC_TERMINAL:
+        prev_status = str(existing.get("status") or "").upper()
+        hist = list(existing.get("history") or [])
+        hist.append({
+            "rfc_id": existing.get("rfc_id"),
+            "status": existing.get("status"),
+            "locked": bool(existing.get("locked")),
+            "messages": list(existing.get("messages") or []),
+            "closed_at": existing.get("closed_at") or existing.get("closed_at"),
+            "archived_at": now.isoformat(),
+        })
+        existing = {
+            "rfc_id": "RFC" + uuid.uuid4().hex[:10].upper(),
+            "faculty_id": fid,
+            "term_id": term_id,
+            "section_id": section_id,
+            "messages": [],
+            "status": "OPEN",
+            "history": hist,
+        }
+
+        # Add a lightweight tag in the new thread so the UI can display the context
+        # even if it does not render `history`.
+        existing["messages"].append({
+            "sender_role": "system",
+            "sender_user_id": "system",
+            "message": f"Previous RFC was {prev_status} (archived).",
+            "created_at": now.isoformat(),
+        })
+
     msgs = list(existing.get("messages") or [])
     msgs.append({
         "sender_role": "faculty",
@@ -1093,6 +1148,7 @@ async def faculty_send_load_rfc_message(userId: str = Query(...), payload: Dict[
             "status": "NEEDS_OM",
             "locked": False,
             "messages": msgs,
+            "history": list(existing.get("history") or []),
             "updated_at": now,
         }, "$setOnInsert": {"created_at": now}},
         upsert=True,
@@ -1293,28 +1349,26 @@ async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[s
                 detail="You have a pending RFC. Please wait for OM to respond before accepting the schedule."
             )
 
+    # IMPORTANT: "Accept Schedule" should NOT lock/finalize anything.
+    # It simply marks the proposal as approved/accepted on the OM side.
+    now = _now_utc()
     await db[COL_LOAD_PROPOSALS].update_one(
         {"faculty_id": fid, "term_id": term_id},
         {"$set": {
+            # Keep OM-side status as "approved" once faculty accepts.
             "status": "approved",
-            "locked": True,
-            "accepted_at": _now_utc(),
-            "updated_at": _now_utc(),
+            # Do not lock; OM can still edit/add/resend schedules.
+            "locked": False,
+            "accepted_at": now,
+            "updated_at": now,
         }},
     )
 
-    try:
-        await db[COL_LOAD_PROPOSALS].update_one(
-            {"faculty_id": fid, "term_id": term_id},
-            {"$set": {"rows.$[].finalized": True}},
-        )
-    except Exception:
-        pass
-
-    now = _now_utc()
+    # Mark existing RFC threads as ACCEPTED (terminal) but do not lock them.
+    # Faculty can create a new RFC thread later; OM can still adjust proposals.
     await db[COL_LOAD_RFC].update_many(
         {"faculty_id": fid, "term_id": term_id},
-        {"$set": {"status": "ACCEPTED", "locked": True, "updated_at": now}},
+        {"$set": {"status": "ACCEPTED", "locked": False, "updated_at": now}},
     )
 
     recipient_email = (

@@ -4,6 +4,7 @@ from fastapi import APIRouter, HTTPException, Query
 import re
 
 from ..main import db
+from ..Notifications import create_notification
 from datetime import datetime, timezone, timedelta  # <-- add
 
 router = APIRouter(prefix="/om", tags=["om"])
@@ -18,6 +19,76 @@ COL_CAMPUSES = "campuses"
 COL_KACS = "kacs"
 COL_PREEN_COUNT = "preenlistment_count" 
 COL_PREFS_WINDOWS = "faculty_prefs_windows"
+
+
+async def _notify_all_faculty_deadline_changed(
+    term_id: str,
+    old_deadline_iso: str,
+    new_deadline_iso: str,
+) -> None:
+    """Notify all faculty (in-app bell) when OM changes the preferences deadline."""
+
+    # Avoid noise if nothing actually changed.
+    if (old_deadline_iso or "") == (new_deadline_iso or ""):
+        return
+
+    # Best-effort resolve a friendly term label.
+    term_doc = await db[COL_TERMS].find_one(
+        {"term_id": term_id},
+        {"_id": 0, "acad_year_start": 1, "term_number": 1},
+    ) or {}
+    ay = term_doc.get("acad_year_start")
+    tn = term_doc.get("term_number")
+    term_label = (
+        f"Term {tn} · AY {ay}-{ay + 1}" if (ay is not None and tn is not None) else term_id
+    )
+
+    def _fmt(iso: str) -> str:
+        if not iso:
+            return "—"
+        try:
+            dt = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+            # Display in local server timezone formatting (frontend can reformat if needed).
+            return dt.astimezone(timezone.utc).strftime("%b %d, %Y %I:%M %p UTC")
+        except Exception:
+            return str(iso)
+
+    title = "Preference Submission Deadline Updated"
+    details = (
+        f"The Office Manager updated the preference submission deadline for {term_label}. "
+        f"New deadline: {_fmt(new_deadline_iso)}"
+        + (f" (previously {_fmt(old_deadline_iso)})." if old_deadline_iso else ".")
+    )
+
+    # Target all faculty users (user_id stored in faculty_profiles).
+    cursor = db[COL_FACULTY].find(
+        {"user_id": {"$ne": None}},
+        {"_id": 0, "user_id": 1, "faculty_id": 1},
+    )
+    faculty_docs = await cursor.to_list(length=None)
+
+    # Best-effort: don't let a single failure block others.
+    for f in faculty_docs:
+        uid = (f.get("user_id") or "").strip()
+        if not uid:
+            continue
+        try:
+            await create_notification(
+                user_id=uid,
+                title=title,
+                details=details,
+                meta={
+                    "route": "/faculty/preferences",
+                    "kind": "prefs_deadline_changed",
+                    "term_id": term_id,
+                    "faculty_id": f.get("faculty_id"),
+                    "old_deadline": old_deadline_iso or "",
+                    "new_deadline": new_deadline_iso or "",
+                },
+            )
+        except Exception:
+            # Notification is non-critical; ignore and continue.
+            pass
 
 # ---- Helpers (same style as Faculty Management) ----
 def _dept_name_expr() -> Dict[str, Any]:
@@ -407,6 +478,13 @@ async def facultyforms_handler(
 
         term_id = term_doc["term_id"]
 
+        # Capture previous deadline (if any) so we can notify faculty on change.
+        prev_override = await db[COL_PREFS_WINDOWS].find_one(
+            {"term_id": term_id},
+            {"_id": 0, "deadlineISO": 1, "deadline_dt": 1},
+        ) or {}
+        old_deadline_iso = (prev_override.get("deadlineISO") or "").strip()
+
         # Default duration: 7 days after start, unless caller overrides
         days = durationDays if durationDays is not None else 7
         try:
@@ -437,6 +515,13 @@ async def facultyforms_handler(
                 },
             },
             upsert=True,
+        )
+
+        # Notify faculty if the deadline changed.
+        await _notify_all_faculty_deadline_changed(
+            term_id=term_id,
+            old_deadline_iso=old_deadline_iso,
+            new_deadline_iso=deadline_dt.isoformat(),
         )
 
         # After saving the override, read back the override-only window
