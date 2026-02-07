@@ -47,7 +47,7 @@ const INSIGHT_CARDS: CardItem[] = [
     },
   },
   {
-    title: "Deloading Utilization Report",
+    title: "Deloading Utilization",
     to: "deloading-utilization",
     Icon: GaugeCircle,
     accent: {

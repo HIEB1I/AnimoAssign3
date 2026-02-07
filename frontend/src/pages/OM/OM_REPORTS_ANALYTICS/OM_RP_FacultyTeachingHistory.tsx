@@ -94,7 +94,7 @@ function searchKeys(name: string) {
 export default function OM_RP_FacultyTeachingHistory() {
   return (
     <div className="w-full px-8 py-8">
-      <h1 className="text-2xl font-bold mb-2">Teaching History of Faculty</h1>
+      <h1 className="text-2xl font-bold mb-2">Teaching History per Faculty</h1>
       <p className="text-sm text-gray-600 mb-6">
         Click a name to expand their complete teaching history.
       </p>
@@ -338,7 +338,7 @@ function UnitsHistoryChart({
     // Replaced generic div with a styled card for visual impact
     <div className="p-5 rounded-xl border border-gray-200 bg-white shadow-lg">
       <h3 className="text-xl font-bold text-gray-800 mb-4 flex items-center gap-2">
-        📊 Teaching Load Trend (Units per Term)
+        Teaching Load Trend (Units per Term)
       </h3>
 
       {/* Legend for context - Simplified */}
@@ -549,7 +549,7 @@ function HistoryTables({ rows }: { rows: TeachingHistoryRow[] }) {
         <div className="flex items-start justify-between gap-3 mb-4">
           <div>
             <h3 className="text-lg font-bold text-emerald-800 flex items-center gap-2">
-              ⭐ Overall Faculty Profile
+              Overall Faculty Profile
             </h3>
             <p className="text-xs text-gray-600 mt-1">
               Covers {globalSummary.acadYearsCovered} Academic Year(s) •{" "}
@@ -622,7 +622,7 @@ function HistoryTables({ rows }: { rows: TeachingHistoryRow[] }) {
 
       {/* 3. Detailed Term History - Streamlined for focus */}
       <h3 className="text-xl font-bold text-gray-800 border-b pb-2 flex items-center gap-2">
-        📅 Term-by-Term Course Details
+        Term-by-Term Course Details
       </h3>
 
       <div className="flex items-center justify-between gap-2 my-3">
@@ -636,7 +636,7 @@ function HistoryTables({ rows }: { rows: TeachingHistoryRow[] }) {
           ◀ Previous Term
         </button>
 
-        <div className="text-sm font-semibold text-gray-700">
+        <div className="text-m font-semibold">
           {activeKey || "—"}
         </div>
 
@@ -651,8 +651,6 @@ function HistoryTables({ rows }: { rows: TeachingHistoryRow[] }) {
 
       {activeKey && (
         <div className="space-y-4">
-          {/* TERM HEADER */}
-          <h4 className="text-lg font-semibold text-gray-700">{activeKey}</h4>
 
           {/* TERM TABLE */}
           <div className="overflow-x-auto rounded-lg border">

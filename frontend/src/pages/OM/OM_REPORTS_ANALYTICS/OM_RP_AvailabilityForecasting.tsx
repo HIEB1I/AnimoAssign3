@@ -305,8 +305,6 @@ export default function OM_RP_AvailabilityForecasting() {
   const [error, setError] = useState<string | null>(null);
 
   const [active, setActive] = useState<{ d1: DayCode; d2: DayCode; slot: string } | null>(null);
-  const title = "Faculty Availability Forecasting (Pre-Survey)";
-  const subtitle = "Assess forecast reliability via quality metrics and identify peak availability.";
   const right = <div className="hidden sm:block text-xs text-zinc-400"></div>;
 
   async function loadHeatmap() {
@@ -432,8 +430,10 @@ export default function OM_RP_AvailabilityForecasting() {
     <div className="w-full max-w-[1400px] mx-auto px-4 sm:px-6 lg:px-8 py-8">
       <div className="flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
         <div>
-          <h1 className="text-xl sm:text-2xl font-semibold tracking-tight">{title}</h1>
-          {subtitle && <p className="text-sm text-zinc-500">{subtitle}</p>}
+        <h1 className="text-2xl font-bold mb-2">Faculty Availability Forecasting (Pre-Survey)</h1>
+        <p className="text-sm text-gray-600 mb-6">
+          Assess forecast reliability via quality metrics and identify peak availability.
+        </p>
         </div>
         {right}
       </div>

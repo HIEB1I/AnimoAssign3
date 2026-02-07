@@ -153,7 +153,8 @@ function SelectBox({
         onClick={() => setOpen((v) => !v)}
         className={cls(
           "w-full rounded-md border border-gray-300 bg-white",
-          "px-1.5 py-1 text-center text-[13px] leading-tight",
+          // Keep consistent typography with the toolbar buttons/inputs
+          "px-1.5 py-1 text-center text-sm",
           "shadow-sm focus:ring-2 focus:ring-emerald-500/30",
           buttonClassName
         )}
@@ -181,7 +182,7 @@ function SelectBox({
                   setOpen(false);
                 }}
                 className={cls(
-                  "cursor-pointer px-3 py-1.5 text-[13px]",
+                  "cursor-pointer px-3 py-1.5 text-sm",
                   isSelected
                     ? "bg-emerald-50 text-emerald-700 font-medium"
                     : hover === i
@@ -2254,6 +2255,9 @@ export default function OM_LoadAssignment() {
   }, [userId]);
 
   const [search, setSearch] = useState("");
+  // Filter rows by academic level (derived from backend courseProgramLevel map).
+  // Values: ALL | UG | GS | SHS
+  const [levelFilter, setLevelFilter] = useState<string>("ALL");
   const [rows, setRows] = useState<Row[]>([]);
 
   // Remarks are saved explicitly per-row (do NOT mix with load draft/undo stacks).
@@ -2531,7 +2535,9 @@ export default function OM_LoadAssignment() {
   const [deloadAllRows, setDeloadAllRows] = useState<DeloadingDisplayRow[]>([]);
   const [deloadAllLoading, setDeloadAllLoading] = useState(false);
   const [deloadAllError, setDeloadAllError] = useState<string>("");
-  const [facultyWithDeloadings, setFacultyWithDeloadings] = useState<Faculty[]>([]);
+  // We still track this internally (setter is used), but we no longer display the summary line.
+  // Avoid TS6133 (unused state value) by omitting the read value.
+  const [, setFacultyWithDeloadings] = useState<Faculty[]>([]);
 
   // Load all faculty once on mount
   useEffect(() => {
@@ -2592,9 +2598,78 @@ export default function OM_LoadAssignment() {
     commitRows(next, { markDirty: false });
   };
 
+  const levelOptions: SelectOption[] = [
+    { value: "ALL", label: "All Levels" },
+    { value: "UG", label: "Undergraduate" },
+    { value: "GS", label: "Graduate" },
+    { value: "SHS", label: "SHS" },
+  ];
+  const getRowProgramLevel = (r: Row): "UG" | "GS" | "SHS" | "" => {
+    // Prefer explicit course_id from backend row; fall back to sectionCourse map.
+    const sid = String((r as any)?.id || (r as any)?.section_id || "").trim();
+    const cid = String(
+      (r as any)?.course_id || validationContext.sectionCourse?.[sid] || ""
+    ).trim();
+
+    // Backend map is course_id -> program_level (from courses.program_level), but UG data is sometimes blank.
+    const raw0 = String(validationContext.courseProgramLevel?.[cid] || "")
+      .trim()
+      .toUpperCase();
+
+    // If program_level is missing, treat it as UG by default (unless it clearly looks like SHS).
+    // This fixes the common case where GS is populated but UG courses are left blank in the catalog.
+    if (!raw0) {
+      const code = String((r as any)?.course || "").trim().toUpperCase();
+      if (code.startsWith("SHS") || code.includes("SHS")) return "SHS";
+      return "UG";
+    }
+
+    // Normalize to make matching robust (handles values like "UG - Undergraduate", "Under graduate", etc.)
+    const raw = raw0.replace(/[^A-Z]/g, "");
+
+    if (
+      raw === "UG" ||
+      raw.startsWith("UG") ||
+      raw.includes("UNDERGRAD") ||
+      raw.includes("UNDERGRADUATE") ||
+      raw.includes("COLLEGE") ||
+      raw === "COL"
+    )
+      return "UG";
+
+    if (
+      raw === "GS" ||
+      raw.startsWith("GS") ||
+      raw === "GR" ||
+      raw.startsWith("GR") ||
+      raw.includes("GRAD") ||
+      raw.includes("GRADUATE") ||
+      raw.includes("POSTGRAD")
+    )
+      return "GS";
+
+    if (
+      raw === "SHS" ||
+      raw.includes("SENIORHIGHSCHOOL") ||
+      raw.includes("SHS")
+    )
+      return "SHS";
+
+    return "";
+  };
+
+
+
   const filtered = rows.filter((r) => {
+    // Apply the level filter first so it works even when search is blank.
+    if (levelFilter !== "ALL") {
+      const lvl = getRowProgramLevel(r);
+      if (lvl !== levelFilter) return false;
+    }
+
     const s = search.trim().toLowerCase();
     if (!s) return true;
+
     return (
       r.course.toLowerCase().includes(s) ||
       (r.faculty || "").toLowerCase().includes(s) ||
@@ -3761,6 +3836,14 @@ export default function OM_LoadAssignment() {
                   Archived Loads
                 </button>
 
+                <SelectBox
+                  value={levelFilter}
+                  onChange={setLevelFilter}
+                  options={levelOptions}
+                  className="min-w-[135px] w-[135px]"
+                  buttonClassName="inline-flex h-10 w-full items-center justify-center gap-2 rounded-md border border-gray-300 bg-white px-4 py-2 pr-9 text-sm font-medium text-gray-700 shadow-sm hover:bg-gray-50"
+                />
+
                 <div className="relative flex-1 min-w-[260px]">
                   <SearchIcon className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-500" />
                   <input
@@ -3809,7 +3892,8 @@ export default function OM_LoadAssignment() {
                   <button
                     disabled={!hasReco || isArchiveView}
                     className={cls(
-                      "rounded-lg px-4 py-2 font-semibold shadow-sm flex items-center gap-2",
+                      // Match the typography/size of the other toolbar controls
+                      "inline-flex h-10 min-w-[160px] items-center justify-center gap-2 rounded-md px-4 py-2 text-sm font-medium shadow-sm",
                       !(!hasReco || isArchiveView)
                         ? "bg-emerald-600 text-white hover:bg-emerald-700" // enabled (GREEN)
                         : "bg-gray-200 text-gray-400 cursor-not-allowed" // disabled
@@ -4021,7 +4105,7 @@ export default function OM_LoadAssignment() {
 
                 {/* Match APO_CourseOfferings table styling (sticky header, bordered cells, emerald header text) */}
                 {isArchiveView ? (
-                  <ArchivedLoadsSummary rows={rows} termLabel={term} />
+                  <ArchivedLoadsSummary rows={filtered} termLabel={term} />
                 ) : (
                   <div className="mt-3 max-h-[58vh] overflow-x-auto overflow-y-auto rounded-xl border border-gray-300 bg-white shadow-sm">
                   <table className="min-w-full text-sm table-fixed border-collapse">
@@ -4474,7 +4558,7 @@ export default function OM_LoadAssignment() {
                   <div className="flex items-center justify-between gap-3">
                     <button
                       onClick={addRow}
-                      className="inline-flex items-center gap-2 rounded-lg border border-gray-400 px-3 py-1.5 text-sm text-gray-800 hover:bg-gray-100"
+                      className="inline-flex h-10 min-w-[140px] items-center justify-center gap-2 rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium hover:bg-gray-50"
                       title="Add new line"
                     >
                       <Plus className="h-4 w-4" />
@@ -4505,13 +4589,6 @@ export default function OM_LoadAssignment() {
                 <div className="flex flex-wrap items-start justify-between gap-4 px-4 pt-4 pb-2">
                   <div>
                     <h2 className="text-lg font-semibold">Faculty Deloading</h2>
-                    <div className="mt-0.5 text-xs text-gray-500">
-                      {deloadAllLoading
-                        ? "Loading deloadings…"
-                        : facultyWithDeloadings.length
-                        ? `${facultyWithDeloadings.length} faculty with deloadings for this term`
-                        : "No deloadings recorded for this term."}
-                    </div>
                   </div>
 
                   <div className="w-full sm:w-[420px]">
@@ -4834,9 +4911,6 @@ export default function OM_LoadAssignment() {
                                 Course
                               </th>
                               <th className="px-3 py-2 text-left font-semibold">
-                                Campus
-                              </th>
-                              <th className="px-3 py-2 text-left font-semibold">
                                 Section
                               </th>
                               <th className="px-3 py-2 text-left font-semibold">
@@ -4863,7 +4937,7 @@ export default function OM_LoadAssignment() {
                             {blockedSections.length === 0 ? (
                               <tr>
                                 <td
-                                  colSpan={9}
+                                  colSpan={8}
                                   className="py-6 text-center text-sm text-gray-500"
                                 >
                                   No blocked GE sections for CMPS0002.
@@ -4906,9 +4980,6 @@ export default function OM_LoadAssignment() {
                                   <tr key={b.rowId}>
                                     <td className="px-3 py-2 text-gray-900 font-medium">
                                       {b.course || "—"}
-                                    </td>
-                                    <td className="px-3 py-2 text-gray-700">
-                                      {b.campusName || "—"}
                                     </td>
                                     <td className="px-3 py-2 text-gray-700">
                                       {b.section || "—"}

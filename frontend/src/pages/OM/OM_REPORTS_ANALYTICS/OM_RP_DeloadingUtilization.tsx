@@ -158,7 +158,7 @@ export default function OM_RP_DeloadingUtilization() {
   return (
     <div className="w-full px-8 py-8">
       {/* Header */}
-      <h1 className="text-2xl font-bold mb-2">Deloading Utilization Dashboard</h1>
+      <h1 className="text-2xl font-bold mb-2">Deloading Utilization</h1>
       <p className="text-sm text-gray-600 mb-6">
         Aggregate resource allocation and administrative risk assessment.
       </p>
@@ -302,7 +302,7 @@ export default function OM_RP_DeloadingUtilization() {
                   <table className="min-w-full table-fixed text-sm">
                     <thead className="bg-orange-200 text-orange-900 text-xs uppercase tracking-wide">
                       <tr>
-                        {["Faculty Name", "Deloading Type", "Units"].map(
+                        {["Faculty", "Deloading Type", "Units"].map(
                           (h) => (
                             <th
                               key={h}
@@ -397,7 +397,7 @@ export default function OM_RP_DeloadingUtilization() {
                       <thead className="bg-gray-100 text-gray-600 text-xs uppercase tracking-wide">
                         <tr>
                           {[
-                            "Faculty Name",
+                            "Faculty",
                             "Deloading Type",
                             "Units",
                             "Notes",

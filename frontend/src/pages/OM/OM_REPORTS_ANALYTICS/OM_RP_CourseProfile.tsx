@@ -247,7 +247,7 @@ export default function OM_RP_CourseProfile() {
   return (
     <div className="w-full px-8 py-8">
       {/* Header */}
-      <h1 className="text-2xl font-bold mb-2">Course Profile Dashboard</h1>
+      <h1 className="text-2xl font-bold mb-2">Course Profile</h1>
       <p className="text-sm text-gray-600 mb-6">
         View analytical metrics on course history, demand, and faculty assignment stability.
       </p>
