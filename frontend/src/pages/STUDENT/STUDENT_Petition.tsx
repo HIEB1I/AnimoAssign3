@@ -126,13 +126,32 @@ type FormData = {
 };
 
 /* ---------------- Status Card ---------------- */
+const STATUS_PILL: Record<string, string> = {
+  "Less Than Minimum": "bg-amber-100 text-amber-800",
+  "Forwarded To Department": "bg-amber-50 text-amber-800",
+  "Rejected": "bg-red-100 text-red-800",
+  "Wait For Frosh Block": "bg-purple-100 text-purple-800",
+  "Wait For College Enlistment": "bg-yellow-100 text-yellow-800",
+  "Open Slots Available": "bg-green-100 text-green-800",
+  "New Class Opened": "bg-green-100 text-green-800",
+  "Advised For Special Class": "bg-indigo-100 text-indigo-800",
+  "Slots Increased": "bg-teal-100 text-teal-800",
+};
+
+function pillClass(status?: string) {
+  if (!status) return "bg-gray-100 text-gray-600 border border-gray-200";
+  const exact = STATUS_PILL[status];
+  if (exact) return `${exact} border border-black/5`;
+  const s = status.toLowerCase();
+  if (s.includes("rejected")) return "bg-red-100 text-red-800 border border-black/5";
+  if (s.includes("approved") || s.includes("opened") || s.includes("open slots") || s.includes("new class"))
+    return "bg-green-100 text-green-800 border border-black/5";
+  if (s.includes("wait")) return "bg-yellow-100 text-yellow-800 border border-black/5";
+  return "bg-gray-100 text-gray-600 border border-gray-200";
+}
+
 function StatusCard({ p }: { p: PetitionView }) {
-  const pill =
-    p.status?.toLowerCase().includes("approved") || p.status?.toLowerCase().includes("opened")
-      ? "bg-emerald-50 text-emerald-700 border border-emerald-200"
-      : p.status?.toLowerCase().includes("rejected")
-      ? "bg-red-50 text-red-700 border border-red-200"
-      : "bg-gray-100 text-gray-600 border border-gray-200";
+  const pill = pillClass(p.status);
 
   // Build "AY 2024-2025" from acad_year_start (number or string)
   const ayLabel = (() => {

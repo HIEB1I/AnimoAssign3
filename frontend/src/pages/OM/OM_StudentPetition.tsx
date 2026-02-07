@@ -60,7 +60,7 @@ function TextBox({
 // Map each status to a Tailwind pill (bg + text + optional border)
 const STATUS_PILL: Record<string, string> = {
   "Less Than Minimum": "bg-amber-100 text-amber-800",
-  "Forwarded To Department": "bg-blue-100 text-blue-800",
+  "Forwarded To Department": "bg-amber-50 text-amber-800",
   "Rejected": "bg-red-100 text-red-800",
   "Wait For Frosh Block": "bg-purple-100 text-purple-800",
   "Wait For College Enlistment": "bg-yellow-100 text-yellow-800",

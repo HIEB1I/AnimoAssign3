@@ -197,6 +197,17 @@ export default function STUDENT_CourseOfferings() {
 
   const termPill = termHeader(options.term);
 
+  const visibleSections = useMemo(() => {
+    if (!result?.sections?.length) return [];
+
+    // Hide Special Class sections from Course Offerings (students have a dedicated Special Class tab).
+    // In the DB, special class-generated sections have remarks "SPECIAL CLASS".
+    return result.sections.filter((s) => {
+      const r = String(s.remarks || "").toUpperCase();
+      return !r.includes("SPECIAL CLASS");
+    });
+  }, [result]);
+
   return (
     <div className="min-h-screen w-full bg-white text-slate-900">
       <TopBarInline fullName={fullName} role="Student" />
@@ -248,7 +259,7 @@ export default function STUDENT_CourseOfferings() {
                   <input
                     value={courseInput}
                     onChange={(e) => setCourseInput(e.target.value)}
-                    placeholder="Type course code (e.g., CCPROG1)"
+                    placeholder="Type a course code"
                     className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/30"
                   />
 
@@ -274,12 +285,21 @@ export default function STUDENT_CourseOfferings() {
               <div className="mt-6">
                 {!result ? (
                   <div className="text-sm text-gray-500">
-                    No results yet. Search a course code above.
+                    
                   </div>
-                ) : result.sections.length === 0 ? (
+                ) : visibleSections.length === 0 ? (
                   <div className="text-sm text-gray-500">
-                    No sections found for{" "}
-                    <span className="font-semibold">{result.course?.course_code}</span>.
+                    {result.sections.length > 0 ? (
+                      <>
+                        Only <span className="font-medium">Special Class</span> sections are available for{" "}
+                        <span className="font-semibold">{result.course?.course_code}</span>. 
+                      </>
+                    ) : (
+                      <>
+                        No sections found for{" "}
+                        <span className="font-semibold">{result.course?.course_code}</span>.
+                      </>
+                    )}
                   </div>
                 ) : (
                   <div className="overflow-x-auto rounded-lg border border-gray-200">
@@ -289,31 +309,19 @@ export default function STUDENT_CourseOfferings() {
                           <th className="px-3 py-2 border-b">Section</th>
                           <th className="px-3 py-2 border-b">Day/s & Time</th>
                           <th className="px-3 py-2 border-b">Room</th>
-                          <th className="px-3 py-2 border-b">Enrl Cap</th>
-                          <th className="px-3 py-2 border-b">Enrolled</th>
                           <th className="px-3 py-2 border-b">Faculty</th>
                           <th className="px-3 py-2 border-b">Remarks</th>
                         </tr>
                       </thead>
 
                       <tbody>
-                        {result.sections.map((s, idx) => {
-                          const open = Boolean(s.is_open);
+                        {visibleSections.map((s, idx) => {
                           const rowBg = idx % 2 === 0 ? "bg-white" : "bg-gray-50";
                           return (
                             <tr key={s.section_id} className={`${rowBg} hover:bg-emerald-50/40`}>
                               <td className="px-3 py-2 border-b">
                                 <div className="flex items-center gap-2">
                                   <span className="font-semibold">{s.section_code}</span>
-                                  <span
-                                    className={`px-2 py-0.5 rounded-full text-xs border ${
-                                      open
-                                        ? "border-emerald-200 bg-emerald-50 text-emerald-700"
-                                        : "border-blue-200 bg-blue-50 text-blue-700"
-                                    }`}
-                                  >
-                                    {open ? "Open" : "Closed"}
-                                  </span>
                                 </div>
                               </td>
 
@@ -337,10 +345,10 @@ export default function STUDENT_CourseOfferings() {
                                   <div className="space-y-1">
                                     {s.schedules.map((sc, i) => (
                                       <div key={i}>
-                                        {sc.room_number ? (
+                                        {String(sc.room_number || "").trim() ? (
                                           sc.room_number
                                         ) : (
-                                          <span className="text-gray-400">—</span>
+                                          <span className="text-gray-800">TBA</span>
                                         )}
                                       </div>
                                     ))}
@@ -349,11 +357,6 @@ export default function STUDENT_CourseOfferings() {
                                   <span className="text-gray-400">—</span>
                                 )}
                               </td>
-
-                              <td className="px-3 py-2 border-b tabular-nums">
-                                {s.enrollment_cap ?? 0}
-                              </td>
-                              <td className="px-3 py-2 border-b tabular-nums">{s.enrolled ?? 0}</td>
 
                               <td className="px-3 py-2 border-b">
                                 {s.faculty_name?.trim() ? (

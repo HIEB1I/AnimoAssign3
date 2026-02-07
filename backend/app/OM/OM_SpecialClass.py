@@ -1665,37 +1665,56 @@ async def om_specialclass_post(
             {"$set": {"status": target_status, "updated_at": datetime.utcnow()}},
         )
         return {"ok": True, "matched": res.matched_count, "modified": res.modified_count, "status": target_status}
-
-    # ✅ Export PDF: ONE ROW ONLY
+    # Export PDF: one or many rows
     if action == "exportPdf":
         selected_ids: List[str] = []
         if payload and isinstance(payload.get("special_ids"), list):
             selected_ids = [str(x).strip() for x in payload["special_ids"] if str(x).strip()]
 
-        if specialId:
-            export_id = specialId.strip()
-        else:
-            if not selected_ids:
-                raise HTTPException(status_code=400, detail="Please select one application row to export.")
-            if len(selected_ids) != 1:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Select only ONE row per export. If multiple rows are selected, export each row separately.",
-                )
-            export_id = selected_ids[0]
+        # If specialId is explicitly provided, it takes precedence (single export)
+        if specialId and specialId.strip():
+            selected_ids = [specialId.strip()]
 
-        doc = await db[COL_SPECIAL].find_one(
-            {"term_id": current_term_id, "special_id": export_id},
+        if not selected_ids:
+            raise HTTPException(status_code=400, detail="Please select at least one application row to export.")
+
+        # De-duplicate while preserving order
+        seen: set[str] = set()
+        ordered_ids: List[str] = []
+        for sid in selected_ids:
+            if sid not in seen:
+                ordered_ids.append(sid)
+                seen.add(sid)
+        selected_ids = ordered_ids
+
+        # Fetch selected docs
+        docs = await db[COL_SPECIAL].find(
+            {"term_id": current_term_id, "special_id": {"$in": selected_ids}},
             {"_id": 0},
-        )
-        if not doc:
+        ).to_list(len(selected_ids))
+
+        if not docs:
             raise HTTPException(status_code=404, detail="Application not found for export.")
 
-        maps = await _bulk_maps_for_rows([doc])
-        shaped = [await _shape_row(doc, maps)]
+        by_id: Dict[str, Dict[str, Any]] = {str(d.get("special_id")): d for d in docs if d.get("special_id")}
+        missing = [sid for sid in selected_ids if sid not in by_id]
+        if missing:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Some selected applications were not found for export: {', '.join(missing)}",
+            )
+
+        ordered_docs = [by_id[sid] for sid in selected_ids]
+
+        maps = await _bulk_maps_for_rows(ordered_docs)
+        shaped = [await _shape_row(d, maps) for d in ordered_docs]
         pdf_bytes = _build_pdf(shaped, active_term=active)
 
-        fname = f"SpecialClass_{export_id}.pdf"
+        if len(selected_ids) == 1:
+            fname = f"SpecialClass_{selected_ids[0]}.pdf"
+        else:
+            fname = f"SpecialClass_Selected_{datetime.utcnow().strftime('%Y-%m-%d')}.pdf"
+
         headers = {"Content-Disposition": f'attachment; filename="{fname}"'}
         return StreamingResponse(io.BytesIO(pdf_bytes), media_type="application/pdf", headers=headers)
 

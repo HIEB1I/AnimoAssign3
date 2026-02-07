@@ -2521,14 +2521,17 @@ export default function OM_LoadAssignment() {
   }, []);
 
   const [facultyList, setFacultyList] = useState<Faculty[]>([]);
-  // Faculty Deloading (per-faculty)
-  const [deloadFacultyQuery, setDeloadFacultyQuery] = useState<string>("");
-  const [deloadSelectedFaculty, setDeloadSelectedFaculty] = useState<Faculty | null>(null);
-  const [deloadRows, setDeloadRows] = useState<DeloadingRow[]>([]);
-  const [deloadLoading, setDeloadLoading] = useState(false);
-  const [deloadError, setDeloadError] = useState<string>("");
+  // Faculty Deloading (term-wide; UI-only summary)
+  type DeloadingDisplayRow = DeloadingRow & {
+    faculty_id: string;
+    faculty_name_display: string;
+  };
+
+  const [deloadSearch, setDeloadSearch] = useState<string>("");
+  const [deloadAllRows, setDeloadAllRows] = useState<DeloadingDisplayRow[]>([]);
+  const [deloadAllLoading, setDeloadAllLoading] = useState(false);
+  const [deloadAllError, setDeloadAllError] = useState<string>("");
   const [facultyWithDeloadings, setFacultyWithDeloadings] = useState<Faculty[]>([]);
-  const [deloadDropdownOpen, setDeloadDropdownOpen] = useState(false);
 
   // Load all faculty once on mount
   useEffect(() => {
@@ -3089,41 +3092,100 @@ export default function OM_LoadAssignment() {
     [rowFlags]
   );
 
-  const deloadMatches = useMemo(() => {
-  const q = deloadFacultyQuery.trim().toLowerCase();
-  if (!q) return [] as Faculty[];
-  return (facultyList ?? [])
-    .filter((f) => (f.faculty_name_display || "").toLowerCase().includes(q))
-    .slice(0, 12);
-}, [deloadFacultyQuery, facultyList]);
+  const deloadFiltered = useMemo(() => {
+    const q = deloadSearch.trim().toLowerCase();
+    if (!q) return deloadAllRows;
+    return deloadAllRows.filter((r) => {
+      const hay = [
+        r.faculty_name_display,
+        r.faculty_id,
+        r.deloading_type || "",
+        String(r.units_deloaded ?? ""),
+        r.notes || "",
+        r.updated_at ? new Date(r.updated_at as any).toISOString() : "",
+      ]
+        .join(" ")
+        .toLowerCase();
+      return hay.includes(q);
+    });
+  }, [deloadAllRows, deloadSearch]);
 
-const loadFacultyDeloadings = async (fid: string) => {
-  if (!fid) return;
-  try {
-    setDeloadLoading(true);
-    setDeloadError("");
-    const res = await getOmFacultyDeloadings({ faculty_id: fid, term_id: termId || undefined });
-    setDeloadRows(Array.isArray(res?.rows) ? res.rows : []);
-  } catch (e: any) {
-    setDeloadError(e?.message || "Failed to load deloadings.");
-    setDeloadRows([]);
-  } finally {
-    setDeloadLoading(false);
-  }
-};
+  // Sum deloading units per faculty (UI-only; used in Faculty Load Summary)
+  const deloadUnitsByFacultyId = useMemo(() => {
+    const map: Record<string, number> = {};
+    for (const r of deloadAllRows) {
+      const fid = String((r as any)?.faculty_id || "").trim();
+      if (!fid) continue;
 
-useEffect(() => {
-  if (!termId) return;
-  (async () => {
-    try {
-      const r = await getOmFacultyWithDeloadings(termId);
-      setFacultyWithDeloadings(Array.isArray(r?.faculty) ? r.faculty : []);
-    } catch (e) {
-      console.error("Failed to load facultyWithDeloadings", e);
-      setFacultyWithDeloadings([]);
+      const raw = (r as any)?.units_deloaded;
+      const units =
+        typeof raw === "number" ? raw : parseFloat(String(raw ?? "0")) || 0;
+      map[fid] = (map[fid] || 0) + units;
     }
-  })();
-}, [termId]);
+    return map;
+  }, [deloadAllRows]);
+
+  useEffect(() => {
+    if (!termId) return;
+
+    let cancelled = false;
+    (async () => {
+      setDeloadAllLoading(true);
+      setDeloadAllError("");
+      try {
+        // 1) Get the list of faculty who have deloadings for the term.
+        const r = await getOmFacultyWithDeloadings(termId);
+        const fac = Array.isArray(r?.faculty) ? r.faculty : [];
+        if (cancelled) return;
+        setFacultyWithDeloadings(fac);
+
+        // 2) Fetch deloading rows per faculty and flatten into a single table.
+        const results = await Promise.all(
+          fac.map(async (f) => {
+            try {
+              const res = await getOmFacultyDeloadings({
+                faculty_id: f.faculty_id,
+                term_id: termId || undefined,
+              });
+              const rows = Array.isArray(res?.rows) ? res.rows : [];
+              return rows.map((row) => ({
+                ...row,
+                faculty_id: f.faculty_id,
+                faculty_name_display: f.faculty_name_display,
+              })) as DeloadingDisplayRow[];
+            } catch {
+              // UI-only: if one faculty fails, keep the rest.
+              return [] as DeloadingDisplayRow[];
+            }
+          })
+        );
+
+        if (cancelled) return;
+        const flat = results.flat();
+
+        // Show most recently updated first (still UI-only; no backend behavior changes).
+        flat.sort((a, b) => {
+          const da = a.updated_at ? +new Date(a.updated_at as any) : 0;
+          const db = b.updated_at ? +new Date(b.updated_at as any) : 0;
+          return db - da;
+        });
+
+        setDeloadAllRows(flat);
+      } catch (e: any) {
+        if (cancelled) return;
+        console.error("Failed to load deloadings", e);
+        setFacultyWithDeloadings([]);
+        setDeloadAllRows([]);
+        setDeloadAllError(e?.message || "Failed to load deloadings.");
+      } finally {
+        if (!cancelled) setDeloadAllLoading(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [termId]);
 
 
   type FacultySummaryRow = {
@@ -4438,178 +4500,103 @@ useEffect(() => {
                   </div> */}
                 </div>
               </div>
-              {/* ---- Faculty Deloading (per-faculty) ---- */}
+              {/* ---- Faculty Deloading (term-wide; show immediately) ---- */}
               <div className="mt-6 rounded-xl border border-gray-200 bg-white shadow-sm">
                 <div className="flex flex-wrap items-start justify-between gap-4 px-4 pt-4 pb-2">
                   <div>
                     <h2 className="text-lg font-semibold">Faculty Deloading</h2>
+                    <div className="mt-0.5 text-xs text-gray-500">
+                      {deloadAllLoading
+                        ? "Loading deloadings…"
+                        : facultyWithDeloadings.length
+                        ? `${facultyWithDeloadings.length} faculty with deloadings for this term`
+                        : "No deloadings recorded for this term."}
+                    </div>
                   </div>
 
                   <div className="w-full sm:w-[420px]">
-                    <div className="relative">
-                      <div className="flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-3 py-2 shadow-sm">
-                        <SearchIcon className="h-4 w-4 text-gray-500" />
-                        <input
-                          value={deloadFacultyQuery}
-                          onChange={(e) => {
-                            setDeloadFacultyQuery(e.target.value);
-                            setDeloadDropdownOpen(true);
-                          }}
-                          onFocus={() => setDeloadDropdownOpen(true)}
-                          onBlur={() => window.setTimeout(() => setDeloadDropdownOpen(false), 120)}
-                          onKeyDown={(e) => {
-                            if (e.key === "Enter") {
-                              const best = deloadMatches[0];
-                              if (best) {
-                                setDeloadSelectedFaculty(best);
-                                setDeloadFacultyQuery(best.faculty_name_display);
-                                setDeloadDropdownOpen(false);
-                                loadFacultyDeloadings(best.faculty_id);
-                              }
-                            }
-                            if (e.key === "Escape") setDeloadDropdownOpen(false);
-                          }}
-                          placeholder="Search by faculty name..."
-                          className="w-full bg-transparent text-sm outline-none placeholder:text-gray-400"
-                        />
-                        {deloadFacultyQuery.trim() && (
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setDeloadFacultyQuery("");
-                              setDeloadSelectedFaculty(null);
-                              setDeloadRows([]);
-                              setDeloadError("");
-                            }}
-                            className="rounded-md p-1 text-gray-500 hover:bg-gray-100"
-                            title="Clear"
-                          >
-                            <X className="h-4 w-4" />
-                          </button>
-                        )}
-                      </div>
-
-                      {deloadDropdownOpen && deloadFacultyQuery.trim() && deloadMatches.length > 0 && (
-                        <div className="absolute z-20 mt-1 w-full overflow-hidden rounded-lg border border-gray-200 bg-white shadow-lg">
-                          <ul className="max-h-60 overflow-auto py-1">
-                            {deloadMatches.map((f) => (
-                              <li key={f.faculty_id}>
-                                <button
-                                  type="button"
-                                  className="w-full px-3 py-2 text-left text-sm hover:bg-gray-50"
-                                  onMouseDown={(e) => e.preventDefault()}
-                                  onClick={() => {
-                                    setDeloadSelectedFaculty(f);
-                                    setDeloadFacultyQuery(f.faculty_name_display);
-                                    setDeloadDropdownOpen(false);
-                                    loadFacultyDeloadings(f.faculty_id);
-                                  }}
-                                >
-                                  {f.faculty_name_display}
-                                </button>
-                              </li>
-                            ))}
-                          </ul>
-                        </div>
+                    <div className="flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-3 py-2 shadow-sm">
+                      <SearchIcon className="h-4 w-4 text-gray-500" />
+                      <input
+                        value={deloadSearch}
+                        onChange={(e) => setDeloadSearch(e.target.value)}
+                        placeholder="Search by faculty…"
+                        className="w-full bg-transparent text-sm outline-none placeholder:text-gray-400"
+                      />
+                      {deloadSearch.trim() && (
+                        <button
+                          type="button"
+                          onClick={() => setDeloadSearch("")}
+                          className="rounded-md p-1 text-gray-500 hover:bg-gray-100"
+                          title="Clear"
+                        >
+                          <X className="h-4 w-4" />
+                        </button>
                       )}
                     </div>
                   </div>
                 </div>
 
-                {/* Faculty with current deloadings (quick awareness) */}
-                <div className="px-4 pb-3">
-                  <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2">
-                    <div className="text-xs font-medium text-gray-700">
-                      Faculty with current deloadings
-                      <span className="ml-2 text-[11px] font-normal text-gray-500">
-                        ({facultyWithDeloadings.length})
-                      </span>
-                    </div>
-                    {facultyWithDeloadings.length === 0 ? (
-                      <div className="mt-1 text-xs text-gray-500">None found for this term.</div>
-                    ) : (
-                      <div className="mt-2 flex flex-wrap gap-2">
-                        {facultyWithDeloadings.map((f) => (
-                          <button
-                            key={f.faculty_id}
-                            type="button"
-                            className={cls(
-                              "rounded-full border px-2.5 py-1 text-xs shadow-sm",
-                              deloadSelectedFaculty?.faculty_id === f.faculty_id
-                                ? "border-emerald-300 bg-emerald-50 text-emerald-900"
-                                : "border-gray-200 bg-white text-gray-700 hover:bg-gray-100"
-                            )}
-                            onClick={() => {
-                              setDeloadSelectedFaculty(f);
-                              setDeloadFacultyQuery(f.faculty_name_display);
-                              loadFacultyDeloadings(f.faculty_id);
-                            }}
-                          >
-                            {f.faculty_name_display}
-                          </button>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                </div>
-
-                {deloadError && (
+                {deloadAllError && (
                   <div className="mx-4 mb-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
-                    {deloadError}
+                    {deloadAllError}
                   </div>
                 )}
 
-                <div className="border-t px-4 pb-4 pt-4 overflow-x-auto w-full">
-                  {!deloadSelectedFaculty ? (
-                    <div className="py-6 text-center text-sm text-gray-500">
-                      Select a faculty to view their deloadings.
+                <div className="px-4 pb-4 border-t">
+                  <div className="mt-3 overflow-x-auto rounded-lg border border-gray-200 bg-white">
+                    {deloadAllLoading ? (
+                      <div className="py-6 text-center text-sm text-gray-500">Loading…</div>
+                    ) : deloadFiltered.length === 0 ? (
+                      <div className="py-6 text-center text-sm text-gray-500">
+                        {deloadAllRows.length === 0
+                          ? "No deloadings recorded for this term."
+                          : "No deloadings match your search."}
+                      </div>
+                    ) : (
+                      <div className="max-h-[255px] overflow-y-auto">
+                        <table className="w-full text-sm table-fixed">
+                          <colgroup>
+                            <col style={{ width: "22%" }} />
+                            <col style={{ width: "20%" }} />
+                            <col style={{ width: "10%" }} />
+                            <col style={{ width: "33%" }} />
+                            <col style={{ width: "15%" }} />
+                          </colgroup>
+                          <thead className="bg-gray-50 border-y text-gray-700 sticky top-0 z-10">
+                            <tr>
+                              <th className="px-3 py-2 text-left font-semibold">Faculty</th>
+                              <th className="px-3 py-2 text-left font-semibold">Deloading Type</th>
+                              <th className="px-3 py-2 text-right font-semibold">Units</th>
+                              <th className="px-3 py-2 text-left font-semibold">Notes</th>
+                              <th className="px-3 py-2 text-center font-semibold">Last Updated</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y">
+                            {deloadFiltered.map((r, i) => (
+                              <tr key={`${r.faculty_id}-${r.deloading_type || "row"}-${i}`} className="hover:bg-amber-50/40">
+                                <td className="px-3 py-2 align-middle">
+                                  <div className="font-medium text-gray-900">{r.faculty_name_display || r.faculty_id}</div>
+                                </td>
+                                <td className="px-3 py-2 align-middle">{r.deloading_type || "—"}</td>
+                                <td className="px-3 py-2 text-right align-middle">{r.units_deloaded ?? "—"}</td>
+                                <td className="px-3 py-2 align-middle">{r.notes || "—"}</td>
+                                <td className="px-3 py-2 text-center align-middle">
+                                  {r.updated_at ? new Date(r.updated_at as any).toLocaleDateString() : "—"}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+
+                  {!deloadAllLoading && deloadFiltered.length > 0 && (
+                    <div className="mt-2 flex items-center justify-between text-xs text-gray-500">
+
+                      {deloadAllRows.length > 5 }
                     </div>
-                  ) : deloadLoading ? (
-                    <div className="py-6 text-center text-sm text-gray-500">Loading…</div>
-                  ) : deloadRows.length === 0 ? (
-                    <div className="py-6 text-center text-sm text-gray-500">
-                      No deloadings recorded for{" "}
-                      <span className="font-semibold">{deloadSelectedFaculty.faculty_name_display}</span>.
-                    </div>
-                  ) : (
-                    <table className="w-full text-sm table-fixed">
-                      <colgroup>
-                        <col style={{ width: "28%" }} />
-                        <col style={{ width: "12%" }} />
-                        <col style={{ width: "40%" }} />
-                        <col style={{ width: "20%" }} />
-                      </colgroup>
-                      <thead className="bg-gray-50 border-y text-gray-700">
-                        <tr>
-                          {["Deloading Type", "Units", "Notes", "Last Updated"].map((h) => (
-                            <th
-                              key={h}
-                              className="px-3 py-2 text-center text-xs font-semibold uppercase tracking-wide"
-                            >
-                              {h}
-                            </th>
-                          ))}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {deloadRows.map((r, i) => (
-                          <tr
-                            key={`${r.deloading_type || "row"}-${i}`}
-                            className={cls(
-                              i % 2 === 0 ? "bg-white" : "bg-gray-50",
-                              "text-gray-800 hover:bg-amber-50/40"
-                            )}
-                          >
-                            <td className="px-3 py-2 text-center">{r.deloading_type || "—"}</td>
-                            <td className="px-3 py-2 text-center">{r.units_deloaded ?? "—"}</td>
-                            <td className="px-3 py-2 text-center">{r.notes || "—"}</td>
-                            <td className="px-3 py-2 text-center">
-                              {r.updated_at ? new Date(r.updated_at).toLocaleString() : "—"}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
                   )}
                 </div>
               </div>
@@ -4676,13 +4663,13 @@ useEffect(() => {
                               Faculty
                             </th>
                             <th className="px-3 py-2 text-right font-semibold">
-                              Assigned Units
+                              Assigned Teaching Units
                             </th>
                             <th className="px-3 py-2 text-right font-semibold">
                               Preferred Teaching Units
                             </th>
                             <th className="px-3 py-2 text-right font-semibold">
-                              Δ (Assigned - Pref)
+                              Deloading Units
                             </th>
                             <th className="px-3 py-2 text-center font-semibold">
                               Status
@@ -4743,11 +4730,11 @@ useEffect(() => {
                                     : "—"}
                                 </td>
                                 <td className="px-3 py-2 text-right align-middle">
-                                  {hasPref && f.diff != null
-                                    ? f.diff > 0
-                                      ? `+${f.diff}`
-                                      : `${f.diff}`
-                                    : "—"}
+                                  {(() => {
+                                    const units =
+                                      (f.facultyId && deloadUnitsByFacultyId[f.facultyId]) || 0;
+                                    return units.toFixed(1).replace(/\.0$/, "");
+                                  })()}
                                 </td>
                                 <td className="px-3 py-2 text-center align-middle">
                                   <span
