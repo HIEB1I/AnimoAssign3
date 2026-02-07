@@ -814,10 +814,27 @@ async def preenlistment_post(
         if not campus_uc:
             raise HTTPException(status_code=400, detail="Cannot resolve campus; pass campus=MANILA|LAGUNA.")
 
+        # Reactivation should keep both Manila + Laguna in sync.
+        # We still resolve the caller campus for logging/response, but updates apply to BOTH campuses.
         camp_doc = await _campus_by_name(campus_uc)
         campus_id_for_filter = (camp_doc or {}).get("campus_id")
         if not campus_id_for_filter:
             raise HTTPException(status_code=400, detail="Unknown campus.")
+
+        manila_doc = await _campus_by_name("MANILA")
+        laguna_doc = await _campus_by_name("LAGUNA")
+        both_campus_ids = [
+            cid
+            for cid in [
+                (manila_doc or {}).get("campus_id"),
+                (laguna_doc or {}).get("campus_id"),
+            ]
+            if cid
+        ]
+
+        # Fallback: if campuses cannot be resolved, preserve old campus-scoped behavior.
+        if not both_campus_ids:
+            both_campus_ids = [campus_id_for_filter]
 
         # This termId is the PLANNING term P we want to restore
         planning_term = await db[COL_TERMS].find_one(
@@ -832,27 +849,27 @@ async def preenlistment_post(
 
         curr_tid = await _active_term_id()
 
-        # 1) Archive current active rows (if different term) for this campus
+        # 1) Archive current active rows (if different term) for BOTH campuses
         deactivated_counts = deactivated_stats = 0
         if curr_tid and curr_tid != termId:
             r1 = await db[COL_COUNT].update_many(
-                {"term_id": curr_tid, "is_archived": False, "campus_id": campus_id_for_filter},
+                {"term_id": curr_tid, "is_archived": False, "campus_id": {"$in": both_campus_ids}},
                 {"$set": {"is_archived": True, "updated_at": _now()}},
             )
             r2 = await db[COL_STATS].update_many(
-                {"term_id": curr_tid, "is_archived": False, "campus_id": campus_id_for_filter},
+                {"term_id": curr_tid, "is_archived": False, "campus_id": {"$in": both_campus_ids}},
                 {"$set": {"is_archived": True, "updated_at": _now()}},
             )
             deactivated_counts = r1.modified_count
             deactivated_stats = r2.modified_count
 
-        # 2) Unarchive selected term's rows for this campus
+        # 2) Unarchive selected term's rows for BOTH campuses
         r3 = await db[COL_COUNT].update_many(
-            {"term_id": termId, "is_archived": True, "campus_id": campus_id_for_filter},
+            {"term_id": termId, "is_archived": True, "campus_id": {"$in": both_campus_ids}},
             {"$set": {"is_archived": False, "updated_at": _now()}},
         )
         r4 = await db[COL_STATS].update_many(
-            {"term_id": termId, "is_archived": True, "campus_id": campus_id_for_filter},
+            {"term_id": termId, "is_archived": True, "campus_id": {"$in": both_campus_ids}},
             {"$set": {"is_archived": False, "updated_at": _now()}},
         )
 

@@ -20,7 +20,7 @@ except ModuleNotFoundError:
     RL_A4 = None
     colors = None
 
-router = APIRouter(prefix="/om", tags=["om"])
+router = APIRouter(prefix="/chair", tags=["chair"])
 
 # ---------------- collections ----------------
 COL_SPECIAL = "special_class"

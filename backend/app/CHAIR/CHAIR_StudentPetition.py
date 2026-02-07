@@ -1,4 +1,3 @@
-# backend/app/CHAIR/CHAIR_StudentPetition.py
 from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Query, Body
 from ..main import db
@@ -13,26 +12,74 @@ COL_DEPARTMENTS = "departments"
 COL_USERS = "users"
 COL_ROLE_ASSIGN = "role_assignments"
 COL_USER_ROLES = "user_roles"
+COL_PREEN_COUNT = "preenlistment_count" 
 
 
 # --- helpers ---
+# --- helpers ---
 async def _active_term() -> Dict[str, Any]:
-    """Return the active term; fallback to latest AY/term_number."""
-    t = await db[COL_TERMS].find_one(
+    """
+    Return the WORKING / PLANNING term for OM student petitions.
+
+    Priority:
+    1) If there is an active (non-archived) pre-enlistment batch in
+       preenlistment_count, use that term_id.
+    2) Otherwise, use the *next* term after the current term
+       (where is_current = True or status = 'active').
+    3) If there is no "next" term configured, fall back to the current term
+       (or latest AY/term_number if nothing is flagged current/active).
+    """
+
+    # 1) Try to derive from an active pre-enlistment batch
+    pre_doc = await db[COL_PREEN_COUNT].find_one(
+        {"is_archived": {"$ne": True}},
+        {"_id": 0, "term_id": 1},
+    )
+    if pre_doc and pre_doc.get("term_id"):
+        t = await db[COL_TERMS].find_one(
+            {"term_id": pre_doc["term_id"]},
+            {"_id": 0, "term_id": 1, "acad_year_start": 1, "term_number": 1},
+        )
+        if t:
+            return t
+
+    # 2) Fallback: current term (status = active OR is_current = True)
+    current = await db[COL_TERMS].find_one(
         {"$or": [{"status": "active"}, {"is_current": True}]},
         {"_id": 0, "term_id": 1, "acad_year_start": 1, "term_number": 1},
     )
-    if t:
-        return t
-    last = (
-        await db[COL_TERMS]
-        .find({}, {"_id": 0, "term_id": 1, "acad_year_start": 1, "term_number": 1})
-        .sort([("acad_year_start", -1), ("term_number", -1)])
-        .limit(1)
-        .to_list(1)
-    )
-    return last[0] if last else {}
 
+    if not current:
+        # Same fallback as before: latest term by AY + term_number
+        last = await db[COL_TERMS].find(
+            {}, {"_id": 0, "term_id": 1, "acad_year_start": 1, "term_number": 1}
+        ).sort([("acad_year_start", -1), ("term_number", -1)]).limit(1).to_list(1)
+        current = last[0] if last else None
+
+    if not current:
+        # No terms configured at all
+        return {}
+
+    # 3) Compute the "next" term after the current term
+    next_terms = await db[COL_TERMS].find(
+        {
+            "$or": [
+                {"acad_year_start": {"$gt": current["acad_year_start"]}},
+                {
+                    "acad_year_start": current["acad_year_start"],
+                    "term_number": {"$gt": current["term_number"]},
+                },
+            ]
+        },
+        {"_id": 0, "term_id": 1, "acad_year_start": 1, "term_number": 1},
+    ).sort([("acad_year_start", 1), ("term_number", 1)]).limit(1).to_list(1)
+
+    if next_terms:
+        # Use the next term as the working/planning term
+        return next_terms[0]
+
+    # If no next term, stick with current (still better than returning nothing)
+    return current
 
 def _course_code_expr():
     # Normalize string | array to a single display code
@@ -45,72 +92,25 @@ def _course_code_expr():
     }
 
 
-async def _resolve_department_for_user(userEmail: Optional[str], userId: Optional[str]) -> Optional[str]:
-    """Return department_id from the user's role scope (first 'department' scope found)."""
-    if not userEmail and not userId:
-        return None
-
-    match: Dict[str, Any] = {"user_id": userId} if userId else {"email": userEmail}
-
-    pipeline: List[Dict[str, Any]] = [
-        {"$match": match},
-        {"$project": {"_id": 0, "user_id": 1, "email": 1, "first_name": 1, "last_name": 1}},
-        {"$lookup": {
-            "from": COL_ROLE_ASSIGN,
-            "let": {"uid": "$user_id"},
-            "pipeline": [{"$match": {"$expr": {"$eq": ["$user_id", "$$uid"]}}}],
-            "as": "ra_list"
-        }},
-        {"$unwind": {"path": "$ra_list", "preserveNullAndEmptyArrays": True}},
-        {"$addFields": {
-            "department_id": {
-                "$let": {
-                    "vars": {"sc": {"$ifNull": ["$ra_list.scope", []]}},
-                    "in": {"$first": {
-                        "$map": {
-                            "input": {
-                                "$filter": {
-                                    "input": "$$sc",
-                                    "as": "s",
-                                    "cond": {"$eq": ["$$s.type", "department"]}
-                                }
-                            },
-                            "as": "d",
-                            "in": "$$d.id"
-                        }
-                    }}
-                }
-            }
-        }},
-        {"$project": {"department_id": 1}},
-        {"$limit": 1},
-    ]
-
-    docs = [d async for d in db[COL_USERS].aggregate(pipeline)]
-    if not docs:
-        return None
-    return docs[0].get("department_id")
-
-
 # --- route ---
-@router.post("/student-petitions")
-async def chair_student_petitions_handler(
+@router.post("/student-petition")
+async def om_student_petitions_handler(
     action: str = Query("list", description="options | list | update | bulkForward | header"),
     status: Optional[str] = Query(None, description="Filter by last status (list)"),
     search: Optional[str] = Query(None, description="Search by course code/title (list)"),
     courseId: Optional[str] = Query(None, description="For single update"),
     termId: Optional[str] = Query(None, description="Override active term"),
-    userEmail: Optional[str] = Query(None, description="Header: user email (for scoping)"),
-    userId: Optional[str] = Query(None, description="Header: user id (for scoping)"),
+    userEmail: Optional[str] = Query(None, description="Header: user email"),
+    userId: Optional[str] = Query(None, description="Header: user id"),
     payload: Optional[Dict[str, Any]] = Body(None),
 ):
     """
-    CHAIR Student Petition (department-scoped):
+    Single endpoint for OM Student Petition:
       - header:     topbar profile name + subtitle (role | department)
       - options:    statuses + active term label
-      - list:       groups petitions by course in active term, limited to chair's department
-      - update:     updates status/remarks for all petitions of a course in active term (scoped)
-      - bulkForward:set status for multiple course_ids in active term (scoped)
+      - list:       groups petitions by course in active term (count + latest status/remarks)
+      - update:     updates status/remarks for all petitions of a course in active term
+      - bulkForward:set status for multiple course_ids in active term
     """
 
     # ---------- HEADER (Topbar identity) ----------
@@ -123,6 +123,8 @@ async def chair_student_petitions_handler(
         pipeline: List[Dict[str, Any]] = [
             {"$match": match},
             {"$project": {"_id": 0, "user_id": 1, "email": 1, "first_name": 1, "last_name": 1}},
+
+            # Link role assignments (may be multiple; we just take the first)
             {"$lookup": {
                 "from": COL_ROLE_ASSIGN,
                 "let": {"uid": "$user_id"},
@@ -130,6 +132,8 @@ async def chair_student_petitions_handler(
                 "as": "ra_list"
             }},
             {"$unwind": {"path": "$ra_list", "preserveNullAndEmptyArrays": True}},
+
+            # Compute department_id from scope[] (scope elements look like {type:"department", id:"DEPT0003"})
             {"$addFields": {
                 "ra": "$ra_list",
                 "department_id": {
@@ -151,6 +155,8 @@ async def chair_student_petitions_handler(
                     }
                 }
             }},
+
+            # Join department using computed department_id
             {"$lookup": {
                 "from": COL_DEPARTMENTS,
                 "localField": "department_id",
@@ -158,6 +164,8 @@ async def chair_student_petitions_handler(
                 "as": "dept"
             }},
             {"$unwind": {"path": "$dept", "preserveNullAndEmptyArrays": True}},
+
+            # Resolve role_type through user_roles
             {"$lookup": {
                 "from": COL_USER_ROLES,
                 "localField": "ra.role_id",
@@ -165,6 +173,7 @@ async def chair_student_petitions_handler(
                 "as": "role"
             }},
             {"$unwind": {"path": "$role", "preserveNullAndEmptyArrays": True}},
+
             {"$addFields": {
                 "full_name": {
                     "$trim": {"input": {"$concat": [
@@ -174,10 +183,11 @@ async def chair_student_petitions_handler(
                 "dept_name": {"$ifNull": ["$dept.department_name", "$dept.dept_name"]},
                 "role_type": {"$ifNull": ["$role.role_type", ""]},
             }},
+
             {"$project": {
                 "_id": 0,
                 "email": 1,
-                "department_id": 1,
+                "department_id": 1,  # computed above
                 "role_type": 1,
                 "profileName": "$full_name",
                 "profileSubtitle": {
@@ -188,7 +198,7 @@ async def chair_student_petitions_handler(
                     ]}}
                 }
             }},
-            {"$limit": 1},
+            {"$limit": 1}
         ]
 
         docs = [d async for d in db[COL_USERS].aggregate(pipeline)]
@@ -201,9 +211,6 @@ async def chair_student_petitions_handler(
     current_term_id = termId or active.get("term_id")
     if not current_term_id and action in {"list", "update", "bulkForward"}:
         raise HTTPException(status_code=503, detail="No active term configured.")
-
-    # Resolve department scope (optional but narrows results)
-    department_id = await _resolve_department_for_user(userEmail, userId)
 
     # ---------- OPTIONS ----------
     if action == "options":
@@ -222,7 +229,7 @@ async def chair_student_petitions_handler(
             },
         }
 
-    # ---------- LIST (grouped by course, department-scoped) ----------
+    # ---------- LIST (grouped by course) ----------
     if action == "list":
         pipeline: List[Dict[str, Any]] = [
             {"$match": {"term_id": current_term_id, "petition_id": {"$exists": True}}},
@@ -240,34 +247,24 @@ async def chair_student_petitions_handler(
                 "as": "course"
             }},
             {"$unwind": {"path": "$course", "preserveNullAndEmptyArrays": True}},
-        ]
-
-        # Department filter (scoping)
-        post_match: Dict[str, Any] = {}
-        if department_id:
-            post_match["course.department_id"] = department_id
-
-        # client filters
-        if status and status.strip().lower() != "all status":
-            post_match["last_status"] = status.strip()
-        if search and search.strip():
-            s = search.strip()
-            post_match["$or"] = [
-                {"course_code": {"$regex": s, "$options": "i"}},
-                {"course_title": {"$regex": s, "$options": "i"}},
-            ]
-
-        # add computed display fields before applying text search filter
-        pipeline += [
             {"$addFields": {
                 "course_code": _course_code_expr(),
                 "course_title": {"$ifNull": ["$course.course_title", ""]},
-                "department_id": {"$ifNull": ["$course.department_id", ""]},
             }},
         ]
 
-        if post_match:
-            pipeline.append({"$match": post_match})
+        # client filters
+        post: Dict[str, Any] = {}
+        if status and status.strip().lower() != "all status":
+            post["last_status"] = status.strip()
+        if search and search.strip():
+            s = search.strip()
+            post["$or"] = [
+                {"course_code": {"$regex": s, "$options": "i"}},
+                {"course_title": {"$regex": s, "$options": "i"}},
+            ]
+        if post:
+            pipeline.append({"$match": post})
 
         pipeline += [
             {"$project": {
@@ -285,14 +282,15 @@ async def chair_student_petitions_handler(
         rows = [r async for r in db[COL_PETITIONS].aggregate(pipeline)]
         return {"ok": True, "rows": rows, "term_id": current_term_id}
 
-    # ---------- UPDATE (single course; department-scoped) ----------
+    # ---------- UPDATE (single course) ----------
     if action == "update":
         if not courseId:
             raise HTTPException(status_code=400, detail="courseId is required.")
         if not payload:
             raise HTTPException(status_code=400, detail="payload is required.")
-
         new_status = (payload.get("status") or "").strip()
+
+        # Allow clearing remarks (""), only if key is present
         remarks_present = "remarks" in payload
         new_remarks = (payload.get("remarks") or "") if remarks_present else None
 
@@ -315,20 +313,13 @@ async def chair_student_petitions_handler(
         if not updates:
             return {"ok": False, "message": "Nothing to update."}
 
-        # scope by department if we can resolve it
-        course_filter: Dict[str, Any] = {"course_id": courseId}
-        if department_id:
-            course = await db[COL_COURSES].find_one({"course_id": courseId}, {"department_id": 1})
-            if not course or course.get("department_id") != department_id:
-                raise HTTPException(status_code=403, detail="Course not in your department.")
-
         res = await db[COL_PETITIONS].update_many(
             {"term_id": current_term_id, "course_id": courseId, "petition_id": {"$exists": True}},
             {"$set": updates},
         )
         return {"ok": True, "matched": res.matched_count, "modified": res.modified_count}
 
-    # ---------- BULK FORWARD (department-scoped) ----------
+    # ---------- BULK FORWARD ----------
     if action == "bulkForward":
         if not payload or not isinstance(payload.get("course_ids"), list):
             raise HTTPException(status_code=400, detail="payload.course_ids must be an array.")
@@ -342,22 +333,8 @@ async def chair_student_petitions_handler(
         if allowed and target_status not in allowed:
             raise HTTPException(status_code=400, detail="Invalid status value.")
 
-        course_ids: List[str] = payload["course_ids"]
-
-        # If scoped, limit course_ids to those in the chair's department
-        scoped_ids = course_ids
-        if department_id:
-            in_dept = await db[COL_COURSES].find(
-                {"course_id": {"$in": course_ids}, "department_id": department_id},
-                {"course_id": 1}
-            ).to_list(None)
-            scoped_ids = [c["course_id"] for c in in_dept]
-
-        if not scoped_ids:
-            return {"ok": True, "matched": 0, "modified": 0, "status": target_status}
-
         res = await db[COL_PETITIONS].update_many(
-            {"term_id": current_term_id, "course_id": {"$in": scoped_ids}, "petition_id": {"$exists": True}},
+            {"term_id": current_term_id, "course_id": {"$in": payload["course_ids"]}, "petition_id": {"$exists": True}},
             {"$set": {"status": target_status}},
         )
         return {"ok": True, "matched": res.matched_count, "modified": res.modified_count, "status": target_status}
