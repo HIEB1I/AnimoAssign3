@@ -3616,9 +3616,9 @@ useEffect(() => {
           bySection[sid] = {
             rowId: sid,
             course: b.course_code || b.course_id || "—",
-            section: b.section_code || sid,
+            section: b.section_code || "—",
             campusId: b.campus_id || "",
-            campusName: b.campus_name || b.campus_id || "",
+            campusName: b.campus_name || "",
           };
         }
         return Object.values(bySection).filter(
@@ -3787,9 +3787,6 @@ useEffect(() => {
               <div className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
                 <div className="flex items-center justify-between px-4 pt-4">
                   <div className="flex items-center gap-2">
-                    <h2 className="text-lg font-semibold">
-                      Load Recommendations
-                    </h2>
 
                     <div className="flex flex-wrap items-center gap-2">
                       <button
@@ -3807,7 +3804,7 @@ useEffect(() => {
                             : "Undo last change in Load Recommendations"
                         }
                       >
-                        <Undo2 className="h-4 w-4" />
+                        <Undo2 className="h-5 w-5" />
                       </button>
 
                       <button
@@ -3825,7 +3822,7 @@ useEffect(() => {
                             : "Redo last undone change in Load Recommendations"
                         }
                       >
-                        <Redo2 className="h-4 w-4" />
+                        <Redo2 className="h-5 w-5" />
                       </button>
 
                       {/* Import SHS file */}
@@ -3851,7 +3848,7 @@ useEffect(() => {
                         }
                       >
                         <Upload className="h-4 w-4" />
-                        Import SHS file
+                        Import SHS
                       </button>
 
                       <input
@@ -4413,14 +4410,14 @@ useEffect(() => {
 
                 <div className="border-t px-4 py-3">
                   <div className="flex items-center justify-between gap-3">
-                    {/*<button
+                    <button
                       onClick={addRow}
                       className="inline-flex items-center gap-2 rounded-lg border border-gray-400 px-3 py-1.5 text-sm text-gray-800 hover:bg-gray-100"
                       title="Add new line"
                     >
                       <Plus className="h-4 w-4" />
                       Add new line
-                    </button>*/}
+                    </button>
 
                   </div>
                   {/* Right: Auto-assign (Run algorithm) - REMOVED from bottom */}
@@ -4446,10 +4443,6 @@ useEffect(() => {
                 <div className="flex flex-wrap items-start justify-between gap-4 px-4 pt-4 pb-2">
                   <div>
                     <h2 className="text-lg font-semibold">Faculty Deloading</h2>
-                    <p className="text-xs text-gray-500">
-                      View deloading records per faculty for{" "}
-                      <span className="font-semibold">{term || "this term"}</span>.
-                    </p>
                   </div>
 
                   <div className="w-full sm:w-[420px]">
@@ -4629,13 +4622,6 @@ useEffect(() => {
                       <h2 className="text-lg font-semibold">
                         Faculty Load Summary
                       </h2>
-                      <p className="text-xs text-gray-500">
-                        Total assigned units vs preferred units per faculty for{" "}
-                        <span className="font-semibold">
-                          {term || "this term"}
-                        </span>
-                        .
-                      </p>
                     </div>
 
                     {/* Summary internal tabs */}
@@ -4649,7 +4635,7 @@ useEffect(() => {
                             : "bg-white text-gray-700 border-gray-300"
                         )}
                       >
-                        Units vs Prefs
+                        Units vs Preferences
                       </button>
 
                       <button
@@ -4693,7 +4679,7 @@ useEffect(() => {
                               Assigned Units
                             </th>
                             <th className="px-3 py-2 text-right font-semibold">
-                              Preferred Units
+                              Preferred Teaching Units
                             </th>
                             <th className="px-3 py-2 text-right font-semibold">
                               Δ (Assigned - Pref)
@@ -4854,7 +4840,7 @@ useEffect(() => {
                   {summaryTab === "blocked" && (
                     <div className="px-4 pb-4 border-t">
                       <div className="mt-3 overflow-x-auto rounded-lg border border-gray-200 bg-white">
-                        <table className="w-full text-sm table-fixed">
+                        <table className="w-full text-sm table-auto">
                           <thead className="bg-gray-50 border-y text-gray-700">
                             <tr>
                               <th className="px-3 py-2 text-left font-semibold">
@@ -4867,18 +4853,30 @@ useEffect(() => {
                                 Section
                               </th>
                               <th className="px-3 py-2 text-left font-semibold">
-                                Slot 1 (Day / Time)
+                                Day 1
                               </th>
                               <th className="px-3 py-2 text-left font-semibold">
-                                Slot 2 (Day / Time)
+                                Begin 1
                               </th>
-                            </tr>
+                              <th className="px-3 py-2 text-left font-semibold">
+                                End 1
+                              </th>
+                              <th className="px-3 py-2 text-left font-semibold">
+                                Day 2
+                              </th>
+                              <th className="px-3 py-2 text-left font-semibold">
+                                Begin 2
+                              </th>
+                              <th className="px-3 py-2 text-left font-semibold">
+                                End 2
+                              </th>
+</tr>
                           </thead>
                           <tbody className="divide-y divide-gray-100">
                             {blockedSections.length === 0 ? (
                               <tr>
                                 <td
-                                  colSpan={5}
+                                  colSpan={9}
                                   className="py-6 text-center text-sm text-gray-500"
                                 >
                                   No blocked GE sections for CMPS0002.
@@ -4886,12 +4884,36 @@ useEffect(() => {
                               </tr>
                             ) : (
                               blockedSections.map((b) => {
-                                const slots = blockedGeCmps2
-                                  .filter((x) => x.section_id === b.rowId)
-                                  .map((x) => `${x.day} ${x.begin}–${x.end}`);
+                                const dayRank: Record<string, number> = {
+                                  M: 1,
+                                  T: 2,
+                                  W: 3,
+                                  H: 4,
+                                  F: 5,
+                                  S: 6,
+                                };
 
-                                const slot1 = slots[0] ?? "—";
-                                const slot2 = slots[1] ?? "—";
+                                const slotItems = (blockedGeCmps2 || [])
+                                  .filter((x) => x.section_id === b.rowId)
+                                  .slice()
+                                  .sort((a, bb) => {
+                                    const da = dayRank[(a.day || "").toUpperCase()] ?? 99;
+                                    const dbb = dayRank[(bb.day || "").toUpperCase()] ?? 99;
+                                    if (da !== dbb) return da - dbb;
+                                    const ta = parseInt(String(a.begin || "0"), 10) || 0;
+                                    const tb = parseInt(String(bb.begin || "0"), 10) || 0;
+                                    return ta - tb;
+                                  });
+
+                                const s1 = slotItems[0];
+                                const s2 = slotItems[1];
+
+                                const day1 = s1?.day ?? "—";
+                                const begin1 = s1?.begin ?? "—";
+                                const end1 = s1?.end ?? "—";
+                                const day2 = s2?.day ?? "—";
+                                const begin2 = s2?.begin ?? "—";
+                                const end2 = s2?.end ?? "—";
 
                                 return (
                                   <tr key={b.rowId}>
@@ -4899,17 +4921,17 @@ useEffect(() => {
                                       {b.course || "—"}
                                     </td>
                                     <td className="px-3 py-2 text-gray-700">
-                                      {b.campusName || b.campusId || "—"}
+                                      {b.campusName || "—"}
                                     </td>
                                     <td className="px-3 py-2 text-gray-700">
                                       {b.section || "—"}
                                     </td>
-                                    <td className="px-3 py-2 text-gray-700">
-                                      {slot1}
-                                    </td>
-                                    <td className="px-3 py-2 text-gray-700">
-                                      {slot2}
-                                    </td>
+                                    <td className="px-3 py-2 text-gray-700">{day1}</td>
+                                    <td className="px-3 py-2 text-gray-700">{begin1}</td>
+                                    <td className="px-3 py-2 text-gray-700">{end1}</td>
+                                    <td className="px-3 py-2 text-gray-700">{day2}</td>
+                                    <td className="px-3 py-2 text-gray-700">{begin2}</td>
+                                    <td className="px-3 py-2 text-gray-700">{end2}</td>
                                   </tr>
                                 );
                               })

@@ -2044,11 +2044,26 @@ async def get_om_load_assignment_list(user_id: str, term_id: Optional[str] = Non
     campus_blocked = getattr(ctx, "campus_blocked", {}) or {}
     blocked_ge_cmps2: list[dict] = []
 
-    # Optional campus lookup if you have it on ctx
-    campus_lookup = {}
+    # Campus name lookup (DB first; fallback to campus_id)
+    campus_lookup: dict[str, str] = {}
+    try:
+        campus_ids = [str(cid) for cid in (campus_blocked or {}).keys() if cid]
+        if campus_ids:
+            docs = await db[COL_CAMPUSES].find(
+                {"campus_id": {"$in": campus_ids}},
+                {"_id": 0, "campus_id": 1, "campus_name": 1, "name": 1},
+            ).to_list(None)
+            for d in docs or []:
+                cid = d.get("campus_id")
+                if cid:
+                    campus_lookup[cid] = (d.get("campus_name") or d.get("name") or cid)
+    except Exception:
+        pass
+
+    # Fallback: if ctx already has campuses (older code paths), use it
     for c in getattr(ctx, "campuses", []) or []:
         cid = c.get("campus_id")
-        if cid:
+        if cid and cid not in campus_lookup:
             campus_lookup[cid] = c.get("campus_name") or c.get("name") or cid
 
     # Reverse day index
@@ -2059,20 +2074,94 @@ async def get_om_load_assignment_list(user_id: str, term_id: Optional[str] = Non
 
     # Quick maps
     sec_by_id = {s.get("section_id"): s for s in sections if s.get("section_id")}
-    for campus_id, day_map in campus_blocked.items():
-        if campus_id != "CMPS0002":
+
+    # Resolve section_code for blocked GE sections directly from the sections collection.
+    # We still keep ctx.sections as a fast fallback, but the DB is the source of truth.
+    section_code_by_id: dict[str, str] = {}
+    try:
+        blocked_section_ids: set[str] = set()
+        for _campus_id, _day_map in (campus_blocked or {}).items():
+            if str(_campus_id or "").strip().upper() != "CMPS0002":
+                continue
+            for _di, _slots in (_day_map or {}).items():
+                for _slot in (_slots or []):
+                    sid = None
+                    if isinstance(_slot, (list, tuple)):
+                        if len(_slot) >= 3:
+                            sid = _slot[2]
+                    elif isinstance(_slot, dict):
+                        sid = _slot.get("section_id") or _slot.get("id")
+                    if sid:
+                        blocked_section_ids.add(str(sid).strip())
+
+        blocked_section_ids = {s for s in blocked_section_ids if s}
+        if blocked_section_ids:
+            docs = await db[COL_SECTIONS].find(
+                {"section_id": {"$in": list(blocked_section_ids)}},
+                {
+                    "_id": 0,
+                    "section_id": 1,
+                    "section_code": 1,
+                    "section": 1,
+                    "section_name": 1,
+                },
+            ).to_list(None)
+            for d in docs or []:
+                sid = str(d.get("section_id") or "").strip()
+                if not sid:
+                    continue
+                code = (
+                    str(d.get("section_code") or "").strip()
+                    or str(d.get("section") or "").strip()
+                    or str(d.get("section_name") or "").strip()
+                )
+                if code:
+                    section_code_by_id[sid] = code
+                # Merge into ctx-derived map so later fallbacks work too
+                sec_by_id[sid] = {**(sec_by_id.get(sid) or {}), **d}
+    except Exception:
+        # Best-effort only; do not break /list if lookups fail.
+        section_code_by_id = {}
+
+    for campus_id, day_map in (campus_blocked or {}).items():
+        camp_norm = str(campus_id or "").strip().upper()
+        if camp_norm != "CMPS0002":
             continue
-        for day_idx, slots in day_map.items():
-            day = idx_to_day.get(day_idx, "")
-            for st_min, en_min, sid, cid, sec_code in slots:
+        for day_idx, slots in (day_map or {}).items():
+            try:
+                di = int(day_idx)
+            except Exception:
+                di = day_idx
+            day = idx_to_day.get(di, "")
+
+            for slot in (slots or []):
+                # Expected slot shape: (st_min, en_min, section_id, course_id, section_code)
+                if not isinstance(slot, (list, tuple)) or len(slot) < 4:
+                    continue
+                st_min = slot[0]
+                en_min = slot[1]
+                sid = str(slot[2] or "").strip() if len(slot) >= 3 else ""
+                cid = str(slot[3] or "").strip() if len(slot) >= 4 else ""
+                sec_code = str(slot[4] or "").strip() if len(slot) >= 5 else ""
+
+                if not sid or not cid:
+                    continue
+
                 cinfo = courses.get(cid) or {}
                 course_code = cinfo.get("course_code") or cinfo.get("course_id") or cid
                 sec = sec_by_id.get(sid) or {}
-                section_code = sec_code or sec.get("section_code") or sec.get("section") or ""
+                section_code = (
+                    sec_code
+                    or section_code_by_id.get(sid, "")
+                    or str(sec.get("section_code") or "").strip()
+                    or str(sec.get("section") or "").strip()
+                    or sid
+                )
+
                 blocked_ge_cmps2.append(
                     {
-                        "campus_id": campus_id,
-                        "campus_name": campus_lookup.get(campus_id, campus_id),
+                        "campus_id": camp_norm,
+                        "campus_name": campus_lookup.get(camp_norm, camp_norm),
                         "course_id": cid,
                         "course_code": course_code,
                         "section_id": sid,
@@ -2104,28 +2193,6 @@ async def get_om_load_assignment_list(user_id: str, term_id: Optional[str] = Non
         fid = str(r.get("faculty_id") or "").strip()
         sid = str(r.get("id") or r.get("section_id") or "").strip()
         r["pending_rfc"] = bool(fid and sid and (fid, sid) in open_rfc_keys)
-
-    blocked_ge_cmps2: list[dict[str, Any]] = []
-    try:
-        idx_to_day = {1: "M", 2: "T", 3: "W", 4: "H", 5: "F", 6: "S"}
-        campus_map = getattr(ctx, "campus_blocked", {}) or {}
-        for di, items in (campus_map.get("CMPS0002") or {}).items():
-            for (st_min, en_min, section_id, course_id, section_code) in (items or []):
-                cinfo = (courses or {}).get(course_id) or {}
-                blocked_ge_cmps2.append(
-                    {
-                        "campus_id": "CMPS0002",
-                        "course_id": course_id,
-                        "course_code": cinfo.get("course_code") or cinfo.get("code"),
-                        "section_id": section_id,
-                        "section_code": section_code,
-                        "day": idx_to_day.get(int(di), str(di)),
-                        "begin": _mm_to_hhmm(int(st_min)),
-                        "end": _mm_to_hhmm(int(en_min)),
-                    }
-                )
-    except Exception:
-        blocked_ge_cmps2 = []
 
     return {
         "term": _term_label(active),
