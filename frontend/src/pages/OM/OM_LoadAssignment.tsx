@@ -4453,9 +4453,6 @@ useEffect(() => {
                   </div>
 
                   <div className="w-full sm:w-[420px]">
-                    <label className="block text-xs font-medium text-gray-700 mb-1">
-                      Search faculty
-                    </label>
                     <div className="relative">
                       <div className="flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-3 py-2 shadow-sm">
                         <SearchIcon className="h-4 w-4 text-gray-500" />
@@ -4479,7 +4476,7 @@ useEffect(() => {
                             }
                             if (e.key === "Escape") setDeloadDropdownOpen(false);
                           }}
-                          placeholder="Type a name (e.g., Dela Cruz)"
+                          placeholder="Search by faculty name..."
                           className="w-full bg-transparent text-sm outline-none placeholder:text-gray-400"
                         />
                         {deloadFacultyQuery.trim() && (
@@ -4684,8 +4681,9 @@ useEffect(() => {
 
                   {/* Tab 1: Units vs Preferred Units */}
                   {summaryTab === "units" && (
-                    <div className="border-t px-4 pb-4 overflow-x-auto w-full">
-                      <table className="w-full text-sm table-fixed">
+                    <div className="px-4 pb-4 border-t">
+                      <div className="mt-3 overflow-x-auto rounded-lg border border-gray-200 bg-white">
+                        <table className="w-full text-sm table-fixed">
                         <thead className="bg-gray-50 border-y text-gray-700">
                           <tr>
                             <th className="px-3 py-2 text-left font-semibold">
@@ -4710,7 +4708,7 @@ useEffect(() => {
                             <tr>
                               <td
                                 colSpan={5}
-                                className="px-3 py-6 text-center text-xs text-gray-500"
+                                className="py-6 text-center text-sm text-gray-500"
                               >
                                 No faculty have assignments yet for this term.
                               </td>
@@ -4781,15 +4779,15 @@ useEffect(() => {
                         </tbody>
                       </table>
                     </div>
+                    </div>
                   )}
 
                   {/* Tab 2: Rule / condition flags */}
                   {summaryTab === "second" && (
                     <div className="border-t px-4 pb-6 text-sm">
                       {ruleAlerts.length === 0 ? (
-                        <p className="py-4 text-xs text-gray-500">
-                          No rule violations detected for the current
-                          assignments. 🎉
+                        <p className="py-6 text-center text-sm text-gray-500">
+                          No rule violations detected for the current assignments. 
                         </p>
                       ) : (
                         <div className="mt-2 overflow-x-auto">
@@ -4856,22 +4854,22 @@ useEffect(() => {
                   {summaryTab === "blocked" && (
                     <div className="px-4 pb-4 border-t">
                       <div className="mt-3 overflow-x-auto rounded-lg border border-gray-200 bg-white">
-                        <table className="min-w-full divide-y divide-gray-200 text-xs">
-                          <thead className="bg-gray-50">
+                        <table className="w-full text-sm table-fixed">
+                          <thead className="bg-gray-50 border-y text-gray-700">
                             <tr>
-                              <th className="px-3 py-2 text-left font-semibold text-gray-700">
+                              <th className="px-3 py-2 text-left font-semibold">
                                 Course
                               </th>
-                              <th className="px-3 py-2 text-left font-semibold text-gray-700">
+                              <th className="px-3 py-2 text-left font-semibold">
                                 Campus
                               </th>
-                              <th className="px-3 py-2 text-left font-semibold text-gray-700">
+                              <th className="px-3 py-2 text-left font-semibold">
                                 Section
                               </th>
-                              <th className="px-3 py-2 text-left font-semibold text-gray-700">
+                              <th className="px-3 py-2 text-left font-semibold">
                                 Slot 1 (Day / Time)
                               </th>
-                              <th className="px-3 py-2 text-left font-semibold text-gray-700">
+                              <th className="px-3 py-2 text-left font-semibold">
                                 Slot 2 (Day / Time)
                               </th>
                             </tr>
@@ -4881,7 +4879,7 @@ useEffect(() => {
                               <tr>
                                 <td
                                   colSpan={5}
-                                  className="px-3 py-4 text-center text-gray-500"
+                                  className="py-6 text-center text-sm text-gray-500"
                                 >
                                   No blocked GE sections for CMPS0002.
                                 </td>
