@@ -2530,8 +2530,6 @@ export default function OM_LoadAssignment() {
     faculty_id: string;
     faculty_name_display: string;
   };
-
-  const [deloadSearch, setDeloadSearch] = useState<string>("");
   const [deloadAllRows, setDeloadAllRows] = useState<DeloadingDisplayRow[]>([]);
   const [deloadAllLoading, setDeloadAllLoading] = useState(false);
   const [deloadAllError, setDeloadAllError] = useState<string>("");
@@ -2657,9 +2655,6 @@ export default function OM_LoadAssignment() {
 
     return "";
   };
-
-
-
   const filtered = rows.filter((r) => {
     // Apply the level filter first so it works even when search is blank.
     if (levelFilter !== "ALL") {
@@ -2667,14 +2662,41 @@ export default function OM_LoadAssignment() {
       if (lvl !== levelFilter) return false;
     }
 
-    const s = search.trim().toLowerCase();
-    if (!s) return true;
+    const q = search.trim().toLowerCase();
+    if (!q) return true;
 
-    return (
-      r.course.toLowerCase().includes(s) ||
-      (r.faculty || "").toLowerCase().includes(s) ||
-      (r.section || "").toLowerCase().includes(s)
+    const remarks = String(
+      remarksDraftBySection[r.id] ??
+        remarksSavedBySection[r.id] ??
+        (r as any)?.remarks ??
+        ""
     );
+
+    const hay = [
+      r.course,
+      r.title,
+      r.section,
+      r.faculty,
+      r.faculty_id || "",
+      String(r.units ?? ""),
+      r.day1,
+      r.begin1,
+      r.end1,
+      r.room1,
+      r.day2,
+      r.begin2,
+      r.end2,
+      r.room2,
+      String(r.capacity ?? ""),
+      r.mode || "",
+      r.status || "",
+      (r as any)?.conflictNote || "",
+      remarks,
+    ]
+      .join(" ")
+      .toLowerCase();
+
+    return hay.includes(q);
   });
 
   const allSelected =
@@ -3168,7 +3190,7 @@ export default function OM_LoadAssignment() {
   );
 
   const deloadFiltered = useMemo(() => {
-    const q = deloadSearch.trim().toLowerCase();
+    const q = search.trim().toLowerCase();
     if (!q) return deloadAllRows;
     return deloadAllRows.filter((r) => {
       const hay = [
@@ -3183,7 +3205,7 @@ export default function OM_LoadAssignment() {
         .toLowerCase();
       return hay.includes(q);
     });
-  }, [deloadAllRows, deloadSearch]);
+  }, [deloadAllRows, search]);
 
   // Sum deloading units per faculty (UI-only; used in Faculty Load Summary)
   const deloadUnitsByFacultyId = useMemo(() => {
@@ -3324,7 +3346,32 @@ export default function OM_LoadAssignment() {
     return Object.values(acc).sort((a, b) =>
       a.facultyName.localeCompare(b.facultyName)
     );
-  }, [rows, facultyById, preferredByFaculty]);
+}, [rows, facultyById, preferredByFaculty]);
+
+  
+  const facultySummaryFiltered: FacultySummaryRow[] = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return facultySummary;
+
+    return facultySummary.filter((f) => {
+      const deloadUnits =
+        (f.facultyId && deloadUnitsByFacultyId[f.facultyId]) || 0;
+
+      const hay = [
+        f.facultyName,
+        f.facultyId,
+        String(f.assignedUnits ?? ""),
+        String(f.preferredUnits ?? ""),
+        String(f.diff ?? ""),
+        String(deloadUnits ?? ""),
+      ]
+        .join(" ")
+        .toLowerCase();
+
+      return hay.includes(q);
+    });
+  }, [facultySummary, deloadUnitsByFacultyId, search]);
+
 
   // ---- Rule alerts for Tab 2 (violations / warnings) ----
   type RuleAlert = {
@@ -3715,7 +3762,28 @@ export default function OM_LoadAssignment() {
     });
 
     return alerts;
-  }, [rows, rowFlags, validationContext, isRowIncompleteForApproval]);
+}, [rows, rowFlags, validationContext, isRowIncompleteForApproval]);
+
+  
+  const ruleAlertsFiltered: RuleAlert[] = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return ruleAlerts;
+
+    return ruleAlerts.filter((a) => {
+      const hay = [
+        a.rule,
+        a.severity,
+        a.facultyName || "",
+        a.facultyId || "",
+        String(a.rowNumber ?? ""),
+        a.message,
+      ]
+        .join(" ")
+        .toLowerCase();
+      return hay.includes(q);
+    });
+  }, [ruleAlerts, search]);
+
 
   type BlockedGeCmps2Item = {
     campus_id: string;
@@ -3769,7 +3837,21 @@ export default function OM_LoadAssignment() {
     return Object.values(bySection).filter(
       (x) => (x.campusId || "").toUpperCase() === "CMPS0002"
     );
-  }, [blockedGeCmps2]);
+}, [blockedGeCmps2]);
+
+  
+  const blockedSectionsFiltered: BlockedSectionRow[] = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return blockedSections;
+
+    return blockedSections.filter((b) => {
+      const hay = [b.course, b.section, b.campusId, b.campusName || ""]
+        .join(" ")
+        .toLowerCase();
+      return hay.includes(q);
+    });
+  }, [blockedSections, search]);
+
 
   const [summaryTab, setSummaryTab] = useState<
     "units" | "second" | "blocked"
@@ -3849,7 +3931,7 @@ export default function OM_LoadAssignment() {
                   <input
                     value={search}
                     onChange={(e) => setSearch(e.target.value)}
-                    placeholder="Search by course, section, or faculty..."
+                    placeholder="Search across loads, deloadings, remarks, mode, etc..."
                     className="w-full rounded-lg border border-gray-300 px-9 pr-10 py-2 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30"
                   />
 
@@ -4542,10 +4624,15 @@ export default function OM_LoadAssignment() {
                             colSpan={18}
                             className="px-4 py-10 text-center text-sm text-gray-500"
                           >
-                            No data yet. Click{" "}
-                            <span className="font-medium">Auto-assign</span> or{" "}
-                            <span className="font-medium">Add new line</span> to
-                            begin.
+                            {rows.length === 0 ? (
+                              <>
+                                No data yet. Click{" "}
+                                <span className="font-medium">Auto-assign</span> or{" "}
+                                <span className="font-medium">Add new line</span> to begin.
+                              </>
+                            ) : (
+                              <>No rows match your search.</>
+                            )}
                           </td>
                         </tr>
                       )}
@@ -4591,28 +4678,7 @@ export default function OM_LoadAssignment() {
                     <h2 className="text-lg font-semibold">Faculty Deloading</h2>
                   </div>
 
-                  <div className="w-full sm:w-[420px]">
-                    <div className="flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-3 py-2 shadow-sm">
-                      <SearchIcon className="h-4 w-4 text-gray-500" />
-                      <input
-                        value={deloadSearch}
-                        onChange={(e) => setDeloadSearch(e.target.value)}
-                        placeholder="Search by faculty…"
-                        className="w-full bg-transparent text-sm outline-none placeholder:text-gray-400"
-                      />
-                      {deloadSearch.trim() && (
-                        <button
-                          type="button"
-                          onClick={() => setDeloadSearch("")}
-                          className="rounded-md p-1 text-gray-500 hover:bg-gray-100"
-                          title="Clear"
-                        >
-                          <X className="h-4 w-4" />
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                </div>
+                                  </div>
 
                 {deloadAllError && (
                   <div className="mx-4 mb-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
@@ -4754,7 +4820,7 @@ export default function OM_LoadAssignment() {
                           </tr>
                         </thead>
                         <tbody className="divide-y">
-                          {facultySummary.length === 0 && (
+                          {facultySummary.length === 0 ? (
                             <tr>
                               <td
                                 colSpan={5}
@@ -4763,9 +4829,18 @@ export default function OM_LoadAssignment() {
                                 No faculty have assignments yet for this term.
                               </td>
                             </tr>
-                          )}
+                          ) : facultySummaryFiltered.length === 0 ? (
+                            <tr>
+                              <td
+                                colSpan={5}
+                                className="py-6 text-center text-sm text-gray-500"
+                              >
+                                No faculty match your search.
+                              </td>
+                            </tr>
+                          ) : null}
 
-                          {facultySummary.map((f) => {
+                          {facultySummaryFiltered.map((f) => {
                             const hasPref = f.preferredUnits != null;
                             let statusLabel = "—";
                             let statusTone =
@@ -4834,14 +4909,18 @@ export default function OM_LoadAssignment() {
 
                   {/* Tab 2: Rule / condition flags */}
                   {summaryTab === "second" && (
-                    <div className="border-t px-4 pb-6 text-sm">
-                      {ruleAlerts.length === 0 ? (
-                        <p className="py-6 text-center text-sm text-gray-500">
-                          No rule violations detected for the current assignments. 
-                        </p>
-                      ) : (
-                        <div className="mt-2 overflow-x-auto">
-                          <table className="w-full text-xs table-fixed">
+                    <div className="px-4 pb-4 border-t">
+                      <div className="mt-3 overflow-x-auto rounded-lg border border-gray-200 bg-white">
+                        {ruleAlerts.length === 0 ? (
+                          <div className="py-6 text-center text-sm text-gray-500">
+                            No rule violations detected for the current assignments.
+                          </div>
+                        ) : ruleAlertsFiltered.length === 0 ? (
+                          <div className="py-6 text-center text-sm text-gray-500">
+                            No violations match your search.
+                          </div>
+                        ) : (
+                          <table className="w-full text-sm table-fixed">
                             <thead className="bg-gray-50 border-y text-gray-700">
                               <tr>
                                 <th className="px-3 py-2 text-left font-semibold">
@@ -4850,7 +4929,7 @@ export default function OM_LoadAssignment() {
                                 <th className="px-3 py-2 text-left font-semibold">
                                   Faculty
                                 </th>
-                                <th className="px-3 py-2 text-left font-semibold">
+                                <th className="px-3 py-2 text-center font-semibold">
                                   Row
                                 </th>
                                 <th className="px-3 py-2 text-left font-semibold">
@@ -4861,8 +4940,8 @@ export default function OM_LoadAssignment() {
                                 </th>
                               </tr>
                             </thead>
-                            <tbody className="divide-y">
-                              {ruleAlerts.map((a) => (
+                            <tbody className="divide-y divide-gray-100">
+                              {ruleAlertsFiltered.map((a) => (
                                 <tr key={a.id}>
                                   <td className="px-3 py-2 align-top">
                                     <span className="font-mono text-[11px]">
@@ -4874,7 +4953,7 @@ export default function OM_LoadAssignment() {
                                       {a.facultyName || "—"}
                                     </div>
                                   </td>
-                                  <td className="px-4 py-2 text-sm text-gray-600 text-center">
+                                  <td className="px-3 py-2 text-center align-top text-gray-600">
                                     {a.rowNumber ?? "—"}
                                   </td>
                                   <td className="px-3 py-2 align-top">
@@ -4883,7 +4962,7 @@ export default function OM_LoadAssignment() {
                                   <td className="px-3 py-2 text-center align-top">
                                     <span
                                       className={cls(
-                                        "inline-flex items-center justify-center rounded-full px-2.5 py-0.5 text-[10px] font-semibold border",
+                                        "inline-flex items-center justify-center rounded-full px-2.5 py-0.5 text-[11px] font-medium border",
                                         a.severity === "error"
                                           ? "bg-red-50 text-red-700 border-red-200"
                                           : "bg-amber-50 text-amber-700 border-amber-200"
@@ -4896,12 +4975,12 @@ export default function OM_LoadAssignment() {
                               ))}
                             </tbody>
                           </table>
-                        </div>
-                      )}
+                        )}
+                      </div>
                     </div>
                   )}
 
-                  {summaryTab === "blocked" && (
+{summaryTab === "blocked" && (
                     <div className="px-4 pb-4 border-t">
                       <div className="mt-3 overflow-x-auto rounded-lg border border-gray-200 bg-white">
                         <table className="w-full text-sm table-auto">
@@ -4943,8 +5022,18 @@ export default function OM_LoadAssignment() {
                                   No blocked GE sections for CMPS0002.
                                 </td>
                               </tr>
+                            ) : blockedSectionsFiltered.length === 0 ? (
+                              <tr>
+                                <td
+                                  colSpan={8}
+                                  className="py-6 text-center text-sm text-gray-500"
+                                >
+                                  No blocked sections match your search.
+                                </td>
+                              </tr>
                             ) : (
-                              blockedSections.map((b) => {
+                              blockedSectionsFiltered.map((b) => {
+
                                 const dayRank: Record<string, number> = {
                                   M: 1,
                                   T: 2,
