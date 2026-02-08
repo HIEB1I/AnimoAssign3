@@ -1734,7 +1734,38 @@ async def om_notify_chair_load_forwarded(
 async def om_get_all_faculty(db = Depends(get_db)):
     pipeline = [
         {
-            "$match": {"is_archived": {"$ne": True}}
+            # Only include faculty under the required department.
+            "$match": {
+                "is_archived": {"$ne": True},
+                "department_id": "DEPT0001",
+            }
+        },
+        # Exclude faculty who are currently on an approved leave.
+        # NOTE: Per requirement, any APPROVED leave record is sufficient to exclude.
+        {
+            "$lookup": {
+                "from": COL_LEAVES,
+                "let": {"fid": "$faculty_id"},
+                "pipeline": [
+                    {
+                        "$match": {
+                            "$expr": {
+                                "$and": [
+                                    {"$eq": ["$faculty_id", "$$fid"]},
+                                    {"$eq": ["$approval_status", "APPROVED"]},
+                                ]
+                            }
+                        }
+                    },
+                    {"$project": {"_id": 0, "faculty_id": 1}},
+                ],
+                "as": "approved_leaves",
+            }
+        },
+        {
+            "$match": {
+                "approved_leaves.0": {"$exists": False}
+            }
         },
         {
             "$lookup": {
@@ -1746,6 +1777,9 @@ async def om_get_all_faculty(db = Depends(get_db)):
         },
         {
             "$unwind": "$user"
+        },
+        {
+            "$unset": "approved_leaves"
         },
         {
             "$set": {
