@@ -98,10 +98,17 @@ export async function fetchTeachingHistory(facultyId: string) {
 }
 
 // Descriptive #2 (use ANALYTICS_BASE, not absolute path)
-export async function fetchCourseProfile(query: string) {
-  const url = `${ANALYTICS_BASE.replace(/\/+$/, "")}/course-profile-for?query=${encodeURIComponent(
-    query
-  )}`;
+export async function fetchCourseProfile(
+  query: string,
+  anchorTermId?: string,
+  direction: "current" | "next" | "prev" = "current"
+) {
+  const params = new URLSearchParams();
+  params.set("query", query);
+  if (anchorTermId) params.set("anchor_term_id", anchorTermId);
+  if (direction) params.set("direction", direction);
+
+  const url = `${ANALYTICS_BASE.replace(/\/+$/, "")}/course-profile-for?${params.toString()}`;
   const res = await fetch(url);
   if (!res.ok) throw new Error(await res.text().catch(() => res.statusText));
   return res.json();

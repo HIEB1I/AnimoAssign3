@@ -2016,6 +2016,46 @@ export default function OM_LoadAssignment() {
   // In-app toast (styled to match Faculty pages)
   const { toast, show: showToast, clear: clearToast } = useToast();
 
+  // Custom confirm modal (replaces browser window.confirm for Forward/Re-forward)
+  const [confirmModal, setConfirmModal] = useState<{
+    open: boolean;
+    title: string;
+    message: React.ReactNode;
+    confirmText?: string;
+    cancelText?: string;
+    resolve?: (value: boolean) => void;
+  }>({ open: false, title: "", message: "" });
+
+  const openConfirm = useCallback(
+    (opts: {
+      title: string;
+      message: React.ReactNode;
+      confirmText?: string;
+      cancelText?: string;
+    }) =>
+      new Promise<boolean>((resolve) => {
+        setConfirmModal({
+          open: true,
+          title: opts.title,
+          message: opts.message,
+          confirmText: opts.confirmText ?? "Continue",
+          cancelText: opts.cancelText ?? "Cancel",
+          resolve,
+        });
+      }),
+    []
+  );
+
+  const closeConfirm = useCallback((result: boolean) => {
+    setConfirmModal((prev) => {
+      try {
+        prev.resolve?.(result);
+      } finally {
+        return { open: false, title: "", message: "" };
+      }
+    });
+  }, []);
+
   // Session (same pattern as APO: localStorage["animo.user"])
   const session = useMemo(() => {
     try {
@@ -3980,27 +4020,51 @@ export default function OM_LoadAssignment() {
                         ? "bg-emerald-600 text-white hover:bg-emerald-700" // enabled (GREEN)
                         : "bg-gray-200 text-gray-400 cursor-not-allowed" // disabled
                     )}
-                    onClick={() => {
+                    onClick={async () => {
                     if (isArchiveView) return;
-                    //HARD BLOCK: required fields must be complete before forwarding
+                    // Soft-check only: allow forwarding even if some rows are incomplete.
                     const incomplete = rows.filter(isRowIncompleteForApproval);
                     if (incomplete.length > 0) {
-                      showToast(
-                        `Cannot forward to Chair yet. Please complete all required fields (including Mode) for ${incomplete.length} row(s).`,
-                        "error"
-                      );
-                      return;
+                      const proceed = await openConfirm({
+                        title: "Incomplete rows",
+                        message: (
+                          <div className="space-y-2 text-sm text-gray-700">
+                            <p>
+                              There are <span className="font-semibold">{incomplete.length}</span>{" "}
+                              row(s) with missing required fields (including{" "}
+                              <span className="font-semibold">Mode</span>).
+                            </p>
+                            <p>
+                              You can still forward to the Chair, but incomplete rows may not be
+                              actionable.
+                            </p>
+                            <p className="text-gray-600">Do you want to continue?</p>
+                          </div>
+                        ),
+                        confirmText: "Continue",
+                        cancelText: "Cancel",
+                      });
+                      if (!proceed) return;
                     }
 
                     // Existing behavior: warn about other validation errors, but allow override
                     if (hasAnyErrors) {
-                      const proceed = window.confirm(
-                        [
-                          "There are validation errors (e.g., KAC mismatch, mode mismatch, or schedule conflicts).",
-                          "",
-                          "Do you still want to proceed with approval?",
-                        ].join("\n")
-                      );
+                      const proceed = await openConfirm({
+                        title: "Validation errors detected",
+                        message: (
+                          <div className="space-y-2 text-sm text-gray-700">
+                            <p>
+                              There are validation errors (e.g., KAC mismatch, mode mismatch, or
+                              schedule conflicts).
+                            </p>
+                            <p className="text-gray-600">
+                              Do you still want to proceed with approval?
+                            </p>
+                          </div>
+                        ),
+                        confirmText: "Proceed",
+                        cancelText: "Cancel",
+                      });
                       if (!proceed) return;
                     }
 
@@ -5258,6 +5322,41 @@ export default function OM_LoadAssignment() {
           setShowNewSectionModal(false);
         }}
       />
+
+      {/* Custom confirmation modal (replaces browser confirm dialogs) */}
+      {confirmModal.open && (
+        <div
+          className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/40 p-4"
+          role="dialog"
+          aria-modal="true"
+        >
+          <div className="w-full max-w-md rounded-2xl bg-white shadow-xl ring-1 ring-black/5">
+            <div className="px-6 pt-6">
+              <h3 className="text-lg font-semibold text-gray-900">
+                {confirmModal.title}
+              </h3>
+              <div className="mt-3">{confirmModal.message}</div>
+            </div>
+
+            <div className="mt-6 flex items-center justify-end gap-2 border-t border-gray-200 px-6 py-4">
+              <button
+                type="button"
+                onClick={() => closeConfirm(false)}
+                className="inline-flex h-10 items-center justify-center rounded-md border border-gray-300 bg-white px-4 text-sm font-medium text-gray-700 shadow-sm hover:bg-gray-50"
+              >
+                {confirmModal.cancelText ?? "Cancel"}
+              </button>
+              <button
+                type="button"
+                onClick={() => closeConfirm(true)}
+                className="inline-flex h-10 items-center justify-center rounded-md bg-gray-900 px-4 text-sm font-medium text-white shadow-sm hover:bg-gray-800"
+              >
+                {confirmModal.confirmText ?? "Continue"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Global toast */}
       <Toast

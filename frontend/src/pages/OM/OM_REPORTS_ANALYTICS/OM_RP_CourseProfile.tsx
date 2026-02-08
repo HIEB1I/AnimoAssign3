@@ -1,7 +1,7 @@
 // frontend/src/pages/OM/OM_REPORTS_ANALYTICS/OM_RP_CourseProfile.tsx
 import React, { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { Search as SearchIcon, ChevronLeft, ChevronDown, ChevronUp, BarChart2, Users, Layers, TrendingUp } from "lucide-react";
+import { Search as SearchIcon, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, BarChart2, Users, Layers, TrendingUp } from "lucide-react";
 import { fetchCourseProfile, type CMCourseRow } from "@/api";
 
 /* -----------------------------
@@ -58,6 +58,33 @@ type CourseProfile = {
   past_instructors_others?: PastInstructorCount[]; // Remaining instructors (expandable)
   history_metrics?: HistoryMetrics; // New aggregate metrics
   preferences?: string | PrefEntry[];
+  active_term?: {
+    term_id?: string;
+    acad_year_start?: number;
+    term_number?: number;
+  };
+  // Term navigation (same pattern as Deloading Utilization)
+  term?: {
+    term_id?: string;
+    acad_year_start?: number;
+    term_number?: number;
+  };
+  has_prev?: boolean;
+  has_next?: boolean;
+  terms?: Array<{
+    term_id: string;
+    acad_year_start: number;
+    term_number: number;
+    is_current?: boolean;
+  }>;
+  current_index?: number;
+};
+
+type TermLite = {
+  term_id: string;
+  acad_year_start: number;
+  term_number: number;
+  is_current?: boolean;
 };
 
 
@@ -83,55 +110,96 @@ function fullName(last?: string, first?: string) {
   return `${L}, ${F}`;
 }
 
-// Mock Component for the chart visualization
-// In a real application, this would use a library like Recharts or Victory
+// Demand visualization (UI-only, no external chart libs)
+// Goal: make the "Course Demand" view easy to read at a glance.
 const CourseDemandVisual = ({ data }: { data: Array<{ ay: number; sections: number }> }) => {
-    if (!data || data.length === 0) {
-        return <div className="p-4 text-center text-gray-500">No history data available for demand visualization.</div>;
-    }
-
-    const maxSections = Math.max(...data.map(d => d.sections));
-    const normalizedData = data.map(d => ({
-        ...d,
-        height: (d.sections / maxSections) * 100, // percentage height
-    }));
-
+  if (!data || data.length === 0) {
     return (
-        <div className="p-4 bg-white rounded-lg border border-gray-200 shadow-inner">
-            <h3 className="text-md font-semibold text-emerald-700 mb-3 flex items-center gap-2">
-                <BarChart2 className="w-4 h-4 text-emerald-500" />
-                Course Demand by Academic Year
-            </h3>
-            <div className="flex justify-between items-end h-40">
-                {normalizedData.map((d) => (
-                    <div key={d.ay} className="flex flex-col items-center h-full justify-end group px-1">
-                        <div
-                            style={{ height: `${d.height}%`, minHeight: '5px' }}
-                            className="w-4 bg-emerald-400 rounded-t-sm transition-all duration-300 hover:bg-emerald-600 relative"
-                        >
-                            <span className="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-1 text-xs font-bold text-emerald-700 opacity-0 group-hover:opacity-100 transition-opacity">
-                                {d.sections}
-                            </span>
-                        </div>
-                        <span className="mt-1 text-xs text-gray-500 whitespace-nowrap">{fmtAY(d.ay).split('–')[0]}</span>
-                    </div>
-                ))}
-            </div>
-        </div>
+      <div className="p-4 text-center text-gray-500">
+        No history data available.
+      </div>
     );
+  }
+
+  const rows = [...data].sort((a, b) => a.ay - b.ay);
+
+  return (
+    <div className="p-4 bg-white rounded-lg border border-gray-200 shadow-sm">
+      <div className="flex items-start justify-between gap-3 mb-2">
+        <h3 className="text-md font-semibold text-emerald-700 flex items-center gap-2">
+          <BarChart2 className="w-4 h-4 text-emerald-500" />
+          Course Demand Over Time
+        </h3>
+      </div>
+
+      <p className="text-xs text-gray-600 mb-3">
+        Demand is measured as the <span className="font-semibold">number of sections offered</span> for this course in each academic year.
+        Use this to spot growth/decline patterns and years with unusually high or low offerings.
+      </p>
+
+      <div className="overflow-auto rounded-md border border-gray-200">
+        <table className="w-full text-sm">
+          <thead className="bg-gray-50 text-gray-600">
+            <tr>
+              <th className="text-left px-3 py-2 font-semibold">Academic Year</th>
+              <th className="text-right px-3 py-2 font-semibold">Sections</th>
+              <th className="text-right px-3 py-2 font-semibold">Change</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y">
+            {rows.map((r, idx) => {
+              const prev = idx > 0 ? rows[idx - 1].sections : null;
+              const delta = prev === null ? null : r.sections - prev;
+              const deltaLabel = delta === null ? '—' : `${delta > 0 ? '+' : ''}${delta}`;
+              const deltaClass =
+                delta === null
+                  ? 'text-gray-500'
+                  : delta > 0
+                    ? 'text-emerald-700'
+                    : delta < 0
+                      ? 'text-red-700'
+                      : 'text-gray-700';
+
+              return (
+                <tr key={r.ay} className="bg-white">
+                  <td className="px-3 py-2 whitespace-nowrap">{fmtAY(r.ay)}</td>
+                  <td className="px-3 py-2 text-right font-semibold text-gray-900">{r.sections}</td>
+                  <td className={`px-3 py-2 text-right font-semibold ${deltaClass}`}>{deltaLabel}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
 };
 
 // Reusable Metric Card for the Summary
-const MetricCard = ({ title, value, icon: Icon, colorClass = "text-emerald-500" }: { title: string, value: string | number, icon: React.ElementType, colorClass?: string }) => (
-    <div className="p-4 bg-white rounded-lg border border-gray-200 shadow-sm flex flex-col justify-between">
-        <div className="flex items-center justify-between">
-            <h3 className="text-sm font-medium text-gray-500">{title}</h3>
-            <Icon className={`w-5 h-5 ${colorClass}`} />
-        </div>
-        <p className="mt-1 text-2xl font-bold text-gray-900">{value}</p>
+const MetricCard = ({
+  title,
+  value,
+  helper,
+  icon: Icon,
+  colorClass = "text-emerald-500",
+}: {
+  title: string;
+  value: string | number;
+  helper?: string;
+  icon: React.ElementType;
+  colorClass?: string;
+}) => (
+  <div className="p-4 bg-white rounded-lg border border-gray-200 shadow-sm flex flex-col justify-between">
+    <div className="flex items-start justify-between gap-3">
+      <div>
+        <h3 className="text-sm font-medium text-gray-500">{title}</h3>
+        {helper ? <p className="text-xs text-gray-500 mt-0.5">{helper}</p> : null}
+      </div>
+      <Icon className={`w-5 h-5 ${colorClass}`} />
     </div>
+    <p className="mt-2 text-2xl font-bold text-gray-900">{value}</p>
+  </div>
 );
-
 
 /* -----------------------------
  * Main Page
@@ -145,6 +213,8 @@ export default function OM_RP_CourseProfile() {
   const [data, setData] = useState<CourseProfile | null>(null);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+
+  const [terms, setTerms] = useState<TermLite[]>([]);
 
   const [showOtherInstructors, setShowOtherInstructors] = useState(false);
 
@@ -227,13 +297,18 @@ export default function OM_RP_CourseProfile() {
   }, [data?.course_id]);
 
   // --- Load a single course profile ---
-  async function loadProfile(q: string) {
+  async function loadProfile(
+    q: string,
+    direction: "current" | "next" | "prev" = "current",
+    anchorTermId?: string
+  ) {
     setErr(null);
-    setData(null);
     setLoading(true);
     try {
-      const res = await fetchCourseProfile(q);
-      setData(res as CourseProfile);
+      const res = await fetchCourseProfile(q, anchorTermId, direction);
+      const payload = res as CourseProfile;
+      setData(payload);
+      if (Array.isArray(payload.terms)) setTerms(payload.terms as TermLite[]);
     } catch (e: any) {
       setErr(e?.message || "Failed to fetch course profile");
     } finally {
@@ -269,6 +344,56 @@ export default function OM_RP_CourseProfile() {
   }, [data]);
 
   const metrics = data?.history_metrics;
+
+  function pillLabelOf(t: { acad_year_start?: number; term_number?: number }) {
+    const ay = t?.acad_year_start;
+    const tn = t?.term_number;
+    if (typeof ay === "number" && typeof tn === "number") return `AY ${fmtAY(ay)} • Term ${tn}`;
+    if (typeof ay === "number") return `AY ${fmtAY(ay)}`;
+    if (typeof tn === "number") return `Term ${tn}`;
+    return "—";
+  }
+
+  const currentIndex = useMemo(() => {
+    if (typeof data?.current_index === "number") return data.current_index;
+    const tid = data?.term?.term_id;
+    if (!tid) return 0;
+    const idx = terms.findIndex((t) => t.term_id === tid);
+    return idx >= 0 ? idx : 0;
+  }, [data?.current_index, data?.term?.term_id, terms]);
+
+  const currentPillLabel = useMemo(
+    () => (data?.term ? pillLabelOf(data.term) : data?.active_term ? pillLabelOf(data.active_term) : "—"),
+    [data?.term, data?.active_term]
+  );
+
+  const planningTermId = useMemo(() => {
+    if (!terms || terms.length === 0) return "";
+    const curIdx = terms.findIndex((t) => t.is_current);
+    if (curIdx >= 0) {
+      const next = terms[curIdx + 1];
+      return (next?.term_id || terms[curIdx]?.term_id || "").trim();
+    }
+    return (terms[terms.length - 1]?.term_id || "").trim();
+  }, [terms]);
+
+  const isActiveTerm = useMemo(() => {
+    const viewed = (data?.term?.term_id || data?.active_term?.term_id || "").trim();
+    if (!viewed) return false;
+    if (!planningTermId) return false;
+    return viewed === planningTermId;
+  }, [data?.term?.term_id, data?.active_term?.term_id, planningTermId]);
+
+const activeTermLabel = useMemo(() => {
+    if (!terms || terms.length === 0) return "";
+    const curIdx = terms.findIndex((t) => !!t.is_current);
+    if (curIdx < 0) return "Active indicates the planning term (next term after the current term).";
+    const cur = terms[curIdx];
+    const next = terms[curIdx + 1];
+    if (next) return `Active indicates the planning term: ${pillLabelOf(next)} (next after ${pillLabelOf(cur)}).`;
+    return `Active indicates the current term: ${pillLabelOf(cur)}.`;
+  }, [terms]);
+
 
   return (
     <div className="w-full px-8 py-8">
@@ -373,6 +498,61 @@ export default function OM_RP_CourseProfile() {
             {/* Main Dashboard Content */}
             {!loading && !err && data && (
                 <div className="space-y-6">
+                    {/* Term / Academic Year navigation (same UX as Deloading Utilization) */}
+                    {!!(data?.term || data?.active_term) && (
+                      <div className="relative flex flex-wrap items-center gap-3 rounded-lg border border-gray-200 bg-white px-4 py-3 shadow-sm">
+                        <div className="flex flex-1 items-center justify-between gap-3">
+                          <button
+                            className="inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm shadow-sm hover:bg-gray-50 disabled:opacity-40 disabled:hover:bg-white"
+                            disabled={!data?.has_prev || loading}
+                            onClick={() =>
+                              loadProfile(
+                                data.course_id,
+                                "prev",
+                                data?.term?.term_id || data?.active_term?.term_id
+                              )
+                            }
+                            title="Previous term"
+                          >
+                            <ChevronLeft className="h-4 w-4" />
+                            <span>Previous Term</span>
+                          </button>
+
+                          <button
+                            className="inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm shadow-sm hover:bg-gray-50 disabled:opacity-40 disabled:hover:bg-white"
+                            disabled={!data?.has_next || loading}
+                            onClick={() =>
+                              loadProfile(
+                                data.course_id,
+                                "next",
+                                data?.term?.term_id || data?.active_term?.term_id
+                              )
+                            }
+                            title="Next term"
+                          >
+                            <span>Next Term</span>
+                            <ChevronRight className="h-4 w-4" />
+                          </button>
+                        </div>
+
+                        <div className="pointer-events-none absolute left-1/2 -translate-x-1/2 flex flex-col items-center gap-1">
+                          <div className="inline-flex items-center rounded-full border border-emerald-100 bg-emerald-50 px-4 py-2 text-sm font-semibold text-emerald-800 shadow-sm">
+                            <span>{currentPillLabel}</span>
+                            {isActiveTerm && (
+                              <span className="ml-2 inline-flex items-center rounded-full bg-emerald-200 px-2 py-0.5 text-[11px] font-semibold text-emerald-900">
+                                Active
+                              </span>
+                            )}
+                          </div>
+                          {terms.length > 0 && (
+                            <div className="text-xs text-gray-500">
+                              {currentIndex + 1} of {terms.length}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )}
+
                     {/* Header: Course Code and Title */}
                     <div className="bg-emerald-50 p-4 rounded-lg border border-emerald-200">
                         <h2 className="text-xl font-bold text-emerald-800">{courseHeader}</h2>
@@ -393,8 +573,12 @@ export default function OM_RP_CourseProfile() {
                             colorClass="text-indigo-500"
                         />
                         <MetricCard
-                            title="Avg. Frequency (per AY)"
+                            title="Avg Sections per AY"
                             value={metrics?.avg_teaching_frequency?.toFixed(1) ?? "0.0"}
+                            helper={(() => {
+                              const n = metrics?.ay_demand_visual?.length ?? 0;
+                              return n > 0 ? `Across ${n} AY(s)` : undefined;
+                            })()}
                             icon={TrendingUp}
                             colorClass="text-orange-500"
                         />
@@ -434,11 +618,14 @@ export default function OM_RP_CourseProfile() {
                             </div>
                         </div>
 
-                        {/* Preferences (Current Term) */}
+                        {/* Preferences (Active Term) */}
                         <div className="bg-white p-4 rounded-lg border border-gray-200 shadow-sm">
                             <h3 className="text-md font-semibold text-emerald-700 mb-3">
-                                Preferences (Current Term)
+                                Preferences (Active Term)
                             </h3>
+                            {activeTermLabel ? (
+                                <p className="-mt-2 mb-3 text-xs text-gray-600">{activeTermLabel}</p>
+                            ) : null}
                             {typeof data.preferences === "string" ? (
                                 <p className="text-sm text-gray-700">{data.preferences}</p>
                             ) : prefsUnique.length > 0 ? (

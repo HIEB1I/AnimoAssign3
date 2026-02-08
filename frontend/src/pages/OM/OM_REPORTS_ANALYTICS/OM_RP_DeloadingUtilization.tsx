@@ -166,15 +166,34 @@ function formatFacultyName(name?: string) {
     [data?.term]
   );
 
+  const planningTermId = useMemo(() => {
+    // Planning term = next term after the DB's is_current anchor.
+    // Fallbacks are conservative so the UI still behaves even if the
+    // terms list is missing/empty.
+    if (!terms || terms.length === 0) return "";
+
+    const curIdx = terms.findIndex((t) => t.is_current);
+    if (curIdx >= 0) {
+      const next = terms[curIdx + 1];
+      return (next?.term_id || terms[curIdx]?.term_id || "").trim();
+    }
+
+    // If no term is flagged current, treat the latest as the planning term.
+    return (terms[terms.length - 1]?.term_id || "").trim();
+  }, [terms]);
+
   const isActiveTerm = useMemo(() => {
-    // Prefer server-provided flag; otherwise infer from the terms list.
-    if (data?.term?.is_current) return true;
-    const current = terms.find((t) => t.is_current);
-    return !!(current && data?.term?.term_id && current.term_id === data.term.term_id);
-  }, [data?.term?.is_current, data?.term?.term_id, terms]);
+    const viewed = (data?.term?.term_id || "").trim();
+    if (!viewed) return false;
+    if (!planningTermId) return false;
+    return viewed === planningTermId;
+  }, [data?.term?.term_id, planningTermId]);
 
   useEffect(() => {
-    load("current");
+    // Default view should be the *planning* term (next after current).
+    // The backend paging logic supports direction="next" without an anchor,
+    // which advances from the is_current anchor.
+    load("next");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

@@ -10,7 +10,22 @@ from ..db_async import get_db
 
 router = APIRouter()
 
-async def get_course_profile_for(query: str) -> Dict[str, Any]:
+
+
+def _fmt_ay(start: Optional[int]) -> str:
+    if start is None:
+        return "—"
+    return f"{start}–{start + 1}"
+
+
+def _fmt_term(n: Optional[int]) -> str:
+    return f"Term {n}" if isinstance(n, int) else "—"
+
+async def get_course_profile_for(
+    query: str,
+    anchor_term_id: Optional[str] = None,
+    direction: str = "current",
+) -> Dict[str, Any]:
     """
     Returns Course Profile payload, including new descriptive analytics metrics.
     """
@@ -277,17 +292,67 @@ async def get_course_profile_for(query: str) -> Dict[str, Any]:
         for ay, count in sorted(ay_section_counts.items())
     ]
     
-    # -------- Preferences for current term --------
-    # ... (Keep existing preferences logic, no changes needed) ...
+    # -------- Term context + Preferences --------
+    # This report follows the same term paging logic used in Deloading Utilization.
+    # The default view is the *planning* term = next term after the DB's is_current.
     preferences: Any = "N/A"
-    current = await db.terms.find_one({"is_current": True}, {"term_id": 1})
+
+    terms: List[Dict[str, Any]] = await db.terms.find(
+        {},
+        {"term_id": 1, "term_number": 1, "acad_year_start": 1, "is_current": 1},
+    ).sort([("acad_year_start", 1), ("term_number", 1), ("term_id", 1)]).to_list(None)
+
+    # Determine default index (planning term if possible)
+    default_index = 0
+    cur_idx = -1
+    for i, t in enumerate(terms):
+        if t.get("is_current"):
+            cur_idx = i
+            break
+    if cur_idx >= 0:
+        default_index = min(cur_idx + 1, len(terms) - 1) if terms else 0
+    elif terms:
+        default_index = len(terms) - 1
+
+    # Anchor term selection (if provided)
+    idx = default_index
+    if anchor_term_id:
+        for i, t in enumerate(terms):
+            if t.get("term_id") == anchor_term_id:
+                idx = i
+                break
+
+    # Apply paging direction relative to the anchor/default
+    if direction == "next":
+        idx = min(idx + 1, len(terms) - 1) if terms else 0
+    elif direction == "prev":
+        idx = max(idx - 1, 0) if terms else 0
+    else:
+        # "current" (or unknown) -> keep idx
+        pass
+
+    selected_term = terms[idx] if terms else None
+    has_prev = bool(terms) and idx > 0
+    has_next = bool(terms) and idx < (len(terms) - 1)
+
     prefs_list: List[Dict[str, Any]] = []
 
-    if current and kac_ids:
+    active_term_display = None
+    if selected_term:
+        ay = selected_term.get("acad_year_start")
+        tn = selected_term.get("term_number")
+        if isinstance(ay, int) and isinstance(tn, int):
+            active_term_display = f"AY {_fmt_ay(ay)} {_fmt_term(tn)}"
+        elif isinstance(ay, int):
+            active_term_display = f"AY {_fmt_ay(ay)}"
+        elif isinstance(tn, int):
+            active_term_display = _fmt_term(tn)
+
+    if selected_term and kac_ids:
         # ... (Keep the rest of the preferences pipeline) ...
         pipeline_prefs = [
             {"$match": {
-                "term_id": current["term_id"],
+                "term_id": selected_term["term_id"],
                 "preferred_kacs": {"$in": kac_ids}
             }},
             {"$lookup": {
@@ -345,11 +410,11 @@ async def get_course_profile_for(query: str) -> Dict[str, Any]:
         if prefs_list:
             preferences = prefs_list
         else:
-            preferences = f"No faculty preference submissions yet for current term {current['term_id']}."
-    elif current and not kac_ids:
-        preferences = f"No matching KAC lists this course for current term {current['term_id']}."
+            preferences = f"No faculty preference submissions yet for {active_term_display or '—'}."
+    elif selected_term and not kac_ids:
+        preferences = f"No matching KAC lists this course for {active_term_display or '—'}."
     else:
-        preferences = "No current term found."
+        preferences = "No term found."
 
 
     # Final return structure
@@ -362,6 +427,30 @@ async def get_course_profile_for(query: str) -> Dict[str, Any]:
         "past_instructors_top3": top_3_instructors,
         "past_instructors_remaining_count": remaining_instructors_count,
         "past_instructors_others": other_instructors,  # for expandable list
+        "term": {
+            "term_id": (selected_term or {}).get("term_id"),
+            "acad_year_start": (selected_term or {}).get("acad_year_start"),
+            "term_number": (selected_term or {}).get("term_number"),
+        },
+        "has_prev": has_prev,
+        "has_next": has_next,
+        "terms": [
+            {
+                "term_id": t.get("term_id"),
+                "acad_year_start": t.get("acad_year_start"),
+                "term_number": t.get("term_number"),
+                "is_current": t.get("is_current"),
+            }
+            for t in terms
+        ],
+        "current_index": idx,
+        # "active_term" is the term context used by the report UI.
+        # It follows Deloading Utilization's logic: planning (next-after-current) when available.
+        "active_term": {
+            "term_id": (selected_term or {}).get("term_id"),
+            "acad_year_start": (selected_term or {}).get("acad_year_start"),
+            "term_number": (selected_term or {}).get("term_number"),
+        },
         "history_metrics": {
             "total_sections": total_sections,
             "unique_instructors": num_unique_instructors,
@@ -377,6 +466,10 @@ async def get_course_profile_for(query: str) -> Dict[str, Any]:
 
 
 @router.get("/analytics/course-profile-for")
-async def course_profile_for(query: str = Query(..., description="course_id or course_code")):
-    data = await get_course_profile_for(query)
+async def course_profile_for(
+    query: str = Query(..., description="course_id or course_code"),
+    anchor_term_id: Optional[str] = Query(None, description="Optional anchor term_id for paging"),
+    direction: str = Query("current", description="current | next | prev"),
+):
+    data = await get_course_profile_for(query, anchor_term_id=anchor_term_id, direction=direction)
     return JSONResponse(content=data)
