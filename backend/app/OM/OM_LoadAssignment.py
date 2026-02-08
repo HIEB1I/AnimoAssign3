@@ -21,6 +21,49 @@ from ..main import db
 # In-app bell notifications (same pattern as Faculty Service)
 from ..Notifications import create_notification
 
+
+async def _ensure_user_gmail_address(user_id: str, db) -> None:
+    """Best-effort: ensure users.gmail is populated for email notifications.
+
+    In some deployments, Faculty/Chair user records have their address stored in
+    `email` (or similar) while `gmail` is blank. The notification email sender
+    typically looks for `gmail` first; when it's missing, the in-app notification
+    still works but the Gmail notification can be skipped.
+
+    This helper backfills users.gmail from the best available email field without
+    changing any other behavior. It is safe to call repeatedly.
+    """
+
+    uid = (user_id or "").strip()
+    if not uid:
+        return
+
+    try:
+        user = await db["users"].find_one(
+            {"user_id": uid},
+            {"_id": 0, "gmail": 1, "email": 1, "dlsu_email": 1, "google_email": 1},
+        ) or {}
+        gmail = str(user.get("gmail") or "").strip()
+        if gmail:
+            return
+
+        # Try common fallbacks
+        fallback = (
+            str(user.get("email") or "").strip()
+            or str(user.get("dlsu_email") or "").strip()
+            or str(user.get("google_email") or "").strip()
+        )
+        if not fallback:
+            return
+
+        await db["users"].update_one(
+            {"user_id": uid, "$or": [{"gmail": {"$exists": False}}, {"gmail": ""}, {"gmail": None}]},
+            {"$set": {"gmail": fallback}},
+        )
+    except Exception:
+        # Never fail a workflow due to best-effort backfill.
+        return
+
 import re 
 
 def get_db():
@@ -860,7 +903,12 @@ async def _fetch_rows(user_id: str, term_id: str, db) -> Dict[str, Any]:
             "capacity": d.get("enrollment_cap", "") or "",
             "mode": mode_display,
             "remarks": remarks_by_section_id.get(sid, ""),
-            "status": "Pending" if (d.get("asg") or {}).get("faculty_id") else "Unassigned",
+            "status": (
+                "Approved"
+                if bool((d.get("asg") or {}).get("synced_from_faculty_service")) and (d.get("asg") or {}).get("faculty_id")
+                else ("Pending" if (d.get("asg") or {}).get("faculty_id") else "Unassigned")
+            ),
+            "synced_from_faculty_service": bool((d.get("asg") or {}).get("synced_from_faculty_service")),
         }
 
         # If there is **no faculty assigned**, keep schedule/capacity/mode intact so OM can
@@ -1326,7 +1374,17 @@ async def loadassignment_handler(
             }
 
             for uid in recipients:
-                await create_notification(user_id=uid, title=title, details=details, meta=meta)
+                # Backfill missing users.gmail (some Chair accounts only have users.email).
+                await _ensure_user_gmail_address(uid, db)
+                # Send BOTH in-app + Gmail notification (best-effort) using the OM's connected Gmail.
+                await create_notification(
+                    user_id=uid,
+                    title=title,
+                    details=details,
+                    meta=meta,
+                    send_email=True,
+                    email_from_user_id=userId,
+                )
         except Exception:
             # Never break approval due to notification failure
             pass
@@ -1651,7 +1709,17 @@ async def om_notify_chair_load_forwarded(
 
     created = 0
     for uid in recipients:
-        await create_notification(user_id=uid, title=title, details=details, meta=meta)
+        # Backfill missing users.gmail (some Chair accounts only have users.email).
+        await _ensure_user_gmail_address(uid, db)
+        # Send BOTH in-app + Gmail notification (best-effort) using the OM's connected Gmail.
+        await create_notification(
+            user_id=uid,
+            title=title,
+            details=details,
+            meta=meta,
+            send_email=True,
+            email_from_user_id=userId,
+        )
         created += 1
 
     return {
@@ -1666,7 +1734,38 @@ async def om_notify_chair_load_forwarded(
 async def om_get_all_faculty(db = Depends(get_db)):
     pipeline = [
         {
-            "$match": {"is_archived": {"$ne": True}}
+            # Only include faculty under the required department.
+            "$match": {
+                "is_archived": {"$ne": True},
+                "department_id": "DEPT0001",
+            }
+        },
+        # Exclude faculty who are currently on an approved leave.
+        # NOTE: Per requirement, any APPROVED leave record is sufficient to exclude.
+        {
+            "$lookup": {
+                "from": COL_LEAVES,
+                "let": {"fid": "$faculty_id"},
+                "pipeline": [
+                    {
+                        "$match": {
+                            "$expr": {
+                                "$and": [
+                                    {"$eq": ["$faculty_id", "$$fid"]},
+                                    {"$eq": ["$approval_status", "APPROVED"]},
+                                ]
+                            }
+                        }
+                    },
+                    {"$project": {"_id": 0, "faculty_id": 1}},
+                ],
+                "as": "approved_leaves",
+            }
+        },
+        {
+            "$match": {
+                "approved_leaves.0": {"$exists": False}
+            }
         },
         {
             "$lookup": {
@@ -1678,6 +1777,9 @@ async def om_get_all_faculty(db = Depends(get_db)):
         },
         {
             "$unwind": "$user"
+        },
+        {
+            "$unset": "approved_leaves"
         },
         {
             "$set": {
@@ -1805,6 +1907,21 @@ async def om_load_assignment_terms(db=Depends(get_db)):
         tid = (t.get("term_id") or "").strip()
         if not tid:
             continue
+
+        # Skip academic terms that have no archived load data.
+        # Archived loads come from `sections_submitted` (submitted_for_scheduling=True),
+        # so if there are no submitted sections for a term, it shouldn't appear in the archive selector.
+        try:
+            has_archived = await db[COL_SECTIONS_SUBMITTED].find_one(
+                {"term_id": tid, "submitted_for_scheduling": True},
+                {"_id": 1},
+            )
+            if not has_archived:
+                continue
+        except Exception:
+            # Best-effort filter only; if the check fails, keep existing behavior (show term).
+            pass
+
         terms.append(
             {
                 "term_id": tid,
@@ -2192,7 +2309,12 @@ async def get_om_load_assignment_list(user_id: str, term_id: Optional[str] = Non
     for r in rows:
         fid = str(r.get("faculty_id") or "").strip()
         sid = str(r.get("id") or r.get("section_id") or "").strip()
-        r["pending_rfc"] = bool(fid and sid and (fid, sid) in open_rfc_keys)
+        # Faculty assignments synced from Faculty Service should be treated as already approved.
+        # They should not show RFC notifications in OM Load Assignment.
+        if bool(r.get("synced_from_faculty_service")):
+            r["pending_rfc"] = False
+        else:
+            r["pending_rfc"] = bool(fid and sid and (fid, sid) in open_rfc_keys)
 
     return {
         "term": _term_label(active),
@@ -2406,6 +2528,9 @@ async def om_send_to_faculty(payload: Dict[str, Any] = Body(...), db=Depends(get
         )
 
         if fac_user_id:
+            # Backfill missing users.gmail (some Faculty accounts only have users.email).
+            await _ensure_user_gmail_address(fac_user_id, db)
+            # Send BOTH in-app + Gmail notification (best-effort) using the OM's connected Gmail.
             await create_notification(
                 user_id=fac_user_id,
                 title="Load Assignment: Proposed schedule updated",
@@ -2416,6 +2541,8 @@ async def om_send_to_faculty(payload: Dict[str, Any] = Body(...), db=Depends(get
                     "term_id": term_id,
                     "faculty_id": fid,
                 },
+                send_email=True,
+                email_from_user_id=user_id,
             )
 
         sent += 1
@@ -2600,6 +2727,8 @@ async def respond_load_assignment_rfc(
     fac_user_id = (fac.get("user_id") or "").strip()
 
     if fac_user_id:
+        # Backfill missing users.gmail (some Faculty accounts only have users.email).
+        await _ensure_user_gmail_address(fac_user_id, db)
         if action == "reply":
             title = "Load Assignment: OM replied to your Request for Change"
             details = message
@@ -2613,6 +2742,7 @@ async def respond_load_assignment_rfc(
             details = message or "Your Request for Change was rejected."
             kind = "load_rfc_rejected"
 
+        # Send BOTH in-app + Gmail notification (best-effort) using the OM's connected Gmail.
         await create_notification(
             user_id=fac_user_id,
             title=title,
@@ -2627,6 +2757,8 @@ async def respond_load_assignment_rfc(
                 "section_id": section_id,
                 "rfc_id": rfc_id,
             },
+            send_email=True,
+            email_from_user_id=user_id,
         )
 
     return {"ok": True, "status": new_status}
@@ -2652,6 +2784,9 @@ async def om_finalize_course(payload: Dict[str, Any] = Body(...), db=Depends(get
     fac_user_id = (fac.get("user_id") or "").strip()
 
     if fac_user_id:
+        # Backfill missing users.gmail (some Faculty accounts only have users.email).
+        await _ensure_user_gmail_address(fac_user_id, db)
+        # Send BOTH in-app + Gmail notification (best-effort) using the OM's connected Gmail.
         await create_notification(
             user_id=fac_user_id,
             title="Load Assignment: Added to final schedule",
@@ -2664,6 +2799,8 @@ async def om_finalize_course(payload: Dict[str, Any] = Body(...), db=Depends(get
                 "course_code": course_code,
                 "section": section,
             },
+            send_email=True,
+            email_from_user_id=user_id,
         )
 
     # Best-effort: mark finalized in proposal doc
@@ -3437,7 +3574,12 @@ async def run_auto_assignment(
     for r in rows:
         fid = str(r.get("faculty_id") or "").strip()
         sid = str(r.get("id") or r.get("section_id") or "").strip()
-        r["pending_rfc"] = bool(fid and sid and (fid, sid) in open_rfc_keys)
+        # Faculty assignments synced from Faculty Service should be treated as already approved.
+        # They should not show RFC notifications in OM Load Assignment.
+        if bool(r.get("synced_from_faculty_service")):
+            r["pending_rfc"] = False
+        else:
+            r["pending_rfc"] = bool(fid and sid and (fid, sid) in open_rfc_keys)
 
     return {
         "term": _term_label(active),

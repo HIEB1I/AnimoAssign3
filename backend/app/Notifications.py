@@ -43,8 +43,18 @@ def _user_display_name(user: Dict[str, Any]) -> str:
 
 
 def _user_email(user: Dict[str, Any]) -> str:
-    # Prefer the dedicated gmail field, fallback to email.
-    return (user.get("gmail") or user.get("email") or "").strip()
+    """Best-effort resolve the recipient email address.
+
+    Different deployments / roles may store the user's address under different keys.
+    We prefer `gmail` (historical), then fall back to other common fields.
+    """
+
+    for key in ("gmail", "email", "dlsu_email", "google_email", "connected_email"):
+        val = (user.get(key) or "")
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+    return ""
+
 
 
 def _build_notif_link(route: str) -> str:
@@ -93,19 +103,21 @@ def _build_notification_email_html(*, name: str, title: str, details: str, link:
     safe_link = _html_escape((link or "").strip() or "http://ccscloud.dlsu.edu.ph:11160/")
     preheader = _html_escape(((details or "").strip() or title or "Notification")[:120])
 
+    # NOTE: Avoid escaping quotes (\" ) inside triple-quoted strings—some clients can display them literally.
+    # Also avoid curly apostrophes for maximum email-client compatibility.
     return f"""<!doctype html>
-<html lang=\"en\">
+<html lang="en">
   <head>
-    <meta charset=\"utf-8\" />
-    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>{safe_title}</title>
   </head>
-  <body style=\"margin:0;padding:0;background:#f6f7fb;\">
-    <div style=\"display:none;max-height:0;overflow:hidden;opacity:0;color:transparent;\">{preheader}</div>
-    <table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" style=\"background:#f6f7fb;padding:24px 0;\">
+  <body style="margin:0;padding:0;background:#f6f7fb;">
+    <div style="display:none;max-height:0;overflow:hidden;opacity:0;color:transparent;">{preheader}</div>
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f6f7fb;padding:24px 0;">
       <tr>
-        <td align=\"center\">
-          <table role=\"presentation\" width=\"600\" cellpadding=\"0\" cellspacing=\"0\" style=\"width:600px;max-width:92vw;background:#ffffff;border-radius:14px;overflow:hidden;box-shadow:0 6px 18px rgba(17,24,39,0.08);\">
+        <td align="center">
+          <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="width:600px;max-width:92vw;background:#ffffff;border-radius:14px;overflow:hidden;box-shadow:0 6px 18px rgba(17,24,39,0.08);">
             <tr>
               <td style=\"padding:20px 24px;background:#0B6B3A;color:#ffffff;font-family:Arial,Helvetica,sans-serif;\">
                 <div style=\"font-size:12px;letter-spacing:.08em;text-transform:uppercase;opacity:.9;\">AnimoAssign</div>
@@ -149,8 +161,26 @@ async def _resolve_sender_user_id(email_from_user_id: str | None) -> str:
       3) ANIMOASSIGN_EMAIL_SENDER_EMAIL env (resolve in users collection)
     """
 
+    # If an explicit actor is provided, use it only if they actually have a usable
+    # Google token. If not, fall back to the configured system sender.
+    #
+    # This matches the "best-effort" email notification contract: in-app notifications
+    # should still be created even if the actor never connected Gmail (or their token
+    # was stored without a refresh_token), while email delivery can gracefully fall
+    # back to a service sender account.
     if email_from_user_id:
-        return email_from_user_id.strip()
+        candidate = email_from_user_id.strip()
+        if candidate:
+            try:
+                tok = await _get_user_google_token(candidate)
+                if tok:
+                    access_token = (tok.get("access_token") or "").strip()
+                    refresh_token = (tok.get("refresh_token") or "").strip()
+                    if access_token or refresh_token:
+                        return candidate
+            except Exception:
+                # Ignore and fall back to env sender.
+                pass
 
     sender_user_id = (os.getenv("ANIMOASSIGN_EMAIL_SENDER_USER_ID") or "").strip()
     if sender_user_id:
@@ -171,6 +201,42 @@ async def _get_user_google_token(user_id: str) -> Optional[Dict[str, Any]]:
     user = await db[COL_USERS].find_one({"user_id": user_id}, {"_id": 0, "google_token": 1})
     tok = (user or {}).get("google_token")
     return tok if isinstance(tok, dict) else None
+
+
+def _compute_expires_at(tok: Dict[str, Any]) -> Optional[float]:
+    """Best-effort compute token expiry epoch seconds.
+
+    Different parts of the codebase store expiry differently:
+      - expires_at (epoch seconds)
+      - updated_at + expires_in (seconds)
+
+    This normalizes so we can decide whether to refresh proactively.
+    """
+
+    try:
+        expires_at = tok.get("expires_at")
+        if isinstance(expires_at, (int, float)):
+            return float(expires_at)
+
+        expires_in = tok.get("expires_in")
+        if not isinstance(expires_in, (int, float)):
+            return None
+
+        updated_at = tok.get("updated_at")
+        if isinstance(updated_at, datetime):
+            base_ts = updated_at.replace(tzinfo=timezone.utc).timestamp() if updated_at.tzinfo is None else updated_at.timestamp()
+        elif isinstance(updated_at, str) and updated_at.strip():
+            dt = _parse_iso_dt(updated_at.strip())
+            if not dt:
+                return None
+            base_ts = dt.timestamp()
+        else:
+            return None
+
+        # subtract 60s as a safety buffer
+        return float(base_ts) + float(expires_in) - 60.0
+    except Exception:
+        return None
 
 
 async def _refresh_access_token(refresh_token: str) -> Optional[Dict[str, Any]]:
@@ -220,20 +286,27 @@ async def _send_email_via_user_gmail(
 
     access_token = (tok.get("access_token") or "").strip()
     refresh_token = (tok.get("refresh_token") or "").strip()
-    expires_at = tok.get("expires_at")
+    expires_at = _compute_expires_at(tok)
 
-    if (not access_token) or (isinstance(expires_at, (int, float)) and time.time() >= float(expires_at)):
+    async def _refresh_and_persist() -> str:
         if not refresh_token:
             raise RuntimeError("sender_missing_refresh_token")
         refreshed = await _refresh_access_token(refresh_token)
         if not refreshed:
             raise RuntimeError("sender_token_refresh_failed")
-        access_token = refreshed["access_token"]
-        expires_at = refreshed["expires_at"]
+        new_access = (refreshed.get("access_token") or "").strip()
+        new_expires_at = refreshed.get("expires_at")
+        if not new_access:
+            raise RuntimeError("sender_token_refresh_failed")
         await db[COL_USERS].update_one(
             {"user_id": sender_user_id},
-            {"$set": {"google_token.access_token": access_token, "google_token.expires_at": expires_at}},
+            {"$set": {"google_token.access_token": new_access, "google_token.expires_at": new_expires_at}},
         )
+        return new_access
+
+    # Proactive refresh if we can tell it's expired.
+    if (not access_token) or (isinstance(expires_at, (int, float)) and time.time() >= float(expires_at)):
+        access_token = await _refresh_and_persist()
 
     if html_body:
         msg = MIMEMultipart("alternative")
@@ -258,6 +331,20 @@ async def _send_email_via_user_gmail(
             headers={"Authorization": f"Bearer {access_token}"},
             json={"raw": raw},
         )
+
+        # If token is stale and we have a refresh token, refresh and retry once.
+        if r.status_code == 401:
+            try:
+                access_token = await _refresh_and_persist()
+            except Exception:
+                raise RuntimeError(f"gmail_send_failed:{r.status_code}:{r.text}")
+
+            r = await client.post(
+                "https://gmail.googleapis.com/gmail/v1/users/me/messages/send",
+                headers={"Authorization": f"Bearer {access_token}"},
+                json={"raw": raw},
+            )
+
         if r.status_code >= 400:
             raise RuntimeError(f"gmail_send_failed:{r.status_code}:{r.text}")
 

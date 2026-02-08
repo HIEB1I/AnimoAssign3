@@ -233,6 +233,37 @@ export default function OM_FacultyForm() {
   const [pref, setPref] = useState<any>(null);
   const [prefLoading, setPrefLoading] = useState(false);
 
+  /* ---- Custom confirm modal (replaces window.confirm) ---- */
+  const confirmResolverRef = useRef<((v: boolean) => void) | null>(null);
+  const [confirmState, setConfirmState] = useState<
+    | {
+        title: string;
+        message: string;
+        accent: "emerald" | "amber";
+        confirmText: string;
+      }
+    | null
+  >(null);
+
+  const openConfirm = (payload: {
+    title: string;
+    message: string;
+    accent: "emerald" | "amber";
+    confirmText: string;
+  }) => {
+    return new Promise<boolean>((resolve) => {
+      confirmResolverRef.current = resolve;
+      setConfirmState(payload);
+    });
+  };
+
+  const closeConfirm = (result: boolean) => {
+    const resolver = confirmResolverRef.current;
+    confirmResolverRef.current = null;
+    setConfirmState(null);
+    resolver?.(result);
+  };
+
   const handleStartWindow = async () => {
     if (startingWindow) return;
 
@@ -248,7 +279,13 @@ export default function OM_FacultyForm() {
       days === 1 ? "" : "s"
     }? This will override the existing schedule.`;
 
-    if (!window.confirm(message)) return;
+    const ok = await openConfirm({
+      title: `${verb} submission window?`,
+      message,
+      accent: prefsWindow.openISO ? "amber" : "emerald",
+      confirmText: verb === "Restart" ? "Restart window" : "Start window",
+    });
+    if (!ok) return;
 
     try {
       setStartingWindow(true);
@@ -519,6 +556,77 @@ useEffect(() => {
             )}
           </tbody>
         </table>
+
+        {/* Start/Restart Window Confirm Modal */}
+        {confirmState && (
+          <div className="fixed inset-0 z-[110] grid place-items-center bg-black/40 p-4">
+            <div className="w-full max-w-lg overflow-hidden rounded-2xl bg-white shadow-2xl border border-gray-200">
+              <div
+                className={cls(
+                  "px-5 py-4 text-white",
+                  confirmState.accent === "amber"
+                    ? "bg-amber-600"
+                    : "bg-emerald-700"
+                )}
+              >
+                <div className="flex items-start gap-3">
+                  <div className="mt-0.5 grid h-10 w-10 place-items-center rounded-full bg-white/15">
+                    <Info className="h-5 w-5" />
+                  </div>
+                  <div className="min-w-0">
+                    <div className="text-base font-extrabold tracking-tight">
+                      {confirmState.title}
+                    </div>
+                    <div className="mt-1 text-sm text-white/90">
+                      Review the details below before continuing.
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => closeConfirm(false)}
+                    className="ml-auto rounded-lg p-2 text-white/90 hover:bg-white/10 focus:outline-none focus:ring-2 focus:ring-white/40"
+                    aria-label="Close"
+                    title="Close"
+                  >
+                    <X className="h-5 w-5" />
+                  </button>
+                </div>
+              </div>
+
+              <div className="p-5">
+                <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-800">
+                  {confirmState.message}
+                </div>
+
+                <div className="mt-4 text-xs text-gray-600">
+                  <span className="font-semibold">Note:</span> This action will apply immediately and replace any existing schedule.
+                </div>
+
+                <div className="mt-5 flex items-center justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => closeConfirm(false)}
+                    className="rounded-lg bg-gray-100 px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-200"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => closeConfirm(true)}
+                    className={cls(
+                      "rounded-lg px-4 py-2 text-sm font-semibold text-white shadow-sm",
+                      confirmState.accent === "amber"
+                        ? "bg-amber-600 hover:bg-amber-700"
+                        : "bg-emerald-600 hover:bg-emerald-700"
+                    )}
+                  >
+                    {confirmState.confirmText}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* View Preference Modal */}
         {selected && (
