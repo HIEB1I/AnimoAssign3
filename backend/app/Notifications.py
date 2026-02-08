@@ -48,14 +48,9 @@ def _user_email(user: Dict[str, Any]) -> str:
 
 
 def _build_notif_link(route: str) -> str:
-    base = (os.getenv("ANIMOASSIGN_WEB_URL") or "").strip() or "http://ccscloud.dlsu.edu.ph:11160/"
-    base = base.rstrip("/")
-    route = (route or "").strip()
-    if not route:
-        return base
-    if not route.startswith("/"):
-        route = "/" + route
-    return base + route
+    # IMPORTANT: For email, always point to the app root.
+    # Deep-links may not work if the user is not authenticated / has no active session.
+    return "http://ccscloud.dlsu.edu.ph:11160/"
 
 
 def _make_email_subject(title: str) -> str:
@@ -66,26 +61,36 @@ def _make_email_subject(title: str) -> str:
 
 
 def _build_notification_email_text(*, name: str, title: str, details: str, link: str) -> str:
-    # Keep this readable in plain text clients.
+    """Plain-text Gmail notification for an in-app notification.
+
+    We keep the same tone and structure as the Inbox email template:
+    - Encourage the user to log in
+    - Avoid implying deep links will work without authentication
+    """
+
     safe_name = (name or "User").strip() or "User"
     safe_title = (title or "Notification").strip() or "Notification"
     safe_details = (details or "").strip()
     safe_link = (link or "").strip()
+
     return (
         f"Hi {safe_name},\n\n"
-        f"{safe_title}\n\n"
+        "You have a new notification in AnimoAssign.\n\n"
+        f"{safe_title}\n"
         f"{safe_details}\n\n"
-        f"Open in AnimoAssign: {safe_link}\n\n"
+        f"To view it, please log in to AnimoAssign:\n{safe_link}\n\n"
+        "After logging in, open Notifications from the top bar.\n\n"
         "— AnimoAssign"
     )
 
 
 def _build_notification_email_html(*, name: str, title: str, details: str, link: str) -> str:
-    # Simple, email-client-friendly HTML (tables + inline styles).
+    # Email-client-friendly HTML (tables + inline styles).
+    # NOTE: Notification emails should NOT show an avatar/initials circle (per UI request).
     safe_name = _html_escape((name or "User").strip() or "User")
     safe_title = _html_escape((title or "Notification").strip() or "Notification")
     safe_details = _html_escape((details or "").strip()).replace("\n", "<br>")
-    safe_link = _html_escape((link or "").strip())
+    safe_link = _html_escape((link or "").strip() or "http://ccscloud.dlsu.edu.ph:11160/")
     preheader = _html_escape(((details or "").strip() or title or "Notification")[:120])
 
     return f"""<!doctype html>
@@ -104,21 +109,26 @@ def _build_notification_email_html(*, name: str, title: str, details: str, link:
             <tr>
               <td style=\"padding:20px 24px;background:#0B6B3A;color:#ffffff;font-family:Arial,Helvetica,sans-serif;\">
                 <div style=\"font-size:12px;letter-spacing:.08em;text-transform:uppercase;opacity:.9;\">AnimoAssign</div>
-                <div style=\"font-size:20px;font-weight:700;margin-top:6px;line-height:1.25;\">{safe_title}</div>
+                <div style=\"font-size:20px;font-weight:700;margin-top:6px;line-height:1.25;\">Notification</div>
               </td>
             </tr>
             <tr>
               <td style=\"padding:22px 24px;font-family:Arial,Helvetica,sans-serif;color:#111827;font-size:14px;line-height:1.55;\">
                 <p style=\"margin:0 0 12px 0;\">Hi {safe_name},</p>
-                <p style=\"margin:0 0 18px 0;color:#374151;\">{safe_details}</p>
-                <div style=\"text-align:center;margin:0 0 18px 0;\"><a href=\"{safe_link}\" style=\"display:inline-block;background:#16A34A;color:#ffffff;text-decoration:none;padding:12px 22px;border-radius:10px;font-weight:700;\">Open in AnimoAssign</a></div>
-                <p style=\"margin:18px 0 0 0;color:#6b7280;font-size:12px;\">If the button doesn’t work, copy and paste this link:</p>
-                <p style=\"margin:8px 0 0 0;font-size:12px;\"><a href=\"{safe_link}\" style=\"color:#16A34A;word-break:break-all;\">{safe_link}</a></p>
+                <p style=\"margin:0 0 12px 0;color:#374151;\">You have a new notification in AnimoAssign.</p>
+
+                <div style=\"font-size:16px;font-weight:800;color:#111827;margin:0 0 10px 0;\">{safe_title}</div>
+
+                <div style=\"margin:0 0 18px 0;padding:12px 14px;border-radius:12px;background:#f3f4f6;color:#111827;\">{safe_details}</div>
+
+                <div style=\"text-align:center;margin:0 0 14px 0;\"><a href=\"{safe_link}\" style=\"display:inline-block;background:#16A34A;color:#ffffff;text-decoration:none;padding:12px 22px;border-radius:10px;font-weight:700;\">Log in to AnimoAssign</a></div>
+
+                <p style=\"margin:0;color:#6b7280;font-size:12px;\">After logging in, open <b>Notifications</b> from the top bar to view. If the button doesn’t work, copy and paste this link: <a href=\"{safe_link}\" style=\"color:#16A34A;word-break:break-all;\">{safe_link}</a></p>
               </td>
             </tr>
             <tr>
               <td style=\"padding:14px 24px;background:#f9fafb;font-family:Arial,Helvetica,sans-serif;color:#6b7280;font-size:12px;line-height:1.4;\">
-                You’re receiving this email because you have a notification in AnimoAssign.
+                You’re receiving this email because you received a notification in AnimoAssign.
               </td>
             </tr>
           </table>
@@ -127,6 +137,7 @@ def _build_notification_email_html(*, name: str, title: str, details: str, link:
     </table>
   </body>
 </html>"""
+
 
 
 async def _resolve_sender_user_id(email_from_user_id: str | None) -> str:
