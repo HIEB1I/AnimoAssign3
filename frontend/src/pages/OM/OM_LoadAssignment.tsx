@@ -532,6 +532,236 @@ type Row = {
   finalized?: boolean;
 };
 
+type ChangeItem = { key: string; label: string };
+type EditedDetail = { field: string; from: string; to: string };
+type EditedItem = { key: string; label: string; details: EditedDetail[] };
+type DetectedChanges = {
+  added: ChangeItem[];
+  edited: EditedItem[];
+  deleted: ChangeItem[];
+};
+
+const _rowLabel = (r: Row) => {
+  const course = (r.course || "").trim();
+  const sec = (r.section || "").trim();
+  const title = (r.title || "").trim();
+  const fac = (r.faculty || "").trim();
+  const base = [course, sec].filter(Boolean).join(" ") || r.id;
+  const t = title ? ` — ${title}` : "";
+  const f = fac ? ` (${fac})` : "";
+  return `${base}${t}${f}`;
+};
+
+const detectRowChanges = (baseline: Row[], current: Row[]): DetectedChanges => {
+  const bMap = new Map(baseline.map((r) => [r.id, r] as const));
+  const cMap = new Map(current.map((r) => [r.id, r] as const));
+
+  const added: ChangeItem[] = [];
+  const deleted: ChangeItem[] = [];
+  const edited: EditedItem[] = [];
+
+  // Added
+  for (const [id, r] of cMap) {
+    if (!bMap.has(id)) added.push({ key: id, label: _rowLabel(r) });
+  }
+
+  // Deleted
+  for (const [id, r] of bMap) {
+    if (!cMap.has(id)) deleted.push({ key: id, label: _rowLabel(r) });
+  }
+
+  // Edited
+  const fields: Array<[keyof Row, string]> = [
+    ["course", "Course"],
+    ["title", "Title"],
+    ["units", "Units"],
+    ["section", "Section"],
+    ["faculty", "Faculty"],
+    ["day1", "Day 1"],
+    ["begin1", "Begin 1"],
+    ["end1", "End 1"],
+    ["room1", "Room 1"],
+    ["day2", "Day 2"],
+    ["begin2", "Begin 2"],
+    ["end2", "End 2"],
+    ["room2", "Room 2"],
+    ["capacity", "Capacity"],
+    ["mode", "Mode"],
+  ];
+
+  const fmt = (v: any) => {
+    if (v === null || v === undefined) return "";
+    if (typeof v === "number") return String(v);
+    return String(v);
+  };
+
+  for (const [id, b] of bMap) {
+    const c = cMap.get(id);
+    if (!c) continue;
+    const details: EditedDetail[] = [];
+    for (const [k, label] of fields) {
+      const bv = fmt((b as any)[k]);
+      const cv = fmt((c as any)[k]);
+      if (bv !== cv) details.push({ field: label, from: bv || "—", to: cv || "—" });
+    }
+    if (details.length) edited.push({ key: id, label: _rowLabel(c), details });
+  }
+
+  const byLabel = (a: { label: string }, b: { label: string }) =>
+    a.label.localeCompare(b.label);
+
+  return {
+    added: added.sort(byLabel),
+    edited: edited.sort(byLabel),
+    deleted: deleted.sort(byLabel),
+  };
+};
+
+const ForwardReviewModal: React.FC<{
+  open: boolean;
+  changes: DetectedChanges | null;
+  title: string;
+  subtitle: React.ReactNode;
+  confirmText: string;
+  onClose: () => void;
+  onConfirm: () => void | Promise<void>;
+}> = ({ open, changes, title, subtitle, confirmText, onClose, onConfirm }) => {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string>("");
+
+  if (!open) return null;
+
+  const hasAny =
+    !!changes &&
+    (changes.added.length > 0 || changes.edited.length > 0 || changes.deleted.length > 0);
+
+  return (
+    <div className="fixed inset-0 z-[120] grid place-items-center bg-black/40 p-4">
+      <div className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-2xl">
+        <div className="mx-auto mb-4 grid h-16 w-16 place-items-center rounded-full border-2 border-emerald-600 text-emerald-700">
+          <Send className="h-8 w-8" strokeWidth={2.5} />
+        </div>
+
+        <h3 className="mb-2 text-center text-2xl font-semibold">{title}</h3>
+
+        <p className="mx-auto mb-4 max-w-md text-center text-sm text-neutral-600">{subtitle}</p>
+
+        <div className="mb-4">
+          <div className="flex items-center justify-between gap-2">
+            <div className="text-sm font-semibold text-gray-700">Detected changes</div>
+            {!hasAny ? <div className="text-xs text-slate-500">No differences found.</div> : null}
+          </div>
+
+          <div className="mt-2 max-h-[260px] overflow-auto rounded-lg border border-slate-200 bg-slate-50 p-3">
+            {changes ? (
+              <div className="space-y-4">
+                {/* Added */}
+                <div>
+                  <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                    Added ({changes.added.length})
+                  </div>
+                  {changes.added.length ? (
+                    <ul className="list-disc space-y-1 pl-5 text-sm text-slate-800">
+                      {changes.added.map((a) => (
+                        <li key={a.key}>{a.label}</li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <div className="text-sm text-slate-500">None</div>
+                  )}
+                </div>
+
+                {/* Edited */}
+                <div>
+                  <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                    Edited ({changes.edited.length})
+                  </div>
+                  {changes.edited.length ? (
+                    <ul className="space-y-2">
+                      {changes.edited.map((e) => (
+                        <li key={e.key} className="rounded-lg border border-slate-200 bg-white px-3 py-2">
+                          <div className="text-sm font-medium text-slate-900">{e.label}</div>
+                          {e.details.length ? (
+                            <ul className="mt-1 list-disc space-y-1 pl-5 text-sm text-slate-700">
+                              {e.details.map((d, idx) => (
+                                <li key={idx}>
+                                  <span className="font-medium text-slate-800">{d.field}:</span>{" "}
+                                  <span className="text-slate-600">{d.from}</span>{" "}
+                                  <span className="text-slate-400">→</span>{" "}
+                                  <span className="text-slate-900">{d.to}</span>
+                                </li>
+                              ))}
+                            </ul>
+                          ) : (
+                            <div className="mt-1 text-xs text-slate-500">Edited</div>
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <div className="text-sm text-slate-500">None</div>
+                  )}
+                </div>
+
+                {/* Deleted */}
+                <div>
+                  <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                    Deleted ({changes.deleted.length})
+                  </div>
+                  {changes.deleted.length ? (
+                    <ul className="list-disc space-y-1 pl-5 text-sm text-slate-800">
+                      {changes.deleted.map((d) => (
+                        <li key={d.key}>{d.label}</li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <div className="text-sm text-slate-500">None</div>
+                  )}
+                </div>
+              </div>
+            ) : (
+              <div className="text-sm text-slate-500">No change summary available.</div>
+            )}
+          </div>
+        </div>
+
+        {error ? (
+          <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+            {error}
+          </div>
+        ) : null}
+
+        <div className="flex justify-end gap-2">
+          <button
+            onClick={onClose}
+            disabled={busy}
+            className="rounded-lg border border-neutral-300 bg-neutral-100 px-4 py-2 text-sm hover:bg-neutral-200 disabled:opacity-50"
+          >
+            Cancel
+          </button>
+          <button
+            disabled={busy}
+            className="rounded-lg bg-emerald-700 px-4 py-2 text-sm font-medium text-white hover:brightness-110 disabled:opacity-50"
+            onClick={async () => {
+              setBusy(true);
+              setError("");
+              try {
+                await onConfirm();
+              } catch (e: any) {
+                setError(e?.message || "Action failed.");
+              } finally {
+                setBusy(false);
+              }
+            }}
+          >
+            {confirmText}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 function ArchivedLoadsSummary({
   rows,
   termLabel,
@@ -2438,6 +2668,13 @@ export default function OM_LoadAssignment() {
   const [levelFilter, setLevelFilter] = useState<string>("ALL");
   const [rows, setRows] = useState<Row[]>([]);
 
+  // Snapshot of the rows at the last successful Forward/Re-forward to Chair.
+  // Used to generate an APO-style "Detected changes" preview on re-forward.
+  const forwardBaselineRef = useRef<Row[] | null>(null);
+
+  const [showForwardReview, setShowForwardReview] = useState(false);
+  const [forwardReviewChanges, setForwardReviewChanges] = useState<DetectedChanges | null>(null);
+
   // Day pairing (auto-fill Day 2 based on Day 1), but keep Day 2 editable for manual override.
   const [day2ManualById, setDay2ManualById] = useState<Record<string, boolean>>({});
 
@@ -3161,7 +3398,15 @@ export default function OM_LoadAssignment() {
     }
     setMode("run");
     // Once forwarded to Chair, it is a final act and must remain disabled across refresh/auto-assign.
-    setApproved(Boolean((res as any)?.forwarded_to_chair));
+    const forwardedToChair = Boolean((res as any)?.forwarded_to_chair);
+    setApproved(forwardedToChair);
+    // Keep a baseline snapshot for "Re-forward" change preview.
+    // Only update baseline when the server says it is forwarded; otherwise clear.
+    if (forwardedToChair) {
+      forwardBaselineRef.current = normalizedRows.map((r) => ({ ...r }));
+    } else {
+      forwardBaselineRef.current = null;
+    }
     setHasLocalEdits(false);
     resetHistory();
   };
@@ -4288,28 +4533,28 @@ export default function OM_LoadAssignment() {
                       if (!proceed) return;
                     }
 
-                    // Final confirm (match APO "Submit for Scheduling" UX)
+                    // Final step:
+                    //  - First forward: simple confirmation
+                    //  - Re-forward: show APO-style change preview before sending
+                    if (approved) {
+                      const baseline = forwardBaselineRef.current || [];
+                      setForwardReviewChanges(detectRowChanges(baseline, rows));
+                      setShowForwardReview(true);
+                      return;
+                    }
+
                     const finalProceed = await openConfirm({
-                      title: approved ? "Re-forward to Chair?" : "Forward to Chair?",
+                      title: "Forward to Chair?",
                       variant: "warning",
-                      confirmText: approved ? "Re-forward" : "Forward",
+                      confirmText: "Forward",
                       cancelText: "Cancel",
                       message: (
                         <div className="space-y-2 text-sm text-neutral-600">
                           <p>
-                            This will send your current <span className="font-semibold text-neutral-800">Load Recommendations</span> to the
-                            Chair.
+                            This will send your current <span className="font-semibold text-neutral-800">Load Recommendations</span> to the Chair.
                           </p>
                           <p>
-                            {approved ? (
-                              <>
-                                Since you already forwarded before, this will <span className="font-semibold text-neutral-800">re-notify</span> the Chair with your latest updates.
-                              </>
-                            ) : (
-                              <>
-                                Once forwarded, this is treated as a <span className="font-semibold text-neutral-800">final action</span> for this term.
-                              </>
-                            )}
+                            Once forwarded, this is treated as a <span className="font-semibold text-neutral-800">final action</span> for this term.
                           </p>
                           <p className="text-neutral-500">Do you want to continue?</p>
                         </div>
@@ -5721,6 +5966,25 @@ export default function OM_LoadAssignment() {
           </div>
         </div>
       )}
+
+      {/* Re-forward review modal (APO-style change list) */}
+      <ForwardReviewModal
+        open={showForwardReview}
+        changes={forwardReviewChanges}
+        title="Re-forward to Chair?"
+        subtitle={
+          <>
+            You're about to <span className="font-semibold text-neutral-800">re-notify</span> the Chair.
+            Review the detected changes below before sending.
+          </>
+        }
+        confirmText="Re-forward"
+        onClose={() => setShowForwardReview(false)}
+        onConfirm={async () => {
+          setShowForwardReview(false);
+          await handleForwardToChair();
+        }}
+      />
 
       {/* Global toast */}
       <Toast
