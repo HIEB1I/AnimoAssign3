@@ -388,10 +388,6 @@ const activeTermLabel = useMemo(() => {
     if (!terms || terms.length === 0) return "";
     const curIdx = terms.findIndex((t) => !!t.is_current);
     if (curIdx < 0) return "Active indicates the planning term (next term after the current term).";
-    const cur = terms[curIdx];
-    const next = terms[curIdx + 1];
-    if (next) return `Active indicates the planning term: ${pillLabelOf(next)} (next after ${pillLabelOf(cur)}).`;
-    return `Active indicates the current term: ${pillLabelOf(cur)}.`;
   }, [terms]);
 
 
