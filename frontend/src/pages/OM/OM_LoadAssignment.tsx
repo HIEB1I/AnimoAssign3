@@ -40,6 +40,7 @@ import {
   Redo2,
   X,
   Upload,
+  Download,
   Save,
 } from "lucide-react";
 import { InboxContent as OMInboxContent } from "./OM_Inbox";
@@ -2076,35 +2077,168 @@ export default function OM_LoadAssignment() {
     (session as any)?.id ||
     "";
 
-  // Import SHS file
+  // Import SHS (match APO import UX)
   const shsFileInputRef = useRef<HTMLInputElement>(null);
+  const [showShsImportModal, setShowShsImportModal] = useState(false);
+  const [shsImportBusy, setShsImportBusy] = useState(false);
+  const [shsImportError, setShsImportError] = useState<string>("");
   const [shsFile, setShsFile] = useState<File | null>(null);
+
+  const openShsImport = () => {
+    setShsImportError("");
+    setShowShsImportModal(true);
+  };
+
+  const closeShsImport = () => {
+    if (shsImportBusy) return;
+    setShowShsImportModal(false);
+    setShsImportError("");
+  };
+
+  const downloadShsTemplate = () => {
+    const esc = (v: any) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+    const headers = [
+      "Course Code & Title",
+      "Units",
+      "Section",
+      "Day 1",
+      "Begin 1",
+      "End 1",
+      "Room 1",
+      "Day 2",
+      "Begin 2",
+      "End 2",
+      "Room 2",
+      "Capacity",
+      "Mode",
+      "Campus",
+    ];
+    const sample = [
+      [
+        "SHS-ENG1 - English 1",
+        3,
+        "A",
+        "M",
+        "08:00",
+        "09:30",
+        "R101",
+        "W",
+        "08:00",
+        "09:30",
+        "R101",
+        40,
+        "F2F",
+        "Manila",
+      ],
+    ];
+    const csv = [headers.map(esc).join(","), ...sample.map((r) => r.map(esc).join(","))].join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "om_shs_import_TEMPLATE.csv";
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const splitCsvLine = (line: string): string[] => {
+    const out: string[] = [];
+    let cur = "";
+    let inQuotes = false;
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      if (ch === '"') {
+        // Escaped quote
+        if (inQuotes && line[i + 1] === '"') {
+          cur += '"';
+          i++;
+        } else {
+          inQuotes = !inQuotes;
+        }
+        continue;
+      }
+      if (ch === "," && !inQuotes) {
+        out.push(cur);
+        cur = "";
+        continue;
+      }
+      cur += ch;
+    }
+    out.push(cur);
+    return out.map((s) => s.trim());
+  };
+
+  const validateShsCsvHeaders = (csvText: string) => {
+    const firstLine = (csvText || "").split(/\r?\n/).find((l) => !!l.trim()) || "";
+    if (!firstLine) throw new Error("CSV has no headers.");
+    const headers = splitCsvLine(firstLine).map((h) => h.replace(/^"|"$/g, "").trim());
+    const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
+    const headerSet = new Set(headers.map(norm));
+    const required = [
+      "Course Code & Title",
+      "Units",
+      "Section",
+      "Day 1",
+      "Begin 1",
+      "End 1",
+      "Room 1",
+      "Day 2",
+      "Begin 2",
+      "End 2",
+      "Room 2",
+      "Capacity",
+      "Mode",
+    ];
+    const missing = required.filter((h) => !headerSet.has(norm(h)));
+    if (missing.length) {
+      throw new Error(
+        `Missing required column(s): ${missing.join(", ")}\n\nExpected columns: ${required.join(", ")}`
+      );
+    }
+  };
 
   const handlePickShsFile = () => {
     shsFileInputRef.current?.click();
+  };
+
+  const importShsFile = async (file: File) => {
+    if (!file) return;
+    if (!userId) throw new Error("Missing user session.");
+
+    // Basic guard: backend expects CSV text
+    const isCsv = file.name.toLowerCase().endsWith(".csv") || file.type.includes("csv");
+    if (!isCsv) {
+      throw new Error("Please upload a .csv file. Download the template to match the required format.");
+    }
+
+    const text = await file.text();
+    validateShsCsvHeaders(text);
+
+    const res = await importOmShsCsv(userId, text);
+    await loadFromServer();
+    showToast(`Imported ${res.imported ?? 0} row(s) from SHS CSV.`, "success");
   };
 
   const handleShsFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0] || null;
     if (!file) return;
     setShsFile(file);
+    setShsImportError("");
 
     (async () => {
       try {
-        if (!userId) throw new Error("Missing user session.");
-        const text = await file.text();
-        const res = await importOmShsCsv(userId, text);
-        await loadFromServer();
-        showToast(
-          `Imported ${res.imported ?? 0} row(s) from SHS CSV.`,
-          "success"
-        );
+        setShsImportBusy(true);
+        await importShsFile(file);
+        setShowShsImportModal(false);
       } catch (err: any) {
         const msg =
           typeof err?.message === "string"
             ? err.message
             : "Failed to import SHS CSV.";
+        setShsImportError(msg);
         showToast(msg, "error");
+      } finally {
+        setShsImportBusy(false);
       }
     })();
 
@@ -4154,13 +4288,13 @@ export default function OM_LoadAssignment() {
                       {/* Import SHS file */}
                       <button
                         type="button"
-                        onClick={handlePickShsFile}
+                        onClick={openShsImport}
                         disabled={!isRunning || isAssigning || isArchiveView}
                         className={cls(
-                          "inline-flex h-10 min-w-[140px] items-center justify-center gap-2 rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 shadow-sm",
-                          "hover:bg-gray-50",
+                          "inline-flex h-10 min-w-[140px] items-center justify-center gap-2 rounded-md bg-[#008e4e] px-4 py-2 text-sm font-medium text-white shadow-sm",
+                          "hover:brightness-110",
                           (!isRunning || isAssigning || isArchiveView) &&
-                            "opacity-50 cursor-not-allowed hover:bg-white"
+                            "opacity-50 cursor-not-allowed hover:brightness-100"
                         )}
                         title={
                           isArchiveView
@@ -4176,14 +4310,6 @@ export default function OM_LoadAssignment() {
                         <Upload className="h-4 w-4" />
                         Import SHS
                       </button>
-
-                      <input
-                        ref={shsFileInputRef}
-                        type="file"
-                        accept=".csv,.xlsx,.xls"
-                        className="hidden"
-                        onChange={handleShsFileChange}
-                      />
                     </div>
                   </div>
 
@@ -5360,6 +5486,93 @@ export default function OM_LoadAssignment() {
           setShowNewSectionModal(false);
         }}
       />
+
+      {/* Import SHS modal (match APO import UX) */}
+      {showShsImportModal && (
+        <div className="fixed inset-0 z-[120] grid place-items-center bg-black/40 p-4" role="dialog" aria-modal="true">
+          <div className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-2xl">
+            <div className="mx-auto mb-4 grid h-16 w-16 place-items-center rounded-full border-2 border-emerald-600 text-emerald-700">
+              <Upload className="h-8 w-8" strokeWidth={2.5} />
+            </div>
+
+            <h3 className="mb-2 text-center text-2xl font-semibold">Import SHS CSV</h3>
+            <p className="mx-auto mb-4 max-w-md text-center text-sm text-neutral-600">
+              Upload a CSV fsile to import SHS sections into the current planning term.
+            </p>
+
+            <div className="mb-4 rounded-lg border border-emerald-100 bg-emerald-50 px-3 py-2 text-sm text-emerald-900">
+              <div className="mb-1 font-semibold">CSV format</div>
+              <ul className="list-disc pl-5 space-y-1">
+                <li>
+                  Required columns: <span className="font-mono">Course Code &amp; Title</span>,{" "}
+                  <span className="font-mono">Units</span>, <span className="font-mono">Section</span>,{" "}
+                  <span className="font-mono">Day 1</span>, <span className="font-mono">Begin 1</span>,{" "}
+                  <span className="font-mono">End 1</span>, <span className="font-mono">Room 1</span>,{" "}
+                  <span className="font-mono">Day 2</span>, <span className="font-mono">Begin 2</span>,{" "}
+                  <span className="font-mono">End 2</span>, <span className="font-mono">Room 2</span>,{" "}
+                  <span className="font-mono">Capacity</span>, <span className="font-mono">Mode</span>
+                </li>
+              </ul>
+            </div>
+
+            {!!shsImportError && (
+              <div className="mb-4 whitespace-pre-wrap rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-800">
+                {shsImportError}
+              </div>
+            )}
+
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+              <button
+                type="button"
+                onClick={downloadShsTemplate}
+                className="inline-flex items-center justify-center gap-2 rounded-lg border border-emerald-300 bg-white px-4 py-2 text-sm font-medium text-emerald-700 hover:bg-emerald-50"
+              >
+                <Download className="h-4 w-4" />
+                Download template
+              </button>
+
+              <div className="flex items-center justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={closeShsImport}
+                  disabled={shsImportBusy}
+                  className={cls(
+                    "rounded-lg border border-neutral-300 bg-neutral-100 px-4 py-2 text-sm hover:bg-neutral-200",
+                    shsImportBusy && "opacity-60 cursor-not-allowed"
+                  )}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={handlePickShsFile}
+                  disabled={shsImportBusy || isArchiveView}
+                  className={cls(
+                    "inline-flex items-center gap-2 rounded-lg bg-[#008e4e] px-4 py-2 text-sm font-medium text-white shadow-sm hover:brightness-110",
+                    (shsImportBusy || isArchiveView) && "opacity-60 cursor-not-allowed hover:brightness-100"
+                  )}
+                  title={isArchiveView ? "Archived view: importing is disabled" : "Choose a CSV file"}
+                >
+                  <Upload className="h-4 w-4" />
+                  {shsImportBusy ? "Importing…" : "Choose file"}
+                </button>
+              </div>
+            </div>
+
+            <div className="mt-3 text-center text-xs text-neutral-500">
+              {shsFile ? `Selected: ${shsFile.name}` : "No file selected yet."}
+            </div>
+
+            <input
+              ref={shsFileInputRef}
+              type="file"
+              accept=".csv,.xlsx,.xls"
+              className="hidden"
+              onChange={handleShsFileChange}
+            />
+          </div>
+        </div>
+      )}
 
       {/* Custom confirmation modal (replaces browser confirm dialogs) */}
       {confirmModal.open && (

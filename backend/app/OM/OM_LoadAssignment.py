@@ -83,6 +83,29 @@ COL_DEPTS = "departments"
 COL_CAMPUSES = "campuses"
 
 
+def _campus_name_to_id(val: str) -> str:
+    """Map Campus column values to campus_id.
+
+    Supported values (case-insensitive):
+      - Manila  -> CMPS0001
+      - Laguna  -> CMPS0002
+
+    Returns an empty string when the input is blank.
+    Raises ValueError for non-blank unknown values.
+    """
+    s = (val or "").strip()
+    if not s:
+        return ""
+
+    s_norm = s.casefold()
+    if s_norm == "manila":
+        return "CMPS0001"
+    if s_norm == "laguna":
+        return "CMPS0002"
+
+    raise ValueError(f"Invalid Campus value: {s}")
+
+
 async def _om_department_ids(user_id: str, db) -> List[str]:
     """Departments this OM should see.
     Tries role_assignments(role=office_manager/om) then staff_profiles.department_id.
@@ -902,7 +925,9 @@ async def _fetch_rows(user_id: str, term_id: str, db) -> Dict[str, Any]:
             **pair,
             "capacity": d.get("enrollment_cap", "") or "",
             "mode": mode_display,
-            "remarks": remarks_by_section_id.get(sid, ""),
+            # Prefer canonical sections.remarks, but fall back to sections_submitted.remarks
+            # (needed for SHS imports which may store remarks on the submitted snapshot).
+            "remarks": remarks_by_section_id.get(sid, "") or str(d.get("remarks") or ""),
             "status": (
                 "Approved"
                 if bool((d.get("asg") or {}).get("synced_from_faculty_service")) and (d.get("asg") or {}).get("faculty_id")
@@ -1422,9 +1447,10 @@ async def loadassignment_handler(
         term_id = active.get("term_id")
         ts = datetime.utcnow()
 
-        # Best-effort campus_id from staff profile (optional)
+        # Best-effort campus_id fallback from staff profile (optional).
+        # Note: If the CSV includes a "Campus" column, per-row Campus will override this fallback.
         staff = await db[COL_STAFF].find_one({"user_id": userId}, {"_id": 0, "campus_id": 1}) or {}
-        campus_id = (staff.get("campus_id") or "").strip()
+        campus_id_fallback = (staff.get("campus_id") or "").strip()
 
         # Parse CSV
         reader = csv.DictReader(io.StringIO(csv_text))
@@ -1454,6 +1480,16 @@ async def loadassignment_handler(
         c_room2 = col("Room 2", "Room2")
         c_cap = col("Capacity", "Cap")
         c_mode = col("Mode")
+
+        # Optional: per-row campus (Manila/Laguna). Saved to sections_submitted.campus_id.
+        c_campus = col("Campus")
+
+        # Optional: per-row campus value ("Manila" or "Laguna").
+        c_campus = col("Campus")
+
+        # Optional: allow SHS import files to include per-section remarks
+        # (requested to be saved in sections_submitted.remarks and shown in the remarks column)
+        c_remarks = col("Remarks", "Remark", "Notes", "Note")
 
         missing = [
             n for n, c in [
@@ -1548,6 +1584,24 @@ async def loadassignment_handler(
 
             mode = str(raw.get(c_mode) or "").strip().upper()
 
+            # Optional per-row remarks.
+            remarks_val = ""
+            if c_remarks:
+                remarks_val = str(raw.get(c_remarks) or "").strip()
+
+            # Resolve campus_id.
+            campus_id = campus_id_fallback
+            if c_campus:
+                campus_raw = str(raw.get(c_campus) or "").strip()
+                if campus_raw:
+                    try:
+                        campus_id = _campus_name_to_id(campus_raw)
+                    except ValueError:
+                        raise HTTPException(
+                            status_code=422,
+                            detail=f"Invalid Campus value '{campus_raw}' for section '{section_code}'. Use Manila or Laguna.",
+                        )
+
             course_id = await ensure_course(course_code, course_title, units_val)
 
             # Create a new section_id. If the same section_code+course exists for term, upsert instead.
@@ -1575,6 +1629,13 @@ async def loadassignment_handler(
                 "submitted_by": userId,
                 "updated_at": ts,
             }
+
+            # Persist SHS import remarks.
+            # - Requested storage: sections_submitted.remarks
+            # - Also store it in sections.remarks so existing remarks-loading logic continues to work.
+            # Only set if provided to avoid wiping existing remarks.
+            if remarks_val:
+                sec_doc["remarks"] = remarks_val
 
             await db[COL_SECTIONS].update_one(
                 {"section_id": section_id},
