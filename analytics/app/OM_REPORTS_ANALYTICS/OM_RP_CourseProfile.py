@@ -268,6 +268,9 @@ async def get_course_profile_for(query: str) -> Dict[str, Any]:
     top_3_instructors = past[:3]
     remaining_instructors_count = len(past) - len(top_3_instructors)
 
+    # Other instructors beyond top 3 (for expandable UI)
+    other_instructors = past[3:] if len(past) > 3 else []
+
     # Format AY section counts for the Demand Visual (Frontend)
     ay_demand_visual = [
         {"ay": ay, "sections": count} 
@@ -314,6 +317,20 @@ async def get_course_profile_for(query: str) -> Dict[str, Any]:
                 "last_name":  "$user.last_name",
                 "email":      "$user.email",
             }},
+            {"$group": {
+                "_id": "$faculty_id",
+                "faculty_id": {"$first": "$faculty_id"},
+                "first_name": {"$first": "$first_name"},
+                "last_name":  {"$first": "$last_name"},
+                "email":      {"$first": "$email"}
+            }},
+            {"$project": {
+                "_id": 0,
+                "faculty_id": 1,
+                "first_name": 1,
+                "last_name":  1,
+                "email":      1
+            }},
             {"$sort": {"last_name": 1, "first_name": 1}}
         ]
 
@@ -344,6 +361,7 @@ async def get_course_profile_for(query: str) -> Dict[str, Any]:
         # Only return the aggregate metrics and top 3 instructors
         "past_instructors_top3": top_3_instructors,
         "past_instructors_remaining_count": remaining_instructors_count,
+        "past_instructors_others": other_instructors,  # for expandable list
         "history_metrics": {
             "total_sections": total_sections,
             "unique_instructors": num_unique_instructors,

@@ -311,8 +311,9 @@ function AllocateClassModal({
     // base ids: all sections that are scheduled at this day/time
     let ids = matchingSectionIds;
 
-    // if backend provided a stricter list, intersect with it
-    if (eligibleFromCell && eligibleFromCell.length > 0) {
+    // If backend provided an eligibility list, ALWAYS intersect with it.
+    // NOTE: An empty list means "no eligible sections" for this room/slot (capacity/type mismatch).
+    if (eligibleFromCell !== null) {
       const eligibleSet = new Set(eligibleFromCell);
       ids = ids.filter((id) => eligibleSet.has(id));
     }

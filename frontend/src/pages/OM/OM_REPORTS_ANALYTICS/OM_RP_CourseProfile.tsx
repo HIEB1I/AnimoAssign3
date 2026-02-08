@@ -1,7 +1,7 @@
 // frontend/src/pages/OM/OM_REPORTS_ANALYTICS/OM_RP_CourseProfile.tsx
 import React, { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { Search as SearchIcon, ChevronLeft, BarChart2, Users, Layers, TrendingUp } from "lucide-react";
+import { Search as SearchIcon, ChevronLeft, ChevronDown, ChevronUp, BarChart2, Users, Layers, TrendingUp } from "lucide-react";
 import { fetchCourseProfile, type CMCourseRow } from "@/api";
 
 /* -----------------------------
@@ -55,6 +55,7 @@ type CourseProfile = {
   qualified_faculty?: InstructorInfo[];
   past_instructors_top3?: PastInstructorCount[]; // Top 3 list
   past_instructors_remaining_count?: number; // Count of the rest
+  past_instructors_others?: PastInstructorCount[]; // Remaining instructors (expandable)
   history_metrics?: HistoryMetrics; // New aggregate metrics
   preferences?: string | PrefEntry[];
 };
@@ -97,7 +98,7 @@ const CourseDemandVisual = ({ data }: { data: Array<{ ay: number; sections: numb
 
     return (
         <div className="p-4 bg-white rounded-lg border border-gray-200 shadow-inner">
-            <h3 className="text-md font-semibold text-gray-800 mb-3 flex items-center gap-2">
+            <h3 className="text-md font-semibold text-emerald-700 mb-3 flex items-center gap-2">
                 <BarChart2 className="w-4 h-4 text-emerald-500" />
                 Course Demand by Academic Year
             </h3>
@@ -144,6 +145,13 @@ export default function OM_RP_CourseProfile() {
   const [data, setData] = useState<CourseProfile | null>(null);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+
+  const [showOtherInstructors, setShowOtherInstructors] = useState(false);
+
+  // Reset expandable state when switching course
+  useEffect(() => {
+    setShowOtherInstructors(false);
+  }, [data?.course_id]);
 
   // --- Fetch ALL courses on mount (default view) ---
   useEffect(() => {
@@ -213,6 +221,11 @@ export default function OM_RP_CourseProfile() {
     );
   }, [query, courseList]);
 
+  useEffect(() => {
+    // collapse 'other instructors' list when switching courses
+    setShowOtherInstructors(false);
+  }, [data?.course_id]);
+
   // --- Load a single course profile ---
   async function loadProfile(q: string) {
     setErr(null);
@@ -236,6 +249,19 @@ export default function OM_RP_CourseProfile() {
     await loadProfile(q);
   }
 
+
+  const prefsUnique = useMemo(() => {
+    if (!data) return [];
+    if (typeof data.preferences === "string") return [];
+    if (!Array.isArray(data.preferences)) return [];
+    const seen = new Map<string, PrefEntry>();
+    for (const p of data.preferences as PrefEntry[]) {
+      const fid = (p?.faculty_id || "").trim();
+      if (!fid) continue;
+      if (!seen.has(fid)) seen.set(fid, p);
+    }
+    return Array.from(seen.values());
+  }, [data]);
   const courseHeader = useMemo(() => {
     const code = (data?.course_code?.length ? joinCodes(data.course_code) : data?.course_id) ?? "";
     const title = data?.title || "No title listed";
@@ -271,7 +297,7 @@ export default function OM_RP_CourseProfile() {
               <input
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                placeholder="Filter courses by code or title…"
+                placeholder="Search by course code…"
                 className="w-full rounded-lg border border-gray-300 px-9 py-2 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30"
               />
               {!!query && (
@@ -286,20 +312,6 @@ export default function OM_RP_CourseProfile() {
                 </button>
               )}
             </div>
-
-            {/* Optional: direct Search will try to open profile for the typed code */}
-            <button
-              type="submit"
-              disabled={loading}
-              className={`rounded-lg border px-4 py-2 text-sm font-semibold ${
-                loading
-                  ? "cursor-default border-emerald-200 bg-emerald-200 text-emerald-900"
-                  : "cursor-pointer border-emerald-500 bg-emerald-400 text-emerald-950 hover:bg-emerald-300"
-              }`}
-              title="Open exact course profile for the typed code"
-            >
-              {loading ? "Searching…" : "Open"}
-            </button>
           </form>
         </div>
 
@@ -429,9 +441,9 @@ export default function OM_RP_CourseProfile() {
                             </h3>
                             {typeof data.preferences === "string" ? (
                                 <p className="text-sm text-gray-700">{data.preferences}</p>
-                            ) : Array.isArray(data.preferences) && data.preferences.length > 0 ? (
+                            ) : prefsUnique.length > 0 ? (
                                 <div className="flex flex-wrap gap-2 text-sm">
-                                    {(data.preferences as PrefEntry[]).map((p) => (
+                                    {prefsUnique.map((p) => (
                                         <span
                                             key={p.faculty_id}
                                             className="px-3 py-1 bg-emerald-100 rounded-full text-emerald-700 whitespace-nowrap"
@@ -473,11 +485,51 @@ export default function OM_RP_CourseProfile() {
                                             </li>
                                         ))}
                                     </ul>
-                                    {data.past_instructors_remaining_count && data.past_instructors_remaining_count > 0 ? (
-                                        <p className="mt-3 text-sm text-gray-500">
-                                            ...and {data.past_instructors_remaining_count} other instructor(s).
-                                        </p>
-                                    ) : null}
+                                    {(() => {
+                                      const otherCount = data.past_instructors_remaining_count || (data.past_instructors_others?.length ?? 0);
+                                      if (!otherCount) return null;
+                                      return (
+                                        <div className="mt-3">
+                                          <button
+                                            type="button"
+                                            onClick={() => setShowOtherInstructors((v) => !v)}
+                                            className="inline-flex items-center gap-2 rounded-md border border-gray-300 bg-white px-3 py-2 text-sm shadow-sm hover:bg-gray-50"
+                                          >
+                                            <span>
+                                              {showOtherInstructors ? "Hide" : "Show"} {otherCount} other instructor(s)
+                                            </span>
+                                            {showOtherInstructors ? (
+                                              <ChevronUp className="h-4 w-4 text-gray-600" />
+                                            ) : (
+                                              <ChevronDown className="h-4 w-4 text-gray-600" />
+                                            )}
+                                          </button>
+
+                                          {showOtherInstructors && (
+                                            <div className="mt-2 max-h-64 overflow-auto rounded-md border border-gray-200 bg-white">
+                                              {data.past_instructors_others && data.past_instructors_others.length ? (
+                                                <ul className="divide-y">
+                                                  {data.past_instructors_others.map((pi) => (
+                                                    <li key={pi.faculty_id} className="flex items-center justify-between px-3 py-2">
+                                                      <div className="text-sm font-medium text-gray-800">
+                                                        {fullName(pi.last_name, pi.first_name)}
+                                                      </div>
+                                                      <div className="text-sm text-gray-600">
+                                                        <span className="font-semibold text-emerald-700">{pi.count ?? 0}</span> time(s)
+                                                      </div>
+                                                    </li>
+                                                  ))}
+                                                </ul>
+                                              ) : (
+                                                <div className="px-3 py-2 text-sm text-gray-500">
+                                                  No details available.
+                                                </div>
+                                              )}
+                                            </div>
+                                          )}
+                                        </div>
+                                      );
+                                    })()}
                                 </>
                             )}
                         </div>
