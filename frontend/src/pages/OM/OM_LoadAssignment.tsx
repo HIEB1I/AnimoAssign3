@@ -1,4 +1,10 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { Outlet, useLocation } from "react-router-dom";
 import AppShell from "../../base/AppShell";
 import { runOmAutoAssign } from "../../api.ts";
@@ -9,7 +15,6 @@ import {
   sendOmLoadAssignmentsToFaculty,
   getOmLoadAssignmentRfc,
   respondOmLoadAssignmentRfc,
-
 } from "../../api.ts";
 
 import {
@@ -19,7 +24,7 @@ import {
   getAllFaculty,
   getOmFacultyWithDeloadings,
   getOmFacultyDeloadings,
-  type DeloadingRow
+  type DeloadingRow,
 } from "../../api";
 
 import { cls } from "../../utilities/cls";
@@ -34,14 +39,12 @@ import {
   Plus,
   MessageSquareText,
   Copy,
-
   Archive,
-
   Undo2,
   Redo2,
   X,
-
-  Upload,} from "lucide-react";
+  Upload,
+} from "lucide-react";
 import { InboxContent as OMInboxContent } from "./OM_Inbox";
 
 export type FlagSeverity = "warning" | "error";
@@ -227,7 +230,7 @@ function TimeBeginInput({
   value,
   onChange,
   options,
-  placeholder = "e.g. 07:30 - 09:00",
+  placeholder = "e.g. 0730",
   className = "",
 }: {
   value: string;
@@ -519,7 +522,13 @@ type Row = {
   room2: string;
   capacity: number | "";
   mode?: string;
-  status?: "" | "Confirmed" | "Approved" | "Pending" | "Unassigned" | "Conflict";
+  status?:
+    | ""
+    | "Confirmed"
+    | "Approved"
+    | "Pending"
+    | "Unassigned"
+    | "Conflict";
   pending_rfc?: boolean;
   conflictNote?: string;
   editable?: boolean;
@@ -559,13 +568,12 @@ function ArchivedLoadsSummary({
 
       const key = r.faculty_id || facultyName;
 
-      const g =
-        groups.get(key) || {
-          faculty: facultyName,
-          sections: 0,
-          units: 0,
-          courses: new Set<string>(),
-        };
+      const g = groups.get(key) || {
+        faculty: facultyName,
+        sections: 0,
+        units: 0,
+        courses: new Set<string>(),
+      };
 
       g.sections += 1;
       g.units += units;
@@ -659,7 +667,9 @@ function ArchivedLoadsSummary({
                 const courseList = Array.from(g.courses);
                 const preview = courseList.slice(0, 4).join(", ");
                 const more =
-                  courseList.length > 4 ? ` +${courseList.length - 4} more` : "";
+                  courseList.length > 4
+                    ? ` +${courseList.length - 4} more`
+                    : "";
 
                 return (
                   <tr key={`${g.faculty}-${i}`} className="hover:bg-gray-50">
@@ -699,7 +709,12 @@ function ArchivedLoadsSummary({
 }
 
 // Used for hard validation before sending proposals to faculty
-export type MissingFieldRow = { course: string; section: string; faculty: string; fields: string[] };
+export type MissingFieldRow = {
+  course: string;
+  section: string;
+  faculty: string;
+  fields: string[];
+};
 
 // --- Validation helpers & engine (row-level flags) ---
 
@@ -1074,8 +1089,6 @@ function validateAllRows(rows: Row[], ctx: ValidationContext): RowFlagsById {
   return flags;
 }
 
-
-
 const DAY_OPTIONS = [
   { value: "M", label: "Monday" },
   { value: "T", label: "Tuesday" },
@@ -1089,27 +1102,27 @@ const ROOM_OPTIONS = ["Online", "Classroom", "Comlab"];
 const TIME_BEGIN_OPTIONS = [
   // Match APO time-band menu content: show full band label in menu,
   // but keep stored/selected value as HHMM (shown in-cell via SelectBox displayLabel).
-  { value: "0730", label: "07:30 - 09:00" },
-  { value: "0915", label: "09:15 - 10:45" },
-  { value: "1100", label: "11:00 - 12:30" },
-  { value: "1245", label: "12:45 - 14:15" },
-  { value: "1430", label: "14:30 - 16:00" },
-  { value: "1615", label: "16:15 - 17:45" },
-  { value: "1800", label: "18:00 - 19:30" },
-  { value: "1945", label: "19:45 - 21:00" },
+  { value: "0730", label: "0730" },
+  { value: "0915", label: "0915" },
+  { value: "1100", label: "1100" },
+  { value: "1245", label: "1245" },
+  { value: "1430", label: "1430" },
+  { value: "1615", label: "1615" },
+  { value: "1800", label: "1800" },
+  { value: "1945", label: "1945" },
 ];
 
 const TIME_END_OPTIONS = [
   // End-time dropdown should show only the end time (not the full band).
   // Stored/selected value remains HHMM.
-  { value: "0900", label: "09:00" },
-  { value: "1045", label: "10:45" },
-  { value: "1230", label: "12:30" },
-  { value: "1415", label: "14:15" },
-  { value: "1600", label: "16:00" },
-  { value: "1745", label: "17:45" },
-  { value: "1930", label: "19:30" },
-  { value: "2100", label: "21:00" },
+  { value: "0900", label: "0900" },
+  { value: "1045", label: "1045" },
+  { value: "1230", label: "1230" },
+  { value: "1415", label: "1415" },
+  { value: "1600", label: "1600" },
+  { value: "1745", label: "1745" },
+  { value: "1930", label: "1930" },
+  { value: "2100", label: "2100" },
 ];
 
 /**
@@ -1207,7 +1220,7 @@ const StatusChip = ({ r }: { r: Row }) => {
 
   if (!r.status) return <span className="inline-block w-24 h-6" />;
   const tone =
-    (r.status === "Confirmed" || r.status === "Approved")
+    r.status === "Confirmed" || r.status === "Approved"
       ? "bg-green-100 text-green-700"
       : r.status === "Pending"
       ? "bg-yellow-100 text-yellow-700"
@@ -1358,19 +1371,43 @@ const SendModal = ({
                       >
                         <td className="px-4 py-3 align-middle">
                           <div className="leading-tight">
-                            <div className="font-semibold text-gray-900">{r.course || "—"}</div>
-                            <div className="mt-0.5 text-[12px] text-gray-600">{r.title || "—"}</div>
+                            <div className="font-semibold text-gray-900">
+                              {r.course || "—"}
+                            </div>
+                            <div className="mt-0.5 text-[12px] text-gray-600">
+                              {r.title || "—"}
+                            </div>
                           </div>
                         </td>
-                        <td className="px-4 py-3 align-middle">{r.section || "—"}</td>
-                        <td className="px-4 py-3 align-middle">{r.day1 || "—"}</td>
-                        <td className="px-4 py-3 align-middle">{displayBeginTimeOnly(r.begin1) || "—"}</td>
-                        <td className="px-4 py-3 align-middle">{displayTimeFromOptions(r.end1, TIME_END_OPTIONS) || "—"}</td>
-                        <td className="px-4 py-3 align-middle">{r.room1 || "—"}</td>
-                        <td className="px-4 py-3 align-middle">{r.day2 || "—"}</td>
-                        <td className="px-4 py-3 align-middle">{displayBeginTimeOnly(r.begin2) || "—"}</td>
-                        <td className="px-4 py-3 align-middle">{displayTimeFromOptions(r.end2, TIME_END_OPTIONS) || "—"}</td>
-                        <td className="px-4 py-3 align-middle">{r.room2 || "—"}</td>
+                        <td className="px-4 py-3 align-middle">
+                          {r.section || "—"}
+                        </td>
+                        <td className="px-4 py-3 align-middle">
+                          {r.day1 || "—"}
+                        </td>
+                        <td className="px-4 py-3 align-middle">
+                          {displayBeginTimeOnly(r.begin1) || "—"}
+                        </td>
+                        <td className="px-4 py-3 align-middle">
+                          {displayTimeFromOptions(r.end1, TIME_END_OPTIONS) ||
+                            "—"}
+                        </td>
+                        <td className="px-4 py-3 align-middle">
+                          {r.room1 || "—"}
+                        </td>
+                        <td className="px-4 py-3 align-middle">
+                          {r.day2 || "—"}
+                        </td>
+                        <td className="px-4 py-3 align-middle">
+                          {displayBeginTimeOnly(r.begin2) || "—"}
+                        </td>
+                        <td className="px-4 py-3 align-middle">
+                          {displayTimeFromOptions(r.end2, TIME_END_OPTIONS) ||
+                            "—"}
+                        </td>
+                        <td className="px-4 py-3 align-middle">
+                          {r.room2 || "—"}
+                        </td>
                         <td className="px-4 py-3 align-middle text-gray-800">
                           {r.mode || (r as any).room_type || "—"}
                         </td>
@@ -1409,8 +1446,7 @@ const SendModal = ({
                 onClose();
               } catch (e: any) {
                 onToast?.(e?.message || "Failed to send to faculty.", "error");
-              }
-              finally {
+              } finally {
                 setSending(false);
               }
             }}
@@ -1427,7 +1463,6 @@ const SendModal = ({
     </div>
   );
 };
-
 
 const SendBlockedModal = ({
   open,
@@ -1455,7 +1490,10 @@ const SendBlockedModal = ({
               Cannot send to Faculty yet
             </h3>
             <p className="mt-0.5 text-sm text-gray-600">
-              Please complete all <span className="font-semibold">required</span> fields for the selected faculty’s load recommendation rows before clicking <span className="font-semibold">To Faculty</span>.
+              Please complete all{" "}
+              <span className="font-semibold">required</span> fields for the
+              selected faculty’s load recommendation rows before clicking{" "}
+              <span className="font-semibold">To Faculty</span>.
             </p>
           </div>
         </div>
@@ -1481,7 +1519,8 @@ const SendBlockedModal = ({
         <div className="mt-5 flex items-center justify-between gap-3">
           <div className="text-xs text-gray-500">
             Tip: Required columns are marked with a{" "}
-            <span className="text-red-600 font-bold">*</span> in the table header.
+            <span className="text-red-600 font-bold">*</span> in the table
+            header.
           </div>
 
           <button
@@ -1525,8 +1564,10 @@ const RequestChangeModal = ({
 
   const displayFaculty = facultyName || "Faculty";
 
-  const isTerminal = !!status && ["ACCEPTED", "APPROVED", "REJECTED"].includes(status);
-  const needsOm = status === "NEEDS_OM" || status === "OPEN" || status === "open";
+  const isTerminal =
+    !!status && ["ACCEPTED", "APPROVED", "REJECTED"].includes(status);
+  const needsOm =
+    status === "NEEDS_OM" || status === "OPEN" || status === "open";
 
   useEffect(() => {
     if (!open) {
@@ -1627,13 +1668,24 @@ const RequestChangeModal = ({
           <X className="h-5 w-5 text-gray-500" />
         </button>
 
-        <h3 className="text-lg font-semibold text-emerald-700 mb-2">Request for Change</h3>
+        <h3 className="text-lg font-semibold text-emerald-700 mb-2">
+          Request for Change
+        </h3>
         <div className="text-sm text-gray-600 mb-1">
           From: <span className="font-semibold">{displayFaculty}</span>
         </div>
         <div className="text-[12px] text-gray-600 mb-4">
           Status:{" "}
-          <span className={cls("font-semibold", isTerminal ? "text-gray-700" : needsOm ? "text-red-600" : "text-blue-600")}>
+          <span
+            className={cls(
+              "font-semibold",
+              isTerminal
+                ? "text-gray-700"
+                : needsOm
+                ? "text-red-600"
+                : "text-blue-600"
+            )}
+          >
             {status || "(none)"}
           </span>
         </div>
@@ -1651,12 +1703,20 @@ const RequestChangeModal = ({
           {messages.length ? (
             <div className="space-y-2">
               {messages.map((m: any, idx: number) => {
-                const who = (m.sender_role || m.from || "").toString().toUpperCase();
-                const ts = m.created_at ? new Date(m.created_at).toLocaleString() : "";
+                const who = (m.sender_role || m.from || "")
+                  .toString()
+                  .toUpperCase();
+                const ts = m.created_at
+                  ? new Date(m.created_at).toLocaleString()
+                  : "";
                 return (
                   <div key={idx} className="text-sm">
-                    <div className="text-[11px] text-gray-500">{who} {ts ? `• ${ts}` : ""}</div>
-                    <div className="whitespace-pre-wrap text-gray-800">{m.message || m.text || ""}</div>
+                    <div className="text-[11px] text-gray-500">
+                      {who} {ts ? `• ${ts}` : ""}
+                    </div>
+                    <div className="whitespace-pre-wrap text-gray-800">
+                      {m.message || m.text || ""}
+                    </div>
                   </div>
                 );
               })}
@@ -1681,7 +1741,8 @@ const RequestChangeModal = ({
             disabled={loading || !status || isTerminal}
             className={cls(
               "px-4 py-2 rounded-lg bg-red-600 text-white text-sm",
-              (loading || !status || isTerminal) && "opacity-60 cursor-not-allowed"
+              (loading || !status || isTerminal) &&
+                "opacity-60 cursor-not-allowed"
             )}
             onClick={() => respond("reject")}
           >
@@ -1691,7 +1752,8 @@ const RequestChangeModal = ({
             disabled={loading || !status || isTerminal}
             className={cls(
               "px-4 py-2 rounded-lg bg-emerald-700 text-white text-sm",
-              (loading || !status || isTerminal) && "opacity-60 cursor-not-allowed"
+              (loading || !status || isTerminal) &&
+                "opacity-60 cursor-not-allowed"
             )}
             onClick={() => respond("approve")}
           >
@@ -1701,7 +1763,8 @@ const RequestChangeModal = ({
             disabled={loading || !status || isTerminal}
             className={cls(
               "px-4 py-2 rounded-lg bg-blue-600 text-white text-sm",
-              (loading || !status || isTerminal) && "opacity-60 cursor-not-allowed"
+              (loading || !status || isTerminal) &&
+                "opacity-60 cursor-not-allowed"
             )}
             onClick={() => respond("reply")}
           >
@@ -1751,10 +1814,10 @@ const NewSectionModal = ({
     courseOptions.find((c) => c.code === course)?.title || "";
 
   const handleSave = () => {
-  if (!course || !section) {
-    onToast?.("Please fill at least Course Code and Section Code.", "error");
-    return;
-  }
+    if (!course || !section) {
+      onToast?.("Please fill at least Course Code and Section Code.", "error");
+      return;
+    }
 
     onSave({
       course,
@@ -1852,8 +1915,6 @@ const NewSectionModal = ({
   );
 };
 
-
-
 type ToastKind = "success" | "error" | "warning" | "info";
 
 function Toast({
@@ -1910,7 +1971,10 @@ function Toast({
 }
 
 function useToast() {
-  const [toast, setToast] = useState<{ kind: ToastKind; message: string } | null>(null);
+  const [toast, setToast] = useState<{
+    kind: ToastKind;
+    message: string;
+  } | null>(null);
   const timerRef = useRef<number | null>(null);
 
   const clear = useCallback(() => {
@@ -1919,14 +1983,17 @@ function useToast() {
     setToast(null);
   }, []);
 
-  const show = useCallback((message: string, kind: ToastKind = "info", ms = 2500) => {
-    if (timerRef.current) window.clearTimeout(timerRef.current);
-    setToast({ kind, message });
-    timerRef.current = window.setTimeout(() => {
-      setToast(null);
-      timerRef.current = null;
-    }, ms);
-  }, []);
+  const show = useCallback(
+    (message: string, kind: ToastKind = "info", ms = 2500) => {
+      if (timerRef.current) window.clearTimeout(timerRef.current);
+      setToast({ kind, message });
+      timerRef.current = window.setTimeout(() => {
+        setToast(null);
+        timerRef.current = null;
+      }, ms);
+    },
+    []
+  );
 
   useEffect(() => () => clear(), [clear]);
 
@@ -1934,7 +2001,6 @@ function useToast() {
 }
 /* ---------------- Main ---------------- */
 export default function OM_LoadAssignment() {
-
   const [copiedRowId, setCopiedRowId] = useState<string | null>(null);
 
   const formatRowForClipboard = (row: Row) =>
@@ -2095,7 +2161,16 @@ export default function OM_LoadAssignment() {
         }
       }
 
-      setRows(nextRows);
+      const normalizedNextRows: Row[] = nextRows.map((r: any) => ({
+        ...r,
+        mode: (r as any)?.mode ?? (r as any)?.Mode ?? "",
+        begin1: normalizeServerTimeToHHMM(r?.begin1),
+        end1: normalizeServerTimeToHHMM(r?.end1),
+        begin2: normalizeServerTimeToHHMM(r?.begin2),
+        end2: normalizeServerTimeToHHMM(r?.end2),
+      }));
+
+      setRows(normalizedNextRows);
       setTerm(typeof res?.term === "string" ? res.term : "");
       setMode("run");
       // Preserve the "Forward to Chair" final-state across auto-assign.
@@ -2110,7 +2185,6 @@ export default function OM_LoadAssignment() {
       setIsAssigning(false);
     }
   }
-
 
   const prettifyRole = (raw: string) => {
     const s = String(raw || "").trim();
@@ -2127,7 +2201,11 @@ export default function OM_LoadAssignment() {
 
   const computedRoleTitleFromRoles = (roles?: string[]) => {
     const norm = (roles || [])
-      .map((r) => String(r || "").trim().toLowerCase())
+      .map((r) =>
+        String(r || "")
+          .trim()
+          .toLowerCase()
+      )
       .filter(Boolean);
 
     if (norm.includes("office manager")) return "Office Manager";
@@ -2138,7 +2216,9 @@ export default function OM_LoadAssignment() {
   };
 
   // TopBar profile (session first, optionally enriched by OM profile API)
-  const [profileName, setProfileName] = useState<string>(session?.fullName || "");
+  const [profileName, setProfileName] = useState<string>(
+    session?.fullName || ""
+  );
   const [profileSubtitle, setProfileSubtitle] = useState<string>(
     computedRoleTitleFromRoles(session?.roles)
   );
@@ -2152,7 +2232,12 @@ export default function OM_LoadAssignment() {
   /** Archived view UI */
   const [archiveOpen, setArchiveOpen] = useState(false);
   const [archiveTerms, setArchiveTerms] = useState<
-    { term_id: string; label: string; is_active?: boolean; is_current?: boolean }[]
+    {
+      term_id: string;
+      label: string;
+      is_active?: boolean;
+      is_current?: boolean;
+    }[]
   >([]);
   const [archiveTermId, setArchiveTermId] = useState<string>("");
   const isArchiveView = !!activeTermId && !!termId && termId !== activeTermId;
@@ -2164,15 +2249,21 @@ export default function OM_LoadAssignment() {
     (async () => {
       try {
         const res = await getOmLoadAssignmentTerms();
-        const terms = Array.isArray((res as any)?.terms) ? (res as any).terms : [];
+        const terms = Array.isArray((res as any)?.terms)
+          ? (res as any).terms
+          : [];
         setArchiveTerms(terms);
 
-        const apiActive = typeof (res as any)?.active_term_id === "string" ? (res as any).active_term_id : "";
+        const apiActive =
+          typeof (res as any)?.active_term_id === "string"
+            ? (res as any).active_term_id
+            : "";
         // Keep activeTermId in sync if the page hasn't yet loaded its default list.
         if (apiActive && !activeTermId) setActiveTermId(apiActive);
 
         const defaultPick =
-          terms.find((t: any) => (t?.term_id || "") !== (termId || ""))?.term_id ||
+          terms.find((t: any) => (t?.term_id || "") !== (termId || ""))
+            ?.term_id ||
           terms[0]?.term_id ||
           "";
         setArchiveTermId(defaultPick);
@@ -2196,14 +2287,13 @@ export default function OM_LoadAssignment() {
         const displayName = (p?.full_name || baseName || "").trim();
         const roleTitle = (p?.position_title || baseRole || "").trim();
         const dept = String(
-  p?.dept_name ??
-  (session as any)?.dept_name ??
-  (session as any)?.dept_label ??
-  (session as any)?.deptName ??
-  (session as any)?.department?.dept_name ??
-  ""
-).trim();
-
+          p?.dept_name ??
+            (session as any)?.dept_name ??
+            (session as any)?.dept_label ??
+            (session as any)?.deptName ??
+            (session as any)?.department?.dept_name ??
+            ""
+        ).trim();
 
         let subtitle = roleTitle;
         if (dept) {
@@ -2211,7 +2301,8 @@ export default function OM_LoadAssignment() {
           const deptLower = dept.toLowerCase();
           // append dept exactly once
           if (!subtitle) subtitle = dept;
-          else if (!subLower.includes(deptLower)) subtitle = `${subtitle} | ${dept}`;
+          else if (!subLower.includes(deptLower))
+            subtitle = `${subtitle} | ${dept}`;
         }
 
         setProfileName(displayName);
@@ -2256,7 +2347,10 @@ export default function OM_LoadAssignment() {
   const [approved, setApproved] = useState(false);
   const [showSend, setShowSend] = useState(false);
   const [sendRowsPreview, setSendRowsPreview] = useState<Row[]>([]);
-  const [sendBlocked, setSendBlocked] = useState<{ open: boolean; missing: MissingFieldRow[] }>({ open: false, missing: [] });
+  const [sendBlocked, setSendBlocked] = useState<{
+    open: boolean;
+    missing: MissingFieldRow[];
+  }>({ open: false, missing: [] });
 
   const [reqChange, setReqChange] = useState<{
     open: boolean;
@@ -2293,7 +2387,8 @@ export default function OM_LoadAssignment() {
      * We only auto-promote when the row is "complete" and not in a terminal/locked state.
      */
     const applyAutoPendingStatus = (rowsIn: Row[]): Row[] => {
-      const isBlank = (v: any) => v === null || v === undefined || String(v).trim() === "";
+      const isBlank = (v: any) =>
+        v === null || v === undefined || String(v).trim() === "";
 
       const hasAnySecondMeeting = (r: Row) =>
         !isBlank(r.day2) || !isBlank(r.begin2) || !isBlank(r.end2);
@@ -2317,7 +2412,8 @@ export default function OM_LoadAssignment() {
       };
 
       return rowsIn.map((r) => {
-        const locked = !!r.finalized || r.status === "Approved" || r.status === "Confirmed";
+        const locked =
+          !!r.finalized || r.status === "Approved" || r.status === "Confirmed";
         if (locked) return r;
 
         // If OM has completed the row, ensure it's Pending (unless it is already a more specific status).
@@ -2380,11 +2476,14 @@ export default function OM_LoadAssignment() {
   const [facultyList, setFacultyList] = useState<Faculty[]>([]);
   // Faculty Deloading (per-faculty)
   const [deloadFacultyQuery, setDeloadFacultyQuery] = useState<string>("");
-  const [deloadSelectedFaculty, setDeloadSelectedFaculty] = useState<Faculty | null>(null);
+  const [deloadSelectedFaculty, setDeloadSelectedFaculty] =
+    useState<Faculty | null>(null);
   const [deloadRows, setDeloadRows] = useState<DeloadingRow[]>([]);
   const [deloadLoading, setDeloadLoading] = useState(false);
   const [deloadError, setDeloadError] = useState<string>("");
-  const [facultyWithDeloadings, setFacultyWithDeloadings] = useState<Faculty[]>([]);
+  const [facultyWithDeloadings, setFacultyWithDeloadings] = useState<Faculty[]>(
+    []
+  );
   const [deloadDropdownOpen, setDeloadDropdownOpen] = useState(false);
 
   // Load all faculty once on mount
@@ -2433,7 +2532,8 @@ export default function OM_LoadAssignment() {
 
   // Selection in the load recommendation table is by faculty (not per subject):
   // if the OM selects any row for a faculty, we select *all* rows for that faculty.
-  const facultyKeyOf = (r: Row) => String((r.faculty_id || r.faculty || "")).trim();
+  const facultyKeyOf = (r: Row) =>
+    String(r.faculty_id || r.faculty || "").trim();
   const setFacultySelected = (refRow: Row, checked: boolean) => {
     const k = facultyKeyOf(refRow);
     if (!k) {
@@ -2473,7 +2573,7 @@ export default function OM_LoadAssignment() {
 
     const all = rows.every((r) => r.selected);
 
-    const key = (r: Row) => String((r.faculty_id || r.faculty || "")).trim();
+    const key = (r: Row) => String(r.faculty_id || r.faculty || "").trim();
     const selectedKeys = new Set(selectedRows.map(key).filter(Boolean));
 
     if (all) {
@@ -2484,7 +2584,7 @@ export default function OM_LoadAssignment() {
     // If any row is selected for a faculty, send ALL rows for that faculty (not per subject)
     return rows.filter((r) => selectedKeys.has(key(r)));
   };
-/**
+  /**
    * Before forwarding to faculty, require that the rows being sent are complete.
    * This prevents faculty from receiving half-filled / unusable schedules.
    */
@@ -2528,31 +2628,32 @@ export default function OM_LoadAssignment() {
 
     return missing;
   };
-  
+
   const handleSendToFaculty = async (rowsToSend: Row[]) => {
     if (!userId) throw new Error("Missing userId");
     if (!rowsToSend?.length) throw new Error("No rows to send");
 
-	    // Defensive: ensure faculty_id exists (backend groups strictly by faculty_id).
-	    // This also prevents schedule fields from being wiped on refresh for rows whose faculty was
-	    // selected by display name only.
-	    const normalizedRowsToSend: Row[] = rowsToSend
-	      .map((r) => {
-	        const fid = (r.faculty_id || "").trim() || (facultyNameToId[r.faculty] || "");
-	        return fid ? ({ ...r, faculty_id: fid } as Row) : r;
-	      })
-	      .filter((r) => !!(r.faculty_id || "").trim());
+    // Defensive: ensure faculty_id exists (backend groups strictly by faculty_id).
+    // This also prevents schedule fields from being wiped on refresh for rows whose faculty was
+    // selected by display name only.
+    const normalizedRowsToSend: Row[] = rowsToSend
+      .map((r) => {
+        const fid =
+          (r.faculty_id || "").trim() || facultyNameToId[r.faculty] || "";
+        return fid ? ({ ...r, faculty_id: fid } as Row) : r;
+      })
+      .filter((r) => !!(r.faculty_id || "").trim());
 
-	    if (!normalizedRowsToSend.length) {
-	      throw new Error("No rows with faculty_id");
-	    }
+    if (!normalizedRowsToSend.length) {
+      throw new Error("No rows with faculty_id");
+    }
 
     const term_id = termId || undefined;
 
     // 1️⃣ Send selected rows to faculty (proposal + notification)
     await sendOmLoadAssignmentsToFaculty(userId, {
       term_id,
-	      rows: normalizedRowsToSend,
+      rows: normalizedRowsToSend,
     });
 
     // 2️⃣ Persist the FULL OM table so refresh doesn't revert changes
@@ -2560,7 +2661,8 @@ export default function OM_LoadAssignment() {
     // The backend groups/updates rows by faculty_id; if OM selected a faculty by name only,
     // saving without faculty_id can cause fields (including Mode) to be treated as blank on reload.
     const normalizedAllRows: Row[] = rows.map((r) => {
-      const fid = (r.faculty_id || "").trim() || (facultyNameToId[r.faculty] || "");
+      const fid =
+        (r.faculty_id || "").trim() || facultyNameToId[r.faculty] || "";
       return fid ? ({ ...r, faculty_id: fid } as Row) : r;
     });
     await submitOmLoadAssignment(userId, { rows: normalizedAllRows }, "save");
@@ -2570,10 +2672,10 @@ export default function OM_LoadAssignment() {
     setSendRowsPreview([]);
     await loadFromServer();
     setHasLocalEdits(false);
-	    const uniqueFaculty = new Set(
-	      normalizedRowsToSend
-	        .map((r) => (r.faculty || r.faculty_id || "").toString().trim())
-	        .filter(Boolean)
+    const uniqueFaculty = new Set(
+      normalizedRowsToSend
+        .map((r) => (r.faculty || r.faculty_id || "").toString().trim())
+        .filter(Boolean)
     );
     showToast(
       uniqueFaculty.size <= 1
@@ -2632,7 +2734,8 @@ export default function OM_LoadAssignment() {
       end2: normalizeServerTimeToHHMM(r?.end2),
     }));
     setRows(normalizedRows);
-    const nextTermId = typeof (res as any)?.term_id === "string" ? (res as any).term_id : "";
+    const nextTermId =
+      typeof (res as any)?.term_id === "string" ? (res as any).term_id : "";
     setTerm(typeof res?.term === "string" ? res.term : "");
     setTermId(nextTermId);
     // Capture the default active term id on normal loads so we can detect archive view.
@@ -2845,41 +2948,43 @@ export default function OM_LoadAssignment() {
   );
 
   const deloadMatches = useMemo(() => {
-  const q = deloadFacultyQuery.trim().toLowerCase();
-  if (!q) return [] as Faculty[];
-  return (facultyList ?? [])
-    .filter((f) => (f.faculty_name_display || "").toLowerCase().includes(q))
-    .slice(0, 12);
-}, [deloadFacultyQuery, facultyList]);
+    const q = deloadFacultyQuery.trim().toLowerCase();
+    if (!q) return [] as Faculty[];
+    return (facultyList ?? [])
+      .filter((f) => (f.faculty_name_display || "").toLowerCase().includes(q))
+      .slice(0, 12);
+  }, [deloadFacultyQuery, facultyList]);
 
-const loadFacultyDeloadings = async (fid: string) => {
-  if (!fid) return;
-  try {
-    setDeloadLoading(true);
-    setDeloadError("");
-    const res = await getOmFacultyDeloadings({ faculty_id: fid, term_id: termId || undefined });
-    setDeloadRows(Array.isArray(res?.rows) ? res.rows : []);
-  } catch (e: any) {
-    setDeloadError(e?.message || "Failed to load deloadings.");
-    setDeloadRows([]);
-  } finally {
-    setDeloadLoading(false);
-  }
-};
-
-useEffect(() => {
-  if (!termId) return;
-  (async () => {
+  const loadFacultyDeloadings = async (fid: string) => {
+    if (!fid) return;
     try {
-      const r = await getOmFacultyWithDeloadings(termId);
-      setFacultyWithDeloadings(Array.isArray(r?.faculty) ? r.faculty : []);
-    } catch (e) {
-      console.error("Failed to load facultyWithDeloadings", e);
-      setFacultyWithDeloadings([]);
+      setDeloadLoading(true);
+      setDeloadError("");
+      const res = await getOmFacultyDeloadings({
+        faculty_id: fid,
+        term_id: termId || undefined,
+      });
+      setDeloadRows(Array.isArray(res?.rows) ? res.rows : []);
+    } catch (e: any) {
+      setDeloadError(e?.message || "Failed to load deloadings.");
+      setDeloadRows([]);
+    } finally {
+      setDeloadLoading(false);
     }
-  })();
-}, [termId]);
+  };
 
+  useEffect(() => {
+    if (!termId) return;
+    (async () => {
+      try {
+        const r = await getOmFacultyWithDeloadings(termId);
+        setFacultyWithDeloadings(Array.isArray(r?.faculty) ? r.faculty : []);
+      } catch (e) {
+        console.error("Failed to load facultyWithDeloadings", e);
+        setFacultyWithDeloadings([]);
+      }
+    })();
+  }, [termId]);
 
   type FacultySummaryRow = {
     facultyId: string;
@@ -2892,9 +2997,30 @@ useEffect(() => {
   const facultySummary: FacultySummaryRow[] = useMemo(() => {
     const acc: Record<string, FacultySummaryRow> = {};
 
-    for (const r of rows) {
-      if (!r.faculty && !r.faculty_id) continue;
+    // 1) Seed with ALL faculty from DB (so unassigned ones exist with 0 units)
+    for (const f of facultyList ?? []) {
+      const fid = f.faculty_id;
+      if (!fid) continue;
 
+      const prefFromMap = preferredByFaculty?.[fid];
+      const preferredUnits =
+        typeof prefFromMap === "number"
+          ? prefFromMap
+          : typeof f.preferred_units === "number"
+          ? f.preferred_units
+          : null;
+
+      acc[fid] = {
+        facultyId: fid,
+        facultyName: f.faculty_name_display || fid,
+        assignedUnits: 0,
+        preferredUnits,
+        diff: preferredUnits != null ? 0 - preferredUnits : null,
+      };
+    }
+
+    // 2) Add assigned units from rows (only increments those who appear in rows)
+    for (const r of rows) {
       const key = r.faculty_id || r.faculty || "";
       if (!key) continue;
 
@@ -2904,15 +3030,14 @@ useEffect(() => {
           : parseFloat(String(r.units || "0")) || 0;
 
       if (!acc[key]) {
+        // fallback if faculty is not in facultyList (edge case)
         const meta = r.faculty_id ? facultyById[r.faculty_id] : undefined;
         const facultyName =
           r.faculty || meta?.faculty_name_display || r.faculty_id || "—";
 
-        // NEW: first try map from backend, then fallback to meta.preferred_units
         const prefFromMap = r.faculty_id
-          ? preferredByFaculty[r.faculty_id]
+          ? preferredByFaculty?.[r.faculty_id]
           : undefined;
-
         const preferredUnits =
           typeof prefFromMap === "number"
             ? prefFromMap
@@ -2932,17 +3057,19 @@ useEffect(() => {
       acc[key].assignedUnits += numericUnits;
     }
 
-    // compute diff after accumulating
+    // 3) Recompute diff after accumulating
     Object.values(acc).forEach((row) => {
       if (row.preferredUnits != null) {
         row.diff = row.assignedUnits - row.preferredUnits;
+      } else {
+        row.diff = null;
       }
     });
 
     return Object.values(acc).sort((a, b) =>
       a.facultyName.localeCompare(b.facultyName)
     );
-  }, [rows, facultyById, preferredByFaculty]);
+  }, [rows, facultyList, facultyById, preferredByFaculty]);
 
   // ---- Rule alerts for Tab 2 (violations / warnings) ----
   type RuleAlert = {
@@ -3389,9 +3516,87 @@ useEffect(() => {
     );
   }, [blockedGeCmps2]);
 
-  const [summaryTab, setSummaryTab] = useState<
-    "units" | "second" | "blocked"
-  >("units");
+  const [summaryTab, setSummaryTab] = useState<"units" | "second" | "blocked">(
+    "units"
+  );
+
+  type UnitsFilterMode = "all" | "unassigned" | "issues";
+  type UnitsSortKey = "faculty" | "assigned" | "preferred" | "gap";
+
+  const [hideNoPrefs, setHideNoPrefs] = useState(false);
+  const [showUnitsFilters, setShowUnitsFilters] = useState(false);
+  const [unitsFilterMode, setUnitsFilterMode] =
+    useState<UnitsFilterMode>("all");
+
+  // default sort (you can change these defaults if you want)
+  const [unitsSortKey, setUnitsSortKey] = useState<UnitsSortKey>("gap");
+  const [unitsSortDir, setUnitsSortDir] = useState<"asc" | "desc">("asc"); // asc: most underloaded first
+
+  const toggleUnitsSort = (key: UnitsSortKey) => {
+    if (unitsSortKey === key) {
+      setUnitsSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    } else {
+      setUnitsSortKey(key);
+      setUnitsSortDir("asc");
+    }
+  };
+
+  const facultySummaryView = useMemo(() => {
+    const base = [...facultySummary];
+
+    const filtered = base.filter((f) => {
+      const assigned = Number(f.assignedUnits ?? 0);
+      const hasPref = f.preferredUnits != null;
+      const diff = f.diff;
+
+      if (hideNoPrefs && !hasPref) return false;
+
+      if (unitsFilterMode === "unassigned") return assigned === 0;
+      if (unitsFilterMode === "issues")
+        return hasPref && diff != null && diff !== 0;
+      return true;
+    });
+
+    const dir = unitsSortDir === "asc" ? 1 : -1;
+
+    filtered.sort((a, b) => {
+      const aName = a.facultyName ?? "";
+      const bName = b.facultyName ?? "";
+
+      const aAssigned = Number(a.assignedUnits ?? 0);
+      const bAssigned = Number(b.assignedUnits ?? 0);
+
+      const aPref =
+        a.preferredUnits == null
+          ? Number.POSITIVE_INFINITY
+          : Number(a.preferredUnits);
+      const bPref =
+        b.preferredUnits == null
+          ? Number.POSITIVE_INFINITY
+          : Number(b.preferredUnits);
+
+      const aGap = a.diff == null ? Number.POSITIVE_INFINITY : Number(a.diff);
+      const bGap = b.diff == null ? Number.POSITIVE_INFINITY : Number(b.diff);
+
+      if (unitsSortKey === "faculty") return dir * aName.localeCompare(bName);
+      if (unitsSortKey === "assigned") return dir * (aAssigned - bAssigned);
+      if (unitsSortKey === "preferred") return dir * (aPref - bPref);
+
+      // default: gap
+      if (aGap !== bGap) return dir * (aGap - bGap);
+
+      // tie-breaker: name
+      return aName.localeCompare(bName);
+    });
+
+    return filtered;
+  }, [
+    facultySummary,
+    unitsFilterMode,
+    unitsSortKey,
+    unitsSortDir,
+    hideNoPrefs,
+  ]);
 
   const courseOptions = useMemo(() => {
     const map: Record<string, string> = {};
@@ -3508,31 +3713,33 @@ useEffect(() => {
                         : "bg-gray-200 text-gray-400 cursor-not-allowed" // disabled
                     )}
                     onClick={() => {
-                    if (isArchiveView) return;
-                    //HARD BLOCK: required fields must be complete before forwarding
-                    const incomplete = rows.filter(isRowIncompleteForApproval);
-                    if (incomplete.length > 0) {
-                      showToast(
-                        `Cannot forward to Chair yet. Please complete all required fields (including Mode) for ${incomplete.length} row(s).`,
-                        "error"
+                      if (isArchiveView) return;
+                      //HARD BLOCK: required fields must be complete before forwarding
+                      const incomplete = rows.filter(
+                        isRowIncompleteForApproval
                       );
-                      return;
-                    }
+                      if (incomplete.length > 0) {
+                        showToast(
+                          `Cannot forward to Chair yet. Please complete all required fields (including Mode) for ${incomplete.length} row(s).`,
+                          "error"
+                        );
+                        return;
+                      }
 
-                    // Existing behavior: warn about other validation errors, but allow override
-                    if (hasAnyErrors) {
-                      const proceed = window.confirm(
-                        [
-                          "There are validation errors (e.g., KAC mismatch, mode mismatch, or schedule conflicts).",
-                          "",
-                          "Do you still want to proceed with approval?",
-                        ].join("\n")
-                      );
-                      if (!proceed) return;
-                    }
+                      // Existing behavior: warn about other validation errors, but allow override
+                      if (hasAnyErrors) {
+                        const proceed = window.confirm(
+                          [
+                            "There are validation errors (e.g., KAC mismatch, mode mismatch, or schedule conflicts).",
+                            "",
+                            "Do you still want to proceed with approval?",
+                          ].join("\n")
+                        );
+                        if (!proceed) return;
+                      }
 
-                    void handleForwardToChair();
-                  }}
+                      void handleForwardToChair();
+                    }}
                   >
                     <CheckCheck className="h-4 w-4" />
                     {approved ? "Re-forward to Chair" : "Forward to Chair"}
@@ -3597,8 +3804,7 @@ useEffect(() => {
                         title={
                           isArchiveView
                             ? "Archived view: importing is disabled"
-                            :
-                          !isRunning
+                            : !isRunning
                             ? "Run Auto-assign or load data first"
                             : shsFile
                             ? `Selected: ${shsFile.name}`
@@ -3629,8 +3835,7 @@ useEffect(() => {
                       title={
                         isArchiveView
                           ? "Archived view: auto-assign is disabled"
-                          :
-                        hasLocalEdits
+                          : hasLocalEdits
                           ? "Auto-assign is disabled while you have manual edits. Save or refresh first."
                           : "Run auto-assignment algorithm"
                       }
@@ -3640,56 +3845,61 @@ useEffect(() => {
                     </button>
 
                     {/* Refresh button (always visible if running) */}
-                      {isRunning && (
-                        <button
-                          onClick={() => loadFromServer()}
-                          className="inline-flex h-10 min-w-[140px] items-center justify-center gap-2 rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium hover:bg-gray-50"
-                        >
-                          <RefreshCcw className="h-4 w-4" />
-                          Refresh
-                        </button>
-
-                      )}
-
-                      {/* To Faculty button moved here (beside Refresh) */}
+                    {isRunning && (
                       <button
-                        disabled={!anySelected || !isRunning || isArchiveView}
-                        onClick={() => {
-                          if (isArchiveView) return;
-                          const preview = buildSendRowsForPreview();
-                          if (!preview.length) {
-                            showToast("Select at least one row with an assigned faculty.", "error");
-                            return;
-                          }
-
-                          const missing = validateRowsCompleteForSend(preview);
-                          if (missing.length) {
-                            // Hard validation: block sending until required fields are filled
-                            setSendBlocked({ open: true, missing });
-                            showToast("Cannot send to faculty: please complete all required fields in the selected faculty’s rows.", "error");
-                            return;
-                          }
-
-                          setSendRowsPreview(preview.map((r) => ({ ...r })));
-                          setShowSend(true);
-                        }}
-                        className={cls(
-                          "inline-flex h-10 min-w-[140px] items-center justify-center gap-2 rounded-md px-4 py-2 text-sm font-medium shadow-sm",
-                          anySelected && isRunning && !isArchiveView
-                            ? "bg-blue-600 text-white hover:brightness-110"
-                            : "bg-gray-200 text-gray-500 cursor-not-allowed"
-                        )}
-                        title={
-                          isArchiveView
-                            ? "Archived view: sending is disabled"
-                            : anySelected
-                            ? "Send to selected faculty"
-                            : "Select at least one row"
-                        }
+                        onClick={() => loadFromServer()}
+                        className="inline-flex h-10 min-w-[140px] items-center justify-center gap-2 rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium hover:bg-gray-50"
                       >
-                        <Send className="h-4 w-4" />
-                        To Faculty
+                        <RefreshCcw className="h-4 w-4" />
+                        Refresh
                       </button>
+                    )}
+
+                    {/* To Faculty button moved here (beside Refresh) */}
+                    <button
+                      disabled={!anySelected || !isRunning || isArchiveView}
+                      onClick={() => {
+                        if (isArchiveView) return;
+                        const preview = buildSendRowsForPreview();
+                        if (!preview.length) {
+                          showToast(
+                            "Select at least one row with an assigned faculty.",
+                            "error"
+                          );
+                          return;
+                        }
+
+                        const missing = validateRowsCompleteForSend(preview);
+                        if (missing.length) {
+                          // Hard validation: block sending until required fields are filled
+                          setSendBlocked({ open: true, missing });
+                          showToast(
+                            "Cannot send to faculty: please complete all required fields in the selected faculty’s rows.",
+                            "error"
+                          );
+                          return;
+                        }
+
+                        setSendRowsPreview(preview.map((r) => ({ ...r })));
+                        setShowSend(true);
+                      }}
+                      className={cls(
+                        "inline-flex h-10 min-w-[140px] items-center justify-center gap-2 rounded-md px-4 py-2 text-sm font-medium shadow-sm",
+                        anySelected && isRunning && !isArchiveView
+                          ? "bg-blue-600 text-white hover:brightness-110"
+                          : "bg-gray-200 text-gray-500 cursor-not-allowed"
+                      )}
+                      title={
+                        isArchiveView
+                          ? "Archived view: sending is disabled"
+                          : anySelected
+                          ? "Send to selected faculty"
+                          : "Select at least one row"
+                      }
+                    >
+                      <Send className="h-4 w-4" />
+                      To Faculty
+                    </button>
 
                     {/* Original Import CSV block removed */}
                     {/* {isRunning ? (...) : (
@@ -3717,424 +3927,486 @@ useEffect(() => {
                   <ArchivedLoadsSummary rows={rows} termLabel={term} />
                 ) : (
                   <div className="mt-3 max-h-[58vh] overflow-x-auto overflow-y-auto rounded-xl border border-gray-300 bg-white shadow-sm">
-                  <table className="min-w-full text-sm table-fixed border-collapse">
-                    <colgroup>
-                      <col className="w-[46px]" />
-                      <col className="w-[160px]" />
-                      <col className="w-[26%]" />
-                      <col className="w-[70px]" />
-                      <col className="w-[80px]" />
-                      <col className="w-[18%]" />
-                      <col className="w-[72px]" />
-                      <col className="w-[140px]" />
-                      <col className="w-[96px]" />
-                      <col className="w-[96px]" />
-                      <col className="w-[72px]" />
-                      <col className="w-[140px]" />
-                      <col className="w-[96px]" />
-                      <col className="w-[96px]" />
-                      <col className="w-[80px]" />
-                      <col className="w-[100px]" />
-                      <col className="w-[110px]" />
-                    </colgroup>
+                    <table className="min-w-full text-sm table-fixed border-collapse">
+                      <colgroup>
+                        <col className="w-[46px]" />
+                        <col className="w-[160px]" />
+                        <col className="w-[26%]" />
+                        <col className="w-[70px]" />
+                        <col className="w-[80px]" />
+                        <col className="w-[18%]" />
+                        <col className="w-[72px]" />
+                        <col className="w-[140px]" />
+                        <col className="w-[96px]" />
+                        <col className="w-[96px]" />
+                        <col className="w-[72px]" />
+                        <col className="w-[140px]" />
+                        <col className="w-[96px]" />
+                        <col className="w-[96px]" />
+                        <col className="w-[80px]" />
+                        <col className="w-[100px]" />
+                        <col className="w-[110px]" />
+                      </colgroup>
 
-                    <thead className="bg-gray-50 text-emerald-800 sticky top-0 z-10">
-                      <tr className="whitespace-nowrap text-[13px] font-semibold">
-                        <th className="px-3 py-2 text-center border border-gray-300">
-                          {isRunning && (
-                            <input
-                              type="checkbox"
-                              checked={allSelected}
-                              onChange={(e) =>
-                                toggleSelectAll(e.target.checked)
-                              }
-                              className="rounded border-gray-300 text-emerald-600 focus:ring-emerald-500"
-                              title="Select all"
-                            />
-                          )}
-                        </th>
-                        <th className="px-3 py-2 text-left border border-gray-300">
-                          Course Code & Title<span className="text-red-600" aria-hidden="true">*</span>
-                        </th>
-                        <th className="px-3 py-2 text-center border border-gray-300">
-                          Units
-                        </th>
-                        <th className="px-3 py-2 text-center border border-gray-300">
-                          Section
-                        </th>
-                        <th className="px-3 py-2 text-left border border-gray-300">
-                          Faculty <span className="text-red-600" aria-hidden="true">*</span>
-                        </th>
-                        <th className="px-3 py-2 text-center border border-gray-300">
-                          Day 1 <span className="text-red-600" aria-hidden="true">*</span>
-                        </th>
-                        <th className="px-3 py-2 text-center border border-gray-300">
-                          Begin 1 <span className="text-red-600" aria-hidden="true">*</span>
-                        </th>
-                        <th className="px-3 py-2 text-center border border-gray-300">
-                          End 1 <span className="text-red-600" aria-hidden="true">*</span>
-                        </th>
-                        <th className="px-3 py-2 text-center border border-gray-300">
-                          Room 1
-                        </th>
-                        <th className="px-3 py-2 text-center border border-gray-300">
-                          Day 2 <span className="text-red-600" aria-hidden="true">*</span>
-                        </th>
-                        <th className="px-3 py-2 text-center border border-gray-300">
-                          Begin 2 <span className="text-red-600" aria-hidden="true">*</span>
-                        </th>
-                        <th className="px-3 py-2 text-center border border-gray-300">
-                          End 2 <span className="text-red-600" aria-hidden="true">*</span>
-                        </th>
-                        <th className="px-3 py-2 text-center border border-gray-300">
-                          Room 2
-                        </th>
-                        <th className="px-3 py-2 text-center border border-gray-300">
-                          Capacity
-                        </th>
-                        <th className="px-3 py-2 text-center border border-gray-300">
-                          Mode <span className="text-red-600" aria-hidden="true">*</span>
-                        </th>
-                        <th className="px-3 py-2 text-center border border-gray-300">
-                          Status
-                        </th>
-                        <th className="px-3 py-2 text-center border border-gray-300">
-                          Actions
-                        </th>
-                      </tr>
-                    </thead>
-
-                    <tbody>
-                      {filtered.map((r, idx) => {
-                        const e = getEditFlags(r);
-                        const isLocked = !!r.finalized || r.status === "Approved";
-                        const isForwardedToFaculty = !!r.forwarded_to_faculty;
-                        // Show the red dot only when there is a pending RFC AND the row is still actionable.
-                        // Once the schedule is approved/finalized, the message icon is disabled; the dot should disappear.
-                        const unread = !!(r as any).pending_rfc && !r.finalized;
-                        return (
-                          <tr
-                            key={r.id}
-                            className={cls(
-                              "whitespace-nowrap [&>td]:border [&>td]:border-gray-200",
-                              isLocked
-                                ? "bg-gray-100 text-gray-500 hover:bg-gray-100"
-                                : isForwardedToFaculty
-                                ? "bg-sky-50 hover:bg-sky-100/40"
-                                : "hover:bg-gray-50"
+                      <thead className="bg-gray-50 text-emerald-800 sticky top-0 z-10">
+                        <tr className="whitespace-nowrap text-[13px] font-semibold">
+                          <th className="px-3 py-2 text-center border border-gray-300">
+                            {isRunning && (
+                              <input
+                                type="checkbox"
+                                checked={allSelected}
+                                onChange={(e) =>
+                                  toggleSelectAll(e.target.checked)
+                                }
+                                className="rounded border-gray-300 text-emerald-600 focus:ring-emerald-500"
+                                title="Select all"
+                              />
                             )}
-                          >
-                            <td className="px-3 py-2 text-center">
-                              {isRunning && (
-                                <input
-                                  type="checkbox"
-                                  checked={!!r.selected}
-                                  disabled={isLocked}
-                                  onChange={(ev) =>
-                                    !isLocked &&
-                                    setFacultySelected(r, ev.target.checked)
-                                  }
-                                  className="rounded border-gray-300 text-emerald-600 focus:ring-emerald-500"
-                                  title={`Select row ${idx + 1}`}
-                                />
-                              )}
-                            </td>
+                          </th>
+                          <th className="px-3 py-2 text-left border border-gray-300">
+                            Course Code & Title
+                            <span className="text-red-600" aria-hidden="true">
+                              *
+                            </span>
+                          </th>
+                          <th className="px-3 py-2 text-center border border-gray-300">
+                            Units
+                          </th>
+                          <th className="px-3 py-2 text-center border border-gray-300">
+                            Section
+                          </th>
+                          <th className="px-3 py-2 text-left border border-gray-300">
+                            Faculty{" "}
+                            <span className="text-red-600" aria-hidden="true">
+                              *
+                            </span>
+                          </th>
+                          <th className="px-3 py-2 text-center border border-gray-300">
+                            Day 1{" "}
+                            <span className="text-red-600" aria-hidden="true">
+                              *
+                            </span>
+                          </th>
+                          <th className="px-3 py-2 text-center border border-gray-300">
+                            Begin 1{" "}
+                            <span className="text-red-600" aria-hidden="true">
+                              *
+                            </span>
+                          </th>
+                          <th className="px-3 py-2 text-center border border-gray-300">
+                            End 1{" "}
+                            <span className="text-red-600" aria-hidden="true">
+                              *
+                            </span>
+                          </th>
+                          <th className="px-3 py-2 text-center border border-gray-300">
+                            Room 1
+                          </th>
+                          <th className="px-3 py-2 text-center border border-gray-300">
+                            Day 2{" "}
+                            <span className="text-red-600" aria-hidden="true">
+                              *
+                            </span>
+                          </th>
+                          <th className="px-3 py-2 text-center border border-gray-300">
+                            Begin 2{" "}
+                            <span className="text-red-600" aria-hidden="true">
+                              *
+                            </span>
+                          </th>
+                          <th className="px-3 py-2 text-center border border-gray-300">
+                            End 2{" "}
+                            <span className="text-red-600" aria-hidden="true">
+                              *
+                            </span>
+                          </th>
+                          <th className="px-3 py-2 text-center border border-gray-300">
+                            Room 2
+                          </th>
+                          <th className="px-3 py-2 text-center border border-gray-300">
+                            Capacity
+                          </th>
+                          <th className="px-3 py-2 text-center border border-gray-300">
+                            Mode{" "}
+                            <span className="text-red-600" aria-hidden="true">
+                              *
+                            </span>
+                          </th>
+                          <th className="px-3 py-2 text-center border border-gray-300">
+                            Status
+                          </th>
+                          <th className="px-3 py-2 text-center border border-gray-300">
+                            Actions
+                          </th>
+                        </tr>
+                      </thead>
 
-                            <td className="px-4 py-2 align-top">
-                              {getEditFlags(r).course ? (
-                                <div className="flex flex-col gap-1">
-                                  {/* Course code dropdown */}
-                                  <SelectBox
-                                    value={r.course || ""}
-                                    onChange={(code) => {
-                                      const found = courseOptions.find(
-                                        (c) => c.code === code
-                                      );
+                      <tbody>
+                        {filtered.map((r, idx) => {
+                          const e = getEditFlags(r);
+                          const isLocked =
+                            !!r.finalized || r.status === "Approved";
+                          const isForwardedToFaculty = !!r.forwarded_to_faculty;
+                          // Show the red dot only when there is a pending RFC AND the row is still actionable.
+                          // Once the schedule is approved/finalized, the message icon is disabled; the dot should disappear.
+                          const unread =
+                            !!(r as any).pending_rfc && !r.finalized;
+                          return (
+                            <tr
+                              key={r.id}
+                              className={cls(
+                                "whitespace-nowrap [&>td]:border [&>td]:border-gray-200",
+                                isLocked
+                                  ? "bg-gray-100 text-gray-500 hover:bg-gray-100"
+                                  : isForwardedToFaculty
+                                  ? "bg-sky-50 hover:bg-sky-100/40"
+                                  : "hover:bg-gray-50"
+                              )}
+                            >
+                              <td className="px-3 py-2 text-center">
+                                {isRunning && (
+                                  <input
+                                    type="checkbox"
+                                    checked={!!r.selected}
+                                    disabled={isLocked}
+                                    onChange={(ev) =>
+                                      !isLocked &&
+                                      setFacultySelected(r, ev.target.checked)
+                                    }
+                                    className="rounded border-gray-300 text-emerald-600 focus:ring-emerald-500"
+                                    title={`Select row ${idx + 1}`}
+                                  />
+                                )}
+                              </td>
+
+                              <td className="px-4 py-2 align-top">
+                                {getEditFlags(r).course ? (
+                                  <div className="flex flex-col gap-1">
+                                    {/* Course code dropdown */}
+                                    <SelectBox
+                                      value={r.course || ""}
+                                      onChange={(code) => {
+                                        const found = courseOptions.find(
+                                          (c) => c.code === code
+                                        );
+                                        updateRow(
+                                          r.id,
+                                          {
+                                            course: code,
+                                            title: (found?.title || "") as any,
+                                          },
+                                          { markDirty: true }
+                                        );
+                                      }}
+                                      options={courseOptions.map((c) => c.code)}
+                                      placeholder="— Select course —"
+                                      className="w-[160px]"
+                                    />
+
+                                    {/* Auto-filled course title (read-only text) */}
+                                    <div className="text-gray-600 text-xs max-w-xs truncate">
+                                      {r.title ||
+                                        courseOptions.find(
+                                          (c) => c.code === r.course
+                                        )?.title ||
+                                        "—"}
+                                    </div>
+                                  </div>
+                                ) : (
+                                  // Non-editable rows: same as before
+                                  <div>
+                                    <div className="font-semibold text-emerald-700">
+                                      {r.course || "—"}
+                                    </div>
+                                    <div className="text-gray-600 text-sm">
+                                      {r.title || "—"}
+                                    </div>
+                                  </div>
+                                )}
+                              </td>
+
+                              <td className="px-2 py-2 text-center">
+                                <Cell
+                                  editable={e.units}
+                                  value={String(r.units ?? "")}
+                                  onChange={(v) =>
+                                    setCell(r.id, "units", v as any)
+                                  }
+                                  className="w-[60px]"
+                                  align="center"
+                                />
+                              </td>
+
+                              <td className="px-2 py-2 text-center">
+                                <Cell
+                                  editable={e.section}
+                                  value={r.section}
+                                  onChange={(v) => setCell(r.id, "section", v)}
+                                  className="w-[68px]"
+                                  align="center"
+                                />
+                              </td>
+
+                              <td className="px-4 py-2">
+                                {e.faculty ? (
+                                  <ComboBox
+                                    value={r.faculty ?? ""}
+                                    onChange={(v) => {
+                                      const fid = facultyNameToId[v] || "";
                                       updateRow(
                                         r.id,
-                                        {
-                                          course: code,
-                                          title: (found?.title || "") as any,
-                                        },
+                                        { faculty: v, faculty_id: fid as any },
                                         { markDirty: true }
                                       );
                                     }}
-                                    options={courseOptions.map((c) => c.code)}
-                                    placeholder="— Select course —"
-                                    className="w-[160px]"
+                                    options={facultyOptions}
+                                    className="w-[200px] md:w-[240px] lg:w-[280px]"
                                   />
+                                ) : (
+                                  <span className="block w-[200px] md:w-[240px] lg:w-[280px] truncate">
+                                    {r.faculty || "—"}
+                                  </span>
+                                )}
+                              </td>
 
-                                  {/* Auto-filled course title (read-only text) */}
-                                  <div className="text-gray-600 text-xs max-w-xs truncate">
-                                    {r.title ||
-                                      courseOptions.find(
-                                        (c) => c.code === r.course
-                                      )?.title ||
-                                      "—"}
-                                  </div>
-                                </div>
-                              ) : (
-                                // Non-editable rows: same as before
-                                <div>
-                                  <div className="font-semibold text-emerald-700">
-                                    {r.course || "—"}
-                                  </div>
-                                  <div className="text-gray-600 text-sm">
-                                    {r.title || "—"}
-                                  </div>
-                                </div>
-                              )}
-                            </td>
+                              <td className="px-2 py-2 text-center">
+                                {e.day1 ? (
+                                  <SelectBox
+                                    value={r.day1}
+                                    onChange={(v) => setCell(r.id, "day1", v)}
+                                    options={DAY_OPTIONS}
+                                  />
+                                ) : (
+                                  <span>{r.day1 || "—"}</span>
+                                )}
+                              </td>
 
-                            <td className="px-2 py-2 text-center">
-                              <Cell
-                                editable={e.units}
-                                value={String(r.units ?? "")}
-                                onChange={(v) =>
-                                  setCell(r.id, "units", v as any)
-                                }
-                                className="w-[60px]"
-                                align="center"
-                              />
-                            </td>
-
-                            <td className="px-2 py-2 text-center">
-                              <Cell
-                                editable={e.section}
-                                value={r.section}
-                                onChange={(v) => setCell(r.id, "section", v)}
-                                className="w-[68px]"
-                                align="center"
-                              />
-                            </td>
-
-                            <td className="px-4 py-2">
-                              {e.faculty ? (
-                                <ComboBox
-                                  value={r.faculty ?? ""}
-                                  onChange={(v) => {
-                                    const fid = facultyNameToId[v] || "";
-                                    updateRow(
-                                      r.id,
-                                      { faculty: v, faculty_id: fid as any },
-                                      { markDirty: true }
-                                    );
-                                  }}
-                                  options={facultyOptions}
-                                  className="w-[200px] md:w-[240px] lg:w-[280px]"
-                                />
-                              ) : (
-                                <span className="block w-[200px] md:w-[240px] lg:w-[280px] truncate">
-                                  {r.faculty || "—"}
-                                </span>
-                              )}
-                            </td>
-
-                            <td className="px-2 py-2 text-center">
-                              {e.day1 ? (
-                                <SelectBox
-                                  value={r.day1}
-                                  onChange={(v) => setCell(r.id, "day1", v)}
-                                  options={DAY_OPTIONS}
-                                />
-                              ) : (
-                                <span>{r.day1 || "—"}</span>
-                              )}
-                            </td>
-
-                            <td className="px-2 py-2 text-center">
-                              {e.begin1 ? (
-                                <TimeBeginInput
-                                  value={r.begin1}
-                                  onChange={(v) => {
-                                    const patch: Partial<Row> = { begin1: v };
-                                    if (v) patch.end1 = calculateEndTime(v);
-                                    updateRow(r.id, patch, { markDirty: true });
-                                  }}
-                                  options={TIME_BEGIN_OPTIONS}
-                                  className="w-[120px] text-center"
-                                />
-                              ) : (
-                                <span>{displayTimeFromOptions(r.begin1, TIME_BEGIN_OPTIONS) || "—"}</span>
-                              )}
-                            </td>
-
-                            <td className="px-2 py-2 text-center">
-                              {e.end1 ? (
-                                <SelectBox
-                                  value={r.end1}
-                                  onChange={(v) => setCell(r.id, "end1", v)}
-                                  options={TIME_END_OPTIONS}
-                                  className="w-[70px] text-center"
-                                />
-                              ) : (
-                                <span>{displayTimeFromOptions(r.end1, TIME_END_OPTIONS) || "—"}</span>
-                              )}
-                            </td>
-
-                            <td className="px-2 py-2 text-center">
-                              {e.room1 ? (
-                                <SelectBox
-                                  value={r.room1 || ""}
-                                  onChange={(v) =>
-                                    setCell(r.id, "room1", v as Row["room1"])
-                                  }
-                                  options={ROOM_OPTIONS}
-                                  className="w-[100px] text-center"
-                                />
-                              ) : (
-                                <span>{r.room1 || "—"}</span>
-                              )}
-                            </td>
-
-                            <td className="px-2 py-2 text-center">
-                              {e.day2 ? (
-                                <SelectBox
-                                  value={r.day2}
-                                  onChange={(v) => setCell(r.id, "day2", v)}
-                                  options={DAY_OPTIONS}
-                                />
-                              ) : (
-                                <span>{r.day2 || "—"}</span>
-                              )}
-                            </td>
-
-                            <td className="px-2 py-2 text-center">
-                              {e.begin2 ? (
-                                <TimeBeginInput
-                                  value={r.begin2}
-                                  onChange={(v) => {
-                                    const patch: Partial<Row> = { begin2: v };
-                                    if (v) {
-                                      patch.end2 = calculateEndTime(v);
-                                    }
-                                    updateRow(r.id, patch, { markDirty: true });
-                                  }}
-                                  options={TIME_BEGIN_OPTIONS}
-                                  className="w-[120px] text-center"
-                                />
-                              ) : (
-                                <span>{displayTimeFromOptions(r.begin2, TIME_BEGIN_OPTIONS) || "—"}</span>
-                              )}
-                            </td>
-
-                            <td className="px-2 py-2 text-center">
-                              {e.end2 ? (
-                                <SelectBox
-                                  value={r.end2}
-                                  onChange={(v) => setCell(r.id, "end2", v)}
-                                  options={TIME_END_OPTIONS}
-                                  className="w-[70px] text-center"
-                                />
-                              ) : (
-                                <span>{displayTimeFromOptions(r.end2, TIME_END_OPTIONS) || "—"}</span>
-                              )}
-                            </td>
-
-                            <td className="px-2 py-2 text-center">
-                              {e.room2 ? (
-                                <SelectBox
-                                  value={r.room2 || ""}
-                                  onChange={(v) =>
-                                    setCell(r.id, "room2", v as Row["room2"])
-                                  }
-                                  options={ROOM_OPTIONS}
-                                  className="w-[100px] text-center"
-                                />
-                              ) : (
-                                <span>{r.room2 || "—"}</span>
-                              )}
-                            </td>
-
-                            <td className="px-2 py-2 text-center">
-                              <Cell
-                                editable={e.capacity}
-                                value={String(r.capacity ?? "")}
-                                onChange={(v) =>
-                                  setCell(r.id, "capacity", v as any)
-                                }
-                                className="w-[64px]"
-                                align="center"
-                              />
-                            </td>
-                            <td className="px-2 py-2 text-center">
-                              {e.mode ? (
-                                <SelectBox
-                                  value={r.mode || ""}
-                                  onChange={(v) =>
-                                    setCell(r.id, "mode", v as Row["mode"])
-                                  }
-                                  options={MODE_OPTIONS}
-                                  className="w-[80px] text-center"
-                                />
-                              ) : (
-                                <span>{r.mode || "—"}</span>
-                              )}
-                            </td>
-                            <td className="px-2 py-2 text-center">
-                              <StatusChip r={r} />
-                            </td>
-
-                            <td className="px-2 py-2 text-center">
-                              {isRunning && (
-                                <div className="relative flex items-center justify-center gap-3 text-emerald-700">
-                                  <button
-                                    disabled={!!r.finalized}
-                                    className={cls(
-                                      "relative hover:brightness-110",
-                                      !!r.finalized && "opacity-40 cursor-not-allowed hover:brightness-100"
-                                    )}
-                                    title="Message"
-                                    onClick={() => {
-                                      if (r.finalized) return;
-                                      setReqChange({
-                                        open: true,
-                                        facultyName: r.faculty || "Faculty",
-                                        facultyId: (r as any).faculty_id,
-                                        sectionId: (r as any).section_id || r.id,
+                              <td className="px-2 py-2 text-center">
+                                {e.begin1 ? (
+                                  <TimeBeginInput
+                                    value={r.begin1}
+                                    onChange={(v) => {
+                                      const patch: Partial<Row> = { begin1: v };
+                                      if (v) patch.end1 = calculateEndTime(v);
+                                      updateRow(r.id, patch, {
+                                        markDirty: true,
                                       });
                                     }}
-                                  >
-                                    <MessageSquareText className="h-5 w-5" />
-                                    {unread && (
-                                      <span className="absolute -top-1 -right-1 h-2.5 w-2.5 rounded-full bg-red-600" />
-                                    )}
-                                  </button>
+                                    options={TIME_BEGIN_OPTIONS}
+                                    className="w-[120px] text-center"
+                                  />
+                                ) : (
+                                  <span>
+                                    {displayTimeFromOptions(
+                                      r.begin1,
+                                      TIME_BEGIN_OPTIONS
+                                    ) || "—"}
+                                  </span>
+                                )}
+                              </td>
 
-                                  <button
-                                    className="relative hover:brightness-110"
-                                    title={copiedRowId === r.id ? "Copied!" : "Copy"}
-                                    onClick={() => handleCopyRow(r)}
-                                  >
-                                    {copiedRowId === r.id ? (
-                                      <span className="text-xs font-semibold text-emerald-700">✓</span>
-                                    ) : (
-                                      <Copy className="h-4 w-4" />
-                                    )}
-                                  </button>
-                                </div>
-                              )}
+                              <td className="px-2 py-2 text-center">
+                                {e.end1 ? (
+                                  <SelectBox
+                                    value={r.end1}
+                                    onChange={(v) => setCell(r.id, "end1", v)}
+                                    options={TIME_END_OPTIONS}
+                                    className="w-[70px] text-center"
+                                  />
+                                ) : (
+                                  <span>
+                                    {displayTimeFromOptions(
+                                      r.end1,
+                                      TIME_END_OPTIONS
+                                    ) || "—"}
+                                  </span>
+                                )}
+                              </td>
+
+                              <td className="px-2 py-2 text-center">
+                                {e.room1 ? (
+                                  <SelectBox
+                                    value={r.room1 || ""}
+                                    onChange={(v) =>
+                                      setCell(r.id, "room1", v as Row["room1"])
+                                    }
+                                    options={ROOM_OPTIONS}
+                                    className="w-[100px] text-center"
+                                  />
+                                ) : (
+                                  <span>{r.room1 || "—"}</span>
+                                )}
+                              </td>
+
+                              <td className="px-2 py-2 text-center">
+                                {e.day2 ? (
+                                  <SelectBox
+                                    value={r.day2}
+                                    onChange={(v) => setCell(r.id, "day2", v)}
+                                    options={DAY_OPTIONS}
+                                  />
+                                ) : (
+                                  <span>{r.day2 || "—"}</span>
+                                )}
+                              </td>
+
+                              <td className="px-2 py-2 text-center">
+                                {e.begin2 ? (
+                                  <TimeBeginInput
+                                    value={r.begin2}
+                                    onChange={(v) => {
+                                      const patch: Partial<Row> = { begin2: v };
+                                      if (v) {
+                                        patch.end2 = calculateEndTime(v);
+                                      }
+                                      updateRow(r.id, patch, {
+                                        markDirty: true,
+                                      });
+                                    }}
+                                    options={TIME_BEGIN_OPTIONS}
+                                    className="w-[120px] text-center"
+                                  />
+                                ) : (
+                                  <span>
+                                    {displayTimeFromOptions(
+                                      r.begin2,
+                                      TIME_BEGIN_OPTIONS
+                                    ) || "—"}
+                                  </span>
+                                )}
+                              </td>
+
+                              <td className="px-2 py-2 text-center">
+                                {e.end2 ? (
+                                  <SelectBox
+                                    value={r.end2}
+                                    onChange={(v) => setCell(r.id, "end2", v)}
+                                    options={TIME_END_OPTIONS}
+                                    className="w-[70px] text-center"
+                                  />
+                                ) : (
+                                  <span>
+                                    {displayTimeFromOptions(
+                                      r.end2,
+                                      TIME_END_OPTIONS
+                                    ) || "—"}
+                                  </span>
+                                )}
+                              </td>
+
+                              <td className="px-2 py-2 text-center">
+                                {e.room2 ? (
+                                  <SelectBox
+                                    value={r.room2 || ""}
+                                    onChange={(v) =>
+                                      setCell(r.id, "room2", v as Row["room2"])
+                                    }
+                                    options={ROOM_OPTIONS}
+                                    className="w-[100px] text-center"
+                                  />
+                                ) : (
+                                  <span>{r.room2 || "—"}</span>
+                                )}
+                              </td>
+
+                              <td className="px-2 py-2 text-center">
+                                <Cell
+                                  editable={e.capacity}
+                                  value={String(r.capacity ?? "")}
+                                  onChange={(v) =>
+                                    setCell(r.id, "capacity", v as any)
+                                  }
+                                  className="w-[64px]"
+                                  align="center"
+                                />
+                              </td>
+                              <td className="px-2 py-2 text-center">
+                                {e.mode ? (
+                                  <SelectBox
+                                    value={r.mode || ""}
+                                    onChange={(v) =>
+                                      setCell(r.id, "mode", v as Row["mode"])
+                                    }
+                                    options={MODE_OPTIONS}
+                                    className="w-[80px] text-center"
+                                  />
+                                ) : (
+                                  <span>{r.mode || "—"}</span>
+                                )}
+                              </td>
+                              <td className="px-2 py-2 text-center">
+                                <StatusChip r={r} />
+                              </td>
+
+                              <td className="px-2 py-2 text-center">
+                                {isRunning && (
+                                  <div className="relative flex items-center justify-center gap-3 text-emerald-700">
+                                    <button
+                                      disabled={!!r.finalized}
+                                      className={cls(
+                                        "relative hover:brightness-110",
+                                        !!r.finalized &&
+                                          "opacity-40 cursor-not-allowed hover:brightness-100"
+                                      )}
+                                      title="Message"
+                                      onClick={() => {
+                                        if (r.finalized) return;
+                                        setReqChange({
+                                          open: true,
+                                          facultyName: r.faculty || "Faculty",
+                                          facultyId: (r as any).faculty_id,
+                                          sectionId:
+                                            (r as any).section_id || r.id,
+                                        });
+                                      }}
+                                    >
+                                      <MessageSquareText className="h-5 w-5" />
+                                      {unread && (
+                                        <span className="absolute -top-1 -right-1 h-2.5 w-2.5 rounded-full bg-red-600" />
+                                      )}
+                                    </button>
+
+                                    <button
+                                      className="relative hover:brightness-110"
+                                      title={
+                                        copiedRowId === r.id
+                                          ? "Copied!"
+                                          : "Copy"
+                                      }
+                                      onClick={() => handleCopyRow(r)}
+                                    >
+                                      {copiedRowId === r.id ? (
+                                        <span className="text-xs font-semibold text-emerald-700">
+                                          ✓
+                                        </span>
+                                      ) : (
+                                        <Copy className="h-4 w-4" />
+                                      )}
+                                    </button>
+                                  </div>
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        })}
+
+                        {filtered.length === 0 && (
+                          <tr>
+                            <td
+                              colSpan={17}
+                              className="px-4 py-10 text-center text-sm text-gray-500"
+                            >
+                              No data yet. Click{" "}
+                              <span className="font-medium">Auto-assign</span>{" "}
+                              or{" "}
+                              <span className="font-medium">Add new line</span>{" "}
+                              to begin.
                             </td>
                           </tr>
-                        );
-                      })}
-
-                      {filtered.length === 0 && (
-                        <tr>
-                          <td
-                            colSpan={17}
-                            className="px-4 py-10 text-center text-sm text-gray-500"
-                          >
-                            No data yet. Click{" "}
-                            <span className="font-medium">Auto-assign</span> or{" "}
-                            <span className="font-medium">Add new line</span> to
-                            begin.
-                          </td>
-                        </tr>
-                      )}
-                    </tbody>
-                  </table>
-                </div>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
                 )}
 
                 <div className="border-t px-4 py-3">
@@ -4147,7 +4419,6 @@ useEffect(() => {
                       <Plus className="h-4 w-4" />
                       Add new line
                     </button>*/}
-
                   </div>
                   {/* Right: Auto-assign (Run algorithm) - REMOVED from bottom */}
                   {/* <div className="flex items-center gap-2">
@@ -4174,7 +4445,10 @@ useEffect(() => {
                     <h2 className="text-lg font-semibold">Faculty Deloading</h2>
                     <p className="text-xs text-gray-500">
                       View deloading records per faculty for{" "}
-                      <span className="font-semibold">{term || "this term"}</span>.
+                      <span className="font-semibold">
+                        {term || "this term"}
+                      </span>
+                      .
                     </p>
                   </div>
 
@@ -4192,18 +4466,26 @@ useEffect(() => {
                             setDeloadDropdownOpen(true);
                           }}
                           onFocus={() => setDeloadDropdownOpen(true)}
-                          onBlur={() => window.setTimeout(() => setDeloadDropdownOpen(false), 120)}
+                          onBlur={() =>
+                            window.setTimeout(
+                              () => setDeloadDropdownOpen(false),
+                              120
+                            )
+                          }
                           onKeyDown={(e) => {
                             if (e.key === "Enter") {
                               const best = deloadMatches[0];
                               if (best) {
                                 setDeloadSelectedFaculty(best);
-                                setDeloadFacultyQuery(best.faculty_name_display);
+                                setDeloadFacultyQuery(
+                                  best.faculty_name_display
+                                );
                                 setDeloadDropdownOpen(false);
                                 loadFacultyDeloadings(best.faculty_id);
                               }
                             }
-                            if (e.key === "Escape") setDeloadDropdownOpen(false);
+                            if (e.key === "Escape")
+                              setDeloadDropdownOpen(false);
                           }}
                           placeholder="Type a name (e.g., Dela Cruz)"
                           className="w-full bg-transparent text-sm outline-none placeholder:text-gray-400"
@@ -4225,29 +4507,33 @@ useEffect(() => {
                         )}
                       </div>
 
-                      {deloadDropdownOpen && deloadFacultyQuery.trim() && deloadMatches.length > 0 && (
-                        <div className="absolute z-20 mt-1 w-full overflow-hidden rounded-lg border border-gray-200 bg-white shadow-lg">
-                          <ul className="max-h-60 overflow-auto py-1">
-                            {deloadMatches.map((f) => (
-                              <li key={f.faculty_id}>
-                                <button
-                                  type="button"
-                                  className="w-full px-3 py-2 text-left text-sm hover:bg-gray-50"
-                                  onMouseDown={(e) => e.preventDefault()}
-                                  onClick={() => {
-                                    setDeloadSelectedFaculty(f);
-                                    setDeloadFacultyQuery(f.faculty_name_display);
-                                    setDeloadDropdownOpen(false);
-                                    loadFacultyDeloadings(f.faculty_id);
-                                  }}
-                                >
-                                  {f.faculty_name_display}
-                                </button>
-                              </li>
-                            ))}
-                          </ul>
-                        </div>
-                      )}
+                      {deloadDropdownOpen &&
+                        deloadFacultyQuery.trim() &&
+                        deloadMatches.length > 0 && (
+                          <div className="absolute z-20 mt-1 w-full overflow-hidden rounded-lg border border-gray-200 bg-white shadow-lg">
+                            <ul className="max-h-60 overflow-auto py-1">
+                              {deloadMatches.map((f) => (
+                                <li key={f.faculty_id}>
+                                  <button
+                                    type="button"
+                                    className="w-full px-3 py-2 text-left text-sm hover:bg-gray-50"
+                                    onMouseDown={(e) => e.preventDefault()}
+                                    onClick={() => {
+                                      setDeloadSelectedFaculty(f);
+                                      setDeloadFacultyQuery(
+                                        f.faculty_name_display
+                                      );
+                                      setDeloadDropdownOpen(false);
+                                      loadFacultyDeloadings(f.faculty_id);
+                                    }}
+                                  >
+                                    {f.faculty_name_display}
+                                  </button>
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
                     </div>
                   </div>
                 </div>
@@ -4262,7 +4548,9 @@ useEffect(() => {
                       </span>
                     </div>
                     {facultyWithDeloadings.length === 0 ? (
-                      <div className="mt-1 text-xs text-gray-500">None found for this term.</div>
+                      <div className="mt-1 text-xs text-gray-500">
+                        None found for this term.
+                      </div>
                     ) : (
                       <div className="mt-2 flex flex-wrap gap-2">
                         {facultyWithDeloadings.map((f) => (
@@ -4301,11 +4589,16 @@ useEffect(() => {
                       Select a faculty to view their deloadings.
                     </div>
                   ) : deloadLoading ? (
-                    <div className="py-6 text-center text-sm text-gray-500">Loading…</div>
+                    <div className="py-6 text-center text-sm text-gray-500">
+                      Loading…
+                    </div>
                   ) : deloadRows.length === 0 ? (
                     <div className="py-6 text-center text-sm text-gray-500">
                       No deloadings recorded for{" "}
-                      <span className="font-semibold">{deloadSelectedFaculty.faculty_name_display}</span>.
+                      <span className="font-semibold">
+                        {deloadSelectedFaculty.faculty_name_display}
+                      </span>
+                      .
                     </div>
                   ) : (
                     <table className="w-full text-sm table-fixed">
@@ -4317,7 +4610,12 @@ useEffect(() => {
                       </colgroup>
                       <thead className="bg-gray-50 border-y text-gray-700">
                         <tr>
-                          {["Deloading Type", "Units", "Notes", "Last Updated"].map((h) => (
+                          {[
+                            "Deloading Type",
+                            "Units",
+                            "Notes",
+                            "Last Updated",
+                          ].map((h) => (
                             <th
                               key={h}
                               className="px-3 py-2 text-center text-xs font-semibold uppercase tracking-wide"
@@ -4336,11 +4634,19 @@ useEffect(() => {
                               "text-gray-800 hover:bg-amber-50/40"
                             )}
                           >
-                            <td className="px-3 py-2 text-center">{r.deloading_type || "—"}</td>
-                            <td className="px-3 py-2 text-center">{r.units_deloaded ?? "—"}</td>
-                            <td className="px-3 py-2 text-center">{r.notes || "—"}</td>
                             <td className="px-3 py-2 text-center">
-                              {r.updated_at ? new Date(r.updated_at).toLocaleString() : "—"}
+                              {r.deloading_type || "—"}
+                            </td>
+                            <td className="px-3 py-2 text-center">
+                              {r.units_deloaded ?? "—"}
+                            </td>
+                            <td className="px-3 py-2 text-center">
+                              {r.notes || "—"}
+                            </td>
+                            <td className="px-3 py-2 text-center">
+                              {r.updated_at
+                                ? new Date(r.updated_at).toLocaleString()
+                                : "—"}
                             </td>
                           </tr>
                         ))}
@@ -4410,102 +4716,241 @@ useEffect(() => {
 
                   {/* Tab 1: Units vs Preferred Units */}
                   {summaryTab === "units" && (
-                    <div className="border-t px-4 pb-4 overflow-x-auto w-full">
-                      <table className="w-full text-sm table-fixed">
-                        <thead className="bg-gray-50 border-y text-gray-700">
-                          <tr>
-                            <th className="px-3 py-2 text-left font-semibold">
-                              Faculty
-                            </th>
-                            <th className="px-3 py-2 text-right font-semibold">
-                              Assigned Units
-                            </th>
-                            <th className="px-3 py-2 text-right font-semibold">
-                              Preferred Units
-                            </th>
-                            <th className="px-3 py-2 text-right font-semibold">
-                              Δ (Assigned - Pref)
-                            </th>
-                            <th className="px-3 py-2 text-center font-semibold">
-                              Status
-                            </th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y">
-                          {facultySummary.length === 0 && (
-                            <tr>
-                              <td
-                                colSpan={5}
-                                className="px-3 py-6 text-center text-xs text-gray-500"
-                              >
-                                No faculty have assignments yet for this term.
-                              </td>
-                            </tr>
+                    <div className="border-t px-4 pb-4 w-full">
+                      {/* + Add filters button row */}
+                      <div className="flex items-center gap-2 py-3">
+                        <button
+                          type="button"
+                          onClick={() => setShowUnitsFilters((v) => !v)}
+                          className={cls(
+                            "px-4 py-2 text-sm font-medium",
+                            "rounded-md border border-gray-300 bg-white text-gray-700",
+                            "hover:bg-gray-50",
+                            "focus:outline-none focus:ring-2 focus:ring-emerald-500/30"
                           )}
+                        >
+                          + Add filters
+                        </button>
 
-                          {facultySummary.map((f) => {
-                            const hasPref = f.preferredUnits != null;
-                            let statusLabel = "—";
-                            let statusTone =
-                              "bg-gray-100 text-gray-700 border-gray-200";
+                        <div className="ml-auto text-xs text-gray-500">
+                          Showing{" "}
+                          <span className="font-semibold">
+                            {facultySummaryView.length}
+                          </span>{" "}
+                          of{" "}
+                          <span className="font-semibold">
+                            {facultySummary.length}
+                          </span>
+                        </div>
+                      </div>
 
-                            if (hasPref && f.diff != null) {
-                              if (f.diff > 0) {
-                                statusLabel = `Over by ${f.diff}`;
-                                statusTone =
-                                  "bg-red-50 text-red-700 border-red-200";
-                              } else if (f.diff < 0) {
-                                statusLabel = `Under by ${Math.abs(f.diff)}`;
-                                statusTone =
-                                  "bg-amber-50 text-amber-700 border-amber-200";
-                              } else {
-                                statusLabel = "Match";
-                                statusTone =
-                                  "bg-emerald-50 text-emerald-700 border-emerald-200";
-                              }
-                            }
+                      {/* Filter options */}
+                      {showUnitsFilters && (
+                        <div className="mb-3 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2">
+                          <div className="flex flex-wrap items-center gap-4 text-xs">
+                            {/* radios */}
+                            <label className="inline-flex items-center gap-2">
+                              <input
+                                type="radio"
+                                name="unitsFilterMode"
+                                checked={unitsFilterMode === "all"}
+                                onChange={() => setUnitsFilterMode("all")}
+                              />
+                              Show all
+                            </label>
 
-                            return (
-                              <tr key={f.facultyId || f.facultyName}>
-                                <td className="px-3 py-2 align-middle">
-                                  <div className="font-medium text-gray-900">
-                                    {f.facultyName}
-                                  </div>
-                                </td>
-                                <td className="px-3 py-2 text-right align-middle">
-                                  {f.assignedUnits
-                                    .toFixed(1)
-                                    .replace(/\.0$/, "")}
-                                </td>
-                                <td className="px-3 py-2 text-right align-middle">
-                                  {hasPref
-                                    ? f
-                                        .preferredUnits!.toFixed(1)
-                                        .replace(/\.0$/, "")
-                                    : "—"}
-                                </td>
-                                <td className="px-3 py-2 text-right align-middle">
-                                  {hasPref && f.diff != null
-                                    ? f.diff > 0
-                                      ? `+${f.diff}`
-                                      : `${f.diff}`
-                                    : "—"}
-                                </td>
-                                <td className="px-3 py-2 text-center align-middle">
-                                  <span
-                                    className={cls(
-                                      "inline-flex items-center justify-center rounded-full border px-2.5 py-0.5 text-[11px] font-medium",
-                                      statusTone
-                                    )}
-                                  >
-                                    {statusLabel}
-                                  </span>
+                            <label className="inline-flex items-center gap-2">
+                              <input
+                                type="radio"
+                                name="unitsFilterMode"
+                                checked={unitsFilterMode === "unassigned"}
+                                onChange={() =>
+                                  setUnitsFilterMode("unassigned")
+                                }
+                              />
+                              Unassigned only
+                            </label>
+
+                            <label className="inline-flex items-center gap-2">
+                              <input
+                                type="radio"
+                                name="unitsFilterMode"
+                                checked={unitsFilterMode === "issues"}
+                                onChange={() => setUnitsFilterMode("issues")}
+                              />
+                              Only issues
+                            </label>
+
+                            {/* separator + checkbox on the same line */}
+                            <span className="hidden sm:inline text-gray-300">
+                              |
+                            </span>
+
+                            <label className="inline-flex items-center gap-2 font-medium text-gray-900">
+                              <input
+                                type="checkbox"
+                                checked={hideNoPrefs}
+                                onChange={(e) =>
+                                  setHideNoPrefs(e.target.checked)
+                                }
+                              />
+                              Hide faculty without preferences
+                            </label>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Scroll wrapper (THIS is the only overflow-x-auto) */}
+                      <div className="overflow-x-auto w-full">
+                        <table className="w-full text-sm table-fixed">
+                          <thead className="bg-gray-50 border-y text-gray-700">
+                            <tr>
+                              <th className="px-3 py-2 text-left font-semibold">
+                                <button
+                                  type="button"
+                                  onClick={() => toggleUnitsSort("faculty")}
+                                  className="inline-flex items-center gap-1 hover:underline"
+                                >
+                                  Faculty{" "}
+                                  {unitsSortKey === "faculty"
+                                    ? unitsSortDir === "asc"
+                                      ? "▲"
+                                      : "▼"
+                                    : ""}
+                                </button>
+                              </th>
+
+                              <th className="px-3 py-2 text-right font-semibold">
+                                <button
+                                  type="button"
+                                  onClick={() => toggleUnitsSort("assigned")}
+                                  className="inline-flex items-center gap-1 hover:underline"
+                                >
+                                  Assigned Units{" "}
+                                  {unitsSortKey === "assigned"
+                                    ? unitsSortDir === "asc"
+                                      ? "▲"
+                                      : "▼"
+                                    : ""}
+                                </button>
+                              </th>
+
+                              <th className="px-3 py-2 text-right font-semibold">
+                                <button
+                                  type="button"
+                                  onClick={() => toggleUnitsSort("preferred")}
+                                  className="inline-flex items-center gap-1 hover:underline"
+                                >
+                                  Preferred Units{" "}
+                                  {unitsSortKey === "preferred"
+                                    ? unitsSortDir === "asc"
+                                      ? "▲"
+                                      : "▼"
+                                    : ""}
+                                </button>
+                              </th>
+
+                              <th className="px-3 py-2 text-right font-semibold">
+                                <button
+                                  type="button"
+                                  onClick={() => toggleUnitsSort("gap")}
+                                  className="inline-flex items-center gap-1 hover:underline"
+                                >
+                                  Load Gap (Units){" "}
+                                  {unitsSortKey === "gap"
+                                    ? unitsSortDir === "asc"
+                                      ? "▲"
+                                      : "▼"
+                                    : ""}
+                                </button>
+                              </th>
+
+                              <th className="px-3 py-2 text-center font-semibold">
+                                Status
+                              </th>
+                            </tr>
+                          </thead>
+
+                          <tbody className="divide-y">
+                            {facultySummaryView.length === 0 && (
+                              <tr>
+                                <td
+                                  colSpan={5}
+                                  className="px-3 py-6 text-center text-xs text-gray-500"
+                                >
+                                  No matching faculty rows.
                                 </td>
                               </tr>
-                            );
-                          })}
-                        </tbody>
-                      </table>
+                            )}
+
+                            {facultySummaryView.map((f) => {
+                              const hasPref = f.preferredUnits != null;
+                              let statusLabel = "—";
+                              let statusTone =
+                                "bg-gray-100 text-gray-700 border-gray-200";
+
+                              if (hasPref && f.diff != null) {
+                                if (f.diff > 0) {
+                                  statusLabel = `Over by ${f.diff}`;
+                                  statusTone =
+                                    "bg-red-50 text-red-700 border-red-200";
+                                } else if (f.diff < 0) {
+                                  statusLabel = `Under by ${Math.abs(f.diff)}`;
+                                  statusTone =
+                                    "bg-amber-50 text-amber-700 border-amber-200";
+                                } else {
+                                  statusLabel = "Match";
+                                  statusTone =
+                                    "bg-emerald-50 text-emerald-700 border-emerald-200";
+                                }
+                              }
+
+                              return (
+                                <tr key={f.facultyId || f.facultyName}>
+                                  <td className="px-3 py-2 align-middle">
+                                    <div className="font-medium text-gray-900">
+                                      {f.facultyName}
+                                    </div>
+                                  </td>
+
+                                  <td className="px-3 py-2 text-right align-middle">
+                                    {Number(f.assignedUnits ?? 0)
+                                      .toFixed(1)
+                                      .replace(/\.0$/, "")}
+                                  </td>
+
+                                  <td className="px-3 py-2 text-right align-middle">
+                                    {hasPref
+                                      ? Number(f.preferredUnits)
+                                          .toFixed(1)
+                                          .replace(/\.0$/, "")
+                                      : "—"}
+                                  </td>
+
+                                  <td className="px-3 py-2 text-right align-middle">
+                                    {hasPref && f.diff != null
+                                      ? f.diff > 0
+                                        ? `+${f.diff}`
+                                        : `${f.diff}`
+                                      : "—"}
+                                  </td>
+
+                                  <td className="px-3 py-2 text-center align-middle">
+                                    <span
+                                      className={cls(
+                                        "inline-flex items-center justify-center rounded-full border px-2.5 py-0.5 text-[11px] font-medium",
+                                        statusTone
+                                      )}
+                                    >
+                                      {statusLabel}
+                                    </span>
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
                     </div>
                   )}
 
@@ -4654,13 +5099,14 @@ useEffect(() => {
         </>
       )}
 
-
       {archiveOpen && (
         <div className="fixed inset-0 z-[150] grid place-items-center bg-black/40 p-4">
           <div className="w-full max-w-lg rounded-xl bg-white shadow-lg">
             <div className="flex items-center justify-between border-b border-gray-200 px-5 py-4">
               <div>
-                <h3 className="text-lg font-semibold text-gray-900">Archived Loads</h3>
+                <h3 className="text-lg font-semibold text-gray-900">
+                  Archived Loads
+                </h3>
                 <p className="mt-0.5 text-sm text-gray-600">
                   Display faculty loads from past terms.
                 </p>
@@ -4700,7 +5146,8 @@ useEffect(() => {
 
               {isArchiveView && (
                 <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
-                  You’re currently viewing an archived term. Actions like Auto-assign, Import, Send, and Save are disabled.
+                  You’re currently viewing an archived term. Actions like
+                  Auto-assign, Import, Send, and Save are disabled.
                 </div>
               )}
             </div>
@@ -4746,7 +5193,6 @@ useEffect(() => {
           </div>
         </div>
       )}
-
 
       <SendModal
         open={showSend}
@@ -4825,7 +5271,6 @@ useEffect(() => {
         message={toast?.message || ""}
         onClose={clearToast}
       />
-
     </AppShell>
   );
 }
