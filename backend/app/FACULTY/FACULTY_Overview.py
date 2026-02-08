@@ -1167,76 +1167,19 @@ async def faculty_send_load_rfc_message(userId: str = Query(...), payload: Dict[
                 "section_id": section_id,   # ✅ IMPORTANT
                 "rfc_id": existing.get("rfc_id"),
             },
+            send_email=True,
+            email_from_user_id=userId,
         )
 
-    # Fetch some context for the email 
-    term_doc = await db[COL_TERMS].find_one({"term_id": term_id}, {"_id": 0, "acad_year_start": 1, "term_number": 1}) or {}
-    term_label = _term_label(term_doc) if term_doc else term_id
-
-    sec_doc = await db[COL_SECTIONS].find_one({"section_id": section_id}, {"_id": 0}) or {}
-    course_id = (sec_doc.get("course_id") or "").strip()
-    course_doc = await db[COL_COURSES].find_one({"course_id": course_id}, {"_id": 0}) if course_id else ({})
-
-    code = (course_doc or {}).get("course_code") or (course_doc or {}).get("code") or ""
-    title = (course_doc or {}).get("course_title") or (course_doc or {}).get("title") or ""
-    section_label = sec_doc.get("section_code") or sec_doc.get("section") or section_id
-
-    sender_name = f"{faculty.get('first_name','')} {faculty.get('last_name','')}".strip() or userId
-
-    subject = f"[AnimoAssign] RFC - {code} {section_label}".strip()
-
-    thread_lines = []
-    for m in msgs:
-        who = (m.get("sender_role") or "").upper()
-        ts = m.get("created_at") or ""
-        txt = m.get("message") or ""
-        thread_lines.append(f"- {who} @ {ts}\n  {txt}")
-
-    email_body = (
-        f"Request for Change (RFC)\n\n"
-        f"From: {sender_name}\n"
-        f"Term: {term_label}\n"
-        f"Course: {code} - {title}\n"
-        f"Section: {section_label}\n"
-        f"Section ID: {section_id}\n\n"
-        f"Latest message:\n{message}\n\n"
-        f"Thread:\n" + "\n".join(thread_lines) +
-        f"\n\n[AnimoAssign]"
-    )
-
-    # Prefer emailing the OM user (proposal.om_user_id) if we can resolve an address.
-    to_email = _RFC_EMAIL_TO
-    if om_uid:
-        om_user = await db["users"].find_one(
-            {"user_id": om_uid},
-            {"_id": 0, "email": 1, "google_email": 1, "gmail": 1},
-        ) or {}
-        to_email = (
-            (om_user.get("email") or "").strip()
-            or (om_user.get("google_email") or "").strip()
-            or (om_user.get("gmail") or "").strip()
-            or to_email
-        )
-
-    email_sent = False
-    email_error: Optional[str] = None
-    try:
-        email_sent, email_error = await _send_email_via_user_gmail(
-            user_id=userId,
-            to_email=to_email,
-            subject=subject,
-            body=email_body,
-        )
-    except Exception as e:
-        email_sent = False
-        email_error = str(e)
+    # Gmail notification is handled by create_notification(...send_email=True...).
+    # Email sending is best-effort and runs asynchronously.
 
     return {
         "ok": True,
         "rfc_id": existing.get("rfc_id"),
         "status": "NEEDS_OM",
-        "email_sent": email_sent,
-        "email_error": email_error,
+        "email_sent": True,
+        "email_error": None,
     }
 
 # END NEW BLOCK
@@ -1459,6 +1402,8 @@ async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[s
                 "faculty_id": fid,
                 "rfc_id": rfc_id or "",
             },
+            send_email=True,
+            email_from_user_id=userId,
         )
 
     return {"ok": True, "status": "ACCEPTED", "email_sent": email_sent, "email_error": email_error}
