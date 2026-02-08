@@ -217,22 +217,61 @@ async def _active_term():
         return {}
 
     # 3) Compute the "next" term after the current term
-    next_terms = await db[COL_TERMS].find(
-        {
-            "$or": [
-                {"acad_year_start": {"$gt": current["acad_year_start"]}},
-                {
-                    "acad_year_start": current["acad_year_start"],
-                    "term_number": {"$gt": current["term_number"]},
-                },
-            ]
-        },
-        term_fields,
-    ).sort([("acad_year_start", 1), ("term_number", 1)]).limit(1).to_list(1)
+    # Prefer chronological ordering by (acad_year_start, term_number) as defined in the terms table.
+    # If those fields are missing/inconsistent, fall back to numeric ordering from term_id (e.g., TERM0013 -> 13).
+    next_term: Optional[dict] = None
 
-    if next_terms:
-        # Use the next term as the working/planning term
-        return next_terms[0]
+    if current.get("acad_year_start") is not None and current.get("term_number") is not None:
+        next_terms = await db[COL_TERMS].find(
+            {
+                "$or": [
+                    {"acad_year_start": {"$gt": current["acad_year_start"]}},
+                    {
+                        "acad_year_start": current["acad_year_start"],
+                        "term_number": {"$gt": current["term_number"]},
+                    },
+                ]
+            },
+            term_fields,
+        ).sort([("acad_year_start", 1), ("term_number", 1)]).limit(1).to_list(1)
+
+        if next_terms:
+            next_term = next_terms[0]
+
+    if not next_term:
+        # Fallback: parse numeric suffix from TERM IDs and pick the smallest greater-than-current.
+        def _term_id_num(tid: Optional[str]) -> Optional[int]:
+            if not tid:
+                return None
+            m = re.search(r"(\d+)$", str(tid))
+            return int(m.group(1)) if m else None
+
+        cur_num = _term_id_num(current.get("term_id"))
+        if cur_num is not None:
+            # Pull only term_id (and minimal display fields) to keep this lightweight.
+            candidates = await db[COL_TERMS].find(
+                {"term_id": {"$type": "string"}},
+                {"_id": 0, "term_id": 1, "acad_year_start": 1, "term_number": 1, "submission_deadline": 1, "start_date": 1, "classes_start_date": 1},
+            ).to_list(None)
+
+            best = None
+            best_num = None
+            for t in candidates:
+                n = _term_id_num(t.get("term_id"))
+                if n is None or n <= cur_num:
+                    continue
+                if best_num is None or n < best_num:
+                    best_num = n
+                    best = t
+
+            if best:
+                # Ensure we include the same field set as term_fields
+                # (best already includes all those keys, but keep consistent with callers)
+                next_term = {k: best.get(k) for k in term_fields.keys() if k != "_id"}
+
+    if next_term:
+        # Use the next term as the working/planning term (e.g., if TERM0013 is current, TERM0014 is planning)
+        return next_term
 
     # If no next term, stick with current (still better than returning nothing)
     return current

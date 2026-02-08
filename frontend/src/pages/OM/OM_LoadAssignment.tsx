@@ -31,6 +31,7 @@ import {
   RefreshCcw,
   Send,
   CheckCheck,
+  AlertTriangle,
   Plus,
   MessageSquareText,
   Copy,
@@ -2020,6 +2021,7 @@ export default function OM_LoadAssignment() {
   const [confirmModal, setConfirmModal] = useState<{
     open: boolean;
     title: string;
+    variant?: "info" | "warning" | "danger";
     message: React.ReactNode;
     confirmText?: string;
     cancelText?: string;
@@ -2029,6 +2031,7 @@ export default function OM_LoadAssignment() {
   const openConfirm = useCallback(
     (opts: {
       title: string;
+      variant?: "info" | "warning" | "danger";
       message: React.ReactNode;
       confirmText?: string;
       cancelText?: string;
@@ -2037,6 +2040,7 @@ export default function OM_LoadAssignment() {
         setConfirmModal({
           open: true,
           title: opts.title,
+          variant: opts.variant ?? "info",
           message: opts.message,
           confirmText: opts.confirmText ?? "Continue",
           cancelText: opts.cancelText ?? "Cancel",
@@ -4051,6 +4055,7 @@ export default function OM_LoadAssignment() {
                     if (hasAnyErrors) {
                       const proceed = await openConfirm({
                         title: "Validation errors detected",
+                        variant: "warning",
                         message: (
                           <div className="space-y-2 text-sm text-gray-700">
                             <p>
@@ -4067,6 +4072,35 @@ export default function OM_LoadAssignment() {
                       });
                       if (!proceed) return;
                     }
+
+                    // Final confirm (match APO "Submit for Scheduling" UX)
+                    const finalProceed = await openConfirm({
+                      title: approved ? "Re-forward to Chair?" : "Forward to Chair?",
+                      variant: "warning",
+                      confirmText: approved ? "Re-forward" : "Forward",
+                      cancelText: "Cancel",
+                      message: (
+                        <div className="space-y-2 text-sm text-neutral-600">
+                          <p>
+                            This will send your current <span className="font-semibold text-neutral-800">Load Recommendations</span> to the
+                            Chair.
+                          </p>
+                          <p>
+                            {approved ? (
+                              <>
+                                Since you already forwarded before, this will <span className="font-semibold text-neutral-800">re-notify</span> the Chair with your latest updates.
+                              </>
+                            ) : (
+                              <>
+                                Once forwarded, this is treated as a <span className="font-semibold text-neutral-800">final action</span> for this term.
+                              </>
+                            )}
+                          </p>
+                          <p className="text-neutral-500">Do you want to continue?</p>
+                        </div>
+                      ),
+                    });
+                    if (!finalProceed) return;
 
                     void handleForwardToChair();
                   }}
@@ -5325,31 +5359,48 @@ export default function OM_LoadAssignment() {
 
       {/* Custom confirmation modal (replaces browser confirm dialogs) */}
       {confirmModal.open && (
-        <div
-          className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/40 p-4"
-          role="dialog"
-          aria-modal="true"
-        >
-          <div className="w-full max-w-md rounded-2xl bg-white shadow-xl ring-1 ring-black/5">
-            <div className="px-6 pt-6">
-              <h3 className="text-lg font-semibold text-gray-900">
-                {confirmModal.title}
-              </h3>
-              <div className="mt-3">{confirmModal.message}</div>
+        <div className="fixed inset-0 z-[9999] grid place-items-center bg-black/40 p-4" role="dialog" aria-modal="true">
+          <div className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-2xl">
+            <div
+              className={cls(
+                "mx-auto mb-4 grid h-16 w-16 place-items-center rounded-full border-2",
+                confirmModal.variant === "danger"
+                  ? "border-rose-600 text-rose-700"
+                  : confirmModal.variant === "warning"
+                  ? "border-amber-600 text-amber-700"
+                  : "border-emerald-600 text-emerald-700"
+              )}
+            >
+              {confirmModal.variant === "info" ? (
+                <Send className="h-8 w-8" strokeWidth={2.5} />
+              ) : (
+                <AlertTriangle className="h-8 w-8" strokeWidth={2.5} />
+              )}
             </div>
 
-            <div className="mt-6 flex items-center justify-end gap-2 border-t border-gray-200 px-6 py-4">
+            <h3 className="mb-2 text-center text-2xl font-semibold">{confirmModal.title}</h3>
+
+            <div className="mx-auto max-w-md text-center">{confirmModal.message}</div>
+
+            <div className="mt-6 flex justify-end gap-2">
               <button
                 type="button"
                 onClick={() => closeConfirm(false)}
-                className="inline-flex h-10 items-center justify-center rounded-md border border-gray-300 bg-white px-4 text-sm font-medium text-gray-700 shadow-sm hover:bg-gray-50"
+                className="rounded-lg border border-neutral-300 bg-neutral-100 px-4 py-2 text-sm hover:bg-neutral-200"
               >
                 {confirmModal.cancelText ?? "Cancel"}
               </button>
               <button
                 type="button"
                 onClick={() => closeConfirm(true)}
-                className="inline-flex h-10 items-center justify-center rounded-md bg-gray-900 px-4 text-sm font-medium text-white shadow-sm hover:bg-gray-800"
+                className={cls(
+                  "rounded-lg px-4 py-2 text-sm font-medium text-white hover:brightness-110",
+                  confirmModal.variant === "danger"
+                    ? "bg-rose-700"
+                    : confirmModal.variant === "warning"
+                    ? "bg-amber-700"
+                    : "bg-emerald-700"
+                )}
               >
                 {confirmModal.confirmText ?? "Continue"}
               </button>

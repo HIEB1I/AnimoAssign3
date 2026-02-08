@@ -10,6 +10,8 @@ import {
   MapPin,
   Calendar,
   BookOpen,
+  Info,
+  X,
 } from "lucide-react";
 import {
   getOMFOptions,
@@ -351,7 +353,7 @@ useEffect(() => {
         row.faculty_id,
         activeTerm?.term_id
       );
-      if (ok) setPref(preference);
+      if (ok) setPref(preference ?? null);
     } finally {
       setPrefLoading(false);
     }
@@ -368,6 +370,12 @@ useEffect(() => {
   };
 
   const headerLabel = activeTerm?.label || "—";
+
+  const shownLabel =
+    (pref as any)?.meta?.shown_term_label ||
+    (pref as any)?.meta?.shownTermLabel ||
+    "";
+  const isFallbackShown = Boolean((pref as any)?.meta?.is_fallback && shownLabel);
 
   return (
     <main className="w-full px-8 py-8">
@@ -436,8 +444,18 @@ useEffect(() => {
             value={searchInput}
             onChange={(e) => setSearchInput(e.target.value)}
             placeholder="Search by name or email…"
-            className="w-full rounded-lg border border-gray-300 px-9 py-2 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30"
+            className="w-full rounded-lg border border-gray-300 px-9 py-2 pr-8 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30"
           />
+          {searchInput && (
+            <button
+              type="button"
+              onClick={() => setSearchInput("")}
+              className="absolute right-2 top-1/2 -translate-y-1/2 text-neutral-400 hover:text-neutral-600"
+              aria-label="Clear search"
+            >
+              ×
+            </button>
+          )}
         </div>
 
         <SelectBox value={department} onChange={setDepartment} options={deptOptions} />
@@ -505,117 +523,259 @@ useEffect(() => {
         {/* View Preference Modal */}
         {selected && (
           <div className="fixed inset-0 z-[100] grid place-items-center bg-black/40 p-4">
-            <div className="w-full max-w-xl rounded-2xl bg-white shadow-2xl max-h-[90vh] flex flex-col">
-              {/* Header (stays visible) */}
-              <div className="flex-none px-8 pt-8">
-                <h2 className="text-lg font-semibold text-emerald-700 mb-1">
-                  Faculty Preference
-                </h2>
-                <p className="text-sm text-gray-600 mb-6">
-                  Instructor:{" "}
-                  <span className="font-medium text-gray-800">{selected.name}</span>
-                </p>
+            <div className="w-full max-w-3xl overflow-hidden rounded-2xl bg-white shadow-2xl max-h-[90vh] flex flex-col">
+              {/* Header */}
+              <div className="relative flex-none bg-gradient-to-r from-emerald-700 to-emerald-600 px-6 py-5 text-white">
+                <button
+                  onClick={closeView}
+                  className="absolute right-4 top-4 rounded-lg p-2 text-white/90 hover:bg-white/10 focus:outline-none focus:ring-2 focus:ring-white/40"
+                  aria-label="Close"
+                  title="Close"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+
+                <div className="flex items-start gap-4">
+                  <div className="grid h-12 w-12 shrink-0 place-items-center rounded-xl bg-white/15 ring-1 ring-white/25 text-lg font-semibold">
+                    {(selected.name || "?")
+                      .trim()
+                      .split(/\s+/)
+                      .filter(Boolean)
+                      .slice(0, 2)
+                      .map((p) => p[0]?.toUpperCase())
+                      .join("")}
+                  </div>
+
+                  <div className="min-w-0">
+                    <h2 className="text-lg font-semibold leading-tight">
+                      Faculty Preferences
+                    </h2>
+                    <p className="mt-0.5 text-sm text-white/90 truncate">
+                      {selected.name} • {selected.email}
+                    </p>
+
+                    <div className="mt-3 flex flex-wrap gap-2 text-xs">
+                      <span className="rounded-full bg-white/15 px-3 py-1 ring-1 ring-white/20">
+                        Active Term: {headerLabel}
+                      </span>
+
+                      {isFallbackShown && (
+                        <span className="rounded-full bg-white/15 px-3 py-1 ring-1 ring-white/20">
+                          Showing: {shownLabel}
+                        </span>
+                      )}
+
+                      <span className="rounded-full bg-white/15 px-3 py-1 ring-1 ring-white/20">
+                        Status:{" "}
+                        {pref?.submission?.status ?? selected.status ?? "—"}
+                      </span>
+                      <span className="rounded-full bg-white/15 px-3 py-1 ring-1 ring-white/20">
+                        Submitted:{" "}
+                        {fmtDate(
+                          (pref?.submission?.date as string | undefined) ||
+                            selected.submission_date
+                        )}
+                      </span>
+                    </div>
+                  </div>
+                </div>
               </div>
 
-              {/* Body (scrolls) */}
-              <div className="flex-1 min-h-0 overflow-y-auto px-8">
+              {/* Body */}
+              <div className="flex-1 min-h-0 overflow-y-auto bg-gray-50 p-6">
                 {prefLoading && (
-                  <div className="text-sm text-gray-600">Loading preference…</div>
+                  <div className="rounded-xl border border-gray-200 bg-white p-4 text-sm text-gray-600">
+                    Loading preference…
+                  </div>
                 )}
+
                 {!prefLoading && !pref && (
-                  <div className="text-sm text-gray-600">
-                    No preference record found for this term.
+                  <div className="rounded-xl border border-gray-200 bg-white p-4 text-sm text-gray-600">
+                    No preference record found for the active term.
+                    <div className="mt-1 text-xs text-gray-500">
+                      If the faculty has submitted before, their last submitted preferences will appear here.
+                    </div>
+                  </div>
+                )}
+
+                {!prefLoading && pref && isFallbackShown && (
+                  <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+                    <div className="flex items-start gap-2">
+                      <Info className="mt-0.5 h-4 w-4 shrink-0 text-amber-700" />
+                      <div>
+                        <div className="font-semibold">
+                          No submission for the active term
+                        </div>
+                        <div className="mt-0.5 text-[13px] text-amber-900/90">
+                          Showing the faculty&apos;s last submitted preferences from <span className="font-semibold">{shownLabel}</span>.
+                        </div>
+                      </div>
+                    </div>
                   </div>
                 )}
 
                 {!prefLoading && pref && (
-                  <div className="grid grid-cols-2 gap-x-10 gap-y-6 text-sm pb-6">
-                    <div>
-                      <h4 className="font-semibold flex items-center gap-2 mb-2 text-gray-800">
-                        <GraduationCap className="h-4 w-4 text-emerald-700" /> Teaching Load
-                      </h4>
-                      <p>Preferred Teaching Units</p>
-                      <p className="text-gray-500 break-words">
-                        {pref.teaching?.preferred_units ?? "—"}
-                      </p>
-                      <p className="mt-1">Deloading</p>
-                      <p className="text-gray-500 break-words">
-                        {Array.isArray(pref.teaching?.deloading)
-                          ? pref.teaching?.deloading.join(", ")
-                          : pref.teaching?.deloading ?? "—"}
-                      </p>
+                  <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                    {/* Teaching Load */}
+                    <div className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
+                      <div className="flex items-center gap-2 text-gray-900">
+                        <GraduationCap className="h-4 w-4 text-emerald-700" />
+                        <h3 className="font-semibold">Teaching Load</h3>
+                      </div>
+
+                      <div className="mt-3 space-y-3 text-sm">
+                        <div>
+                          <p className="text-xs font-medium text-gray-600">
+                            Preferred Teaching Units
+                          </p>
+                          <p className="mt-1 break-words text-gray-800">
+                            {pref.teaching?.preferred_units ?? "—"}
+                          </p>
+                        </div>
+
+                        <div>
+                          <p className="text-xs font-medium text-gray-600">
+                            Deloading
+                          </p>
+
+                          {(() => {
+                            const raw = pref.teaching?.deloading;
+                            const deload: string[] = Array.isArray(raw)
+                              ? raw
+                              : raw
+                              ? [String(raw)]
+                              : [];
+
+                            if (!deload.length) {
+                              return (
+                                <div className="mt-2 flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                                  <Info className="mt-0.5 h-4 w-4 shrink-0 text-amber-700" />
+                                  <div>
+                                    <div className="font-semibold">
+                                      No deloading indicated
+                                    </div>
+                                    <div className="mt-0.5 text-amber-800/90">
+                                      This faculty has no deloading entry for
+                                      the current preference record.
+                                    </div>
+                                  </div>
+                                </div>
+                              );
+                            }
+
+                            return (
+                              <ul className="mt-2 space-y-1 text-gray-700">
+                                {deload.map((d, i) => (
+                                  <li key={i} className="flex gap-2">
+                                    <span className="mt-2 h-1 w-1 shrink-0 rounded-full bg-gray-400" />
+                                    <span className="flex-1 break-words">
+                                      {d}
+                                    </span>
+                                  </li>
+                                ))}
+                              </ul>
+                            );
+                          })()}
+                        </div>
+                      </div>
                     </div>
 
-                    <div>
-                      <h4 className="font-semibold flex items-center gap-2 mb-2 text-gray-800">
-                        <MapPin className="h-4 w-4 text-emerald-700" /> Location and Mode
-                      </h4>
-                      <p>Mode</p>
-                      <p className="text-gray-500 break-words">
-                        {typeof pref.location_mode?.mode === "object"
-                          ? JSON.stringify(pref.location_mode?.mode)
-                          : pref.location_mode?.mode ?? "—"}
-                      </p>
+                    {/* Location and Mode */}
+                    <div className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
+                      <div className="flex items-center gap-2 text-gray-900">
+                        <MapPin className="h-4 w-4 text-emerald-700" />
+                        <h3 className="font-semibold">Location and Mode</h3>
+                      </div>
+
+                      <div className="mt-3 text-sm">
+                        <p className="text-xs font-medium text-gray-600">Mode</p>
+                        <p className="mt-1 break-words text-gray-800">
+                          {typeof pref.location_mode?.mode === "object"
+                            ? JSON.stringify(pref.location_mode?.mode)
+                            : pref.location_mode?.mode ?? "—"}
+                        </p>
+                      </div>
                     </div>
 
-                    <div>
-                      <h4 className="font-semibold flex items-center gap-2 mb-2 text-gray-800">
-                        <Calendar className="h-4 w-4 text-emerald-700" /> Schedule
-                      </h4>
-                      <p>Days</p>
-                      <p className="text-gray-500 break-words">
-                        {(pref.schedule?.days || []).length
-                          ? pref.schedule.days.join(", ")
-                          : "—"}
-                      </p>
-                      <p className="mt-1">Time Slots</p>
-                      <p className="text-gray-500 break-words">
-                        {(pref.schedule?.times || []).length
-                          ? pref.schedule.times.join(", ")
-                          : "—"}
-                      </p>
+                    {/* Schedule */}
+                    <div className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
+                      <div className="flex items-center gap-2 text-gray-900">
+                        <Calendar className="h-4 w-4 text-emerald-700" />
+                        <h3 className="font-semibold">Schedule</h3>
+                      </div>
+
+                      <div className="mt-3 space-y-3 text-sm">
+                        <div>
+                          <p className="text-xs font-medium text-gray-600">
+                            Days
+                          </p>
+                          <p className="mt-1 break-words text-gray-800">
+                            {(pref.schedule?.days || []).length
+                              ? pref.schedule.days.join(", ")
+                              : "—"}
+                          </p>
+                        </div>
+
+                        <div>
+                          <p className="text-xs font-medium text-gray-600">
+                            Time Slots
+                          </p>
+                          <p className="mt-1 break-words text-gray-800">
+                            {(pref.schedule?.times || []).length
+                              ? pref.schedule.times.join(", ")
+                              : "—"}
+                          </p>
+                        </div>
+                      </div>
                     </div>
 
-                    <div>
-                      <h4 className="font-semibold flex items-center gap-2 mb-2 text-gray-800">
-                        <BookOpen className="h-4 w-4 text-emerald-700" /> Academic Specialization
-                      </h4>
-                      <p>Courses</p>
-                      <p className="text-gray-500 break-words">
-                        {(pref.specialization?.courses || []).length
-                          ? pref.specialization.courses.join(", ")
-                          : "—"}
-                      </p>
+                    {/* Academic Specialization */}
+                    <div className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
+                      <div className="flex items-center gap-2 text-gray-900">
+                        <BookOpen className="h-4 w-4 text-emerald-700" />
+                        <h3 className="font-semibold">
+                          Academic Specialization
+                        </h3>
+                      </div>
+
+                      <div className="mt-3 text-sm">
+                        <p className="text-xs font-medium text-gray-600">
+                          Courses
+                        </p>
+                        <p className="mt-1 break-words text-gray-800">
+                          {(pref.specialization?.courses || []).length
+                            ? pref.specialization.courses.join(", ")
+                            : "—"}
+                        </p>
+                      </div>
                     </div>
 
-                    <div className="col-span-2 mt-2">
-                      <h4 className="font-semibold mb-1">Remarks</h4>
-                      <p className="text-gray-700 whitespace-pre-wrap break-words">
-                        {pref.submission?.notes && pref.submission.notes.trim()
-                          ? pref.submission.notes
-                          : "—"}
-                      </p>
-
-                      <h4 className="font-semibold mt-3 mb-1">Submission</h4>
-                      <p className="text-gray-700 break-words">
-                        Status:{" "}
-                        <span className="font-medium">
-                          {pref.submission?.status ?? "Not Submitted"}
-                        </span>{" "}
-                        • Date:{" "}
-                        <span className="font-medium">{fmtDate(pref.submission?.date)}</span>
-                      </p>
+                    {/* Remarks */}
+                    <div className="md:col-span-2 rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
+                      <div className="grid grid-cols-1 gap-4 md:grid-cols-1">
+                        <div>
+                          <p className="text-xs font-medium text-gray-600">
+                            Remarks
+                          </p>
+                          <p className="mt-1 whitespace-pre-wrap break-words text-sm text-gray-800">
+                            {pref.submission?.notes &&
+                            String(pref.submission.notes).trim()
+                              ? pref.submission.notes
+                              : "—"}
+                          </p>
+                        </div>
+                      </div>
                     </div>
                   </div>
                 )}
               </div>
 
-              {/* Footer (stays visible) */}
-              <div className="flex-none px-8 pb-8 pt-4 border-t border-gray-100">
+              {/* Footer */}
+              <div className="flex-none border-t border-gray-100 bg-white px-6 py-4">
                 <div className="flex justify-end">
                   <button
                     onClick={closeView}
-                    className="px-4 py-2 rounded-lg bg-gray-100 hover:bg-gray-200 text-sm"
+                    className="rounded-lg bg-gray-100 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-200"
                   >
                     Close
                   </button>
