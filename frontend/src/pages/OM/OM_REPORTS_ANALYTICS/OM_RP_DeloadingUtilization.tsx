@@ -137,15 +137,35 @@ function formatFacultyName(name?: string) {
     direction: "current" | "next" | "prev" = "current",
     anchor?: string
   ) {
+    // Some terms can exist in the DB but have no deloadings (or no displayable rows)
+    // which should not be shown to users. We defensively auto-skip a few empties
+    // to keep navigation smooth even if the backend sends an empty term.
+    const MAX_SKIPS = 10;
+    let attempts = 0;
+    let nextAnchor = anchor ?? data?.term?.term_id;
+    let nextDirection: "current" | "next" | "prev" = direction;
+
     try {
       setLoading(true);
       setError("");
-      const res = await fetchDeloadingsByTerm(
-        anchor ?? data?.term?.term_id,
-        direction
-      );
-      setData(res);
-      if (Array.isArray(res.terms)) setTerms(res.terms);
+
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        const res = await fetchDeloadingsByTerm(nextAnchor, nextDirection);
+
+        // Update the terms list as early as possible.
+        if (Array.isArray(res.terms)) setTerms(res.terms);
+
+        const hasRows = Array.isArray(res.rows) && res.rows.length > 0;
+        if (hasRows || nextDirection === "current" || attempts >= MAX_SKIPS) {
+          setData(res);
+          break;
+        }
+
+        // Continue paging in the same direction from the newly returned term.
+        attempts += 1;
+        nextAnchor = res?.term?.term_id;
+      }
     } catch (err: any) {
       setError(err?.message || "Failed to load.");
     } finally {

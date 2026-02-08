@@ -1907,6 +1907,21 @@ async def om_load_assignment_terms(db=Depends(get_db)):
         tid = (t.get("term_id") or "").strip()
         if not tid:
             continue
+
+        # Skip academic terms that have no archived load data.
+        # Archived loads come from `sections_submitted` (submitted_for_scheduling=True),
+        # so if there are no submitted sections for a term, it shouldn't appear in the archive selector.
+        try:
+            has_archived = await db[COL_SECTIONS_SUBMITTED].find_one(
+                {"term_id": tid, "submitted_for_scheduling": True},
+                {"_id": 1},
+            )
+            if not has_archived:
+                continue
+        except Exception:
+            # Best-effort filter only; if the check fails, keep existing behavior (show term).
+            pass
+
         terms.append(
             {
                 "term_id": tid,
