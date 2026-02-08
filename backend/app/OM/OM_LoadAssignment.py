@@ -2705,23 +2705,8 @@ async def respond_load_assignment_rfc(
         locked = False
         extra["closed_at"] = now
 
-        # RFC APPROVED → mark schedule as approved BUT keep it editable (no proposal lock, no row finalization).
-        try:
-            await db[COL_LOAD_PROPOSALS].update_one(
-                {"faculty_id": faculty_id, "term_id": term_id},
-                {
-                    "$set": {
-                        "status": "approved",
-                        "locked": False,
-                        "rows.$[].finalized": False,
-                        "updated_at": now,
-                    },
-                    "$setOnInsert": {"created_at": now},
-                },
-                upsert=True,
-            )
-        except Exception:
-            pass
+        # RFC APPROVED → notify faculty only.
+        # IMPORTANT: Do NOT change proposal/schedule status here; it becomes "Approved" only when faculty accepts.
     else:
         new_status = "REJECTED"
         # Keep the RFC closed, but do not hard-lock the workflow.
@@ -6927,8 +6912,144 @@ async def _persist_rows_no_auto(term_id: str, rows: list[dict], db):
         fid_raw = (r.get("faculty_id") or "").strip()
         existing = await db[COL_ASSIGN].find_one(
             {"section_id": sid},
-            {"_id": 0, "assignment_id": 1, "load_id": 1, "status": 1},
+            {"_id": 0, "assignment_id": 1, "load_id": 1, "status": 1, "faculty_id": 1},
         ) or {}
+
+        existing_fid = str(existing.get("faculty_id") or "").strip()
+
+        # If OM edits a schedule row that is currently in "Approved" status,
+        # the approval becomes stale and must be re-sent to faculty.
+        # Automatically demote Approved → Pending and reset the faculty proposal to "proposed"
+        # (without notifying yet; OM will send again).
+        edit_resets_approval = False
+        try:
+            if str(existing.get("status") or "").strip().lower() == "approved":
+                def _c(v: str) -> str:
+                    return _to_compact_hhmm(_norm_hhmm(v) or "") if v else ""
+
+                # Current DB schedules (best-effort)
+                s1 = await db[COL_SCHED].find_one(
+                    {"schedule_id": _sched_id(sid, 1)},
+                    {"_id": 0, "day": 1, "start_time": 1, "end_time": 1},
+                ) or {}
+                s2 = await db[COL_SCHED].find_one(
+                    {"schedule_id": _sched_id(sid, 2)},
+                    {"_id": 0, "day": 1, "start_time": 1, "end_time": 1},
+                ) or {}
+
+                db_view = {
+                    "faculty_id": existing_fid,
+                    "day1": str(s1.get("day") or "").strip().upper(),
+                    "begin1": str(s1.get("start_time") or "").strip(),
+                    "end1": str(s1.get("end_time") or "").strip(),
+                    "day2": str(s2.get("day") or "").strip().upper(),
+                    "begin2": str(s2.get("start_time") or "").strip(),
+                    "end2": str(s2.get("end_time") or "").strip(),
+                }
+
+                in_view = {
+                    "faculty_id": fid_raw,
+                    "day1": str(r.get("day1") or "").strip().upper(),
+                    "begin1": _c(str(r.get("begin1") or "")),
+                    "end1": _c(str(r.get("end1") or "")),
+                    "day2": str(r.get("day2") or "").strip().upper(),
+                    "begin2": _c(str(r.get("begin2") or "")),
+                    "end2": _c(str(r.get("end2") or "")),
+                }
+
+                if db_view != in_view:
+                    edit_resets_approval = True
+        except Exception:
+            edit_resets_approval = False
+
+        if edit_resets_approval:
+            now = _utcnow()
+            # Ensure the persisted assignment becomes Pending
+            r["status"] = "Pending"
+
+            # Reset the faculty proposal row to the edited version and set proposal status back to "proposed"
+            # so Faculty must accept again; previous approved version is replaced.
+            def _norm_for_faculty(rr: dict) -> dict:
+                out = dict(rr or {})
+                out["course_code"] = (out.get("course_code") or out.get("course") or "").strip()
+                out["course_title"] = (out.get("course_title") or out.get("title") or "").strip()
+
+                b1 = str(out.get("start") or out.get("begin1") or "").strip()
+                e1 = str(out.get("end") or out.get("end1") or "").strip()
+                if b1 and re.fullmatch(r"\d{4}", b1):
+                    b1 = f"{b1[:2]}:{b1[2:]}"
+                if e1 and re.fullmatch(r"\d{4}", e1):
+                    e1 = f"{e1[:2]}:{e1[2:]}"
+                out["start"] = b1
+                out["end"] = e1
+                if b1 and e1:
+                    out["time1"] = out.get("time1") or f"{b1}–{e1}"
+
+                b2 = str(out.get("start2") or out.get("begin2") or "").strip()
+                e2 = str(out.get("end2") or out.get("end2") or "").strip()
+                if b2 and re.fullmatch(r"\d{4}", b2):
+                    b2 = f"{b2[:2]}:{b2[2:]}"
+                if e2 and re.fullmatch(r"\d{4}", e2):
+                    e2 = f"{e2[:2]}:{e2[2:]}"
+                out["start2"] = b2
+                out["end2"] = e2
+                if b2 and e2:
+                    out["time2"] = out.get("time2") or f"{b2}–{e2}"
+
+                # Keep stable identifiers
+                out["section_id"] = str(out.get("id") or out.get("section_id") or "").strip()
+                return out
+
+            def _proposal_row_key(pr: dict) -> str:
+                return str(pr.get("id") or pr.get("section_id") or "").strip()
+
+            async def _update_proposal_for(fid_target: str, remove: bool = False):
+                if not fid_target:
+                    return
+                prop = await db[COL_LOAD_PROPOSALS].find_one(
+                    {"faculty_id": fid_target, "term_id": term_id},
+                    {"_id": 0, "rows": 1, "status": 1},
+                ) or {}
+                rows0 = list(prop.get("rows") or []) if isinstance(prop.get("rows"), list) else []
+                sid_key = str(r.get("id") or r.get("section_id") or "").strip()
+
+                if remove:
+                    rows1 = [pr for pr in rows0 if _proposal_row_key(pr) != sid_key]
+                    await db[COL_LOAD_PROPOSALS].update_one(
+                        {"faculty_id": fid_target, "term_id": term_id},
+                        {"$set": {"rows": rows1, "status": "proposed", "locked": False, "updated_at": now}},
+                        upsert=True,
+                    )
+                    return
+
+                # Replace or append row
+                new_row = _norm_for_faculty(r)
+                replaced = False
+                rows1 = []
+                for pr in rows0:
+                    if _proposal_row_key(pr) == sid_key:
+                        rows1.append(new_row)
+                        replaced = True
+                    else:
+                        rows1.append(pr)
+                if not replaced:
+                    rows1.append(new_row)
+
+                await db[COL_LOAD_PROPOSALS].update_one(
+                    {"faculty_id": fid_target, "term_id": term_id},
+                    {"$set": {"rows": rows1, "status": "proposed", "locked": False, "updated_at": now},
+                     "$setOnInsert": {"created_at": now}},
+                    upsert=True,
+                )
+
+            try:
+                # If reassigned, remove from previous faculty proposal doc
+                if existing_fid and existing_fid != fid_raw:
+                    await _update_proposal_for(existing_fid, remove=True)
+                await _update_proposal_for(fid_raw, remove=False)
+            except Exception:
+                pass
+
 
         incoming_status = str(r.get("status") or "").strip()
         existing_status = str(existing.get("status") or "").strip()

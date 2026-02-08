@@ -2438,6 +2438,9 @@ export default function OM_LoadAssignment() {
   const [levelFilter, setLevelFilter] = useState<string>("ALL");
   const [rows, setRows] = useState<Row[]>([]);
 
+  // Day pairing (auto-fill Day 2 based on Day 1), but keep Day 2 editable for manual override.
+  const [day2ManualById, setDay2ManualById] = useState<Record<string, boolean>>({});
+
   // Remarks are saved explicitly per-row (do NOT mix with load draft/undo stacks).
   const [remarksDraftBySection, setRemarksDraftBySection] = useState<Record<string, string>>({});
   const [remarksSavedBySection, setRemarksSavedBySection] = useState<Record<string, string>>({});
@@ -2500,6 +2503,59 @@ export default function OM_LoadAssignment() {
   };
 
   const commitRows = (nextRows: Row[], options?: { markDirty?: boolean }) => {
+    // If OM edits a schedule row that is currently "Approved",
+    // the approval becomes stale immediately and must be re-sent to faculty.
+    // This must happen even before OM clicks "Send to Faculty".
+    const demoteApprovedRowsOnAnyEdit = (incoming: Row[]): Row[] => {
+      const oldById = new Map(rows.map((r) => [r.id, r] as const));
+
+      const deepEq = (a: any, b: any) => {
+        if (a === b) return true;
+        // Handle simple cases
+        const ta = typeof a;
+        const tb = typeof b;
+        if (ta !== tb) return false;
+        if (a == null || b == null) return a === b;
+        // Fallback for objects/arrays
+        try {
+          return JSON.stringify(a) === JSON.stringify(b);
+        } catch {
+          return false;
+        }
+      };
+
+      const isMeaningfulEdit = (prev: any, next: any) => {
+        const keys = new Set<string>([...Object.keys(prev || {}), ...Object.keys(next || {})]);
+        // Ignore non-content/UI/meta fields when detecting an "edit".
+        // Status itself is what we mutate; ignore it when detecting edits.
+        const ignore = new Set([
+          "id",
+          "status",
+          "selected",
+          "forwarded_to_faculty",
+          "reforward_needed",
+          "pending_rfc",
+          "conflictNote",
+          "editable",
+          "finalized",
+        ]);
+        for (const k of ignore) keys.delete(k);
+        for (const k of keys) {
+          if (!deepEq((prev as any)?.[k], (next as any)?.[k])) return true;
+        }
+        return false;
+      };
+
+      return incoming.map((n): Row => {
+        const p = oldById.get(n.id);
+        if (!p) return n;
+        if (String(p.status || "").trim().toLowerCase() !== "approved") return n;
+        if (!isMeaningfulEdit(p, n)) return n;
+        return { ...n, status: "Pending" as Row["status"] };
+      });
+    };
+
+    const nextRowsWithApprovedDemotions = demoteApprovedRowsOnAnyEdit(nextRows);
     // If a row was already forwarded to faculty, any meaningful edit should make it eligible for re-forwarding.
     // (Selection toggles should NOT trigger this.)
     const prevById = new Map(rows.map((r) => [r.id, r] as const));
@@ -2532,7 +2588,7 @@ export default function OM_LoadAssignment() {
       return false;
     };
 
-    const nextRowsWithReforward: Row[] = nextRows.map((nr) => {
+    const nextRowsWithReforward: Row[] = nextRowsWithApprovedDemotions.map((nr) => {
       const pr = prevById.get(nr.id);
       if (!pr) return nr;
       if (!pr.forwarded_to_faculty) return nr;
@@ -2576,12 +2632,12 @@ export default function OM_LoadAssignment() {
         return true;
       };
 
-      return rowsIn.map((r) => {
+      return rowsIn.map((r): Row => {
         // If OM has completed the row, ensure it's Pending (unless it is already a more specific status).
         if (isComplete(r)) {
           const current = String(r.status || "").trim();
           if (!current || current === "Unassigned") {
-            return { ...r, status: "Pending" };
+            return { ...r, status: "Pending" as Row["status"] };
           }
         }
 
@@ -2752,6 +2808,31 @@ export default function OM_LoadAssignment() {
   }, []);
 
   const [initialLoaded, setInitialLoaded] = useState(false);
+
+  // Returns the *stored value* for Day 2 (same format as DAY_OPTIONS.value).
+  // Supports either stored codes (M/T/W/H/F/S) or day names/labels.
+  const pairedDay2For = (day1: string): string => {
+    const raw = String(day1 || "").trim();
+    if (!raw) return "";
+
+    // If already in code form, map directly.
+    const code = raw.length === 1 ? raw.toUpperCase() : "";
+    if (code === "M") return "H"; // Monday -> Thursday
+    if (code === "T") return "F"; // Tuesday -> Friday
+    if (code === "W") return "S"; // Wednesday -> Saturday
+
+    // Otherwise try to map from label/name to code.
+    const d = raw.toLowerCase();
+    if (d === "monday") return "H";
+    if (d === "tuesday") return "F";
+    if (d === "wednesday") return "S";
+    // Also handle common label forms (e.g., "Mon", "Tue", "Wed").
+    if (d === "mon") return "H";
+    if (d === "tue") return "F";
+    if (d === "wed") return "S";
+    return "";
+  };
+
 
   const setCell = <K extends keyof Row>(id: string, key: K, val: Row[K]) => {
     const markDirty = key !== ("selected" as K);
@@ -4638,7 +4719,19 @@ export default function OM_LoadAssignment() {
                               {e.day1 ? (
                                 <SelectBox
                                   value={r.day1}
-                                  onChange={(v) => setCell(r.id, "day1", v)}
+                                  onChange={(v) => {
+                                    const autoDay2 = pairedDay2For(String(v || ""));
+                                    const shouldAuto = !day2ManualById[r.id];
+                                    if (shouldAuto && autoDay2) {
+                                      updateRow(
+                                        r.id,
+                                        { day1: v as any, day2: autoDay2 as any },
+                                        { markDirty: true }
+                                      );
+                                    } else {
+                                      setCell(r.id, "day1", v as any);
+                                    }
+                                  }}
                                   options={DAY_OPTIONS}
                                 />
                               ) : (
@@ -4695,7 +4788,10 @@ export default function OM_LoadAssignment() {
                               {e.day2 ? (
                                 <SelectBox
                                   value={r.day2}
-                                  onChange={(v) => setCell(r.id, "day2", v)}
+                                  onChange={(v) => {
+                                    setDay2ManualById((prev) => ({ ...prev, [r.id]: true }));
+                                    setCell(r.id, "day2", v as any);
+                                  }}
                                   options={DAY_OPTIONS}
                                 />
                               ) : (
