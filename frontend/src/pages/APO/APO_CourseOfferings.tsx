@@ -1107,7 +1107,7 @@ const EligibleRoomSelect: React.FC<{
   const [currSearch, setCurrSearch] = useState("");
 
   // per-program add selection (code-only select still stores course_id)
-  const [currAddSel, setCurrAddSel] = useState<Record<string, string>>({});
+  const [_currAddSel, setCurrAddSel] = useState<Record<string, string>>({});
   const [editorState, setEditorState] = useState<{
     open: boolean;
     program_id?: string;
