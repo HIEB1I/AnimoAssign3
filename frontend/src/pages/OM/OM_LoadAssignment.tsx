@@ -4389,6 +4389,7 @@ export default function OM_LoadAssignment() {
                         // Show the red dot only when there is a pending RFC AND the row is still actionable.
                         // Once the schedule is approved/finalized, the message icon is disabled; the dot should disappear.
                         const unread = !!(r as any).pending_rfc;
+                        const fromFacultyService = !!(r as any).synced_from_faculty_service;
                         return (
                           <tr
                             key={r.id}
@@ -4676,6 +4677,7 @@ export default function OM_LoadAssignment() {
                             <td className="px-2 py-2 text-center">
                               {isRunning && (
                                 <div className="relative flex items-center justify-center gap-3 text-emerald-700">
+                                  {!fromFacultyService && (
                                   <button
                                     className={cls(
                                       "relative hover:brightness-110",
@@ -4697,6 +4699,8 @@ export default function OM_LoadAssignment() {
                                       <span className="absolute -top-1 -right-1 h-2.5 w-2.5 rounded-full bg-red-600" />
                                     )}
                                   </button>
+                                  )}
+
 
                                   <button
                                     className="relative hover:brightness-110"

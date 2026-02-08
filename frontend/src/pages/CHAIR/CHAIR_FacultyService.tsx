@@ -273,7 +273,7 @@ function Dropdown({
           // NON-SEARCHABLE MODE: plain button shows selected value
           <button
             type="button"
-            className={cls(CONTROL, "pr-8 text-left", !value && "text-neutral-400")}
+            className={cls(CONTROL, "pr-8 text-left truncate", !value && "text-neutral-400")}
             onClick={() => {
               if (open) setOpen(false);
               else openFresh();
@@ -393,8 +393,8 @@ function ColGroup14() {
   );
 }
 
-/** compact requester layout (6 columns) */
-const COLS_REQ = ["22ch", "36ch", "8ch", "36ch", "36ch", "14ch"];
+/** compact requester layout (7 columns) */
+const COLS_REQ = ["20ch", "18ch", "40ch", "8ch", "24ch", "24ch", "14ch"];
 function ColGroupReq() {
   return (
     <colgroup>
@@ -434,6 +434,8 @@ function ColGroupAccepted() {
 
 type FSCreate = {
   course_code: string;
+  section_id: string;
+  section: string;
   course_title: string;
   units: number | null;
   to_department: string | "";
@@ -575,6 +577,8 @@ export default function CHAIR_FacultyService({ chairDepartmentName }: ChairFacul
 
   const [draft, setDraft] = useState<FSCreate>({
     course_code: "",
+    section_id: "",
+    section: "",
     course_title: "",
     units: null,
     to_department: "",
@@ -845,6 +849,9 @@ export default function CHAIR_FacultyService({ chairDepartmentName }: ChairFacul
   const [courseTerm, setCourseTerm] = useState("");
   const [courseSuggestions, setCourseSuggestions] = useState<Array<{ code: string; title: string; units?: number }>>([]);
 
+  // Sections for the selected course (from OM Load Assignment source: sections_submitted)
+  const [sectionOptions, setSectionOptions] = useState<Array<{ section_id: string; section_code: string }>>([]);
+
   useEffect(() => {
     let mounted = true;
     if (!activeDeptName) {
@@ -870,7 +877,45 @@ export default function CHAIR_FacultyService({ chairDepartmentName }: ChairFacul
     [courseSuggestions]
   );
 
-  const canSend = Boolean(draft.course_code && draft.course_title && draft.units != null && draft.to_department);
+  // Load sections for the selected course so requests can target a specific OM row.
+  useEffect(() => {
+    let mounted = true;
+
+    // Reset when no course is selected
+    if (!draft.course_code) {
+      setSectionOptions([]);
+      setDraft((d) => ({ ...d, section_id: "", section: "" }));
+      return () => {
+        mounted = false;
+      };
+    }
+
+    (async () => {
+      try {
+        if (!activeDeptName) return;
+        const res = await getFSOptions({ requesterDepartment: activeDeptName, courseCode: draft.course_code });
+        if (!mounted) return;
+        const secs = (res?.sections || []) as Array<{ section_id: string; section_code: string }>;
+        setSectionOptions(secs);
+
+        // If current selection isn't valid anymore, clear it.
+        if (draft.section_id && !secs.some((s) => String(s.section_id) === String(draft.section_id))) {
+          setDraft((d) => ({ ...d, section_id: "", section: "" }));
+        }
+      } catch {
+        if (mounted) setSectionOptions([]);
+      }
+    })();
+
+    return () => {
+      mounted = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draft.course_code, activeDeptName]);
+
+  const canSend = Boolean(
+    draft.course_code && draft.section_id && draft.course_title && draft.units != null && draft.to_department
+  );
 
   function friendlyError(e: any) {
     const m = e?.response?.data?.detail || e?.response?.data?.message || e?.message || "Something went wrong.";
@@ -883,12 +928,14 @@ export default function CHAIR_FacultyService({ chairDepartmentName }: ChairFacul
         showToast({
           type: "info",
           title: "Missing details",
-          message: "Please complete Course, Units, and To Department.",
+          message: "Please complete Course, Section, Units, and To Department.",
         });
         return;
       }
       const crt = await createFacultyService({
         course_code: draft.course_code,
+        section_id: draft.section_id,
+        section: draft.section,
         course_title: draft.course_title,
         units: draft.units,
         to_department: draft.to_department as any,
@@ -904,7 +951,7 @@ export default function CHAIR_FacultyService({ chairDepartmentName }: ChairFacul
 
       setSentRows((prev) => [snd.row, ...prev]);
 
-      setDraft({ course_code: "", course_title: "", units: null, to_department: "" });
+      setDraft({ course_code: "", section_id: "", section: "", course_title: "", units: null, to_department: "" });
       setCourseTerm("");
 
       await refresh();
@@ -1052,6 +1099,7 @@ export default function CHAIR_FacultyService({ chairDepartmentName }: ChairFacul
                 <thead className={PLANTILLA_THEAD}>
                   <tr className={PLANTILLA_HEAD_TR}>
                     <th className={PLANTILLA_TH}>Course Code</th>
+                    <th className={PLANTILLA_TH}>Section</th>
                     <th className={PLANTILLA_TH}>Course Title</th>
                     <th className={PLANTILLA_TH}>Units</th>
                     <th className={PLANTILLA_TH}>From</th>
@@ -1072,6 +1120,8 @@ export default function CHAIR_FacultyService({ chairDepartmentName }: ChairFacul
                             setDraft((d) => ({
                               ...d,
                               course_code: code,
+                              section_id: "",
+                              section: "",
                               course_title: hit?.title ?? d.course_title,
                               units: hit?.units ?? d.units,
                             }));
@@ -1080,10 +1130,28 @@ export default function CHAIR_FacultyService({ chairDepartmentName }: ChairFacul
                           options={codeOptions}
                           placeholder="Select code…"
                           searchable
-                          className="min-w-[10rem] [&>button]:h-9 [&>button]:px-2"
+                          className="w-full [&>button]:h-9 [&>button]:px-2"
                           onOpen={() => setCourseTerm("")}
                         />
                       </div>
+                    </td>
+
+                    {/* Section */}
+                    <td className={cls(PLANTILLA_TD, "align-middle")}> 
+                      <Dropdown
+                        value={draft.section}
+                        onChange={(sec) => {
+                          const hit = (sectionOptions || []).find((s) => s.section_code === sec);
+                          setDraft((d) => ({
+                            ...d,
+                            section: sec,
+                            section_id: hit?.section_id || "",
+                          }));
+                        }}
+                        options={Array.from(new Set((sectionOptions || []).map((s) => s.section_code))).sort()}
+                        placeholder={draft.course_code ? "Select section…" : "Select course first"}
+                        className="w-full [&>button]:h-9 [&>button]:px-2"
+                      />
                     </td>
 
                     {/* Course Title (readonly) */}
@@ -1161,6 +1229,9 @@ export default function CHAIR_FacultyService({ chairDepartmentName }: ChairFacul
                     <tr key={r.fs_id} className={PLANTILLA_ROW}>
                       <td className={cls(PLANTILLA_TD, "text-left")}> 
                         <div className="font-semibold text-emerald-700">{r.course_code}</div>
+                        {r.section ? (
+                          <div className="text-[12px] text-neutral-700 leading-tight">Section: {r.section}</div>
+                        ) : null}
                         <div className="text-[12px] text-neutral-600 leading-tight">{r.course_title}</div>
                       </td>
 
@@ -1295,7 +1366,10 @@ export default function CHAIR_FacultyService({ chairDepartmentName }: ChairFacul
                       >
                         {/* Course */}
                         <td className={cls(PLANTILLA_TD, "text-left")}>
-                          <div className="font-semibold text-emerald-700">{r.course_code}</div>
+                          <div className="flex items-baseline justify-between gap-2">
+                            <div className="font-semibold text-emerald-700">{r.course_code}</div>
+                            {r.section ? <div className="text-[12px] text-neutral-700">{r.section}</div> : null}
+                          </div>
                           <div className="text-[12px] text-neutral-600 leading-tight">{r.course_title}</div>
                         </td>
 
@@ -1587,7 +1661,10 @@ export default function CHAIR_FacultyService({ chairDepartmentName }: ChairFacul
                       <tr key={r.fs_id || r.id} className={PLANTILLA_ROW}>
                         {/* Course */}
                         <td className={cls(PLANTILLA_TD, "text-left")}> 
-                          <div className="font-semibold text-emerald-700">{r.course_code}</div>
+                          <div className="flex items-baseline justify-between gap-2">
+                            <div className="font-semibold text-emerald-700">{r.course_code}</div>
+                            {r.section ? <div className="text-[12px] text-neutral-700">{r.section}</div> : null}
+                          </div>
                           <div className="text-[12px] text-neutral-600 leading-tight">{r.course_title}</div>
                         </td>
 

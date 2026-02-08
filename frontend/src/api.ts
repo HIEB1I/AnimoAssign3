@@ -2891,6 +2891,8 @@ export type OmLoadRow = {
   editable?: boolean;
   finalized?: boolean;
   pending_rfc?: boolean;
+  /** True when faculty assignment was synced from an accepted Faculty Service request. */
+  synced_from_faculty_service?: boolean;
 };
 
 // export async function getOmLoadAssignmentList(userId: string) {
@@ -3237,6 +3239,10 @@ export type FacultyServiceRow = {
   id?: string;
   fs_id?: string;
   course_code: string;
+  /** Specific section to target in OM Load Assignment (section_id from sections_submitted). */
+  section_id?: string;
+  /** Human-readable section code shown in OM Load Assignment (e.g., "BSIT 2-1"). */
+  section?: string;
   course_title: string;
   units: number | null;
   from_department: string; 
@@ -3254,19 +3260,28 @@ export type FacultyServiceRow = {
   updated_at?: string;
 };
 
-export async function getFSOptions(params?: { q?: string; toDepartment?: ToDept; requesterDepartment?: string }) {
+export async function getFSOptions(params?: {
+  q?: string;
+  toDepartment?: ToDept;
+  requesterDepartment?: string;
+  /** When provided, backend also returns sections for this course within the active/planning term. */
+  courseCode?: string;
+}) {
   const sp = new URLSearchParams();
   if (params?.q) sp.set("q", params.q);
   if (params?.toDepartment) sp.set("toDepartment", params.toDepartment);
   if (params?.requesterDepartment) sp.set("requesterDepartment", params.requesterDepartment);
+  if (params?.courseCode) sp.set("courseCode", params.courseCode);
   const { data } = await api.get(`/chair/faculty-service/options?${sp.toString()}`);
   return data as {
     ok: boolean;
     courses: Array<{ code: string; title: string; units?: number }>;
+    sections?: Array<{ section_id: string; section_code: string }>;
     departments: ToDept[];
     timeBegins: string[]; // renamed: begin options only
     days: DayShort[];
     facultyOptions?: Array<{ faculty_id: string; first_name: string; last_name: string; email?: string; label: string }>;
+    activeTerm?: any;
   };
 }
 
@@ -3290,6 +3305,8 @@ export async function listFacultyService(params?: {
 
 export async function createFacultyService(payload: {
   course_code: string;
+  section_id: string;
+  section?: string;
   course_title?: string;
   units?: number | null;
   to_department: ToDept;

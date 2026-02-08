@@ -903,7 +903,12 @@ async def _fetch_rows(user_id: str, term_id: str, db) -> Dict[str, Any]:
             "capacity": d.get("enrollment_cap", "") or "",
             "mode": mode_display,
             "remarks": remarks_by_section_id.get(sid, ""),
-            "status": "Pending" if (d.get("asg") or {}).get("faculty_id") else "Unassigned",
+            "status": (
+                "Approved"
+                if bool((d.get("asg") or {}).get("synced_from_faculty_service")) and (d.get("asg") or {}).get("faculty_id")
+                else ("Pending" if (d.get("asg") or {}).get("faculty_id") else "Unassigned")
+            ),
+            "synced_from_faculty_service": bool((d.get("asg") or {}).get("synced_from_faculty_service")),
         }
 
         # If there is **no faculty assigned**, keep schedule/capacity/mode intact so OM can
@@ -2255,7 +2260,12 @@ async def get_om_load_assignment_list(user_id: str, term_id: Optional[str] = Non
     for r in rows:
         fid = str(r.get("faculty_id") or "").strip()
         sid = str(r.get("id") or r.get("section_id") or "").strip()
-        r["pending_rfc"] = bool(fid and sid and (fid, sid) in open_rfc_keys)
+        # Faculty assignments synced from Faculty Service should be treated as already approved.
+        # They should not show RFC notifications in OM Load Assignment.
+        if bool(r.get("synced_from_faculty_service")):
+            r["pending_rfc"] = False
+        else:
+            r["pending_rfc"] = bool(fid and sid and (fid, sid) in open_rfc_keys)
 
     return {
         "term": _term_label(active),
@@ -3515,7 +3525,12 @@ async def run_auto_assignment(
     for r in rows:
         fid = str(r.get("faculty_id") or "").strip()
         sid = str(r.get("id") or r.get("section_id") or "").strip()
-        r["pending_rfc"] = bool(fid and sid and (fid, sid) in open_rfc_keys)
+        # Faculty assignments synced from Faculty Service should be treated as already approved.
+        # They should not show RFC notifications in OM Load Assignment.
+        if bool(r.get("synced_from_faculty_service")):
+            r["pending_rfc"] = False
+        else:
+            r["pending_rfc"] = bool(fid and sid and (fid, sid) in open_rfc_keys)
 
     return {
         "term": _term_label(active),
