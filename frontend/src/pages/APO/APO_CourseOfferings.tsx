@@ -6412,7 +6412,7 @@ const GlobalCourseEditModal: React.FC<GlobalCourseEditModalProps> = ({
                 <input
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
-                  placeholder="Type code or title (min 2 characters)…"
+                  placeholder="Search by course code or title…"
                   className={cls(SOFT_INPUT, "pl-9")}
                 />
               </div>
@@ -6465,7 +6465,7 @@ const GlobalCourseEditModal: React.FC<GlobalCourseEditModalProps> = ({
                 <>
                   <div>
                     <label className="text-xs font-medium text-slate-700 mb-1 block">
-                      Course Codes (multiple allowed)
+                      Course Code
                     </label>
 
                     {codeInputs.map((code, idx) => (
@@ -6500,8 +6500,7 @@ const GlobalCourseEditModal: React.FC<GlobalCourseEditModalProps> = ({
                     </button>
 
                     <p className="mt-1 text-[11px] text-slate-500">
-                      Each row will be saved as a separate entry in the{" "}
-                      <code>course_code</code> array in the database.
+                      Each row will be saved as a separate entry.
                     </p>
                   </div>
 
@@ -6763,7 +6762,7 @@ const noMatches = query.trim().length >= 2 && list.length === 0;
                 <input
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
-                  placeholder="Type code or title to search all courses…"
+                  placeholder="Search by course code or title…"
                   className={cls(SOFT_INPUT, "pl-9")}
                 />
               </div>
@@ -6962,7 +6961,7 @@ const CreateCourseModal: React.FC<{
               className={SOFT_INPUT}
               value={title}
               onChange={(e) => setTitle(e.target.value)}
-              placeholder="Course title"
+              placeholder=" "
             />
           </div>
 
@@ -6975,7 +6974,7 @@ const CreateCourseModal: React.FC<{
               className={SOFT_INPUT}
               value={units}
               onChange={(e) => setUnits(e.target.value)}
-              placeholder="3"
+              placeholder=" "
             />
           </div>
 
@@ -7009,7 +7008,7 @@ const CreateCourseModal: React.FC<{
               className={SOFT_INPUT}
               value={capacity}
               onChange={(e) => setCapacity(e.target.value)}
-              placeholder="45"
+              placeholder=" "
             />
           </div>
 
@@ -7026,12 +7025,12 @@ const CreateCourseModal: React.FC<{
 
           {/* Description */}
           <div className="md:col-span-2">
-            <label className="text-xs font-medium text-slate-700">Description</label>
+            <label className="text-xs font-medium text-slate-700">Description (Optional)</label>
             <textarea
               className={cls(SOFT_INPUT, "min-h-[96px]")}
               value={desc}
               onChange={(e) => setDesc(e.target.value)}
-              placeholder="Optional description…"
+              placeholder=" "
             />
           </div>
         </div>
