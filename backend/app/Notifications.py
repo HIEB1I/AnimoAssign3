@@ -161,6 +161,79 @@ def _build_notification_email_html(*, name: str, title: str, details: str, link:
 </html>"""
 
 
+def _build_inbox_email_text(*, name: str, title: str, details: str, link: str) -> str:
+    """Plain-text Gmail email for Inbox-style messages (RFC replies, etc.)."""
+
+    safe_name = (name or "User").strip() or "User"
+    safe_title = (title or "New Message").strip() or "New Message"
+    safe_details = (details or "").strip()
+    safe_link = (link or "").strip()
+
+    return (
+        f"Hi {safe_name},\n\n"
+        "You have a new message in your AnimoAssign Inbox.\n\n"
+        f"{safe_title}\n"
+        f"{safe_details}\n\n"
+        f"To view and reply, please log in to AnimoAssign:\n{safe_link}\n\n"
+        "After logging in, open Inbox from the top bar.\n\n"
+        "— AnimoAssign"
+    )
+
+
+def _build_inbox_email_html(*, name: str, title: str, details: str, link: str) -> str:
+    """Email-client-friendly HTML for Inbox-style messages."""
+
+    safe_name = _html_escape((name or "User").strip() or "User")
+    safe_title = _html_escape((title or "New Message").strip() or "New Message")
+    safe_details = _html_escape((details or "").strip()).replace("\n", "<br>")
+    safe_link = _html_escape((link or "").strip() or "http://ccscloud.dlsu.edu.ph:11160/")
+    preheader = _html_escape(((details or "").strip() or title or "New Message")[:120])
+
+    return f"""<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{safe_title}</title>
+  </head>
+  <body style="margin:0;padding:0;background:#f6f7fb;">
+    <div style="display:none;max-height:0;overflow:hidden;opacity:0;color:transparent;">{preheader}</div>
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f6f7fb;padding:24px 0;">
+      <tr>
+        <td align="center">
+          <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="width:600px;max-width:92vw;background:#ffffff;border-radius:14px;overflow:hidden;box-shadow:0 6px 18px rgba(17,24,39,0.08);">
+            <tr>
+              <td style="padding:20px 24px;background:#0B6B3A;color:#ffffff;font-family:Arial,Helvetica,sans-serif;">
+                <div style="font-size:12px;letter-spacing:.08em;text-transform:uppercase;opacity:.9;">AnimoAssign</div>
+                <div style="font-size:20px;font-weight:700;margin-top:6px;line-height:1.25;">New Message</div>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:22px 24px;font-family:Arial,Helvetica,sans-serif;color:#111827;font-size:14px;line-height:1.55;">
+                <p style="margin:0 0 12px 0;">Hi {safe_name},</p>
+                <p style="margin:0 0 12px 0;color:#374151;">You have a new message in your AnimoAssign Inbox.</p>
+
+                <div style="font-size:16px;font-weight:800;color:#111827;margin:0 0 10px 0;">{safe_title}</div>
+                <div style="margin:0 0 18px 0;padding:12px 14px;border-radius:12px;background:#f3f4f6;color:#111827;">{safe_details}</div>
+
+                <div style="text-align:center;margin:0 0 14px 0;"><a href="{safe_link}" style="display:inline-block;background:#16A34A;color:#ffffff;text-decoration:none;padding:12px 22px;border-radius:10px;font-weight:700;">Open AnimoAssign Inbox</a></div>
+
+                <p style="margin:0;color:#6b7280;font-size:12px;">After logging in, open <b>Inbox</b> from the top bar to view and reply. If the button doesn’t work, copy and paste this link: <a href="{safe_link}" style="color:#16A34A;word-break:break-all;">{safe_link}</a></p>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:14px 24px;background:#f9fafb;font-family:Arial,Helvetica,sans-serif;color:#6b7280;font-size:12px;line-height:1.4;">
+                You’re receiving this email because you received a message in AnimoAssign.
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>"""
+
+
 
 async def _resolve_sender_user_id(email_from_user_id: str | None) -> str:
     """Choose which user's Gmail token to use to send email.
@@ -386,6 +459,41 @@ async def _send_email_via_user_gmail(
             raise RuntimeError(f"gmail_send_failed:{r.status_code}:{r.text}")
 
 
+async def _pick_om_sender_user_id() -> str:
+    """Best-effort pick an OM user_id that can send Gmail.
+
+    Used for system notifications that must appear to come from the Office Manager.
+    """
+
+    try:
+        om_ids = await _get_all_om_user_ids()
+        if not om_ids:
+            return ""
+
+        for uid in om_ids:
+            try:
+                tok = await _get_user_google_token(uid)
+                if not tok:
+                    continue
+
+                refresh_token = (tok.get("refresh_token") or "").strip()
+                access_token = (tok.get("access_token") or "").strip()
+                if refresh_token:
+                    return uid
+
+                # Access-token-only accounts can still work if token is not expired.
+                if access_token:
+                    exp = _compute_expires_at(tok)
+                    if exp is None or time.time() < float(exp):
+                        return uid
+            except Exception:
+                continue
+    except Exception:
+        return ""
+
+    return ""
+
+
 async def _send_notification_email_best_effort(
     *,
     recipient_user_id: str,
@@ -405,6 +513,17 @@ async def _send_notification_email_best_effort(
         if not to_email:
             return
 
+        meta_dict = (meta if isinstance(meta, dict) else {}) or {}
+        kind = (meta_dict.get("kind") or "").strip()
+
+        # Some notifications must always be sent from an OM account (not the recipient).
+        # This prevents faculty-facing system emails (e.g., preference deadline updates/reminders)
+        # from appearing to come from a Faculty account due to fallback sender selection.
+        if kind in {"prefs_deadline_changed", "prefs_deadline"}:
+            om_sender = await _pick_om_sender_user_id()
+            if om_sender:
+                email_from_user_id = om_sender
+
         sender_user_id = await _resolve_sender_user_id(email_from_user_id)
         env_sender_user_id = await _get_env_sender_user_id()
 
@@ -421,22 +540,30 @@ async def _send_notification_email_best_effort(
             sender_candidates.append(recipient_user_id)
 
         name = _user_display_name(recipient)
-        route = ((meta or {}) if isinstance(meta, dict) else {}).get("route") or ""
+        route = meta_dict.get("route") or ""
         link = _build_notif_link(str(route))
 
         subject = _make_email_subject(title)
-        text_body = _build_notification_email_text(
-            name=name,
-            title=title,
-            details=details,
-            link=link,
-        )
-        html_body = _build_notification_email_html(
-            name=name,
-            title=title,
-            details=details,
-            link=link,
-        )
+
+        # If this is a reply notification from an RFC thread, use the Inbox email template.
+        # (Applies to both Faculty->OM and OM->Faculty RFC replies.)
+        is_rfc_reply = ("rfc" in kind.lower()) and ("reply" in kind.lower())
+        if is_rfc_reply:
+            text_body = _build_inbox_email_text(name=name, title=title, details=details, link=link)
+            html_body = _build_inbox_email_html(name=name, title=title, details=details, link=link)
+        else:
+            text_body = _build_notification_email_text(
+                name=name,
+                title=title,
+                details=details,
+                link=link,
+            )
+            html_body = _build_notification_email_html(
+                name=name,
+                title=title,
+                details=details,
+                link=link,
+            )
 
         last_err: Optional[Exception] = None
         for sid in sender_candidates:
