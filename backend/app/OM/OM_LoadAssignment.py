@@ -107,28 +107,21 @@ def _campus_name_to_id(val: str) -> str:
 
 
 async def _om_department_ids(user_id: str, db) -> List[str]:
-    """Departments this OM should see.
-    Tries role_assignments(role=office_manager/om) then staff_profiles.department_id.
-    """
+    """Departments this OM should see (from role_assignments.scope)."""
     ra = await db.get_collection("role_assignments").find_one(
-        {"user_id": user_id, "role": {"$in": ["office_manager", "om"]}},
-        {"_id": 0, "department_ids": 1, "department_id": 1},
+        {"user_id": user_id, "role_id": "ROLE0006"},
+        {"_id": 0, "scope": 1},
     ) or {}
 
     dept_ids: List[str] = []
-    if isinstance(ra.get("department_ids"), list):
-        dept_ids = [str(x).strip() for x in ra["department_ids"] if str(x).strip()]
-    elif ra.get("department_id"):
-        dept_ids = [str(ra["department_id"]).strip()]
+    for sc in (ra.get("scope") or []):
+        if isinstance(sc, dict) and sc.get("type") == "department":
+            did = str(sc.get("id") or "").strip()
+            if did:
+                dept_ids.append(did)
 
-    if dept_ids:
-        return dept_ids
+    return dept_ids
 
-    staff = await db[COL_STAFF].find_one({"user_id": user_id}, {"_id": 0, "department_id": 1}) or {}
-    if staff.get("department_id"):
-        return [str(staff["department_id"]).strip()]
-
-    return []
 COL_LEAVES = "leaves"
 COL_PREFERENCES = "faculty_preferences"
 COL_FACULTY_LOADS = "faculty_loads"
@@ -393,6 +386,22 @@ async def _chair_user_ids_for_department_id(department_id: str, db) -> List[str]
             seen.add(x)
             out.append(x)
     return out
+
+async def get_office_manager_department(db, user_id: str) -> str | None:
+    role = await db.role_assignments.find_one({
+        "user_id": user_id,
+        "role_id": "ROLE0006",
+        "scope.type": "department",
+    })
+
+    if not role:
+        return None
+
+    for scope in role.get("scope", []):
+        if scope.get("type") == "department":
+            return scope.get("id")
+
+    return None
 
 async def _infer_department_id_from_rows(rows: List[Dict[str, Any]], db) -> Optional[str]:
     """Best-effort department_id inference for OM forward/update.
@@ -753,13 +762,15 @@ def _preferred_cap_for(ctx, fid: str) -> int:
 
 async def _fetch_rows(user_id: str, term_id: str, db) -> Dict[str, Any]:
     dept_ids = await _om_department_ids(user_id, db)
+    if not dept_ids:
+        return {"rows": []}
     pipe: List[Dict[str, Any]] = [
         {"$match": {"term_id": term_id, "submitted_for_scheduling": True}} if term_id else {"$match": {"submitted_for_scheduling": True}},
 
         {"$lookup": {"from": COL_COURSES, "localField": "course_id", "foreignField": "course_id", "as": "course"}},
-        {"$unwind": {"path": "$course", "preserveNullAndEmptyArrays": True}},
+        {"$unwind": {"path": "$course", "preserveNullAndEmptyArrays": False}},
         # Dept restriction (each OM only sees their department)
-        ({"$match": {"course.department_id": {"$in": dept_ids}}} if dept_ids else {"$match": {}}),
+        {"$match": {"course.department_id": {"$in": dept_ids}}},
         {
         "$match": {
             "$or": [
@@ -2909,7 +2920,22 @@ async def run_auto_assignment(
     # ----------------------------------------------------------------------
 
     # Prefs (used for alt-window search on duplicates)
-    ctx_for_prefs = await phase0_load(active["term_id"], db, department_id=department_id)
+    # Resolve OM department if not explicitly provided
+    if not department_id:
+        om_dept_ids = await _om_department_ids(user_id, db)
+        if not om_dept_ids:
+            raise HTTPException(
+                status_code=403,
+                detail="Office Manager department not found"
+            )
+        department_id = om_dept_ids[0]  # OM should only see one dept
+
+    ctx_for_prefs = await phase0_load(
+        active["term_id"],
+        db,
+        department_id=department_id
+    )
+
     fac_prefs = ctx_for_prefs.prefs_by_faculty or {}
 
     # Build a quick map → faculty_id -> preferred_mode (from faculty_preferences.mode.mode)
@@ -3679,24 +3705,31 @@ async def phase0_load(term_id: str, db, department_id: str | None = None) -> Con
     # ------------------------------
     # 0) Term-scoped Sections
     # ------------------------------
-    q = {"term_id": term_id}
+    # 1. Load courses by department FIRST
+    course_q = {}
     if department_id:
-        q["department_id"] = department_id
+        course_q["department_id"] = department_id
+
+    courses = await db[COL_COURSES].find(course_q).to_list(None)
+
+    course_ids = [c["course_id"] for c in courses]
+
+    # 2. Load sections ONLY for those courses
+    section_q = {"term_id": term_id}
+    if course_ids:
+        section_q["course_id"] = {"$in": course_ids}
 
     sections = await db[COL_SECTIONS].find(
-        q,
+        section_q,
         {
             "_id": 0,
             "section_id": 1,
             "course_id": 1,
-            "department_id": 1,
-            "campus_id": 1,
             "units": 1,
             "mode": 1,
-            # schedule fields (if denormalized on sections)
             "day1": 1, "begin1": 1, "end1": 1, "room1": 1,
             "day2": 1, "begin2": 1, "end2": 1, "room2": 1,
-        },
+        }
     ).sort([("course_id", 1), ("section_id", 1)]).to_list(None)
 
     # Early return if no sections
@@ -3717,7 +3750,10 @@ async def phase0_load(term_id: str, db, department_id: str | None = None) -> Con
     # ------------------------------
     # 1) Courses (normalize units & type)
     # ------------------------------
-    course_rows = await db[COL_COURSES].find({}, {"_id": 0}).to_list(None)
+    course_rows = await db[COL_COURSES].find(
+        {"course_id": {"$in": course_ids}},
+        {"_id": 0}
+    ).to_list(None)
 
     def _units(r: dict) -> int:
         v = r.get("units", r.get("units_per_section"))
