@@ -162,22 +162,37 @@ async def _faculty_user_ids() -> List[str]:
 
 
 async def _om_user_ids() -> List[str]:
+    """
+    Resolve OM user_ids (best effort).
+
+    NOTE: Per APO requirements, any APO notification sent to OM should ALSO be sent
+    to the GS Coordinator. We include GS Coordinator IDs here so existing OM-targeted
+    notification flows automatically include them.
+    """
     # Some seeds use 'OM', others 'Office Manager'
-    uids = await _user_ids_by_role_regex(r"(^OM$|Office Manager)")
-    if uids:
-        return uids
+    om_uids = await _user_ids_by_role_regex(r"(^OM$|Office Manager)")
+    gs_uids = await _user_ids_by_role_regex(r"GS\s*Coordinator")
+
     # fallback: staff_profiles position_title
-    staff = [
+    staff_om = [
         s.get("user_id")
         async for s in db[COL_STAFF_PROFILES].find(
             {"position_title": {"$regex": "office manager|\bom\b", "$options": "i"}},
             {"_id": 0, "user_id": 1},
         )
     ]
-    staff = _dedupe([u for u in staff if u])
-    if staff:
-        return staff
-    return await _user_ids_by_role_regex("om")
+    staff_gs = [
+        s.get("user_id")
+        async for s in db[COL_STAFF_PROFILES].find(
+            {"position_title": {"$regex": "gs coordinator|graduate school coordinator", "$options": "i"}},
+            {"_id": 0, "user_id": 1},
+        )
+    ]
+
+    # legacy fallback (very old seeds)
+    legacy = await _user_ids_by_role_regex("om")
+
+    return _dedupe([u for u in (om_uids + gs_uids + staff_om + staff_gs + legacy) if u])
 
 async def _notify_planning_started(*, actor_user_id: str, planning_term_id: str) -> Dict[str, Any]:
     """Notify OM + Chair + Faculty that course offerings planning started."""

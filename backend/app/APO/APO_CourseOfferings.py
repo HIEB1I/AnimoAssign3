@@ -140,29 +140,38 @@ async def _dept_name_by_id(dept_id: str, db) -> str:
     return (d.get("dept_name") or d.get("department_name") or d.get("name") or "").strip()
 
 
-async def _om_user_ids_for_department_id(dept_id: str, db) -> List[str]:
+async def _om_and_gs_user_ids_for_department_id(dept_id: str, campus_id: Optional[str], db) -> List[str]:
     """
-    Resolve OM user_id(s) for a department (best effort).
-    Uses role_assignments scope(type=department,id=dept_id) and role name matching OM.
+    Resolve OM + GS Coordinator user_id(s) for a department (best effort).
+
+    APO notifications that are targeted to the Office Manager should ALSO be sent to GS Coordinator.
+
+    Strategy:
+      1) Look up role_ids whose role_type matches OM / Office Manager OR GS Coordinator.
+      2) For each role_assignment:
+           - If scope includes {type:'department', id: dept_id} => include
+           - Else if scope includes {type:'campus', id: campus_id} => include
+           - Else if scope is missing/empty => include (treat as global)
+      3) Deduplicate.
     """
     if not dept_id:
         return []
 
-    # 1) Find role_ids that look like OM
-    om_roles = await db[COL_USER_ROLES].find(
-        {"role_type": {"$regex": r"(^OM$|Office Manager)", "$options": "i"}},
-        {"_id": 0, "role_id": 1},
-    ).to_list(100)
-    om_role_ids = [r.get("role_id") for r in om_roles if r.get("role_id")]
-
-    if not om_role_ids:
+    role_q = {
+        "$or": [
+            {"role_type": {"$regex": r"(^OM$|Office Manager)", "$options": "i"}},
+            {"role_type": {"$regex": r"GS\s*Coordinator", "$options": "i"}},
+        ]
+    }
+    roles = await db[COL_USER_ROLES].find(role_q, {"_id": 0, "role_id": 1}).to_list(200)
+    role_ids = [r.get("role_id") for r in roles if r.get("role_id")]
+    if not role_ids:
         return []
 
-    # 2) role_assignments with that role_id and dept scope
     ras = await db[COL_ROLE_ASSIGN].find(
-        {"role_id": {"$in": om_role_ids}},
+        {"role_id": {"$in": role_ids}},
         {"_id": 0, "user_id": 1, "scope": 1},
-    ).to_list(500)
+    ).to_list(1000)
 
     recipients: List[str] = []
     for ra in ras:
@@ -170,18 +179,34 @@ async def _om_user_ids_for_department_id(dept_id: str, db) -> List[str]:
         if not uid:
             continue
 
-        scope = ra.get("scope") or []
+        scope = ra.get("scope")
+        if not scope:
+            # global assignment
+            recipients.append(uid)
+            continue
+
         if isinstance(scope, dict):
             scope = [scope]
+        if not isinstance(scope, list):
+            scope = []
 
+        matched = False
         for s in scope:
             if not isinstance(s, dict):
                 continue
-            if (s.get("type") or "").lower() == "department" and (s.get("id") or "").strip() == dept_id:
-                recipients.append(uid)
+            stype = (s.get("type") or "").strip().lower()
+            sid = (s.get("id") or "").strip()
+            if stype == "department" and sid == dept_id:
+                matched = True
+                break
+            if campus_id and stype == "campus" and sid == str(campus_id).strip():
+                matched = True
                 break
 
-    # Deduplicate
+        if matched:
+            recipients.append(uid)
+
+    # Deduplicate (stable)
     out: List[str] = []
     seen = set()
     for u in recipients:
@@ -6114,7 +6139,7 @@ async def apo_forward_courseofferings_to_scheduling(
     notified: List[str] = []
 
     for dept_id in dept_ids:
-        recipients = await _om_user_ids_for_department_id(dept_id, db)
+        recipients = await _om_and_gs_user_ids_for_department_id(dept_id, campus_id, db)
         dept_name = await _dept_name_by_id(dept_id, db)
 
         # kind inference: forwarded vs updated (same idea as your notify-chair)
