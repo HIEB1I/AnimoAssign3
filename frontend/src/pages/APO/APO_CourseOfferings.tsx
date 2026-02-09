@@ -7071,9 +7071,11 @@ const noMatches = query.trim().length >= 2 && list.length === 0;
           {/* Current courses */}
           <div className="rounded-lg border">
             <div className="px-3 py-2 bg-gray-50 font-semibold">Current courses</div>
-            <div className="flex flex-wrap justify-end gap-4">
-              {current.length === 0 && <div className="p-3 text-sm text-neutral-500">No courses.</div>}
-              {current.map((c) => (
+            <div className="flex flex-col divide-y">
+            {current.length === 0 ? (
+              <div className="p-3 text-sm text-neutral-500">No courses.</div>
+            ) : (
+              current.map((c) => (
                 <div key={c.course_id} className="p-3 flex items-start justify-between gap-3">
                   <div className="min-w-0">
                     <div className="font-semibold text-emerald-700">{c.code}</div>
@@ -7089,8 +7091,9 @@ const noMatches = query.trim().length >= 2 && list.length === 0;
                     <Trash2 className="h-4 w-4" />
                   </button>
                 </div>
-              ))}
-            </div>
+              ))
+            )}
+          </div>
           </div>
 
           {/* Global catalog search */}
