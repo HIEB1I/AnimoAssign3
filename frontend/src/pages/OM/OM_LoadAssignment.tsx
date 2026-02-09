@@ -2638,7 +2638,16 @@ export default function OM_LoadAssignment() {
         }
       }
 
-      setRows(nextRows);
+      const normalizedNextRows: Row[] = nextRows.map((r: any) => ({
+        ...r,
+        mode: (r as any)?.mode ?? (r as any)?.Mode ?? "",
+        begin1: normalizeServerTimeToHHMM(r?.begin1),
+        end1: normalizeServerTimeToHHMM(r?.end1),
+        begin2: normalizeServerTimeToHHMM(r?.begin2),
+        end2: normalizeServerTimeToHHMM(r?.end2),
+      }));
+      
+      setRows(normalizedNextRows);      
       setTerm(typeof res?.term === "string" ? res.term : "");
       setMode("run");
       // Preserve the "Forward to Chair" final-state across auto-assign.

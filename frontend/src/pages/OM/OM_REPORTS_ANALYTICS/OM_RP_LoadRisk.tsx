@@ -149,6 +149,23 @@ export default function OM_RP_LoadRisk() {
   const [riskFilter, setRiskFilter] = useState<RiskFilter>("HIGH_MED");
   const [showLowRisk, setShowLowRisk] = useState(false);
 
+  type RiskTableSortKey = "course" | "demand" | "pt_needed" | "risk";
+  const [riskSortKey, setRiskSortKey] = useState<RiskTableSortKey>("risk");
+  const [riskSortDir, setRiskSortDir] = useState<"asc" | "desc">("desc");
+
+  const toggleRiskSort = (key: RiskTableSortKey) => {
+    if (riskSortKey === key) {
+      setRiskSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    } else {
+      setRiskSortKey(key);
+      setRiskSortDir("asc");
+    }
+  };
+
+  const sortArrow = (key: RiskTableSortKey) =>
+    riskSortKey === key ? (riskSortDir === "asc" ? "▲" : "▼") : "";
+
+
   // defaults (for Reset)
   const DEFAULT_DEPT = "DEPT0001";
   const DEFAULT_OVERLOAD = 0;
@@ -234,16 +251,42 @@ export default function OM_RP_LoadRisk() {
     const allCourses = data.rows.length;
     const lowRiskCount = allCourses - (data.summary.high_risk_course_count || 0) - (data.summary.medium_risk_course_count || 0);
 
-    // Risk sorting logic: High (1) > Medium (2) > Low (3)
-    const riskOrder = { 'High': 1, 'Medium': 2, 'Low': 3 };
+    const riskRank = (v?: string) => {
+      const s = (v || "").toLowerCase();
+      if (s.includes("high")) return 3;
+      if (s.includes("medium")) return 2;
+      if (s.includes("low")) return 1;
+      return 0;
+    };
+    
+    const dir = riskSortDir === "asc" ? 1 : -1;
+    
     const sortedRows = [...data.rows].sort((a, b) => {
-        const orderA = riskOrder[a.risk as keyof typeof riskOrder] || 4;
-        const orderB = riskOrder[b.risk as keyof typeof riskOrder] || 4;
-        return orderA - orderB;
-    });
+      const aCourse = String(a.course_code ?? "");
+      const bCourse = String(b.course_code ?? "");
+    
+      const aDemand = Number(a.demand_sections ?? 0);
+      const bDemand = Number(b.demand_sections ?? 0);
+    
+      const aPT = Number(a.pt_needed_sections ?? 0);
+      const bPT = Number(b.pt_needed_sections ?? 0);
+    
+      const aRisk = riskRank(a.risk);
+      const bRisk = riskRank(b.risk);
+    
+      if (riskSortKey === "course") return dir * aCourse.localeCompare(bCourse);
+      if (riskSortKey === "demand") return dir * (aDemand - bDemand);
+      if (riskSortKey === "pt_needed") return dir * (aPT - bPT);
+    
+      // risk
+      if (aRisk !== bRisk) return dir * (aRisk - bRisk);
+    
+      // tie-breaker
+      return aCourse.localeCompare(bCourse);
+    });    
 
     return { sortedRows, totals: { demand, ft, pt }, lowRiskCount };
-  }, [data]);
+  }, [data, riskSortKey, riskSortDir]);
 
   const displayedRows = useMemo(() => {
     const highs = sortedRows.filter((r) => r.risk === "High");
@@ -522,19 +565,57 @@ export default function OM_RP_LoadRisk() {
 
                   <thead className="bg-gray-50 text-gray-700 text-xs uppercase tracking-wide sticky top-0 z-[1]">
                     <tr>
-                      {[
-                          "Course",
-                          "Demand (sections)",
-                          "FT Capacity Used (estimated)",
-                          "Suggested FT Candidates (model)",
-                          "PT Needed",
-                          "Risk",
-                          "Confidence Level",
-                        ].map((h) => (
-                        <th key={h} className="px-4 py-2.5 text-center font-semibold whitespace-nowrap border-b">
-                          {h}
-                        </th>
-                      ))}
+                      <th className="px-4 py-2.5 text-center font-semibold whitespace-nowrap border-b">
+                        <button
+                          type="button"
+                          onClick={() => toggleRiskSort("course")}
+                          className="inline-flex items-center gap-1 hover:underline"
+                        >
+                          Course {sortArrow("course")}
+                        </button>
+                      </th>
+
+                      <th className="px-4 py-2.5 text-center font-semibold whitespace-nowrap border-b">
+                        <button
+                          type="button"
+                          onClick={() => toggleRiskSort("demand")}
+                          className="inline-flex items-center gap-1 hover:underline"
+                        >
+                          Demand (sections) {sortArrow("demand")}
+                        </button>
+                      </th>
+
+                      <th className="px-4 py-2.5 text-center font-semibold whitespace-nowrap border-b">
+                        FT Capacity Used (estimated)
+                      </th>
+
+                      <th className="px-4 py-2.5 text-center font-semibold whitespace-nowrap border-b">
+                        Suggested FT Candidates (model)
+                      </th>
+
+                      <th className="px-4 py-2.5 text-center font-semibold whitespace-nowrap border-b">
+                        <button
+                          type="button"
+                          onClick={() => toggleRiskSort("pt_needed")}
+                          className="inline-flex items-center gap-1 hover:underline"
+                        >
+                          PT Needed {sortArrow("pt_needed")}
+                        </button>
+                      </th>
+
+                      <th className="px-4 py-2.5 text-center font-semibold whitespace-nowrap border-b">
+                        <button
+                          type="button"
+                          onClick={() => toggleRiskSort("risk")}
+                          className="inline-flex items-center gap-1 hover:underline"
+                        >
+                          Risk {sortArrow("risk")}
+                        </button>
+                      </th>
+
+                      <th className="px-4 py-2.5 text-center font-semibold whitespace-nowrap border-b">
+                        Confidence Level
+                      </th>
                     </tr>
                   </thead>
 
