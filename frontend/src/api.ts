@@ -3309,6 +3309,7 @@ export async function createFacultyService(payload: {
   section?: string;
   course_title?: string;
   units?: number | null;
+  remarks?: string;
   to_department: ToDept;
   from_department?: string; // NEW
 }) {
