@@ -588,27 +588,76 @@ async def preferences_root(
       term = await _active_term_doc()
       
       # UPDATED: Fetch "Future Terms" to populate the return dropdown
-      future_terms = []
-      if term:
-          # Terms that start after current academic year OR same year but later term
-          ft_cursor = db[COL_TERMS].find({
-              "$or": [
-                  {"acad_year_start": {"$gt": term.get("acad_year_start", 0)}},
-                  {
-                      "acad_year_start": term.get("acad_year_start", 0),
-                      "term_number": {"$gt": term.get("term_number", 0)}
-                  }
-              ]
-          }, {"_id": 0, "term_id": 1, "acad_year_start": 1, "acad_year_end": 1, "term_number": 1, "start_date": 1}).sort([("acad_year_start", 1), ("term_number", 1)]).limit(10)
-          
-          async for ft in ft_cursor:
-              label = f"AY {ft.get('acad_year_start')}-{ft.get('acad_year_end')} Term {ft.get('term_number')}"
-              future_terms.append({
-                  "term_id": ft["term_id"],
-                  "label": label,
-                  "start_date": ft.get("start_date")
-              })
+      # Requirement: show ONLY the current (active) term and terms AFTER it (planning onwards).
+      # Note: Some datasets (e.g., dev seed) don't have explicit status/planning flags, so we
+      # fall back to using acad_year_start + term_number ordering from the current term.
+      future_terms: List[Dict[str, Any]] = []
+      if term and term.get("acad_year_start") is not None and term.get("term_number") is not None:
+          try:
+              anchor_ay = int(term.get("acad_year_start"))
+              anchor_tn = int(term.get("term_number"))
+          except Exception:
+              anchor_ay, anchor_tn = None, None
 
+          if anchor_ay is not None and anchor_tn is not None:
+              onward_q: Dict[str, Any] = {
+                  "is_archived": {"$ne": True},
+                  "$or": [
+                      {"acad_year_start": {"$gt": anchor_ay}},
+                      {"acad_year_start": anchor_ay, "term_number": {"$gte": anchor_tn}},
+                  ],
+              }
+
+              # Pull fields that exist across variants (start_at in dev seed, start_date in some prod datasets).
+              proj = {
+                  "_id": 0,
+                  "term_id": 1,
+                  "acad_year_start": 1,
+                  "acad_year_end": 1,
+                  "term_number": 1,
+                  "start_at": 1,
+                  "start_date": 1,
+                  "is_current": 1,
+                  "status": 1,
+                  "is_planning": 1,
+              }
+
+              ft_cursor = (
+                  db[COL_TERMS]
+                  .find(onward_q, proj)
+                  .sort([("acad_year_start", 1), ("term_number", 1)])
+                  .limit(30)
+              )
+
+              async for ft in ft_cursor:
+                  ay_start = ft.get("acad_year_start")
+                  tn = ft.get("term_number")
+                  if ay_start is None or tn is None:
+                      continue
+                  try:
+                      ay_start_i = int(ay_start)
+                      tn_i = int(tn)
+                  except Exception:
+                      continue
+
+                  # If acad_year_end is not stored, derive it as AY+1 (matches the seed dataset).
+                  ay_end = ft.get("acad_year_end")
+                  try:
+                      ay_end_i = int(ay_end) if ay_end is not None else (ay_start_i + 1)
+                  except Exception:
+                      ay_end_i = ay_start_i + 1
+
+                  current_suffix = " (Current)" if ft.get("is_current") else ""
+                  label = f"AY {ay_start_i}–{ay_end_i} • Term {tn_i}{current_suffix}"
+
+                  # Use whichever field exists.
+                  start_any = ft.get("start_at") or ft.get("start_date")
+
+                  future_terms.append({
+                      "term_id": ft.get("term_id"),
+                      "label": label,
+                      "start_date": start_any,
+                  })
       window = await _prefs_window_override_for_term(term)
       prefs_window = {
           "openISO": window.get("openISO") or "",
