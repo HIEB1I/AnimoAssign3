@@ -3522,6 +3522,27 @@ export default function OM_LoadAssignment() {
   };
 
   const getEditFlags = (r: Row) => {
+    // Rows synced from Faculty Service Request are view-only for OM.
+    if (!!(r as any).synced_from_faculty_service) {
+      return {
+        course: false,
+        title: false,
+        units: false,
+        section: false,
+        faculty: false,
+        day1: false,
+        begin1: false,
+        end1: false,
+        room1: false,
+        day2: false,
+        begin2: false,
+        end2: false,
+        room2: false,
+        capacity: false,
+        mode: false,
+      } as const;
+    }
+
     // Archived terms are view-only.
     // NOTE: Faculty acceptance/"Approved" schedules must remain editable by OM.
     if (isArchiveView) {
@@ -4836,19 +4857,21 @@ export default function OM_LoadAssignment() {
                     <tbody>
                       {filtered.map((r, idx) => {
                         const e = getEditFlags(r);
-                        const isLocked = isArchiveView;
+                        const fromFacultyService = !!(r as any).synced_from_faculty_service;
+                        const isLocked = isArchiveView || fromFacultyService;
                         const isForwardedToFaculty = !!r.forwarded_to_faculty;
                         // Show the red dot only when there is a pending RFC AND the row is still actionable.
                         // Once the schedule is approved/finalized, the message icon is disabled; the dot should disappear.
                         const unread = !!(r as any).pending_rfc;
-                        const fromFacultyService = !!(r as any).synced_from_faculty_service;
                         return (
                           <tr
                             key={r.id}
                             className={cls(
                               "whitespace-nowrap [&>td]:border [&>td]:border-gray-200",
                               isLocked
-                                ? "bg-gray-100 text-gray-500 hover:bg-gray-100"
+                                ? fromFacultyService
+                                  ? "bg-orange-50 hover:bg-orange-50"
+                                  : "bg-gray-100 text-gray-500 hover:bg-gray-100"
                                 : isForwardedToFaculty
                                 ? "bg-sky-50 hover:bg-sky-100/40"
                                 : "hover:bg-gray-50"
@@ -5127,11 +5150,11 @@ export default function OM_LoadAssignment() {
                                     clearRemarkAutosaveTimer(r.id);
                                     void handleSaveRemark(r, { silentSuccess: true });
                                   }}
-                                  disabled={isArchiveView}
+                                  disabled={isLocked}
                                   placeholder="—"
                                   className={cls(
                                     "flex-1 min-w-0 min-h-[36px] resize-y rounded-md border border-gray-300 px-2 py-1 text-sm leading-snug shadow-sm focus:ring-2 focus:ring-emerald-500/30",
-                                    isArchiveView && "bg-gray-100 text-gray-500"
+                                    isLocked && "bg-gray-100 text-gray-500"
                                   )}
                                 />
                               </div>

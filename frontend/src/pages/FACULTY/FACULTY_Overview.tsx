@@ -1378,12 +1378,11 @@ function ChangeRequestModal({
 	            {/* Step 3: remarks */}
 	            {!!choices.length && (
 	              <div className="rounded-2xl border border-neutral-200 bg-white p-4">
-	                <div className="text-sm font-semibold text-neutral-800">3) Add remarks <span className="text-red-500">*</span></div>
-	                <div className="mt-0.5 text-sm text-neutral-500">Include brief context so OM can review faster.</div>
+	                <div className="text-sm font-semibold text-neutral-800">3) Special remarks <span className="text-red-500">*</span></div>
 	                <textarea
 	                  rows={4}
 	                  className="mt-3 w-full resize-y rounded-xl border border-neutral-300 p-2.5 text-sm outline-none focus:ring-2 focus:ring-emerald-600/20"
-	                  placeholder="Provide context for this request…"
+	                  placeholder="Include brief context so OM can review faster..."
 	                  value={remarks}
 	                  onChange={(e) => setRemarks(e.target.value)}
 	                />
