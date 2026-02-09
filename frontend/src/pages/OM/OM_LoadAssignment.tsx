@@ -1,4 +1,10 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { Outlet, useLocation } from "react-router-dom";
 import AppShell from "../../base/AppShell";
 import { runOmAutoAssign } from "../../api.ts";
@@ -10,7 +16,6 @@ import {
   sendOmLoadAssignmentsToFaculty,
   getOmLoadAssignmentRfc,
   respondOmLoadAssignmentRfc,
-
 } from "../../api.ts";
 
 import {
@@ -20,7 +25,7 @@ import {
   getAllFaculty,
   getOmFacultyWithDeloadings,
   getOmFacultyDeloadings,
-  type DeloadingRow
+  type DeloadingRow,
 } from "../../api";
 
 import { cls } from "../../utilities/cls";
@@ -229,7 +234,7 @@ function TimeBeginInput({
   value,
   onChange,
   options,
-  placeholder = "e.g. 07:30 - 09:00",
+  placeholder = "e.g. 0730",
   className = "",
 }: {
   value: string;
@@ -523,7 +528,13 @@ type Row = {
   room2: string;
   capacity: number | "";
   mode?: string;
-  status?: "" | "Confirmed" | "Approved" | "Pending" | "Unassigned" | "Conflict";
+  status?:
+    | ""
+    | "Confirmed"
+    | "Approved"
+    | "Pending"
+    | "Unassigned"
+    | "Conflict";
   pending_rfc?: boolean;
   conflictNote?: string;
   editable?: boolean;
@@ -602,7 +613,8 @@ const detectRowChanges = (baseline: Row[], current: Row[]): DetectedChanges => {
     for (const [k, label] of fields) {
       const bv = fmt((b as any)[k]);
       const cv = fmt((c as any)[k]);
-      if (bv !== cv) details.push({ field: label, from: bv || "—", to: cv || "—" });
+      if (bv !== cv)
+        details.push({ field: label, from: bv || "—", to: cv || "—" });
     }
     if (details.length) edited.push({ key: id, label: _rowLabel(c), details });
   }
@@ -633,7 +645,9 @@ const ForwardReviewModal: React.FC<{
 
   const hasAny =
     !!changes &&
-    (changes.added.length > 0 || changes.edited.length > 0 || changes.deleted.length > 0);
+    (changes.added.length > 0 ||
+      changes.edited.length > 0 ||
+      changes.deleted.length > 0);
 
   return (
     <div className="fixed inset-0 z-[120] grid place-items-center bg-black/40 p-4">
@@ -644,12 +658,20 @@ const ForwardReviewModal: React.FC<{
 
         <h3 className="mb-2 text-center text-2xl font-semibold">{title}</h3>
 
-        <p className="mx-auto mb-4 max-w-md text-center text-sm text-neutral-600">{subtitle}</p>
+        <p className="mx-auto mb-4 max-w-md text-center text-sm text-neutral-600">
+          {subtitle}
+        </p>
 
         <div className="mb-4">
           <div className="flex items-center justify-between gap-2">
-            <div className="text-sm font-semibold text-gray-700">Detected changes</div>
-            {!hasAny ? <div className="text-xs text-slate-500">No differences found.</div> : null}
+            <div className="text-sm font-semibold text-gray-700">
+              Detected changes
+            </div>
+            {!hasAny ? (
+              <div className="text-xs text-slate-500">
+                No differences found.
+              </div>
+            ) : null}
           </div>
 
           <div className="mt-2 max-h-[260px] overflow-auto rounded-lg border border-slate-200 bg-slate-50 p-3">
@@ -679,21 +701,32 @@ const ForwardReviewModal: React.FC<{
                   {changes.edited.length ? (
                     <ul className="space-y-2">
                       {changes.edited.map((e) => (
-                        <li key={e.key} className="rounded-lg border border-slate-200 bg-white px-3 py-2">
-                          <div className="text-sm font-medium text-slate-900">{e.label}</div>
+                        <li
+                          key={e.key}
+                          className="rounded-lg border border-slate-200 bg-white px-3 py-2"
+                        >
+                          <div className="text-sm font-medium text-slate-900">
+                            {e.label}
+                          </div>
                           {e.details.length ? (
                             <ul className="mt-1 list-disc space-y-1 pl-5 text-sm text-slate-700">
                               {e.details.map((d, idx) => (
                                 <li key={idx}>
-                                  <span className="font-medium text-slate-800">{d.field}:</span>{" "}
-                                  <span className="text-slate-600">{d.from}</span>{" "}
+                                  <span className="font-medium text-slate-800">
+                                    {d.field}:
+                                  </span>{" "}
+                                  <span className="text-slate-600">
+                                    {d.from}
+                                  </span>{" "}
                                   <span className="text-slate-400">→</span>{" "}
                                   <span className="text-slate-900">{d.to}</span>
                                 </li>
                               ))}
                             </ul>
                           ) : (
-                            <div className="mt-1 text-xs text-slate-500">Edited</div>
+                            <div className="mt-1 text-xs text-slate-500">
+                              Edited
+                            </div>
                           )}
                         </li>
                       ))}
@@ -720,7 +753,9 @@ const ForwardReviewModal: React.FC<{
                 </div>
               </div>
             ) : (
-              <div className="text-sm text-slate-500">No change summary available.</div>
+              <div className="text-sm text-slate-500">
+                No change summary available.
+              </div>
             )}
           </div>
         </div>
@@ -793,13 +828,12 @@ function ArchivedLoadsSummary({
 
       const key = r.faculty_id || facultyName;
 
-      const g =
-        groups.get(key) || {
-          faculty: facultyName,
-          sections: 0,
-          units: 0,
-          courses: new Set<string>(),
-        };
+      const g = groups.get(key) || {
+        faculty: facultyName,
+        sections: 0,
+        units: 0,
+        courses: new Set<string>(),
+      };
 
       g.sections += 1;
       g.units += units;
@@ -893,7 +927,9 @@ function ArchivedLoadsSummary({
                 const courseList = Array.from(g.courses);
                 const preview = courseList.slice(0, 4).join(", ");
                 const more =
-                  courseList.length > 4 ? ` +${courseList.length - 4} more` : "";
+                  courseList.length > 4
+                    ? ` +${courseList.length - 4} more`
+                    : "";
 
                 return (
                   <tr key={`${g.faculty}-${i}`} className="hover:bg-gray-50">
@@ -933,7 +969,12 @@ function ArchivedLoadsSummary({
 }
 
 // Used for hard validation before sending proposals to faculty
-export type MissingFieldRow = { course: string; section: string; faculty: string; fields: string[] };
+export type MissingFieldRow = {
+  course: string;
+  section: string;
+  faculty: string;
+  fields: string[];
+};
 
 // --- Validation helpers & engine (row-level flags) ---
 
@@ -1308,8 +1349,6 @@ function validateAllRows(rows: Row[], ctx: ValidationContext): RowFlagsById {
   return flags;
 }
 
-
-
 const DAY_OPTIONS = [
   { value: "M", label: "Monday" },
   { value: "T", label: "Tuesday" },
@@ -1323,27 +1362,27 @@ const ROOM_OPTIONS = ["Online", "Classroom", "Comlab"];
 const TIME_BEGIN_OPTIONS = [
   // Match APO time-band menu content: show full band label in menu,
   // but keep stored/selected value as HHMM (shown in-cell via SelectBox displayLabel).
-  { value: "0730", label: "07:30 - 09:00" },
-  { value: "0915", label: "09:15 - 10:45" },
-  { value: "1100", label: "11:00 - 12:30" },
-  { value: "1245", label: "12:45 - 14:15" },
-  { value: "1430", label: "14:30 - 16:00" },
-  { value: "1615", label: "16:15 - 17:45" },
-  { value: "1800", label: "18:00 - 19:30" },
-  { value: "1945", label: "19:45 - 21:00" },
+  { value: "0730", label: "0730" },
+  { value: "0915", label: "0915" },
+  { value: "1100", label: "1100" },
+  { value: "1245", label: "1245" },
+  { value: "1430", label: "1430" },
+  { value: "1615", label: "1615" },
+  { value: "1800", label: "1800" },
+  { value: "1945", label: "1945" },
 ];
 
 const TIME_END_OPTIONS = [
   // End-time dropdown should show only the end time (not the full band).
   // Stored/selected value remains HHMM.
-  { value: "0900", label: "09:00" },
-  { value: "1045", label: "10:45" },
-  { value: "1230", label: "12:30" },
-  { value: "1415", label: "14:15" },
-  { value: "1600", label: "16:00" },
-  { value: "1745", label: "17:45" },
-  { value: "1930", label: "19:30" },
-  { value: "2100", label: "21:00" },
+  { value: "0900", label: "0900" },
+  { value: "1045", label: "1045" },
+  { value: "1230", label: "1230" },
+  { value: "1415", label: "1415" },
+  { value: "1600", label: "1600" },
+  { value: "1745", label: "1745" },
+  { value: "1930", label: "1930" },
+  { value: "2100", label: "2100" },
 ];
 
 /**
@@ -1444,7 +1483,9 @@ const StatusChip = ({ r }: { r: Row }) => {
   //   but only when it does not require a re-forward.
   // - Pending is reserved for rows not yet sent to faculty.
   const displayStatus =
-    r.forwarded_to_faculty && !r.reforward_needed && (!r.status || r.status === "Pending")
+    r.forwarded_to_faculty &&
+    !r.reforward_needed &&
+    (!r.status || r.status === "Pending")
       ? "Sent"
       : r.status;
 
@@ -1604,19 +1645,43 @@ const SendModal = ({
                       >
                         <td className="px-4 py-3 align-middle">
                           <div className="leading-tight">
-                            <div className="font-semibold text-gray-900">{r.course || "—"}</div>
-                            <div className="mt-0.5 text-[12px] text-gray-600">{r.title || "—"}</div>
+                            <div className="font-semibold text-gray-900">
+                              {r.course || "—"}
+                            </div>
+                            <div className="mt-0.5 text-[12px] text-gray-600">
+                              {r.title || "—"}
+                            </div>
                           </div>
                         </td>
-                        <td className="px-4 py-3 align-middle">{r.section || "—"}</td>
-                        <td className="px-4 py-3 align-middle">{r.day1 || "—"}</td>
-                        <td className="px-4 py-3 align-middle">{displayBeginTimeOnly(r.begin1) || "—"}</td>
-                        <td className="px-4 py-3 align-middle">{displayTimeFromOptions(r.end1, TIME_END_OPTIONS) || "—"}</td>
-                        <td className="px-4 py-3 align-middle">{r.room1 || "—"}</td>
-                        <td className="px-4 py-3 align-middle">{r.day2 || "—"}</td>
-                        <td className="px-4 py-3 align-middle">{displayBeginTimeOnly(r.begin2) || "—"}</td>
-                        <td className="px-4 py-3 align-middle">{displayTimeFromOptions(r.end2, TIME_END_OPTIONS) || "—"}</td>
-                        <td className="px-4 py-3 align-middle">{r.room2 || "—"}</td>
+                        <td className="px-4 py-3 align-middle">
+                          {r.section || "—"}
+                        </td>
+                        <td className="px-4 py-3 align-middle">
+                          {r.day1 || "—"}
+                        </td>
+                        <td className="px-4 py-3 align-middle">
+                          {displayBeginTimeOnly(r.begin1) || "—"}
+                        </td>
+                        <td className="px-4 py-3 align-middle">
+                          {displayTimeFromOptions(r.end1, TIME_END_OPTIONS) ||
+                            "—"}
+                        </td>
+                        <td className="px-4 py-3 align-middle">
+                          {r.room1 || "—"}
+                        </td>
+                        <td className="px-4 py-3 align-middle">
+                          {r.day2 || "—"}
+                        </td>
+                        <td className="px-4 py-3 align-middle">
+                          {displayBeginTimeOnly(r.begin2) || "—"}
+                        </td>
+                        <td className="px-4 py-3 align-middle">
+                          {displayTimeFromOptions(r.end2, TIME_END_OPTIONS) ||
+                            "—"}
+                        </td>
+                        <td className="px-4 py-3 align-middle">
+                          {r.room2 || "—"}
+                        </td>
                         <td className="px-4 py-3 align-middle text-gray-800">
                           {r.mode || (r as any).room_type || "—"}
                         </td>
@@ -1655,8 +1720,7 @@ const SendModal = ({
                 onClose();
               } catch (e: any) {
                 onToast?.(e?.message || "Failed to send to faculty.", "error");
-              }
-              finally {
+              } finally {
                 setSending(false);
               }
             }}
@@ -1673,7 +1737,6 @@ const SendModal = ({
     </div>
   );
 };
-
 
 const SendBlockedModal = ({
   open,
@@ -1701,7 +1764,10 @@ const SendBlockedModal = ({
               Cannot send to Faculty yet
             </h3>
             <p className="mt-0.5 text-sm text-gray-600">
-              Please complete all <span className="font-semibold">required</span> fields for the selected faculty’s load recommendation rows before clicking <span className="font-semibold">To Faculty</span>.
+              Please complete all{" "}
+              <span className="font-semibold">required</span> fields for the
+              selected faculty’s load recommendation rows before clicking{" "}
+              <span className="font-semibold">To Faculty</span>.
             </p>
           </div>
         </div>
@@ -1727,7 +1793,8 @@ const SendBlockedModal = ({
         <div className="mt-5 flex items-center justify-between gap-3">
           <div className="text-xs text-gray-500">
             Tip: Required columns are marked with a{" "}
-            <span className="text-red-600 font-bold">*</span> in the table header.
+            <span className="text-red-600 font-bold">*</span> in the table
+            header.
           </div>
 
           <button
@@ -1876,7 +1943,9 @@ const RequestChangeModal = ({
           <X className="h-5 w-5 text-gray-500" />
         </button>
 
-        <h3 className="text-lg font-semibold text-emerald-700 mb-2">Request for Change</h3>
+        <h3 className="text-lg font-semibold text-emerald-700 mb-2">
+          Request for Change
+        </h3>
         <div className="text-sm text-gray-600 mb-1">
           From: <span className="font-semibold">{displayFaculty}</span>
         </div>
@@ -1897,7 +1966,9 @@ const RequestChangeModal = ({
               {messages.map((m: any, idx: number) => {
                 const whoRaw = (m.sender_role || m.from || "").toString();
                 const who = whoRaw.toUpperCase();
-                const ts = m.created_at ? new Date(m.created_at).toLocaleString() : "";
+                const ts = m.created_at
+                  ? new Date(m.created_at).toLocaleString()
+                  : "";
                 const isFaculty = /FACULTY/i.test(whoRaw) || who === "F";
                 const bubble = m.message || m.text || "";
 
@@ -1909,9 +1980,21 @@ const RequestChangeModal = ({
                       isFaculty ? "justify-start" : "justify-end"
                     )}
                   >
-                    <div className={cls("max-w-[85%]", isFaculty ? "text-left" : "text-right")}>
-                      <div className={cls("mb-1 text-[11px] text-gray-500", isFaculty ? "pl-1" : "pr-1")}>
-                        {who || (isFaculty ? displayFaculty.toUpperCase() : "OM")}{ts ? ` • ${ts}` : ""}
+                    <div
+                      className={cls(
+                        "max-w-[85%]",
+                        isFaculty ? "text-left" : "text-right"
+                      )}
+                    >
+                      <div
+                        className={cls(
+                          "mb-1 text-[11px] text-gray-500",
+                          isFaculty ? "pl-1" : "pr-1"
+                        )}
+                      >
+                        {who ||
+                          (isFaculty ? displayFaculty.toUpperCase() : "OM")}
+                        {ts ? ` • ${ts}` : ""}
                       </div>
                       <div
                         className={cls(
@@ -1948,7 +2031,8 @@ const RequestChangeModal = ({
             disabled={loading || !status || isTerminal}
             className={cls(
               "px-4 py-2 rounded-lg bg-red-600 text-white text-sm",
-              (loading || !status || isTerminal) && "opacity-60 cursor-not-allowed"
+              (loading || !status || isTerminal) &&
+                "opacity-60 cursor-not-allowed"
             )}
             onClick={() => respond("reject")}
           >
@@ -1958,7 +2042,8 @@ const RequestChangeModal = ({
             disabled={loading || !status || isTerminal}
             className={cls(
               "px-4 py-2 rounded-lg bg-emerald-700 text-white text-sm",
-              (loading || !status || isTerminal) && "opacity-60 cursor-not-allowed"
+              (loading || !status || isTerminal) &&
+                "opacity-60 cursor-not-allowed"
             )}
             onClick={() => respond("approve")}
           >
@@ -1968,7 +2053,8 @@ const RequestChangeModal = ({
             disabled={loading || !status || isTerminal}
             className={cls(
               "px-4 py-2 rounded-lg bg-blue-600 text-white text-sm",
-              (loading || !status || isTerminal) && "opacity-60 cursor-not-allowed"
+              (loading || !status || isTerminal) &&
+                "opacity-60 cursor-not-allowed"
             )}
             onClick={() => respond("reply")}
           >
@@ -2018,10 +2104,10 @@ const NewSectionModal = ({
     courseOptions.find((c) => c.code === course)?.title || "";
 
   const handleSave = () => {
-  if (!course || !section) {
-    onToast?.("Please fill at least Course Code and Section Code.", "error");
-    return;
-  }
+    if (!course || !section) {
+      onToast?.("Please fill at least Course Code and Section Code.", "error");
+      return;
+    }
 
     onSave({
       course,
@@ -2119,8 +2205,6 @@ const NewSectionModal = ({
   );
 };
 
-
-
 type ToastKind = "success" | "error" | "warning" | "info";
 
 function Toast({
@@ -2177,7 +2261,10 @@ function Toast({
 }
 
 function useToast() {
-  const [toast, setToast] = useState<{ kind: ToastKind; message: string } | null>(null);
+  const [toast, setToast] = useState<{
+    kind: ToastKind;
+    message: string;
+  } | null>(null);
   const timerRef = useRef<number | null>(null);
 
   const clear = useCallback(() => {
@@ -2186,14 +2273,17 @@ function useToast() {
     setToast(null);
   }, []);
 
-  const show = useCallback((message: string, kind: ToastKind = "info", ms = 2500) => {
-    if (timerRef.current) window.clearTimeout(timerRef.current);
-    setToast({ kind, message });
-    timerRef.current = window.setTimeout(() => {
-      setToast(null);
-      timerRef.current = null;
-    }, ms);
-  }, []);
+  const show = useCallback(
+    (message: string, kind: ToastKind = "info", ms = 2500) => {
+      if (timerRef.current) window.clearTimeout(timerRef.current);
+      setToast({ kind, message });
+      timerRef.current = window.setTimeout(() => {
+        setToast(null);
+        timerRef.current = null;
+      }, ms);
+    },
+    []
+  );
 
   useEffect(() => () => clear(), [clear]);
 
@@ -2201,7 +2291,6 @@ function useToast() {
 }
 /* ---------------- Main ---------------- */
 export default function OM_LoadAssignment() {
-
   const [copiedRowId, setCopiedRowId] = useState<string | null>(null);
 
   const formatRowForClipboard = (row: Row) =>
@@ -2367,7 +2456,10 @@ export default function OM_LoadAssignment() {
         "Manila",
       ],
     ];
-    const csv = [headers.map(esc).join(","), ...sample.map((r) => r.map(esc).join(","))].join("\n");
+    const csv = [
+      headers.map(esc).join(","),
+      ...sample.map((r) => r.map(esc).join(",")),
+    ].join("\n");
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -2405,9 +2497,12 @@ export default function OM_LoadAssignment() {
   };
 
   const validateShsCsvHeaders = (csvText: string) => {
-    const firstLine = (csvText || "").split(/\r?\n/).find((l) => !!l.trim()) || "";
+    const firstLine =
+      (csvText || "").split(/\r?\n/).find((l) => !!l.trim()) || "";
     if (!firstLine) throw new Error("CSV has no headers.");
-    const headers = splitCsvLine(firstLine).map((h) => h.replace(/^"|"$/g, "").trim());
+    const headers = splitCsvLine(firstLine).map((h) =>
+      h.replace(/^"|"$/g, "").trim()
+    );
     const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
     const headerSet = new Set(headers.map(norm));
     const required = [
@@ -2428,7 +2523,9 @@ export default function OM_LoadAssignment() {
     const missing = required.filter((h) => !headerSet.has(norm(h)));
     if (missing.length) {
       throw new Error(
-        `Missing required column(s): ${missing.join(", ")}\n\nExpected columns: ${required.join(", ")}`
+        `Missing required column(s): ${missing.join(
+          ", "
+        )}\n\nExpected columns: ${required.join(", ")}`
       );
     }
   };
@@ -2442,9 +2539,12 @@ export default function OM_LoadAssignment() {
     if (!userId) throw new Error("Missing user session.");
 
     // Basic guard: backend expects CSV text
-    const isCsv = file.name.toLowerCase().endsWith(".csv") || file.type.includes("csv");
+    const isCsv =
+      file.name.toLowerCase().endsWith(".csv") || file.type.includes("csv");
     if (!isCsv) {
-      throw new Error("Please upload a .csv file. Download the template to match the required format.");
+      throw new Error(
+        "Please upload a .csv file. Download the template to match the required format."
+      );
     }
 
     const text = await file.text();
@@ -2554,7 +2654,6 @@ export default function OM_LoadAssignment() {
     }
   }
 
-
   const prettifyRole = (raw: string) => {
     const s = String(raw || "").trim();
     if (!s) return "";
@@ -2570,7 +2669,11 @@ export default function OM_LoadAssignment() {
 
   const computedRoleTitleFromRoles = (roles?: string[]) => {
     const norm = (roles || [])
-      .map((r) => String(r || "").trim().toLowerCase())
+      .map((r) =>
+        String(r || "")
+          .trim()
+          .toLowerCase()
+      )
       .filter(Boolean);
 
     if (norm.includes("office manager")) return "Office Manager";
@@ -2581,7 +2684,9 @@ export default function OM_LoadAssignment() {
   };
 
   // TopBar profile (session first, optionally enriched by OM profile API)
-  const [profileName, setProfileName] = useState<string>(session?.fullName || "");
+  const [profileName, setProfileName] = useState<string>(
+    session?.fullName || ""
+  );
   const [profileSubtitle, setProfileSubtitle] = useState<string>(
     computedRoleTitleFromRoles(session?.roles)
   );
@@ -2595,7 +2700,12 @@ export default function OM_LoadAssignment() {
   /** Archived view UI */
   const [archiveOpen, setArchiveOpen] = useState(false);
   const [archiveTerms, setArchiveTerms] = useState<
-    { term_id: string; label: string; is_active?: boolean; is_current?: boolean }[]
+    {
+      term_id: string;
+      label: string;
+      is_active?: boolean;
+      is_current?: boolean;
+    }[]
   >([]);
   const [archiveTermId, setArchiveTermId] = useState<string>("");
   const isArchiveView = !!activeTermId && !!termId && termId !== activeTermId;
@@ -2607,15 +2717,21 @@ export default function OM_LoadAssignment() {
     (async () => {
       try {
         const res = await getOmLoadAssignmentTerms();
-        const terms = Array.isArray((res as any)?.terms) ? (res as any).terms : [];
+        const terms = Array.isArray((res as any)?.terms)
+          ? (res as any).terms
+          : [];
         setArchiveTerms(terms);
 
-        const apiActive = typeof (res as any)?.active_term_id === "string" ? (res as any).active_term_id : "";
+        const apiActive =
+          typeof (res as any)?.active_term_id === "string"
+            ? (res as any).active_term_id
+            : "";
         // Keep activeTermId in sync if the page hasn't yet loaded its default list.
         if (apiActive && !activeTermId) setActiveTermId(apiActive);
 
         const defaultPick =
-          terms.find((t: any) => (t?.term_id || "") !== (termId || ""))?.term_id ||
+          terms.find((t: any) => (t?.term_id || "") !== (termId || ""))
+            ?.term_id ||
           terms[0]?.term_id ||
           "";
         setArchiveTermId(defaultPick);
@@ -2639,14 +2755,13 @@ export default function OM_LoadAssignment() {
         const displayName = (p?.full_name || baseName || "").trim();
         const roleTitle = (p?.position_title || baseRole || "").trim();
         const dept = String(
-  p?.dept_name ??
-  (session as any)?.dept_name ??
-  (session as any)?.dept_label ??
-  (session as any)?.deptName ??
-  (session as any)?.department?.dept_name ??
-  ""
-).trim();
-
+          p?.dept_name ??
+            (session as any)?.dept_name ??
+            (session as any)?.dept_label ??
+            (session as any)?.deptName ??
+            (session as any)?.department?.dept_name ??
+            ""
+        ).trim();
 
         let subtitle = roleTitle;
         if (dept) {
@@ -2654,7 +2769,8 @@ export default function OM_LoadAssignment() {
           const deptLower = dept.toLowerCase();
           // append dept exactly once
           if (!subtitle) subtitle = dept;
-          else if (!subLower.includes(deptLower)) subtitle = `${subtitle} | ${dept}`;
+          else if (!subLower.includes(deptLower))
+            subtitle = `${subtitle} | ${dept}`;
         }
 
         setProfileName(displayName);
@@ -2679,15 +2795,24 @@ export default function OM_LoadAssignment() {
   const forwardBaselineRef = useRef<Row[] | null>(null);
 
   const [showForwardReview, setShowForwardReview] = useState(false);
-  const [forwardReviewChanges, setForwardReviewChanges] = useState<DetectedChanges | null>(null);
+  const [forwardReviewChanges, setForwardReviewChanges] =
+    useState<DetectedChanges | null>(null);
 
   // Day pairing (auto-fill Day 2 based on Day 1), but keep Day 2 editable for manual override.
-  const [day2ManualById, setDay2ManualById] = useState<Record<string, boolean>>({});
+  const [day2ManualById, setDay2ManualById] = useState<Record<string, boolean>>(
+    {}
+  );
 
   // Remarks are saved explicitly per-row (do NOT mix with load draft/undo stacks).
-  const [remarksDraftBySection, setRemarksDraftBySection] = useState<Record<string, string>>({});
-  const [remarksSavedBySection, setRemarksSavedBySection] = useState<Record<string, string>>({});
-  const [savingRemarkBySection, setSavingRemarkBySection] = useState<Record<string, boolean>>({});
+  const [remarksDraftBySection, setRemarksDraftBySection] = useState<
+    Record<string, string>
+  >({});
+  const [remarksSavedBySection, setRemarksSavedBySection] = useState<
+    Record<string, string>
+  >({});
+  const [savingRemarkBySection, setSavingRemarkBySection] = useState<
+    Record<string, boolean>
+  >({});
   const [validationContext, setValidationContext] = useState<ValidationContext>(
     {
       courseToKac: {},
@@ -2717,7 +2842,10 @@ export default function OM_LoadAssignment() {
   const [approved, setApproved] = useState(false);
   const [showSend, setShowSend] = useState(false);
   const [sendRowsPreview, setSendRowsPreview] = useState<Row[]>([]);
-  const [sendBlocked, setSendBlocked] = useState<{ open: boolean; missing: MissingFieldRow[] }>({ open: false, missing: [] });
+  const [sendBlocked, setSendBlocked] = useState<{
+    open: boolean;
+    missing: MissingFieldRow[];
+  }>({ open: false, missing: [] });
 
   const [reqChange, setReqChange] = useState<{
     open: boolean;
@@ -2768,7 +2896,10 @@ export default function OM_LoadAssignment() {
       };
 
       const isMeaningfulEdit = (prev: any, next: any) => {
-        const keys = new Set<string>([...Object.keys(prev || {}), ...Object.keys(next || {})]);
+        const keys = new Set<string>([
+          ...Object.keys(prev || {}),
+          ...Object.keys(next || {}),
+        ]);
         // Ignore non-content/UI/meta fields when detecting an "edit".
         // Status itself is what we mutate; ignore it when detecting edits.
         const ignore = new Set([
@@ -2792,7 +2923,12 @@ export default function OM_LoadAssignment() {
       return incoming.map((n): Row => {
         const p = oldById.get(n.id);
         if (!p) return n;
-        if (String(p.status || "").trim().toLowerCase() !== "approved") return n;
+        if (
+          String(p.status || "")
+            .trim()
+            .toLowerCase() !== "approved"
+        )
+          return n;
         if (!isMeaningfulEdit(p, n)) return n;
         return { ...n, status: "Pending" as Row["status"] };
       });
@@ -2831,18 +2967,20 @@ export default function OM_LoadAssignment() {
       return false;
     };
 
-    const nextRowsWithReforward: Row[] = nextRowsWithApprovedDemotions.map((nr) => {
-      const pr = prevById.get(nr.id);
-      if (!pr) return nr;
-      if (!pr.forwarded_to_faculty) return nr;
-      if (pr.reforward_needed) return nr;
+    const nextRowsWithReforward: Row[] = nextRowsWithApprovedDemotions.map(
+      (nr) => {
+        const pr = prevById.get(nr.id);
+        if (!pr) return nr;
+        if (!pr.forwarded_to_faculty) return nr;
+        if (pr.reforward_needed) return nr;
 
-      // Only flag if something meaningful (not selection) changed.
-      if (isMeaningfullyChanged(pr, nr)) {
-        return { ...nr, reforward_needed: true };
+        // Only flag if something meaningful (not selection) changed.
+        if (isMeaningfullyChanged(pr, nr)) {
+          return { ...nr, reforward_needed: true };
+        }
+        return nr;
       }
-      return nr;
-    });
+    );
 
     /**
      * Auto-status rule:
@@ -2852,7 +2990,8 @@ export default function OM_LoadAssignment() {
      * We only auto-promote when the row is "complete" and not in a terminal/locked state.
      */
     const applyAutoPendingStatus = (rowsIn: Row[]): Row[] => {
-      const isBlank = (v: any) => v === null || v === undefined || String(v).trim() === "";
+      const isBlank = (v: any) =>
+        v === null || v === undefined || String(v).trim() === "";
 
       const hasAnySecondMeeting = (r: Row) =>
         !isBlank(r.day2) || !isBlank(r.begin2) || !isBlank(r.end2);
@@ -2956,8 +3095,11 @@ export default function OM_LoadAssignment() {
       const el = t as HTMLElement | null;
       if (!el) return false;
 
-      const tag = (el as any).tagName ? String((el as any).tagName).toLowerCase() : "";
-      if (tag === "input" || tag === "textarea" || tag === "select") return true;
+      const tag = (el as any).tagName
+        ? String((el as any).tagName).toLowerCase()
+        : "";
+      if (tag === "input" || tag === "textarea" || tag === "select")
+        return true;
 
       if ((el as any).isContentEditable) return true;
       if (el.closest?.("[contenteditable='true']")) return true;
@@ -3076,7 +3218,6 @@ export default function OM_LoadAssignment() {
     return "";
   };
 
-
   const setCell = <K extends keyof Row>(id: string, key: K, val: Row[K]) => {
     const markDirty = key !== ("selected" as K);
     const next = rows.map((r) => (r.id === id ? { ...r, [key]: val } : r));
@@ -3085,7 +3226,8 @@ export default function OM_LoadAssignment() {
 
   // Selection in the load recommendation table is by faculty (not per subject):
   // if the OM selects any row for a faculty, we select *all* rows for that faculty.
-  const facultyKeyOf = (r: Row) => String((r.faculty_id || r.faculty || "")).trim();
+  const facultyKeyOf = (r: Row) =>
+    String(r.faculty_id || r.faculty || "").trim();
   const setFacultySelected = (refRow: Row, checked: boolean) => {
     const k = facultyKeyOf(refRow);
     if (!k) {
@@ -3119,7 +3261,9 @@ export default function OM_LoadAssignment() {
     // If program_level is missing, treat it as UG by default (unless it clearly looks like SHS).
     // This fixes the common case where GS is populated but UG courses are left blank in the catalog.
     if (!raw0) {
-      const code = String((r as any)?.course || "").trim().toUpperCase();
+      const code = String((r as any)?.course || "")
+        .trim()
+        .toUpperCase();
       if (code.startsWith("SHS") || code.includes("SHS")) return "SHS";
       return "UG";
     }
@@ -3218,7 +3362,7 @@ export default function OM_LoadAssignment() {
 
     const all = rows.every((r) => r.selected);
 
-    const key = (r: Row) => String((r.faculty_id || r.faculty || "")).trim();
+    const key = (r: Row) => String(r.faculty_id || r.faculty || "").trim();
     const selectedKeys = new Set(selectedRows.map(key).filter(Boolean));
 
     const isEligible = (r: Row) => {
@@ -3238,7 +3382,7 @@ export default function OM_LoadAssignment() {
     // If any row is selected for a faculty, send ALL rows for that faculty (not per subject)
     return rows.filter((r) => selectedKeys.has(key(r)) && isEligible(r));
   };
-/**
+  /**
    * Before forwarding to faculty, require that the rows being sent are complete.
    * This prevents faculty from receiving half-filled / unusable schedules.
    */
@@ -3282,31 +3426,32 @@ export default function OM_LoadAssignment() {
 
     return missing;
   };
-  
+
   const handleSendToFaculty = async (rowsToSend: Row[]) => {
     if (!userId) throw new Error("Missing userId");
     if (!rowsToSend?.length) throw new Error("No rows to send");
 
-	    // Defensive: ensure faculty_id exists (backend groups strictly by faculty_id).
-	    // This also prevents schedule fields from being wiped on refresh for rows whose faculty was
-	    // selected by display name only.
-	    const normalizedRowsToSend: Row[] = rowsToSend
-	      .map((r) => {
-	        const fid = (r.faculty_id || "").trim() || (facultyNameToId[r.faculty] || "");
-	        return fid ? ({ ...r, faculty_id: fid } as Row) : r;
-	      })
-	      .filter((r) => !!(r.faculty_id || "").trim());
+    // Defensive: ensure faculty_id exists (backend groups strictly by faculty_id).
+    // This also prevents schedule fields from being wiped on refresh for rows whose faculty was
+    // selected by display name only.
+    const normalizedRowsToSend: Row[] = rowsToSend
+      .map((r) => {
+        const fid =
+          (r.faculty_id || "").trim() || facultyNameToId[r.faculty] || "";
+        return fid ? ({ ...r, faculty_id: fid } as Row) : r;
+      })
+      .filter((r) => !!(r.faculty_id || "").trim());
 
-	    if (!normalizedRowsToSend.length) {
-	      throw new Error("No rows with faculty_id");
-	    }
+    if (!normalizedRowsToSend.length) {
+      throw new Error("No rows with faculty_id");
+    }
 
     const term_id = termId || undefined;
 
     // 1️⃣ Send selected rows to faculty (proposal + notification)
     await sendOmLoadAssignmentsToFaculty(userId, {
       term_id,
-	      rows: normalizedRowsToSend,
+      rows: normalizedRowsToSend,
     });
 
     // 2️⃣ Persist the FULL OM table so refresh doesn't revert changes
@@ -3314,7 +3459,8 @@ export default function OM_LoadAssignment() {
     // The backend groups/updates rows by faculty_id; if OM selected a faculty by name only,
     // saving without faculty_id can cause fields (including Mode) to be treated as blank on reload.
     const normalizedAllRows: Row[] = rows.map((r) => {
-      const fid = (r.faculty_id || "").trim() || (facultyNameToId[r.faculty] || "");
+      const fid =
+        (r.faculty_id || "").trim() || facultyNameToId[r.faculty] || "";
       return fid ? ({ ...r, faculty_id: fid } as Row) : r;
     });
     await submitOmLoadAssignment(userId, { rows: normalizedAllRows }, "save");
@@ -3324,10 +3470,10 @@ export default function OM_LoadAssignment() {
     setSendRowsPreview([]);
     await loadFromServer();
     setHasLocalEdits(false);
-	    const uniqueFaculty = new Set(
-	      normalizedRowsToSend
-	        .map((r) => (r.faculty || r.faculty_id || "").toString().trim())
-	        .filter(Boolean)
+    const uniqueFaculty = new Set(
+      normalizedRowsToSend
+        .map((r) => (r.faculty || r.faculty_id || "").toString().trim())
+        .filter(Boolean)
     );
     showToast(
       uniqueFaculty.size <= 1
@@ -3395,7 +3541,8 @@ export default function OM_LoadAssignment() {
     setRemarksDraftBySection(initRemarks);
     setRemarksSavedBySection(initRemarks);
 
-    const nextTermId = typeof (res as any)?.term_id === "string" ? (res as any).term_id : "";
+    const nextTermId =
+      typeof (res as any)?.term_id === "string" ? (res as any).term_id : "";
     setTerm(typeof res?.term === "string" ? res.term : "");
     setTermId(nextTermId);
     // Capture the default active term id on normal loads so we can detect archive view.
@@ -3475,7 +3622,9 @@ export default function OM_LoadAssignment() {
       setRemarksSavedBySection((p) => ({ ...p, [sectionId]: remarks }));
       // Do not clobber a newer in-progress edit that happened while the save was in-flight.
       setRemarksDraftBySection((p) =>
-        String(p[sectionId] ?? "") === remarks ? { ...p, [sectionId]: remarks } : p
+        String(p[sectionId] ?? "") === remarks
+          ? { ...p, [sectionId]: remarks }
+          : p
       );
       if (!options?.silentSuccess) {
         showToast("Remarks saved.", "success");
@@ -3815,7 +3964,6 @@ export default function OM_LoadAssignment() {
     };
   }, [termId]);
 
-
   type FacultySummaryRow = {
     facultyId: string;
     facultyName: string;
@@ -3877,9 +4025,29 @@ export default function OM_LoadAssignment() {
     return Object.values(acc).sort((a, b) =>
       a.facultyName.localeCompare(b.facultyName)
     );
-}, [rows, facultyById, preferredByFaculty]);
+  }, [rows, facultyById, preferredByFaculty]);
 
-  
+  type UnitsFilterMode = "all" | "unassigned" | "issues";
+  type UnitsSortKey = "faculty" | "assigned" | "preferred" | "gap";
+
+  const [showUnitsFilters, setShowUnitsFilters] = useState(false);
+  const [unitsFilterMode, setUnitsFilterMode] =
+    useState<UnitsFilterMode>("all");
+  const [hideNoPrefs, setHideNoPrefs] = useState(false);
+
+  // default sort
+  const [unitsSortKey, setUnitsSortKey] = useState<UnitsSortKey>("gap");
+  const [unitsSortDir, setUnitsSortDir] = useState<"asc" | "desc">("asc");
+
+  const toggleUnitsSort = (key: UnitsSortKey) => {
+    if (unitsSortKey === key) {
+      setUnitsSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    } else {
+      setUnitsSortKey(key);
+      setUnitsSortDir("asc");
+    }
+  };
+
   const facultySummaryFiltered: FacultySummaryRow[] = useMemo(() => {
     const q = search.trim().toLowerCase();
     if (!q) return facultySummary;
@@ -3903,6 +4071,62 @@ export default function OM_LoadAssignment() {
     });
   }, [facultySummary, deloadUnitsByFacultyId, search]);
 
+  const facultySummaryView: FacultySummaryRow[] = useMemo(() => {
+    const base = [...facultySummaryFiltered];
+
+    const filtered = base.filter((f) => {
+      const assigned = Number(f.assignedUnits ?? 0);
+      const hasPref = f.preferredUnits != null;
+      const diff = f.diff;
+
+      if (hideNoPrefs && !hasPref) return false;
+
+      if (unitsFilterMode === "unassigned") return assigned === 0;
+      if (unitsFilterMode === "issues")
+        return hasPref && diff != null && diff !== 0;
+      return true;
+    });
+
+    const dir = unitsSortDir === "asc" ? 1 : -1;
+
+    filtered.sort((a, b) => {
+      const aName = a.facultyName ?? "";
+      const bName = b.facultyName ?? "";
+
+      const aAssigned = Number(a.assignedUnits ?? 0);
+      const bAssigned = Number(b.assignedUnits ?? 0);
+
+      const aPref =
+        a.preferredUnits == null
+          ? Number.POSITIVE_INFINITY
+          : Number(a.preferredUnits);
+      const bPref =
+        b.preferredUnits == null
+          ? Number.POSITIVE_INFINITY
+          : Number(b.preferredUnits);
+
+      const aGap = a.diff == null ? Number.POSITIVE_INFINITY : Number(a.diff);
+      const bGap = b.diff == null ? Number.POSITIVE_INFINITY : Number(b.diff);
+
+      if (unitsSortKey === "faculty") return dir * aName.localeCompare(bName);
+      if (unitsSortKey === "assigned") return dir * (aAssigned - bAssigned);
+      if (unitsSortKey === "preferred") return dir * (aPref - bPref);
+
+      // default: gap
+      if (aGap !== bGap) return dir * (aGap - bGap);
+
+      // tie-breaker: name
+      return aName.localeCompare(bName);
+    });
+
+    return filtered;
+  }, [
+    facultySummaryFiltered,
+    unitsFilterMode,
+    unitsSortKey,
+    unitsSortDir,
+    hideNoPrefs,
+  ]);
 
   // ---- Rule alerts for Tab 2 (violations / warnings) ----
   type RuleAlert = {
@@ -4293,9 +4517,8 @@ export default function OM_LoadAssignment() {
     });
 
     return alerts;
-}, [rows, rowFlags, validationContext, isRowIncompleteForApproval]);
+  }, [rows, rowFlags, validationContext, isRowIncompleteForApproval]);
 
-  
   const ruleAlertsFiltered: RuleAlert[] = useMemo(() => {
     const q = search.trim().toLowerCase();
     if (!q) return ruleAlerts;
@@ -4314,7 +4537,6 @@ export default function OM_LoadAssignment() {
       return hay.includes(q);
     });
   }, [ruleAlerts, search]);
-
 
   type BlockedGeCmps2Item = {
     campus_id: string;
@@ -4368,9 +4590,8 @@ export default function OM_LoadAssignment() {
     return Object.values(bySection).filter(
       (x) => (x.campusId || "").toUpperCase() === "CMPS0002"
     );
-}, [blockedGeCmps2]);
+  }, [blockedGeCmps2]);
 
-  
   const blockedSectionsFiltered: BlockedSectionRow[] = useMemo(() => {
     const q = search.trim().toLowerCase();
     if (!q) return blockedSections;
@@ -4383,10 +4604,9 @@ export default function OM_LoadAssignment() {
     });
   }, [blockedSections, search]);
 
-
-  const [summaryTab, setSummaryTab] = useState<
-    "units" | "second" | "blocked"
-  >("units");
+  const [summaryTab, setSummaryTab] = useState<"units" | "second" | "blocked">(
+    "units"
+  );
 
   const courseOptions = useMemo(() => {
     const map: Record<string, string> = {};
@@ -4481,47 +4701,50 @@ export default function OM_LoadAssignment() {
 
                 <div className="ml-auto flex items-center gap-2">
                   {/* To Faculty button moved here (beside Refresh) */}
-                      <button
-                        disabled={!anySelected || !isRunning || isArchiveView}
-                        onClick={() => {
-                          if (isArchiveView) return;
-                          const preview = buildSendRowsForPreview();
-                          if (!preview.length) {
-                            showToast(
-                              "No new or edited rows to send for the selected faculty. (Previously sent rows are excluded unless edited.)",
-                              "error"
-                            );
-                            return;
-                          }
+                  <button
+                    disabled={!anySelected || !isRunning || isArchiveView}
+                    onClick={() => {
+                      if (isArchiveView) return;
+                      const preview = buildSendRowsForPreview();
+                      if (!preview.length) {
+                        showToast(
+                          "No new or edited rows to send for the selected faculty. (Previously sent rows are excluded unless edited.)",
+                          "error"
+                        );
+                        return;
+                      }
 
-                          const missing = validateRowsCompleteForSend(preview);
-                          if (missing.length) {
-                            // Hard validation: block sending until required fields are filled
-                            setSendBlocked({ open: true, missing });
-                            showToast("Cannot send to faculty: please complete all required fields in the selected faculty’s rows.", "error");
-                            return;
-                          }
+                      const missing = validateRowsCompleteForSend(preview);
+                      if (missing.length) {
+                        // Hard validation: block sending until required fields are filled
+                        setSendBlocked({ open: true, missing });
+                        showToast(
+                          "Cannot send to faculty: please complete all required fields in the selected faculty’s rows.",
+                          "error"
+                        );
+                        return;
+                      }
 
-                          setSendRowsPreview(preview.map((r) => ({ ...r })));
-                          setShowSend(true);
-                        }}
-                        className={cls(
-                          "inline-flex h-10 min-w-[140px] items-center justify-center gap-2 rounded-md px-4 py-2 text-sm font-medium shadow-sm",
-                          anySelected && isRunning && !isArchiveView
-                            ? "bg-blue-600 text-white hover:brightness-110"
-                            : "bg-gray-200 text-gray-500 cursor-not-allowed"
-                        )}
-                        title={
-                          isArchiveView
-                            ? "Archived view: sending is disabled"
-                            : anySelected
-                            ? "Send to selected faculty"
-                            : "Select at least one row"
-                        }
-                      >
-                        <Send className="h-4 w-4" />
-                        To Faculty
-                      </button>
+                      setSendRowsPreview(preview.map((r) => ({ ...r })));
+                      setShowSend(true);
+                    }}
+                    className={cls(
+                      "inline-flex h-10 min-w-[140px] items-center justify-center gap-2 rounded-md px-4 py-2 text-sm font-medium shadow-sm",
+                      anySelected && isRunning && !isArchiveView
+                        ? "bg-blue-600 text-white hover:brightness-110"
+                        : "bg-gray-200 text-gray-500 cursor-not-allowed"
+                    )}
+                    title={
+                      isArchiveView
+                        ? "Archived view: sending is disabled"
+                        : anySelected
+                        ? "Send to selected faculty"
+                        : "Select at least one row"
+                    }
+                  >
+                    <Send className="h-4 w-4" />
+                    To Faculty
+                  </button>
                   <button
                     disabled={!hasReco || isArchiveView}
                     className={cls(
@@ -4532,85 +4755,104 @@ export default function OM_LoadAssignment() {
                         : "bg-gray-200 text-gray-400 cursor-not-allowed" // disabled
                     )}
                     onClick={async () => {
-                    if (isArchiveView) return;
-                    // Soft-check only: allow forwarding even if some rows are incomplete.
-                    const incomplete = rows.filter(isRowIncompleteForApproval);
-                    if (incomplete.length > 0) {
-                      const proceed = await openConfirm({
-                        title: "Incomplete rows",
-                        message: (
-                          <div className="space-y-2 text-sm text-gray-700">
-                            <p>
-                              There are <span className="font-semibold">{incomplete.length}</span>{" "}
-                              row(s) with missing required fields (including{" "}
-                              <span className="font-semibold">Mode</span>).
-                            </p>
-                            <p>
-                              You can still forward to the Chair, but incomplete rows may not be
-                              actionable.
-                            </p>
-                            <p className="text-gray-600">Do you want to continue?</p>
-                          </div>
-                        ),
-                        confirmText: "Continue",
-                        cancelText: "Cancel",
-                      });
-                      if (!proceed) return;
-                    }
+                      if (isArchiveView) return;
+                      // Soft-check only: allow forwarding even if some rows are incomplete.
+                      const incomplete = rows.filter(
+                        isRowIncompleteForApproval
+                      );
+                      if (incomplete.length > 0) {
+                        const proceed = await openConfirm({
+                          title: "Incomplete rows",
+                          message: (
+                            <div className="space-y-2 text-sm text-gray-700">
+                              <p>
+                                There are{" "}
+                                <span className="font-semibold">
+                                  {incomplete.length}
+                                </span>{" "}
+                                row(s) with missing required fields (including{" "}
+                                <span className="font-semibold">Mode</span>).
+                              </p>
+                              <p>
+                                You can still forward to the Chair, but
+                                incomplete rows may not be actionable.
+                              </p>
+                              <p className="text-gray-600">
+                                Do you want to continue?
+                              </p>
+                            </div>
+                          ),
+                          confirmText: "Continue",
+                          cancelText: "Cancel",
+                        });
+                        if (!proceed) return;
+                      }
 
-                    // Existing behavior: warn about other validation errors, but allow override
-                    if (hasAnyErrors) {
-                      const proceed = await openConfirm({
-                        title: "Validation errors detected",
+                      // Existing behavior: warn about other validation errors, but allow override
+                      if (hasAnyErrors) {
+                        const proceed = await openConfirm({
+                          title: "Validation errors detected",
+                          variant: "warning",
+                          message: (
+                            <div className="space-y-2 text-sm text-gray-700">
+                              <p>
+                                There are validation errors (e.g., KAC mismatch,
+                                mode mismatch, or schedule conflicts).
+                              </p>
+                              <p className="text-gray-600">
+                                Do you still want to proceed with approval?
+                              </p>
+                            </div>
+                          ),
+                          confirmText: "Proceed",
+                          cancelText: "Cancel",
+                        });
+                        if (!proceed) return;
+                      }
+
+                      // Final step:
+                      //  - First forward: simple confirmation
+                      //  - Re-forward: show APO-style change preview before sending
+                      if (approved) {
+                        const baseline = forwardBaselineRef.current || [];
+                        setForwardReviewChanges(
+                          detectRowChanges(baseline, rows)
+                        );
+                        setShowForwardReview(true);
+                        return;
+                      }
+
+                      const finalProceed = await openConfirm({
+                        title: "Forward to Chair?",
                         variant: "warning",
+                        confirmText: "Forward",
+                        cancelText: "Cancel",
                         message: (
-                          <div className="space-y-2 text-sm text-gray-700">
+                          <div className="space-y-2 text-sm text-neutral-600">
                             <p>
-                              There are validation errors (e.g., KAC mismatch, mode mismatch, or
-                              schedule conflicts).
+                              This will send your current{" "}
+                              <span className="font-semibold text-neutral-800">
+                                Load Recommendations
+                              </span>{" "}
+                              to the Chair.
                             </p>
-                            <p className="text-gray-600">
-                              Do you still want to proceed with approval?
+                            <p>
+                              Once forwarded, this is treated as a{" "}
+                              <span className="font-semibold text-neutral-800">
+                                final action
+                              </span>{" "}
+                              for this term.
+                            </p>
+                            <p className="text-neutral-500">
+                              Do you want to continue?
                             </p>
                           </div>
                         ),
-                        confirmText: "Proceed",
-                        cancelText: "Cancel",
                       });
-                      if (!proceed) return;
-                    }
+                      if (!finalProceed) return;
 
-                    // Final step:
-                    //  - First forward: simple confirmation
-                    //  - Re-forward: show APO-style change preview before sending
-                    if (approved) {
-                      const baseline = forwardBaselineRef.current || [];
-                      setForwardReviewChanges(detectRowChanges(baseline, rows));
-                      setShowForwardReview(true);
-                      return;
-                    }
-
-                    const finalProceed = await openConfirm({
-                      title: "Forward to Chair?",
-                      variant: "warning",
-                      confirmText: "Forward",
-                      cancelText: "Cancel",
-                      message: (
-                        <div className="space-y-2 text-sm text-neutral-600">
-                          <p>
-                            This will send your current <span className="font-semibold text-neutral-800">Load Recommendations</span> to the Chair.
-                          </p>
-                          <p>
-                            Once forwarded, this is treated as a <span className="font-semibold text-neutral-800">final action</span> for this term.
-                          </p>
-                          <p className="text-neutral-500">Do you want to continue?</p>
-                        </div>
-                      ),
-                    });
-                    if (!finalProceed) return;
-
-                    void handleForwardToChair();
-                  }}
+                      void handleForwardToChair();
+                    }}
                   >
                     <CheckCheck className="h-4 w-4" />
                     {approved ? "Re-forward to Chair" : "Forward to Chair"}
@@ -4620,7 +4862,6 @@ export default function OM_LoadAssignment() {
               <div className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
                 <div className="flex items-center justify-between px-4 pt-4">
                   <div className="flex items-center gap-2">
-
                     <div className="flex flex-wrap items-center gap-2">
                       <button
                         onClick={handleUndo}
@@ -4672,8 +4913,7 @@ export default function OM_LoadAssignment() {
                         title={
                           isArchiveView
                             ? "Archived view: importing is disabled"
-                            :
-                          !isRunning
+                            : !isRunning
                             ? "Run Auto-assign or load data first"
                             : shsFile
                             ? `Selected: ${shsFile.name}`
@@ -4696,8 +4936,7 @@ export default function OM_LoadAssignment() {
                       title={
                         isArchiveView
                           ? "Archived view: auto-assign is disabled"
-                          :
-                        hasLocalEdits
+                          : hasLocalEdits
                           ? "Auto-assign is disabled while you have manual edits. Save or refresh first."
                           : "Run auto-assignment algorithm"
                       }
@@ -4707,41 +4946,38 @@ export default function OM_LoadAssignment() {
                     </button>
 
                     {/* Refresh button (always visible if running) */}
-                      {isRunning && (
-                        <button
-                          onClick={() => loadFromServer()}
-                          className="inline-flex h-10 min-w-[140px] items-center justify-center gap-2 rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium hover:bg-gray-50"
-                        >
-                          <RefreshCcw className="h-4 w-4" />
-                          Refresh
-                        </button>
-
-                      )}
-
-                                        <button
-                    disabled={!hasReco || isArchiveView}
-                    onClick={handleSaveDraft}
-                    className={cls(
-                      "inline-flex h-10 min-w-[140px] items-center justify-center gap-2 rounded-md px-4 py-2 text-sm font-medium shadow-sm",
-                      hasReco
-                        ? isArchiveView
-                          ? "bg-gray-200 text-gray-500 cursor-not-allowed"
-                          : "bg-gray-800 text-white hover:brightness-110"
-                        : "bg-gray-200 text-gray-500 cursor-not-allowed"
+                    {isRunning && (
+                      <button
+                        onClick={() => loadFromServer()}
+                        className="inline-flex h-10 min-w-[140px] items-center justify-center gap-2 rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium hover:bg-gray-50"
+                      >
+                        <RefreshCcw className="h-4 w-4" />
+                        Refresh
+                      </button>
                     )}
-                    title={
-                      isArchiveView
-                        ? "Archived view: saving is disabled"
-                        : !hasReco
-                        ? "No recommendations to save yet"
-                        : "Save current assignments to the database"
-                    }
-                  >
-                    <Save className="h-4 w-4" />
-                    Save Draft
-                  </button>
 
-                      
+                    <button
+                      disabled={!hasReco || isArchiveView}
+                      onClick={handleSaveDraft}
+                      className={cls(
+                        "inline-flex h-10 min-w-[140px] items-center justify-center gap-2 rounded-md px-4 py-2 text-sm font-medium shadow-sm",
+                        hasReco
+                          ? isArchiveView
+                            ? "bg-gray-200 text-gray-500 cursor-not-allowed"
+                            : "bg-gray-800 text-white hover:brightness-110"
+                          : "bg-gray-200 text-gray-500 cursor-not-allowed"
+                      )}
+                      title={
+                        isArchiveView
+                          ? "Archived view: saving is disabled"
+                          : !hasReco
+                          ? "No recommendations to save yet"
+                          : "Save current assignments to the database"
+                      }
+                    >
+                      <Save className="h-4 w-4" />
+                      Save Draft
+                    </button>
 
                     {/* Original Import CSV block removed */}
                     {/* {isRunning ? (...) : (
@@ -4769,476 +5005,556 @@ export default function OM_LoadAssignment() {
                   <ArchivedLoadsSummary rows={filtered} termLabel={term} />
                 ) : (
                   <div className="mt-3 max-h-[58vh] overflow-x-auto overflow-y-auto rounded-xl border border-gray-300 bg-white shadow-sm">
-                  <table className="min-w-full text-sm table-fixed border-collapse">
-                    <colgroup>
-                      <col className="w-[46px]" />
-                      <col className="w-[160px]" />
-                      <col className="w-[26%]" />
-                      <col className="w-[70px]" />
-                      <col className="w-[80px]" />
-                      <col className="w-[18%]" />
-                      <col className="w-[72px]" />
-                      <col className="w-[140px]" />
-                      <col className="w-[96px]" />
-                      <col className="w-[96px]" />
-                      <col className="w-[72px]" />
-                      <col className="w-[140px]" />
-                      <col className="w-[96px]" />
-                      <col className="w-[96px]" />
-                      <col className="w-[80px]" />
-                      <col className="w-[80px]" />
-                      {/* Wider remarks column (may contain full sentences) */}
-                      <col className="w-[320px]" />
-                      <col className="w-[100px]" />
-                      <col className="w-[110px]" />
-                    </colgroup>
+                    <table className="min-w-full text-sm table-fixed border-collapse">
+                      <colgroup>
+                        <col className="w-[46px]" />
+                        <col className="w-[160px]" />
+                        <col className="w-[26%]" />
+                        <col className="w-[70px]" />
+                        <col className="w-[80px]" />
+                        <col className="w-[18%]" />
+                        <col className="w-[72px]" />
+                        <col className="w-[140px]" />
+                        <col className="w-[96px]" />
+                        <col className="w-[96px]" />
+                        <col className="w-[72px]" />
+                        <col className="w-[140px]" />
+                        <col className="w-[96px]" />
+                        <col className="w-[96px]" />
+                        <col className="w-[80px]" />
+                        <col className="w-[80px]" />
+                        {/* Wider remarks column (may contain full sentences) */}
+                        <col className="w-[320px]" />
+                        <col className="w-[100px]" />
+                        <col className="w-[110px]" />
+                      </colgroup>
 
-                    <thead className="bg-gray-50 text-emerald-800 sticky top-0 z-10">
-                      <tr className="whitespace-nowrap text-[13px] font-semibold">
-                        <th className="px-3 py-2 text-center border border-gray-300">
-                          {isRunning && (
-                            <input
-                              type="checkbox"
-                              checked={allSelected}
-                              onChange={(e) =>
-                                toggleSelectAll(e.target.checked)
-                              }
-                              className="rounded border-gray-300 text-emerald-600 focus:ring-emerald-500"
-                              title="Select all"
-                            />
-                          )}
-                        </th>
-                        <th className="px-3 py-2 text-left border border-gray-300">
-                          Course Code & Title<span className="text-red-600" aria-hidden="true">*</span>
-                        </th>
-                        <th className="px-3 py-2 text-center border border-gray-300">
-                          Units
-                        </th>
-                        <th className="px-3 py-2 text-center border border-gray-300">
-                          Section
-                        </th>
-                        <th className="px-3 py-2 text-left border border-gray-300">
-                          Faculty <span className="text-red-600" aria-hidden="true">*</span>
-                        </th>
-                        <th className="px-3 py-2 text-center border border-gray-300">
-                          Day 1 <span className="text-red-600" aria-hidden="true">*</span>
-                        </th>
-                        <th className="px-3 py-2 text-center border border-gray-300">
-                          Begin 1 <span className="text-red-600" aria-hidden="true">*</span>
-                        </th>
-                        <th className="px-3 py-2 text-center border border-gray-300">
-                          End 1 <span className="text-red-600" aria-hidden="true">*</span>
-                        </th>
-                        <th className="px-3 py-2 text-center border border-gray-300">
-                          Room 1
-                        </th>
-                        <th className="px-3 py-2 text-center border border-gray-300">
-                          Day 2 <span className="text-red-600" aria-hidden="true">*</span>
-                        </th>
-                        <th className="px-3 py-2 text-center border border-gray-300">
-                          Begin 2 <span className="text-red-600" aria-hidden="true">*</span>
-                        </th>
-                        <th className="px-3 py-2 text-center border border-gray-300">
-                          End 2 <span className="text-red-600" aria-hidden="true">*</span>
-                        </th>
-                        <th className="px-3 py-2 text-center border border-gray-300">
-                          Room 2
-                        </th>
-                        <th className="px-3 py-2 text-center border border-gray-300">
-                          Capacity
-                        </th>
-                        <th className="px-3 py-2 text-center border border-gray-300">
-                          Mode <span className="text-red-600" aria-hidden="true">*</span>
-                        </th>
-                        <th className="px-3 py-2 text-left border border-gray-300">
-                          Remarks
-                        </th>
-                        <th className="px-3 py-2 text-center border border-gray-300">
-                          Status
-                        </th>
-                        <th className="px-3 py-2 text-center border border-gray-300">
-                          Actions
-                        </th>
-                      </tr>
-                    </thead>
-
-                    <tbody>
-                      {filtered.map((r, idx) => {
-                        const e = getEditFlags(r);
-                        const fromFacultyService = !!(r as any).synced_from_faculty_service;
-                        const isLocked = isArchiveView || fromFacultyService;
-                        const isForwardedToFaculty = !!r.forwarded_to_faculty;
-                        // Show the red dot only when there is a pending RFC AND the row is still actionable.
-                        // Once the schedule is approved/finalized, the message icon is disabled; the dot should disappear.
-                        const unread = !!(r as any).pending_rfc;
-                        return (
-                          <tr
-                            key={r.id}
-                            className={cls(
-                              "whitespace-nowrap [&>td]:border [&>td]:border-gray-200",
-                              isLocked
-                                ? fromFacultyService
-                                  ? "bg-orange-50 hover:bg-orange-50"
-                                  : "bg-gray-100 text-gray-500 hover:bg-gray-100"
-                                : isForwardedToFaculty
-                                ? "bg-sky-50 hover:bg-sky-100/40"
-                                : "hover:bg-gray-50"
+                      <thead className="bg-gray-50 text-emerald-800 sticky top-0 z-10">
+                        <tr className="whitespace-nowrap text-[13px] font-semibold">
+                          <th className="px-3 py-2 text-center border border-gray-300">
+                            {isRunning && (
+                              <input
+                                type="checkbox"
+                                checked={allSelected}
+                                onChange={(e) =>
+                                  toggleSelectAll(e.target.checked)
+                                }
+                                className="rounded border-gray-300 text-emerald-600 focus:ring-emerald-500"
+                                title="Select all"
+                              />
                             )}
-                          >
-                            <td className="px-3 py-2 text-center">
-                              {isRunning && (
-                                <input
-                                  type="checkbox"
-                                  checked={!!r.selected}
-                                  disabled={isLocked}
-                                  onChange={(ev) =>
-                                    !isLocked &&
-                                    setFacultySelected(r, ev.target.checked)
-                                  }
-                                  className="rounded border-gray-300 text-emerald-600 focus:ring-emerald-500"
-                                  title={`Select row ${idx + 1}`}
-                                />
-                              )}
-                            </td>
+                          </th>
+                          <th className="px-3 py-2 text-left border border-gray-300">
+                            Course Code & Title
+                            <span className="text-red-600" aria-hidden="true">
+                              *
+                            </span>
+                          </th>
+                          <th className="px-3 py-2 text-center border border-gray-300">
+                            Units
+                          </th>
+                          <th className="px-3 py-2 text-center border border-gray-300">
+                            Section
+                          </th>
+                          <th className="px-3 py-2 text-left border border-gray-300">
+                            Faculty{" "}
+                            <span className="text-red-600" aria-hidden="true">
+                              *
+                            </span>
+                          </th>
+                          <th className="px-3 py-2 text-center border border-gray-300">
+                            Day 1{" "}
+                            <span className="text-red-600" aria-hidden="true">
+                              *
+                            </span>
+                          </th>
+                          <th className="px-3 py-2 text-center border border-gray-300">
+                            Begin 1{" "}
+                            <span className="text-red-600" aria-hidden="true">
+                              *
+                            </span>
+                          </th>
+                          <th className="px-3 py-2 text-center border border-gray-300">
+                            End 1{" "}
+                            <span className="text-red-600" aria-hidden="true">
+                              *
+                            </span>
+                          </th>
+                          <th className="px-3 py-2 text-center border border-gray-300">
+                            Room 1
+                          </th>
+                          <th className="px-3 py-2 text-center border border-gray-300">
+                            Day 2{" "}
+                            <span className="text-red-600" aria-hidden="true">
+                              *
+                            </span>
+                          </th>
+                          <th className="px-3 py-2 text-center border border-gray-300">
+                            Begin 2{" "}
+                            <span className="text-red-600" aria-hidden="true">
+                              *
+                            </span>
+                          </th>
+                          <th className="px-3 py-2 text-center border border-gray-300">
+                            End 2{" "}
+                            <span className="text-red-600" aria-hidden="true">
+                              *
+                            </span>
+                          </th>
+                          <th className="px-3 py-2 text-center border border-gray-300">
+                            Room 2
+                          </th>
+                          <th className="px-3 py-2 text-center border border-gray-300">
+                            Capacity
+                          </th>
+                          <th className="px-3 py-2 text-center border border-gray-300">
+                            Mode{" "}
+                            <span className="text-red-600" aria-hidden="true">
+                              *
+                            </span>
+                          </th>
+                          <th className="px-3 py-2 text-left border border-gray-300">
+                            Remarks
+                          </th>
+                          <th className="px-3 py-2 text-center border border-gray-300">
+                            Status
+                          </th>
+                          <th className="px-3 py-2 text-center border border-gray-300">
+                            Actions
+                          </th>
+                        </tr>
+                      </thead>
 
-                            <td className="px-4 py-2 align-top">
-                              {getEditFlags(r).course ? (
-                                <div className="flex flex-col gap-1">
-                                  {/* Course code dropdown */}
-                                  <SelectBox
-                                    value={r.course || ""}
-                                    onChange={(code) => {
-                                      const found = courseOptions.find(
-                                        (c) => c.code === code
-                                      );
+                      <tbody>
+                        {filtered.map((r, idx) => {
+                          const e = getEditFlags(r);
+                          const fromFacultyService = !!(r as any)
+                            .synced_from_faculty_service;
+                          const isLocked = isArchiveView || fromFacultyService;
+                          const isForwardedToFaculty = !!r.forwarded_to_faculty;
+                          // Show the red dot only when there is a pending RFC AND the row is still actionable.
+                          // Once the schedule is approved/finalized, the message icon is disabled; the dot should disappear.
+                          const unread = !!(r as any).pending_rfc;
+                          return (
+                            <tr
+                              key={r.id}
+                              className={cls(
+                                "whitespace-nowrap [&>td]:border [&>td]:border-gray-200",
+                                isLocked
+                                  ? fromFacultyService
+                                    ? "bg-orange-50 hover:bg-orange-50"
+                                    : "bg-gray-100 text-gray-500 hover:bg-gray-100"
+                                  : isForwardedToFaculty
+                                  ? "bg-sky-50 hover:bg-sky-100/40"
+                                  : "hover:bg-gray-50"
+                              )}
+                            >
+                              <td className="px-3 py-2 text-center">
+                                {isRunning && (
+                                  <input
+                                    type="checkbox"
+                                    checked={!!r.selected}
+                                    disabled={isLocked}
+                                    onChange={(ev) =>
+                                      !isLocked &&
+                                      setFacultySelected(r, ev.target.checked)
+                                    }
+                                    className="rounded border-gray-300 text-emerald-600 focus:ring-emerald-500"
+                                    title={`Select row ${idx + 1}`}
+                                  />
+                                )}
+                              </td>
+
+                              <td className="px-4 py-2 align-top">
+                                {getEditFlags(r).course ? (
+                                  <div className="flex flex-col gap-1">
+                                    {/* Course code dropdown */}
+                                    <SelectBox
+                                      value={r.course || ""}
+                                      onChange={(code) => {
+                                        const found = courseOptions.find(
+                                          (c) => c.code === code
+                                        );
+                                        updateRow(
+                                          r.id,
+                                          {
+                                            course: code,
+                                            title: (found?.title || "") as any,
+                                          },
+                                          { markDirty: true }
+                                        );
+                                      }}
+                                      options={courseOptions.map((c) => c.code)}
+                                      placeholder="— Select course —"
+                                      className="w-[160px]"
+                                    />
+
+                                    {/* Auto-filled course title (read-only text) */}
+                                    <div className="text-gray-600 text-xs max-w-xs truncate">
+                                      {r.title ||
+                                        courseOptions.find(
+                                          (c) => c.code === r.course
+                                        )?.title ||
+                                        "—"}
+                                    </div>
+                                  </div>
+                                ) : (
+                                  // Non-editable rows: same as before
+                                  <div>
+                                    <div className="font-semibold text-emerald-700">
+                                      {r.course || "—"}
+                                    </div>
+                                    <div className="text-gray-600 text-sm">
+                                      {r.title || "—"}
+                                    </div>
+                                  </div>
+                                )}
+                              </td>
+
+                              <td className="px-2 py-2 text-center">
+                                <Cell
+                                  editable={e.units}
+                                  value={String(r.units ?? "")}
+                                  onChange={(v) =>
+                                    setCell(r.id, "units", v as any)
+                                  }
+                                  className="w-[60px]"
+                                  align="center"
+                                />
+                              </td>
+
+                              <td className="px-2 py-2 text-center">
+                                <Cell
+                                  editable={e.section}
+                                  value={r.section}
+                                  onChange={(v) => setCell(r.id, "section", v)}
+                                  className="w-[68px]"
+                                  align="center"
+                                />
+                              </td>
+
+                              <td className="px-4 py-2">
+                                {e.faculty ? (
+                                  <ComboBox
+                                    value={r.faculty ?? ""}
+                                    onChange={(v) => {
+                                      const fid = facultyNameToId[v] || "";
                                       updateRow(
                                         r.id,
-                                        {
-                                          course: code,
-                                          title: (found?.title || "") as any,
-                                        },
+                                        { faculty: v, faculty_id: fid as any },
                                         { markDirty: true }
                                       );
                                     }}
-                                    options={courseOptions.map((c) => c.code)}
-                                    placeholder="— Select course —"
-                                    className="w-[160px]"
+                                    options={facultyOptions}
+                                    className="w-[200px] md:w-[240px] lg:w-[280px]"
                                   />
+                                ) : (
+                                  <span className="block w-[200px] md:w-[240px] lg:w-[280px] truncate">
+                                    {r.faculty || "—"}
+                                  </span>
+                                )}
+                              </td>
 
-                                  {/* Auto-filled course title (read-only text) */}
-                                  <div className="text-gray-600 text-xs max-w-xs truncate">
-                                    {r.title ||
-                                      courseOptions.find(
-                                        (c) => c.code === r.course
-                                      )?.title ||
-                                      "—"}
-                                  </div>
-                                </div>
-                              ) : (
-                                // Non-editable rows: same as before
-                                <div>
-                                  <div className="font-semibold text-emerald-700">
-                                    {r.course || "—"}
-                                  </div>
-                                  <div className="text-gray-600 text-sm">
-                                    {r.title || "—"}
-                                  </div>
-                                </div>
-                              )}
-                            </td>
-
-                            <td className="px-2 py-2 text-center">
-                              <Cell
-                                editable={e.units}
-                                value={String(r.units ?? "")}
-                                onChange={(v) =>
-                                  setCell(r.id, "units", v as any)
-                                }
-                                className="w-[60px]"
-                                align="center"
-                              />
-                            </td>
-
-                            <td className="px-2 py-2 text-center">
-                              <Cell
-                                editable={e.section}
-                                value={r.section}
-                                onChange={(v) => setCell(r.id, "section", v)}
-                                className="w-[68px]"
-                                align="center"
-                              />
-                            </td>
-
-                            <td className="px-4 py-2">
-                              {e.faculty ? (
-                                <ComboBox
-                                  value={r.faculty ?? ""}
-                                  onChange={(v) => {
-                                    const fid = facultyNameToId[v] || "";
-                                    updateRow(
-                                      r.id,
-                                      { faculty: v, faculty_id: fid as any },
-                                      { markDirty: true }
-                                    );
-                                  }}
-                                  options={facultyOptions}
-                                  className="w-[200px] md:w-[240px] lg:w-[280px]"
-                                />
-                              ) : (
-                                <span className="block w-[200px] md:w-[240px] lg:w-[280px] truncate">
-                                  {r.faculty || "—"}
-                                </span>
-                              )}
-                            </td>
-
-                            <td className="px-2 py-2 text-center">
-                              {e.day1 ? (
-                                <SelectBox
-                                  value={r.day1}
-                                  onChange={(v) => {
-                                    const autoDay2 = pairedDay2For(String(v || ""));
-                                    const shouldAuto = !day2ManualById[r.id];
-                                    if (shouldAuto && autoDay2) {
-                                      updateRow(
-                                        r.id,
-                                        { day1: v as any, day2: autoDay2 as any },
-                                        { markDirty: true }
+                              <td className="px-2 py-2 text-center">
+                                {e.day1 ? (
+                                  <SelectBox
+                                    value={r.day1}
+                                    onChange={(v) => {
+                                      const autoDay2 = pairedDay2For(
+                                        String(v || "")
                                       );
-                                    } else {
-                                      setCell(r.id, "day1", v as any);
-                                    }
-                                  }}
-                                  options={DAY_OPTIONS}
-                                />
-                              ) : (
-                                <span>{r.day1 || "—"}</span>
-                              )}
-                            </td>
+                                      const shouldAuto = !day2ManualById[r.id];
+                                      if (shouldAuto && autoDay2) {
+                                        updateRow(
+                                          r.id,
+                                          {
+                                            day1: v as any,
+                                            day2: autoDay2 as any,
+                                          },
+                                          { markDirty: true }
+                                        );
+                                      } else {
+                                        setCell(r.id, "day1", v as any);
+                                      }
+                                    }}
+                                    options={DAY_OPTIONS}
+                                  />
+                                ) : (
+                                  <span>{r.day1 || "—"}</span>
+                                )}
+                              </td>
 
-                            <td className="px-2 py-2 text-center">
-                              {e.begin1 ? (
-                                <TimeBeginInput
-                                  value={r.begin1}
-                                  onChange={(v) => {
-                                    const patch: Partial<Row> = { begin1: v };
-                                    if (v) patch.end1 = calculateEndTime(v);
-                                    updateRow(r.id, patch, { markDirty: true });
-                                  }}
-                                  options={TIME_BEGIN_OPTIONS}
-                                  className="w-[120px] text-center"
-                                />
-                              ) : (
-                                <span>{displayTimeFromOptions(r.begin1, TIME_BEGIN_OPTIONS) || "—"}</span>
-                              )}
-                            </td>
-
-                            <td className="px-2 py-2 text-center">
-                              {e.end1 ? (
-                                <SelectBox
-                                  value={r.end1}
-                                  onChange={(v) => setCell(r.id, "end1", v)}
-                                  options={TIME_END_OPTIONS}
-                                  className="w-[70px] text-center"
-                                />
-                              ) : (
-                                <span>{displayTimeFromOptions(r.end1, TIME_END_OPTIONS) || "—"}</span>
-                              )}
-                            </td>
-
-                            <td className="px-2 py-2 text-center">
-                              {e.room1 ? (
-                                <SelectBox
-                                  value={r.room1 || ""}
-                                  onChange={(v) =>
-                                    setCell(r.id, "room1", v as Row["room1"])
-                                  }
-                                  options={ROOM_OPTIONS}
-                                  className="w-[100px] text-center"
-                                />
-                              ) : (
-                                <span>{r.room1 || "—"}</span>
-                              )}
-                            </td>
-
-                            <td className="px-2 py-2 text-center">
-                              {e.day2 ? (
-                                <SelectBox
-                                  value={r.day2}
-                                  onChange={(v) => {
-                                    setDay2ManualById((prev) => ({ ...prev, [r.id]: true }));
-                                    setCell(r.id, "day2", v as any);
-                                  }}
-                                  options={DAY_OPTIONS}
-                                />
-                              ) : (
-                                <span>{r.day2 || "—"}</span>
-                              )}
-                            </td>
-
-                            <td className="px-2 py-2 text-center">
-                              {e.begin2 ? (
-                                <TimeBeginInput
-                                  value={r.begin2}
-                                  onChange={(v) => {
-                                    const patch: Partial<Row> = { begin2: v };
-                                    if (v) {
-                                      patch.end2 = calculateEndTime(v);
-                                    }
-                                    updateRow(r.id, patch, { markDirty: true });
-                                  }}
-                                  options={TIME_BEGIN_OPTIONS}
-                                  className="w-[120px] text-center"
-                                />
-                              ) : (
-                                <span>{displayTimeFromOptions(r.begin2, TIME_BEGIN_OPTIONS) || "—"}</span>
-                              )}
-                            </td>
-
-                            <td className="px-2 py-2 text-center">
-                              {e.end2 ? (
-                                <SelectBox
-                                  value={r.end2}
-                                  onChange={(v) => setCell(r.id, "end2", v)}
-                                  options={TIME_END_OPTIONS}
-                                  className="w-[70px] text-center"
-                                />
-                              ) : (
-                                <span>{displayTimeFromOptions(r.end2, TIME_END_OPTIONS) || "—"}</span>
-                              )}
-                            </td>
-
-                            <td className="px-2 py-2 text-center">
-                              {e.room2 ? (
-                                <SelectBox
-                                  value={r.room2 || ""}
-                                  onChange={(v) =>
-                                    setCell(r.id, "room2", v as Row["room2"])
-                                  }
-                                  options={ROOM_OPTIONS}
-                                  className="w-[100px] text-center"
-                                />
-                              ) : (
-                                <span>{r.room2 || "—"}</span>
-                              )}
-                            </td>
-
-                            <td className="px-2 py-2 text-center">
-                              <Cell
-                                editable={e.capacity}
-                                value={String(r.capacity ?? "")}
-                                onChange={(v) =>
-                                  setCell(r.id, "capacity", v as any)
-                                }
-                                className="w-[64px]"
-                                align="center"
-                              />
-                            </td>
-                            <td className="px-2 py-2 text-center">
-                              {e.mode ? (
-                                <SelectBox
-                                  value={r.mode || ""}
-                                  onChange={(v) =>
-                                    setCell(r.id, "mode", v as Row["mode"])
-                                  }
-                                  options={MODE_OPTIONS}
-                                  className="w-[80px] text-center"
-                                />
-                              ) : (
-                                <span>{r.mode || "—"}</span>
-                              )}
-                            </td>
-
-                            <td className="px-2 py-2 align-top w-[280px] min-w-[280px]">
-                              <div className="flex w-full min-w-0 items-start gap-2">
-                                <textarea
-                                  value={remarksDraftBySection[r.id] ?? String((r as any)?.remarks ?? "")}
-                                  onChange={(ev) => queueAutosaveRemark(r, ev.target.value)}
-                                  onBlur={() => {
-                                    // Ensure the latest value is persisted when the user leaves the field.
-                                    clearRemarkAutosaveTimer(r.id);
-                                    void handleSaveRemark(r, { silentSuccess: true });
-                                  }}
-                                  disabled={isLocked}
-                                  placeholder="—"
-                                  className={cls(
-                                    "flex-1 min-w-0 min-h-[36px] resize-y rounded-md border border-gray-300 px-2 py-1 text-sm leading-snug shadow-sm focus:ring-2 focus:ring-emerald-500/30",
-                                    isLocked && "bg-gray-100 text-gray-500"
-                                  )}
-                                />
-                              </div>
-                            </td>
-
-                            <td className="px-2 py-2 text-center">
-                              <StatusChip r={r} />
-                            </td>
-
-                            <td className="px-2 py-2 text-center">
-                              {isRunning && (
-                                <div className="relative flex items-center justify-center gap-3 text-emerald-700">
-                                  {!fromFacultyService && (
-                                  <button
-                                    className={cls(
-                                      "relative hover:brightness-110",
-                                      isArchiveView && "opacity-40 cursor-not-allowed hover:brightness-100"
-                                    )}
-                                    title="Message"
-                                    onClick={() => {
-                                      if (isArchiveView) return;
-                                      setReqChange({
-                                        open: true,
-                                        facultyName: r.faculty || "Faculty",
-                                        facultyId: (r as any).faculty_id,
-                                        sectionId: (r as any).section_id || r.id,
+                              <td className="px-2 py-2 text-center">
+                                {e.begin1 ? (
+                                  <TimeBeginInput
+                                    value={r.begin1}
+                                    onChange={(v) => {
+                                      const patch: Partial<Row> = { begin1: v };
+                                      if (v) patch.end1 = calculateEndTime(v);
+                                      updateRow(r.id, patch, {
+                                        markDirty: true,
                                       });
                                     }}
-                                  >
-                                    <MessageSquareText className="h-5 w-5" />
-                                    {unread && (
-                                      <span className="absolute -top-1 -right-1 h-2.5 w-2.5 rounded-full bg-red-600" />
-                                    )}
-                                  </button>
-                                  )}
+                                    options={TIME_BEGIN_OPTIONS}
+                                    className="w-[120px] text-center"
+                                  />
+                                ) : (
+                                  <span>
+                                    {displayTimeFromOptions(
+                                      r.begin1,
+                                      TIME_BEGIN_OPTIONS
+                                    ) || "—"}
+                                  </span>
+                                )}
+                              </td>
 
+                              <td className="px-2 py-2 text-center">
+                                {e.end1 ? (
+                                  <SelectBox
+                                    value={r.end1}
+                                    onChange={(v) => setCell(r.id, "end1", v)}
+                                    options={TIME_END_OPTIONS}
+                                    className="w-[70px] text-center"
+                                  />
+                                ) : (
+                                  <span>
+                                    {displayTimeFromOptions(
+                                      r.end1,
+                                      TIME_END_OPTIONS
+                                    ) || "—"}
+                                  </span>
+                                )}
+                              </td>
 
-                                  <button
-                                    className="relative hover:brightness-110"
-                                    title={copiedRowId === r.id ? "Copied!" : "Copy"}
-                                    onClick={() => handleCopyRow(r)}
-                                  >
-                                    {copiedRowId === r.id ? (
-                                      <span className="text-xs font-semibold text-emerald-700">✓</span>
-                                    ) : (
-                                      <Copy className="h-4 w-4" />
+                              <td className="px-2 py-2 text-center">
+                                {e.room1 ? (
+                                  <SelectBox
+                                    value={r.room1 || ""}
+                                    onChange={(v) =>
+                                      setCell(r.id, "room1", v as Row["room1"])
+                                    }
+                                    options={ROOM_OPTIONS}
+                                    className="w-[100px] text-center"
+                                  />
+                                ) : (
+                                  <span>{r.room1 || "—"}</span>
+                                )}
+                              </td>
+
+                              <td className="px-2 py-2 text-center">
+                                {e.day2 ? (
+                                  <SelectBox
+                                    value={r.day2}
+                                    onChange={(v) => {
+                                      setDay2ManualById((prev) => ({
+                                        ...prev,
+                                        [r.id]: true,
+                                      }));
+                                      setCell(r.id, "day2", v as any);
+                                    }}
+                                    options={DAY_OPTIONS}
+                                  />
+                                ) : (
+                                  <span>{r.day2 || "—"}</span>
+                                )}
+                              </td>
+
+                              <td className="px-2 py-2 text-center">
+                                {e.begin2 ? (
+                                  <TimeBeginInput
+                                    value={r.begin2}
+                                    onChange={(v) => {
+                                      const patch: Partial<Row> = { begin2: v };
+                                      if (v) {
+                                        patch.end2 = calculateEndTime(v);
+                                      }
+                                      updateRow(r.id, patch, {
+                                        markDirty: true,
+                                      });
+                                    }}
+                                    options={TIME_BEGIN_OPTIONS}
+                                    className="w-[120px] text-center"
+                                  />
+                                ) : (
+                                  <span>
+                                    {displayTimeFromOptions(
+                                      r.begin2,
+                                      TIME_BEGIN_OPTIONS
+                                    ) || "—"}
+                                  </span>
+                                )}
+                              </td>
+
+                              <td className="px-2 py-2 text-center">
+                                {e.end2 ? (
+                                  <SelectBox
+                                    value={r.end2}
+                                    onChange={(v) => setCell(r.id, "end2", v)}
+                                    options={TIME_END_OPTIONS}
+                                    className="w-[70px] text-center"
+                                  />
+                                ) : (
+                                  <span>
+                                    {displayTimeFromOptions(
+                                      r.end2,
+                                      TIME_END_OPTIONS
+                                    ) || "—"}
+                                  </span>
+                                )}
+                              </td>
+
+                              <td className="px-2 py-2 text-center">
+                                {e.room2 ? (
+                                  <SelectBox
+                                    value={r.room2 || ""}
+                                    onChange={(v) =>
+                                      setCell(r.id, "room2", v as Row["room2"])
+                                    }
+                                    options={ROOM_OPTIONS}
+                                    className="w-[100px] text-center"
+                                  />
+                                ) : (
+                                  <span>{r.room2 || "—"}</span>
+                                )}
+                              </td>
+
+                              <td className="px-2 py-2 text-center">
+                                <Cell
+                                  editable={e.capacity}
+                                  value={String(r.capacity ?? "")}
+                                  onChange={(v) =>
+                                    setCell(r.id, "capacity", v as any)
+                                  }
+                                  className="w-[64px]"
+                                  align="center"
+                                />
+                              </td>
+                              <td className="px-2 py-2 text-center">
+                                {e.mode ? (
+                                  <SelectBox
+                                    value={r.mode || ""}
+                                    onChange={(v) =>
+                                      setCell(r.id, "mode", v as Row["mode"])
+                                    }
+                                    options={MODE_OPTIONS}
+                                    className="w-[80px] text-center"
+                                  />
+                                ) : (
+                                  <span>{r.mode || "—"}</span>
+                                )}
+                              </td>
+
+                              <td className="px-2 py-2 align-top w-[280px] min-w-[280px]">
+                                <div className="flex w-full min-w-0 items-start gap-2">
+                                  <textarea
+                                    value={
+                                      remarksDraftBySection[r.id] ??
+                                      String((r as any)?.remarks ?? "")
+                                    }
+                                    onChange={(ev) =>
+                                      queueAutosaveRemark(r, ev.target.value)
+                                    }
+                                    onBlur={() => {
+                                      // Ensure the latest value is persisted when the user leaves the field.
+                                      clearRemarkAutosaveTimer(r.id);
+                                      void handleSaveRemark(r, {
+                                        silentSuccess: true,
+                                      });
+                                    }}
+                                    disabled={isLocked}
+                                    placeholder="—"
+                                    className={cls(
+                                      "flex-1 min-w-0 min-h-[36px] resize-y rounded-md border border-gray-300 px-2 py-1 text-sm leading-snug shadow-sm focus:ring-2 focus:ring-emerald-500/30",
+                                      isLocked && "bg-gray-100 text-gray-500"
                                     )}
-                                  </button>
+                                  />
                                 </div>
+                              </td>
+
+                              <td className="px-2 py-2 text-center">
+                                <StatusChip r={r} />
+                              </td>
+
+                              <td className="px-2 py-2 text-center">
+                                {isRunning && (
+                                  <div className="relative flex items-center justify-center gap-3 text-emerald-700">
+                                    {!fromFacultyService && (
+                                      <button
+                                        className={cls(
+                                          "relative hover:brightness-110",
+                                          isArchiveView &&
+                                            "opacity-40 cursor-not-allowed hover:brightness-100"
+                                        )}
+                                        title="Message"
+                                        onClick={() => {
+                                          if (isArchiveView) return;
+                                          setReqChange({
+                                            open: true,
+                                            facultyName: r.faculty || "Faculty",
+                                            facultyId: (r as any).faculty_id,
+                                            sectionId:
+                                              (r as any).section_id || r.id,
+                                          });
+                                        }}
+                                      >
+                                        <MessageSquareText className="h-5 w-5" />
+                                        {unread && (
+                                          <span className="absolute -top-1 -right-1 h-2.5 w-2.5 rounded-full bg-red-600" />
+                                        )}
+                                      </button>
+                                    )}
+
+                                    <button
+                                      className="relative hover:brightness-110"
+                                      title={
+                                        copiedRowId === r.id
+                                          ? "Copied!"
+                                          : "Copy"
+                                      }
+                                      onClick={() => handleCopyRow(r)}
+                                    >
+                                      {copiedRowId === r.id ? (
+                                        <span className="text-xs font-semibold text-emerald-700">
+                                          ✓
+                                        </span>
+                                      ) : (
+                                        <Copy className="h-4 w-4" />
+                                      )}
+                                    </button>
+                                  </div>
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        })}
+
+                        {filtered.length === 0 && (
+                          <tr>
+                            <td
+                              colSpan={18}
+                              className="px-4 py-10 text-center text-sm text-gray-500"
+                            >
+                              {rows.length === 0 ? (
+                                <>
+                                  No data yet. Click{" "}
+                                  <span className="font-medium">
+                                    Auto-assign
+                                  </span>{" "}
+                                  or{" "}
+                                  <span className="font-medium">
+                                    Add new line
+                                  </span>{" "}
+                                  to begin.
+                                </>
+                              ) : (
+                                <>No rows match your search.</>
                               )}
                             </td>
                           </tr>
-                        );
-                      })}
-
-                      {filtered.length === 0 && (
-                        <tr>
-                          <td
-                            colSpan={18}
-                            className="px-4 py-10 text-center text-sm text-gray-500"
-                          >
-                            {rows.length === 0 ? (
-                              <>
-                                No data yet. Click{" "}
-                                <span className="font-medium">Auto-assign</span> or{" "}
-                                <span className="font-medium">Add new line</span> to begin.
-                              </>
-                            ) : (
-                              <>No rows match your search.</>
-                            )}
-                          </td>
-                        </tr>
-                      )}
-                    </tbody>
-                  </table>
-                </div>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
                 )}
 
                 <div className="border-t px-4 py-3">
@@ -5251,7 +5567,6 @@ export default function OM_LoadAssignment() {
                       <Plus className="h-4 w-4" />
                       Add new line
                     </button>
-
                   </div>
                   {/* Right: Auto-assign (Run algorithm) - REMOVED from bottom */}
                   {/* <div className="flex items-center gap-2">
@@ -5277,8 +5592,7 @@ export default function OM_LoadAssignment() {
                   <div>
                     <h2 className="text-lg font-semibold">Faculty Deloading</h2>
                   </div>
-
-                                  </div>
+                </div>
 
                 {deloadAllError && (
                   <div className="mx-4 mb-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
@@ -5289,7 +5603,9 @@ export default function OM_LoadAssignment() {
                 <div className="px-4 pb-4 border-t">
                   <div className="mt-3 overflow-x-auto rounded-lg border border-gray-200 bg-white">
                     {deloadAllLoading ? (
-                      <div className="py-6 text-center text-sm text-gray-500">Loading…</div>
+                      <div className="py-6 text-center text-sm text-gray-500">
+                        Loading…
+                      </div>
                     ) : deloadFiltered.length === 0 ? (
                       <div className="py-6 text-center text-sm text-gray-500">
                         {deloadAllRows.length === 0
@@ -5308,24 +5624,51 @@ export default function OM_LoadAssignment() {
                           </colgroup>
                           <thead className="bg-gray-50 border-y text-gray-700 sticky top-0 z-10">
                             <tr>
-                              <th className="px-3 py-2 text-left font-semibold">Faculty</th>
-                              <th className="px-3 py-2 text-left font-semibold">Deloading Type</th>
-                              <th className="px-3 py-2 text-right font-semibold">Units</th>
-                              <th className="px-3 py-2 text-left font-semibold">Notes</th>
-                              <th className="px-3 py-2 text-center font-semibold">Last Updated</th>
+                              <th className="px-3 py-2 text-left font-semibold">
+                                Faculty
+                              </th>
+                              <th className="px-3 py-2 text-left font-semibold">
+                                Deloading Type
+                              </th>
+                              <th className="px-3 py-2 text-right font-semibold">
+                                Units
+                              </th>
+                              <th className="px-3 py-2 text-left font-semibold">
+                                Notes
+                              </th>
+                              <th className="px-3 py-2 text-center font-semibold">
+                                Last Updated
+                              </th>
                             </tr>
                           </thead>
                           <tbody className="divide-y">
                             {deloadFiltered.map((r, i) => (
-                              <tr key={`${r.faculty_id}-${r.deloading_type || "row"}-${i}`} className="hover:bg-amber-50/40">
+                              <tr
+                                key={`${r.faculty_id}-${
+                                  r.deloading_type || "row"
+                                }-${i}`}
+                                className="hover:bg-amber-50/40"
+                              >
                                 <td className="px-3 py-2 align-middle">
-                                  <div className="font-medium text-gray-900">{r.faculty_name_display || r.faculty_id}</div>
+                                  <div className="font-medium text-gray-900">
+                                    {r.faculty_name_display || r.faculty_id}
+                                  </div>
                                 </td>
-                                <td className="px-3 py-2 align-middle">{r.deloading_type || "—"}</td>
-                                <td className="px-3 py-2 text-right align-middle">{r.units_deloaded ?? "—"}</td>
-                                <td className="px-3 py-2 align-middle">{r.notes || "—"}</td>
+                                <td className="px-3 py-2 align-middle">
+                                  {r.deloading_type || "—"}
+                                </td>
+                                <td className="px-3 py-2 text-right align-middle">
+                                  {r.units_deloaded ?? "—"}
+                                </td>
+                                <td className="px-3 py-2 align-middle">
+                                  {r.notes || "—"}
+                                </td>
                                 <td className="px-3 py-2 text-center align-middle">
-                                  {r.updated_at ? new Date(r.updated_at as any).toLocaleDateString() : "—"}
+                                  {r.updated_at
+                                    ? new Date(
+                                        r.updated_at as any
+                                      ).toLocaleDateString()
+                                    : "—"}
                                 </td>
                               </tr>
                             ))}
@@ -5337,8 +5680,7 @@ export default function OM_LoadAssignment() {
 
                   {!deloadAllLoading && deloadFiltered.length > 0 && (
                     <div className="mt-2 flex items-center justify-between text-xs text-gray-500">
-
-                      {deloadAllRows.length > 5 }
+                      {deloadAllRows.length > 5}
                     </div>
                   )}
                 </div>
@@ -5397,113 +5739,248 @@ export default function OM_LoadAssignment() {
 
                   {/* Tab 1: Units vs Preferred Units */}
                   {summaryTab === "units" && (
-                    <div className="px-4 pb-4 border-t">
-                      <div className="mt-3 overflow-x-auto rounded-lg border border-gray-200 bg-white">
+                    <div className="border-t px-4 pb-4 w-full">
+                      {/* + Add filters button row */}
+                      <div className="flex items-center gap-2 py-3">
+                        <button
+                          type="button"
+                          onClick={() => setShowUnitsFilters((v) => !v)}
+                          className={cls(
+                            "px-4 py-2 text-sm font-medium",
+                            "rounded-md border border-gray-300 bg-white text-gray-700",
+                            "hover:bg-gray-50",
+                            "focus:outline-none focus:ring-2 focus:ring-emerald-500/30"
+                          )}
+                        >
+                          + Add filters
+                        </button>
+
+                        <div className="ml-auto text-xs text-gray-500">
+                          Showing{" "}
+                          <span className="font-semibold">
+                            {facultySummaryView.length}
+                          </span>{" "}
+                          of{" "}
+                          <span className="font-semibold">
+                            {facultySummaryFiltered.length}
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* Filter options */}
+                      {showUnitsFilters && (
+                        <div className="mb-3 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2">
+                          <div className="flex flex-wrap items-center gap-4 text-xs">
+                            <label className="inline-flex items-center gap-2">
+                              <input
+                                type="radio"
+                                name="unitsFilterMode"
+                                checked={unitsFilterMode === "all"}
+                                onChange={() => setUnitsFilterMode("all")}
+                              />
+                              Show all
+                            </label>
+
+                            <label className="inline-flex items-center gap-2">
+                              <input
+                                type="radio"
+                                name="unitsFilterMode"
+                                checked={unitsFilterMode === "unassigned"}
+                                onChange={() =>
+                                  setUnitsFilterMode("unassigned")
+                                }
+                              />
+                              Unassigned only
+                            </label>
+
+                            <label className="inline-flex items-center gap-2">
+                              <input
+                                type="radio"
+                                name="unitsFilterMode"
+                                checked={unitsFilterMode === "issues"}
+                                onChange={() => setUnitsFilterMode("issues")}
+                              />
+                              Only issues
+                            </label>
+
+                            <span className="hidden sm:inline text-gray-300">
+                              |
+                            </span>
+
+                            <label className="inline-flex items-center gap-2 font-medium text-gray-900">
+                              <input
+                                type="checkbox"
+                                checked={hideNoPrefs}
+                                onChange={(e) =>
+                                  setHideNoPrefs(e.target.checked)
+                                }
+                              />
+                              Hide faculty without preferences
+                            </label>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Scroll wrapper */}
+                      <div className="overflow-x-auto w-full">
                         <table className="w-full text-sm table-fixed">
-                        <thead className="bg-gray-50 border-y text-gray-700">
-                          <tr>
-                            <th className="px-3 py-2 text-left font-semibold">
-                              Faculty
-                            </th>
-                            <th className="px-3 py-2 text-right font-semibold">
-                              Assigned Teaching Units
-                            </th>
-                            <th className="px-3 py-2 text-right font-semibold">
-                              Preferred Teaching Units
-                            </th>
-                            <th className="px-3 py-2 text-right font-semibold">
-                              Deloading Units
-                            </th>
-                            <th className="px-3 py-2 text-center font-semibold">
-                              Status
-                            </th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y">
-                          {facultySummary.length === 0 ? (
+                          <thead className="bg-gray-50 border-y text-gray-700">
                             <tr>
-                              <td
-                                colSpan={5}
-                                className="py-6 text-center text-sm text-gray-500"
-                              >
-                                No faculty have assignments yet for this term.
-                              </td>
+                              <th className="px-3 py-2 text-left font-semibold">
+                                <button
+                                  type="button"
+                                  onClick={() => toggleUnitsSort("faculty")}
+                                  className="inline-flex items-center gap-1 hover:underline"
+                                >
+                                  Faculty{" "}
+                                  {unitsSortKey === "faculty"
+                                    ? unitsSortDir === "asc"
+                                      ? "▲"
+                                      : "▼"
+                                    : ""}
+                                </button>
+                              </th>
+
+                              <th className="px-3 py-2 text-right font-semibold">
+                                <button
+                                  type="button"
+                                  onClick={() => toggleUnitsSort("assigned")}
+                                  className="inline-flex items-center gap-1 hover:underline"
+                                >
+                                  Assigned Units{" "}
+                                  {unitsSortKey === "assigned"
+                                    ? unitsSortDir === "asc"
+                                      ? "▲"
+                                      : "▼"
+                                    : ""}
+                                </button>
+                              </th>
+
+                              <th className="px-3 py-2 text-right font-semibold">
+                                <button
+                                  type="button"
+                                  onClick={() => toggleUnitsSort("preferred")}
+                                  className="inline-flex items-center gap-1 hover:underline"
+                                >
+                                  Preferred Units{" "}
+                                  {unitsSortKey === "preferred"
+                                    ? unitsSortDir === "asc"
+                                      ? "▲"
+                                      : "▼"
+                                    : ""}
+                                </button>
+                              </th>
+
+                              <th className="px-3 py-2 text-right font-semibold">
+                                <button
+                                  type="button"
+                                  onClick={() => toggleUnitsSort("gap")}
+                                  className="inline-flex items-center gap-1 hover:underline"
+                                >
+                                  Load Gap (Units){" "}
+                                  {unitsSortKey === "gap"
+                                    ? unitsSortDir === "asc"
+                                      ? "▲"
+                                      : "▼"
+                                    : ""}
+                                </button>
+                              </th>
+
+                              <th className="px-3 py-2 text-center font-semibold">
+                                Status
+                              </th>
                             </tr>
-                          ) : facultySummaryFiltered.length === 0 ? (
-                            <tr>
-                              <td
-                                colSpan={5}
-                                className="py-6 text-center text-sm text-gray-500"
-                              >
-                                No faculty match your search.
-                              </td>
-                            </tr>
-                          ) : null}
+                          </thead>
 
-                          {facultySummaryFiltered.map((f) => {
-                            const hasPref = f.preferredUnits != null;
-                            let statusLabel = "—";
-                            let statusTone =
-                              "bg-gray-100 text-gray-700 border-gray-200";
-
-                            if (hasPref && f.diff != null) {
-                              if (f.diff > 0) {
-                                statusLabel = `Over by ${f.diff}`;
-                                statusTone =
-                                  "bg-red-50 text-red-700 border-red-200";
-                              } else if (f.diff < 0) {
-                                statusLabel = `Under by ${Math.abs(f.diff)}`;
-                                statusTone =
-                                  "bg-amber-50 text-amber-700 border-amber-200";
-                              } else {
-                                statusLabel = "Match";
-                                statusTone =
-                                  "bg-emerald-50 text-emerald-700 border-emerald-200";
-                              }
-                            }
-
-                            return (
-                              <tr key={f.facultyId || f.facultyName}>
-                                <td className="px-3 py-2 align-middle">
-                                  <div className="font-medium text-gray-900">
-                                    {f.facultyName}
-                                  </div>
-                                </td>
-                                <td className="px-3 py-2 text-right align-middle">
-                                  {f.assignedUnits
-                                    .toFixed(1)
-                                    .replace(/\.0$/, "")}
-                                </td>
-                                <td className="px-3 py-2 text-right align-middle">
-                                  {hasPref
-                                    ? f
-                                        .preferredUnits!.toFixed(1)
-                                        .replace(/\.0$/, "")
-                                    : "—"}
-                                </td>
-                                <td className="px-3 py-2 text-right align-middle">
-                                  {(() => {
-                                    const units =
-                                      (f.facultyId && deloadUnitsByFacultyId[f.facultyId]) || 0;
-                                    return units.toFixed(1).replace(/\.0$/, "");
-                                  })()}
-                                </td>
-                                <td className="px-3 py-2 text-center align-middle">
-                                  <span
-                                    className={cls(
-                                      "inline-flex items-center justify-center rounded-full border px-2.5 py-0.5 text-[11px] font-medium",
-                                      statusTone
-                                    )}
-                                  >
-                                    {statusLabel}
-                                  </span>
+                          <tbody className="divide-y">
+                            {facultySummary.length === 0 ? (
+                              <tr>
+                                <td
+                                  colSpan={5}
+                                  className="px-3 py-6 text-center text-xs text-gray-500"
+                                >
+                                  No faculty have assignments yet for this term.
                                 </td>
                               </tr>
-                            );
-                          })}
-                        </tbody>
-                      </table>
-                    </div>
+                            ) : facultySummaryView.length === 0 ? (
+                              <tr>
+                                <td
+                                  colSpan={5}
+                                  className="px-3 py-6 text-center text-xs text-gray-500"
+                                >
+                                  No matching faculty rows.
+                                </td>
+                              </tr>
+                            ) : null}
+
+                            {facultySummaryView.map((f) => {
+                              const hasPref = f.preferredUnits != null;
+                              let statusLabel = "—";
+                              let statusTone =
+                                "bg-gray-100 text-gray-700 border-gray-200";
+
+                              if (hasPref && f.diff != null) {
+                                if (f.diff > 0) {
+                                  statusLabel = `Over by ${f.diff}`;
+                                  statusTone =
+                                    "bg-red-50 text-red-700 border-red-200";
+                                } else if (f.diff < 0) {
+                                  statusLabel = `Under by ${Math.abs(f.diff)}`;
+                                  statusTone =
+                                    "bg-amber-50 text-amber-700 border-amber-200";
+                                } else {
+                                  statusLabel = "Match";
+                                  statusTone =
+                                    "bg-emerald-50 text-emerald-700 border-emerald-200";
+                                }
+                              }
+
+                              return (
+                                <tr key={f.facultyId || f.facultyName}>
+                                  <td className="px-3 py-2 align-middle">
+                                    <div className="font-medium text-gray-900">
+                                      {f.facultyName}
+                                    </div>
+                                  </td>
+
+                                  <td className="px-3 py-2 text-right align-middle">
+                                    {Number(f.assignedUnits ?? 0)
+                                      .toFixed(1)
+                                      .replace(/\.0$/, "")}
+                                  </td>
+
+                                  <td className="px-3 py-2 text-right align-middle">
+                                    {hasPref
+                                      ? Number(f.preferredUnits)
+                                          .toFixed(1)
+                                          .replace(/\.0$/, "")
+                                      : "—"}
+                                  </td>
+
+                                  <td className="px-3 py-2 text-right align-middle">
+                                    {hasPref && f.diff != null
+                                      ? f.diff > 0
+                                        ? `+${f.diff}`
+                                        : `${f.diff}`
+                                      : "—"}
+                                  </td>
+
+                                  <td className="px-3 py-2 text-center align-middle">
+                                    <span
+                                      className={cls(
+                                        "inline-flex items-center justify-center rounded-full border px-2.5 py-0.5 text-[11px] font-medium",
+                                        statusTone
+                                      )}
+                                    >
+                                      {statusLabel}
+                                    </span>
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
                     </div>
                   )}
 
@@ -5513,7 +5990,8 @@ export default function OM_LoadAssignment() {
                       <div className="mt-3 overflow-x-auto rounded-lg border border-gray-200 bg-white">
                         {ruleAlerts.length === 0 ? (
                           <div className="py-6 text-center text-sm text-gray-500">
-                            No rule violations detected for the current assignments.
+                            No rule violations detected for the current
+                            assignments.
                           </div>
                         ) : ruleAlertsFiltered.length === 0 ? (
                           <div className="py-6 text-center text-sm text-gray-500">
@@ -5580,7 +6058,7 @@ export default function OM_LoadAssignment() {
                     </div>
                   )}
 
-{summaryTab === "blocked" && (
+                  {summaryTab === "blocked" && (
                     <div className="px-4 pb-4 border-t">
                       <div className="mt-3 overflow-x-auto rounded-lg border border-gray-200 bg-white">
                         <table className="w-full text-sm table-auto">
@@ -5610,7 +6088,7 @@ export default function OM_LoadAssignment() {
                               <th className="px-3 py-2 text-left font-semibold">
                                 End 2
                               </th>
-</tr>
+                            </tr>
                           </thead>
                           <tbody className="divide-y divide-gray-100">
                             {blockedSections.length === 0 ? (
@@ -5633,7 +6111,6 @@ export default function OM_LoadAssignment() {
                               </tr>
                             ) : (
                               blockedSectionsFiltered.map((b) => {
-
                                 const dayRank: Record<string, number> = {
                                   M: 1,
                                   T: 2,
@@ -5647,11 +6124,18 @@ export default function OM_LoadAssignment() {
                                   .filter((x) => x.section_id === b.rowId)
                                   .slice()
                                   .sort((a, bb) => {
-                                    const da = dayRank[(a.day || "").toUpperCase()] ?? 99;
-                                    const dbb = dayRank[(bb.day || "").toUpperCase()] ?? 99;
+                                    const da =
+                                      dayRank[(a.day || "").toUpperCase()] ??
+                                      99;
+                                    const dbb =
+                                      dayRank[(bb.day || "").toUpperCase()] ??
+                                      99;
                                     if (da !== dbb) return da - dbb;
-                                    const ta = parseInt(String(a.begin || "0"), 10) || 0;
-                                    const tb = parseInt(String(bb.begin || "0"), 10) || 0;
+                                    const ta =
+                                      parseInt(String(a.begin || "0"), 10) || 0;
+                                    const tb =
+                                      parseInt(String(bb.begin || "0"), 10) ||
+                                      0;
                                     return ta - tb;
                                   });
 
@@ -5673,12 +6157,24 @@ export default function OM_LoadAssignment() {
                                     <td className="px-3 py-2 text-gray-700">
                                       {b.section || "—"}
                                     </td>
-                                    <td className="px-3 py-2 text-gray-700">{day1}</td>
-                                    <td className="px-3 py-2 text-gray-700">{begin1}</td>
-                                    <td className="px-3 py-2 text-gray-700">{end1}</td>
-                                    <td className="px-3 py-2 text-gray-700">{day2}</td>
-                                    <td className="px-3 py-2 text-gray-700">{begin2}</td>
-                                    <td className="px-3 py-2 text-gray-700">{end2}</td>
+                                    <td className="px-3 py-2 text-gray-700">
+                                      {day1}
+                                    </td>
+                                    <td className="px-3 py-2 text-gray-700">
+                                      {begin1}
+                                    </td>
+                                    <td className="px-3 py-2 text-gray-700">
+                                      {end1}
+                                    </td>
+                                    <td className="px-3 py-2 text-gray-700">
+                                      {day2}
+                                    </td>
+                                    <td className="px-3 py-2 text-gray-700">
+                                      {begin2}
+                                    </td>
+                                    <td className="px-3 py-2 text-gray-700">
+                                      {end2}
+                                    </td>
                                   </tr>
                                 );
                               })
@@ -5695,13 +6191,14 @@ export default function OM_LoadAssignment() {
         </>
       )}
 
-
       {archiveOpen && (
         <div className="fixed inset-0 z-[150] grid place-items-center bg-black/40 p-4">
           <div className="w-full max-w-lg rounded-xl bg-white shadow-lg">
             <div className="flex items-center justify-between border-b border-gray-200 px-5 py-4">
               <div>
-                <h3 className="text-lg font-semibold text-gray-900">Archived Loads</h3>
+                <h3 className="text-lg font-semibold text-gray-900">
+                  Archived Loads
+                </h3>
                 <p className="mt-0.5 text-sm text-gray-600">
                   Display faculty loads from past terms.
                 </p>
@@ -5741,7 +6238,8 @@ export default function OM_LoadAssignment() {
 
               {isArchiveView && (
                 <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
-                  You’re currently viewing an archived term. Actions like Auto-assign, Import, Send, and Save are disabled.
+                  You’re currently viewing an archived term. Actions like
+                  Auto-assign, Import, Send, and Save are disabled.
                 </div>
               )}
             </div>
@@ -5787,7 +6285,6 @@ export default function OM_LoadAssignment() {
           </div>
         </div>
       )}
-
 
       <SendModal
         open={showSend}
@@ -5861,28 +6358,42 @@ export default function OM_LoadAssignment() {
 
       {/* Import SHS modal (match APO import UX) */}
       {showShsImportModal && (
-        <div className="fixed inset-0 z-[120] grid place-items-center bg-black/40 p-4" role="dialog" aria-modal="true">
+        <div
+          className="fixed inset-0 z-[120] grid place-items-center bg-black/40 p-4"
+          role="dialog"
+          aria-modal="true"
+        >
           <div className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-2xl">
             <div className="mx-auto mb-4 grid h-16 w-16 place-items-center rounded-full border-2 border-emerald-600 text-emerald-700">
               <Upload className="h-8 w-8" strokeWidth={2.5} />
             </div>
 
-            <h3 className="mb-2 text-center text-2xl font-semibold">Import SHS CSV</h3>
+            <h3 className="mb-2 text-center text-2xl font-semibold">
+              Import SHS CSV
+            </h3>
             <p className="mx-auto mb-4 max-w-md text-center text-sm text-neutral-600">
-              Upload a CSV fsile to import SHS sections into the current planning term.
+              Upload a CSV fsile to import SHS sections into the current
+              planning term.
             </p>
 
             <div className="mb-4 rounded-lg border border-emerald-100 bg-emerald-50 px-3 py-2 text-sm text-emerald-900">
               <div className="mb-1 font-semibold">CSV format</div>
               <ul className="list-disc pl-5 space-y-1">
                 <li>
-                  Required columns: <span className="font-mono">Course Code &amp; Title</span>,{" "}
-                  <span className="font-mono">Units</span>, <span className="font-mono">Section</span>,{" "}
-                  <span className="font-mono">Day 1</span>, <span className="font-mono">Begin 1</span>,{" "}
-                  <span className="font-mono">End 1</span>, <span className="font-mono">Room 1</span>,{" "}
-                  <span className="font-mono">Day 2</span>, <span className="font-mono">Begin 2</span>,{" "}
-                  <span className="font-mono">End 2</span>, <span className="font-mono">Room 2</span>,{" "}
-                  <span className="font-mono">Capacity</span>, <span className="font-mono">Mode</span>
+                  Required columns:{" "}
+                  <span className="font-mono">Course Code &amp; Title</span>,{" "}
+                  <span className="font-mono">Units</span>,{" "}
+                  <span className="font-mono">Section</span>,{" "}
+                  <span className="font-mono">Day 1</span>,{" "}
+                  <span className="font-mono">Begin 1</span>,{" "}
+                  <span className="font-mono">End 1</span>,{" "}
+                  <span className="font-mono">Room 1</span>,{" "}
+                  <span className="font-mono">Day 2</span>,{" "}
+                  <span className="font-mono">Begin 2</span>,{" "}
+                  <span className="font-mono">End 2</span>,{" "}
+                  <span className="font-mono">Room 2</span>,{" "}
+                  <span className="font-mono">Capacity</span>,{" "}
+                  <span className="font-mono">Mode</span>
                 </li>
               </ul>
             </div>
@@ -5921,9 +6432,14 @@ export default function OM_LoadAssignment() {
                   disabled={shsImportBusy || isArchiveView}
                   className={cls(
                     "inline-flex items-center gap-2 rounded-lg bg-[#008e4e] px-4 py-2 text-sm font-medium text-white shadow-sm hover:brightness-110",
-                    (shsImportBusy || isArchiveView) && "opacity-60 cursor-not-allowed hover:brightness-100"
+                    (shsImportBusy || isArchiveView) &&
+                      "opacity-60 cursor-not-allowed hover:brightness-100"
                   )}
-                  title={isArchiveView ? "Archived view: importing is disabled" : "Choose a CSV file"}
+                  title={
+                    isArchiveView
+                      ? "Archived view: importing is disabled"
+                      : "Choose a CSV file"
+                  }
                 >
                   <Upload className="h-4 w-4" />
                   {shsImportBusy ? "Importing…" : "Choose file"}
@@ -5948,7 +6464,11 @@ export default function OM_LoadAssignment() {
 
       {/* Custom confirmation modal (replaces browser confirm dialogs) */}
       {confirmModal.open && (
-        <div className="fixed inset-0 z-[9999] grid place-items-center bg-black/40 p-4" role="dialog" aria-modal="true">
+        <div
+          className="fixed inset-0 z-[9999] grid place-items-center bg-black/40 p-4"
+          role="dialog"
+          aria-modal="true"
+        >
           <div className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-2xl">
             <div
               className={cls(
@@ -5967,9 +6487,13 @@ export default function OM_LoadAssignment() {
               )}
             </div>
 
-            <h3 className="mb-2 text-center text-2xl font-semibold">{confirmModal.title}</h3>
+            <h3 className="mb-2 text-center text-2xl font-semibold">
+              {confirmModal.title}
+            </h3>
 
-            <div className="mx-auto max-w-md text-center">{confirmModal.message}</div>
+            <div className="mx-auto max-w-md text-center">
+              {confirmModal.message}
+            </div>
 
             <div className="mt-6 flex justify-end gap-2">
               <button
@@ -6005,8 +6529,9 @@ export default function OM_LoadAssignment() {
         title="Re-forward to Chair?"
         subtitle={
           <>
-            You're about to <span className="font-semibold text-neutral-800">re-notify</span> the Chair.
-            Review the detected changes below before sending.
+            You're about to{" "}
+            <span className="font-semibold text-neutral-800">re-notify</span>{" "}
+            the Chair. Review the detected changes below before sending.
           </>
         }
         confirmText="Re-forward"
@@ -6024,7 +6549,6 @@ export default function OM_LoadAssignment() {
         message={toast?.message || ""}
         onClose={clearToast}
       />
-
     </AppShell>
   );
 }
