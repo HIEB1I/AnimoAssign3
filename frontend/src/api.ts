@@ -3328,6 +3328,7 @@ export async function createFacultyService(payload: {
   course_title?: string;
   units?: number | null;
   to_department: ToDept;
+  remarks?: string;
   from_department?: string; // NEW
 }) {
   const { data } = await api.post(`/chair/faculty-service/create`, payload);
@@ -3518,23 +3519,79 @@ export async function addChairFacultyEntry(payload: FacultyUpsertPayload) {
 export async function getChairFacultySchedule(
   facultyId: string,
   termId?: string
-) {
-  const { data } = await axios.post(`${API_BASE}/chair/facultymanagement`, {}, {
-    params: { action: "schedule", facultyId, termId },
-  });
-  return data;
+) : Promise<{ ok: boolean; term_id: string | null; teaching_load: Array<{
+  course_code: string;
+  course_title: string;
+  section: string;
+  units: number;
+  mode: string;
+  day1: string;
+  begin1: string;
+  end1: string;
+  day2: string;
+  begin2: string;
+  end2: string;
+}> }> {
+  const { data } = await axios.post(
+    `${API_BASE}/chair/facultymanagement`,
+    {},
+    { params: { action: "schedule", facultyId, termId } }
+  );
+
+  // Normalize to always provide teaching_load array (mirror OM helper)
+  const tl = Array.isArray(data?.teaching_load) ? data.teaching_load : [];
+  return { ok: !!data?.ok, term_id: data?.term_id ?? null, teaching_load: tl };
 }
 
 export async function getChairFacultyHistory(
   facultyId: string,
   termOrAy?: string | number
-) {
+): Promise<{ ok: boolean; term_id: string | null; teaching_history: Array<{
+  code: string;
+  title: string;
+  section: string;
+  units?: number;
+  day1?: string;
+  begin1?: string;
+  end1?: string;
+  day2?: string;
+  begin2?: string;
+  end2?: string;
+  term?: string;
+}> }> {
   const params: Record<string, any> = { action: "history", facultyId };
   if (typeof termOrAy === "number") params.acadYearStart = termOrAy;
   else if (typeof termOrAy === "string" && termOrAy) params.termId = termOrAy;
 
   const { data } = await axios.post(`${API_BASE}/chair/facultymanagement`, {}, { params });
-  return data;
+
+  // Normalize backend response ({ terms: Record<string, any[]> }) to teaching_history[]
+  const teaching_history: Array<any> = [];
+  const termsObj = data?.terms || {};
+  Object.keys(termsObj).forEach((termKey) => {
+    const arr = Array.isArray(termsObj[termKey]) ? termsObj[termKey] : [];
+    arr.forEach((r: any) => {
+      teaching_history.push({
+        code: r?.code ?? r?.course_code ?? "",
+        title: r?.title ?? r?.course_title ?? "",
+        section: r?.section ?? "",
+        units: r?.units,
+        day1: r?.day1,
+        begin1: r?.begin1,
+        end1: r?.end1,
+        day2: r?.day2,
+        begin2: r?.begin2,
+        end2: r?.end2,
+        term: termKey,
+      });
+    });
+  });
+
+  return {
+    ok: !!data?.ok,
+    term_id: data?.term_id ?? null,
+    teaching_history,
+  };
 }
 
 export async function updateChairFacultyEntry(
