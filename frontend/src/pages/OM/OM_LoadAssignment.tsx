@@ -4864,7 +4864,7 @@ export default function OM_LoadAssignment() {
                     }}
                   >
                     <CheckCheck className="h-4 w-4" />
-                    {approved ? "Re-forward to Chair" : "Forward to Chair"}
+                    {approved ? "Forward to Chair" : "Forward to Chair"}
                   </button>
                 </div>
               </div>

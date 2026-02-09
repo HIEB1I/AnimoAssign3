@@ -844,6 +844,8 @@ async def preferences_root(
                       title=title,
                       details=details,
                       meta=meta,
+                      send_email=True,
+                      email_from_user_id=userId,
                   )
           except Exception:
               # best-effort only; never block faculty submission on notification issues

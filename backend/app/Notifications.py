@@ -49,10 +49,20 @@ def _user_email(user: Dict[str, Any]) -> str:
     We prefer `gmail` (historical), then fall back to other common fields.
     """
 
+    # 1) Common top-level fields
     for key in ("gmail", "email", "dlsu_email", "google_email", "connected_email"):
-        val = (user.get(key) or "")
+        val = user.get(key)
         if isinstance(val, str) and val.strip():
             return val.strip()
+
+    # 2) Version 2 stores the connected Google email under users.google_token.connected_email.
+    # Some accounts (especially imported/legacy records) may not have users.gmail/users.email populated.
+    gt = user.get("google_token")
+    if isinstance(gt, dict):
+        nested = gt.get("connected_email") or gt.get("email")
+        if isinstance(nested, str) and nested.strip():
+            return nested.strip()
+
     return ""
 
 
@@ -176,11 +186,38 @@ async def _resolve_sender_user_id(email_from_user_id: str | None) -> str:
                 if tok:
                     access_token = (tok.get("access_token") or "").strip()
                     refresh_token = (tok.get("refresh_token") or "").strip()
-                    if access_token or refresh_token:
+
+                    # Prefer candidates that can refresh (most reliable).
+                    if refresh_token:
                         return candidate
+
+                    # If we only have an access token, only use it if it does not appear expired.
+                    # Otherwise, fall back to the configured service sender to avoid silent failures.
+                    if access_token:
+                        exp = _compute_expires_at(tok)
+                        if exp is None or time.time() < float(exp):
+                            return candidate
             except Exception:
                 # Ignore and fall back to env sender.
                 pass
+
+    sender_user_id = (os.getenv("ANIMOASSIGN_EMAIL_SENDER_USER_ID") or "").strip()
+    if sender_user_id:
+        return sender_user_id
+
+    sender_email = (os.getenv("ANIMOASSIGN_EMAIL_SENDER_EMAIL") or "").strip()
+    if not sender_email:
+        return ""
+
+    sdoc = await db[COL_USERS].find_one(
+        {"$or": [{"email": sender_email}, {"gmail": sender_email}]},
+        {"_id": 0, "user_id": 1},
+    ) or {}
+    return (sdoc.get("user_id") or "").strip()
+
+
+async def _get_env_sender_user_id() -> str:
+    """Resolve the configured service sender only (no actor fallback)."""
 
     sender_user_id = (os.getenv("ANIMOASSIGN_EMAIL_SENDER_USER_ID") or "").strip()
     if sender_user_id:
@@ -360,10 +397,6 @@ async def _send_notification_email_best_effort(
     """Best-effort: never raise to callers."""
 
     try:
-        sender_user_id = await _resolve_sender_user_id(email_from_user_id)
-        if not sender_user_id:
-            return
-
         recipient = await db[COL_USERS].find_one({"user_id": recipient_user_id}, {"_id": 0})
         if not recipient:
             return
@@ -371,6 +404,21 @@ async def _send_notification_email_best_effort(
         to_email = _user_email(recipient)
         if not to_email:
             return
+
+        sender_user_id = await _resolve_sender_user_id(email_from_user_id)
+        env_sender_user_id = await _get_env_sender_user_id()
+
+        # Build a retry list: primary sender (actor or env), then env (if different).
+        # If neither is configured, fall back to sending from the recipient's own
+        # connected Gmail. This guarantees that every in-app notification can still
+        # have a corresponding Gmail email as long as the recipient has connected Google.
+        sender_candidates: list[str] = []
+        if sender_user_id:
+            sender_candidates.append(sender_user_id)
+        if env_sender_user_id and env_sender_user_id not in sender_candidates:
+            sender_candidates.append(env_sender_user_id)
+        if not sender_candidates:
+            sender_candidates.append(recipient_user_id)
 
         name = _user_display_name(recipient)
         route = ((meta or {}) if isinstance(meta, dict) else {}).get("route") or ""
@@ -390,13 +438,23 @@ async def _send_notification_email_best_effort(
             link=link,
         )
 
-        await _send_email_via_user_gmail(
-            sender_user_id=sender_user_id,
-            to_email=to_email,
-            subject=subject,
-            text_body=text_body,
-            html_body=html_body,
-        )
+        last_err: Optional[Exception] = None
+        for sid in sender_candidates:
+            try:
+                await _send_email_via_user_gmail(
+                    sender_user_id=sid,
+                    to_email=to_email,
+                    subject=subject,
+                    text_body=text_body,
+                    html_body=html_body,
+                )
+                last_err = None
+                break
+            except Exception as e:
+                last_err = e
+
+        if last_err is not None:
+            raise last_err
     except Exception as e:
         try:
             logger.warning("Notif email send failed to %s: %s", recipient_user_id, str(e))
@@ -498,7 +556,8 @@ async def _create_notification_once(
 
     m = dict(meta or {})
     m["dedupe_key"] = dedupe_key
-    await create_notification(user_id=user_id, title=title, details=details, meta=m)
+    # Mirror APO behavior: every in-app notification should also trigger a best-effort Gmail email.
+    await create_notification(user_id=user_id, title=title, details=details, meta=m, send_email=True)
 
 
 async def _get_active_term_doc() -> Optional[Dict[str, Any]]:

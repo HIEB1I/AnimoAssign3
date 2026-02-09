@@ -57,7 +57,24 @@ def _user_display_name(user: Dict[str, Any]) -> str:
 
 
 def _user_email(user: Dict[str, Any]) -> str:
-    return (user.get("gmail") or user.get("email") or "").strip()
+    """Best-effort resolve a user's email.
+
+    Version 2 stores the connected Google email under users.google_token.connected_email.
+    Some accounts may not have users.gmail/users.email populated, so we fall back to that.
+    """
+
+    for key in ("gmail", "email", "dlsu_email", "google_email", "connected_email"):
+        v = user.get(key)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+
+    gt = user.get("google_token")
+    if isinstance(gt, dict):
+        nested = gt.get("connected_email") or gt.get("email")
+        if isinstance(nested, str) and nested.strip():
+            return nested.strip()
+
+    return ""
 
 
 def _build_link(route: str) -> str:
