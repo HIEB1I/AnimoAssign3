@@ -1150,7 +1150,7 @@ function ChangeRequestModal({
 
   return (
     <div className="fixed inset-0 z-80 grid place-items-center bg-black/30 p-3">
-	    <div className="w-full max-w-3xl rounded-2xl bg-white shadow-2xl max-h-[90vh] flex flex-col overflow-hidden">
+	    <div className="w-full max-w-5xl rounded-2xl bg-white shadow-2xl max-h-[92vh] flex flex-col overflow-hidden">
 	      {/* Header */}
 	      <div className="border-b border-neutral-200 p-5 sm:p-6">
 	        <div className="flex items-start justify-between gap-4">
@@ -1519,51 +1519,7 @@ function RfcThreadView({ term, sectionId }: { term: any; sectionId: string }) {
   const [loading, setLoading] = useState(false);
   const [reply, setReply] = useState("");
   const [sending, setSending] = useState(false);
-
-  const formatRfcStatus = useCallback(
-    (rawStatus: string, isLocked: boolean) => {
-      const key = String(rawStatus || "").toUpperCase();
-
-      // Friendly, professional labels (avoid code-like statuses)
-      const map: Record<string, string> = {
-        OPEN: "Open",
-        IN_PROGRESS: "In Progress",
-        PENDING: "Pending",
-        NEEDS_OM: "Pending OM Review",
-        NEEDS_CHAIR: "Pending Chair Review",
-        NEEDS_FACULTY: "Awaiting Faculty Response",
-        APPROVED: "Approved",
-        ACCEPTED: "Accepted",
-        REJECTED: "Rejected",
-        CLOSED: "Closed",
-        LOCKED: "Closed",
-      };
-
-      if (map[key]) return map[key];
-      if (isLocked) return "Closed";
-
-      // Fallback: Title Case (e.g., NEEDS_OM -> Needs Om)
-      return key
-        ? key
-            .toLowerCase()
-            .split(/[_\s]+/)
-            .filter(Boolean)
-            .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-            .join(" ")
-        : "Open";
-    },
-    []
-  );
-
-  const statusTone = useCallback((rawStatus: string, isLocked: boolean) => {
-    const key = String(rawStatus || "").toUpperCase();
-    if (isLocked) return "bg-neutral-200 text-neutral-700";
-    if (key === "NEEDS_OM" || key === "NEEDS_CHAIR" || key === "PENDING") {
-      return "bg-yellow-100 text-yellow-800";
-    }
-    if (key === "REJECTED") return "bg-red-100 text-red-800";
-    return "bg-emerald-100 text-emerald-800";
-  }, []);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -1589,6 +1545,12 @@ function RfcThreadView({ term, sectionId }: { term: any; sectionId: string }) {
     };
   }, [term?.term_id, term?._id, term?.id, sectionId]);
 
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+  }, [thread]);
+
   if (loading && !thread) {
     return (
       <div className="rounded-xl border border-neutral-200 bg-neutral-50 p-3 text-sm text-neutral-600">
@@ -1605,27 +1567,15 @@ function RfcThreadView({ term, sectionId }: { term: any; sectionId: string }) {
       </div>
     );
   }
-
-  const status = String(thread.status || "").toUpperCase();
-  // RFC terminal statuses are informational; only the explicit `locked` flag should disable interactions.
   const locked = Boolean(thread.locked);
-  const statusLabel = formatRfcStatus(status, locked);
 
   return (
     <div className="rounded-xl border border-neutral-200 bg-white p-3">
       <div className="mb-2 flex items-center justify-between">
         <div className="text-sm font-semibold text-neutral-800">RFC Conversation</div>
-        <div
-          className={cls(
-            "rounded-full px-2 py-0.5 text-xs font-medium",
-            statusTone(status, locked)
-          )}
-        >
-          {statusLabel}
-        </div>
       </div>
 
-      <div className="max-h-56 space-y-2 overflow-y-auto rounded-lg bg-neutral-50 p-2">
+      <div ref={scrollRef} className="max-h-[60vh] space-y-2 overflow-y-auto rounded-lg bg-neutral-50 p-2">
         {msgs.map((m: any, i: number) => {
           const role = String(m.sender_role || "").toLowerCase();
           const isMe = role === "faculty";
@@ -1685,12 +1635,12 @@ function RfcThreadView({ term, sectionId }: { term: any; sectionId: string }) {
               }
             }}
             className={cls(
-              "inline-flex h-9 items-center justify-center rounded-xl px-4 text-sm font-medium text-white shadow",
+              "inline-flex h-9 w-10 items-center justify-center rounded-xl text-white shadow",
               "bg-[#1F7A49] hover:brightness-[1.06] active:translate-y-[0.5px]",
               (sending || !reply.trim()) && "opacity-60 cursor-not-allowed"
             )}
           >
-            {sending ? "Sending…" : "Send"}
+            <SendIcon className={cls("h-4 w-4", sending && "animate-pulse")} />
           </button>
         </div>
       )}

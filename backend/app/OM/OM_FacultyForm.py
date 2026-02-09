@@ -25,6 +25,8 @@ async def _notify_all_faculty_deadline_changed(
     term_id: str,
     old_deadline_iso: str,
     new_deadline_iso: str,
+    *,
+    actor_user_id: str | None = None,
 ) -> None:
     """Notify all faculty (in-app bell) when OM changes the preferences deadline."""
 
@@ -85,6 +87,10 @@ async def _notify_all_faculty_deadline_changed(
                     "old_deadline": old_deadline_iso or "",
                     "new_deadline": new_deadline_iso or "",
                 },
+                # Match APO behavior: every in-app notification also triggers a best-effort Gmail email.
+                send_email=True,
+                # Prefer sending via the OM's connected Gmail when available.
+                email_from_user_id=(actor_user_id or None),
             )
         except Exception:
             # Notification is non-critical; ignore and continue.
@@ -440,6 +446,7 @@ async def _prefs_window_override_for_term(term: Dict[str, Any]) -> Dict[str, Any
 @router.post("/facultyforms")
 async def facultyforms_handler(
     action: str = Query("list", description="options | list | view | startWindow"),
+    userId: Optional[str] = Query(None, description="(Optional) Acting user id; used as Gmail sender when available"),
     department: Optional[str] = Query(None),
     facultyType: Optional[str] = Query(None, description="Full-Time | Part-Time | All Faculty Type"),
     status: Optional[str] = Query(None, description="Submitted | Not Submitted | All Status"),
@@ -561,6 +568,7 @@ async def facultyforms_handler(
             term_id=term_id,
             old_deadline_iso=old_deadline_iso,
             new_deadline_iso=deadline_dt.isoformat(),
+            actor_user_id=(userId or None),
         )
 
         # After saving the override, read back the override-only window

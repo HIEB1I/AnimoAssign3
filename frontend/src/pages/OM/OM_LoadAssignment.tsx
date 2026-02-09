@@ -1836,6 +1836,7 @@ const RequestChangeModal = ({
   const [status, setStatus] = useState<string | null>(null);
   const [locked, setLocked] = useState<boolean>(false);
   const [reply, setReply] = useState("");
+  const scrollRef = useRef<HTMLDivElement | null>(null);
 
   const displayFaculty = facultyName || "Faculty";
 
@@ -1890,6 +1891,12 @@ const RequestChangeModal = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+  }, [messages, open]);
+
   if (!open) return null;
 
   const respond = async (decision: "reply" | "approve" | "reject") => {
@@ -1934,7 +1941,7 @@ const RequestChangeModal = ({
 
   return (
     <div className="fixed inset-0 z-[120] grid place-items-center bg-black/40 p-4">
-      <div className="w-full max-w-2xl rounded-2xl bg-white p-6 shadow-2xl relative">
+      <div className="w-full max-w-5xl rounded-2xl bg-white shadow-2xl relative max-h-[92vh] flex flex-col overflow-hidden">
         <button
           aria-label="Close"
           className="absolute right-3 top-3 rounded-md p-1.5 hover:bg-gray-100"
@@ -1943,7 +1950,8 @@ const RequestChangeModal = ({
           <X className="h-5 w-5 text-gray-500" />
         </button>
 
-        <h3 className="text-lg font-semibold text-emerald-700 mb-2">
+        <div className="p-6 pb-4">
+          <h3 className="text-lg font-semibold text-emerald-700 mb-2">
           Request for Change
         </h3>
         <div className="text-sm text-gray-600 mb-1">
@@ -1960,7 +1968,9 @@ const RequestChangeModal = ({
           </div>
         )}
 
-        <div className="mb-4 max-h-60 overflow-auto rounded-lg border border-gray-200 bg-gray-50 p-3">
+        </div>
+
+        <div ref={scrollRef} className="mx-6 mb-4 flex-1 min-h-0 overflow-auto rounded-lg border border-gray-200 bg-gray-50 p-3">
           {messages.length ? (
             <div className="space-y-2">
               {messages.map((m: any, idx: number) => {
@@ -2016,8 +2026,9 @@ const RequestChangeModal = ({
           )}
         </div>
 
-        <label className="block text-sm font-medium mb-1">Reply</label>
-        <textarea
+        <div className="mx-6">
+          <label className="block text-sm font-medium mb-1">Reply</label>
+          <textarea
           className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30 mb-6"
           rows={4}
           placeholder={isTerminal ? "This RFC is locked." : "Type your reply…"}
@@ -2025,8 +2036,9 @@ const RequestChangeModal = ({
           disabled={loading || !status || isTerminal}
           onChange={(e) => setReply(e.target.value)}
         />
+        </div>
 
-        <div className="flex justify-end gap-2">
+        <div className="mx-6 pb-6 flex justify-end gap-2">
           <button
             disabled={loading || !status || isTerminal}
             className={cls(
@@ -4265,7 +4277,6 @@ export default function OM_LoadAssignment() {
           ).join(", ");
 
           // use the first row in the streak as the reference row
-          const rowIndex = rows.findIndex((x) => x.id === sample.row.id);
 
           alerts.push({
             id: `${key}-streak`,
@@ -4287,7 +4298,6 @@ export default function OM_LoadAssignment() {
     // 3) Incomplete rows (same logic as hasIncompleteRows)
     rows.forEach((r, idx) => {
       if (isRowIncompleteForApproval(r)) {
-        const rowIndex = rows.findIndex((x) => x.id === r.id);
         alerts.push({
           id: `incomplete-${idx}-${r.id}`,
           rule: "INCOMPLETE_ROW",
@@ -4309,8 +4319,6 @@ export default function OM_LoadAssignment() {
 
       const kac = flags.find((f) => f.type === "KAC_MISMATCH");
       if (!kac) return;
-
-      const rowIndex = rows.findIndex((x) => x.id === r.id);
 
       alerts.push({
         id: `kac-${r.id}`,
@@ -4337,8 +4345,6 @@ export default function OM_LoadAssignment() {
       const allowed = validationContext.facultyAllowedModes[fid] || [];
       const prefLabel = allowed.join(", ") || "another mode";
       const rowModeLabel = (r.mode || "").toUpperCase() || "unspecified";
-      const rowIndex = rows.findIndex((x) => x.id === r.id);
-
       alerts.push({
         id: `mode-${r.id}`,
         rule: "MODE_MISMATCH",
@@ -4359,8 +4365,6 @@ export default function OM_LoadAssignment() {
 
       const dbl = flags.find((f) => f.type === "DOUBLE_BOOKED");
       if (!dbl) return;
-
-      const rowIndex = rows.findIndex((x) => x.id === r.id);
 
       alerts.push({
         id: `double-${r.id}`,
@@ -4383,8 +4387,6 @@ export default function OM_LoadAssignment() {
 
       const flag = flags.find((f) => f.type === "DAY_MISMATCH");
       if (!flag) return;
-
-      const rowIndex = rows.findIndex((x) => x.id === r.id);
 
       alerts.push({
         id: `day-${r.id}`,
@@ -4864,7 +4866,7 @@ export default function OM_LoadAssignment() {
                     }}
                   >
                     <CheckCheck className="h-4 w-4" />
-                    {approved ? "Re-forward to Chair" : "Forward to Chair"}
+                    {approved ? "Forward to Chair" : "Forward to Chair"}
                   </button>
                 </div>
               </div>
