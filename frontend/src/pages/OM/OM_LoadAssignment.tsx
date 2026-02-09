@@ -2646,8 +2646,8 @@ export default function OM_LoadAssignment() {
         begin2: normalizeServerTimeToHHMM(r?.begin2),
         end2: normalizeServerTimeToHHMM(r?.end2),
       }));
-      
-      setRows(normalizedNextRows);      
+
+      setRows(normalizedNextRows);
       setTerm(typeof res?.term === "string" ? res.term : "");
       setMode("run");
       // Preserve the "Forward to Chair" final-state across auto-assign.
@@ -4144,7 +4144,7 @@ export default function OM_LoadAssignment() {
     severity: "error" | "warning";
     facultyName?: string;
     facultyId?: string;
-    rowNumber?: number;
+    courseSection?: string;
     message: string;
   };
 
@@ -4163,6 +4163,9 @@ export default function OM_LoadAssignment() {
       if (Number.isNaN(h) || Number.isNaN(m)) return null;
       return h * 60 + m;
     };
+
+    const courseSectionLabel = (r?: Row) =>
+      `${r?.course || "?"} ${r?.section || ""}`.trim();
 
     // 1) Build intervals per faculty+day from rows
     type Interval = {
@@ -4270,8 +4273,10 @@ export default function OM_LoadAssignment() {
             severity: "warning",
             facultyName,
             facultyId,
-            rowNumber: rowIndex >= 0 ? rowIndex + 1 : undefined,
-            message: `${facultyName} has more than 4.5 consecutive hours of teaching on ${day} (sections: ${sections}).`,
+            courseSection: courseSectionLabel(sample.row),
+            message: `${courseSectionLabel(
+              sample.row
+            )}: ${facultyName} has more than 4.5 consecutive hours of teaching on ${day} (sections: ${sections}).`,
           });
 
           break; // one alert per faculty+day is enough
@@ -4289,10 +4294,10 @@ export default function OM_LoadAssignment() {
           severity: "error",
           facultyName: r.faculty || undefined,
           facultyId: r.faculty_id,
-          rowNumber: rowIndex + 1,
-          message: `Row ${
-            idx + 1
-          } has missing required fields but contains partial schedule/faculty data.`,
+          courseSection: courseSectionLabel(r),
+          message: `${courseSectionLabel(
+            r
+          )} has missing required fields but contains partial schedule/faculty data.`,
         });
       }
     });
@@ -4313,10 +4318,10 @@ export default function OM_LoadAssignment() {
         severity: "error",
         facultyName: r.faculty || undefined,
         facultyId: r.faculty_id,
-        rowNumber: rowIndex + 1,
-        message: `KAC mismatch: ${
+        courseSection: courseSectionLabel(r),
+        message: `${courseSectionLabel(r)}: KAC mismatch — ${
           r.faculty || "This faculty"
-        } is not aligned with the KAC cluster for ${r.course} ${r.section}.`,
+        } is not aligned with the KAC cluster.`,
       });
     });
 
@@ -4340,10 +4345,10 @@ export default function OM_LoadAssignment() {
         severity: "error",
         facultyName: r.faculty || undefined,
         facultyId: r.faculty_id,
-        rowNumber: rowIndex + 1,
-        message: `Mode mismatch: ${
+        courseSection: courseSectionLabel(r),
+        message: `${courseSectionLabel(r)}: Mode mismatch — ${
           r.faculty || "This faculty"
-        } prefers ${prefLabel} but this row is ${rowModeLabel}.`,
+        } prefers ${prefLabel} but this section is ${rowModeLabel}.`,
       });
     });
 
@@ -4363,10 +4368,11 @@ export default function OM_LoadAssignment() {
         severity: "error",
         facultyName: r.faculty || undefined,
         facultyId: r.faculty_id,
-        rowNumber: rowIndex + 1,
-        message:
+        courseSection: courseSectionLabel(r),
+        message: `${courseSectionLabel(r)}: ${
           dbl.message ||
-          "Schedule conflict: faculty is assigned to multiple sections at the same day and time.",
+          "Schedule conflict: faculty is assigned to multiple sections at the same day and time."
+        }`,
       });
     });
 
@@ -4386,8 +4392,8 @@ export default function OM_LoadAssignment() {
         severity: flag.severity,
         facultyName: r.faculty || undefined,
         facultyId: r.faculty_id,
-        rowNumber: rowIndex + 1,
-        message: flag.message,
+        courseSection: courseSectionLabel(r),
+        message: `${courseSectionLabel(r)}: ${flag.message}`,
       });
     });
 
@@ -4399,16 +4405,14 @@ export default function OM_LoadAssignment() {
       const flag = flags.find((f) => f.type === "TIME_MISMATCH");
       if (!flag) return;
 
-      const rowIndex = rows.findIndex((x) => x.id === r.id);
-
       alerts.push({
         id: `time-${r.id}`,
         rule: "TIME_MISMATCH",
         severity: flag.severity,
         facultyName: r.faculty || undefined,
         facultyId: r.faculty_id,
-        rowNumber: rowIndex + 1,
-        message: flag.message,
+        courseSection: courseSectionLabel(r),
+        message: `${courseSectionLabel(r)}: ${flag.message}`,
       });
     });
 
@@ -4420,20 +4424,18 @@ export default function OM_LoadAssignment() {
       const flag = flags.find((f) => f.type === "GS_NO_PHD");
       if (!flag) return;
 
-      const rowIndex = rows.findIndex((x) => x.id === r.id);
-
       alerts.push({
         id: `gs-${r.id}`,
         rule: "GS_NO_PHD",
         severity: flag.severity,
         facultyName: r.faculty || undefined,
         facultyId: r.faculty_id,
-        rowNumber: rowIndex >= 0 ? rowIndex + 1 : undefined,
-        message:
-          flag.message ||
-          `GS course ${r.course || "?"} ${
-            r.section || ""
-          } is assigned to a non-PhD faculty member.`,
+        courseSection: courseSectionLabel(r),
+        message: flag.message
+          ? `${courseSectionLabel(r)}: ${flag.message}`
+          : `${courseSectionLabel(
+              r
+            )}: GS course is assigned to a non-PhD faculty member.`,
       });
     });
 
@@ -4445,20 +4447,18 @@ export default function OM_LoadAssignment() {
       const geFlag = flags.find((f) => f.type === "GE_BLOCKED_SLOT");
       if (!geFlag) return;
 
-      const rowIndex = rows.findIndex((x) => x.id === r.id);
-
       alerts.push({
         id: `ge-block-${r.id}`,
         rule: "GE_BLOCKED_SLOT",
         severity: geFlag.severity,
         facultyName: r.faculty || undefined,
         facultyId: r.faculty_id,
-        rowNumber: rowIndex >= 0 ? rowIndex + 1 : undefined,
-        message:
-          geFlag.message ||
-          `GE slot conflict: ${r.course || "?"} ${
-            r.section || ""
-          } is using a GE-reserved schedule at CMPS0002.`,
+        courseSection: courseSectionLabel(r),
+        message: geFlag.message
+          ? `${courseSectionLabel(r)}: ${geFlag.message}`
+          : `${courseSectionLabel(
+              r
+            )}: GE slot conflict — this section is using a GE-reserved schedule at CMPS0002.`,
       });
     });
 
@@ -4538,7 +4538,7 @@ export default function OM_LoadAssignment() {
         a.severity,
         a.facultyName || "",
         a.facultyId || "",
-        String(a.rowNumber ?? ""),
+        a.courseSection || "",
         a.message,
       ]
         .join(" ")
@@ -6017,7 +6017,7 @@ export default function OM_LoadAssignment() {
                                   Faculty
                                 </th>
                                 <th className="px-3 py-2 text-center font-semibold">
-                                  Row
+                                  Course &amp; Section
                                 </th>
                                 <th className="px-3 py-2 text-left font-semibold">
                                   Message
@@ -6041,7 +6041,7 @@ export default function OM_LoadAssignment() {
                                     </div>
                                   </td>
                                   <td className="px-3 py-2 text-center align-top text-gray-600">
-                                    {a.rowNumber ?? "—"}
+                                    {a.courseSection || "—"}
                                   </td>
                                   <td className="px-3 py-2 align-top">
                                     {a.message}
