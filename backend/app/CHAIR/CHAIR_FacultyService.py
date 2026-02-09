@@ -528,13 +528,139 @@ async def _reflect_faculty_service_to_om(row: Dict[str, Any], update: Dict[str, 
             upsert=True,
         )
 
-        # 3) Remarks live on the canonical `sections` collection
+        # 3) Remarks live on the canonical `sections` collection.
+        # We preserve the previous remarks so we can revert when an Approved request
+        # is later changed to Rejected/Pending.
         if remarks is not None:
+            try:
+                prev_doc = await db[COL_SECTIONS].find_one(
+                    {"section_id": sid},
+                    {"_id": 0, "remarks": 1, "synced_from_faculty_service_remarks": 1, "synced_from_faculty_service_prev_remarks": 1},
+                )
+            except Exception:
+                prev_doc = None
+
+            already_synced = bool((prev_doc or {}).get("synced_from_faculty_service_remarks"))
+            prev_remarks = (prev_doc or {}).get("remarks", "") if not already_synced else (prev_doc or {}).get(
+                "synced_from_faculty_service_prev_remarks", ""
+            )
+
+            set_fields: Dict[str, Any] = {
+                "remarks": remarks,
+                "updated_at": ts,
+                "synced_from_faculty_service_remarks": True,
+                "synced_from_faculty_service_remarks_at": ts,
+            }
+            if not already_synced:
+                set_fields["synced_from_faculty_service_prev_remarks"] = prev_remarks
+
             await db[COL_SECTIONS].update_one(
                 {"section_id": sid},
-                {"$set": {"remarks": remarks, "updated_at": ts}, "$setOnInsert": {"created_at": ts}},
+                {"$set": set_fields, "$setOnInsert": {"created_at": ts}},
                 upsert=True,
             )
+
+
+async def _target_section_ids_for_faculty_service_row(row: Dict[str, Any]) -> List[str]:
+    """Resolve which submitted section_id(s) in the active/planning term should be affected
+    by a faculty service request.
+
+    Mirrors the targeting logic of _reflect_faculty_service_to_om().
+    """
+
+    active = await _active_term()
+    term_id = (active or {}).get("term_id")
+    if not term_id:
+        return []
+
+    course_code = _normalize_code(row.get("course_code"))
+    if not course_code:
+        return []
+
+    from_dept_name = await _canon_dept_name(row.get("from_department"))
+    from_dept = await _find_department(from_dept_name) if from_dept_name else None
+    from_dept_id = (from_dept or {}).get("department_id")
+
+    course_doc = await db.courses.find_one(
+        {
+            "$and": [
+                {"$or": [{"course_code": course_code}, {"course_code": [course_code]}]},
+                *([{"department_id": from_dept_id}] if from_dept_id else []),
+            ]
+        },
+        {"_id": 0, "course_id": 1},
+    )
+    if not course_doc:
+        course_doc = await _course_by_code(course_code)
+
+    course_id = (course_doc or {}).get("course_id")
+    if not course_id:
+        return []
+
+    requested_section_id = str(row.get("section_id") or "").strip()
+    match: Dict[str, Any] = {"term_id": term_id, "submitted_for_scheduling": True, "course_id": course_id}
+
+    section_ids: List[str] = []
+    if requested_section_id:
+        ok_sec = await db[COL_SECTIONS_SUBMITTED].find_one(
+            {**match, "section_id": requested_section_id},
+            {"_id": 0, "section_id": 1},
+        )
+        if ok_sec and (ok_sec.get("section_id") or "").strip():
+            section_ids = [requested_section_id]
+
+    if not section_ids:
+        sec_docs = await db[COL_SECTIONS_SUBMITTED].find(match, {"_id": 0, "section_id": 1}).to_list(None)
+        section_ids = [str(d.get("section_id") or "").strip() for d in (sec_docs or [])]
+        section_ids = [sid for sid in section_ids if sid]
+
+    return section_ids
+
+
+async def _unreflect_faculty_service_from_om(row: Dict[str, Any]) -> None:
+    """Undo faculty assignment reflections into OM Load Assignment.
+
+    Requirement: If a previously Approved (responded) request is later changed to Rejected (or Pending),
+    the corresponding Load Assignment row(s) should revert to having *no assigned faculty*.
+
+    We only remove assignments that were created/updated by Faculty Service syncing.
+    """
+
+    section_ids = await _target_section_ids_for_faculty_service_row(row)
+    if not section_ids:
+        return
+
+    # 1) Remove synced faculty assignments
+    try:
+        await db[COL_ASSIGN].delete_many({"section_id": {"$in": section_ids}, "synced_from_faculty_service": True})
+    except Exception:
+        pass
+
+    # 2) Revert remarks that were set via faculty-service syncing
+    # (Only revert when we previously marked the remarks as synced.)
+    for sid in section_ids:
+        try:
+            sdoc = await db[COL_SECTIONS].find_one(
+                {"section_id": sid},
+                {"_id": 0, "synced_from_faculty_service_remarks": 1, "synced_from_faculty_service_prev_remarks": 1},
+            )
+            if not sdoc or not sdoc.get("synced_from_faculty_service_remarks"):
+                continue
+            prev_remarks = sdoc.get("synced_from_faculty_service_prev_remarks", "")
+            await db[COL_SECTIONS].update_one(
+                {"section_id": sid},
+                {
+                    "$set": {"remarks": prev_remarks, "updated_at": datetime.now(timezone.utc)},
+                    "$unset": {
+                        "synced_from_faculty_service_remarks": "",
+                        "synced_from_faculty_service_remarks_at": "",
+                        "synced_from_faculty_service_prev_remarks": "",
+                    },
+                },
+            )
+        except Exception:
+            # Fail silently so Chair workflow doesn't break even if OM data is missing
+            continue
 
 
 async def _faculty_dropdown(dept_name: Optional[str]) -> List[Dict[str, Any]]:
@@ -664,6 +790,7 @@ async def fs_options(
                     }
                 }
             )
+
 
         pipe += [
             {
@@ -1057,11 +1184,18 @@ async def fs_reject(fs_id: str, payload: Dict[str, Any] = Body(default={})):
     if not row:
         raise HTTPException(status_code=404, detail="Not found.")
 
+    prev_status = (row.get("status") or "sent").strip()
+
     remarks = (payload.get("remarks") or "").strip()
     await db.faculty_service.update_one(
         {"fs_id": fs_id},
         {"$set": {"status": "rejected", "remarks": remarks, "updated_at": _now_iso()}}
     )
+
+    # If this was previously Approved/Responded and reflected into OM Load Assignment,
+    # undo the reflection so the Load Assignment row reverts to having no assigned faculty.
+    if prev_status == "responded":
+        await _unreflect_faculty_service_from_om(row)
 
     # In-app notification back to the requesting department chair user(s)
     try:
@@ -1124,6 +1258,8 @@ async def fs_restore(fs_id: str, payload: Dict[str, Any] = Body(default={})):
     if not row:
         raise HTTPException(status_code=404, detail="Not found.")
 
+    prev_status = (row.get("status") or "sent").strip()
+
     allowed_status = {"sent", "responded", "rejected"}
     status = (payload.get("status") or row.get("status") or "sent").strip()
     if status not in allowed_status:
@@ -1175,5 +1311,14 @@ async def fs_restore(fs_id: str, payload: Dict[str, Any] = Body(default={})):
         update["remarks"] = str(remarks)
 
     await db.faculty_service.update_one({"fs_id": fs_id}, {"$set": update})
+
+    # Keep OM Load Assignment reflection consistent with status transitions
+    # - moving away from responded => undo faculty assignment reflection
+    # - moving into responded => apply reflection using the restored snapshot
+    if prev_status == "responded" and status != "responded":
+        await _unreflect_faculty_service_from_om(row)
+    elif prev_status != "responded" and status == "responded":
+        merged = {**row, **update}
+        await _reflect_faculty_service_to_om(merged, merged)
     doc = await db.faculty_service.find_one({"fs_id": fs_id}, {"_id": 0})
     return {"ok": True, "row": doc}
