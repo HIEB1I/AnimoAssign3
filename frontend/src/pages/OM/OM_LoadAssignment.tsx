@@ -1439,13 +1439,25 @@ const StatusChip = ({ r }: { r: Row }) => {
     setPlace(below < 72 ? "top" : "bottom");
   }, [show]);
 
-  if (!r.status) return <span className="inline-block w-24 h-6" />;
+  // Display rule:
+  // - If the row was already sent to faculty, show status as "Sent" (instead of "Pending"),
+  //   but only when it does not require a re-forward.
+  // - Pending is reserved for rows not yet sent to faculty.
+  const displayStatus =
+    r.forwarded_to_faculty && !r.reforward_needed && (!r.status || r.status === "Pending")
+      ? "Sent"
+      : r.status;
+
+  if (!displayStatus) return <span className="inline-block w-24 h-6" />;
+
   const tone =
-    (r.status === "Confirmed" || r.status === "Approved")
+    displayStatus === "Sent"
+      ? "bg-sky-100 text-sky-800"
+      : displayStatus === "Confirmed" || displayStatus === "Approved"
       ? "bg-green-100 text-green-700"
-      : r.status === "Pending"
+      : displayStatus === "Pending"
       ? "bg-yellow-100 text-yellow-700"
-      : r.status === "Unassigned"
+      : displayStatus === "Unassigned"
       ? "bg-gray-200 text-gray-700"
       : "bg-red-600 text-white";
 
@@ -1463,8 +1475,8 @@ const StatusChip = ({ r }: { r: Row }) => {
       onBlur={() => setShow(false)}
       tabIndex={0}
     >
-      {r.status === "Conflict" ? "Conflict" : r.status}
-      {r.status === "Conflict" && r.conflictNote && show && (
+      {displayStatus === "Conflict" ? "Conflict" : displayStatus}
+      {displayStatus === "Conflict" && r.conflictNote && show && (
         <div
           className={cls(
             "absolute z-[2000] w-[min(70vw,260px)] rounded-md border border-gray-200 bg-white px-3 py-2",
@@ -1762,7 +1774,6 @@ const RequestChangeModal = ({
 
   // Terminal statuses are informational; only the explicit `locked` flag should prevent interaction.
   const isTerminal = Boolean(locked);
-  const needsOm = status === "NEEDS_OM" || status === "OPEN" || status === "open";
 
   useEffect(() => {
     if (!open) {
@@ -1869,12 +1880,7 @@ const RequestChangeModal = ({
         <div className="text-sm text-gray-600 mb-1">
           From: <span className="font-semibold">{displayFaculty}</span>
         </div>
-        <div className="text-[12px] text-gray-600 mb-4">
-          Status:{" "}
-          <span className={cls("font-semibold", isTerminal ? "text-gray-700" : needsOm ? "text-red-600" : "text-blue-600")}>
-            {status || "(none)"}
-          </span>
-        </div>
+        {/* Status hidden per request (avoid showing code-like thread statuses in OM modal) */}
 
         {loading && <div className="mb-4 text-sm text-gray-600">Loading…</div>}
         {error && <div className="mb-4 text-sm text-red-600">{error}</div>}
@@ -4474,28 +4480,48 @@ export default function OM_LoadAssignment() {
                 </div>
 
                 <div className="ml-auto flex items-center gap-2">
-                  <button
-                    disabled={!hasReco || isArchiveView}
-                    onClick={handleSaveDraft}
-                    className={cls(
-                      "inline-flex h-10 min-w-[140px] items-center justify-center gap-2 rounded-md px-4 py-2 text-sm font-medium shadow-sm",
-                      hasReco
-                        ? isArchiveView
-                          ? "bg-gray-200 text-gray-500 cursor-not-allowed"
-                          : "bg-gray-800 text-white hover:brightness-110"
-                        : "bg-gray-200 text-gray-500 cursor-not-allowed"
-                    )}
-                    title={
-                      isArchiveView
-                        ? "Archived view: saving is disabled"
-                        : !hasReco
-                        ? "No recommendations to save yet"
-                        : "Save current assignments to the database"
-                    }
-                  >
-                    <Save className="h-4 w-4" />
-                    Save Draft
-                  </button>
+                  {/* To Faculty button moved here (beside Refresh) */}
+                      <button
+                        disabled={!anySelected || !isRunning || isArchiveView}
+                        onClick={() => {
+                          if (isArchiveView) return;
+                          const preview = buildSendRowsForPreview();
+                          if (!preview.length) {
+                            showToast(
+                              "No new or edited rows to send for the selected faculty. (Previously sent rows are excluded unless edited.)",
+                              "error"
+                            );
+                            return;
+                          }
+
+                          const missing = validateRowsCompleteForSend(preview);
+                          if (missing.length) {
+                            // Hard validation: block sending until required fields are filled
+                            setSendBlocked({ open: true, missing });
+                            showToast("Cannot send to faculty: please complete all required fields in the selected faculty’s rows.", "error");
+                            return;
+                          }
+
+                          setSendRowsPreview(preview.map((r) => ({ ...r })));
+                          setShowSend(true);
+                        }}
+                        className={cls(
+                          "inline-flex h-10 min-w-[140px] items-center justify-center gap-2 rounded-md px-4 py-2 text-sm font-medium shadow-sm",
+                          anySelected && isRunning && !isArchiveView
+                            ? "bg-blue-600 text-white hover:brightness-110"
+                            : "bg-gray-200 text-gray-500 cursor-not-allowed"
+                        )}
+                        title={
+                          isArchiveView
+                            ? "Archived view: sending is disabled"
+                            : anySelected
+                            ? "Send to selected faculty"
+                            : "Select at least one row"
+                        }
+                      >
+                        <Send className="h-4 w-4" />
+                        To Faculty
+                      </button>
                   <button
                     disabled={!hasReco || isArchiveView}
                     className={cls(
@@ -4692,48 +4718,30 @@ export default function OM_LoadAssignment() {
 
                       )}
 
-                      {/* To Faculty button moved here (beside Refresh) */}
-                      <button
-                        disabled={!anySelected || !isRunning || isArchiveView}
-                        onClick={() => {
-                          if (isArchiveView) return;
-                          const preview = buildSendRowsForPreview();
-                          if (!preview.length) {
-                            showToast(
-                              "No new or edited rows to send for the selected faculty. (Previously sent rows are excluded unless edited.)",
-                              "error"
-                            );
-                            return;
-                          }
+                                        <button
+                    disabled={!hasReco || isArchiveView}
+                    onClick={handleSaveDraft}
+                    className={cls(
+                      "inline-flex h-10 min-w-[140px] items-center justify-center gap-2 rounded-md px-4 py-2 text-sm font-medium shadow-sm",
+                      hasReco
+                        ? isArchiveView
+                          ? "bg-gray-200 text-gray-500 cursor-not-allowed"
+                          : "bg-gray-800 text-white hover:brightness-110"
+                        : "bg-gray-200 text-gray-500 cursor-not-allowed"
+                    )}
+                    title={
+                      isArchiveView
+                        ? "Archived view: saving is disabled"
+                        : !hasReco
+                        ? "No recommendations to save yet"
+                        : "Save current assignments to the database"
+                    }
+                  >
+                    <Save className="h-4 w-4" />
+                    Save Draft
+                  </button>
 
-                          const missing = validateRowsCompleteForSend(preview);
-                          if (missing.length) {
-                            // Hard validation: block sending until required fields are filled
-                            setSendBlocked({ open: true, missing });
-                            showToast("Cannot send to faculty: please complete all required fields in the selected faculty’s rows.", "error");
-                            return;
-                          }
-
-                          setSendRowsPreview(preview.map((r) => ({ ...r })));
-                          setShowSend(true);
-                        }}
-                        className={cls(
-                          "inline-flex h-10 min-w-[140px] items-center justify-center gap-2 rounded-md px-4 py-2 text-sm font-medium shadow-sm",
-                          anySelected && isRunning && !isArchiveView
-                            ? "bg-blue-600 text-white hover:brightness-110"
-                            : "bg-gray-200 text-gray-500 cursor-not-allowed"
-                        )}
-                        title={
-                          isArchiveView
-                            ? "Archived view: sending is disabled"
-                            : anySelected
-                            ? "Send to selected faculty"
-                            : "Select at least one row"
-                        }
-                      >
-                        <Send className="h-4 w-4" />
-                        To Faculty
-                      </button>
+                      
 
                     {/* Original Import CSV block removed */}
                     {/* {isRunning ? (...) : (
@@ -5611,7 +5619,7 @@ export default function OM_LoadAssignment() {
                                   colSpan={8}
                                   className="py-6 text-center text-sm text-gray-500"
                                 >
-                                  No blocked GE sections for CMPS0002.
+                                  No blocked GE sections for Laguna.
                                 </td>
                               </tr>
                             ) : blockedSectionsFiltered.length === 0 ? (

@@ -578,17 +578,20 @@ function splitBeginEnd(time?: string): { begin: string; end: string } {
 function TeachingLoadEnhanced({ teachingLoad, term, workflow, onToast, onRefresh }: TeachingLoadEnhancedProps) {
   const [view, setView] = useState<"Calendar" | "List">("Calendar");
   const [modal, setModal] = useState<{ day: DayLong; item: TLItemForCalendar } | null>(null);
-  const [isAccepted, setIsAccepted] = useState(false);
   const [isAccepting, setIsAccepting] = useState(false);
 
   // Schedule is finalized only when backend explicitly marks it so (e.g., an admin lock).
   // Faculty acceptance should NOT lock/finalize; OM can still edit/resend, and faculty can RFC/accept again.
   const scheduleFinal = Boolean(workflow?.schedule_final);
 
+  // If OM already marked the schedule as Approved (faculty accepted), prevent accepting again.
+  // The button should re-enable when OM sends a new schedule proposal (proposal_status changes away from Approved/Accepted).
+  const proposalStatusLower = String(workflow?.proposal_status || "").toLowerCase();
+  const isAlreadyApproved = proposalStatusLower === "approved" || proposalStatusLower === "accepted";
+
 
 const scheduleFinalLabel = (() => {
-  const ps = String(workflow?.proposal_status || "").toLowerCase();
-  if (ps === "accepted") return "Finalized (Accepted)";
+  if (proposalStatusLower === "accepted") return "Finalized (Accepted)";
   return "Finalized";
 })();
 
@@ -692,7 +695,6 @@ const scheduleFinalLabel = (() => {
               return;
             }
 
-            setIsAccepted(true);
             onToast?.("success", "Schedule accepted and added to your Google Calendar.", "Success");
             await onRefresh?.();
 
@@ -708,22 +710,21 @@ const scheduleFinalLabel = (() => {
             }
           }}
 
-            // Accept should remain available even after acceptance.
-            disabled={isAccepting || scheduleFinal}
+            disabled={isAccepting || scheduleFinal || isAlreadyApproved}
             className={cls(
               "inline-flex h-9 items-center justify-center rounded-lg px-4 text-sm font-medium shadow",
               "focus:outline-none focus:ring-2 focus:ring-emerald-600/40",
-              (isAccepting || scheduleFinal)
+              (isAccepting || scheduleFinal || isAlreadyApproved)
                 ? "bg-neutral-300 text-neutral-600 cursor-not-allowed"
                 : "bg-blue-700 text-white hover:bg-blue-800 active:translate-y-[0.5px]"
             )}
           >
             {scheduleFinal
               ? "Finalized"
+              : isAlreadyApproved
+              ? "Approved"
               : isAccepting
               ? "Accepting…"
-              : isAccepted
-              ? "Accept Again"
               : "Accept Schedule"}
           </button>
         </div>
@@ -1105,32 +1106,18 @@ function ChangeRequestModal({
   const toggle = (label: ChangeKind) =>
     setChoices((prev) => (prev.includes(label) ? prev.filter((c) => c !== label) : [...prev, label]));
 
-  // Helpers to exclude the *current* slot and day
-  const extractStartHM = (band: string) => band.split("–")[0].match(/\d{1,2}:\d{2}/)?.[0] ?? "";
-  const toMinutes = (hm: string) => {
-    if (!hm) return -1;
-    const [h, m] = hm.split(":").map(Number);
-    return h * 60 + m;
-  };
   const oi = context.item.originalItem;
   const hasSecond = Boolean(
     (oi?.day2 && String(oi.day2).trim() && String(oi.day2).trim() !== "TBA") ||
       (oi?.time2 && String(oi.time2).trim() && String(oi.time2).trim() !== "TBA")
   );
 
-  const currentDay1 = normalizeDay(oi?.day1) || "TBA";
-  const currentDay2 = normalizeDay(oi?.day2) || "TBA";
-  const currentStartMin1 = toMinutes(extractStartHM(String(oi?.time1 || "")));
-  const currentStartMin2 = toMinutes(extractStartHM(String(oi?.time2 || "")));
-
-  const filteredTimeSlots1 = TIME_SLOTS.filter(
-    (band) => toMinutes(extractStartHM(band)) !== currentStartMin1
-  );
-  const filteredTimeSlots2 = TIME_SLOTS.filter(
-    (band) => toMinutes(extractStartHM(band)) !== currentStartMin2
-  );
-  const filteredDays1 = ALL_DAYS.filter((d) => d !== currentDay1);
-  const filteredDays2 = ALL_DAYS.filter((d) => d !== currentDay2);
+  // IMPORTANT: keep ALL options available in RFC dropdowns.
+  // Do not omit the current schedule's day/time so faculty can explicitly re-select it if needed.
+  const filteredTimeSlots1 = TIME_SLOTS;
+  const filteredTimeSlots2 = TIME_SLOTS;
+  const filteredDays1 = ALL_DAYS;
+  const filteredDays2 = ALL_DAYS;
 
   const mustTime = choices.includes("Change class time");
   const mustDay = choices.includes("Change class day");
@@ -1513,6 +1500,8 @@ function ChangeRequestModal({
 function RfcThreadView({ term, sectionId }: { term: any; sectionId: string }) {
   const [thread, setThread] = useState<any | null>(null);
   const [loading, setLoading] = useState(false);
+  const [reply, setReply] = useState("");
+  const [sending, setSending] = useState(false);
 
   const formatRfcStatus = useCallback(
     (rawStatus: string, isLocked: boolean) => {
@@ -1640,6 +1629,54 @@ function RfcThreadView({ term, sectionId }: { term: any; sectionId: string }) {
           );
         })}
       </div>
+
+      {/* Quick reply: allow faculty to respond in-thread even without creating a new RFC request */}
+      {!locked && (
+        <div className="mt-3 flex items-end gap-2">
+          <textarea
+            rows={2}
+            value={reply}
+            onChange={(e) => setReply(e.target.value)}
+            placeholder="Reply to Office Manager…"
+            className="flex-1 resize-none rounded-xl border border-neutral-300 bg-white p-2.5 text-sm outline-none focus:ring-2 focus:ring-emerald-600/20"
+          />
+          <button
+            type="button"
+            disabled={sending || !reply.trim()}
+            onClick={async () => {
+              if (!reply.trim()) return;
+              try {
+                setSending(true);
+                const raw = JSON.parse(localStorage.getItem("animo.user") || "{}");
+                const userId = raw.userId || raw.user_id || raw.id || "";
+                await sendFacultyLoadAssignmentRfcMessage(userId, {
+                  term_id: (term as any)?.term_id || (term as any)?._id || (term as any)?.id,
+                  section_id: sectionId,
+                  message: reply.trim(),
+                });
+                setReply("");
+                // Refresh thread so the new message appears immediately.
+                const refreshed = await getFacultyLoadAssignmentRfc(userId, {
+                  term_id: (term as any)?.term_id || (term as any)?._id || (term as any)?.id,
+                  section_id: sectionId,
+                });
+                setThread(refreshed?.rfc || null);
+              } catch (e) {
+                console.error(e);
+              } finally {
+                setSending(false);
+              }
+            }}
+            className={cls(
+              "inline-flex h-9 items-center justify-center rounded-xl px-4 text-sm font-medium text-white shadow",
+              "bg-[#1F7A49] hover:brightness-[1.06] active:translate-y-[0.5px]",
+              (sending || !reply.trim()) && "opacity-60 cursor-not-allowed"
+            )}
+          >
+            {sending ? "Sending…" : "Send"}
+          </button>
+        </div>
+      )}
     </div>
   );
 }
