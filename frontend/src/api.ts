@@ -2010,7 +2010,19 @@ export async function getFacultyProfile(facultyId: string) {
 export async function getFacultySchedule(
   facultyId: string,
   termId?: string
-): Promise<{ ok: boolean; term_id: string | null; teaching_load: any[] }> {
+): Promise<{ ok: boolean; term_id: string | null; teaching_load: Array<{
+  course_code: string;
+  course_title: string;
+  section: string;
+  units: number;
+  mode: string;
+  day1: string;
+  begin1: string;
+  end1: string;
+  day2: string;
+  begin2: string;
+  end2: string;
+}> }> {
   const { data } = await axios.post(
     `${API_BASE}/om/facultymanagement`,
     {},
@@ -2028,13 +2040,14 @@ export async function getFacultyHistory(
   code: string;
   title: string;
   section: string;
-  mode?: string | null;
-  day1?: string | null;
-  room1?: string | null;
-  day2?: string | null;
-  room2?: string | null;
-  time?: string | null;
-  term?: string | null;
+  units?: number;
+  day1?: string;
+  begin1?: string;
+  end1?: string;
+  day2?: string;
+  begin2?: string;
+  end2?: string;
+  term?: string;
 }> }> {
   const params: Record<string, any> = { action: "history", facultyId };
   if (typeof termOrAy === "number") params.acadYearStart = termOrAy; // AY start (e.g., 2024)
@@ -2049,16 +2062,21 @@ export async function getFacultyHistory(
     const termMatch = /Term\s*([123])/i.exec(termKey);
     const termLabel = termMatch ? `Term ${termMatch[1]}` : termKey.includes("Term") ? termKey : "Term 1";
     (list as any[]).forEach((r) => {
+      const n = (v: any) => {
+        const x = typeof v === "number" ? v : Number(v);
+        return Number.isFinite(x) ? x : 0;
+      };
       teaching_history.push({
         code: r.code ?? r.course_code ?? "",
         title: r.title ?? r.course_title ?? "",
         section: r.section ?? r.section_code ?? "",
-        mode: r.mode ?? "",
-        day1: r.day1 ?? "",
-        room1: r.room1 ?? "",
-        day2: r.day2 ?? "",
-        room2: r.room2 ?? "",
-        time: r.time ?? r.schedule ?? "",
+        units: n(r.units),
+        day1: (r.day1 ?? "") || "",
+        begin1: (r.begin1 ?? "") || "",
+        end1: (r.end1 ?? "") || "",
+        day2: (r.day2 ?? "") || "",
+        begin2: (r.begin2 ?? "") || "",
+        end2: (r.end2 ?? "") || "",
         term: termLabel,
       });
     });
@@ -3309,7 +3327,6 @@ export async function createFacultyService(payload: {
   section?: string;
   course_title?: string;
   units?: number | null;
-  remarks?: string;
   to_department: ToDept;
   from_department?: string; // NEW
 }) {
