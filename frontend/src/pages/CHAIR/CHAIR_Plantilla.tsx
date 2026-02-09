@@ -2,7 +2,18 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
 import AppShell from "@/base/AppShell";
 import type { SidebarItem } from "@/base/Sidebar";
-import { Users, BookOpen, FileText, FilePlus, BookMarked, ListChecks, FileSpreadsheet, ClipboardList, Star } from "lucide-react";
+import {
+  Users,
+  BookOpen,
+  FileText,
+  FilePlus,
+  BookMarked,
+  ListChecks,
+  FileSpreadsheet,
+  ClipboardList,
+  Star,
+  Search as SearchIcon,
+} from "lucide-react";
 
 function ClipboardStarIcon({
   size = 18,
@@ -119,11 +130,30 @@ const DepartmentPlantilla: React.FC<{
 }> = ({ deptLabel, plantillaFile, rows, termLabel }) => {
   const tableRef = useRef<HTMLTableElement | null>(null);
 
+  const [searchInput, setSearchInput] = useState("");
+  const [search, setSearch] = useState("");
+
+  useEffect(() => {
+    const t = setTimeout(() => setSearch(searchInput.trim()), 250);
+    return () => clearTimeout(t);
+  }, [searchInput]);
+
+  const filteredRows = useMemo(() => {
+    const q = (search || "").toLowerCase();
+    if (!q) return rows;
+    return (rows || []).filter((r) => {
+      const name = String(r.faculty_name || "").toLowerCase();
+      const course = String(r.course_code || "").toLowerCase();
+      const section = String(r.section_code || "").toLowerCase();
+      return name.includes(q) || course.includes(q) || section.includes(q);
+    });
+  }, [rows, search]);
+
   const safeExcelFilename =
     (plantillaFile && plantillaFile.replace(/\.pdf$/i, ".xls")) || "Faculty_Plantilla.xls";
 
   const handleExportExcel = () => {
-    if (!rows || rows.length === 0) {
+    if (!filteredRows || filteredRows.length === 0) {
       alert("No plantilla rows to export.");
       return;
     }
@@ -152,7 +182,7 @@ const DepartmentPlantilla: React.FC<{
       "Remarks",
     ];
 
-    const dataRows = rows.map((r) => [
+    const dataRows = filteredRows.map((r) => [
       r.rank ?? "",
       r.faculty_name || "",
       r.course_code || "",
@@ -231,7 +261,18 @@ const DepartmentPlantilla: React.FC<{
         </h2>
       </header>
 
-      <div className="mt-4 flex items-center justify-end gap-3">
+      {/* Search / Export bar (match Course Management search styling) */}
+      <div className="mt-4 flex flex-wrap items-center gap-3 rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
+        <div className="relative flex-1 min-w-[240px]">
+          <SearchIcon className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-500" />
+          <input
+            value={searchInput}
+            onChange={(e) => setSearchInput(e.target.value)}
+            placeholder="Search faculty, course, or section…"
+            className="w-full rounded-lg border border-gray-300 px-9 py-2 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30"
+          />
+        </div>
+
         <button
           onClick={handleExportExcel}
           className={cls(
@@ -338,14 +379,14 @@ const DepartmentPlantilla: React.FC<{
           </thead>
 
           <tbody>
-            {rows.length === 0 ? (
+            {filteredRows.length === 0 ? (
               <tr>
                 <td colSpan={21} className="px-4 py-10 text-center text-sm text-gray-500">
-                  No plantilla to display.
+                  {rows.length === 0 ? "No plantilla to display." : "No matching results."}
                 </td>
               </tr>
             ) : (
-              rows.map((r, i) => (
+              filteredRows.map((r, i) => (
                 <tr key={i} className="hover:bg-gray-50 [&>td]:border [&>td]:border-gray-200">
                   <td className="px-3 py-2 text-center">{r.rank ?? ""}</td>
                   <td className="px-3 py-2 text-left font-semibold text-emerald-700">
