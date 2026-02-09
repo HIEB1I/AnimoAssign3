@@ -617,6 +617,9 @@ function EditForm({
   const [form, setForm] = useState<SavedPrefs>(initial);
   const [step, setStep] = useState<number>(form.prefUnits && form.prefUnits.trim() ? 2 : 1);
 
+	// Field-level validation (only for Preferred Time Slots minimum selection rule)
+	const [timeSlotsError, setTimeSlotsError] = useState<string>("");
+
   const ZERO_LOAD_LABEL = "0.0 units - no teaching load (for full-time only)";
   const isZeroTeachingLoad = form.prefUnits === ZERO_LOAD_LABEL;
 
@@ -666,6 +669,19 @@ function EditForm({
     }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [form.prefUnits]);
+
+	// Clear Preferred Time Slots field error as soon as the user satisfies the rule
+	useEffect(() => {
+		const ZERO_LOAD_LABEL_LOCAL = "0.0 units - no teaching load (for full-time only)";
+		const hasZeroLoad = form.prefUnits === ZERO_LOAD_LABEL_LOCAL;
+		if (isTeachingBreak || hasZeroLoad) {
+			if (timeSlotsError) setTimeSlotsError("");
+			return;
+		}
+		if (timeSlotsError && (form.timeSlots?.length ?? 0) >= 3) {
+			setTimeSlotsError("");
+		}
+	}, [form.prefUnits, form.timeSlots, isTeachingBreak, timeSlotsError]);
 
   // deloading rows
   const [deloadRows, setDeloadRows] = useState<DeloadRow[]>(() =>
@@ -717,12 +733,13 @@ function EditForm({
           msg: "Preferred Teaching Days are required when you have a teaching load.",
         };
       }
-      if (!form.timeSlots || form.timeSlots.length === 0) {
-        return {
-          ok: false,
-          msg: "Preferred Time Slots are required when you have a teaching load.",
-        };
-      }
+	      // Preferred Time Slots: require at least 3 selections (field-specific rule)
+	      if (!form.timeSlots || form.timeSlots.length < 3) {
+	        return {
+	          ok: false,
+	          msg: "Please select at least 3 Preferred Time Slots.",
+	        };
+	      }
       if (!form.kac || form.kac.length === 0) {
         return {
           ok: false,
@@ -1055,14 +1072,21 @@ function EditForm({
                     </button>
                     <button
                       disabled={deadlinePassed}
-                      onClick={() => {
-                        const v = validate();
-                        if (v.ok)
-                          onSave({
-                            ...form,
-                            deloadings: form.noDeloading ? [] : deloadRows,
-                          });
-                      }}
+	                      onClick={() => {
+	                        const v = validate();
+	                        if (!v.ok) {
+	                          // Only show field-level validation for Preferred Time Slots minimum selection
+	                          setTimeSlotsError(
+	                            v.msg === "Please select at least 3 Preferred Time Slots." ? v.msg : ""
+	                          );
+	                          return;
+	                        }
+	                        setTimeSlotsError("");
+	                        onSave({
+	                          ...form,
+	                          deloadings: form.noDeloading ? [] : deloadRows,
+	                        });
+	                      }}
                       className={cls(
                         "inline-flex h-9 items-center justify-center rounded-2xl px-4 text-sm font-medium text-white shadow active:translate-y-[0.5px]",
                         deadlinePassed
@@ -1259,14 +1283,21 @@ function EditForm({
                     </button>
                     <button
                       disabled={deadlinePassed}
-                      onClick={() => {
-                        const v = validate();
-                        if (v.ok)
-                          onSave({
-                            ...form,
-                            deloadings: form.noDeloading ? [] : deloadRows,
-                          });
-                      }}
+	                    	  onClick={() => {
+	                    	    const v = validate();
+	                    	    if (!v.ok) {
+	                    	      // Only show field-level validation for Preferred Time Slots minimum selection
+	                    	      setTimeSlotsError(
+	                    	        v.msg === "Please select at least 3 Preferred Time Slots." ? v.msg : ""
+	                    	      );
+	                    	      return;
+	                    	    }
+	                    	    setTimeSlotsError("");
+	                    	    onSave({
+	                    	      ...form,
+	                    	      deloadings: form.noDeloading ? [] : deloadRows,
+	                    	    });
+	                    	  }}
                       className={cls(
                         "inline-flex h-9 items-center justify-center rounded-2xl px-4 text-sm font-medium text-white shadow active:translate-y-[0.5px]",
                         deadlinePassed
@@ -1366,6 +1397,12 @@ function EditForm({
         </label>
       ))}
     </div>
+	    {!!timeSlotsError && (
+	      <div className="mt-2 flex items-start gap-2 rounded-md border border-red-200 bg-red-50 p-2 text-[13px] text-red-800">
+	        <AlertTriangle className="mt-0.5 h-4 w-4" />
+	        <span>{timeSlotsError}</span>
+	      </div>
+	    )}
   </div>
 </div>
 
@@ -1560,14 +1597,21 @@ function EditForm({
                     </button>
                     <button
                       disabled={deadlinePassed}
-                      onClick={() => {
-                        const v = validate();
-                        if (v.ok)
-                          onSave({
-                            ...form,
-                            deloadings: form.noDeloading ? [] : deloadRows,
-                          });
-                      }}
+	                      onClick={() => {
+	                        const v = validate();
+	                        if (!v.ok) {
+	                          // Only show field-level validation for Preferred Time Slots minimum selection
+	                          setTimeSlotsError(
+	                            v.msg === "Please select at least 3 Preferred Time Slots." ? v.msg : ""
+	                          );
+	                          return;
+	                        }
+	                        setTimeSlotsError("");
+	                        onSave({
+	                          ...form,
+	                          deloadings: form.noDeloading ? [] : deloadRows,
+	                        });
+	                      }}
                       className={cls(
                         "inline-flex h-9 items-center justify-center rounded-2xl px-4 text-sm font-medium text-white shadow active:translate-y-[0.5px]",
                         deadlinePassed

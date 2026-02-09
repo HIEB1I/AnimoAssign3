@@ -4,6 +4,7 @@ from fastapi import APIRouter, HTTPException, Query
 import re
 
 from ..main import db
+from ..Notifications import create_notification
 from datetime import datetime, timezone, timedelta  # <-- add
 
 router = APIRouter(prefix="/om", tags=["om"])
@@ -18,6 +19,76 @@ COL_CAMPUSES = "campuses"
 COL_KACS = "kacs"
 COL_PREEN_COUNT = "preenlistment_count" 
 COL_PREFS_WINDOWS = "faculty_prefs_windows"
+
+
+async def _notify_all_faculty_deadline_changed(
+    term_id: str,
+    old_deadline_iso: str,
+    new_deadline_iso: str,
+) -> None:
+    """Notify all faculty (in-app bell) when OM changes the preferences deadline."""
+
+    # Avoid noise if nothing actually changed.
+    if (old_deadline_iso or "") == (new_deadline_iso or ""):
+        return
+
+    # Best-effort resolve a friendly term label.
+    term_doc = await db[COL_TERMS].find_one(
+        {"term_id": term_id},
+        {"_id": 0, "acad_year_start": 1, "term_number": 1},
+    ) or {}
+    ay = term_doc.get("acad_year_start")
+    tn = term_doc.get("term_number")
+    term_label = (
+        f"Term {tn} · AY {ay}-{ay + 1}" if (ay is not None and tn is not None) else term_id
+    )
+
+    def _fmt(iso: str) -> str:
+        if not iso:
+            return "—"
+        try:
+            dt = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+            # Display in local server timezone formatting (frontend can reformat if needed).
+            return dt.astimezone(timezone.utc).strftime("%b %d, %Y %I:%M %p UTC")
+        except Exception:
+            return str(iso)
+
+    title = "Preference Submission Deadline Updated"
+    details = (
+        f"The Office Manager updated the preference submission deadline for {term_label}. "
+        f"New deadline: {_fmt(new_deadline_iso)}"
+        + (f" (previously {_fmt(old_deadline_iso)})." if old_deadline_iso else ".")
+    )
+
+    # Target all faculty users (user_id stored in faculty_profiles).
+    cursor = db[COL_FACULTY].find(
+        {"user_id": {"$ne": None}},
+        {"_id": 0, "user_id": 1, "faculty_id": 1},
+    )
+    faculty_docs = await cursor.to_list(length=None)
+
+    # Best-effort: don't let a single failure block others.
+    for f in faculty_docs:
+        uid = (f.get("user_id") or "").strip()
+        if not uid:
+            continue
+        try:
+            await create_notification(
+                user_id=uid,
+                title=title,
+                details=details,
+                meta={
+                    "route": "/faculty/preferences",
+                    "kind": "prefs_deadline_changed",
+                    "term_id": term_id,
+                    "faculty_id": f.get("faculty_id"),
+                    "old_deadline": old_deadline_iso or "",
+                    "new_deadline": new_deadline_iso or "",
+                },
+            )
+        except Exception:
+            # Notification is non-critical; ignore and continue.
+            pass
 
 # ---- Helpers (same style as Faculty Management) ----
 def _dept_name_expr() -> Dict[str, Any]:
@@ -146,22 +217,61 @@ async def _active_term():
         return {}
 
     # 3) Compute the "next" term after the current term
-    next_terms = await db[COL_TERMS].find(
-        {
-            "$or": [
-                {"acad_year_start": {"$gt": current["acad_year_start"]}},
-                {
-                    "acad_year_start": current["acad_year_start"],
-                    "term_number": {"$gt": current["term_number"]},
-                },
-            ]
-        },
-        term_fields,
-    ).sort([("acad_year_start", 1), ("term_number", 1)]).limit(1).to_list(1)
+    # Prefer chronological ordering by (acad_year_start, term_number) as defined in the terms table.
+    # If those fields are missing/inconsistent, fall back to numeric ordering from term_id (e.g., TERM0013 -> 13).
+    next_term: Optional[dict] = None
 
-    if next_terms:
-        # Use the next term as the working/planning term
-        return next_terms[0]
+    if current.get("acad_year_start") is not None and current.get("term_number") is not None:
+        next_terms = await db[COL_TERMS].find(
+            {
+                "$or": [
+                    {"acad_year_start": {"$gt": current["acad_year_start"]}},
+                    {
+                        "acad_year_start": current["acad_year_start"],
+                        "term_number": {"$gt": current["term_number"]},
+                    },
+                ]
+            },
+            term_fields,
+        ).sort([("acad_year_start", 1), ("term_number", 1)]).limit(1).to_list(1)
+
+        if next_terms:
+            next_term = next_terms[0]
+
+    if not next_term:
+        # Fallback: parse numeric suffix from TERM IDs and pick the smallest greater-than-current.
+        def _term_id_num(tid: Optional[str]) -> Optional[int]:
+            if not tid:
+                return None
+            m = re.search(r"(\d+)$", str(tid))
+            return int(m.group(1)) if m else None
+
+        cur_num = _term_id_num(current.get("term_id"))
+        if cur_num is not None:
+            # Pull only term_id (and minimal display fields) to keep this lightweight.
+            candidates = await db[COL_TERMS].find(
+                {"term_id": {"$type": "string"}},
+                {"_id": 0, "term_id": 1, "acad_year_start": 1, "term_number": 1, "submission_deadline": 1, "start_date": 1, "classes_start_date": 1},
+            ).to_list(None)
+
+            best = None
+            best_num = None
+            for t in candidates:
+                n = _term_id_num(t.get("term_id"))
+                if n is None or n <= cur_num:
+                    continue
+                if best_num is None or n < best_num:
+                    best_num = n
+                    best = t
+
+            if best:
+                # Ensure we include the same field set as term_fields
+                # (best already includes all those keys, but keep consistent with callers)
+                next_term = {k: best.get(k) for k in term_fields.keys() if k != "_id"}
+
+    if next_term:
+        # Use the next term as the working/planning term (e.g., if TERM0013 is current, TERM0014 is planning)
+        return next_term
 
     # If no next term, stick with current (still better than returning nothing)
     return current
@@ -407,6 +517,13 @@ async def facultyforms_handler(
 
         term_id = term_doc["term_id"]
 
+        # Capture previous deadline (if any) so we can notify faculty on change.
+        prev_override = await db[COL_PREFS_WINDOWS].find_one(
+            {"term_id": term_id},
+            {"_id": 0, "deadlineISO": 1, "deadline_dt": 1},
+        ) or {}
+        old_deadline_iso = (prev_override.get("deadlineISO") or "").strip()
+
         # Default duration: 7 days after start, unless caller overrides
         days = durationDays if durationDays is not None else 7
         try:
@@ -437,6 +554,13 @@ async def facultyforms_handler(
                 },
             },
             upsert=True,
+        )
+
+        # Notify faculty if the deadline changed.
+        await _notify_all_faculty_deadline_changed(
+            term_id=term_id,
+            old_deadline_iso=old_deadline_iso,
+            new_deadline_iso=deadline_dt.isoformat(),
         )
 
         # After saving the override, read back the override-only window

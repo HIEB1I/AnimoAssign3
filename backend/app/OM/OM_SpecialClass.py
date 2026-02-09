@@ -57,12 +57,10 @@ ALLOWED_DAYS = {"M", "T", "W", "H", "F", "S"}
 
 REASON_LINES = [
     "Graduating at the end of this Term and course is not offered",
-    "Graduating at the end of this Term and course offered is\nconflict with other enrolled courses",
-    "The course is indicated in the program flowchart as a regular\noffering for the term but is not offered",
+    "Graduating at the end of this Term and course offered is conflict with other enrolled courses",
+    "The course is indicated in the program flowchart as a regular offering for the term but is not offered",
     "Others (please specify)",
 ]
-
-
 def _normalize_day(d: Any) -> str:
     if d is None:
         return ""
@@ -990,6 +988,38 @@ def _fit_and_draw_text(
             c.drawString(x, yy, line)
 
 
+def _wrap_text_lines(c, text: str, font: str, size: int, max_w: float) -> List[str]:
+    """Word-wrap `text` into lines that fit `max_w` using the given font+size.
+    Preserves explicit newlines as hard breaks.
+    """
+    t = "" if text is None else str(text).strip()
+    if not t:
+        return []
+
+    out: List[str] = []
+    for para in t.split("\n"):
+        para = para.strip()
+        if not para:
+            out.append("")
+            continue
+        words = para.split()
+        cur = ""
+        for wrd in words:
+            cand = (cur + " " + wrd).strip()
+            if c.stringWidth(cand, font, size) <= max_w:
+                cur = cand
+            else:
+                if cur:
+                    out.append(cur)
+                    cur = wrd
+                else:
+                    # extremely long single token; fall back to emitting it
+                    out.append(wrd)
+                    cur = ""
+        if cur:
+            out.append(cur)
+    return out
+
 def _draw_rect(c, x, y, w, h, stroke=1, fill=0):
     c.rect(x, y, w, h, stroke=stroke, fill=fill)
 
@@ -1174,39 +1204,71 @@ def _render_one_application(c, r: Dict[str, Any], active_term: Dict[str, Any]):
     rw = W - left_reason_w
     idx = _reason_index(r.get("reason", ""), r.get("reason_other", ""))
 
-    c.setFont("Helvetica", 9)
+    # Layout: fixed font size for all options, wrap text, and allocate vertical space per option
+    option_font = "Helvetica"
+    option_size = 9
+    leading = option_size * 1.05
     cb_size = 12
-    start_y = reason_top - 22
-    line_gap = 24
-    for i, line in enumerate(REASON_LINES):
-        yy = start_y - i * line_gap
-        _draw_checkbox(c, rx + 12, yy - 8, size=cb_size, checked=(i == idx))
-        _fit_and_draw_text(
-            c,
-            line,
-            rx + 12 + cb_size + 8,
-            yy - 18,
-            rw - (12 + cb_size + 28),
-            22,
-            font="Helvetica",
-            max_size=9,
-            min_size=7,
-        )
 
+    pad_x = 12
+    pad_top = 10
+    pad_bottom = 8
+    gap_x = 8
+    gap_y = 2
+
+    cb_x = rx + pad_x
+    text_x = cb_x + cb_size + gap_x
+    max_w = rw - (pad_x * 2 + cb_size + gap_x)
+
+    y_cursor = reason_top - pad_top  # top edge of content area
+    bottom_limit = (reason_top - reason_h) + pad_bottom
+
+    c.setFillColor(BLACK)
+    for i, label in enumerate(REASON_LINES):
+        lines = _wrap_text_lines(c, label, option_font, option_size, max_w)
+        if not lines:
+            lines = [""]
+
+        text_h = len(lines) * leading
+        block_h = max(cb_size, text_h)
+
+        # If we're going to overflow the box, tighten spacing slightly (last-resort)
+        if (y_cursor - block_h) < bottom_limit and gap_y > 0:
+            gap_y = 1
+
+        cb_y = y_cursor - cb_size  # top-aligned with the text block
+        _draw_checkbox(c, cb_x, cb_y, size=cb_size, checked=(i == idx))
+
+        c.setFont(option_font, option_size)
+        # Draw text with its top aligned to y_cursor
+        baseline0 = y_cursor - option_size
+        for li, line in enumerate(lines):
+            c.drawString(text_x, baseline0 - li * leading, line)
+
+        # Move cursor down; don't add extra gap after last option
+        y_cursor -= block_h
+        if i < len(REASON_LINES) - 1:
+            y_cursor -= gap_y
+
+    # Render "Others" free text just below the "Others (please specify)" option (inside the box)
     if idx == 3 and (r.get("reason_other") or "").strip():
-        _fit_and_draw_text(
-            c,
-            (r.get("reason_other") or "").strip(),
-            rx + 12 + cb_size + 8,
-            (start_y - 3 * line_gap) - 40,
-            rw - (12 + cb_size + 28),
-            18,
-            font="Helvetica-Oblique",
-            max_size=8,
-            min_size=7,
-            valign="top",
-        )
+        other_text = (r.get("reason_other") or "").strip()
+        other_font = "Helvetica-Oblique"
+        other_size = 9
+        other_leading = other_size * 1.05
 
+        # small separation from the option row
+        y_cursor -= 2
+
+        other_lines = _wrap_text_lines(c, other_text, other_font, other_size, max_w)
+        c.setFont(other_font, other_size)
+
+        baseline0 = y_cursor - other_size
+        for li, line in enumerate(other_lines):
+            yy = baseline0 - li * other_leading
+            if yy < bottom_limit + 2:
+                break  # keep inside the reason box
+            c.drawString(text_x, yy, line)
     # ---- Terms and Conditions ----
     tc_top = reason_top - reason_h - 10
     tc_h = 100
@@ -1665,37 +1727,56 @@ async def om_specialclass_post(
             {"$set": {"status": target_status, "updated_at": datetime.utcnow()}},
         )
         return {"ok": True, "matched": res.matched_count, "modified": res.modified_count, "status": target_status}
-
-    # ✅ Export PDF: ONE ROW ONLY
+    # Export PDF: one or many rows
     if action == "exportPdf":
         selected_ids: List[str] = []
         if payload and isinstance(payload.get("special_ids"), list):
             selected_ids = [str(x).strip() for x in payload["special_ids"] if str(x).strip()]
 
-        if specialId:
-            export_id = specialId.strip()
-        else:
-            if not selected_ids:
-                raise HTTPException(status_code=400, detail="Please select one application row to export.")
-            if len(selected_ids) != 1:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Select only ONE row per export. If multiple rows are selected, export each row separately.",
-                )
-            export_id = selected_ids[0]
+        # If specialId is explicitly provided, it takes precedence (single export)
+        if specialId and specialId.strip():
+            selected_ids = [specialId.strip()]
 
-        doc = await db[COL_SPECIAL].find_one(
-            {"term_id": current_term_id, "special_id": export_id},
+        if not selected_ids:
+            raise HTTPException(status_code=400, detail="Please select at least one application row to export.")
+
+        # De-duplicate while preserving order
+        seen: set[str] = set()
+        ordered_ids: List[str] = []
+        for sid in selected_ids:
+            if sid not in seen:
+                ordered_ids.append(sid)
+                seen.add(sid)
+        selected_ids = ordered_ids
+
+        # Fetch selected docs
+        docs = await db[COL_SPECIAL].find(
+            {"term_id": current_term_id, "special_id": {"$in": selected_ids}},
             {"_id": 0},
-        )
-        if not doc:
+        ).to_list(len(selected_ids))
+
+        if not docs:
             raise HTTPException(status_code=404, detail="Application not found for export.")
 
-        maps = await _bulk_maps_for_rows([doc])
-        shaped = [await _shape_row(doc, maps)]
+        by_id: Dict[str, Dict[str, Any]] = {str(d.get("special_id")): d for d in docs if d.get("special_id")}
+        missing = [sid for sid in selected_ids if sid not in by_id]
+        if missing:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Some selected applications were not found for export: {', '.join(missing)}",
+            )
+
+        ordered_docs = [by_id[sid] for sid in selected_ids]
+
+        maps = await _bulk_maps_for_rows(ordered_docs)
+        shaped = [await _shape_row(d, maps) for d in ordered_docs]
         pdf_bytes = _build_pdf(shaped, active_term=active)
 
-        fname = f"SpecialClass_{export_id}.pdf"
+        if len(selected_ids) == 1:
+            fname = f"SpecialClass_{selected_ids[0]}.pdf"
+        else:
+            fname = f"SpecialClass_Selected_{datetime.utcnow().strftime('%Y-%m-%d')}.pdf"
+
         headers = {"Content-Disposition": f'attachment; filename="{fname}"'}
         return StreamingResponse(io.BytesIO(pdf_bytes), media_type="application/pdf", headers=headers)
 

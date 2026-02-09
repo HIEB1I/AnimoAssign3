@@ -10,6 +10,7 @@ import AppShell from "../../base/AppShell";
 import { runOmAutoAssign } from "../../api.ts";
 import {
   submitOmLoadAssignment,
+  saveOmSectionRemarks,
   importOmShsCsv,
   notifyChairLoadRecommendation,
   sendOmLoadAssignmentsToFaculty,
@@ -34,8 +35,8 @@ import {
   Play,
   RefreshCcw,
   Send,
-  Save,
   CheckCheck,
+  AlertTriangle,
   Plus,
   MessageSquareText,
   Copy,
@@ -44,6 +45,8 @@ import {
   Redo2,
   X,
   Upload,
+  Download,
+  Save,
 } from "lucide-react";
 import { InboxContent as OMInboxContent } from "./OM_Inbox";
 
@@ -157,7 +160,8 @@ function SelectBox({
         onClick={() => setOpen((v) => !v)}
         className={cls(
           "w-full rounded-md border border-gray-300 bg-white",
-          "px-1.5 py-1 text-center text-[13px] leading-tight",
+          // Keep consistent typography with the toolbar buttons/inputs
+          "px-1.5 py-1 text-center text-sm",
           "shadow-sm focus:ring-2 focus:ring-emerald-500/30",
           buttonClassName
         )}
@@ -185,7 +189,7 @@ function SelectBox({
                   setOpen(false);
                 }}
                 className={cls(
-                  "cursor-pointer px-3 py-1.5 text-[13px]",
+                  "cursor-pointer px-3 py-1.5 text-sm",
                   isSelected
                     ? "bg-emerald-50 text-emerald-700 font-medium"
                     : hover === i
@@ -512,6 +516,8 @@ type Row = {
   faculty_id?: string;
   /** True when this row has already been sent/forwarded to the faculty (proposal created). */
   forwarded_to_faculty?: boolean;
+  /** True when a forwarded row was edited after it was last sent to faculty. */
+  reforward_needed?: boolean;
   day1: string;
   begin1: string;
   end1: string;
@@ -535,6 +541,260 @@ type Row = {
   campus_id?: string;
   /** When OM has already finalized this course for the faculty */
   finalized?: boolean;
+};
+
+type ChangeItem = { key: string; label: string };
+type EditedDetail = { field: string; from: string; to: string };
+type EditedItem = { key: string; label: string; details: EditedDetail[] };
+type DetectedChanges = {
+  added: ChangeItem[];
+  edited: EditedItem[];
+  deleted: ChangeItem[];
+};
+
+const _rowLabel = (r: Row) => {
+  const course = (r.course || "").trim();
+  const sec = (r.section || "").trim();
+  const title = (r.title || "").trim();
+  const fac = (r.faculty || "").trim();
+  const base = [course, sec].filter(Boolean).join(" ") || r.id;
+  const t = title ? ` — ${title}` : "";
+  const f = fac ? ` (${fac})` : "";
+  return `${base}${t}${f}`;
+};
+
+const detectRowChanges = (baseline: Row[], current: Row[]): DetectedChanges => {
+  const bMap = new Map(baseline.map((r) => [r.id, r] as const));
+  const cMap = new Map(current.map((r) => [r.id, r] as const));
+
+  const added: ChangeItem[] = [];
+  const deleted: ChangeItem[] = [];
+  const edited: EditedItem[] = [];
+
+  // Added
+  for (const [id, r] of cMap) {
+    if (!bMap.has(id)) added.push({ key: id, label: _rowLabel(r) });
+  }
+
+  // Deleted
+  for (const [id, r] of bMap) {
+    if (!cMap.has(id)) deleted.push({ key: id, label: _rowLabel(r) });
+  }
+
+  // Edited
+  const fields: Array<[keyof Row, string]> = [
+    ["course", "Course"],
+    ["title", "Title"],
+    ["units", "Units"],
+    ["section", "Section"],
+    ["faculty", "Faculty"],
+    ["day1", "Day 1"],
+    ["begin1", "Begin 1"],
+    ["end1", "End 1"],
+    ["room1", "Room 1"],
+    ["day2", "Day 2"],
+    ["begin2", "Begin 2"],
+    ["end2", "End 2"],
+    ["room2", "Room 2"],
+    ["capacity", "Capacity"],
+    ["mode", "Mode"],
+  ];
+
+  const fmt = (v: any) => {
+    if (v === null || v === undefined) return "";
+    if (typeof v === "number") return String(v);
+    return String(v);
+  };
+
+  for (const [id, b] of bMap) {
+    const c = cMap.get(id);
+    if (!c) continue;
+    const details: EditedDetail[] = [];
+    for (const [k, label] of fields) {
+      const bv = fmt((b as any)[k]);
+      const cv = fmt((c as any)[k]);
+      if (bv !== cv)
+        details.push({ field: label, from: bv || "—", to: cv || "—" });
+    }
+    if (details.length) edited.push({ key: id, label: _rowLabel(c), details });
+  }
+
+  const byLabel = (a: { label: string }, b: { label: string }) =>
+    a.label.localeCompare(b.label);
+
+  return {
+    added: added.sort(byLabel),
+    edited: edited.sort(byLabel),
+    deleted: deleted.sort(byLabel),
+  };
+};
+
+const ForwardReviewModal: React.FC<{
+  open: boolean;
+  changes: DetectedChanges | null;
+  title: string;
+  subtitle: React.ReactNode;
+  confirmText: string;
+  onClose: () => void;
+  onConfirm: () => void | Promise<void>;
+}> = ({ open, changes, title, subtitle, confirmText, onClose, onConfirm }) => {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string>("");
+
+  if (!open) return null;
+
+  const hasAny =
+    !!changes &&
+    (changes.added.length > 0 ||
+      changes.edited.length > 0 ||
+      changes.deleted.length > 0);
+
+  return (
+    <div className="fixed inset-0 z-[120] grid place-items-center bg-black/40 p-4">
+      <div className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-2xl">
+        <div className="mx-auto mb-4 grid h-16 w-16 place-items-center rounded-full border-2 border-emerald-600 text-emerald-700">
+          <Send className="h-8 w-8" strokeWidth={2.5} />
+        </div>
+
+        <h3 className="mb-2 text-center text-2xl font-semibold">{title}</h3>
+
+        <p className="mx-auto mb-4 max-w-md text-center text-sm text-neutral-600">
+          {subtitle}
+        </p>
+
+        <div className="mb-4">
+          <div className="flex items-center justify-between gap-2">
+            <div className="text-sm font-semibold text-gray-700">
+              Detected changes
+            </div>
+            {!hasAny ? (
+              <div className="text-xs text-slate-500">
+                No differences found.
+              </div>
+            ) : null}
+          </div>
+
+          <div className="mt-2 max-h-[260px] overflow-auto rounded-lg border border-slate-200 bg-slate-50 p-3">
+            {changes ? (
+              <div className="space-y-4">
+                {/* Added */}
+                <div>
+                  <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                    Added ({changes.added.length})
+                  </div>
+                  {changes.added.length ? (
+                    <ul className="list-disc space-y-1 pl-5 text-sm text-slate-800">
+                      {changes.added.map((a) => (
+                        <li key={a.key}>{a.label}</li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <div className="text-sm text-slate-500">None</div>
+                  )}
+                </div>
+
+                {/* Edited */}
+                <div>
+                  <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                    Edited ({changes.edited.length})
+                  </div>
+                  {changes.edited.length ? (
+                    <ul className="space-y-2">
+                      {changes.edited.map((e) => (
+                        <li
+                          key={e.key}
+                          className="rounded-lg border border-slate-200 bg-white px-3 py-2"
+                        >
+                          <div className="text-sm font-medium text-slate-900">
+                            {e.label}
+                          </div>
+                          {e.details.length ? (
+                            <ul className="mt-1 list-disc space-y-1 pl-5 text-sm text-slate-700">
+                              {e.details.map((d, idx) => (
+                                <li key={idx}>
+                                  <span className="font-medium text-slate-800">
+                                    {d.field}:
+                                  </span>{" "}
+                                  <span className="text-slate-600">
+                                    {d.from}
+                                  </span>{" "}
+                                  <span className="text-slate-400">→</span>{" "}
+                                  <span className="text-slate-900">{d.to}</span>
+                                </li>
+                              ))}
+                            </ul>
+                          ) : (
+                            <div className="mt-1 text-xs text-slate-500">
+                              Edited
+                            </div>
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <div className="text-sm text-slate-500">None</div>
+                  )}
+                </div>
+
+                {/* Deleted */}
+                <div>
+                  <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                    Deleted ({changes.deleted.length})
+                  </div>
+                  {changes.deleted.length ? (
+                    <ul className="list-disc space-y-1 pl-5 text-sm text-slate-800">
+                      {changes.deleted.map((d) => (
+                        <li key={d.key}>{d.label}</li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <div className="text-sm text-slate-500">None</div>
+                  )}
+                </div>
+              </div>
+            ) : (
+              <div className="text-sm text-slate-500">
+                No change summary available.
+              </div>
+            )}
+          </div>
+        </div>
+
+        {error ? (
+          <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+            {error}
+          </div>
+        ) : null}
+
+        <div className="flex justify-end gap-2">
+          <button
+            onClick={onClose}
+            disabled={busy}
+            className="rounded-lg border border-neutral-300 bg-neutral-100 px-4 py-2 text-sm hover:bg-neutral-200 disabled:opacity-50"
+          >
+            Cancel
+          </button>
+          <button
+            disabled={busy}
+            className="rounded-lg bg-emerald-700 px-4 py-2 text-sm font-medium text-white hover:brightness-110 disabled:opacity-50"
+            onClick={async () => {
+              setBusy(true);
+              setError("");
+              try {
+                await onConfirm();
+              } catch (e: any) {
+                setError(e?.message || "Action failed.");
+              } finally {
+                setBusy(false);
+              }
+            }}
+          >
+            {confirmText}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 };
 
 function ArchivedLoadsSummary({
@@ -1218,13 +1478,27 @@ const StatusChip = ({ r }: { r: Row }) => {
     setPlace(below < 72 ? "top" : "bottom");
   }, [show]);
 
-  if (!r.status) return <span className="inline-block w-24 h-6" />;
+  // Display rule:
+  // - If the row was already sent to faculty, show status as "Sent" (instead of "Pending"),
+  //   but only when it does not require a re-forward.
+  // - Pending is reserved for rows not yet sent to faculty.
+  const displayStatus =
+    r.forwarded_to_faculty &&
+    !r.reforward_needed &&
+    (!r.status || r.status === "Pending")
+      ? "Sent"
+      : r.status;
+
+  if (!displayStatus) return <span className="inline-block w-24 h-6" />;
+
   const tone =
-    r.status === "Confirmed" || r.status === "Approved"
+    displayStatus === "Sent"
+      ? "bg-sky-100 text-sky-800"
+      : displayStatus === "Confirmed" || displayStatus === "Approved"
       ? "bg-green-100 text-green-700"
-      : r.status === "Pending"
+      : displayStatus === "Pending"
       ? "bg-yellow-100 text-yellow-700"
-      : r.status === "Unassigned"
+      : displayStatus === "Unassigned"
       ? "bg-gray-200 text-gray-700"
       : "bg-red-600 text-white";
 
@@ -1242,8 +1516,8 @@ const StatusChip = ({ r }: { r: Row }) => {
       onBlur={() => setShow(false)}
       tabIndex={0}
     >
-      {r.status === "Conflict" ? "Conflict" : r.status}
-      {r.status === "Conflict" && r.conflictNote && show && (
+      {displayStatus === "Conflict" ? "Conflict" : displayStatus}
+      {displayStatus === "Conflict" && r.conflictNote && show && (
         <div
           className={cls(
             "absolute z-[2000] w-[min(70vw,260px)] rounded-md border border-gray-200 bg-white px-3 py-2",
@@ -1560,14 +1834,13 @@ const RequestChangeModal = ({
   const [error, setError] = useState<string | null>(null);
   const [messages, setMessages] = useState<Array<any>>([]);
   const [status, setStatus] = useState<string | null>(null);
+  const [locked, setLocked] = useState<boolean>(false);
   const [reply, setReply] = useState("");
 
   const displayFaculty = facultyName || "Faculty";
 
-  const isTerminal =
-    !!status && ["ACCEPTED", "APPROVED", "REJECTED"].includes(status);
-  const needsOm =
-    status === "NEEDS_OM" || status === "OPEN" || status === "open";
+  // Terminal statuses are informational; only the explicit `locked` flag should prevent interaction.
+  const isTerminal = Boolean(locked);
 
   useEffect(() => {
     if (!open) {
@@ -1575,6 +1848,7 @@ const RequestChangeModal = ({
       setError(null);
       setMessages([]);
       setStatus(null);
+      setLocked(false);
       setReply("");
       return;
     }
@@ -1605,6 +1879,7 @@ const RequestChangeModal = ({
 
         const rfc = res.rfc;
         setStatus(rfc.status || null);
+        setLocked(Boolean(rfc.locked));
         setMessages(rfc.messages || rfc.thread || []);
       } catch (e: any) {
         setError(e?.message || "Failed to load RFC.");
@@ -1646,8 +1921,8 @@ const RequestChangeModal = ({
         decision === "reply"
           ? "Reply sent to faculty."
           : decision === "approve"
-          ? "RFC approved. Schedule is now locked."
-          : "RFC rejected. Schedule is now locked.";
+          ? "RFC approved."
+          : "RFC rejected.";
       onToast?.(msg, "success");
       onClose();
     } catch (e: any) {
@@ -1674,21 +1949,7 @@ const RequestChangeModal = ({
         <div className="text-sm text-gray-600 mb-1">
           From: <span className="font-semibold">{displayFaculty}</span>
         </div>
-        <div className="text-[12px] text-gray-600 mb-4">
-          Status:{" "}
-          <span
-            className={cls(
-              "font-semibold",
-              isTerminal
-                ? "text-gray-700"
-                : needsOm
-                ? "text-red-600"
-                : "text-blue-600"
-            )}
-          >
-            {status || "(none)"}
-          </span>
-        </div>
+        {/* Status hidden per request (avoid showing code-like thread statuses in OM modal) */}
 
         {loading && <div className="mb-4 text-sm text-gray-600">Loading…</div>}
         {error && <div className="mb-4 text-sm text-red-600">{error}</div>}
@@ -1703,19 +1964,48 @@ const RequestChangeModal = ({
           {messages.length ? (
             <div className="space-y-2">
               {messages.map((m: any, idx: number) => {
-                const who = (m.sender_role || m.from || "")
-                  .toString()
-                  .toUpperCase();
+                const whoRaw = (m.sender_role || m.from || "").toString();
+                const who = whoRaw.toUpperCase();
                 const ts = m.created_at
                   ? new Date(m.created_at).toLocaleString()
                   : "";
+                const isFaculty = /FACULTY/i.test(whoRaw) || who === "F";
+                const bubble = m.message || m.text || "";
+
                 return (
-                  <div key={idx} className="text-sm">
-                    <div className="text-[11px] text-gray-500">
-                      {who} {ts ? `• ${ts}` : ""}
-                    </div>
-                    <div className="whitespace-pre-wrap text-gray-800">
-                      {m.message || m.text || ""}
+                  <div
+                    key={idx}
+                    className={cls(
+                      "flex",
+                      isFaculty ? "justify-start" : "justify-end"
+                    )}
+                  >
+                    <div
+                      className={cls(
+                        "max-w-[85%]",
+                        isFaculty ? "text-left" : "text-right"
+                      )}
+                    >
+                      <div
+                        className={cls(
+                          "mb-1 text-[11px] text-gray-500",
+                          isFaculty ? "pl-1" : "pr-1"
+                        )}
+                      >
+                        {who ||
+                          (isFaculty ? displayFaculty.toUpperCase() : "OM")}
+                        {ts ? ` • ${ts}` : ""}
+                      </div>
+                      <div
+                        className={cls(
+                          "inline-block rounded-2xl px-3 py-2 text-sm whitespace-pre-wrap",
+                          isFaculty
+                            ? "bg-white text-gray-800 border border-gray-200"
+                            : "bg-emerald-600 text-white"
+                        )}
+                      >
+                        {bubble}
+                      </div>
                     </div>
                   </div>
                 );
@@ -2053,6 +2343,49 @@ export default function OM_LoadAssignment() {
   // In-app toast (styled to match Faculty pages)
   const { toast, show: showToast, clear: clearToast } = useToast();
 
+  // Custom confirm modal (replaces browser window.confirm for Forward/Re-forward)
+  const [confirmModal, setConfirmModal] = useState<{
+    open: boolean;
+    title: string;
+    variant?: "info" | "warning" | "danger";
+    message: React.ReactNode;
+    confirmText?: string;
+    cancelText?: string;
+    resolve?: (value: boolean) => void;
+  }>({ open: false, title: "", message: "" });
+
+  const openConfirm = useCallback(
+    (opts: {
+      title: string;
+      variant?: "info" | "warning" | "danger";
+      message: React.ReactNode;
+      confirmText?: string;
+      cancelText?: string;
+    }) =>
+      new Promise<boolean>((resolve) => {
+        setConfirmModal({
+          open: true,
+          title: opts.title,
+          variant: opts.variant ?? "info",
+          message: opts.message,
+          confirmText: opts.confirmText ?? "Continue",
+          cancelText: opts.cancelText ?? "Cancel",
+          resolve,
+        });
+      }),
+    []
+  );
+
+  const closeConfirm = useCallback((result: boolean) => {
+    setConfirmModal((prev) => {
+      try {
+        prev.resolve?.(result);
+      } finally {
+        return { open: false, title: "", message: "" };
+      }
+    });
+  }, []);
+
   // Session (same pattern as APO: localStorage["animo.user"])
   const session = useMemo(() => {
     try {
@@ -2069,35 +2402,179 @@ export default function OM_LoadAssignment() {
     (session as any)?.id ||
     "";
 
-  // Import SHS file
+  // Import SHS (match APO import UX)
   const shsFileInputRef = useRef<HTMLInputElement>(null);
+  const [showShsImportModal, setShowShsImportModal] = useState(false);
+  const [shsImportBusy, setShsImportBusy] = useState(false);
+  const [shsImportError, setShsImportError] = useState<string>("");
   const [shsFile, setShsFile] = useState<File | null>(null);
+
+  const openShsImport = () => {
+    setShsImportError("");
+    setShowShsImportModal(true);
+  };
+
+  const closeShsImport = () => {
+    if (shsImportBusy) return;
+    setShowShsImportModal(false);
+    setShsImportError("");
+  };
+
+  const downloadShsTemplate = () => {
+    const esc = (v: any) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+    const headers = [
+      "Course Code & Title",
+      "Units",
+      "Section",
+      "Day 1",
+      "Begin 1",
+      "End 1",
+      "Room 1",
+      "Day 2",
+      "Begin 2",
+      "End 2",
+      "Room 2",
+      "Capacity",
+      "Mode",
+      "Campus",
+    ];
+    const sample = [
+      [
+        "SHS-ENG1 - English 1",
+        3,
+        "A",
+        "M",
+        "08:00",
+        "09:30",
+        "R101",
+        "W",
+        "08:00",
+        "09:30",
+        "R101",
+        40,
+        "F2F",
+        "Manila",
+      ],
+    ];
+    const csv = [
+      headers.map(esc).join(","),
+      ...sample.map((r) => r.map(esc).join(",")),
+    ].join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "om_shs_import_TEMPLATE.csv";
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const splitCsvLine = (line: string): string[] => {
+    const out: string[] = [];
+    let cur = "";
+    let inQuotes = false;
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      if (ch === '"') {
+        // Escaped quote
+        if (inQuotes && line[i + 1] === '"') {
+          cur += '"';
+          i++;
+        } else {
+          inQuotes = !inQuotes;
+        }
+        continue;
+      }
+      if (ch === "," && !inQuotes) {
+        out.push(cur);
+        cur = "";
+        continue;
+      }
+      cur += ch;
+    }
+    out.push(cur);
+    return out.map((s) => s.trim());
+  };
+
+  const validateShsCsvHeaders = (csvText: string) => {
+    const firstLine =
+      (csvText || "").split(/\r?\n/).find((l) => !!l.trim()) || "";
+    if (!firstLine) throw new Error("CSV has no headers.");
+    const headers = splitCsvLine(firstLine).map((h) =>
+      h.replace(/^"|"$/g, "").trim()
+    );
+    const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
+    const headerSet = new Set(headers.map(norm));
+    const required = [
+      "Course Code & Title",
+      "Units",
+      "Section",
+      "Day 1",
+      "Begin 1",
+      "End 1",
+      "Room 1",
+      "Day 2",
+      "Begin 2",
+      "End 2",
+      "Room 2",
+      "Capacity",
+      "Mode",
+    ];
+    const missing = required.filter((h) => !headerSet.has(norm(h)));
+    if (missing.length) {
+      throw new Error(
+        `Missing required column(s): ${missing.join(
+          ", "
+        )}\n\nExpected columns: ${required.join(", ")}`
+      );
+    }
+  };
 
   const handlePickShsFile = () => {
     shsFileInputRef.current?.click();
+  };
+
+  const importShsFile = async (file: File) => {
+    if (!file) return;
+    if (!userId) throw new Error("Missing user session.");
+
+    // Basic guard: backend expects CSV text
+    const isCsv =
+      file.name.toLowerCase().endsWith(".csv") || file.type.includes("csv");
+    if (!isCsv) {
+      throw new Error(
+        "Please upload a .csv file. Download the template to match the required format."
+      );
+    }
+
+    const text = await file.text();
+    validateShsCsvHeaders(text);
+
+    const res = await importOmShsCsv(userId, text);
+    await loadFromServer();
+    showToast(`Imported ${res.imported ?? 0} row(s) from SHS CSV.`, "success");
   };
 
   const handleShsFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0] || null;
     if (!file) return;
     setShsFile(file);
+    setShsImportError("");
 
     (async () => {
       try {
-        if (!userId) throw new Error("Missing user session.");
-        const text = await file.text();
-        const res = await importOmShsCsv(userId, text);
-        await loadFromServer();
-        showToast(
-          `Imported ${res.imported ?? 0} row(s) from SHS CSV.`,
-          "success"
-        );
+        setShsImportBusy(true);
+        await importShsFile(file);
+        setShowShsImportModal(false);
       } catch (err: any) {
         const msg =
           typeof err?.message === "string"
             ? err.message
             : "Failed to import SHS CSV.";
+        setShsImportError(msg);
         showToast(msg, "error");
+      } finally {
+        setShsImportBusy(false);
       }
     })();
 
@@ -2161,16 +2638,7 @@ export default function OM_LoadAssignment() {
         }
       }
 
-      const normalizedNextRows: Row[] = nextRows.map((r: any) => ({
-        ...r,
-        mode: (r as any)?.mode ?? (r as any)?.Mode ?? "",
-        begin1: normalizeServerTimeToHHMM(r?.begin1),
-        end1: normalizeServerTimeToHHMM(r?.end1),
-        begin2: normalizeServerTimeToHHMM(r?.begin2),
-        end2: normalizeServerTimeToHHMM(r?.end2),
-      }));
-
-      setRows(normalizedNextRows);
+      setRows(nextRows);
       setTerm(typeof res?.term === "string" ? res.term : "");
       setMode("run");
       // Preserve the "Forward to Chair" final-state across auto-assign.
@@ -2317,7 +2785,34 @@ export default function OM_LoadAssignment() {
   }, [userId]);
 
   const [search, setSearch] = useState("");
+  // Filter rows by academic level (derived from backend courseProgramLevel map).
+  // Values: ALL | UG | GS | SHS
+  const [levelFilter, setLevelFilter] = useState<string>("ALL");
   const [rows, setRows] = useState<Row[]>([]);
+
+  // Snapshot of the rows at the last successful Forward/Re-forward to Chair.
+  // Used to generate an APO-style "Detected changes" preview on re-forward.
+  const forwardBaselineRef = useRef<Row[] | null>(null);
+
+  const [showForwardReview, setShowForwardReview] = useState(false);
+  const [forwardReviewChanges, setForwardReviewChanges] =
+    useState<DetectedChanges | null>(null);
+
+  // Day pairing (auto-fill Day 2 based on Day 1), but keep Day 2 editable for manual override.
+  const [day2ManualById, setDay2ManualById] = useState<Record<string, boolean>>(
+    {}
+  );
+
+  // Remarks are saved explicitly per-row (do NOT mix with load draft/undo stacks).
+  const [remarksDraftBySection, setRemarksDraftBySection] = useState<
+    Record<string, string>
+  >({});
+  const [remarksSavedBySection, setRemarksSavedBySection] = useState<
+    Record<string, string>
+  >({});
+  const [savingRemarkBySection, setSavingRemarkBySection] = useState<
+    Record<string, boolean>
+  >({});
   const [validationContext, setValidationContext] = useState<ValidationContext>(
     {
       courseToKac: {},
@@ -2379,6 +2874,114 @@ export default function OM_LoadAssignment() {
   };
 
   const commitRows = (nextRows: Row[], options?: { markDirty?: boolean }) => {
+    // If OM edits a schedule row that is currently "Approved",
+    // the approval becomes stale immediately and must be re-sent to faculty.
+    // This must happen even before OM clicks "Send to Faculty".
+    const demoteApprovedRowsOnAnyEdit = (incoming: Row[]): Row[] => {
+      const oldById = new Map(rows.map((r) => [r.id, r] as const));
+
+      const deepEq = (a: any, b: any) => {
+        if (a === b) return true;
+        // Handle simple cases
+        const ta = typeof a;
+        const tb = typeof b;
+        if (ta !== tb) return false;
+        if (a == null || b == null) return a === b;
+        // Fallback for objects/arrays
+        try {
+          return JSON.stringify(a) === JSON.stringify(b);
+        } catch {
+          return false;
+        }
+      };
+
+      const isMeaningfulEdit = (prev: any, next: any) => {
+        const keys = new Set<string>([
+          ...Object.keys(prev || {}),
+          ...Object.keys(next || {}),
+        ]);
+        // Ignore non-content/UI/meta fields when detecting an "edit".
+        // Status itself is what we mutate; ignore it when detecting edits.
+        const ignore = new Set([
+          "id",
+          "status",
+          "selected",
+          "forwarded_to_faculty",
+          "reforward_needed",
+          "pending_rfc",
+          "conflictNote",
+          "editable",
+          "finalized",
+        ]);
+        for (const k of ignore) keys.delete(k);
+        for (const k of keys) {
+          if (!deepEq((prev as any)?.[k], (next as any)?.[k])) return true;
+        }
+        return false;
+      };
+
+      return incoming.map((n): Row => {
+        const p = oldById.get(n.id);
+        if (!p) return n;
+        if (
+          String(p.status || "")
+            .trim()
+            .toLowerCase() !== "approved"
+        )
+          return n;
+        if (!isMeaningfulEdit(p, n)) return n;
+        return { ...n, status: "Pending" as Row["status"] };
+      });
+    };
+
+    const nextRowsWithApprovedDemotions = demoteApprovedRowsOnAnyEdit(nextRows);
+    // If a row was already forwarded to faculty, any meaningful edit should make it eligible for re-forwarding.
+    // (Selection toggles should NOT trigger this.)
+    const prevById = new Map(rows.map((r) => [r.id, r] as const));
+
+    const meaningfulKeys: (keyof Row)[] = [
+      "course",
+      "title",
+      "units",
+      "section",
+      "faculty",
+      "faculty_id",
+      "day1",
+      "begin1",
+      "end1",
+      "room1",
+      "day2",
+      "begin2",
+      "end2",
+      "room2",
+      "capacity",
+      "mode",
+    ];
+
+    const isMeaningfullyChanged = (a: Row, b: Row) => {
+      for (const k of meaningfulKeys) {
+        const av = (a as any)[k];
+        const bv = (b as any)[k];
+        if (String(av ?? "") !== String(bv ?? "")) return true;
+      }
+      return false;
+    };
+
+    const nextRowsWithReforward: Row[] = nextRowsWithApprovedDemotions.map(
+      (nr) => {
+        const pr = prevById.get(nr.id);
+        if (!pr) return nr;
+        if (!pr.forwarded_to_faculty) return nr;
+        if (pr.reforward_needed) return nr;
+
+        // Only flag if something meaningful (not selection) changed.
+        if (isMeaningfullyChanged(pr, nr)) {
+          return { ...nr, reforward_needed: true };
+        }
+        return nr;
+      }
+    );
+
     /**
      * Auto-status rule:
      * Once OM fills a row with the required details (even before sending to faculty),
@@ -2411,16 +3014,12 @@ export default function OM_LoadAssignment() {
         return true;
       };
 
-      return rowsIn.map((r) => {
-        const locked =
-          !!r.finalized || r.status === "Approved" || r.status === "Confirmed";
-        if (locked) return r;
-
+      return rowsIn.map((r): Row => {
         // If OM has completed the row, ensure it's Pending (unless it is already a more specific status).
         if (isComplete(r)) {
           const current = String(r.status || "").trim();
           if (!current || current === "Unassigned") {
-            return { ...r, status: "Pending" };
+            return { ...r, status: "Pending" as Row["status"] };
           }
         }
 
@@ -2428,7 +3027,7 @@ export default function OM_LoadAssignment() {
       });
     };
 
-    const nextRowsWithStatus = applyAutoPendingStatus(nextRows);
+    const nextRowsWithStatus = applyAutoPendingStatus(nextRowsWithReforward);
 
     // Push current snapshot to undo before applying the change
     undoStackRef.current.push({ rows, hasLocalEdits });
@@ -2473,18 +3072,89 @@ export default function OM_LoadAssignment() {
     bumpHistory();
   };
 
+  /* ---------------------- Keyboard shortcuts (Ctrl/Cmd) ---------------------- */
+  // NOTE: We intentionally do NOT override native undo/redo inside text inputs.
+  const shortcutFnsRef = useRef<{ undo: () => void; redo: () => void }>({
+    undo: () => {},
+    redo: () => {},
+  });
+  const isRunningRef = useRef(false);
+  useEffect(() => {
+    isRunningRef.current = isRunning;
+  }, [isRunning]);
+
+  useEffect(() => {
+    shortcutFnsRef.current = {
+      undo: handleUndo,
+      redo: handleRedo,
+    };
+  }, [handleUndo, handleRedo]);
+
+  useEffect(() => {
+    const isEditableTarget = (t: EventTarget | null) => {
+      const el = t as HTMLElement | null;
+      if (!el) return false;
+
+      const tag = (el as any).tagName
+        ? String((el as any).tagName).toLowerCase()
+        : "";
+      if (tag === "input" || tag === "textarea" || tag === "select")
+        return true;
+
+      if ((el as any).isContentEditable) return true;
+      if (el.closest?.("[contenteditable='true']")) return true;
+      if (el.getAttribute?.("role") === "textbox") return true;
+      return false;
+    };
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.defaultPrevented) return;
+      if (e.altKey) return;
+
+      const mod = e.ctrlKey || e.metaKey; // Ctrl (Win/Linux) / Cmd (Mac)
+      if (!mod) return;
+
+      const key = String(e.key || "").toLowerCase();
+      if (key !== "z" && key !== "y") return;
+
+      if (!isRunningRef.current) return;
+
+      // Don’t intercept while the user is typing in an editable control
+      if (isEditableTarget(e.target)) return;
+
+      e.preventDefault();
+      e.stopPropagation();
+
+      const fns = shortcutFnsRef.current;
+
+      // Ctrl/Cmd+Z => Undo
+      if (key === "z" && !e.shiftKey) {
+        fns.undo();
+        return;
+      }
+
+      // Ctrl/Cmd+Y or Ctrl/Cmd+Shift+Z => Redo
+      if (key === "y" || (key === "z" && e.shiftKey)) {
+        fns.redo();
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => window.removeEventListener("keydown", onKeyDown, true);
+  }, []);
+
   const [facultyList, setFacultyList] = useState<Faculty[]>([]);
-  // Faculty Deloading (per-faculty)
-  const [deloadFacultyQuery, setDeloadFacultyQuery] = useState<string>("");
-  const [deloadSelectedFaculty, setDeloadSelectedFaculty] =
-    useState<Faculty | null>(null);
-  const [deloadRows, setDeloadRows] = useState<DeloadingRow[]>([]);
-  const [deloadLoading, setDeloadLoading] = useState(false);
-  const [deloadError, setDeloadError] = useState<string>("");
-  const [facultyWithDeloadings, setFacultyWithDeloadings] = useState<Faculty[]>(
-    []
-  );
-  const [deloadDropdownOpen, setDeloadDropdownOpen] = useState(false);
+  // Faculty Deloading (term-wide; UI-only summary)
+  type DeloadingDisplayRow = DeloadingRow & {
+    faculty_id: string;
+    faculty_name_display: string;
+  };
+  const [deloadAllRows, setDeloadAllRows] = useState<DeloadingDisplayRow[]>([]);
+  const [deloadAllLoading, setDeloadAllLoading] = useState(false);
+  const [deloadAllError, setDeloadAllError] = useState<string>("");
+  // We still track this internally (setter is used), but we no longer display the summary line.
+  // Avoid TS6133 (unused state value) by omitting the read value.
+  const [, setFacultyWithDeloadings] = useState<Faculty[]>([]);
 
   // Load all faculty once on mount
   useEffect(() => {
@@ -2524,6 +3194,30 @@ export default function OM_LoadAssignment() {
 
   const [initialLoaded, setInitialLoaded] = useState(false);
 
+  // Returns the *stored value* for Day 2 (same format as DAY_OPTIONS.value).
+  // Supports either stored codes (M/T/W/H/F/S) or day names/labels.
+  const pairedDay2For = (day1: string): string => {
+    const raw = String(day1 || "").trim();
+    if (!raw) return "";
+
+    // If already in code form, map directly.
+    const code = raw.length === 1 ? raw.toUpperCase() : "";
+    if (code === "M") return "H"; // Monday -> Thursday
+    if (code === "T") return "F"; // Tuesday -> Friday
+    if (code === "W") return "S"; // Wednesday -> Saturday
+
+    // Otherwise try to map from label/name to code.
+    const d = raw.toLowerCase();
+    if (d === "monday") return "H";
+    if (d === "tuesday") return "F";
+    if (d === "wednesday") return "S";
+    // Also handle common label forms (e.g., "Mon", "Tue", "Wed").
+    if (d === "mon") return "H";
+    if (d === "tue") return "F";
+    if (d === "wed") return "S";
+    return "";
+  };
+
   const setCell = <K extends keyof Row>(id: string, key: K, val: Row[K]) => {
     const markDirty = key !== ("selected" as K);
     const next = rows.map((r) => (r.id === id ? { ...r, [key]: val } : r));
@@ -2546,14 +3240,109 @@ export default function OM_LoadAssignment() {
     commitRows(next, { markDirty: false });
   };
 
+  const levelOptions: SelectOption[] = [
+    { value: "ALL", label: "All Levels" },
+    { value: "UG", label: "Undergraduate" },
+    { value: "GS", label: "Graduate" },
+    { value: "SHS", label: "SHS" },
+  ];
+  const getRowProgramLevel = (r: Row): "UG" | "GS" | "SHS" | "" => {
+    // Prefer explicit course_id from backend row; fall back to sectionCourse map.
+    const sid = String((r as any)?.id || (r as any)?.section_id || "").trim();
+    const cid = String(
+      (r as any)?.course_id || validationContext.sectionCourse?.[sid] || ""
+    ).trim();
+
+    // Backend map is course_id -> program_level (from courses.program_level), but UG data is sometimes blank.
+    const raw0 = String(validationContext.courseProgramLevel?.[cid] || "")
+      .trim()
+      .toUpperCase();
+
+    // If program_level is missing, treat it as UG by default (unless it clearly looks like SHS).
+    // This fixes the common case where GS is populated but UG courses are left blank in the catalog.
+    if (!raw0) {
+      const code = String((r as any)?.course || "")
+        .trim()
+        .toUpperCase();
+      if (code.startsWith("SHS") || code.includes("SHS")) return "SHS";
+      return "UG";
+    }
+
+    // Normalize to make matching robust (handles values like "UG - Undergraduate", "Under graduate", etc.)
+    const raw = raw0.replace(/[^A-Z]/g, "");
+
+    if (
+      raw === "UG" ||
+      raw.startsWith("UG") ||
+      raw.includes("UNDERGRAD") ||
+      raw.includes("UNDERGRADUATE") ||
+      raw.includes("COLLEGE") ||
+      raw === "COL"
+    )
+      return "UG";
+
+    if (
+      raw === "GS" ||
+      raw.startsWith("GS") ||
+      raw === "GR" ||
+      raw.startsWith("GR") ||
+      raw.includes("GRAD") ||
+      raw.includes("GRADUATE") ||
+      raw.includes("POSTGRAD")
+    )
+      return "GS";
+
+    if (
+      raw === "SHS" ||
+      raw.includes("SENIORHIGHSCHOOL") ||
+      raw.includes("SHS")
+    )
+      return "SHS";
+
+    return "";
+  };
   const filtered = rows.filter((r) => {
-    const s = search.trim().toLowerCase();
-    if (!s) return true;
-    return (
-      r.course.toLowerCase().includes(s) ||
-      (r.faculty || "").toLowerCase().includes(s) ||
-      (r.section || "").toLowerCase().includes(s)
+    // Apply the level filter first so it works even when search is blank.
+    if (levelFilter !== "ALL") {
+      const lvl = getRowProgramLevel(r);
+      if (lvl !== levelFilter) return false;
+    }
+
+    const q = search.trim().toLowerCase();
+    if (!q) return true;
+
+    const remarks = String(
+      remarksDraftBySection[r.id] ??
+        remarksSavedBySection[r.id] ??
+        (r as any)?.remarks ??
+        ""
     );
+
+    const hay = [
+      r.course,
+      r.title,
+      r.section,
+      r.faculty,
+      r.faculty_id || "",
+      String(r.units ?? ""),
+      r.day1,
+      r.begin1,
+      r.end1,
+      r.room1,
+      r.day2,
+      r.begin2,
+      r.end2,
+      r.room2,
+      String(r.capacity ?? ""),
+      r.mode || "",
+      r.status || "",
+      (r as any)?.conflictNote || "",
+      remarks,
+    ]
+      .join(" ")
+      .toLowerCase();
+
+    return hay.includes(q);
   });
 
   const allSelected =
@@ -2576,13 +3365,22 @@ export default function OM_LoadAssignment() {
     const key = (r: Row) => String(r.faculty_id || r.faculty || "").trim();
     const selectedKeys = new Set(selectedRows.map(key).filter(Boolean));
 
+    const isEligible = (r: Row) => {
+      // Never include rows without a faculty
+      if (!key(r)) return false;
+
+      // Do NOT re-send rows that were already forwarded unless they've been edited since.
+      if (r.forwarded_to_faculty && !r.reforward_needed) return false;
+      return true;
+    };
+
     if (all) {
-      // Send all rows that are assigned to a faculty
-      return rows.filter((r) => !!key(r));
+      // Send all eligible rows that are assigned to a faculty
+      return rows.filter(isEligible);
     }
 
     // If any row is selected for a faculty, send ALL rows for that faculty (not per subject)
-    return rows.filter((r) => selectedKeys.has(key(r)));
+    return rows.filter((r) => selectedKeys.has(key(r)) && isEligible(r));
   };
   /**
    * Before forwarding to faculty, require that the rows being sent are complete.
@@ -2734,6 +3532,15 @@ export default function OM_LoadAssignment() {
       end2: normalizeServerTimeToHHMM(r?.end2),
     }));
     setRows(normalizedRows);
+
+    // Initialize remarks state from DB values (sections.remarks) without affecting other save/undo behaviors.
+    const initRemarks: Record<string, string> = {};
+    for (const rr of normalizedRows) {
+      initRemarks[rr.id] = String((rr as any)?.remarks ?? "");
+    }
+    setRemarksDraftBySection(initRemarks);
+    setRemarksSavedBySection(initRemarks);
+
     const nextTermId =
       typeof (res as any)?.term_id === "string" ? (res as any).term_id : "";
     setTerm(typeof res?.term === "string" ? res.term : "");
@@ -2744,9 +3551,103 @@ export default function OM_LoadAssignment() {
     }
     setMode("run");
     // Once forwarded to Chair, it is a final act and must remain disabled across refresh/auto-assign.
-    setApproved(Boolean((res as any)?.forwarded_to_chair));
+    const forwardedToChair = Boolean((res as any)?.forwarded_to_chair);
+    setApproved(forwardedToChair);
+    // Keep a baseline snapshot for "Re-forward" change preview.
+    // Only update baseline when the server says it is forwarded; otherwise clear.
+    if (forwardedToChair) {
+      forwardBaselineRef.current = normalizedRows.map((r) => ({ ...r }));
+    } else {
+      forwardBaselineRef.current = null;
+    }
     setHasLocalEdits(false);
     resetHistory();
+  };
+
+  const getPrimaryScheduleId = (r: Row): string => {
+    const ids = (r as any)?.schedule_ids;
+    if (Array.isArray(ids)) {
+      const found = ids.find((x: any) => typeof x === "string" && x.trim());
+      if (found) return String(found);
+    }
+    const single = (r as any)?.schedule_id;
+    return typeof single === "string" ? single : "";
+  };
+
+  // --- Remarks autosave (per section) ---
+  // Debounce timers keyed by section row id.
+  const remarkAutosaveTimersRef = useRef<Record<string, number>>({});
+
+  const clearRemarkAutosaveTimer = (sectionId: string) => {
+    const t = remarkAutosaveTimersRef.current[sectionId];
+    if (t) {
+      window.clearTimeout(t);
+      delete remarkAutosaveTimersRef.current[sectionId];
+    }
+  };
+
+  useEffect(() => {
+    return () => {
+      // cleanup timers on unmount
+      for (const k of Object.keys(remarkAutosaveTimersRef.current)) {
+        window.clearTimeout(remarkAutosaveTimersRef.current[k]);
+      }
+      remarkAutosaveTimersRef.current = {};
+    };
+  }, []);
+
+  const handleSaveRemark = async (
+    r: Row,
+    options?: { silentSuccess?: boolean }
+  ) => {
+    if (!userId || isArchiveView) return;
+    const sectionId = r.id;
+    const scheduleId = getPrimaryScheduleId(r);
+    if (!scheduleId) {
+      showToast(
+        "Cannot save remarks for this row because a schedule identifier is missing.",
+        "error"
+      );
+      return;
+    }
+
+    const remarks = String(remarksDraftBySection[sectionId] ?? "");
+    const saved = String(remarksSavedBySection[sectionId] ?? "");
+    if (remarks === saved) return;
+    if (savingRemarkBySection[sectionId]) return;
+
+    setSavingRemarkBySection((p) => ({ ...p, [sectionId]: true }));
+    try {
+      await saveOmSectionRemarks(userId, { schedule_id: scheduleId, remarks });
+      setRemarksSavedBySection((p) => ({ ...p, [sectionId]: remarks }));
+      // Do not clobber a newer in-progress edit that happened while the save was in-flight.
+      setRemarksDraftBySection((p) =>
+        String(p[sectionId] ?? "") === remarks
+          ? { ...p, [sectionId]: remarks }
+          : p
+      );
+      if (!options?.silentSuccess) {
+        showToast("Remarks saved.", "success");
+      }
+    } catch (e: any) {
+      showToast(e?.message || "Failed to save remarks.", "error");
+    } finally {
+      setSavingRemarkBySection((p) => ({ ...p, [sectionId]: false }));
+    }
+  };
+
+  const queueAutosaveRemark = (r: Row, nextValue: string) => {
+    if (!userId || isArchiveView) return;
+    const sectionId = r.id;
+    // Update draft immediately.
+    setRemarksDraftBySection((p) => ({ ...p, [sectionId]: nextValue }));
+
+    // Debounced save.
+    clearRemarkAutosaveTimer(sectionId);
+    remarkAutosaveTimersRef.current[sectionId] = window.setTimeout(() => {
+      // Use the latest draft at save time.
+      void handleSaveRemark(r, { silentSuccess: true });
+    }, 700);
   };
 
   const handleForwardToChair = async () => {
@@ -2776,9 +3677,30 @@ export default function OM_LoadAssignment() {
   };
 
   const getEditFlags = (r: Row) => {
-    // Once a row is finalized/approved, it must be locked from any further edits.
-    const isLocked = !!r.finalized || r.status === "Approved";
-    if (isLocked) {
+    // Rows synced from Faculty Service Request are view-only for OM.
+    if (!!(r as any).synced_from_faculty_service) {
+      return {
+        course: false,
+        title: false,
+        units: false,
+        section: false,
+        faculty: false,
+        day1: false,
+        begin1: false,
+        end1: false,
+        room1: false,
+        day2: false,
+        begin2: false,
+        end2: false,
+        room2: false,
+        capacity: false,
+        mode: false,
+      } as const;
+    }
+
+    // Archived terms are view-only.
+    // NOTE: Faculty acceptance/"Approved" schedules must remain editable by OM.
+    if (isArchiveView) {
       return {
         course: false,
         title: false,
@@ -2947,43 +3869,99 @@ export default function OM_LoadAssignment() {
     [rowFlags]
   );
 
-  const deloadMatches = useMemo(() => {
-    const q = deloadFacultyQuery.trim().toLowerCase();
-    if (!q) return [] as Faculty[];
-    return (facultyList ?? [])
-      .filter((f) => (f.faculty_name_display || "").toLowerCase().includes(q))
-      .slice(0, 12);
-  }, [deloadFacultyQuery, facultyList]);
+  const deloadFiltered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return deloadAllRows;
+    return deloadAllRows.filter((r) => {
+      const hay = [
+        r.faculty_name_display,
+        r.faculty_id,
+        r.deloading_type || "",
+        String(r.units_deloaded ?? ""),
+        r.notes || "",
+        r.updated_at ? new Date(r.updated_at as any).toISOString() : "",
+      ]
+        .join(" ")
+        .toLowerCase();
+      return hay.includes(q);
+    });
+  }, [deloadAllRows, search]);
 
-  const loadFacultyDeloadings = async (fid: string) => {
-    if (!fid) return;
-    try {
-      setDeloadLoading(true);
-      setDeloadError("");
-      const res = await getOmFacultyDeloadings({
-        faculty_id: fid,
-        term_id: termId || undefined,
-      });
-      setDeloadRows(Array.isArray(res?.rows) ? res.rows : []);
-    } catch (e: any) {
-      setDeloadError(e?.message || "Failed to load deloadings.");
-      setDeloadRows([]);
-    } finally {
-      setDeloadLoading(false);
+  // Sum deloading units per faculty (UI-only; used in Faculty Load Summary)
+  const deloadUnitsByFacultyId = useMemo(() => {
+    const map: Record<string, number> = {};
+    for (const r of deloadAllRows) {
+      const fid = String((r as any)?.faculty_id || "").trim();
+      if (!fid) continue;
+
+      const raw = (r as any)?.units_deloaded;
+      const units =
+        typeof raw === "number" ? raw : parseFloat(String(raw ?? "0")) || 0;
+      map[fid] = (map[fid] || 0) + units;
     }
-  };
+    return map;
+  }, [deloadAllRows]);
 
   useEffect(() => {
     if (!termId) return;
+
+    let cancelled = false;
     (async () => {
+      setDeloadAllLoading(true);
+      setDeloadAllError("");
       try {
+        // 1) Get the list of faculty who have deloadings for the term.
         const r = await getOmFacultyWithDeloadings(termId);
-        setFacultyWithDeloadings(Array.isArray(r?.faculty) ? r.faculty : []);
-      } catch (e) {
-        console.error("Failed to load facultyWithDeloadings", e);
+        const fac = Array.isArray(r?.faculty) ? r.faculty : [];
+        if (cancelled) return;
+        setFacultyWithDeloadings(fac);
+
+        // 2) Fetch deloading rows per faculty and flatten into a single table.
+        const results = await Promise.all(
+          fac.map(async (f) => {
+            try {
+              const res = await getOmFacultyDeloadings({
+                faculty_id: f.faculty_id,
+                term_id: termId || undefined,
+              });
+              const rows = Array.isArray(res?.rows) ? res.rows : [];
+              return rows.map((row) => ({
+                ...row,
+                faculty_id: f.faculty_id,
+                faculty_name_display: f.faculty_name_display,
+              })) as DeloadingDisplayRow[];
+            } catch {
+              // UI-only: if one faculty fails, keep the rest.
+              return [] as DeloadingDisplayRow[];
+            }
+          })
+        );
+
+        if (cancelled) return;
+        const flat = results.flat();
+
+        // Show most recently updated first (still UI-only; no backend behavior changes).
+        flat.sort((a, b) => {
+          const da = a.updated_at ? +new Date(a.updated_at as any) : 0;
+          const db = b.updated_at ? +new Date(b.updated_at as any) : 0;
+          return db - da;
+        });
+
+        setDeloadAllRows(flat);
+      } catch (e: any) {
+        if (cancelled) return;
+        console.error("Failed to load deloadings", e);
         setFacultyWithDeloadings([]);
+        setDeloadAllRows([]);
+        setDeloadAllError(e?.message || "Failed to load deloadings.");
+      } finally {
+        if (!cancelled) setDeloadAllLoading(false);
       }
     })();
+
+    return () => {
+      cancelled = true;
+    };
   }, [termId]);
 
   type FacultySummaryRow = {
@@ -2997,30 +3975,9 @@ export default function OM_LoadAssignment() {
   const facultySummary: FacultySummaryRow[] = useMemo(() => {
     const acc: Record<string, FacultySummaryRow> = {};
 
-    // 1) Seed with ALL faculty from DB (so unassigned ones exist with 0 units)
-    for (const f of facultyList ?? []) {
-      const fid = f.faculty_id;
-      if (!fid) continue;
-
-      const prefFromMap = preferredByFaculty?.[fid];
-      const preferredUnits =
-        typeof prefFromMap === "number"
-          ? prefFromMap
-          : typeof f.preferred_units === "number"
-          ? f.preferred_units
-          : null;
-
-      acc[fid] = {
-        facultyId: fid,
-        facultyName: f.faculty_name_display || fid,
-        assignedUnits: 0,
-        preferredUnits,
-        diff: preferredUnits != null ? 0 - preferredUnits : null,
-      };
-    }
-
-    // 2) Add assigned units from rows (only increments those who appear in rows)
     for (const r of rows) {
+      if (!r.faculty && !r.faculty_id) continue;
+
       const key = r.faculty_id || r.faculty || "";
       if (!key) continue;
 
@@ -3030,14 +3987,15 @@ export default function OM_LoadAssignment() {
           : parseFloat(String(r.units || "0")) || 0;
 
       if (!acc[key]) {
-        // fallback if faculty is not in facultyList (edge case)
         const meta = r.faculty_id ? facultyById[r.faculty_id] : undefined;
         const facultyName =
           r.faculty || meta?.faculty_name_display || r.faculty_id || "—";
 
+        // NEW: first try map from backend, then fallback to meta.preferred_units
         const prefFromMap = r.faculty_id
-          ? preferredByFaculty?.[r.faculty_id]
+          ? preferredByFaculty[r.faculty_id]
           : undefined;
+
         const preferredUnits =
           typeof prefFromMap === "number"
             ? prefFromMap
@@ -3057,19 +4015,118 @@ export default function OM_LoadAssignment() {
       acc[key].assignedUnits += numericUnits;
     }
 
-    // 3) Recompute diff after accumulating
+    // compute diff after accumulating
     Object.values(acc).forEach((row) => {
       if (row.preferredUnits != null) {
         row.diff = row.assignedUnits - row.preferredUnits;
-      } else {
-        row.diff = null;
       }
     });
 
     return Object.values(acc).sort((a, b) =>
       a.facultyName.localeCompare(b.facultyName)
     );
-  }, [rows, facultyList, facultyById, preferredByFaculty]);
+  }, [rows, facultyById, preferredByFaculty]);
+
+  type UnitsFilterMode = "all" | "unassigned" | "issues";
+  type UnitsSortKey = "faculty" | "assigned" | "preferred" | "gap";
+
+  const [showUnitsFilters, setShowUnitsFilters] = useState(false);
+  const [unitsFilterMode, setUnitsFilterMode] =
+    useState<UnitsFilterMode>("all");
+  const [hideNoPrefs, setHideNoPrefs] = useState(false);
+
+  // default sort
+  const [unitsSortKey, setUnitsSortKey] = useState<UnitsSortKey>("gap");
+  const [unitsSortDir, setUnitsSortDir] = useState<"asc" | "desc">("asc");
+
+  const toggleUnitsSort = (key: UnitsSortKey) => {
+    if (unitsSortKey === key) {
+      setUnitsSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    } else {
+      setUnitsSortKey(key);
+      setUnitsSortDir("asc");
+    }
+  };
+
+  const facultySummaryFiltered: FacultySummaryRow[] = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return facultySummary;
+
+    return facultySummary.filter((f) => {
+      const deloadUnits =
+        (f.facultyId && deloadUnitsByFacultyId[f.facultyId]) || 0;
+
+      const hay = [
+        f.facultyName,
+        f.facultyId,
+        String(f.assignedUnits ?? ""),
+        String(f.preferredUnits ?? ""),
+        String(f.diff ?? ""),
+        String(deloadUnits ?? ""),
+      ]
+        .join(" ")
+        .toLowerCase();
+
+      return hay.includes(q);
+    });
+  }, [facultySummary, deloadUnitsByFacultyId, search]);
+
+  const facultySummaryView: FacultySummaryRow[] = useMemo(() => {
+    const base = [...facultySummaryFiltered];
+
+    const filtered = base.filter((f) => {
+      const assigned = Number(f.assignedUnits ?? 0);
+      const hasPref = f.preferredUnits != null;
+      const diff = f.diff;
+
+      if (hideNoPrefs && !hasPref) return false;
+
+      if (unitsFilterMode === "unassigned") return assigned === 0;
+      if (unitsFilterMode === "issues")
+        return hasPref && diff != null && diff !== 0;
+      return true;
+    });
+
+    const dir = unitsSortDir === "asc" ? 1 : -1;
+
+    filtered.sort((a, b) => {
+      const aName = a.facultyName ?? "";
+      const bName = b.facultyName ?? "";
+
+      const aAssigned = Number(a.assignedUnits ?? 0);
+      const bAssigned = Number(b.assignedUnits ?? 0);
+
+      const aPref =
+        a.preferredUnits == null
+          ? Number.POSITIVE_INFINITY
+          : Number(a.preferredUnits);
+      const bPref =
+        b.preferredUnits == null
+          ? Number.POSITIVE_INFINITY
+          : Number(b.preferredUnits);
+
+      const aGap = a.diff == null ? Number.POSITIVE_INFINITY : Number(a.diff);
+      const bGap = b.diff == null ? Number.POSITIVE_INFINITY : Number(b.diff);
+
+      if (unitsSortKey === "faculty") return dir * aName.localeCompare(bName);
+      if (unitsSortKey === "assigned") return dir * (aAssigned - bAssigned);
+      if (unitsSortKey === "preferred") return dir * (aPref - bPref);
+
+      // default: gap
+      if (aGap !== bGap) return dir * (aGap - bGap);
+
+      // tie-breaker: name
+      return aName.localeCompare(bName);
+    });
+
+    return filtered;
+  }, [
+    facultySummaryFiltered,
+    unitsFilterMode,
+    unitsSortKey,
+    unitsSortDir,
+    hideNoPrefs,
+  ]);
 
   // ---- Rule alerts for Tab 2 (violations / warnings) ----
   type RuleAlert = {
@@ -3462,6 +4519,25 @@ export default function OM_LoadAssignment() {
     return alerts;
   }, [rows, rowFlags, validationContext, isRowIncompleteForApproval]);
 
+  const ruleAlertsFiltered: RuleAlert[] = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return ruleAlerts;
+
+    return ruleAlerts.filter((a) => {
+      const hay = [
+        a.rule,
+        a.severity,
+        a.facultyName || "",
+        a.facultyId || "",
+        String(a.rowNumber ?? ""),
+        a.message,
+      ]
+        .join(" ")
+        .toLowerCase();
+      return hay.includes(q);
+    });
+  }, [ruleAlerts, search]);
+
   type BlockedGeCmps2Item = {
     campus_id: string;
     campus_name?: string;
@@ -3498,9 +4574,9 @@ export default function OM_LoadAssignment() {
           bySection[sid] = {
             rowId: sid,
             course: b.course_code || b.course_id || "—",
-            section: b.section_code || sid,
+            section: b.section_code || "—",
             campusId: b.campus_id || "",
-            campusName: b.campus_name || b.campus_id || "",
+            campusName: b.campus_name || "",
           };
         }
         return Object.values(bySection).filter(
@@ -3516,87 +4592,21 @@ export default function OM_LoadAssignment() {
     );
   }, [blockedGeCmps2]);
 
+  const blockedSectionsFiltered: BlockedSectionRow[] = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return blockedSections;
+
+    return blockedSections.filter((b) => {
+      const hay = [b.course, b.section, b.campusId, b.campusName || ""]
+        .join(" ")
+        .toLowerCase();
+      return hay.includes(q);
+    });
+  }, [blockedSections, search]);
+
   const [summaryTab, setSummaryTab] = useState<"units" | "second" | "blocked">(
     "units"
   );
-
-  type UnitsFilterMode = "all" | "unassigned" | "issues";
-  type UnitsSortKey = "faculty" | "assigned" | "preferred" | "gap";
-
-  const [hideNoPrefs, setHideNoPrefs] = useState(false);
-  const [showUnitsFilters, setShowUnitsFilters] = useState(false);
-  const [unitsFilterMode, setUnitsFilterMode] =
-    useState<UnitsFilterMode>("all");
-
-  // default sort (you can change these defaults if you want)
-  const [unitsSortKey, setUnitsSortKey] = useState<UnitsSortKey>("gap");
-  const [unitsSortDir, setUnitsSortDir] = useState<"asc" | "desc">("asc"); // asc: most underloaded first
-
-  const toggleUnitsSort = (key: UnitsSortKey) => {
-    if (unitsSortKey === key) {
-      setUnitsSortDir((d) => (d === "asc" ? "desc" : "asc"));
-    } else {
-      setUnitsSortKey(key);
-      setUnitsSortDir("asc");
-    }
-  };
-
-  const facultySummaryView = useMemo(() => {
-    const base = [...facultySummary];
-
-    const filtered = base.filter((f) => {
-      const assigned = Number(f.assignedUnits ?? 0);
-      const hasPref = f.preferredUnits != null;
-      const diff = f.diff;
-
-      if (hideNoPrefs && !hasPref) return false;
-
-      if (unitsFilterMode === "unassigned") return assigned === 0;
-      if (unitsFilterMode === "issues")
-        return hasPref && diff != null && diff !== 0;
-      return true;
-    });
-
-    const dir = unitsSortDir === "asc" ? 1 : -1;
-
-    filtered.sort((a, b) => {
-      const aName = a.facultyName ?? "";
-      const bName = b.facultyName ?? "";
-
-      const aAssigned = Number(a.assignedUnits ?? 0);
-      const bAssigned = Number(b.assignedUnits ?? 0);
-
-      const aPref =
-        a.preferredUnits == null
-          ? Number.POSITIVE_INFINITY
-          : Number(a.preferredUnits);
-      const bPref =
-        b.preferredUnits == null
-          ? Number.POSITIVE_INFINITY
-          : Number(b.preferredUnits);
-
-      const aGap = a.diff == null ? Number.POSITIVE_INFINITY : Number(a.diff);
-      const bGap = b.diff == null ? Number.POSITIVE_INFINITY : Number(b.diff);
-
-      if (unitsSortKey === "faculty") return dir * aName.localeCompare(bName);
-      if (unitsSortKey === "assigned") return dir * (aAssigned - bAssigned);
-      if (unitsSortKey === "preferred") return dir * (aPref - bPref);
-
-      // default: gap
-      if (aGap !== bGap) return dir * (aGap - bGap);
-
-      // tie-breaker: name
-      return aName.localeCompare(bName);
-    });
-
-    return filtered;
-  }, [
-    facultySummary,
-    unitsFilterMode,
-    unitsSortKey,
-    unitsSortDir,
-    hideNoPrefs,
-  ]);
 
   const courseOptions = useMemo(() => {
     const map: Record<string, string> = {};
@@ -3659,12 +4669,20 @@ export default function OM_LoadAssignment() {
                   Archived Loads
                 </button>
 
+                <SelectBox
+                  value={levelFilter}
+                  onChange={setLevelFilter}
+                  options={levelOptions}
+                  className="min-w-[135px] w-[135px]"
+                  buttonClassName="inline-flex h-10 w-full items-center justify-center gap-2 rounded-md border border-gray-300 bg-white px-4 py-2 pr-9 text-sm font-medium text-gray-700 shadow-sm hover:bg-gray-50"
+                />
+
                 <div className="relative flex-1 min-w-[260px]">
                   <SearchIcon className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-500" />
                   <input
                     value={search}
                     onChange={(e) => setSearch(e.target.value)}
-                    placeholder="Search by course, section, or faculty..."
+                    placeholder="Search across loads, deloadings, remarks, mode, etc..."
                     className="w-full rounded-lg border border-gray-300 px-9 pr-10 py-2 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30"
                   />
 
@@ -3682,61 +4700,156 @@ export default function OM_LoadAssignment() {
                 </div>
 
                 <div className="ml-auto flex items-center gap-2">
+                  {/* To Faculty button moved here (beside Refresh) */}
                   <button
-                    disabled={!hasReco || isArchiveView}
-                    onClick={handleSaveDraft}
-                    className={cls(
-                      "inline-flex h-10 min-w-[140px] items-center justify-center gap-2 rounded-md px-4 py-2 text-sm font-medium shadow-sm",
-                      hasReco
-                        ? isArchiveView
-                          ? "bg-gray-200 text-gray-500 cursor-not-allowed"
-                          : "bg-gray-800 text-white hover:brightness-110"
-                        : "bg-gray-200 text-gray-500 cursor-not-allowed"
-                    )}
-                    title={
-                      isArchiveView
-                        ? "Archived view: saving is disabled"
-                        : !hasReco
-                        ? "No recommendations to save yet"
-                        : "Save current assignments to the database"
-                    }
-                  >
-                    <Save className="h-4 w-4" />
-                    Save Draft
-                  </button>
-                  <button
-                    disabled={!hasReco || isArchiveView}
-                    className={cls(
-                      "rounded-lg px-4 py-2 font-semibold shadow-sm flex items-center gap-2",
-                      !(!hasReco || isArchiveView)
-                        ? "bg-emerald-600 text-white hover:bg-emerald-700" // enabled (GREEN)
-                        : "bg-gray-200 text-gray-400 cursor-not-allowed" // disabled
-                    )}
+                    disabled={!anySelected || !isRunning || isArchiveView}
                     onClick={() => {
                       if (isArchiveView) return;
-                      //HARD BLOCK: required fields must be complete before forwarding
-                      const incomplete = rows.filter(
-                        isRowIncompleteForApproval
-                      );
-                      if (incomplete.length > 0) {
+                      const preview = buildSendRowsForPreview();
+                      if (!preview.length) {
                         showToast(
-                          `Cannot forward to Chair yet. Please complete all required fields (including Mode) for ${incomplete.length} row(s).`,
+                          "No new or edited rows to send for the selected faculty. (Previously sent rows are excluded unless edited.)",
                           "error"
                         );
                         return;
                       }
 
-                      // Existing behavior: warn about other validation errors, but allow override
-                      if (hasAnyErrors) {
-                        const proceed = window.confirm(
-                          [
-                            "There are validation errors (e.g., KAC mismatch, mode mismatch, or schedule conflicts).",
-                            "",
-                            "Do you still want to proceed with approval?",
-                          ].join("\n")
+                      const missing = validateRowsCompleteForSend(preview);
+                      if (missing.length) {
+                        // Hard validation: block sending until required fields are filled
+                        setSendBlocked({ open: true, missing });
+                        showToast(
+                          "Cannot send to faculty: please complete all required fields in the selected faculty’s rows.",
+                          "error"
                         );
+                        return;
+                      }
+
+                      setSendRowsPreview(preview.map((r) => ({ ...r })));
+                      setShowSend(true);
+                    }}
+                    className={cls(
+                      "inline-flex h-10 min-w-[140px] items-center justify-center gap-2 rounded-md px-4 py-2 text-sm font-medium shadow-sm",
+                      anySelected && isRunning && !isArchiveView
+                        ? "bg-blue-600 text-white hover:brightness-110"
+                        : "bg-gray-200 text-gray-500 cursor-not-allowed"
+                    )}
+                    title={
+                      isArchiveView
+                        ? "Archived view: sending is disabled"
+                        : anySelected
+                        ? "Send to selected faculty"
+                        : "Select at least one row"
+                    }
+                  >
+                    <Send className="h-4 w-4" />
+                    To Faculty
+                  </button>
+                  <button
+                    disabled={!hasReco || isArchiveView}
+                    className={cls(
+                      // Match the typography/size of the other toolbar controls
+                      "inline-flex h-10 min-w-[160px] items-center justify-center gap-2 rounded-md px-4 py-2 text-sm font-medium shadow-sm",
+                      !(!hasReco || isArchiveView)
+                        ? "bg-emerald-600 text-white hover:bg-emerald-700" // enabled (GREEN)
+                        : "bg-gray-200 text-gray-400 cursor-not-allowed" // disabled
+                    )}
+                    onClick={async () => {
+                      if (isArchiveView) return;
+                      // Soft-check only: allow forwarding even if some rows are incomplete.
+                      const incomplete = rows.filter(
+                        isRowIncompleteForApproval
+                      );
+                      if (incomplete.length > 0) {
+                        const proceed = await openConfirm({
+                          title: "Incomplete rows",
+                          message: (
+                            <div className="space-y-2 text-sm text-gray-700">
+                              <p>
+                                There are{" "}
+                                <span className="font-semibold">
+                                  {incomplete.length}
+                                </span>{" "}
+                                row(s) with missing required fields (including{" "}
+                                <span className="font-semibold">Mode</span>).
+                              </p>
+                              <p>
+                                You can still forward to the Chair, but
+                                incomplete rows may not be actionable.
+                              </p>
+                              <p className="text-gray-600">
+                                Do you want to continue?
+                              </p>
+                            </div>
+                          ),
+                          confirmText: "Continue",
+                          cancelText: "Cancel",
+                        });
                         if (!proceed) return;
                       }
+
+                      // Existing behavior: warn about other validation errors, but allow override
+                      if (hasAnyErrors) {
+                        const proceed = await openConfirm({
+                          title: "Validation errors detected",
+                          variant: "warning",
+                          message: (
+                            <div className="space-y-2 text-sm text-gray-700">
+                              <p>
+                                There are validation errors (e.g., KAC mismatch,
+                                mode mismatch, or schedule conflicts).
+                              </p>
+                              <p className="text-gray-600">
+                                Do you still want to proceed with approval?
+                              </p>
+                            </div>
+                          ),
+                          confirmText: "Proceed",
+                          cancelText: "Cancel",
+                        });
+                        if (!proceed) return;
+                      }
+
+                      // Final step:
+                      //  - First forward: simple confirmation
+                      //  - Re-forward: show APO-style change preview before sending
+                      if (approved) {
+                        const baseline = forwardBaselineRef.current || [];
+                        setForwardReviewChanges(
+                          detectRowChanges(baseline, rows)
+                        );
+                        setShowForwardReview(true);
+                        return;
+                      }
+
+                      const finalProceed = await openConfirm({
+                        title: "Forward to Chair?",
+                        variant: "warning",
+                        confirmText: "Forward",
+                        cancelText: "Cancel",
+                        message: (
+                          <div className="space-y-2 text-sm text-neutral-600">
+                            <p>
+                              This will send your current{" "}
+                              <span className="font-semibold text-neutral-800">
+                                Load Recommendations
+                              </span>{" "}
+                              to the Chair.
+                            </p>
+                            <p>
+                              Once forwarded, this is treated as a{" "}
+                              <span className="font-semibold text-neutral-800">
+                                final action
+                              </span>{" "}
+                              for this term.
+                            </p>
+                            <p className="text-neutral-500">
+                              Do you want to continue?
+                            </p>
+                          </div>
+                        ),
+                      });
+                      if (!finalProceed) return;
 
                       void handleForwardToChair();
                     }}
@@ -3749,10 +4862,6 @@ export default function OM_LoadAssignment() {
               <div className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
                 <div className="flex items-center justify-between px-4 pt-4">
                   <div className="flex items-center gap-2">
-                    <h2 className="text-lg font-semibold">
-                      Load Recommendations
-                    </h2>
-
                     <div className="flex flex-wrap items-center gap-2">
                       <button
                         onClick={handleUndo}
@@ -3769,7 +4878,7 @@ export default function OM_LoadAssignment() {
                             : "Undo last change in Load Recommendations"
                         }
                       >
-                        <Undo2 className="h-4 w-4" />
+                        <Undo2 className="h-5 w-5" />
                       </button>
 
                       <button
@@ -3787,19 +4896,19 @@ export default function OM_LoadAssignment() {
                             : "Redo last undone change in Load Recommendations"
                         }
                       >
-                        <Redo2 className="h-4 w-4" />
+                        <Redo2 className="h-5 w-5" />
                       </button>
 
                       {/* Import SHS file */}
                       <button
                         type="button"
-                        onClick={handlePickShsFile}
+                        onClick={openShsImport}
                         disabled={!isRunning || isAssigning || isArchiveView}
                         className={cls(
-                          "inline-flex h-10 min-w-[140px] items-center justify-center gap-2 rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 shadow-sm",
-                          "hover:bg-gray-50",
+                          "inline-flex h-10 min-w-[140px] items-center justify-center gap-2 rounded-md bg-[#008e4e] px-4 py-2 text-sm font-medium text-white shadow-sm",
+                          "hover:brightness-110",
                           (!isRunning || isAssigning || isArchiveView) &&
-                            "opacity-50 cursor-not-allowed hover:bg-white"
+                            "opacity-50 cursor-not-allowed hover:brightness-100"
                         )}
                         title={
                           isArchiveView
@@ -3812,16 +4921,8 @@ export default function OM_LoadAssignment() {
                         }
                       >
                         <Upload className="h-4 w-4" />
-                        Import SHS file
+                        Import SHS
                       </button>
-
-                      <input
-                        ref={shsFileInputRef}
-                        type="file"
-                        accept=".csv,.xlsx,.xls"
-                        className="hidden"
-                        onChange={handleShsFileChange}
-                      />
                     </div>
                   </div>
 
@@ -3855,50 +4956,27 @@ export default function OM_LoadAssignment() {
                       </button>
                     )}
 
-                    {/* To Faculty button moved here (beside Refresh) */}
                     <button
-                      disabled={!anySelected || !isRunning || isArchiveView}
-                      onClick={() => {
-                        if (isArchiveView) return;
-                        const preview = buildSendRowsForPreview();
-                        if (!preview.length) {
-                          showToast(
-                            "Select at least one row with an assigned faculty.",
-                            "error"
-                          );
-                          return;
-                        }
-
-                        const missing = validateRowsCompleteForSend(preview);
-                        if (missing.length) {
-                          // Hard validation: block sending until required fields are filled
-                          setSendBlocked({ open: true, missing });
-                          showToast(
-                            "Cannot send to faculty: please complete all required fields in the selected faculty’s rows.",
-                            "error"
-                          );
-                          return;
-                        }
-
-                        setSendRowsPreview(preview.map((r) => ({ ...r })));
-                        setShowSend(true);
-                      }}
+                      disabled={!hasReco || isArchiveView}
+                      onClick={handleSaveDraft}
                       className={cls(
                         "inline-flex h-10 min-w-[140px] items-center justify-center gap-2 rounded-md px-4 py-2 text-sm font-medium shadow-sm",
-                        anySelected && isRunning && !isArchiveView
-                          ? "bg-blue-600 text-white hover:brightness-110"
+                        hasReco
+                          ? isArchiveView
+                            ? "bg-gray-200 text-gray-500 cursor-not-allowed"
+                            : "bg-gray-800 text-white hover:brightness-110"
                           : "bg-gray-200 text-gray-500 cursor-not-allowed"
                       )}
                       title={
                         isArchiveView
-                          ? "Archived view: sending is disabled"
-                          : anySelected
-                          ? "Send to selected faculty"
-                          : "Select at least one row"
+                          ? "Archived view: saving is disabled"
+                          : !hasReco
+                          ? "No recommendations to save yet"
+                          : "Save current assignments to the database"
                       }
                     >
-                      <Send className="h-4 w-4" />
-                      To Faculty
+                      <Save className="h-4 w-4" />
+                      Save Draft
                     </button>
 
                     {/* Original Import CSV block removed */}
@@ -3924,7 +5002,7 @@ export default function OM_LoadAssignment() {
 
                 {/* Match APO_CourseOfferings table styling (sticky header, bordered cells, emerald header text) */}
                 {isArchiveView ? (
-                  <ArchivedLoadsSummary rows={rows} termLabel={term} />
+                  <ArchivedLoadsSummary rows={filtered} termLabel={term} />
                 ) : (
                   <div className="mt-3 max-h-[58vh] overflow-x-auto overflow-y-auto rounded-xl border border-gray-300 bg-white shadow-sm">
                     <table className="min-w-full text-sm table-fixed border-collapse">
@@ -3944,6 +5022,9 @@ export default function OM_LoadAssignment() {
                         <col className="w-[96px]" />
                         <col className="w-[96px]" />
                         <col className="w-[80px]" />
+                        <col className="w-[80px]" />
+                        {/* Wider remarks column (may contain full sentences) */}
+                        <col className="w-[320px]" />
                         <col className="w-[100px]" />
                         <col className="w-[110px]" />
                       </colgroup>
@@ -4032,6 +5113,9 @@ export default function OM_LoadAssignment() {
                               *
                             </span>
                           </th>
+                          <th className="px-3 py-2 text-left border border-gray-300">
+                            Remarks
+                          </th>
                           <th className="px-3 py-2 text-center border border-gray-300">
                             Status
                           </th>
@@ -4044,20 +5128,22 @@ export default function OM_LoadAssignment() {
                       <tbody>
                         {filtered.map((r, idx) => {
                           const e = getEditFlags(r);
-                          const isLocked =
-                            !!r.finalized || r.status === "Approved";
+                          const fromFacultyService = !!(r as any)
+                            .synced_from_faculty_service;
+                          const isLocked = isArchiveView || fromFacultyService;
                           const isForwardedToFaculty = !!r.forwarded_to_faculty;
                           // Show the red dot only when there is a pending RFC AND the row is still actionable.
                           // Once the schedule is approved/finalized, the message icon is disabled; the dot should disappear.
-                          const unread =
-                            !!(r as any).pending_rfc && !r.finalized;
+                          const unread = !!(r as any).pending_rfc;
                           return (
                             <tr
                               key={r.id}
                               className={cls(
                                 "whitespace-nowrap [&>td]:border [&>td]:border-gray-200",
                                 isLocked
-                                  ? "bg-gray-100 text-gray-500 hover:bg-gray-100"
+                                  ? fromFacultyService
+                                    ? "bg-orange-50 hover:bg-orange-50"
+                                    : "bg-gray-100 text-gray-500 hover:bg-gray-100"
                                   : isForwardedToFaculty
                                   ? "bg-sky-50 hover:bg-sky-100/40"
                                   : "hover:bg-gray-50"
@@ -4173,7 +5259,24 @@ export default function OM_LoadAssignment() {
                                 {e.day1 ? (
                                   <SelectBox
                                     value={r.day1}
-                                    onChange={(v) => setCell(r.id, "day1", v)}
+                                    onChange={(v) => {
+                                      const autoDay2 = pairedDay2For(
+                                        String(v || "")
+                                      );
+                                      const shouldAuto = !day2ManualById[r.id];
+                                      if (shouldAuto && autoDay2) {
+                                        updateRow(
+                                          r.id,
+                                          {
+                                            day1: v as any,
+                                            day2: autoDay2 as any,
+                                          },
+                                          { markDirty: true }
+                                        );
+                                      } else {
+                                        setCell(r.id, "day1", v as any);
+                                      }
+                                    }}
                                     options={DAY_OPTIONS}
                                   />
                                 ) : (
@@ -4242,7 +5345,13 @@ export default function OM_LoadAssignment() {
                                 {e.day2 ? (
                                   <SelectBox
                                     value={r.day2}
-                                    onChange={(v) => setCell(r.id, "day2", v)}
+                                    onChange={(v) => {
+                                      setDay2ManualById((prev) => ({
+                                        ...prev,
+                                        [r.id]: true,
+                                      }));
+                                      setCell(r.id, "day2", v as any);
+                                    }}
                                     options={DAY_OPTIONS}
                                   />
                                 ) : (
@@ -4334,6 +5443,34 @@ export default function OM_LoadAssignment() {
                                   <span>{r.mode || "—"}</span>
                                 )}
                               </td>
+
+                              <td className="px-2 py-2 align-top w-[280px] min-w-[280px]">
+                                <div className="flex w-full min-w-0 items-start gap-2">
+                                  <textarea
+                                    value={
+                                      remarksDraftBySection[r.id] ??
+                                      String((r as any)?.remarks ?? "")
+                                    }
+                                    onChange={(ev) =>
+                                      queueAutosaveRemark(r, ev.target.value)
+                                    }
+                                    onBlur={() => {
+                                      // Ensure the latest value is persisted when the user leaves the field.
+                                      clearRemarkAutosaveTimer(r.id);
+                                      void handleSaveRemark(r, {
+                                        silentSuccess: true,
+                                      });
+                                    }}
+                                    disabled={isLocked}
+                                    placeholder="—"
+                                    className={cls(
+                                      "flex-1 min-w-0 min-h-[36px] resize-y rounded-md border border-gray-300 px-2 py-1 text-sm leading-snug shadow-sm focus:ring-2 focus:ring-emerald-500/30",
+                                      isLocked && "bg-gray-100 text-gray-500"
+                                    )}
+                                  />
+                                </div>
+                              </td>
+
                               <td className="px-2 py-2 text-center">
                                 <StatusChip r={r} />
                               </td>
@@ -4341,30 +5478,31 @@ export default function OM_LoadAssignment() {
                               <td className="px-2 py-2 text-center">
                                 {isRunning && (
                                   <div className="relative flex items-center justify-center gap-3 text-emerald-700">
-                                    <button
-                                      disabled={!!r.finalized}
-                                      className={cls(
-                                        "relative hover:brightness-110",
-                                        !!r.finalized &&
-                                          "opacity-40 cursor-not-allowed hover:brightness-100"
-                                      )}
-                                      title="Message"
-                                      onClick={() => {
-                                        if (r.finalized) return;
-                                        setReqChange({
-                                          open: true,
-                                          facultyName: r.faculty || "Faculty",
-                                          facultyId: (r as any).faculty_id,
-                                          sectionId:
-                                            (r as any).section_id || r.id,
-                                        });
-                                      }}
-                                    >
-                                      <MessageSquareText className="h-5 w-5" />
-                                      {unread && (
-                                        <span className="absolute -top-1 -right-1 h-2.5 w-2.5 rounded-full bg-red-600" />
-                                      )}
-                                    </button>
+                                    {!fromFacultyService && (
+                                      <button
+                                        className={cls(
+                                          "relative hover:brightness-110",
+                                          isArchiveView &&
+                                            "opacity-40 cursor-not-allowed hover:brightness-100"
+                                        )}
+                                        title="Message"
+                                        onClick={() => {
+                                          if (isArchiveView) return;
+                                          setReqChange({
+                                            open: true,
+                                            facultyName: r.faculty || "Faculty",
+                                            facultyId: (r as any).faculty_id,
+                                            sectionId:
+                                              (r as any).section_id || r.id,
+                                          });
+                                        }}
+                                      >
+                                        <MessageSquareText className="h-5 w-5" />
+                                        {unread && (
+                                          <span className="absolute -top-1 -right-1 h-2.5 w-2.5 rounded-full bg-red-600" />
+                                        )}
+                                      </button>
+                                    )}
 
                                     <button
                                       className="relative hover:brightness-110"
@@ -4393,14 +5531,24 @@ export default function OM_LoadAssignment() {
                         {filtered.length === 0 && (
                           <tr>
                             <td
-                              colSpan={17}
+                              colSpan={18}
                               className="px-4 py-10 text-center text-sm text-gray-500"
                             >
-                              No data yet. Click{" "}
-                              <span className="font-medium">Auto-assign</span>{" "}
-                              or{" "}
-                              <span className="font-medium">Add new line</span>{" "}
-                              to begin.
+                              {rows.length === 0 ? (
+                                <>
+                                  No data yet. Click{" "}
+                                  <span className="font-medium">
+                                    Auto-assign
+                                  </span>{" "}
+                                  or{" "}
+                                  <span className="font-medium">
+                                    Add new line
+                                  </span>{" "}
+                                  to begin.
+                                </>
+                              ) : (
+                                <>No rows match your search.</>
+                              )}
                             </td>
                           </tr>
                         )}
@@ -4411,14 +5559,14 @@ export default function OM_LoadAssignment() {
 
                 <div className="border-t px-4 py-3">
                   <div className="flex items-center justify-between gap-3">
-                    {/*<button
+                    <button
                       onClick={addRow}
-                      className="inline-flex items-center gap-2 rounded-lg border border-gray-400 px-3 py-1.5 text-sm text-gray-800 hover:bg-gray-100"
+                      className="inline-flex h-10 min-w-[140px] items-center justify-center gap-2 rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium hover:bg-gray-50"
                       title="Add new line"
                     >
                       <Plus className="h-4 w-4" />
                       Add new line
-                    </button>*/}
+                    </button>
                   </div>
                   {/* Right: Auto-assign (Run algorithm) - REMOVED from bottom */}
                   {/* <div className="flex items-center gap-2">
@@ -4438,220 +5586,102 @@ export default function OM_LoadAssignment() {
                   </div> */}
                 </div>
               </div>
-              {/* ---- Faculty Deloading (per-faculty) ---- */}
+              {/* ---- Faculty Deloading (term-wide; show immediately) ---- */}
               <div className="mt-6 rounded-xl border border-gray-200 bg-white shadow-sm">
                 <div className="flex flex-wrap items-start justify-between gap-4 px-4 pt-4 pb-2">
                   <div>
                     <h2 className="text-lg font-semibold">Faculty Deloading</h2>
-                    <p className="text-xs text-gray-500">
-                      View deloading records per faculty for{" "}
-                      <span className="font-semibold">
-                        {term || "this term"}
-                      </span>
-                      .
-                    </p>
-                  </div>
-
-                  <div className="w-full sm:w-[420px]">
-                    <label className="block text-xs font-medium text-gray-700 mb-1">
-                      Search faculty
-                    </label>
-                    <div className="relative">
-                      <div className="flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-3 py-2 shadow-sm">
-                        <SearchIcon className="h-4 w-4 text-gray-500" />
-                        <input
-                          value={deloadFacultyQuery}
-                          onChange={(e) => {
-                            setDeloadFacultyQuery(e.target.value);
-                            setDeloadDropdownOpen(true);
-                          }}
-                          onFocus={() => setDeloadDropdownOpen(true)}
-                          onBlur={() =>
-                            window.setTimeout(
-                              () => setDeloadDropdownOpen(false),
-                              120
-                            )
-                          }
-                          onKeyDown={(e) => {
-                            if (e.key === "Enter") {
-                              const best = deloadMatches[0];
-                              if (best) {
-                                setDeloadSelectedFaculty(best);
-                                setDeloadFacultyQuery(
-                                  best.faculty_name_display
-                                );
-                                setDeloadDropdownOpen(false);
-                                loadFacultyDeloadings(best.faculty_id);
-                              }
-                            }
-                            if (e.key === "Escape")
-                              setDeloadDropdownOpen(false);
-                          }}
-                          placeholder="Type a name (e.g., Dela Cruz)"
-                          className="w-full bg-transparent text-sm outline-none placeholder:text-gray-400"
-                        />
-                        {deloadFacultyQuery.trim() && (
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setDeloadFacultyQuery("");
-                              setDeloadSelectedFaculty(null);
-                              setDeloadRows([]);
-                              setDeloadError("");
-                            }}
-                            className="rounded-md p-1 text-gray-500 hover:bg-gray-100"
-                            title="Clear"
-                          >
-                            <X className="h-4 w-4" />
-                          </button>
-                        )}
-                      </div>
-
-                      {deloadDropdownOpen &&
-                        deloadFacultyQuery.trim() &&
-                        deloadMatches.length > 0 && (
-                          <div className="absolute z-20 mt-1 w-full overflow-hidden rounded-lg border border-gray-200 bg-white shadow-lg">
-                            <ul className="max-h-60 overflow-auto py-1">
-                              {deloadMatches.map((f) => (
-                                <li key={f.faculty_id}>
-                                  <button
-                                    type="button"
-                                    className="w-full px-3 py-2 text-left text-sm hover:bg-gray-50"
-                                    onMouseDown={(e) => e.preventDefault()}
-                                    onClick={() => {
-                                      setDeloadSelectedFaculty(f);
-                                      setDeloadFacultyQuery(
-                                        f.faculty_name_display
-                                      );
-                                      setDeloadDropdownOpen(false);
-                                      loadFacultyDeloadings(f.faculty_id);
-                                    }}
-                                  >
-                                    {f.faculty_name_display}
-                                  </button>
-                                </li>
-                              ))}
-                            </ul>
-                          </div>
-                        )}
-                    </div>
                   </div>
                 </div>
 
-                {/* Faculty with current deloadings (quick awareness) */}
-                <div className="px-4 pb-3">
-                  <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2">
-                    <div className="text-xs font-medium text-gray-700">
-                      Faculty with current deloadings
-                      <span className="ml-2 text-[11px] font-normal text-gray-500">
-                        ({facultyWithDeloadings.length})
-                      </span>
-                    </div>
-                    {facultyWithDeloadings.length === 0 ? (
-                      <div className="mt-1 text-xs text-gray-500">
-                        None found for this term.
-                      </div>
-                    ) : (
-                      <div className="mt-2 flex flex-wrap gap-2">
-                        {facultyWithDeloadings.map((f) => (
-                          <button
-                            key={f.faculty_id}
-                            type="button"
-                            className={cls(
-                              "rounded-full border px-2.5 py-1 text-xs shadow-sm",
-                              deloadSelectedFaculty?.faculty_id === f.faculty_id
-                                ? "border-emerald-300 bg-emerald-50 text-emerald-900"
-                                : "border-gray-200 bg-white text-gray-700 hover:bg-gray-100"
-                            )}
-                            onClick={() => {
-                              setDeloadSelectedFaculty(f);
-                              setDeloadFacultyQuery(f.faculty_name_display);
-                              loadFacultyDeloadings(f.faculty_id);
-                            }}
-                          >
-                            {f.faculty_name_display}
-                          </button>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                </div>
-
-                {deloadError && (
+                {deloadAllError && (
                   <div className="mx-4 mb-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
-                    {deloadError}
+                    {deloadAllError}
                   </div>
                 )}
 
-                <div className="border-t px-4 pb-4 pt-4 overflow-x-auto w-full">
-                  {!deloadSelectedFaculty ? (
-                    <div className="py-6 text-center text-sm text-gray-500">
-                      Select a faculty to view their deloadings.
+                <div className="px-4 pb-4 border-t">
+                  <div className="mt-3 overflow-x-auto rounded-lg border border-gray-200 bg-white">
+                    {deloadAllLoading ? (
+                      <div className="py-6 text-center text-sm text-gray-500">
+                        Loading…
+                      </div>
+                    ) : deloadFiltered.length === 0 ? (
+                      <div className="py-6 text-center text-sm text-gray-500">
+                        {deloadAllRows.length === 0
+                          ? "No deloadings recorded for this term."
+                          : "No deloadings match your search."}
+                      </div>
+                    ) : (
+                      <div className="max-h-[255px] overflow-y-auto">
+                        <table className="w-full text-sm table-fixed">
+                          <colgroup>
+                            <col style={{ width: "22%" }} />
+                            <col style={{ width: "20%" }} />
+                            <col style={{ width: "10%" }} />
+                            <col style={{ width: "33%" }} />
+                            <col style={{ width: "15%" }} />
+                          </colgroup>
+                          <thead className="bg-gray-50 border-y text-gray-700 sticky top-0 z-10">
+                            <tr>
+                              <th className="px-3 py-2 text-left font-semibold">
+                                Faculty
+                              </th>
+                              <th className="px-3 py-2 text-left font-semibold">
+                                Deloading Type
+                              </th>
+                              <th className="px-3 py-2 text-right font-semibold">
+                                Units
+                              </th>
+                              <th className="px-3 py-2 text-left font-semibold">
+                                Notes
+                              </th>
+                              <th className="px-3 py-2 text-center font-semibold">
+                                Last Updated
+                              </th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y">
+                            {deloadFiltered.map((r, i) => (
+                              <tr
+                                key={`${r.faculty_id}-${
+                                  r.deloading_type || "row"
+                                }-${i}`}
+                                className="hover:bg-amber-50/40"
+                              >
+                                <td className="px-3 py-2 align-middle">
+                                  <div className="font-medium text-gray-900">
+                                    {r.faculty_name_display || r.faculty_id}
+                                  </div>
+                                </td>
+                                <td className="px-3 py-2 align-middle">
+                                  {r.deloading_type || "—"}
+                                </td>
+                                <td className="px-3 py-2 text-right align-middle">
+                                  {r.units_deloaded ?? "—"}
+                                </td>
+                                <td className="px-3 py-2 align-middle">
+                                  {r.notes || "—"}
+                                </td>
+                                <td className="px-3 py-2 text-center align-middle">
+                                  {r.updated_at
+                                    ? new Date(
+                                        r.updated_at as any
+                                      ).toLocaleDateString()
+                                    : "—"}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+
+                  {!deloadAllLoading && deloadFiltered.length > 0 && (
+                    <div className="mt-2 flex items-center justify-between text-xs text-gray-500">
+                      {deloadAllRows.length > 5}
                     </div>
-                  ) : deloadLoading ? (
-                    <div className="py-6 text-center text-sm text-gray-500">
-                      Loading…
-                    </div>
-                  ) : deloadRows.length === 0 ? (
-                    <div className="py-6 text-center text-sm text-gray-500">
-                      No deloadings recorded for{" "}
-                      <span className="font-semibold">
-                        {deloadSelectedFaculty.faculty_name_display}
-                      </span>
-                      .
-                    </div>
-                  ) : (
-                    <table className="w-full text-sm table-fixed">
-                      <colgroup>
-                        <col style={{ width: "28%" }} />
-                        <col style={{ width: "12%" }} />
-                        <col style={{ width: "40%" }} />
-                        <col style={{ width: "20%" }} />
-                      </colgroup>
-                      <thead className="bg-gray-50 border-y text-gray-700">
-                        <tr>
-                          {[
-                            "Deloading Type",
-                            "Units",
-                            "Notes",
-                            "Last Updated",
-                          ].map((h) => (
-                            <th
-                              key={h}
-                              className="px-3 py-2 text-center text-xs font-semibold uppercase tracking-wide"
-                            >
-                              {h}
-                            </th>
-                          ))}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {deloadRows.map((r, i) => (
-                          <tr
-                            key={`${r.deloading_type || "row"}-${i}`}
-                            className={cls(
-                              i % 2 === 0 ? "bg-white" : "bg-gray-50",
-                              "text-gray-800 hover:bg-amber-50/40"
-                            )}
-                          >
-                            <td className="px-3 py-2 text-center">
-                              {r.deloading_type || "—"}
-                            </td>
-                            <td className="px-3 py-2 text-center">
-                              {r.units_deloaded ?? "—"}
-                            </td>
-                            <td className="px-3 py-2 text-center">
-                              {r.notes || "—"}
-                            </td>
-                            <td className="px-3 py-2 text-center">
-                              {r.updated_at
-                                ? new Date(r.updated_at).toLocaleString()
-                                : "—"}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
                   )}
                 </div>
               </div>
@@ -4664,13 +5694,6 @@ export default function OM_LoadAssignment() {
                       <h2 className="text-lg font-semibold">
                         Faculty Load Summary
                       </h2>
-                      <p className="text-xs text-gray-500">
-                        Total assigned units vs preferred units per faculty for{" "}
-                        <span className="font-semibold">
-                          {term || "this term"}
-                        </span>
-                        .
-                      </p>
                     </div>
 
                     {/* Summary internal tabs */}
@@ -4684,7 +5707,7 @@ export default function OM_LoadAssignment() {
                             : "bg-white text-gray-700 border-gray-300"
                         )}
                       >
-                        Units vs Prefs
+                        Units vs Preferences
                       </button>
 
                       <button
@@ -4739,7 +5762,7 @@ export default function OM_LoadAssignment() {
                           </span>{" "}
                           of{" "}
                           <span className="font-semibold">
-                            {facultySummary.length}
+                            {facultySummaryFiltered.length}
                           </span>
                         </div>
                       </div>
@@ -4748,7 +5771,6 @@ export default function OM_LoadAssignment() {
                       {showUnitsFilters && (
                         <div className="mb-3 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2">
                           <div className="flex flex-wrap items-center gap-4 text-xs">
-                            {/* radios */}
                             <label className="inline-flex items-center gap-2">
                               <input
                                 type="radio"
@@ -4781,7 +5803,6 @@ export default function OM_LoadAssignment() {
                               Only issues
                             </label>
 
-                            {/* separator + checkbox on the same line */}
                             <span className="hidden sm:inline text-gray-300">
                               |
                             </span>
@@ -4800,7 +5821,7 @@ export default function OM_LoadAssignment() {
                         </div>
                       )}
 
-                      {/* Scroll wrapper (THIS is the only overflow-x-auto) */}
+                      {/* Scroll wrapper */}
                       <div className="overflow-x-auto w-full">
                         <table className="w-full text-sm table-fixed">
                           <thead className="bg-gray-50 border-y text-gray-700">
@@ -4872,7 +5893,16 @@ export default function OM_LoadAssignment() {
                           </thead>
 
                           <tbody className="divide-y">
-                            {facultySummaryView.length === 0 && (
+                            {facultySummary.length === 0 ? (
+                              <tr>
+                                <td
+                                  colSpan={5}
+                                  className="px-3 py-6 text-center text-xs text-gray-500"
+                                >
+                                  No faculty have assignments yet for this term.
+                                </td>
+                              </tr>
+                            ) : facultySummaryView.length === 0 ? (
                               <tr>
                                 <td
                                   colSpan={5}
@@ -4881,7 +5911,7 @@ export default function OM_LoadAssignment() {
                                   No matching faculty rows.
                                 </td>
                               </tr>
-                            )}
+                            ) : null}
 
                             {facultySummaryView.map((f) => {
                               const hasPref = f.preferredUnits != null;
@@ -4956,15 +5986,19 @@ export default function OM_LoadAssignment() {
 
                   {/* Tab 2: Rule / condition flags */}
                   {summaryTab === "second" && (
-                    <div className="border-t px-4 pb-6 text-sm">
-                      {ruleAlerts.length === 0 ? (
-                        <p className="py-4 text-xs text-gray-500">
-                          No rule violations detected for the current
-                          assignments. 🎉
-                        </p>
-                      ) : (
-                        <div className="mt-2 overflow-x-auto">
-                          <table className="w-full text-xs table-fixed">
+                    <div className="px-4 pb-4 border-t">
+                      <div className="mt-3 overflow-x-auto rounded-lg border border-gray-200 bg-white">
+                        {ruleAlerts.length === 0 ? (
+                          <div className="py-6 text-center text-sm text-gray-500">
+                            No rule violations detected for the current
+                            assignments.
+                          </div>
+                        ) : ruleAlertsFiltered.length === 0 ? (
+                          <div className="py-6 text-center text-sm text-gray-500">
+                            No violations match your search.
+                          </div>
+                        ) : (
+                          <table className="w-full text-sm table-fixed">
                             <thead className="bg-gray-50 border-y text-gray-700">
                               <tr>
                                 <th className="px-3 py-2 text-left font-semibold">
@@ -4973,7 +6007,7 @@ export default function OM_LoadAssignment() {
                                 <th className="px-3 py-2 text-left font-semibold">
                                   Faculty
                                 </th>
-                                <th className="px-3 py-2 text-left font-semibold">
+                                <th className="px-3 py-2 text-center font-semibold">
                                   Row
                                 </th>
                                 <th className="px-3 py-2 text-left font-semibold">
@@ -4984,8 +6018,8 @@ export default function OM_LoadAssignment() {
                                 </th>
                               </tr>
                             </thead>
-                            <tbody className="divide-y">
-                              {ruleAlerts.map((a) => (
+                            <tbody className="divide-y divide-gray-100">
+                              {ruleAlertsFiltered.map((a) => (
                                 <tr key={a.id}>
                                   <td className="px-3 py-2 align-top">
                                     <span className="font-mono text-[11px]">
@@ -4997,7 +6031,7 @@ export default function OM_LoadAssignment() {
                                       {a.facultyName || "—"}
                                     </div>
                                   </td>
-                                  <td className="px-4 py-2 text-sm text-gray-600 text-center">
+                                  <td className="px-3 py-2 text-center align-top text-gray-600">
                                     {a.rowNumber ?? "—"}
                                   </td>
                                   <td className="px-3 py-2 align-top">
@@ -5006,7 +6040,7 @@ export default function OM_LoadAssignment() {
                                   <td className="px-3 py-2 text-center align-top">
                                     <span
                                       className={cls(
-                                        "inline-flex items-center justify-center rounded-full px-2.5 py-0.5 text-[10px] font-semibold border",
+                                        "inline-flex items-center justify-center rounded-full px-2.5 py-0.5 text-[11px] font-medium border",
                                         a.severity === "error"
                                           ? "bg-red-50 text-red-700 border-red-200"
                                           : "bg-amber-50 text-amber-700 border-amber-200"
@@ -5019,31 +6053,40 @@ export default function OM_LoadAssignment() {
                               ))}
                             </tbody>
                           </table>
-                        </div>
-                      )}
+                        )}
+                      </div>
                     </div>
                   )}
 
                   {summaryTab === "blocked" && (
                     <div className="px-4 pb-4 border-t">
                       <div className="mt-3 overflow-x-auto rounded-lg border border-gray-200 bg-white">
-                        <table className="min-w-full divide-y divide-gray-200 text-xs">
-                          <thead className="bg-gray-50">
+                        <table className="w-full text-sm table-auto">
+                          <thead className="bg-gray-50 border-y text-gray-700">
                             <tr>
-                              <th className="px-3 py-2 text-left font-semibold text-gray-700">
+                              <th className="px-3 py-2 text-left font-semibold">
                                 Course
                               </th>
-                              <th className="px-3 py-2 text-left font-semibold text-gray-700">
-                                Campus
-                              </th>
-                              <th className="px-3 py-2 text-left font-semibold text-gray-700">
+                              <th className="px-3 py-2 text-left font-semibold">
                                 Section
                               </th>
-                              <th className="px-3 py-2 text-left font-semibold text-gray-700">
-                                Slot 1 (Day / Time)
+                              <th className="px-3 py-2 text-left font-semibold">
+                                Day 1
                               </th>
-                              <th className="px-3 py-2 text-left font-semibold text-gray-700">
-                                Slot 2 (Day / Time)
+                              <th className="px-3 py-2 text-left font-semibold">
+                                Begin 1
+                              </th>
+                              <th className="px-3 py-2 text-left font-semibold">
+                                End 1
+                              </th>
+                              <th className="px-3 py-2 text-left font-semibold">
+                                Day 2
+                              </th>
+                              <th className="px-3 py-2 text-left font-semibold">
+                                Begin 2
+                              </th>
+                              <th className="px-3 py-2 text-left font-semibold">
+                                End 2
                               </th>
                             </tr>
                           </thead>
@@ -5051,20 +6094,60 @@ export default function OM_LoadAssignment() {
                             {blockedSections.length === 0 ? (
                               <tr>
                                 <td
-                                  colSpan={5}
-                                  className="px-3 py-4 text-center text-gray-500"
+                                  colSpan={8}
+                                  className="py-6 text-center text-sm text-gray-500"
                                 >
-                                  No blocked GE sections for CMPS0002.
+                                  No blocked GE sections for Laguna.
+                                </td>
+                              </tr>
+                            ) : blockedSectionsFiltered.length === 0 ? (
+                              <tr>
+                                <td
+                                  colSpan={8}
+                                  className="py-6 text-center text-sm text-gray-500"
+                                >
+                                  No blocked sections match your search.
                                 </td>
                               </tr>
                             ) : (
-                              blockedSections.map((b) => {
-                                const slots = blockedGeCmps2
-                                  .filter((x) => x.section_id === b.rowId)
-                                  .map((x) => `${x.day} ${x.begin}–${x.end}`);
+                              blockedSectionsFiltered.map((b) => {
+                                const dayRank: Record<string, number> = {
+                                  M: 1,
+                                  T: 2,
+                                  W: 3,
+                                  H: 4,
+                                  F: 5,
+                                  S: 6,
+                                };
 
-                                const slot1 = slots[0] ?? "—";
-                                const slot2 = slots[1] ?? "—";
+                                const slotItems = (blockedGeCmps2 || [])
+                                  .filter((x) => x.section_id === b.rowId)
+                                  .slice()
+                                  .sort((a, bb) => {
+                                    const da =
+                                      dayRank[(a.day || "").toUpperCase()] ??
+                                      99;
+                                    const dbb =
+                                      dayRank[(bb.day || "").toUpperCase()] ??
+                                      99;
+                                    if (da !== dbb) return da - dbb;
+                                    const ta =
+                                      parseInt(String(a.begin || "0"), 10) || 0;
+                                    const tb =
+                                      parseInt(String(bb.begin || "0"), 10) ||
+                                      0;
+                                    return ta - tb;
+                                  });
+
+                                const s1 = slotItems[0];
+                                const s2 = slotItems[1];
+
+                                const day1 = s1?.day ?? "—";
+                                const begin1 = s1?.begin ?? "—";
+                                const end1 = s1?.end ?? "—";
+                                const day2 = s2?.day ?? "—";
+                                const begin2 = s2?.begin ?? "—";
+                                const end2 = s2?.end ?? "—";
 
                                 return (
                                   <tr key={b.rowId}>
@@ -5072,16 +6155,25 @@ export default function OM_LoadAssignment() {
                                       {b.course || "—"}
                                     </td>
                                     <td className="px-3 py-2 text-gray-700">
-                                      {b.campusName || b.campusId || "—"}
-                                    </td>
-                                    <td className="px-3 py-2 text-gray-700">
                                       {b.section || "—"}
                                     </td>
                                     <td className="px-3 py-2 text-gray-700">
-                                      {slot1}
+                                      {day1}
                                     </td>
                                     <td className="px-3 py-2 text-gray-700">
-                                      {slot2}
+                                      {begin1}
+                                    </td>
+                                    <td className="px-3 py-2 text-gray-700">
+                                      {end1}
+                                    </td>
+                                    <td className="px-3 py-2 text-gray-700">
+                                      {day2}
+                                    </td>
+                                    <td className="px-3 py-2 text-gray-700">
+                                      {begin2}
+                                    </td>
+                                    <td className="px-3 py-2 text-gray-700">
+                                      {end2}
                                     </td>
                                   </tr>
                                 );
@@ -5261,6 +6353,192 @@ export default function OM_LoadAssignment() {
           setMode("manual");
           setApproved(false);
           setShowNewSectionModal(false);
+        }}
+      />
+
+      {/* Import SHS modal (match APO import UX) */}
+      {showShsImportModal && (
+        <div
+          className="fixed inset-0 z-[120] grid place-items-center bg-black/40 p-4"
+          role="dialog"
+          aria-modal="true"
+        >
+          <div className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-2xl">
+            <div className="mx-auto mb-4 grid h-16 w-16 place-items-center rounded-full border-2 border-emerald-600 text-emerald-700">
+              <Upload className="h-8 w-8" strokeWidth={2.5} />
+            </div>
+
+            <h3 className="mb-2 text-center text-2xl font-semibold">
+              Import SHS CSV
+            </h3>
+            <p className="mx-auto mb-4 max-w-md text-center text-sm text-neutral-600">
+              Upload a CSV fsile to import SHS sections into the current
+              planning term.
+            </p>
+
+            <div className="mb-4 rounded-lg border border-emerald-100 bg-emerald-50 px-3 py-2 text-sm text-emerald-900">
+              <div className="mb-1 font-semibold">CSV format</div>
+              <ul className="list-disc pl-5 space-y-1">
+                <li>
+                  Required columns:{" "}
+                  <span className="font-mono">Course Code &amp; Title</span>,{" "}
+                  <span className="font-mono">Units</span>,{" "}
+                  <span className="font-mono">Section</span>,{" "}
+                  <span className="font-mono">Day 1</span>,{" "}
+                  <span className="font-mono">Begin 1</span>,{" "}
+                  <span className="font-mono">End 1</span>,{" "}
+                  <span className="font-mono">Room 1</span>,{" "}
+                  <span className="font-mono">Day 2</span>,{" "}
+                  <span className="font-mono">Begin 2</span>,{" "}
+                  <span className="font-mono">End 2</span>,{" "}
+                  <span className="font-mono">Room 2</span>,{" "}
+                  <span className="font-mono">Capacity</span>,{" "}
+                  <span className="font-mono">Mode</span>
+                </li>
+              </ul>
+            </div>
+
+            {!!shsImportError && (
+              <div className="mb-4 whitespace-pre-wrap rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-800">
+                {shsImportError}
+              </div>
+            )}
+
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+              <button
+                type="button"
+                onClick={downloadShsTemplate}
+                className="inline-flex items-center justify-center gap-2 rounded-lg border border-emerald-300 bg-white px-4 py-2 text-sm font-medium text-emerald-700 hover:bg-emerald-50"
+              >
+                <Download className="h-4 w-4" />
+                Download template
+              </button>
+
+              <div className="flex items-center justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={closeShsImport}
+                  disabled={shsImportBusy}
+                  className={cls(
+                    "rounded-lg border border-neutral-300 bg-neutral-100 px-4 py-2 text-sm hover:bg-neutral-200",
+                    shsImportBusy && "opacity-60 cursor-not-allowed"
+                  )}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={handlePickShsFile}
+                  disabled={shsImportBusy || isArchiveView}
+                  className={cls(
+                    "inline-flex items-center gap-2 rounded-lg bg-[#008e4e] px-4 py-2 text-sm font-medium text-white shadow-sm hover:brightness-110",
+                    (shsImportBusy || isArchiveView) &&
+                      "opacity-60 cursor-not-allowed hover:brightness-100"
+                  )}
+                  title={
+                    isArchiveView
+                      ? "Archived view: importing is disabled"
+                      : "Choose a CSV file"
+                  }
+                >
+                  <Upload className="h-4 w-4" />
+                  {shsImportBusy ? "Importing…" : "Choose file"}
+                </button>
+              </div>
+            </div>
+
+            <div className="mt-3 text-center text-xs text-neutral-500">
+              {shsFile ? `Selected: ${shsFile.name}` : "No file selected yet."}
+            </div>
+
+            <input
+              ref={shsFileInputRef}
+              type="file"
+              accept=".csv,.xlsx,.xls"
+              className="hidden"
+              onChange={handleShsFileChange}
+            />
+          </div>
+        </div>
+      )}
+
+      {/* Custom confirmation modal (replaces browser confirm dialogs) */}
+      {confirmModal.open && (
+        <div
+          className="fixed inset-0 z-[9999] grid place-items-center bg-black/40 p-4"
+          role="dialog"
+          aria-modal="true"
+        >
+          <div className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-2xl">
+            <div
+              className={cls(
+                "mx-auto mb-4 grid h-16 w-16 place-items-center rounded-full border-2",
+                confirmModal.variant === "danger"
+                  ? "border-rose-600 text-rose-700"
+                  : confirmModal.variant === "warning"
+                  ? "border-amber-600 text-amber-700"
+                  : "border-emerald-600 text-emerald-700"
+              )}
+            >
+              {confirmModal.variant === "info" ? (
+                <Send className="h-8 w-8" strokeWidth={2.5} />
+              ) : (
+                <AlertTriangle className="h-8 w-8" strokeWidth={2.5} />
+              )}
+            </div>
+
+            <h3 className="mb-2 text-center text-2xl font-semibold">
+              {confirmModal.title}
+            </h3>
+
+            <div className="mx-auto max-w-md text-center">
+              {confirmModal.message}
+            </div>
+
+            <div className="mt-6 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => closeConfirm(false)}
+                className="rounded-lg border border-neutral-300 bg-neutral-100 px-4 py-2 text-sm hover:bg-neutral-200"
+              >
+                {confirmModal.cancelText ?? "Cancel"}
+              </button>
+              <button
+                type="button"
+                onClick={() => closeConfirm(true)}
+                className={cls(
+                  "rounded-lg px-4 py-2 text-sm font-medium text-white hover:brightness-110",
+                  confirmModal.variant === "danger"
+                    ? "bg-rose-700"
+                    : confirmModal.variant === "warning"
+                    ? "bg-amber-700"
+                    : "bg-emerald-700"
+                )}
+              >
+                {confirmModal.confirmText ?? "Continue"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Re-forward review modal (APO-style change list) */}
+      <ForwardReviewModal
+        open={showForwardReview}
+        changes={forwardReviewChanges}
+        title="Re-forward to Chair?"
+        subtitle={
+          <>
+            You're about to{" "}
+            <span className="font-semibold text-neutral-800">re-notify</span>{" "}
+            the Chair. Review the detected changes below before sending.
+          </>
+        }
+        confirmText="Re-forward"
+        onClose={() => setShowForwardReview(false)}
+        onConfirm={async () => {
+          setShowForwardReview(false);
+          await handleForwardToChair();
         }}
       />
 

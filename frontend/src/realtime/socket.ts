@@ -1,6 +1,12 @@
 // frontend/src/realtime/socket.ts
 import { io, Socket } from "socket.io-client";
-import { attachInboxBadgeSocket, resetInboxBadgeSocket } from "./inboxBadge";
+import { emitAck } from "./ack";
+import {
+  attachInboxBadgeSocket,
+  replaceInboxUnread,
+  resetInboxBadgeSocket,
+  resetInboxBadgeState,
+} from "./inboxBadge";
 
 type SessionUser = {
   userId?: string;
@@ -63,6 +69,7 @@ export function resetSocket() {
   socket = null;
   socketUserId = null;
   resetInboxBadgeSocket();
+  resetInboxBadgeState();
 }
 
 export function getSocket(): Socket | null {
@@ -103,13 +110,42 @@ export function getSocket(): Socket | null {
     // ✅ Attach inbox badge listeners once
     attachInboxBadgeSocket(socket);
 
-    socket.on("connect", () => console.log("[socket] connected", socket?.id));
+
+    const seedUnreadFromServer = async () => {
+      try {
+        if (!socket) return;
+        const resp = await emitAck<any>(socket, "conversation_list", { limit: 50 });
+        if (!resp?.ok) return;
+
+        const convs = Array.isArray(resp?.conversations) ? resp.conversations : [];
+        replaceInboxUnread(
+          convs.map((c: any) => ({
+            conversationId: String(c?.conversationId || c?.conversation_id || ""),
+            unread: Number(c?.unread || 0),
+          }))
+        );
+      } catch {
+        // ignore seed errors
+      }
+    };
+
+    socket.on("connect", () => {
+      console.log("[socket] connected", socket?.id);
+      // Refresh unread snapshot on (re)connect so the badge stays correct after reload.
+      void seedUnreadFromServer();
+    });
+
     socket.on("disconnect", (reason) => console.log("[socket] disconnected", reason));
+
     socket.on("connect_error", (err) =>
       console.log("[socket] connect_error", (err as any)?.message || err)
     );
-    socket.on("socket:ready", (msg) => console.log("[socket] ready", msg));
-  }
+
+    socket.on("socket:ready", (msg) => {
+      console.log("[socket] ready", msg);
+      void seedUnreadFromServer();
+    });
+}
 
   return socket;
 }

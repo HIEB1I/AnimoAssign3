@@ -578,27 +578,20 @@ function splitBeginEnd(time?: string): { begin: string; end: string } {
 function TeachingLoadEnhanced({ teachingLoad, term, workflow, onToast, onRefresh }: TeachingLoadEnhancedProps) {
   const [view, setView] = useState<"Calendar" | "List">("Calendar");
   const [modal, setModal] = useState<{ day: DayLong; item: TLItemForCalendar } | null>(null);
-  const [isAccepted, setIsAccepted] = useState(false);
+  const [isAccepting, setIsAccepting] = useState(false);
 
-  // Schedule is finalized once: Faculty accepted OR OM approved/rejected an RFC.
-const scheduleFinal = Boolean(
-  workflow?.schedule_final ||
-    workflow?.proposal_status?.toString?.().toLowerCase?.() === "approved" ||
-    workflow?.proposal_status?.toString?.().toLowerCase?.() === "accepted" ||
-    (workflow?.rfc?.status &&
-      ["ACCEPTED", "APPROVED", "REJECTED"].includes(String(workflow.rfc.status).toUpperCase()))
-);
+  // Schedule is finalized only when backend explicitly marks it so (e.g., an admin lock).
+  // Faculty acceptance should NOT lock/finalize; OM can still edit/resend, and faculty can RFC/accept again.
+  const scheduleFinal = Boolean(workflow?.schedule_final);
+
+  // If OM already marked the schedule as Approved (faculty accepted), prevent accepting again.
+  // The button should re-enable when OM sends a new schedule proposal (proposal_status changes away from Approved/Accepted).
+  const proposalStatusLower = String(workflow?.proposal_status || "").toLowerCase();
+  const isAlreadyApproved = proposalStatusLower === "approved" || proposalStatusLower === "accepted";
 
 
 const scheduleFinalLabel = (() => {
-  const st = String(workflow?.rfc?.status || "").toUpperCase();
-  if (st === "REJECTED") return "Finalized (RFC Rejected)";
-  if (st === "APPROVED") return "Finalized (RFC Approved)";
-  if (st === "ACCEPTED") return "Finalized (Accepted)";
-
-  const ps = String(workflow?.proposal_status || "").toLowerCase();
-  if (ps === "approved") return "Finalized (Approved)";
-  if (ps === "accepted") return "Finalized (Accepted)";
+  if (proposalStatusLower === "accepted") return "Finalized (Accepted)";
   return "Finalized";
 })();
 
@@ -653,12 +646,14 @@ const scheduleFinalLabel = (() => {
             type="button"
             onClick={async () => {
             try {
+              if (isAccepting) return;
+              setIsAccepting(true);
               const raw = JSON.parse(localStorage.getItem("animo.user") || "{}");
               const userId = raw.userId || raw.user_id || raw.id || "";
 
               const termId = (term as any)?.term_id || (term as any)?._id || (term as any)?.id;
 
-              // 1) Accept proposal in backend
+              // 1) Accept proposal in backend (does NOT lock/finalize)
               await acceptFacultyLoadAssignment(userId, { term_id: termId });
 
               // 2) Create Google Calendar events using items already computed for calendar view
@@ -700,7 +695,6 @@ const scheduleFinalLabel = (() => {
               return;
             }
 
-            setIsAccepted(true);
             onToast?.("success", "Schedule accepted and added to your Google Calendar.", "Success");
             await onRefresh?.();
 
@@ -711,19 +705,27 @@ const scheduleFinalLabel = (() => {
                 "Failed to accept schedule.";
               onToast?.("error", msg, "Action failed");
               console.error(e);
+            } finally {
+              setIsAccepting(false);
             }
           }}
 
-            disabled={isAccepted}
+            disabled={isAccepting || scheduleFinal || isAlreadyApproved}
             className={cls(
               "inline-flex h-9 items-center justify-center rounded-lg px-4 text-sm font-medium shadow",
               "focus:outline-none focus:ring-2 focus:ring-emerald-600/40",
-              (isAccepted || scheduleFinal)
+              (isAccepting || scheduleFinal || isAlreadyApproved)
                 ? "bg-neutral-300 text-neutral-600 cursor-not-allowed"
                 : "bg-blue-700 text-white hover:bg-blue-800 active:translate-y-[0.5px]"
             )}
           >
-            {(isAccepted || scheduleFinal) ? "Finalized" : "Accept Schedule"}
+            {scheduleFinal
+              ? "Finalized"
+              : isAlreadyApproved
+              ? "Approved"
+              : isAccepting
+              ? "Accepting…"
+              : "Accept Schedule"}
           </button>
         </div>
       </div>
@@ -1077,18 +1079,25 @@ function ChangeRequestModal({
   ];
 
   const [choices, setChoices] = useState<ChangeKind[]>([]);
-  const [selTime, setSelTime] = useState("");
-  const [selDay, setSelDay] = useState<DayLong | "">("");
+  // RFC is by pair (meeting 1 + meeting 2), not by individual day tile.
+  const [selTime1, setSelTime1] = useState("");
+  const [selTime2, setSelTime2] = useState("");
+  const [selDay1, setSelDay1] = useState<DayLong | "">("");
+  const [selDay2, setSelDay2] = useState<DayLong | "">("");
   const [remarks, setRemarks] = useState("");
   const [otherText, setOtherText] = useState("");
+  const [panel, setPanel] = useState<"request" | "conversation">("request");
 
   useEffect(() => {
     if (!open) {
       setChoices([]);
-      setSelTime("");
-      setSelDay("");
+      setSelTime1("");
+      setSelTime2("");
+      setSelDay1("");
+      setSelDay2("");
       setRemarks("");
       setOtherText("");
+      setPanel("request");
     }
   }, [open]);
 
@@ -1097,135 +1106,284 @@ function ChangeRequestModal({
   const toggle = (label: ChangeKind) =>
     setChoices((prev) => (prev.includes(label) ? prev.filter((c) => c !== label) : [...prev, label]));
 
-  // Helpers to exclude the *current* slot and day
-  const extractStartHM = (band: string) => band.split("–")[0].match(/\d{1,2}:\d{2}/)?.[0] ?? "";
-  const toMinutes = (hm: string) => {
-    if (!hm) return -1;
-    const [h, m] = hm.split(":").map(Number);
-    return h * 60 + m;
-  };
-  const currentDay = context.day;
-  const currentStartMin = toMinutes(extractStartHM(context.item.time));
-
-  const filteredTimeSlots = TIME_SLOTS.filter(
-    (band) => toMinutes(extractStartHM(band)) !== currentStartMin
+  const oi = context.item.originalItem;
+  const hasSecond = Boolean(
+    (oi?.day2 && String(oi.day2).trim() && String(oi.day2).trim() !== "TBA") ||
+      (oi?.time2 && String(oi.time2).trim() && String(oi.time2).trim() !== "TBA")
   );
-  const filteredDays = ALL_DAYS.filter((d) => d !== currentDay);
+
+  // IMPORTANT: keep ALL options available in RFC dropdowns.
+  // Do not omit the current schedule's day/time so faculty can explicitly re-select it if needed.
+  const filteredTimeSlots1 = TIME_SLOTS;
+  const filteredTimeSlots2 = TIME_SLOTS;
+  const filteredDays1 = ALL_DAYS;
+  const filteredDays2 = ALL_DAYS;
 
   const mustTime = choices.includes("Change class time");
   const mustDay = choices.includes("Change class day");
   const isFinalized = Boolean((context?.item as any)?.finalized);
-  const disabled = scheduleFinal || isFinalized || choices.length === 0 || (mustTime && !selTime) || (mustDay && !selDay);
+  const disabled =
+    scheduleFinal ||
+    isFinalized ||
+    choices.length === 0 ||
+    (mustTime && (!selTime1 || (hasSecond && !selTime2))) ||
+    (mustDay && (!selDay1 || (hasSecond && !selDay2))) ||
+    // Remarks are required once an RFC is being submitted
+    (panel === "request" && choices.length > 0 && !remarks.trim());
 
   return (
     <div className="fixed inset-0 z-80 grid place-items-center bg-black/30 p-3">
-      <div className="w-full max-w-3xl rounded-2xl bg-white p-6 shadow-2xl">
-        <div className="mb-4 flex items-start justify-between">
-          <div>
-            <h3 className="text-xl font-semibold text-emerald-700">Request for Change</h3>
-            <p className="text-sm text-neutral-500">
-              {/* --- MODIFIED: Use calendar item data --- */}
-              {context.item.code} {context.item.sec} • {context.day} • {context.item.time}
-            </p>
-          </div>
-          <button className="rounded-full p-1 hover:bg-neutral-100" onClick={onClose} aria-label="Close">
-            <X className="h-5 w-5" />
-          </button>
-        </div>
+	    <div className="w-full max-w-3xl rounded-2xl bg-white shadow-2xl max-h-[90vh] flex flex-col overflow-hidden">
+	      {/* Header */}
+	      <div className="border-b border-neutral-200 p-5 sm:p-6">
+	        <div className="flex items-start justify-between gap-4">
+	          <div className="min-w-0">
+	            <h3 className="text-xl font-semibold text-emerald-700">Request for Change (RFC)</h3>
+	            <p className="mt-0.5 text-sm text-neutral-500">
+	              {context.item.code} {context.item.sec}
+	            </p>
+	          </div>
+	          <button
+	            className="shrink-0 rounded-full p-1 hover:bg-neutral-100"
+	            onClick={onClose}
+	            aria-label="Close"
+	            type="button"
+	          >
+	            <X className="h-5 w-5" />
+	          </button>
+	        </div>
 
-        <div className="space-y-3">
+	        {/* Panel switcher */}
+	        <div className="mt-4 flex w-full items-center justify-between gap-3">
+	          <div className="inline-flex rounded-xl border border-neutral-200 bg-neutral-50 p-1">
+	            <button
+	              type="button"
+	              onClick={() => setPanel("request")}
+	              className={cls(
+	                "rounded-lg px-3 py-1.5 text-sm font-medium",
+	                panel === "request"
+	                  ? "bg-white text-neutral-900 shadow-sm"
+	                  : "text-neutral-600 hover:text-neutral-900"
+	              )}
+	              aria-pressed={panel === "request"}
+	            >
+	              Request
+	            </button>
+	            <button
+	              type="button"
+	              onClick={() => setPanel("conversation")}
+	              className={cls(
+	                "rounded-lg px-3 py-1.5 text-sm font-medium",
+	                panel === "conversation"
+	                  ? "bg-white text-neutral-900 shadow-sm"
+	                  : "text-neutral-600 hover:text-neutral-900"
+	              )}
+	              aria-pressed={panel === "conversation"}
+	            >
+	              Conversation
+	            </button>
+	          </div>
+	         
+	        </div>
+	      </div>
 
-          
-          {scheduleFinal && (
-            <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900">
-              The schedule is already finalized and locked. RFC is disabled.
-            </div>
-          )}
-
-          {isFinalized && (
-            <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
-              This course has already been finalized by the Office Manager. RFC is disabled for this course.
-            </div>
-          )}
-
-          <RfcThreadView
-            term={term}
-            sectionId={
-              (context.item.originalItem as any)?.section_id ||
-              (context.item.originalItem as any)?.sectionId ||
-              ""
-            }
-          />
-
-          <label className="block text-sm font-medium text-neutral-700">Change</label>
-          <div className="flex flex-wrap gap-2">
-            {(["Change class time", "Change class day", "Other"] as ChangeKind[]).map((opt) => (
-              <button
-                key={opt}
-                onClick={() => toggle(opt)}
-                className={cls(
-                  "rounded-lg border px-3 py-2 text-sm",
-                  choices.includes(opt)
-                    ? "border-emerald-600 bg-emerald-50 text-emerald-700"
-                    : "border-neutral-300 bg-white hover:bg-neutral-50"
+	      {/* Body (scrollable) */}
+	      <div className="flex-1 min-h-0 overflow-y-auto p-5 sm:p-6">
+	        {panel === "conversation" ? (
+	          <RfcThreadView
+	            term={term}
+	            sectionId={
+	              (context.item.originalItem as any)?.section_id ||
+	              (context.item.originalItem as any)?.sectionId ||
+	              ""
+	            }
+	          />
+	        ) : (
+	          <div className="space-y-4">
+	            {/* Status banners */}
+	            {scheduleFinal && (
+	              <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900">
+	                The schedule is already finalized and locked. RFC is disabled.
+	              </div>
+	            )}
+	
+	            {isFinalized && (
+	              <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+	                This course has already been finalized by the Office Manager. RFC is disabled for this course.
+	              </div>
+	            )}
+	
+	            {/* Current schedule summary */}
+	            <div className="rounded-2xl border border-neutral-200 bg-neutral-50 p-4">
+	              <div className="flex items-center justify-between gap-3">
+	                <div className="text-sm font-semibold text-neutral-800">Current schedule</div>
+	                <button
+	                  type="button"
+	                  onClick={() => setPanel("conversation")}
+	                  className="text-sm font-medium text-emerald-700 hover:underline"
+	                >
+	                  View conversation
+	                </button>
+	              </div>
+	              <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
+	                <div className="rounded-xl border border-neutral-200 bg-white p-3">
+	                  <div className="text-xs font-semibold text-neutral-600">Meeting 1</div>
+	                  <div className="mt-1 text-sm text-neutral-800">
+	                    <span className="font-medium">{oi?.day1 || "TBA"}</span>
+	                    <span className="mx-2 text-neutral-300">•</span>
+	                    <span>{oi?.time1 || "TBA"}</span>
+	                  </div>
+	                  <div className="mt-0.5 text-sm text-neutral-600">Room: {oi?.room1 || "—"}</div>
+	                </div>
+	                <div className="rounded-xl border border-neutral-200 bg-white p-3">
+	                  <div className="text-xs font-semibold text-neutral-600">Meeting 2</div>
+	                  {hasSecond ? (
+	                    <>
+	                      <div className="mt-1 text-sm text-neutral-800">
+	                        <span className="font-medium">{oi?.day2 || "TBA"}</span>
+	                        <span className="mx-2 text-neutral-300">•</span>
+	                        <span>{oi?.time2 || "TBA"}</span>
+	                      </div>
+	                      <div className="mt-0.5 text-sm text-neutral-600">Room: {oi?.room2 || "—"}</div>
+	                    </>
+	                  ) : (
+	                    <div className="mt-1 text-sm text-neutral-500">No second meeting</div>
+	                  )}
+	                </div>
+	              </div>
+	            </div>
+	
+	            {/* Step 1: choose what to change */}
+	            <div className="rounded-2xl border border-neutral-200 bg-white p-4">
+	              <div className="flex items-start justify-between gap-3">
+	                <div>
+	                  <div className="text-sm font-semibold text-neutral-800">1) What would you like to change?</div>
+	                  <div className="mt-0.5 text-sm text-neutral-500">Select one or more options.</div>
+	                </div>
+	              </div>
+	              <div className="mt-3 flex flex-wrap gap-2">
+	                {(["Change class time", "Change class day", "Other"] as ChangeKind[]).map((opt) => (
+	                  <button
+	                    key={opt}
+	                    type="button"
+	                    onClick={() => toggle(opt)}
+	                    className={cls(
+	                      "rounded-xl border px-3 py-2 text-sm",
+	                      "transition-colors",
+	                      choices.includes(opt)
+	                        ? "border-emerald-600 bg-emerald-50 text-emerald-800"
+	                        : "border-neutral-300 bg-white hover:bg-neutral-50"
+	                    )}
+	                  >
+	                    {opt}
+	                  </button>
+	                ))}
+	              </div>
+	            </div>
+	
+	            {/* Step 2: details */}
+	            {(mustTime || mustDay || choices.includes("Other")) && (
+	              <div className="rounded-2xl border border-neutral-200 bg-white p-4">
+	                <div className="text-sm font-semibold text-neutral-800">2) Provide the new schedule/details</div>
+	                <div className="mt-0.5 text-sm text-neutral-500">
+	                  For paired schedules, Meeting 1 and Meeting 2 are submitted together.
+	                </div>
+	
+	                {mustTime && (
+	                  <div className="mt-4">
+	                    <div className="mb-2 text-sm font-medium text-neutral-700">New time slot</div>
+	                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+	                      <div>
+	                        <div className="mb-1 text-xs font-semibold text-neutral-600">Meeting 1</div>
+	                        <Dropdown
+	                          value={selTime1}
+	                          onChange={setSelTime1}
+	                          options={filteredTimeSlots1}
+	                          placeholder="— Select a time —"
+	                        />
+	                      </div>
+	                      {hasSecond && (
+	                        <div>
+	                          <div className="mb-1 text-xs font-semibold text-neutral-600">Meeting 2</div>
+	                          <Dropdown
+	                            value={selTime2}
+	                            onChange={setSelTime2}
+	                            options={filteredTimeSlots2}
+	                            placeholder="— Select a time —"
+	                          />
+	                        </div>
+	                      )}
+	                    </div>
+	                  </div>
+	                )}
+	
+	                {mustDay && (
+	                  <div className="mt-4">
+	                    <div className="mb-2 text-sm font-medium text-neutral-700">New class day</div>
+	                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+	                      <div>
+	                        <div className="mb-1 text-xs font-semibold text-neutral-600">Meeting 1</div>
+	                        <Dropdown
+	                          value={selDay1}
+	                          onChange={(v) => setSelDay1(v as DayLong)}
+	                          options={filteredDays1}
+	                          placeholder="— Select a day —"
+	                        />
+	                      </div>
+	                      {hasSecond && (
+	                        <div>
+	                          <div className="mb-1 text-xs font-semibold text-neutral-600">Meeting 2</div>
+	                          <Dropdown
+	                            value={selDay2}
+	                            onChange={(v) => setSelDay2(v as DayLong)}
+	                            options={filteredDays2}
+	                            placeholder="— Select a day —"
+	                          />
+	                        </div>
+	                      )}
+	                    </div>
+	                  </div>
+	                )}
+	
+	                {choices.includes("Other") && (
+	                  <div className="mt-4">
+	                    <label className="mb-1 block text-sm font-medium text-neutral-700">
+	                      Specify change <span className="text-red-500">*</span>
+	                    </label>
+	                    <input
+	                      type="text"
+	                      className="w-full rounded-xl border border-neutral-300 p-2.5 text-sm outline-none focus:ring-2 focus:ring-emerald-600/20"
+	                      placeholder="Type your custom change…"
+	                      value={otherText}
+	                      onChange={(e) => setOtherText(e.target.value)}
+	                    />
+	                  </div>
+	                )}
+	              </div>
+	            )}
+	
+	            {/* Step 3: remarks */}
+	            {!!choices.length && (
+	              <div className="rounded-2xl border border-neutral-200 bg-white p-4">
+	                <div className="text-sm font-semibold text-neutral-800">3) Special remarks <span className="text-red-500">*</span></div>
+	                <textarea
+	                  rows={4}
+	                  className="mt-3 w-full resize-y rounded-xl border border-neutral-300 p-2.5 text-sm outline-none focus:ring-2 focus:ring-emerald-600/20"
+	                  placeholder="Include brief context so OM can review faster..."
+	                  value={remarks}
+	                  onChange={(e) => setRemarks(e.target.value)}
+	                />
+                {!remarks.trim() && (
+                  <div className="mt-1 text-xs text-red-600">Remarks are required to send this RFC.</div>
                 )}
-              >
-                {opt}
-              </button>
-            ))}
-          </div>
+	              </div>
+	            )}
+	          </div>
+	        )}
+	      </div>
 
-          {mustTime && (
-            <div className="mt-2">
-              <label className="mb-1 block text-sm font-medium text-neutral-700">New time slot</label>
-              <Dropdown value={selTime} onChange={setSelTime} options={filteredTimeSlots} placeholder="— Select a time —" />
-            </div>
-          )}
-
-          {mustDay && (
-            <div className="mt-2">
-              <label className="mb-1 block text-sm font-medium text-neutral-700">New class day</label>
-              <Dropdown
-                value={selDay}
-                onChange={(v) => setSelDay(v as DayLong)}
-                options={filteredDays}
-                placeholder="— Select a day —"
-              />
-            </div>
-          )}
-
-          {choices.includes("Other") && (
-            <div className="mt-2">
-              <label className="mb-1 block text-sm font-medium text-neutral-700">
-                Specify change <span className="text-red-500">*</span>
-              </label>
-              <input
-                type="text"
-                className="w-full rounded-lg border border-neutral-300 p-2 text-sm"
-                placeholder="Type your custom change…"
-                value={otherText}
-                onChange={(e) => setOtherText(e.target.value)}
-              />
-            </div>
-          )}
-
-          {!!choices.length && (
-            <div className="mt-2">
-              <label className="mb-1 block text-sm font-medium text-neutral-700">
-                Remarks <span className="text-red-500">*</span>
-              </label>
-              <textarea
-                rows={4}
-                className="w-full resize-y rounded-lg border border-neutral-300 p-2 text-sm"
-                placeholder="Provide context for this request…"
-                value={remarks}
-                onChange={(e) => setRemarks(e.target.value)}
-              />
-            </div>
-          )}
-        </div>
-
-        <div className="mt-6 flex items-center justify-end gap-2.5">
+	      {/* Footer (always visible) */}
+	      <div className="p-6 pt-0 flex items-center justify-end gap-2.5">
           <button
             onClick={onClose}
             className="inline-flex h-9 items-center justify-center rounded-xl border border-neutral-200 bg-neutral-100 px-4 text-sm text-slate-900 shadow-sm hover:bg-neutral-200/70 active:translate-y-[0.5px]"
@@ -1239,27 +1397,60 @@ function ChangeRequestModal({
               const raw = JSON.parse(localStorage.getItem("animo.user") || "{}");
               const userId = raw.userId || raw.user_id || raw.id || "";
 
-              const parts: string[] = [];
-              if (choices.includes("Change class time") && selTime) parts.push(`Change time to ${selTime}`);
-              if (choices.includes("Change class day") && selDay) parts.push(`Change day to ${selDay}`);
-              if (choices.includes("Other") && otherText.trim()) parts.push(otherText.trim());
+              const requestedDay1 = mustDay ? (selDay1 || oi?.day1 || "TBA") : (oi?.day1 || "TBA");
+              const requestedTime1 = mustTime ? (selTime1 || oi?.time1 || "TBA") : (oi?.time1 || "TBA");
+              const requestedDay2 = hasSecond
+                ? mustDay
+                  ? (selDay2 || oi?.day2 || "TBA")
+                  : (oi?.day2 || "TBA")
+                : "";
+              const requestedTime2 = hasSecond
+                ? mustTime
+                  ? (selTime2 || oi?.time2 || "TBA")
+                  : (oi?.time2 || "TBA")
+                : "";
 
-              const changeSummary = parts.join("; ");
-              const msg =
-                `${context.item.code} ${context.item.sec} • ${context.day} • ${context.item.time}\n` +
-                `${changeSummary}\n\nRemarks: ${remarks.trim()}`;
+              // Build a clear, paired summary for OM (avoids confusion between Day 1/2 and Meeting 1/2)
+              const msgLines: string[] = [];
+              msgLines.push(`RFC: ${context.item.code} ${context.item.sec}`);
+              msgLines.push("");
+              msgLines.push("CURRENT SCHEDULE");
+              msgLines.push(
+                `Meeting 1: Day ${oi?.day1 || "TBA"} | Time ${oi?.time1 || "TBA"}`
+              );
+              msgLines.push(
+                hasSecond
+                  ? `Meeting 2: Day ${oi?.day2 || "TBA"} | Time ${oi?.time2 || "TBA"}`
+                  : "Meeting 2: —"
+              );
+              msgLines.push("");
+              msgLines.push("REQUESTED SCHEDULE");
+              msgLines.push(
+                `Meeting 1: Day ${requestedDay1} | Time ${requestedTime1}`
+              );
+              msgLines.push(
+                hasSecond
+                  ? `Meeting 2: Day ${requestedDay2 || "TBA"} | Time ${requestedTime2 || "TBA"}`
+                  : "Meeting 2: —"
+              );
 
-              const oi: any = (context?.item?.originalItem ?? context?.item ?? {});
+              msgLines.push("");
+              msgLines.push("REMARKS");
+              msgLines.push(remarks.trim());
+
+              const msg = msgLines.join("\n");
+
+              const oiAny: any = (context?.item?.originalItem ?? context?.item ?? {});
               const sectionId =
-                oi.section_id ||
-                oi.id ||
-                oi.sectionId ||
-                oi.section?.section_id ||
-                oi.section?.id ||
+                oiAny.section_id ||
+                oiAny.id ||
+                oiAny.sectionId ||
+                oiAny.section?.section_id ||
+                oiAny.section?.id ||
                 "";
 
               if (!sectionId) {
-                console.error("RFC send blocked: missing section_id on row", oi);
+                console.error("RFC send blocked: missing section_id on row", oiAny);
                 onToast?.("error", "Cannot send RFC: missing section_id for this assigned course row.", "RFC not sent");
                 return;
               }
@@ -1300,7 +1491,7 @@ function ChangeRequestModal({
             <SendIcon className="h-4 w-4" strokeWidth={2.2} />
             Send
           </button>
-        </div>
+	      </div>
       </div>
     </div>
   );
@@ -1309,6 +1500,8 @@ function ChangeRequestModal({
 function RfcThreadView({ term, sectionId }: { term: any; sectionId: string }) {
   const [thread, setThread] = useState<any | null>(null);
   const [loading, setLoading] = useState(false);
+  const [reply, setReply] = useState("");
+  const [sending, setSending] = useState(false);
 
   const formatRfcStatus = useCallback(
     (rawStatus: string, isLocked: boolean) => {
@@ -1397,7 +1590,8 @@ function RfcThreadView({ term, sectionId }: { term: any; sectionId: string }) {
   }
 
   const status = String(thread.status || "").toUpperCase();
-  const locked = Boolean(thread.locked) || ["ACCEPTED", "APPROVED", "REJECTED"].includes(status);
+  // RFC terminal statuses are informational; only the explicit `locked` flag should disable interactions.
+  const locked = Boolean(thread.locked);
   const statusLabel = formatRfcStatus(status, locked);
 
   return (
@@ -1435,6 +1629,54 @@ function RfcThreadView({ term, sectionId }: { term: any; sectionId: string }) {
           );
         })}
       </div>
+
+      {/* Quick reply: allow faculty to respond in-thread even without creating a new RFC request */}
+      {!locked && (
+        <div className="mt-3 flex items-end gap-2">
+          <textarea
+            rows={2}
+            value={reply}
+            onChange={(e) => setReply(e.target.value)}
+            placeholder="Reply to Office Manager…"
+            className="flex-1 resize-none rounded-xl border border-neutral-300 bg-white p-2.5 text-sm outline-none focus:ring-2 focus:ring-emerald-600/20"
+          />
+          <button
+            type="button"
+            disabled={sending || !reply.trim()}
+            onClick={async () => {
+              if (!reply.trim()) return;
+              try {
+                setSending(true);
+                const raw = JSON.parse(localStorage.getItem("animo.user") || "{}");
+                const userId = raw.userId || raw.user_id || raw.id || "";
+                await sendFacultyLoadAssignmentRfcMessage(userId, {
+                  term_id: (term as any)?.term_id || (term as any)?._id || (term as any)?.id,
+                  section_id: sectionId,
+                  message: reply.trim(),
+                });
+                setReply("");
+                // Refresh thread so the new message appears immediately.
+                const refreshed = await getFacultyLoadAssignmentRfc(userId, {
+                  term_id: (term as any)?.term_id || (term as any)?._id || (term as any)?.id,
+                  section_id: sectionId,
+                });
+                setThread(refreshed?.rfc || null);
+              } catch (e) {
+                console.error(e);
+              } finally {
+                setSending(false);
+              }
+            }}
+            className={cls(
+              "inline-flex h-9 items-center justify-center rounded-xl px-4 text-sm font-medium text-white shadow",
+              "bg-[#1F7A49] hover:brightness-[1.06] active:translate-y-[0.5px]",
+              (sending || !reply.trim()) && "opacity-60 cursor-not-allowed"
+            )}
+          >
+            {sending ? "Sending…" : "Send"}
+          </button>
+        </div>
+      )}
     </div>
   );
 }

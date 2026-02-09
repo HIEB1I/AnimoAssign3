@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { ChevronLeft, TrendingUp, AlertTriangle, Users, BarChart, CheckCircle } from "lucide-react"; 
 import { fetchPTRisk } from "../../../api";
+import SelectBox from "../../../component/SelectBox";
 
 /** ---------------- Types (from OM_pred2) ---------------- */
 type PTRow = {
@@ -162,6 +163,21 @@ export default function OM_RP_LoadRisk() {
 
   const canRun = Boolean(departmentId?.trim()) && histK >= 1 && histK <= 6;
 
+  // Dropdown options (match Course Management SelectBox style)
+  const deptOptions = useMemo(() => {
+    if (!departments || departments.length === 0) return [departmentId];
+    // Display department names only (no IDs in the dropdown)
+    return departments.map((d) => d.department_name);
+  }, [departments, departmentId]);
+
+  const deptValue = useMemo(() => {
+    if (!departments || departments.length === 0) return departmentId;
+    const match = departments.find((d) => d.department_id === departmentId);
+    return match?.department_name || deptOptions[0] || departmentId;
+  }, [departments, deptOptions, departmentId]);
+
+  const overloadOptions = useMemo(() => ["0", "3"], []);
+
 
   // data state
   const [loading, setLoading] = useState(false);
@@ -270,32 +286,23 @@ export default function OM_RP_LoadRisk() {
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4 items-end">
               <div>
               <label className="block text-xs text-gray-600 mb-1">Department</label>
-              <select
-                value={departmentId}
-                onChange={(e) => setDepartmentId(e.target.value)}
-                className="w-full rounded-lg border border-gray-300 px-3.5 py-2 text-sm shadow-sm bg-white focus:ring-2 focus:ring-emerald-500/30"
-              >
-                {departments.length === 0 ? (
-                  <option value={departmentId}>{departmentId}</option>
-                ) : (
-                  departments.map((d) => (
-                    <option key={d.department_id} value={d.department_id}>
-                      {d.department_name}
-                    </option>
-                  ))
-                )}
-              </select>
+              <SelectBox
+                value={deptValue}
+                onChange={(v) => {
+                  const nextName = (v || "").trim();
+                  const next = departments.find((d) => d.department_name === nextName);
+                  setDepartmentId(next?.department_id || departmentId);
+                }}
+                options={deptOptions}
+              />
               </div>
               <div>
                 <label className="block text-xs text-gray-600 mb-1">Overload allowance (units)</label>
-                <select
-                  value={overload}
-                  onChange={(e) => setOverload(Number(e.target.value))}
-                  className="w-full rounded-lg border border-gray-300 px-3.5 py-2 text-sm shadow-sm bg-white focus:ring-2 focus:ring-emerald-500/30"
-                >
-                  <option value={0}>0</option>
-                  <option value={3}>3</option>
-                </select>
+                <SelectBox
+                  value={String(overload)}
+                  onChange={(v) => setOverload(Number(v))}
+                  options={overloadOptions}
+                />
               </div>
 
               <div>

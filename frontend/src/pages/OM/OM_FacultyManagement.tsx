@@ -1,8 +1,14 @@
 /* ------------- OM_FacultyManagement.tsx ------------- */
 import { useEffect, useMemo, useRef, useState } from "react";
 import SelectBox from "../../component/SelectBox";
-import { cls } from "../../utilities/cls";
-import { Search as SearchIcon, MoreVertical, Calendar, BookOpen } from "lucide-react";
+import {
+  Search as SearchIcon,
+  MoreVertical,
+  Calendar,
+  BookOpen,
+  ChevronLeft,
+  ChevronRight,
+} from "lucide-react";
 import {
   getFacultyOptions,
   listFaculty,
@@ -76,59 +82,35 @@ function ActionMenu({
   );
 }
 
-/* ---------- Helpers to mirror FACULTY_Overview list view ---------- */
-type DayLong = "Monday" | "Tuesday" | "Wednesday" | "Thursday" | "Friday" | "Saturday";
-const DAY_ORDER: DayLong[] = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
-
-type TLItem = {
-  code: string;
-  title: string;
-  sec: string;
-  units: number;
-  campus: string;
-  mode: string;
-  room: string;
-  time: string;
+/* ---------- Schedule + Teaching History table helpers (Reports & Analytics style) ---------- */
+type ScheduleRow = {
+  course_code: string;
+  course_title: string;
+  section: string;
+  units?: number;
+  mode?: string;
+  day1?: string;
+  begin1?: string;
+  end1?: string;
+  day2?: string;
+  begin2?: string;
+  end2?: string;
 };
-type TL = { day: DayLong; items: TLItem[] };
 
-// (Same mapping as in FACULTY_Overview)
-function makeTeachingLoad(dataArray: any[]): TL[] {
-  const byDay: Record<DayLong, TLItem[]> = {
-    Monday: [], Tuesday: [], Wednesday: [], Thursday: [], Friday: [], Saturday: [],
-  };
-  (dataArray || []).forEach((c: any) => {
-    const day = (c.day || "") as DayLong;
-    if (!DAY_ORDER.includes(day)) return;
-    byDay[day].push({
-      code: c.course_code ?? "",
-      title: c.course_title ?? "",
-      sec: c.section ?? "",
-      units: Number(c.units) || 0,
-      campus: c.campus || "—",
-      mode: c.mode || "Online",
-      room: c.room || "Online",
-      time: c.time || "",
-    });
-  });
-  return DAY_ORDER.map((d) => ({ day: d, items: byDay[d] }));
-}
-
-/* ---------- History helpers (mirror FACULTY_History grouping/columns) ---------- */
 type HistRow = {
   code: string;
   title: string;
   section: string;
-  mode?: string | null;
-  day1?: string | null;
-  room1?: string | null;
-  day2?: string | null;
-  room2?: string | null;
-  time?: string | null;
-  term?: string | null; // "Term 1" | "Term 2" | "Term 3"
+  units?: number;
+  day1?: string;
+  begin1?: string;
+  end1?: string;
+  day2?: string;
+  begin2?: string;
+  end2?: string;
+  term?: string; // "Term 1" | "Term 2" | "Term 3"
 };
 
-// Group rows by Term 1/2/3 like FACULTY_History
 function groupHistoryByTerm(rows: HistRow[]) {
   const groups: Record<string, HistRow[]> = { "Term 1": [], "Term 2": [], "Term 3": [] };
   rows.forEach((r) => {
@@ -139,71 +121,121 @@ function groupHistoryByTerm(rows: HistRow[]) {
   return groups;
 }
 
-// Excel-like, single-line cells except title (no horizontal scroll)
-function renderTeachingHistoryLikeFacultyFromArray(flatRows: HistRow[]) {
+function renderScheduleTable(rows: ScheduleRow[]) {
+  return (
+    <div className="border border-gray-200 bg-gray-50 shadow-sm overflow-visible rounded-xl">
+      <div className="overflow-x-auto rounded-xl">
+        <table className="w-full text-sm">
+          <thead className="bg-gray-50 border-b text-gray-700">
+            <tr>
+              <th className="text-left px-4 py-2">Course Code &amp; Title</th>
+              <th className="text-left px-4 py-2">Section</th>
+              <th className="text-left px-4 py-2">Mode</th>
+              <th className="text-center px-4 py-2">Units</th>
+
+              <th className="text-left px-4 py-2">Day 1</th>
+              <th className="text-left px-4 py-2">Begin 1</th>
+              <th className="text-left px-4 py-2">End 1</th>
+
+              <th className="text-left px-4 py-2">Day 2</th>
+              <th className="text-left px-4 py-2">Begin 2</th>
+              <th className="text-left px-4 py-2">End 2</th>
+            </tr>
+          </thead>
+
+          <tbody className="divide-y">
+            {(rows || []).length === 0 ? (
+              <tr>
+                <td colSpan={10} className="px-4 py-6 text-center text-gray-500">
+                  No records
+                </td>
+              </tr>
+            ) : (
+              (rows || []).map((r, idx) => (
+                <tr key={idx} className="hover:bg-gray-50">
+                  <td className="px-4 py-3 text-left font-semibold text-emerald-700">
+                    {r.course_code || "—"}
+                    <div className="text-xs text-gray-500">{r.course_title || "—"}</div>
+                  </td>
+                  <td className="px-4 py-3 text-left">{r.section || "—"}</td>
+                  <td className="px-4 py-3 text-left">{r.mode || "—"}</td>
+                  <td className="px-4 py-3 text-center">{r.units ?? "—"}</td>
+
+                  <td className="px-4 py-3 text-left">{r.day1 || "—"}</td>
+                  <td className="px-4 py-3 text-left whitespace-nowrap">{r.begin1 || "—"}</td>
+                  <td className="px-4 py-3 text-left whitespace-nowrap">{r.end1 || "—"}</td>
+
+                  <td className="px-4 py-3 text-left">{r.day2 || "—"}</td>
+                  <td className="px-4 py-3 text-left whitespace-nowrap">{r.begin2 || "—"}</td>
+                  <td className="px-4 py-3 text-left whitespace-nowrap">{r.end2 || "—"}</td>
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function renderTeachingHistoryByTerm(flatRows: HistRow[]) {
   const groups = groupHistoryByTerm(flatRows);
 
-  const HEADERS = [
-    "Course Code","Course Title","Section",
-    "Mode","Day 1","Room 1","Day 2","Room 2","Time",
-  ] as const;
-
   return (
-    <div className="space-y-8">
-      {(["Term 1","Term 2","Term 3"] as const).map((t) => (
-        <div key={t} className="rounded-xl border border-gray-200 overflow-hidden bg-white">
-          {/* Term header */}
-          <div className="px-4 py-3 text-sm font-semibold text-emerald-700 bg-gray-50 border-b">
-            {t}
-          </div>
+    <div className="space-y-10">
+      {(["Term 1", "Term 2", "Term 3"] as const).map((t) => (
+        <div key={t} className="space-y-3">
+          <div className="text-sm font-semibold text-emerald-700">{t}</div>
 
-          {/* Excel-inspired fixed table */}
-          <div>
-            <table className="w-full table-fixed border-t border-gray-200">
-              <colgroup>
-                <col className="w-[12ch]" /> {/* Code */}
-                <col className="w-[32ch]" /> {/* Title (can wrap) */}
-                <col className="w-[10ch]" /> {/* Section */}
-                <col className="w-[10ch]" /> {/* Mode */}
-                <col className="w-[8ch]"  /> {/* Day 1 */}
-                <col className="w-[14ch]" /> {/* Room 1 */}
-                <col className="w-[8ch]"  /> {/* Day 2 */}
-                <col className="w-[14ch]" /> {/* Room 2 */}
-                <col className="w-[16ch]" /> {/* Time */}
-              </colgroup>
-
-              <thead>
-                <tr className="text-xs text-gray-600 bg-emerald-50">
-                  {HEADERS.map((h) => (
-                    <th key={h} className="px-3 py-2 font-semibold text-center">{h}</th>
-                  ))}
-                </tr>
-              </thead>
-
-              <tbody>
-                {(groups[t] ?? []).length === 0 ? (
+          <div className="border border-gray-200 bg-gray-50 shadow-sm overflow-visible rounded-xl">
+            <div className="overflow-x-auto rounded-xl">
+              <table className="w-full text-sm">
+                <thead className="bg-gray-50 border-b text-gray-700">
                   <tr>
-                    <td colSpan={HEADERS.length} className="px-4 py-6 text-center text-sm text-gray-500 bg-white">
-                      No records.
-                    </td>
+                    <th className="text-left px-4 py-2">Course Code &amp; Title</th>
+                    <th className="text-left px-4 py-2">Section</th>
+                    <th className="text-center px-4 py-2">Units</th>
+
+                    <th className="text-left px-4 py-2">Day 1</th>
+                    <th className="text-left px-4 py-2">Begin 1</th>
+                    <th className="text-left px-4 py-2">End 1</th>
+
+                    <th className="text-left px-4 py-2">Day 2</th>
+                    <th className="text-left px-4 py-2">Begin 2</th>
+                    <th className="text-left px-4 py-2">End 2</th>
                   </tr>
-                ) : (
-                  groups[t].map((r, i) => (
-                    <tr key={`${t}-${i}`} className={i % 2 ? "bg-gray-50" : "bg-white"}>
-                      <td className="px-3 py-2 text-center text-[13px] whitespace-nowrap">{r.code}</td>
-                      <td className="px-3 py-2 text-center text-[13px] whitespace-normal break-words">{r.title}</td>
-                      <td className="px-3 py-2 text-center text-[13px] whitespace-nowrap">{r.section}</td>
-                      <td className="px-3 py-2 text-center text-[13px] whitespace-nowrap">{r.mode ?? ""}</td>
-                      <td className="px-3 py-2 text-center text-[13px] whitespace-nowrap">{r.day1 ?? ""}</td>
-                      <td className="px-3 py-2 text-center text-[13px] whitespace-nowrap">{r.room1 ?? ""}</td>
-                      <td className="px-3 py-2 text-center text-[13px] whitespace-nowrap">{r.day2 ?? ""}</td>
-                      <td className="px-3 py-2 text-center text-[13px] whitespace-nowrap">{r.room2 ?? ""}</td>
-                      <td className="px-3 py-2 text-center text-[13px] whitespace-nowrap">{r.time ?? ""}</td>
+                </thead>
+
+                <tbody className="divide-y">
+                  {(groups[t] ?? []).length === 0 ? (
+                    <tr>
+                      <td colSpan={9} className="px-4 py-6 text-center text-gray-500">
+                        No records
+                      </td>
                     </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
+                  ) : (
+                    (groups[t] ?? []).map((r, idx) => (
+                      <tr key={`${t}-${idx}`} className="hover:bg-gray-50">
+                        <td className="px-4 py-3 text-left font-semibold text-emerald-700">
+                          {r.code || "—"}
+                          <div className="text-xs text-gray-500">{r.title || "—"}</div>
+                        </td>
+                        <td className="px-4 py-3 text-left">{r.section || "—"}</td>
+                        <td className="px-4 py-3 text-center">{r.units ?? "—"}</td>
+
+                        <td className="px-4 py-3 text-left">{r.day1 || "—"}</td>
+                        <td className="px-4 py-3 text-left whitespace-nowrap">{r.begin1 || "—"}</td>
+                        <td className="px-4 py-3 text-left whitespace-nowrap">{r.end1 || "—"}</td>
+
+                        <td className="px-4 py-3 text-left">{r.day2 || "—"}</td>
+                        <td className="px-4 py-3 text-left whitespace-nowrap">{r.begin2 || "—"}</td>
+                        <td className="px-4 py-3 text-left whitespace-nowrap">{r.end2 || "—"}</td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
           </div>
         </div>
       ))}
@@ -336,79 +368,6 @@ export default function OM_FacultyManagement() {
     return ay ? `AY ${ay}–${ay + 1}` : "—";
   }, [historyYearIndex, academicYears]);
 
-  /* ---------- Renderers ---------- */
-  const renderTeachingLoadSummaryList = (s: any) => {
-    // backend returns { teaching_load: [...] }
-    const TL = makeTeachingLoad(s?.teaching_load || []);
-
-    return (
-      <div className="space-y-6">
-        {TL.map((day) => (
-          <div key={day.day} className="rounded-xl border border-emerald-700/50 overflow-hidden bg-white">
-            {/* Day header */}
-            <div className="px-5 py-3">
-              <div className="text-emerald-700 font-semibold text-[15px]">{day.day}</div>
-            </div>
-
-            {/* Excel-like table (no horizontal scroll) */}
-            <div className="px-4 pb-4">
-              <div className="rounded-xl border border-emerald-700/40">
-                <table className="w-full table-fixed">
-                  <colgroup>
-                    <col style={{ width: "12%" }} />
-                    <col style={{ width: "32%" }} />
-                    <col style={{ width: "8%" }} />
-                    <col style={{ width: "8%" }} />
-                    <col style={{ width: "12%" }} />
-                    <col style={{ width: "10%" }} />
-                    <col style={{ width: "10%" }} />
-                    <col style={{ width: "8%" }} />
-                  </colgroup>
-                  <thead>
-                    <tr className="text-[11.5px] uppercase tracking-wide text-emerald-800 bg-emerald-50">
-                      {[
-                        "Course Code","Course Title","Section","Units","Campus","Mode","Room","Time",
-                      ].map((h) => (
-                        <th key={h} className="px-3 py-2 font-semibold text-center border-b border-emerald-700/40">
-                          {h}
-                        </th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {day.items.length === 0 ? (
-                      <tr>
-                        <td colSpan={8} className="px-4 py-6 text-center text-sm text-neutral-500 bg-white">
-                          No records.
-                        </td>
-                      </tr>
-                    ) : (
-                      day.items.map((it, idx) => (
-                        <tr
-                          key={`${day.day}-${it.code}-${it.sec}-${idx}`}
-                          className={cls("text-neutral-900 text-[13px]", idx % 2 === 0 ? "bg-white" : "bg-neutral-50")}
-                        >
-                          <td className="px-3 py-2 text-center whitespace-nowrap border-t border-emerald-700/30">{it.code}</td>
-                          <td className="px-3 py-2 text-center whitespace-normal break-words border-t border-emerald-700/30">{it.title || "—"}</td>
-                          <td className="px-3 py-2 text-center whitespace-nowrap border-t border-emerald-700/30">{it.sec}</td>
-                          <td className="px-3 py-2 text-center whitespace-nowrap border-t border-emerald-700/30">{it.units}</td>
-                          <td className="px-3 py-2 text-center whitespace-nowrap border-t border-emerald-700/30">{it.campus}</td>
-                          <td className="px-3 py-2 text-center whitespace-nowrap border-t border-emerald-700/30">{it.mode}</td>
-                          <td className="px-3 py-2 text-center whitespace-nowrap border-t border-emerald-700/30">{it.room}</td>
-                          <td className="px-3 py-2 text-center whitespace-nowrap border-t border-emerald-700/30">{it.time}</td>
-                        </tr>
-                      ))
-                    )}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          </div>
-        ))}
-      </div>
-    );
-  };
-
   return (
     <main className="w-full px-8 py-8">
       <header className="mb-6">
@@ -516,7 +475,7 @@ export default function OM_FacultyManagement() {
                       No schedule records for the current term.
                     </div>
                   ) : (
-                    renderTeachingLoadSummaryList(schedule)
+                    renderScheduleTable(schedule?.teaching_load || [])
                   )}
                 </>
               )}
@@ -530,37 +489,41 @@ export default function OM_FacultyManagement() {
                   </div>
 
                   {/* Prev / Next AY controls (existing OM behavior kept) */}
-                  <div className="flex justify-between items-center mb-4">
+                  <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
                     <button
+                      className="inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm shadow-sm hover:bg-gray-50 disabled:opacity-40 disabled:hover:bg-white"
                       // Previous = go to OLDER AY (increase index)
-                      onClick={() => setHistoryYearIndex((i) => Math.min(academicYears.length - 1, i + 1))}
+                      onClick={() =>
+                        setHistoryYearIndex((i) => Math.min(academicYears.length - 1, i + 1))
+                      }
                       disabled={historyYearIndex === academicYears.length - 1}
-                      className={cls(
-                        "px-3 py-1.5 rounded-lg text-sm font-medium border shadow-sm",
-                        historyYearIndex === academicYears.length - 1
-                          ? "bg-gray-100 text-gray-400 cursor-not-allowed"
-                          : "bg-white hover:bg-gray-50 text-gray-700"
-                      )}
+                      title="Previous academic year"
                     >
-                      ← Previous
+                      <ChevronLeft className="h-4 w-4" />
+                      <span>Previous</span>
                     </button>
 
-                    <span className="text-base font-semibold text-gray-800">{historyYearLabel}</span>
+                    <div className="flex flex-col items-center gap-1">
+                      <div className="rounded-full border border-emerald-100 bg-emerald-50 px-4 py-2 text-sm font-semibold text-emerald-800 shadow-sm">
+                        {historyYearLabel}
+                      </div>
+                      {academicYears.length > 0 && (
+                        <div className="text-xs text-gray-500">
+                          {Math.min(historyYearIndex + 1, academicYears.length)} of {academicYears.length}
+                        </div>
+                      )}
+                    </div>
 
                     <button
+                      className="inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm shadow-sm hover:bg-gray-50 disabled:opacity-40 disabled:hover:bg-white"
                       // Next = go to NEWER AY (decrease index)
                       onClick={() => setHistoryYearIndex((i) => Math.max(0, i - 1))}
                       disabled={historyYearIndex === 0}
-                      className={cls(
-                        "px-3 py-1.5 rounded-lg text-sm font-medium border shadow-sm",
-                        historyYearIndex === 0
-                          ? "bg-gray-100 text-gray-400 cursor-not-allowed"
-                          : "bg-white hover:bg-gray-50 text-gray-700"
-                      )}
+                      title="Next academic year"
                     >
-                      Next →
+                      <span>Next</span>
+                      <ChevronRight className="h-4 w-4" />
                     </button>
-
                   </div>
 
                   {/* Body */}
@@ -573,7 +536,7 @@ export default function OM_FacultyManagement() {
                       No history records for {historyYearLabel}.
                     </div>
                   ) : (
-                    renderTeachingHistoryLikeFacultyFromArray(history.teaching_history)
+                    renderTeachingHistoryByTerm(history.teaching_history)
                   )}
                 </>
               )}

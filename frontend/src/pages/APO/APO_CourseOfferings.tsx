@@ -15,6 +15,8 @@ import {
   Copy,
   Undo2,
   Redo2,
+  Info,
+  BarChart3,
 } from "lucide-react";
 import TopBar from "../../component/TopBar";
 import Tabs from "../../component/Tabs";
@@ -474,6 +476,20 @@ type OfferingRow = {
     elective_placeholder_course_id?: string;
     fulfilled_placeholder_course_id?: string;
   };
+};
+
+type ActionRequiredItem = {
+  key: string;       // stable row key (sec:... or combo:...)
+  groupKey: string;  // `${ID}::${PROGRAM}` used by collapsedGroups
+  courseCode: string;
+  title: string;
+  batchCode: string;
+  programCode: string;
+  demand: number;
+  preEnlisted: number;
+  plannedCap: number;
+  deficit: number;
+  suggest: number;
 };
 
 type CourseOption = {
@@ -1107,7 +1123,7 @@ const EligibleRoomSelect: React.FC<{
   const [currSearch, setCurrSearch] = useState("");
 
   // per-program add selection (code-only select still stores course_id)
-  const [currAddSel, setCurrAddSel] = useState<Record<string, string>>({});
+  const [_currAddSel, setCurrAddSel] = useState<Record<string, string>>({});
   const [editorState, setEditorState] = useState<{
     open: boolean;
     program_id?: string;
@@ -1162,6 +1178,10 @@ const [currImportErr, setCurrImportErr] = useState<string | null>(null);
   };
 // Offerings collapse state (keyed by "ID::PROGRAM")
   const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
+
+  // Offerings: Action Required panel UI
+  const [showAllActionRequired, setShowAllActionRequired] = useState(false);
+  const [highlightRowKey, setHighlightRowKey] = useState<string | null>(null);
 
   const user = useMemo(() => {
     const raw = localStorage.getItem("animo.user");
@@ -1943,6 +1963,54 @@ useEffect(() => {
     }
     return out;
   }, [filtered]);
+
+  const actionRequired = useMemo<ActionRequiredItem[]>(() => {
+    const items = (filtered || [])
+      .filter((r) => (r?.sizing?.deficit || 0) > 0 || (r?.sizing?.suggest_additional || 0) > 0)
+      .map((r) => {
+        const idKey = normCode(r.batch.batch_code) || "—";
+        const progKey = r.program.program_code || "—";
+        const key = r.section.section_id
+          ? `sec:${r.section.section_id}`
+          : `combo:${r.batch.batch_id}|${r.program.program_id}|${r.course.course_id}`;
+        return {
+          key,
+          groupKey: `${idKey}::${progKey}`,
+          courseCode: r.course.course_code,
+          title: r.course.course_title,
+          batchCode: idKey,
+          programCode: progKey,
+          demand: r.sizing.planning_demand,
+          preEnlisted: r.sizing.preenlistment_total,
+          plannedCap: r.sizing.planned_capacity,
+          deficit: r.sizing.deficit,
+          suggest: r.sizing.suggest_additional,
+        };
+      })
+      .sort((a, b) => {
+        // Prioritize largest deficits; then suggested sections; then course code.
+        if (b.deficit !== a.deficit) return b.deficit - a.deficit;
+        if (b.suggest !== a.suggest) return b.suggest - a.suggest;
+        return a.courseCode.localeCompare(b.courseCode);
+      });
+    return items;
+  }, [filtered]);
+
+  const jumpToActionRequired = (it: ActionRequiredItem) => {
+    // Ensure the group is expanded
+    setCollapsedGroups((prev) => ({ ...prev, [it.groupKey]: false }));
+
+    // Scroll + transient highlight
+    const elId = `row-${it.key}`;
+    window.setTimeout(() => {
+      const el = document.getElementById(elId);
+      if (el) {
+        el.scrollIntoView({ behavior: "smooth", block: "center" });
+        setHighlightRowKey(it.key);
+        window.setTimeout(() => setHighlightRowKey((k) => (k === it.key ? null : k)), 2200);
+      }
+    }, 80);
+  };
 
   /* ---------------------------- offerings: editing --------------------------- */
 
@@ -3955,7 +4023,7 @@ const response = await importCurriculumCsv(user.userId, {
 
                     <div className="flex items-center justify-end gap-2">
                       <button
-                        className="rounded-lg bg-emerald-700 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:brightness-110"
+                        className="rounded-lg bg-orange-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-orange-700"
                         onClick={() => setShowPlanModal(true)}
                       >
                         Review &amp; Approve
@@ -3983,13 +4051,25 @@ const response = await importCurriculumCsv(user.userId, {
                   </a>
                 </div>
               ) : (
-                Object.entries(groups).map(([idLabel, byProgram]) => (
+                <>
+                  {actionRequired.length > 0 && (
+                    <ActionRequiredPanel
+                      items={actionRequired}
+                      showAll={showAllActionRequired}
+                      onToggleShowAll={() => setShowAllActionRequired((v) => !v)}
+                      onJump={jumpToActionRequired}
+                    />
+                  )}
+
+                  {Object.entries(groups).map(([idLabel, byProgram]) => (
                   <div   key={idLabel}
                     className="rounded-xl border border-gray-300 bg-white shadow-sm overflow-visible mb-6">
                     <div className="bg-[#21804A] text-white px-4 py-3 text-center font-semibold">{idLabel}</div>
                     {Object.entries(byProgram).map(([progLabel, list]) => {
                       const key = `${idLabel}::${progLabel}`;
                       const isCollapsed = !!collapsedGroups[key];
+                      const geEditing =
+                        !!editing && isGEType(editing.row?.course?.type_of_course || "");
                       return (
                         <div key={key} className="border-t border-gray-200">
                           <button
@@ -4008,18 +4088,19 @@ const response = await importCurriculumCsv(user.userId, {
                           {!isCollapsed && (
                             <div className="p-0">
                             <div className="overflow-x-auto relative" style={{ overflowY: "visible" }}>
+
                               <table className="w-full text-sm border-collapse table-fixed">
                                   <colgroup>
                                     <col style={{ width: 96 }} />   {/* Program No. */}
                                     <col style={{ width: 230 }} />  {/* Course Code & Title */}
                                     <col style={{ width: 90 }} />   {/* Section */}
                                     <col style={{ width: 180 }} />  {/* Faculty */}
-                                    <col style={{ width: 95 }} />   {/* Day 1 */}
-                                    <col style={{ width: 70 }} />   {/* Begin 1 */}
+                                    <col style={{ width: 140 }} />   {/* Day 1 */}
+                                    <col style={{ width: geEditing ? 170 : 70 }} />   {/* Begin 1 */}
                                     <col style={{ width: 70 }} />   {/* End 1 */}
                                     <col style={{ width: 120 }} />  {/* Room 1 */}
-                                    <col style={{ width: 95 }} />   {/* Day 2 */}
-                                    <col style={{ width: 70 }} />   {/* Begin 2 */}
+                                    <col style={{ width: 140 }} />   {/* Day 2 */}
+                                     <col style={{ width: geEditing ? 170 : 70 }} />   {/* Begin 2 */}
                                     <col style={{ width: 70 }} />   {/* End 2 */}
                                     <col style={{ width: 120 }} />  {/* Room 2 */}
                                     <col style={{ width: 80 }} />   {/* Capacity */}
@@ -4063,24 +4144,7 @@ const response = await importCurriculumCsv(user.userId, {
                                         r.course.course_title
                                       );
 
-                                      const suggestion =
-                                        r.sizing?.deficit > 0 || (r.sizing?.suggest_additional || 0) > 0 ? (
-                                          <div className="mt-1 text-xs text-gray-600">
-                                            <span className="mr-3">
-                                              Demand: <strong>{r.sizing.planning_demand}</strong>
-                                            </span>
-                                            <span className="mr-3">
-                                              Pre-enlisted: <strong>{r.sizing.preenlistment_total}</strong>
-                                            </span>
-                                            <span className="mr-3">
-                                              Planned cap: <strong>{r.sizing.planned_capacity}</strong>
-                                            </span>
-                                            {r.sizing.deficit > 0 && <span className="text-red-600 mr-3">Deficit: {r.sizing.deficit}</span>}
-                                            {r.sizing.suggest_additional > 0 && (
-                                              <span className="text-emerald-700">Suggest +{r.sizing.suggest_additional} section(s)</span>
-                                            )}
-                                          </div>
-                                        ) : null;
+                                      // Sizing alerts are shown in the "Action required" panel (keeps table rows clean)
 
                                       const campusName = data?.campus?.campus_name || "";
                                       const currentCode = (r.section.section_code || "").toUpperCase().replace(/\s+/g, "");
@@ -4089,7 +4153,14 @@ const response = await importCurriculumCsv(user.userId, {
                                       const showExpected = !currentCode || (suggestedCode && suggestedCode !== currentCode);
 
                                       const viewRow = (
-                                        <tr key={(r.section.section_id || r.course.course_id) + "-v"} className="hover:bg-neutral-50">
+                                        <tr
+                                          id={`row-${rowKey}`}
+                                          key={(r.section.section_id || r.course.course_id) + "-v"}
+                                          className={cls(
+                                            "hover:bg-neutral-50",
+                                            highlightRowKey === rowKey && "bg-amber-50"
+                                          )}
+                                        >
                                           <td className="px-3 py-2 border border-gray-300">
                                             {(r.program?.program_code || "—") +
                                               "-" +
@@ -4112,7 +4183,7 @@ const response = await importCurriculumCsv(user.userId, {
                                             <div className="text-xs text-gray-500 leading-snug break-words whitespace-normal">
                                               {r.course.course_title}
                                             </div>
-                                            {suggestion}
+
                                           </td>
                                           <td className="px-3 py-2 border border-gray-300">
                                             <div>{currentCode || "—"}</div>
@@ -4202,8 +4273,9 @@ const response = await importCurriculumCsv(user.userId, {
 
                                       const editRow = (
                                         <tr
+                                          id={`row-${rowKey}`}
                                           key={r.section.section_id + "-e"}
-                                          className="bg-white"
+                                          className={cls("bg-white", highlightRowKey === rowKey && "bg-amber-50")}
                                           style={{ boxShadow: "0 2px 10px rgba(0,0,0,0.05)" }}
                                         >
                                           <td className="px-3 py-2 border border-gray-200 bg-white">
@@ -4850,7 +4922,8 @@ const response = await importCurriculumCsv(user.userId, {
                       );
                     })}
                   </div>
-                ))
+                  ))}
+                </>
               )}
             </>
           )}
@@ -5712,6 +5785,276 @@ const response = await importCurriculumCsv(user.userId, {
 
 /* --------------------------- Small helper components --------------------------- */
 
+const MiniMetric: React.FC<{
+  label: string;
+  value: number | string;
+  help: string;
+  tone?: "default" | "danger";
+}> = ({ label, value, help, tone = "default" }) => {
+  return (
+    <span className="inline-flex items-center gap-1.5 text-xs">
+      <span className="group relative inline-flex items-center gap-1 text-slate-700">
+        <span className="cursor-help underline decoration-dotted underline-offset-2">{label}</span>
+        <Info className="h-3.5 w-3.5 text-slate-400" />
+        <span className="pointer-events-none absolute left-0 top-full z-30 mt-2 w-[340px] rounded-xl border border-slate-200 bg-white px-3 py-2 text-[11px] leading-snug text-slate-700 opacity-0 shadow-xl transition-opacity group-hover:opacity-100">
+          <span className="font-semibold text-slate-900">{label}:</span> {help}
+        </span>
+      </span>
+      <span className={cls("font-semibold", tone === "danger" ? "text-rose-700" : "text-slate-900")}>
+        {value}
+      </span>
+    </span>
+  );
+};
+
+const ActionRequiredPanel: React.FC<{
+  items: ActionRequiredItem[];
+  showAll: boolean;
+  onToggleShowAll: () => void;
+  onJump: (it: ActionRequiredItem) => void;
+}> = ({ items, onJump }) => {
+  type CourseGroup = {
+    courseKey: string;
+    courseCode: string;
+    title: string;
+    demand: number;
+    preEnlisted: number;
+    plannedCap: number;
+    deficit: number;
+    suggest: number;
+    rows: ActionRequiredItem[];
+  };
+
+  const groups = React.useMemo<CourseGroup[]>(() => {
+    const map = new Map<string, CourseGroup>();
+    for (const it of items) {
+      const k = String(it.courseCode || "—");
+      const cur = map.get(k);
+      if (!cur) {
+        map.set(k, {
+          courseKey: k,
+          courseCode: it.courseCode,
+          title: it.title,
+          demand: it.demand,
+          preEnlisted: it.preEnlisted,
+          plannedCap: it.plannedCap,
+          deficit: it.deficit,
+          suggest: it.suggest,
+          rows: [it],
+        });
+      } else {
+        cur.rows.push(it);
+        cur.demand = Math.max(cur.demand, it.demand);
+        cur.preEnlisted = Math.max(cur.preEnlisted, it.preEnlisted);
+        cur.plannedCap = Math.max(cur.plannedCap, it.plannedCap);
+        cur.deficit = Math.max(cur.deficit, it.deficit);
+        cur.suggest = Math.max(cur.suggest, it.suggest);
+      }
+    }
+    return Array.from(map.values()).sort((a, b) => {
+      if (b.deficit !== a.deficit) return b.deficit - a.deficit;
+      return a.courseCode.localeCompare(b.courseCode);
+    });
+  }, [items]);
+
+  const [open, setOpen] = React.useState(false);
+
+  return (
+    <>
+      <div className="mb-4 rounded-xl border border-rose-300 bg-rose-50 px-4 py-3 text-rose-950 shadow-sm">
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex items-start gap-3">
+            <div className="mt-0.5 grid h-9 w-9 place-items-center rounded-full bg-rose-200 text-rose-900">
+              <BarChart3 className="h-5 w-5" />
+            </div>
+            <div>
+              <div className="flex items-center gap-1 font-semibold text-rose-950">
+                Capacity Gap
+              </div>
+              <div className="text-sm text-rose-900">
+                Some courses have fewer planned seats than demand. Review the details and consider adding sections.
+              </div>
+            </div>
+          </div>
+
+          <div className="flex items-center justify-end gap-2">
+            <span className="rounded-full bg-rose-100 px-2 py-0.5 text-xs font-semibold text-rose-900">
+              {groups.length} course{groups.length === 1 ? "" : "s"}
+            </span>
+            <button
+              type="button"
+              className="rounded-lg bg-rose-700 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:brightness-110"
+              onClick={() => setOpen(true)}
+            >
+              View
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <CapacityGapModal
+        open={open}
+        groups={groups}
+        onClose={() => setOpen(false)}
+        onJump={onJump}
+      />
+    </>
+  );
+};
+
+const CapacityGapModal: React.FC<{
+  open: boolean;
+  groups: Array<{
+    courseKey: string;
+    courseCode: string;
+    title: string;
+    demand: number;
+    preEnlisted: number;
+    plannedCap: number;
+    deficit: number;
+    rows: ActionRequiredItem[];
+  }>;
+  onClose: () => void;
+  onJump: (it: ActionRequiredItem) => void;
+}> = ({ open, groups, onClose }) => {
+  const [expanded, setExpanded] = React.useState<Record<string, boolean>>({});
+  if (!open) return null;
+
+  const totalGap = groups.reduce((s, g) => s + (g.deficit || 0), 0);
+
+  return (
+    <div className="fixed inset-0 z-[9999] flex items-start justify-center bg-black/50 p-3 sm:p-6">
+      <div className="w-[95vw] max-w-[980px] max-h-[90vh] mt-4 sm:mt-8 rounded-2xl bg-white shadow-2xl border border-rose-200 flex flex-col overflow-hidden">
+        {/* Header */}
+        <div className="bg-rose-600 text-white px-5 py-4">
+          <div className="flex items-start gap-3">
+            <div className="mt-0.5 grid h-10 w-10 place-items-center rounded-full bg-white/15">
+              <BarChart3 className="h-5 w-5" />
+            </div>
+            <div className="min-w-0">
+              <div className="text-base sm:text-lg font-extrabold tracking-tight">
+                Capacity gap — review needed
+              </div>
+              <div className="mt-1 text-sm text-white/90">
+                This list summarizes where planned slots are below demand.
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Summary */}
+        <div className="border-b border-rose-200 bg-rose-50 px-5 py-3">
+          <div className="flex flex-wrap items-center gap-2 text-sm text-rose-950">
+            <span className="inline-flex items-center rounded-full bg-rose-100 px-3 py-1 font-semibold">
+              Courses: {groups.length}
+            </span>
+            <span className="inline-flex items-center rounded-full bg-white px-3 py-1 font-semibold border border-rose-200">
+              Total gap: {totalGap}
+            </span>
+            <span className="ml-auto text-xs text-rose-900">
+              Hover labels for meaning.
+            </span>
+          </div>
+        </div>
+
+        {/* Body */}
+        <div className="flex-1 min-h-0 p-4 sm:p-5 overflow-auto">
+          {groups.length === 0 ? (
+            <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm text-slate-700">
+              No capacity gaps.
+            </div>
+          ) : (
+            <ul className="space-y-3">
+              {groups.map((g) => {
+                const isOpen = !!expanded[g.courseKey];
+                return (
+                  <li key={g.courseKey} className="rounded-xl border border-gray-200 bg-white p-3 shadow-sm">
+                    <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                      <div className="min-w-0">
+                        <div className="flex items-baseline gap-2">
+                          <span className="text-sm font-extrabold text-emerald-800">{g.courseCode}</span>
+                          <span className="min-w-0 truncate text-xs text-slate-700">{g.title}</span>
+                        </div>
+                        <div className="mt-1 text-xs text-slate-500">
+                          {g.rows.length} plan row{g.rows.length === 1 ? "" : "s"} affected
+                        </div>
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+                        <MiniMetric
+                          label="Pre‑enlisted"
+                          value={g.preEnlisted}
+                          help="Number of students who pre-enlisted in this course."
+                        />
+                        <MiniMetric
+                          label="Demand"
+                          value={g.demand}
+                          help="Planning demand (target seats) used for sizing. Derived from pre-enlistment statistics."
+                        />
+                        <MiniMetric
+                          label="Capacity"
+                          value={g.plannedCap}
+                          help="Current total planned seats for this course through capacity column."
+                        />
+                        <MiniMetric
+                          label="Gap"
+                          value={g.deficit}
+                          tone={g.deficit > 0 ? "danger" : "default"}
+                          help="Slots still needed to meet demand."
+                        />
+
+                        {g.rows.length > 1 && (
+                          <button
+                            type="button"
+                            onClick={() => setExpanded((p) => ({ ...p, [g.courseKey]: !p[g.courseKey] }))}
+                            className="ml-1 inline-flex items-center rounded-md border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-800 hover:bg-slate-50"
+                          >
+                            {isOpen ? `Hide (${g.rows.length})` : `Show (${g.rows.length})`}
+                          </button>
+                        )}
+                        {g.rows.length === 1 && (
+                          <span className="ml-1 inline-flex items-center rounded-md border border-rose-200 bg-rose-50 px-3 py-1.5 text-xs font-semibold text-rose-800">
+                            1 row
+                          </span>
+                        )}
+                      </div>
+                    </div>
+
+                    {isOpen && (
+                      <div className="mt-2 border-t border-slate-100 pt-2">
+                        <div className="flex flex-wrap gap-1.5">
+                          {g.rows
+                            .slice()
+                            .sort((a, b) => a.groupKey.localeCompare(b.groupKey))
+                            .map((r) => (
+                              <span key={r.key} className="rounded-full border border-slate-200 bg-white px-2 py-0.5 text-xs font-semibold text-slate-700">
+                                {r.batchCode} • {r.programCode}
+                              </span>
+                            ))}
+                        </div>
+                      </div>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div className="flex items-center justify-end gap-2 border-t px-5 py-4">
+          <button
+            className="rounded-lg border border-neutral-300 bg-neutral-100 px-4 py-2 text-sm font-medium hover:bg-neutral-200"
+            onClick={onClose}
+          >
+            Done
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const NoticeModal: React.FC<{
   open: boolean;
   title: string;
@@ -6409,7 +6752,7 @@ const GlobalCourseEditModal: React.FC<GlobalCourseEditModalProps> = ({
                 <input
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
-                  placeholder="Type code or title (min 2 characters)…"
+                  placeholder="Search by course code or title…"
                   className={cls(SOFT_INPUT, "pl-9")}
                 />
               </div>
@@ -6462,7 +6805,7 @@ const GlobalCourseEditModal: React.FC<GlobalCourseEditModalProps> = ({
                 <>
                   <div>
                     <label className="text-xs font-medium text-slate-700 mb-1 block">
-                      Course Codes (multiple allowed)
+                      Course Code
                     </label>
 
                     {codeInputs.map((code, idx) => (
@@ -6497,8 +6840,7 @@ const GlobalCourseEditModal: React.FC<GlobalCourseEditModalProps> = ({
                     </button>
 
                     <p className="mt-1 text-[11px] text-slate-500">
-                      Each row will be saved as a separate entry in the{" "}
-                      <code>course_code</code> array in the database.
+                      Each row will be saved as a separate entry.
                     </p>
                   </div>
 
@@ -6729,7 +7071,7 @@ const noMatches = query.trim().length >= 2 && list.length === 0;
           {/* Current courses */}
           <div className="rounded-lg border">
             <div className="px-3 py-2 bg-gray-50 font-semibold">Current courses</div>
-            <div className="max-h-[60vh] overflow-auto divide-y">
+            <div className="flex flex-wrap justify-end gap-4">
               {current.length === 0 && <div className="p-3 text-sm text-neutral-500">No courses.</div>}
               {current.map((c) => (
                 <div key={c.course_id} className="p-3 flex items-start justify-between gap-3">
@@ -6760,7 +7102,7 @@ const noMatches = query.trim().length >= 2 && list.length === 0;
                 <input
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
-                  placeholder="Type code or title to search all courses…"
+                  placeholder="Search by course code or title…"
                   className={cls(SOFT_INPUT, "pl-9")}
                 />
               </div>
@@ -6959,7 +7301,7 @@ const CreateCourseModal: React.FC<{
               className={SOFT_INPUT}
               value={title}
               onChange={(e) => setTitle(e.target.value)}
-              placeholder="Course title"
+              placeholder=" "
             />
           </div>
 
@@ -6972,7 +7314,7 @@ const CreateCourseModal: React.FC<{
               className={SOFT_INPUT}
               value={units}
               onChange={(e) => setUnits(e.target.value)}
-              placeholder="3"
+              placeholder=" "
             />
           </div>
 
@@ -7006,7 +7348,7 @@ const CreateCourseModal: React.FC<{
               className={SOFT_INPUT}
               value={capacity}
               onChange={(e) => setCapacity(e.target.value)}
-              placeholder="45"
+              placeholder=" "
             />
           </div>
 
@@ -7023,12 +7365,12 @@ const CreateCourseModal: React.FC<{
 
           {/* Description */}
           <div className="md:col-span-2">
-            <label className="text-xs font-medium text-slate-700">Description</label>
+            <label className="text-xs font-medium text-slate-700">Description (Optional)</label>
             <textarea
               className={cls(SOFT_INPUT, "min-h-[96px]")}
               value={desc}
               onChange={(e) => setDesc(e.target.value)}
-              placeholder="Optional description…"
+              placeholder=" "
             />
           </div>
         </div>

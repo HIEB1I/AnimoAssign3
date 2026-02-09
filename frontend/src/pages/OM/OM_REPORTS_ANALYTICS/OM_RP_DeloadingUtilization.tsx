@@ -1,8 +1,7 @@
-// frontend/src/pages/OM/OM_REPORTS_ANALYTICS/OM-RP_DeloadingUtilization.tsx
+// frontend/src/pages/OM/OM_REPORTS_ANALYTICS/OM-RP_DeloadingUtilization.tsx 
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { ChevronLeft, BarChart2, AlertTriangle, BookOpen } from "lucide-react"; // Added icons
-import SelectBox from "../../../component/SelectBox";
+import { ChevronLeft, ChevronRight, BarChart2, AlertTriangle, BookOpen } from "lucide-react";
 import { fetchDeloadingsByTerm } from "../../../api";
 
 // --- NEW TYPE DEFINITIONS ---
@@ -85,7 +84,7 @@ const MockBarChart = ({
             </div>
             <div className="w-full bg-gray-200 rounded-full h-2.5">
               <div
-                className="bg-sky-500 h-2.5 rounded-full"
+                className="bg-emerald-600 h-2.5 rounded-full"
                 style={{ width: `${(d.units / maxUnits) * 100}%` }}
               ></div>
             </div>
@@ -104,33 +103,69 @@ export default function OM_RP_DeloadingUtilization() {
   // NEW: State for collapsible table
   const [isTableOpen, setIsTableOpen] = useState(true);
 
-  function labelOf(t: TermLite) {
+  function pillLabelOf(t: TermLite) {
     const ayEnd = t.acad_year_start + 1;
-    return `AY ${t.acad_year_start}–${ayEnd} • Term ${t.term_number}${
-      t.is_current ? " (Current)" : ""
-    }`;
+    return `AY ${t.acad_year_start}–${ayEnd} • Term ${t.term_number}`;
+  }
+function formatFacultyName(name?: string) {
+  if (!name) return "";
+  const s = String(name).trim().replace(/\s+/g, " ");
+  if (!s) return "";
+
+  // If already "Last, First", just normalize spacing around comma.
+  if (s.includes(",")) return s.replace(/\s*,\s*/g, ", ").trim();
+
+  const parts = s.split(" ");
+  if (parts.length === 1) return parts[0];
+
+  const suffixes = new Set(["Jr.", "Jr", "Sr.", "Sr", "II", "III", "IV", "V"]);
+
+  let last = parts[parts.length - 1];
+  let firstParts = parts.slice(0, -1);
+
+  // Handle suffix: "Juan Dela Cruz Jr." -> "Cruz Jr., Juan Dela"
+  if (suffixes.has(last) && parts.length >= 2) {
+    last = parts[parts.length - 2] + " " + parts[parts.length - 1];
+    firstParts = parts.slice(0, -2);
   }
 
-  const currentLabel = useMemo(
-    () => (data?.term ? labelOf(data.term) : ""),
-    [data?.term]
-  );
-
-  const termLabels = useMemo(() => terms.map(labelOf), [terms]);
+  const first = firstParts.join(" ").trim();
+  return first ? `${last}, ${first}` : last;
+}
 
   async function load(
     direction: "current" | "next" | "prev" = "current",
     anchor?: string
   ) {
+    // Some terms can exist in the DB but have no deloadings (or no displayable rows)
+    // which should not be shown to users. We defensively auto-skip a few empties
+    // to keep navigation smooth even if the backend sends an empty term.
+    const MAX_SKIPS = 10;
+    let attempts = 0;
+    let nextAnchor = anchor ?? data?.term?.term_id;
+    let nextDirection: "current" | "next" | "prev" = direction;
+
     try {
       setLoading(true);
       setError("");
-      const res = await fetchDeloadingsByTerm(
-        anchor ?? data?.term?.term_id,
-        direction
-      );
-      setData(res);
-      if (Array.isArray(res.terms)) setTerms(res.terms);
+
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        const res = await fetchDeloadingsByTerm(nextAnchor, nextDirection);
+
+        // Update the terms list as early as possible.
+        if (Array.isArray(res.terms)) setTerms(res.terms);
+
+        const hasRows = Array.isArray(res.rows) && res.rows.length > 0;
+        if (hasRows || nextDirection === "current" || attempts >= MAX_SKIPS) {
+          setData(res);
+          break;
+        }
+
+        // Continue paging in the same direction from the newly returned term.
+        attempts += 1;
+        nextAnchor = res?.term?.term_id;
+      }
     } catch (err: any) {
       setError(err?.message || "Failed to load.");
     } finally {
@@ -138,16 +173,47 @@ export default function OM_RP_DeloadingUtilization() {
     }
   }
 
-  // Handle SelectBox change by mapping label -> term_id
-  const onSelectTerm = (label: string) => {
-    const idx = termLabels.indexOf(label);
-    if (idx >= 0 && terms[idx]) {
-      load("current", terms[idx].term_id);
+  const currentIndex = useMemo(() => {
+    if (typeof data?.current_index === "number") return data.current_index;
+    const tid = data?.term?.term_id;
+    if (!tid) return 0;
+    const idx = terms.findIndex((t) => t.term_id === tid);
+    return idx >= 0 ? idx : 0;
+  }, [data?.current_index, data?.term?.term_id, terms]);
+
+  const currentPillLabel = useMemo(
+    () => (data?.term ? pillLabelOf(data.term) : "—"),
+    [data?.term]
+  );
+
+  const planningTermId = useMemo(() => {
+    // Planning term = next term after the DB's is_current anchor.
+    // Fallbacks are conservative so the UI still behaves even if the
+    // terms list is missing/empty.
+    if (!terms || terms.length === 0) return "";
+
+    const curIdx = terms.findIndex((t) => t.is_current);
+    if (curIdx >= 0) {
+      const next = terms[curIdx + 1];
+      return (next?.term_id || terms[curIdx]?.term_id || "").trim();
     }
-  };
+
+    // If no term is flagged current, treat the latest as the planning term.
+    return (terms[terms.length - 1]?.term_id || "").trim();
+  }, [terms]);
+
+  const isActiveTerm = useMemo(() => {
+    const viewed = (data?.term?.term_id || "").trim();
+    if (!viewed) return false;
+    if (!planningTermId) return false;
+    return viewed === planningTermId;
+  }, [data?.term?.term_id, planningTermId]);
 
   useEffect(() => {
-    load("current");
+    // Default view should be the *planning* term (next after current).
+    // The backend paging logic supports direction="next" without an anchor,
+    // which advances from the is_current anchor.
+    load("next");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -158,7 +224,7 @@ export default function OM_RP_DeloadingUtilization() {
   return (
     <div className="w-full px-8 py-8">
       {/* Header */}
-      <h1 className="text-2xl font-bold mb-2">Deloading Utilization Dashboard</h1>
+      <h1 className="text-2xl font-bold mb-2">Deloading Utilization</h1>
       <p className="text-sm text-gray-600 mb-6">
         Aggregate resource allocation and administrative risk assessment.
       </p>
@@ -166,7 +232,7 @@ export default function OM_RP_DeloadingUtilization() {
       {/* Card wrapper */}
       <div className="rounded-xl border border-gray-200 bg-white shadow-sm">
         {/* Top bar: Back + pager/selector */}
-        <div className="flex flex-wrap items-center gap-3 p-4 border-b border-gray-200">
+        <div className="relative flex flex-wrap items-center gap-3 p-4 border-b border-gray-200">
           <Link
             to="/om/home/reports-analytics"
             className="inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm shadow-sm hover:bg-gray-50 active:bg-gray-100"
@@ -177,41 +243,43 @@ export default function OM_RP_DeloadingUtilization() {
             <span>Back</span>
           </Link>
 
-          {/* Pager / Term selector cluster */}
-          <div className="flex items-center gap-2 flex-1 min-w-[320px] justify-end">
+          {/* Term navigation */}
+          <div className="flex flex-1 items-center justify-between">
             <button
-              onClick={() => load("prev")}
+              className="inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm shadow-sm hover:bg-gray-50 disabled:opacity-40 disabled:hover:bg-white"
               disabled={!data?.has_prev || loading}
-              className={`rounded-lg border px-3 py-2 text-sm font-semibold ${
-                !data?.has_prev || loading
-                  ? "cursor-default border-gray-200 bg-gray-100 text-gray-500"
-                  : "cursor-pointer border-emerald-500 bg-emerald-400 text-emerald-950 hover:bg-emerald-300"
-              }`}
+              onClick={() => load("prev")}
               title="Previous term"
             >
-              ← Prev
+              <ChevronLeft className="h-4 w-4" />
+              <span>Previous Term</span>
             </button>
-
-            <div className="min-w-[260px]">
-              <SelectBox
-                value={currentLabel}
-                onChange={onSelectTerm}
-                options={termLabels}
-              />
-            </div>
 
             <button
-              onClick={() => load("next")}
+              className="inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm shadow-sm hover:bg-gray-50 disabled:opacity-40 disabled:hover:bg-white"
               disabled={!data?.has_next || loading}
-              className={`rounded-lg border px-3 py-2 text-sm font-semibold ${
-                !data?.has_next || loading
-                  ? "cursor-default border-gray-200 bg-gray-100 text-gray-500"
-                  : "cursor-pointer border-emerald-500 bg-emerald-400 text-emerald-950 hover:bg-emerald-300"
-              }`}
+              onClick={() => load("next")}
               title="Next term"
             >
-              Next →
+              <span>Next Term</span>
+              <ChevronRight className="h-4 w-4" />
             </button>
+          </div>
+
+          <div className="pointer-events-none absolute left-1/2 -translate-x-1/2 flex flex-col items-center gap-1">
+            <div className="inline-flex items-center rounded-full border border-emerald-100 bg-emerald-50 px-4 py-2 text-sm font-semibold text-emerald-800 shadow-sm">
+              <span>{currentPillLabel}</span>
+              {isActiveTerm && (
+                <span className="ml-2 inline-flex items-center rounded-full bg-emerald-200 px-2 py-0.5 text-[11px] font-semibold text-emerald-900">
+                  Active
+                </span>
+              )}
+            </div>
+            {terms.length > 0 && (
+              <div className="text-xs text-gray-500">
+                {currentIndex + 1} of {terms.length}
+              </div>
+            )}
           </div>
         </div>
 
@@ -238,18 +306,6 @@ export default function OM_RP_DeloadingUtilization() {
         {/* Dashboard Content (visible when data is loaded) */}
         {!loading && !!data?.rows?.length && summary && (
           <div className="p-4 space-y-8">
-            {/* Context Header */}
-            <div className="text-md text-gray-700">
-              Analysis for{" "}
-              <span className="font-semibold text-gray-900">
-                {data?.term
-                  ? `AY ${data.term.acad_year_start}–${
-                      data.term.acad_year_start + 1
-                    } • Term ${data.term.term_number}`
-                  : "—"}
-              </span>
-            </div>
-
             {/* --- 1. GLOBAL SUMMARY CARDS --- */}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               {/* Total Units Deloaded */}
@@ -293,48 +349,42 @@ export default function OM_RP_DeloadingUtilization() {
                   </h2>
                 </div>
                 <p className="text-sm text-orange-700 mb-3">
-                  The following faculty received 'Admin'-related deloading in the
-                  **previous** term. Review their load for the current/next term
-                  to ensure administrative continuity and resource allocation.
+                  The following faculty received 'Admin'-related deloading in the{' '}
+                  <span className="font-semibold text-orange-800">previous</span>{' '}
+                  term. Review their load for the current/next term to ensure
+                  administrative continuity and resource allocation.
                 </p>
 
-                <div className="overflow-x-auto">
-                  <table className="min-w-full table-fixed text-sm">
-                    <thead className="bg-orange-200 text-orange-900 text-xs uppercase tracking-wide">
-                      <tr>
-                        {["Faculty Name", "Deloading Type", "Units"].map(
-                          (h) => (
-                            <th
-                              key={h}
-                              className="px-3 py-2 text-center font-medium whitespace-nowrap"
-                            >
-                              {h}
-                            </th>
-                          )
-                        )}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {adminWarnings.map((r, i) => (
-                        <tr
-                          key={`${r.faculty_id}-${i}`}
-                          className={
-                            i % 2 === 0
-                              ? "bg-orange-100"
-                              : "bg-orange-50 border-t border-orange-200"
-                          }
-                        >
-                          <td className="px-3 py-2 text-center">
-                            {r.faculty_name}
-                          </td>
-                          <td className="px-3 py-2 text-center">
-                            {r.deloading_type}
-                          </td>
-                          <td className="px-3 py-2 text-center">{r.units}</td>
+                <div className="border border-orange-200 bg-orange-50/70 shadow-sm overflow-hidden rounded-xl">
+                  <div className="overflow-x-auto rounded-xl">
+                    <table className="min-w-full text-sm">
+                      <thead className="bg-orange-100 border-b border-orange-200 text-orange-900">
+                        <tr>
+                          <th className="px-4 py-3 text-left text-xs font-semibold text-orange-900">Faculty</th>
+                          <th className="px-4 py-3 text-left text-xs font-semibold text-orange-900">Deloading Type</th>
+                          <th className="px-4 py-3 text-center text-xs font-semibold text-orange-900">Units</th>
                         </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                      </thead>
+                      <tbody className="divide-y divide-orange-200 bg-transparent">
+                        {adminWarnings.map((r, i) => (
+                          <tr
+                            key={`${r.faculty_id}-${i}`}
+                            className="hover:bg-orange-50"
+                          >
+                            <td className="px-4 py-3 text-left">
+                              {formatFacultyName(r.faculty_name) || "—"}
+                            </td>
+                            <td className="px-4 py-3 text-left">
+                              {r.deloading_type || "—"}
+                            </td>
+                            <td className="px-4 py-3 text-center">
+                              {r.units ?? "—"}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
               </div>
             )}
@@ -342,8 +392,8 @@ export default function OM_RP_DeloadingUtilization() {
             {/* --- 3. UTILIZATION BREAKDOWN VISUAL --- */}
             <div className="p-6 border border-gray-200 rounded-lg shadow-sm">
               <div className="flex items-center mb-4">
-                <BarChart2 className="h-5 w-5 text-indigo-600 mr-2" />
-                <h2 className="text-xl font-semibold text-gray-800">
+                <BarChart2 className="h-5 w-5 text-emerald-700 mr-2" />
+                <h2 className="text-lg font-semibold text-gray-800">
                   Utilization Breakdown by Deloading Type
                 </h2>
               </div>
@@ -358,9 +408,9 @@ export default function OM_RP_DeloadingUtilization() {
             </div>
 
             {/* --- 4. RAW DATA TABLE (Collapsible) --- */}
-            <div className="border border-gray-200 rounded-lg">
+            <div className="border border-gray-200 bg-white shadow-sm overflow-hidden rounded-xl">
               <button
-                className="w-full flex justify-between items-center p-4 bg-gray-50 hover:bg-gray-100 text-left rounded-t-lg"
+                className="w-full flex justify-between items-center px-4 py-3 bg-gray-50 hover:bg-gray-100 text-left rounded-t-xl"
                 onClick={() => setIsTableOpen(!isTableOpen)}
                 aria-expanded={isTableOpen}
                 aria-controls="deloading-records-table"
@@ -368,7 +418,7 @@ export default function OM_RP_DeloadingUtilization() {
                 <div className="flex items-center">
                   <BookOpen className="h-5 w-5 text-gray-600 mr-2" />
                   <h2 className="text-lg font-semibold text-gray-800">
-                    Detailed Deloading Records ({data.rows.length})
+                    Deloading Records ({data.rows.length})
                   </h2>
                 </div>
                 <ChevronLeft
@@ -385,56 +435,37 @@ export default function OM_RP_DeloadingUtilization() {
                 }`}
               >
                 <div className="p-4">
-                  <div className="overflow-x-auto">
-                    <table className="min-w-full table-fixed text-sm border-t border-gray-200">
-                      <colgroup>
-                        <col style={{ width: "20%" }} />
-                        <col style={{ width: "20%" }} />
-                        <col style={{ width: "12%" }} />
-                        <col style={{ width: "28%" }} />
-                        <col style={{ width: "20%" }} />
-                      </colgroup>
-                      <thead className="bg-gray-100 text-gray-600 text-xs uppercase tracking-wide">
+                  <div className="overflow-x-auto rounded-xl border border-gray-200 bg-white">
+                    <table className="min-w-full text-sm">
+                      <thead className="bg-gray-50 border-b border-gray-200 text-gray-700">
                         <tr>
-                          {[
-                            "Faculty Name",
-                            "Deloading Type",
-                            "Units",
-                            "Notes",
-                            "Last Updated",
-                          ].map((h) => (
-                            <th
-                              key={h}
-                              className="px-3 py-2 text-center font-medium whitespace-nowrap"
-                            >
-                              {h}
-                            </th>
-                          ))}
+                          <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700">Faculty</th>
+                          <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700">Deloading Type</th>
+                          <th className="px-4 py-3 text-center text-xs font-semibold text-gray-700">Units</th>
+                          <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700">Notes</th>
+                          <th className="px-4 py-3 text-center text-xs font-semibold text-gray-700">Last Updated</th>
                         </tr>
                       </thead>
-                      <tbody>
+
+                      <tbody className="divide-y divide-gray-200 bg-white">
                         {data.rows.map((r, i) => (
                           <tr
                             key={`${r.faculty_name}-${r.deloading_type}-${i}`}
-                            className={
-                              i % 2 === 0
-                                ? "bg-white text-gray-800"
-                                : "bg-gray-50 text-gray-800"
-                            }
+                            className="hover:bg-gray-50"
                           >
-                            <td className="px-3 py-2 text-center">
-                              {r.faculty_name || "—"}
+                            <td className="px-4 py-3 text-left">
+                              {formatFacultyName(r.faculty_name) || "—"}
                             </td>
-                            <td className="px-3 py-2 text-center">
+                            <td className="px-4 py-3 text-left">
                               {r.deloading_type || "—"}
                             </td>
-                            <td className="px-3 py-2 text-center">
+                            <td className="px-4 py-3 text-center">
                               {r.units_deloaded ?? "—"}
                             </td>
-                            <td className="px-3 py-2 text-center">
+                            <td className="px-4 py-3 text-left">
                               {r.notes || "—"}
                             </td>
-                            <td className="px-3 py-2 text-center">
+                            <td className="px-4 py-3 text-center">
                               {r.updated_at
                                 ? new Date(r.updated_at).toLocaleString()
                                 : "—"}

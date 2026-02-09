@@ -655,12 +655,27 @@ async def overview_handler(
         proposal_status = (proposal or {}).get("status")
         proposal_status_l = str(proposal_status or "").lower()
 
-        is_proposed = bool(proposal and proposal_status_l in ("proposed", "reply", "replied"))
-        is_final = bool(proposal and (bool((proposal or {}).get("locked")) or proposal_status_l in ("accepted", "approved")))
-        schedule_final = bool(is_final or (rfc_norm and str((rfc_norm.get("status") or "")).upper() in RFC_TERMINAL))
+        # A schedule should be visible on the faculty side whenever OM has forwarded
+        # a proposal OR the faculty has already accepted it.
+        show_proposal = bool(
+            proposal
+            and proposal_status_l
+            in (
+                "proposed",
+                "reply",
+                "replied",
+                # Faculty acceptance marks proposal as "approved" on the OM side.
+                "approved",
+                "accepted",
+            )
+        )
+
+        # "Final" means *explicitly locked* only. Faculty acceptance must NOT lock/finalize.
+        is_final = bool(proposal and bool((proposal or {}).get("locked")))
+        schedule_final = bool(is_final)
 
         proposed_load = []
-        if (is_proposed or is_final) and isinstance(proposal.get("rows"), list):
+        if show_proposal and isinstance(proposal.get("rows"), list):
             for rr in proposal.get("rows", []):
                 sec_id = (rr.get("section_id") or rr.get("id") or "").strip()
 
@@ -694,14 +709,24 @@ async def overview_handler(
 
             if proposed_load:
                 final_teaching_load = proposed_load
-                summary["load_status"] = "Approved" if is_final else "Proposed"
+
+                # Faculty-side label:
+                # - Locked -> Finalized
+                # - Accepted/approved -> Accepted
+                # - Otherwise -> Proposed
+                if schedule_final:
+                    summary["load_status"] = "Finalized"
+                elif proposal_status_l in ("approved", "accepted"):
+                    summary["load_status"] = "Accepted"
+                else:
+                    summary["load_status"] = "Proposed"
 
         return {
             "ok": True,
             "term": term,
             "summary": summary,
             "teaching_load": final_teaching_load,
-            "is_proposed": is_proposed,
+            "is_proposed": bool(proposal and proposal_status_l in ("proposed", "reply", "replied")),
             "proposal_status": proposal_status,
             "rfc": rfc_norm,
             "schedule_final": schedule_final,
@@ -1069,10 +1094,40 @@ async def faculty_send_load_rfc_message(userId: str = Query(...), payload: Dict[
         "status": "OPEN",
     }
 
-    if (existing.get("status") or "").upper() in RFC_TERMINAL:
-        raise HTTPException(status_code=409, detail="RFC is locked")
-
     now = _now_utc()
+
+    # Allow RFC again even if the previous RFC thread was terminal.
+    # We archive the previous thread into `history` and start a fresh thread.
+    if (existing.get("status") or "").upper() in RFC_TERMINAL:
+        prev_status = str(existing.get("status") or "").upper()
+        hist = list(existing.get("history") or [])
+        hist.append({
+            "rfc_id": existing.get("rfc_id"),
+            "status": existing.get("status"),
+            "locked": bool(existing.get("locked")),
+            "messages": list(existing.get("messages") or []),
+            "closed_at": existing.get("closed_at") or existing.get("closed_at"),
+            "archived_at": now.isoformat(),
+        })
+        existing = {
+            "rfc_id": "RFC" + uuid.uuid4().hex[:10].upper(),
+            "faculty_id": fid,
+            "term_id": term_id,
+            "section_id": section_id,
+            "messages": [],
+            "status": "OPEN",
+            "history": hist,
+        }
+
+        # Add a lightweight tag in the new thread so the UI can display the context
+        # even if it does not render `history`.
+        existing["messages"].append({
+            "sender_role": "system",
+            "sender_user_id": "system",
+            "message": f"Previous RFC was {prev_status} (archived).",
+            "created_at": now.isoformat(),
+        })
+
     msgs = list(existing.get("messages") or [])
     msgs.append({
         "sender_role": "faculty",
@@ -1093,6 +1148,7 @@ async def faculty_send_load_rfc_message(userId: str = Query(...), payload: Dict[
             "status": "NEEDS_OM",
             "locked": False,
             "messages": msgs,
+            "history": list(existing.get("history") or []),
             "updated_at": now,
         }, "$setOnInsert": {"created_at": now}},
         upsert=True,
@@ -1111,76 +1167,19 @@ async def faculty_send_load_rfc_message(userId: str = Query(...), payload: Dict[
                 "section_id": section_id,   # ✅ IMPORTANT
                 "rfc_id": existing.get("rfc_id"),
             },
+            send_email=True,
+            email_from_user_id=userId,
         )
 
-    # Fetch some context for the email 
-    term_doc = await db[COL_TERMS].find_one({"term_id": term_id}, {"_id": 0, "acad_year_start": 1, "term_number": 1}) or {}
-    term_label = _term_label(term_doc) if term_doc else term_id
-
-    sec_doc = await db[COL_SECTIONS].find_one({"section_id": section_id}, {"_id": 0}) or {}
-    course_id = (sec_doc.get("course_id") or "").strip()
-    course_doc = await db[COL_COURSES].find_one({"course_id": course_id}, {"_id": 0}) if course_id else ({})
-
-    code = (course_doc or {}).get("course_code") or (course_doc or {}).get("code") or ""
-    title = (course_doc or {}).get("course_title") or (course_doc or {}).get("title") or ""
-    section_label = sec_doc.get("section_code") or sec_doc.get("section") or section_id
-
-    sender_name = f"{faculty.get('first_name','')} {faculty.get('last_name','')}".strip() or userId
-
-    subject = f"[AnimoAssign] RFC - {code} {section_label}".strip()
-
-    thread_lines = []
-    for m in msgs:
-        who = (m.get("sender_role") or "").upper()
-        ts = m.get("created_at") or ""
-        txt = m.get("message") or ""
-        thread_lines.append(f"- {who} @ {ts}\n  {txt}")
-
-    email_body = (
-        f"Request for Change (RFC)\n\n"
-        f"From: {sender_name}\n"
-        f"Term: {term_label}\n"
-        f"Course: {code} - {title}\n"
-        f"Section: {section_label}\n"
-        f"Section ID: {section_id}\n\n"
-        f"Latest message:\n{message}\n\n"
-        f"Thread:\n" + "\n".join(thread_lines) +
-        f"\n\n[AnimoAssign]"
-    )
-
-    # Prefer emailing the OM user (proposal.om_user_id) if we can resolve an address.
-    to_email = _RFC_EMAIL_TO
-    if om_uid:
-        om_user = await db["users"].find_one(
-            {"user_id": om_uid},
-            {"_id": 0, "email": 1, "google_email": 1, "gmail": 1},
-        ) or {}
-        to_email = (
-            (om_user.get("email") or "").strip()
-            or (om_user.get("google_email") or "").strip()
-            or (om_user.get("gmail") or "").strip()
-            or to_email
-        )
-
-    email_sent = False
-    email_error: Optional[str] = None
-    try:
-        email_sent, email_error = await _send_email_via_user_gmail(
-            user_id=userId,
-            to_email=to_email,
-            subject=subject,
-            body=email_body,
-        )
-    except Exception as e:
-        email_sent = False
-        email_error = str(e)
+    # Gmail notification is handled by create_notification(...send_email=True...).
+    # Email sending is best-effort and runs asynchronously.
 
     return {
         "ok": True,
         "rfc_id": existing.get("rfc_id"),
         "status": "NEEDS_OM",
-        "email_sent": email_sent,
-        "email_error": email_error,
+        "email_sent": True,
+        "email_error": None,
     }
 
 # END NEW BLOCK
@@ -1293,28 +1292,26 @@ async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[s
                 detail="You have a pending RFC. Please wait for OM to respond before accepting the schedule."
             )
 
+    # IMPORTANT: "Accept Schedule" should NOT lock/finalize anything.
+    # It simply marks the proposal as approved/accepted on the OM side.
+    now = _now_utc()
     await db[COL_LOAD_PROPOSALS].update_one(
         {"faculty_id": fid, "term_id": term_id},
         {"$set": {
+            # Keep OM-side status as "approved" once faculty accepts.
             "status": "approved",
-            "locked": True,
-            "accepted_at": _now_utc(),
-            "updated_at": _now_utc(),
+            # Do not lock; OM can still edit/add/resend schedules.
+            "locked": False,
+            "accepted_at": now,
+            "updated_at": now,
         }},
     )
 
-    try:
-        await db[COL_LOAD_PROPOSALS].update_one(
-            {"faculty_id": fid, "term_id": term_id},
-            {"$set": {"rows.$[].finalized": True}},
-        )
-    except Exception:
-        pass
-
-    now = _now_utc()
+    # Mark existing RFC threads as ACCEPTED (terminal) but do not lock them.
+    # Faculty can create a new RFC thread later; OM can still adjust proposals.
     await db[COL_LOAD_RFC].update_many(
         {"faculty_id": fid, "term_id": term_id},
-        {"$set": {"status": "ACCEPTED", "locked": True, "updated_at": now}},
+        {"$set": {"status": "ACCEPTED", "locked": False, "updated_at": now}},
     )
 
     recipient_email = (
@@ -1405,6 +1402,8 @@ async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[s
                 "faculty_id": fid,
                 "rfc_id": rfc_id or "",
             },
+            send_email=True,
+            email_from_user_id=userId,
         )
 
     return {"ok": True, "status": "ACCEPTED", "email_sent": email_sent, "email_error": email_error}

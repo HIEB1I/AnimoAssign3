@@ -90,6 +90,8 @@ async def build_faculty_availability_heatmap(
     course_id: Optional[str] = None,
     dept_id: Optional[str] = None,
     threshold: float = 0.50,
+    term_id: Optional[str] = None,
+    direction: str = "current",
 ) -> Dict[str, Any]:
     """
     Returns a “propensity-to-assign” heatmap keyed by "D|HH:MM-HH:MM".
@@ -108,8 +110,30 @@ async def build_faculty_availability_heatmap(
     """
     db = get_db()
 
-    cur = await _current_term(db)
+    # Resolve the anchor term (defaults to the system current term), and allow
+    # simple Prev/Next navigation that mirrors other OM_RP tabs.
     terms = await _ordered_terms(db)
+    if not terms:
+        return {"warnings": ["No terms found."], "slots": {}, "total_faculty_considered": 0, "faculty_with_recent_pref": 0, "faculty_with_recent_history": 0, "most_supported_slot_count": 0}
+
+    # Find the "current" term from DB for defaulting and active-tagging.
+    cur_db = next((t for t in terms if t.get("is_current")), None)
+
+    ids = [t.get("term_id") for t in terms if t.get("term_id")]
+    anchor = term_id if term_id in ids else (cur_db.get("term_id") if cur_db else ids[-1])
+
+    try:
+        i = ids.index(anchor)
+    except ValueError:
+        i = max(0, len(ids) - 1)
+
+    if direction == "prev" and i > 0:
+        i -= 1
+    elif direction == "next" and i < len(ids) - 1:
+        i += 1
+    # direction == "current" keeps i as-is
+
+    cur = next((t for t in terms if t.get("term_id") == ids[i]), None)
     term_label_by_id = {t["term_id"]: _term_label(t) for t in terms if t.get("term_id")}
     if not cur:
         return {"warnings": ["No current term found."], "slots": {}, "total_faculty_considered": 0, "faculty_with_recent_pref": 0, "faculty_with_recent_history": 0, "most_supported_slot_count": 0}
@@ -321,6 +345,26 @@ async def build_faculty_availability_heatmap(
         "faculty_with_recent_pref": faculty_with_recent_pref,
         "faculty_with_recent_history": faculty_with_recent_history,
         "most_supported_slot_count": most_supported_slot_count,
+        # Term navigation helpers (used by the frontend Prev/Next buttons)
+        "terms": [
+            {
+                "term_id": t.get("term_id"),
+                "acad_year_start": int(t.get("acad_year_start") or 0),
+                "term_number": int(t.get("term_number") or 0),
+                "is_current": bool(t.get("is_current")),
+            }
+            for t in terms
+            if t.get("term_id")
+        ],
+        "current_index": i,
+        "has_prev": i > 0,
+        "has_next": i < (len(ids) - 1),
+        "term": {
+            "term_id": cur.get("term_id"),
+            "acad_year_start": int(cur.get("acad_year_start") or 0),
+            "term_number": int(cur.get("term_number") or 0),
+            "is_current": bool(cur.get("is_current")),
+        },
         "slots": slots,
     }
 
@@ -330,9 +374,11 @@ async def faculty_availability_heatmap_endpoint(
     course_id: Optional[str] = Query(None),
     dept_id: Optional[str] = Query(None),
     threshold: float = Query(0.50),
+    term_id: Optional[str] = Query(None),
+    direction: str = Query("current"),
 ):
     return await build_faculty_availability_heatmap(
-        course_id=course_id, dept_id=dept_id, threshold=threshold
+        course_id=course_id, dept_id=dept_id, threshold=threshold, term_id=term_id, direction=direction
     )
 
 # add this alias just under the existing endpoint
@@ -341,7 +387,9 @@ async def availability_forecast_alias(
     course_id: Optional[str] = Query(None),
     dept_id: Optional[str] = Query(None),
     threshold: float = Query(0.50),
+    term_id: Optional[str] = Query(None),
+    direction: str = Query("current"),
 ):
     return await build_faculty_availability_heatmap(
-        course_id=course_id, dept_id=dept_id, threshold=threshold
+        course_id=course_id, dept_id=dept_id, threshold=threshold, term_id=term_id, direction=direction
     )

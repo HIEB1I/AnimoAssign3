@@ -1,13 +1,12 @@
 import React from "react";
 import { useNavigate } from "react-router-dom";
-import { Eye, EyeOff, Mail, CheckCircle2 } from "lucide-react";
+import { Eye, EyeOff, Lock, CheckCircle2, Mail } from "lucide-react";
 import AA_Logo from "@/assets/Images/AA_Logo.png";
 import { loginWithPassword, type LoginResponse } from "@/api";
 import { useGoogleLogin } from "@react-oauth/google";
 
 const Login: React.FC = () => {
   const [showPw, setShowPw] = React.useState(false);
-  const [showForm, setShowForm] = React.useState(false);
 
   const [email, setEmail] = React.useState("");
   const [password, setPassword] = React.useState(""); // UI only
@@ -26,7 +25,7 @@ function finishLogin(user: LoginResponse) {
   else if (roles.includes("department chair") || roles.includes("deparment chair"))
     dest = "/chair";
   else if (roles.includes("faculty")) dest = "/faculty/overview";
-  else if (roles.includes("student")) dest = "/student/petition";
+  else if (roles.includes("student")) dest = "/student/courseofferings";
   else if (roles.includes("admin")) dest = "/admin";
   else if (roles.includes("dean")) dest = null;
 
@@ -35,58 +34,57 @@ function finishLogin(user: LoginResponse) {
     return;
   }
 
-  localStorage.setItem("animo.user", JSON.stringify(user));
-  navigate(dest, { replace: true });
-}
-
-async function onSubmit(e: React.FormEvent) {
-  e.preventDefault();
-  setLoading(true);
-  setError(null);
-
-  try {
-    const user: LoginResponse = await loginWithPassword(email.trim(), password);
-    finishLogin(user);
-  } catch (err: any) {
-    setError(err?.message || "Login failed");
-  } finally {
-    setLoading(false);
+    localStorage.setItem("animo.user", JSON.stringify(user));
+    navigate(dest, { replace: true });
   }
-}
 
-const googleLogin = useGoogleLogin({
-  flow: "auth-code",
-  scope: [
-    "openid",
-    "email",
-    "profile",
-    "https://www.googleapis.com/auth/gmail.send",
-    "https://www.googleapis.com/auth/calendar.events",
-  ].join(" "),
-  onSuccess: async (codeResponse) => {
+  async function onSubmit(e: React.FormEvent) {
+    e.preventDefault();
     setLoading(true);
     setError(null);
 
     try {
-      const res = await fetch("/api/auth/google/login", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ code: codeResponse.code }),
-      });
-
-      if (!res.ok) throw new Error(await res.text());
-
-      const user: LoginResponse = await res.json();
+      const user: LoginResponse = await loginWithPassword(email.trim(), password);
       finishLogin(user);
-    } catch (e: any) {
-      setError(e?.message || "Google login failed.");
+    } catch (err: any) {
+      setError(err?.message || "Login failed");
     } finally {
       setLoading(false);
     }
-  },
-  onError: () => setError("Google sign-in failed. Please try again."),
-});
+  }
 
+  const googleLogin = useGoogleLogin({
+    flow: "auth-code",
+    scope: [
+      "openid",
+      "email",
+      "profile",
+      "https://www.googleapis.com/auth/gmail.send",
+      "https://www.googleapis.com/auth/calendar.events",
+    ].join(" "),
+    onSuccess: async (codeResponse) => {
+      setLoading(true);
+      setError(null);
+
+      try {
+        const res = await fetch("/api/auth/google/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ code: codeResponse.code }),
+        });
+
+        if (!res.ok) throw new Error(await res.text());
+
+        const user: LoginResponse = await res.json();
+        finishLogin(user);
+      } catch (e: any) {
+        setError(e?.message || "Google login failed.");
+      } finally {
+        setLoading(false);
+      }
+    },
+    onError: () => setError("Google sign-in failed. Please try again."),
+  });
 
   return (
     <div className="min-h-screen w-full bg-[#f5f6f7] grid place-items-center px-4 py-10">
@@ -99,117 +97,118 @@ const googleLogin = useGoogleLogin({
               Use your DLSU email address to continue with AnimoAssign.
             </p>
 
-            {/* ✅ LEFT-ALIGNED BUTTON (no centering) */}
-            <div className="mt-7">
+            {error && (
+              <div className="mt-5 max-w-xl rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+                {error}
+              </div>
+            )}
+
+            <div className="mt-7 w-full max-w-xl">
+              <form className="space-y-4" onSubmit={onSubmit}>
+                {/* EMAIL */}
+                <div className="relative">
+                  <Mail
+                    className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500"
+                    aria-hidden="true"
+                  />
+
+                  <input
+                    type="email"
+                    className="w-full rounded-2xl border border-gray-200 bg-gray-100 px-4 py-3 pl-11 shadow-inner focus:border-emerald-600 focus:outline-none focus:ring-2 focus:ring-emerald-600/40"
+                    placeholder="Email"
+                    value={email}
+                    onChange={(e) => {
+                      setEmail(e.target.value);
+                      if (error) setError(null);
+                    }}
+                    required
+                    autoComplete="email"
+                  />
+                </div>
+
+                {/* PASSWORD */}
+                <div className="relative">
+                  <Lock
+                    className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500"
+                    aria-hidden="true"
+                  />
+
+                  <input
+                    type={showPw ? "text" : "password"}
+                    className="w-full rounded-2xl border border-gray-200 bg-gray-100 px-4 py-3 pl-11 pr-11 shadow-inner focus:border-emerald-600 focus:outline-none focus:ring-2 focus:ring-emerald-600/40"
+                    placeholder="Password"
+                    value={password}
+                    onChange={(e) => {
+                      setPassword(e.target.value);
+                      if (error) setError(null);
+                    }}
+                    autoComplete="current-password"
+                    required
+                  />
+
+                  <button
+                    type="button"
+                    aria-label={showPw ? "Hide password" : "Show password"}
+                    onClick={() => setShowPw((s) => !s)}
+                    className="absolute inset-y-0 right-0 flex items-center pr-3"
+                  >
+                    {showPw ? (
+                      <Eye className="h-5 w-5 text-gray-500" />
+                    ) : (
+                      <EyeOff className="h-5 w-5 text-gray-500" />
+                    )}
+                  </button>
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={loading}
+                  className="w-full rounded-xl bg-emerald-700 py-3 font-semibold text-white shadow hover:brightness-110 focus:outline-none focus:ring-2 focus:ring-emerald-700/40 focus:ring-offset-2 disabled:opacity-60"
+                >
+                  {loading ? "Logging in…" : "Login"}
+                </button>
+              </form>
+
+              <div className="my-6 flex items-center gap-3">
+                <div className="h-px flex-1 bg-neutral-200" />
+                <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+                  or
+                </div>
+                <div className="h-px flex-1 bg-neutral-200" />
+              </div>
+
+              {/* GOOGLE LOGIN with Google icon */}
               <button
                 type="button"
                 onClick={() => googleLogin()}
                 disabled={loading}
-                className="
-                  group inline-flex w-full max-w-xl items-center justify-center gap-3
-                  rounded-xl border border-neutral-300 bg-white px-6 py-3
-                  text-sm font-semibold text-slate-900 shadow-sm
-                  transition
-                  hover:border-emerald-700 hover:bg-emerald-700 hover:text-white
-                  focus:outline-none focus:ring-2 focus:ring-emerald-500/30
-                "
+                className="group inline-flex w-full items-center justify-center gap-3 rounded-xl border border-neutral-300 bg-white px-4 py-3 text-sm font-semibold text-slate-900 shadow-sm transition hover:border-emerald-700 hover:bg-emerald-700 hover:text-white focus:outline-none focus:ring-2 focus:ring-emerald-500/30 disabled:opacity-60"
               >
-                <span className="grid h-9 w-9 place-items-center rounded-lg bg-transparent">
-                  <Mail className="h-5 w-5 text-slate-700 transition group-hover:text-white" />
-                </span>
-
+              <span className="grid h-9 w-9 place-items-center rounded-lg bg-transparent shadow-none">
+                <img
+                  src="/google.png"
+                  alt="Google"
+                  className="h-5 w-5 bg-transparent"
+                  draggable={false}
+                />
+              </span>
                 <span>Login with your DLSU Google Account</span>
               </button>
+
             </div>
 
-            <p className="mt-4 text-[11px] leading-relaxed text-slate-500">
+            <p className="mt-5 max-w-xl text-[11px] leading-relaxed text-slate-500">
               By using AnimoAssign, you agree to follow the guidelines outlined in the{" "}
-              <span className="underline">DLSU Student Handbook</span> and{" "}
+              <a
+                href="https://www.dlsu.edu.ph/wp-content/uploads/pdf/osa/student-handbook.pdf"
+                target="_blank"
+                rel="noreferrer"
+                className="underline hover:text-emerald-700"
+              >
+                DLSU Student Handbook
+              </a> and{" "}
               <span className="underline">Privacy Policy</span> of AnimoAssign.
             </p>
-
-            {/* Reveal Email/Password AFTER clicking */}
-            {showForm && (
-              <div className="mt-7 rounded-xl border border-neutral-200 bg-white p-5 shadow-sm">
-                <form className="space-y-4" onSubmit={onSubmit}>
-                  <div>
-                    <label className="block text-sm font-medium text-slate-900 mb-1">
-                      Email Address
-                    </label>
-                    <input
-                      type="text"
-                      className="
-                        w-full rounded-xl bg-gray-100 border border-gray-200
-                        px-4 py-3 shadow-inner
-                        focus:outline-none focus:ring-2 focus:ring-emerald-600/40 focus:border-emerald-600
-                      "
-                      placeholder="name@dlsu.edu.ph"
-                      value={email}
-                      onChange={(e) => setEmail(e.target.value)}
-                      required
-                      autoComplete="email"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-sm font-medium text-slate-900 mb-1">
-                      Password
-                    </label>
-                    <div className="relative">
-                      <input
-                        type={showPw ? "text" : "password"}
-                        className="
-                          w-full rounded-xl bg-gray-100 border border-gray-200
-                          px-4 py-3 pr-11 shadow-inner
-                          focus:outline-none focus:ring-2 focus:ring-emerald-600/40 focus:border-emerald-600
-                        "
-                        value={password}
-                        onChange={(e) => setPassword(e.target.value)}
-                        autoComplete="current-password"
-                        required
-                      />
-                      <button
-                        type="button"
-                        onClick={() => setShowPw((s) => !s)}
-                        className="absolute inset-y-0 right-0 pr-3 flex items-center"
-                      >
-                        {showPw ? (
-                          <Eye className="h-5 w-5 text-gray-500" />
-                        ) : (
-                          <EyeOff className="h-5 w-5 text-gray-500" />
-                        )}
-                      </button>
-                    </div>
-                  </div>
-
-                  {error && <div className="text-sm text-red-600 text-center">{error}</div>}
-
-                  <button
-                    type="submit"
-                    disabled={loading}
-                    className="
-                      w-full py-3 rounded-xl bg-emerald-700 text-white font-semibold
-                      shadow hover:brightness-110
-                      focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-emerald-700/40
-                      disabled:opacity-60
-                    "
-                  >
-                    {loading ? "Logging in…" : "Login"}
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setShowForm(false);
-                      setError(null);
-                    }}
-                    className="w-full rounded-xl border border-neutral-300 bg-white py-3 text-sm font-medium hover:bg-neutral-50"
-                  >
-                    Back
-                  </button>
-                </form>
-              </div>
-            )}
           </div>
 
           {/* RIGHT PANEL */}
@@ -258,17 +257,6 @@ const googleLogin = useGoogleLogin({
               <div className="mt-10 w-full max-w-md">
                 <div className="h-px w-full bg-white/20" />
                 <div className="mt-4 text-xs text-white/80">College of Computer Studies</div>
-                <button
-                type="button"
-                onClick={() => {
-                setShowForm(true);
-                setError(null);
-              }}
-              disabled={loading}
-                className="absolute bottom-4 left-4 px-4 py-2 rounded-lg bg-white/90 text-gray-900 shadow hover:bg-white"
-              >
-                Connect Local
-              </button>
               </div>
             </div>
           </div>
@@ -276,7 +264,6 @@ const googleLogin = useGoogleLogin({
         </div>
       </div>
     </div>
-    
   );
 };
 

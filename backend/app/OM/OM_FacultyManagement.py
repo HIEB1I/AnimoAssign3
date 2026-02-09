@@ -33,6 +33,83 @@ def _to_full_day(day_val: str) -> str:
     s = (day_val or "").strip().upper()
     return _DAY_MAP.get(s, (day_val or "").strip() or "")
 
+# Day initials expected by OM tables (M/T/W/H/F/S)
+_DAY_INITIAL_MAP = {
+    "M": "M", "MON": "M", "MONDAY": "M",
+    "T": "T", "TU": "T", "TUE": "T", "TUESDAY": "T",
+    "W": "W", "WED": "W", "WEDNESDAY": "W",
+    "H": "H", "TH": "H", "THU": "H", "THUR": "H", "THURS": "H", "THURSDAY": "H", "R": "H",
+    "F": "F", "FRI": "F", "FRIDAY": "F",
+    "S": "S", "SAT": "S", "SATURDAY": "S",
+    "U": "U", "SUN": "U", "SUNDAY": "U",
+}
+
+_DAY_INITIAL_ORDER = {"M": 1, "T": 2, "W": 3, "H": 4, "F": 5, "S": 6, "U": 7}
+
+def _to_day_initial(day_val: Any) -> str:
+    s = (str(day_val) if day_val is not None else "").strip()
+    if not s:
+        return ""
+    up = s.strip().upper()
+
+    # Exact known tokens
+    if up in _DAY_INITIAL_MAP:
+        return _DAY_INITIAL_MAP[up]
+
+    # Full day names / prefixes
+    if up.startswith("MON"):
+        return "M"
+    if up.startswith("TUE"):
+        return "T"
+    if up.startswith("WED"):
+        return "W"
+    if up.startswith("THU") or up.startswith("THR") or up.startswith("TH"):
+        return "H"
+    if up.startswith("FRI"):
+        return "F"
+    if up.startswith("SAT"):
+        return "S"
+    if up.startswith("SUN"):
+        return "U"
+
+    # Fall back as-is (better than losing information)
+    return s
+
+def _extract_mode_from_remarks(remarks: Any) -> str:
+    """Mode is stored on sections.remarks (e.g., Hybrid, FOL, F2F/FTF, Online)."""
+    if remarks is None:
+        return "Online"
+    if isinstance(remarks, dict):
+        for k in ("mode", "delivery_mode", "class_mode", "section_mode"):
+            v = remarks.get(k)
+            if v:
+                return str(v).strip()
+        # fall back to a stringy representation
+        remarks = " ".join(str(v) for v in remarks.values() if v)
+
+    if isinstance(remarks, list):
+        remarks = " ".join(str(x) for x in remarks if x)
+
+    s = str(remarks).strip()
+    if not s:
+        return "Online"
+
+    up = s.upper()
+    if "HYBRID" in up:
+        return "Hybrid"
+    if "FOL" in up:
+        return "FOL"
+    if "F2F" in up:
+        return "F2F"
+    if "FTF" in up or "FACE" in up:
+        return "FTF"
+    if "ONLINE" in up:
+        return "Online"
+    if "BLENDED" in up:
+        return "Blended"
+
+    # Last-resort: keep whatever is in remarks (trimmed)
+    return s
 def _fmt_hhmm(raw: Any) -> str:
     """
     Input like "730" or 730 -> "07:30"
@@ -431,218 +508,125 @@ async def facultymanagement_handler(
 
         # ----- SCHEDULE: current/selected term sections (reuse FACULTY_Overview logic) -----
     if action == "schedule":
-            if not facultyId:
-                raise HTTPException(status_code=400, detail="facultyId is required.")
+        if not facultyId:
+            raise HTTPException(status_code=400, detail="facultyId is required.")
 
-            # Resolve active term if not provided (kept for parity with OM)
-            if not termId:
-                active = await _active_term()
-                termId = active.get("term_id")
+        # Resolve working term if not provided
+        if not termId:
+            active = await _active_term()
+            termId = active.get("term_id")
 
-            # === This pipeline mirrors FACULTY_Overview (/faculty/overview?action=fetch) ===
-            pipeline: List[Dict[str, Any]] = [
-                {"$match": {"faculty_id": facultyId, "is_archived": False}},
-                {
-                    "$lookup": {
-                        "from": "sections",
-                        "localField": "section_id",
-                        "foreignField": "section_id",
-                        "as": "sec",
-                    }
-                },
-                {"$unwind": {"path": "$sec", "preserveNullAndEmptyArrays": True}},
-            ]
+        # faculty_assignments -> sections (filter by term) -> courses -> section_schedules
+        pipeline: List[Dict[str, Any]] = [
+            {"$match": {"faculty_id": facultyId, "is_archived": False}},
+            {"$lookup": {"from": COL_SECTIONS, "localField": "section_id", "foreignField": "section_id", "as": "sec"}},
+            {"$unwind": {"path": "$sec", "preserveNullAndEmptyArrays": True}},
+        ]
 
-            # 🔐 Filter to the selected / active term ONLY
-            if termId:
-                pipeline.append({"$match": {"sec.term_id": termId}})
+        if termId:
+            pipeline.append({"$match": {"sec.term_id": termId}})
 
-            pipeline.extend(
-                [
-                    {
-                        "$lookup": {
-                            "from": "courses",
-                            "localField": "sec.course_id",
-                            "foreignField": "course_id",
-                            "as": "course",
-                        }
-                    },
-                    {"$unwind": {"path": "$course", "preserveNullAndEmptyArrays": True}},
+        pipeline.extend([
+            {"$lookup": {"from": COL_COURSES, "localField": "sec.course_id", "foreignField": "course_id", "as": "course"}},
+            {"$unwind": {"path": "$course", "preserveNullAndEmptyArrays": True}},
+            {"$lookup": {"from": "section_schedules", "localField": "sec.section_id", "foreignField": "section_id", "as": "sched"}},
+            {"$unwind": {"path": "$sched", "preserveNullAndEmptyArrays": True}},
 
-                    {
-                        "$lookup": {
-                            "from": "section_schedules",
-                            "localField": "sec.section_id",
-                            "foreignField": "section_id",
-                            "as": "sched",
-                        }
-                    },
-                    {"$unwind": {"path": "$sched", "preserveNullAndEmptyArrays": True}},
+            {"$addFields": {
+                "course_code_display": {
+                    "$cond": [
+                        {"$isArray": "$course.course_code"},
+                        {"$ifNull": [{"$arrayElemAt": ["$course.course_code", 0]}, ""]},
+                        {"$ifNull": ["$course.course_code", ""]},
+                    ]
+                }
+            }},
 
-                    {
-                        "$lookup": {
-                            "from": "rooms",
-                            "localField": "sched.room_id",
-                            "foreignField": "room_id",
-                            "as": "room",
-                        }
-                    },
-                    {"$unwind": {"path": "$room", "preserveNullAndEmptyArrays": True}},
+            {"$project": {
+                "_id": 0,
+                "section_id": "$sec.section_id",
+                "section": "$sec.section_code",
+                "course_code": "$course_code_display",
+                "course_title": "$course.course_title",
+                "units": {"$ifNull": ["$course.units", 0]},
+                "sched_day": "$sched.day",
+                "sched_start": "$sched.start_time",
+                "sched_end": "$sched.end_time",
+                "section_remarks": "$sec.remarks",
+            }},
 
-                    {
-                        "$lookup": {
-                            "from": "campuses",
-                            "localField": "room.campus_id",
-                            "foreignField": "campus_id",
-                            "as": "camp",
-                        }
-                    },
-                    {"$unwind": {"path": "$camp", "preserveNullAndEmptyArrays": True}},
+            {"$group": {
+                "_id": "$section_id",
+                "section": {"$first": "$section"},
+                "course_code": {"$first": "$course_code"},
+                "course_title": {"$first": "$course_title"},
+                "units": {"$first": "$units"},
+                "section_remarks": {"$first": "$section_remarks"},
+                "meetings": {"$push": {
+                    "day": "$sched_day",
+                    "start": "$sched_start",
+                    "end": "$sched_end",
+                    
+                }},
+            }},
+        ])
 
-                    {
-                        "$addFields": {
-                            "course_code_display": {
-                                "$cond": [
-                                    {"$isArray": "$course.course_code"},
-                                    {
-                                        "$ifNull": [
-                                            {"$arrayElemAt": ["$course.course_code", 0]},
-                                            "",
-                                        ]
-                                    },
-                                    {"$ifNull": ["$course.course_code", ""]},
-                                ]
-                            },
-                            "day_display": {
-                                "$switch": {
-                                    "branches": [
-                                        {
-                                            "case": {
-                                                "$in": [
-                                                    {"$toUpper": "$sched.day"},
-                                                    ["M", "MON"],
-                                                ]
-                                            },
-                                            "then": "Monday",
-                                        },
-                                        {
-                                            "case": {
-                                                "$in": [
-                                                    {"$toUpper": "$sched.day"},
-                                                    ["T", "TU", "TUE"],
-                                                ]
-                                            },
-                                            "then": "Tuesday",
-                                        },
-                                        {
-                                            "case": {
-                                                "$in": [
-                                                    {"$toUpper": "$sched.day"},
-                                                    ["W", "WED"],
-                                                ]
-                                            },
-                                            "then": "Wednesday",
-                                        },
-                                        {
-                                            "case": {
-                                                "$in": [
-                                                    {"$toUpper": "$sched.day"},
-                                                    ["TH", "THU", "R"],
-                                                ]
-                                            },
-                                            "then": "Thursday",
-                                        },
-                                        {
-                                            "case": {
-                                                "$in": [
-                                                    {"$toUpper": "$sched.day"},
-                                                    ["F", "FRI"],
-                                                ]
-                                            },
-                                            "then": "Friday",
-                                        },
-                                        {
-                                            "case": {
-                                                "$in": [
-                                                    {"$toUpper": "$sched.day"},
-                                                    ["S", "SAT"],
-                                                ]
-                                            },
-                                            "then": "Saturday",
-                                        },
-                                    ],
-                                    "default": "$sched.day",
-                                }
-                            },
-                        }
-                    },
-                    {
-                        "$project": {
-                            "_id": 0,
-                            "day": "$day_display",
-                            "course_code": "$course_code_display",
-                            "course_title": "$course.course_title",
-                            "section": "$sec.section_code",
-                            "units": {"$ifNull": ["$course.units", 0]},
-                            "campus": {"$ifNull": ["$camp.campus_name", "Online"]},
-                            "mode": {"$ifNull": ["$sched.room_type", "Online"]},
-                            "room": {"$ifNull": ["$room.room_number", "Online"]},
-                            "start_raw": "$sched.start_time",
-                            "end_raw": "$sched.end_time",
-                        }
-                    },
-                    {"$sort": {"day": 1, "start_raw": 1, "section": 1}},
-                ]
-            )
+        raw_rows = [r async for r in db[COL_ASSIGNMENTS].aggregate(pipeline)]
 
-            rows = [r async for r in db["faculty_assignments"].aggregate(pipeline)]
+        # Flatten: 1 row per section, up to 2 meetings (Day/Begin/End)
+        day_order = _DAY_INITIAL_ORDER
 
-            # Format times exactly like overview
-            def _fmt_hhmm(raw):
-                if raw is None:
-                    return ""
-                s = str(raw).strip()
-                if ":" in s:
-                    return s
-                if not s.isdigit():
-                    return s
-                if len(s) == 3:
-                    h, m = int(s[0]), int(s[1:])
-                elif len(s) == 4:
-                    h, m = int(s[:2]), int(s[2:])
-                else:
-                    return s
-                return f"{h:02d}:{m:02d}"
+        out_rows: List[Dict[str, Any]] = []
+        for r in raw_rows:
+            meets = r.get("meetings") or []
 
-            def _fmt_time_band(start_raw, end_raw):
-                st = _fmt_hhmm(start_raw)
-                en = _fmt_hhmm(end_raw)
-                return f"{st} – {en}".strip(" –")
+            norm = []
+            for m in meets:
+                if not (m.get("day") or m.get("start") or m.get("end")):
+                    continue
+                day = _to_day_initial(m.get("day"))
+                begin = _fmt_hhmm(m.get("start"))
+                end = _fmt_hhmm(m.get("end"))
+                norm.append((day_order.get(day, 99), begin, {
+                    "day": day,
+                    "begin": begin,
+                    "end": end,
+                                    }))
 
-            teaching_load = []
-            for r in rows:
-                # normalize course_code if list
-                code = r.get("course_code")
-                if isinstance(code, list):
-                    code = " / ".join(str(x) for x in code if x).strip()
+            norm.sort(key=lambda x: (x[0], x[1] or ""))
 
-                teaching_load.append(
-                    {
-                        "day": r.get("day", ""),
-                        "course_code": code or "",
-                        "course_title": r.get("course_title", ""),
-                        "section": r.get("section", ""),
-                        "units": r.get("units", 0) or 0,
-                        "campus": r.get("campus", "Online"),
-                        "mode": r.get("mode", "Online"),
-                        "room": r.get("room", "Online"),
-                        "time": _fmt_time_band(r.get("start_raw"), r.get("end_raw")),
-                    }
-                )
+            day1 = begin1 = end1 = day2 = begin2 = end2 = ""
+            mode_val = _extract_mode_from_remarks(r.get("section_remarks"))
+            if norm:
+                day1 = norm[0][2]["day"]
+                begin1 = norm[0][2]["begin"]
+                end1 = norm[0][2]["end"]
+            if len(norm) > 1:
+                day2 = norm[1][2]["day"]
+                begin2 = norm[1][2]["begin"]
+                end2 = norm[1][2]["end"]
 
-            # Return the same shape the Overview returns so the FE can reuse its helper.
-            return {"ok": True, "term_id": termId, "teaching_load": teaching_load}
+            code = r.get("course_code") or ""
+            if isinstance(code, list):
+                code = " / ".join(str(x) for x in code if x).strip()
 
+            out_rows.append({
+                "course_code": code,
+                "course_title": r.get("course_title") or "",
+                "section": r.get("section") or "",
+                "mode": mode_val,
+                "units": r.get("units", 0) or 0,
+                "day1": day1,
+                "begin1": begin1,
+                "end1": end1,
+                "day2": day2,
+                "begin2": begin2,
+                "end2": end2,
+            })
+
+        out_rows.sort(key=lambda x: (x.get("course_code") or "", x.get("section") or ""))
+
+        return {"ok": True, "term_id": termId, "teaching_load": out_rows}
 
 
     # ----- HISTORY: per AY grouped by term -----
@@ -683,6 +667,7 @@ async def facultymanagement_handler(
                 "section_code": "$sec.section_code",
                 "course_code_raw": "$course.course_code",
                 "course_title": "$course.course_title",
+                "units": {"$ifNull": ["$course.units", 0]},
                 "term_number": "$t.term_number",
                 "sched_day": "$scheds.day",
                 "sched_room_type": "$scheds.room_type",
@@ -697,6 +682,7 @@ async def facultymanagement_handler(
                 "section_code": {"$first": "$section_code"},
                 "course_code_raw": {"$first": "$course_code_raw"},
                 "course_title": {"$first": "$course_title"},
+                "units": {"$first": "$units"},
                 "term_number": {"$first": "$term_number"},
                 "meetings": {"$push": {
                     "day": "$sched_day",
@@ -708,31 +694,7 @@ async def facultymanagement_handler(
                 }},
             }},
         ]
-
-        DAY_MAP = {"M":"Monday","MON":"Monday","T":"Tuesday","TU":"Tuesday","TUE":"Tuesday","W":"Wednesday","WED":"Wednesday",
-                "TH":"Thursday","THU":"Thursday","R":"Thursday","F":"Friday","FRI":"Friday","S":"Saturday","SAT":"Saturday"}
-        DAY_ORDER = {"Monday":1,"Tuesday":2,"Wednesday":3,"Thursday":4,"Friday":5,"Saturday":6}
-
-        def _to_full_day(d):
-            s = str(d or "").strip().upper()
-            return DAY_MAP.get(s, str(d or ""))
-
-        def _fmt_hhmm(raw):
-            if raw is None: return ""
-            s = str(raw).strip()
-            if ":" in s: return s
-            if not s.isdigit(): return s
-            if len(s) == 3:
-                h, m = int(s[0]), int(s[1:])
-            elif len(s) == 4:
-                h, m = int(s[:2]), int(s[2:])
-            else:
-                return s
-            return f"{h:02d}:{m:02d}"
-
-        def _band(start, end):
-            st, en = _fmt_hhmm(start), _fmt_hhmm(end)
-            return f"{st} – {en}".strip(" –")
+        day_order = _DAY_INITIAL_ORDER
 
         rows = [r async for r in db[COL_ASSIGNMENTS].aggregate(pipeline)]
 
@@ -742,24 +704,27 @@ async def facultymanagement_handler(
             meets = r.get("meetings") or []
             norm = []
             for m in meets:
-                full_day = _to_full_day(m.get("day"))
-                norm.append((DAY_ORDER.get(full_day, 99), {
-                    "day": full_day,
-                    "room": m.get("room") or "Online",
-                    "mode": m.get("room_type") or "Online",
-                    "time": _band(m.get("start"), m.get("end")),
-                    "campus": m.get("campus") or None,
+                if not (m.get("day") or m.get("start") or m.get("end")):
+                    continue
+                day = _to_day_initial(m.get("day"))
+                begin = _fmt_hhmm(m.get("start"))
+                end = _fmt_hhmm(m.get("end"))
+                norm.append((day_order.get(day, 99), begin, {
+                    "day": day,
+                    "begin": begin,
+                    "end": end,
                 }))
-            norm.sort(key=lambda x: (x[0], x[1]["time"] or ""))
+            norm.sort(key=lambda x: (x[0], x[1] or ""))
 
-            # default fields
-            day1 = room1 = day2 = room2 = None
-            mode = None
-            time_band = ""
+            day1 = begin1 = end1 = day2 = begin2 = end2 = None
             if norm:
-                day1, room1, mode, time_band = norm[0][1]["day"], norm[0][1]["room"], norm[0][1]["mode"], norm[0][1]["time"]
+                day1 = norm[0][2]["day"]
+                begin1 = norm[0][2]["begin"]
+                end1 = norm[0][2]["end"]
             if len(norm) > 1:
-                day2, room2 = norm[1][1]["day"], norm[1][1]["room"]
+                day2 = norm[1][2]["day"]
+                begin2 = norm[1][2]["begin"]
+                end2 = norm[1][2]["end"]
 
             # normalize course code if array
             code = r.get("course_code_raw")
@@ -771,10 +736,13 @@ async def facultymanagement_handler(
                 "code": code or "",
                 "title": r.get("course_title") or "",
                 "section": r.get("section_code") or "",
-                "mode": mode or "Online",
-                "day1": day1, "room1": room1,
-                "day2": day2, "room2": room2,
-                "time": time_band,
+                "units": r.get("units", 0) or 0,
+                "day1": day1 or "",
+                "begin1": begin1 or "",
+                "end1": end1 or "",
+                "day2": day2 or "",
+                "begin2": begin2 or "",
+                "end2": end2 or "",
             })
 
         # Group by term for OM payload → { terms: { "Term 1": [...] } }
@@ -784,10 +752,13 @@ async def facultymanagement_handler(
                 "code": r["code"],
                 "title": r["title"],
                 "section": r["section"],
-                "mode": r["mode"],
-                "day1": r.get("day1"), "room1": r.get("room1"),
-                "day2": r.get("day2"), "room2": r.get("room2"),
-                "time": r["time"],
+                "units": r.get("units", 0),
+                "day1": r.get("day1"),
+                "begin1": r.get("begin1"),
+                "end1": r.get("end1"),
+                "day2": r.get("day2"),
+                "begin2": r.get("begin2"),
+                "end2": r.get("end2"),
             })
 
         return {"ok": True, "acad_year_start": acadYearStart, "terms": grouped}

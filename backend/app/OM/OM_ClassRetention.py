@@ -22,7 +22,44 @@ COL_FAC_PROFILES = "faculty_profiles"
 COL_FAC_ASSIGN = "faculty_assignments"
 COL_PREEN_COUNT = "preenlistment_count" 
 
-STATUS_OPTIONS = ["Approved", "Under Review", "Dissolved", "Special Class"]
+STATUS_OPTIONS = ["Approved", "Under Review", "Dissolved"]
+
+
+def _status_to_section_remarks_tag(status: str) -> str:
+    """Map Class Retention status → sections.remarks tag used by APO + OM screens.
+
+    We only tag Dissolved in sections.remarks so APO_CourseOfferings and OM_LoadAssignment can see it.
+    """
+    s = (status or "").strip().lower()
+    if s == "dissolved":
+        return "DISSOLVED"
+    return ""
+
+
+async def _ensure_section_remarks_tag(section_id: Optional[str], status: str, now: datetime) -> None:
+    """Ensure sections.remarks contains a marker for Dissolved.
+
+    Notes:
+    - APO_CourseOfferings reads section remarks from `sections.remarks` and exposes it as `section_remarks`.
+    - OM_LoadAssignment also preloads remarks from `sections.remarks` (not from `sections_submitted`).
+    """
+    sid = (section_id or "").strip()
+    tag = _status_to_section_remarks_tag(status)
+    if not sid or not tag:
+        return
+
+    sec = await db[COL_SECTIONS].find_one({"section_id": sid}, {"_id": 0, "remarks": 1})
+    if not sec:
+        return
+    cur = str(sec.get("remarks") or "").strip()
+    if tag.lower() in cur.lower():
+        return
+
+    new_remarks = tag if not cur else f"{cur} | {tag}"
+    await db[COL_SECTIONS].update_one(
+        {"section_id": sid},
+        {"$set": {"remarks": new_remarks, "updated_at": now}},
+    )
 
 # indexes (safe with Motor or PyMongo; ignore failures)
 try:
@@ -220,7 +257,7 @@ def _list_pipeline(term_id: Optional[str], status: Optional[str], q: Optional[st
             "retention_id": {"$toString": "$_id"},
             "term_id": 1, "course_id": 1, "section_id": 1,
             "faculty_id": {"$ifNull": ["$fa.faculty_id", None]},
-            "student_units": 1, "faculty_units": 1, "status": 1,
+            "student_units": 1, "faculty_units": 1, "status": {"$cond": [{"$eq": ["$status", "Special Class"]}, "Dissolved", "$status"]},
             "created_at": 1, "updated_at": 1,
             "enrolled": {"$ifNull": ["$enrolled", "$section.enrolled"]},
             "term_label": _term_label_expr(),
@@ -545,15 +582,26 @@ async def cr_post(action: str = Query(...), payload: Dict[str, Any] = Body(defau
                 "student_units", "faculty_units", "status", "enrolled",
             ]
             update_doc = {k: payload[k] for k in allowed if k in payload}
-            if "status" in update_doc and update_doc["status"] not in STATUS_OPTIONS:
-                raise HTTPException(status_code=400, detail="Invalid status")
+            if "status" in update_doc:
+                s = (update_doc.get("status") or "").strip()
+                if s.lower() == "special class":
+                    # Status removed; treat legacy value as Dissolved.
+                    update_doc["status"] = "Dissolved"
+                if update_doc["status"] not in STATUS_OPTIONS:
+                    raise HTTPException(status_code=400, detail="Invalid status")
             update_doc["updated_at"] = now
 
             # derive faculty from (new/current) section
             section_id_for_fac = update_doc.get("section_id")
+            existing_status = None
             if not section_id_for_fac:
-                existing = await db[COL_CLASS_RETENTION].find_one({"_id": _id}, {"section_id": 1})
+                existing = await db[COL_CLASS_RETENTION].find_one(
+                    {"_id": _id},
+                    {"_id": 0, "section_id": 1, "status": 1},
+                )
                 section_id_for_fac = existing.get("section_id") if existing else None
+                existing_status = existing.get("status") if existing else None
+
             derived_faculty_id = await _derive_faculty_for_section(section_id_for_fac)
             update_doc["faculty_id"] = derived_faculty_id
 
@@ -576,6 +624,11 @@ async def cr_post(action: str = Query(...), payload: Dict[str, Any] = Body(defau
                         {"section_id": section_id},
                         {"$set": {"enrolled": payload["enrolled"], "updated_at": now}},
                     )
+
+            # If status is Dissolved, auto-write a marker into sections.remarks
+            # so APO_CourseOfferings + OM_LoadAssignment can display it.
+            status_effective = (update_doc.get("status") or existing_status or "").strip()
+            await _ensure_section_remarks_tag(section_id_for_fac, status_effective, now)
             return {"ok": True, "retention_id": rid}
 
         # CREATE
@@ -584,6 +637,10 @@ async def cr_post(action: str = Query(...), payload: Dict[str, Any] = Body(defau
                 raise HTTPException(status_code=400, detail=f"{k} is required")
 
         status = payload.get("status", "Under Review")
+        s = (status or "").strip()
+        if s.lower() == "special class":
+            # Status removed; treat legacy value as Dissolved.
+            status = "Dissolved"
         if status not in STATUS_OPTIONS:
             raise HTTPException(status_code=400, detail="Invalid status")
 
@@ -612,6 +669,10 @@ async def cr_post(action: str = Query(...), payload: Dict[str, Any] = Body(defau
                 {"section_id": doc["section_id"]},
                 {"$set": {"enrolled": doc["enrolled"], "updated_at": now}},
             )
+
+        # If status is Dissolved, auto-write a marker into sections.remarks
+        # so APO_CourseOfferings + OM_LoadAssignment can display it.
+        await _ensure_section_remarks_tag(doc.get("section_id"), doc.get("status") or "", now)
 
         return {"ok": True, "retention_id": str(res.inserted_id)}
 
