@@ -130,64 +130,35 @@ function ActionMenu({
   );
 }
 
-/* ---------- Helpers to mirror FACULTY_Overview list view ---------- */
-type DayLong = "Monday" | "Tuesday" | "Wednesday" | "Thursday" | "Friday" | "Saturday";
-const DAY_ORDER: DayLong[] = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
-
-type TLItem = {
-  code: string;
-  title: string;
-  sec: string;
-  units: number;
-  campus: string;
-  mode: string;
-  room: string;
-  time: string;
+/* ---------- Schedule + Teaching History table helpers (match OM_FacultyManagement) ---------- */
+type ScheduleRow = {
+  course_code: string;
+  course_title: string;
+  section: string;
+  units?: number;
+  mode?: string;
+  day1?: string;
+  begin1?: string;
+  end1?: string;
+  day2?: string;
+  begin2?: string;
+  end2?: string;
 };
-type TL = { day: DayLong; items: TLItem[] };
 
-function makeTeachingLoad(dataArray: any[]): TL[] {
-  const byDay: Record<DayLong, TLItem[]> = {
-    Monday: [],
-    Tuesday: [],
-    Wednesday: [],
-    Thursday: [],
-    Friday: [],
-    Saturday: [],
-  };
-  (dataArray || []).forEach((c: any) => {
-    const day = (c.day || "") as DayLong;
-    if (!DAY_ORDER.includes(day)) return;
-    byDay[day].push({
-      code: c.course_code ?? "",
-      title: c.course_title ?? "",
-      sec: c.section ?? "",
-      units: Number(c.units) || 0,
-      campus: c.campus || "—",
-      mode: c.mode || "Online",
-      room: c.room || "Online",
-      time: c.time || "",
-    });
-  });
-  return DAY_ORDER.map((d) => ({ day: d, items: byDay[d] }));
-}
-
-/* ---------- History helpers (mirror FACULTY_History grouping/columns) ---------- */
 type HistRow = {
-  ay: string; // "AY 2024-2025"
   code: string;
   title: string;
   section: string;
-  mode?: string | null;
-  day1?: string | null;
-  room1?: string | null;
-  day2?: string | null;
-  room2?: string | null;
-  time?: string | null;
-  term?: string | null; // "Term 1" | "Term 2" | "Term 3"
+  units?: number;
+  day1?: string;
+  begin1?: string;
+  end1?: string;
+  day2?: string;
+  begin2?: string;
+  end2?: string;
+  term?: string; // "Term 1" | "Term 2" | "Term 3"
 };
 
-// Group rows by Term 1/2/3 like FACULTY_History
 function groupHistoryByTerm(rows: HistRow[]) {
   const groups: Record<string, HistRow[]> = { "Term 1": [], "Term 2": [], "Term 3": [] };
   rows.forEach((r) => {
@@ -198,99 +169,111 @@ function groupHistoryByTerm(rows: HistRow[]) {
   return groups;
 }
 
-// Excel-like, single-line cells except title
-function renderTeachingHistoryLikeFacultyFromArray(flatRows: HistRow[]) {
+function renderScheduleTable(rows: ScheduleRow[]) {
+  return (
+    <div className="border border-gray-200 bg-gray-50 shadow-sm overflow-visible rounded-xl">
+      <div className="overflow-x-auto rounded-xl">
+        <table className="w-full text-sm">
+          <thead className="bg-gray-50 border-b text-gray-700">
+            <tr>
+              <th className="text-left px-4 py-2">Course Code &amp; Title</th>
+              <th className="text-left px-4 py-2">Section</th>
+              <th className="text-left px-4 py-2">Mode</th>
+              <th className="text-center px-4 py-2">Units</th>
+              <th className="text-left px-4 py-2">Day 1</th>
+              <th className="text-left px-4 py-2">Begin 1</th>
+              <th className="text-left px-4 py-2">End 1</th>
+              <th className="text-left px-4 py-2">Day 2</th>
+              <th className="text-left px-4 py-2">Begin 2</th>
+              <th className="text-left px-4 py-2">End 2</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y">
+            {(rows || []).length === 0 ? (
+              <tr>
+                <td colSpan={10} className="px-4 py-6 text-center text-gray-500">
+                  No records
+                </td>
+              </tr>
+            ) : (
+              (rows || []).map((r, idx) => (
+                <tr key={idx} className="hover:bg-gray-50">
+                  <td className="px-4 py-3 text-left font-semibold text-emerald-700">
+                    {r.course_code || "—"}
+                    <div className="text-xs text-gray-500">{r.course_title || "—"}</div>
+                  </td>
+                  <td className="px-4 py-3 text-left">{r.section || "—"}</td>
+                  <td className="px-4 py-3 text-left">{r.mode || "—"}</td>
+                  <td className="px-4 py-3 text-center">{r.units ?? "—"}</td>
+                  <td className="px-4 py-3 text-left">{r.day1 || "—"}</td>
+                  <td className="px-4 py-3 text-left whitespace-nowrap">{r.begin1 || "—"}</td>
+                  <td className="px-4 py-3 text-left whitespace-nowrap">{r.end1 || "—"}</td>
+                  <td className="px-4 py-3 text-left">{r.day2 || "—"}</td>
+                  <td className="px-4 py-3 text-left whitespace-nowrap">{r.begin2 || "—"}</td>
+                  <td className="px-4 py-3 text-left whitespace-nowrap">{r.end2 || "—"}</td>
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function renderTeachingHistoryByTerm(flatRows: HistRow[]) {
   const groups = groupHistoryByTerm(flatRows);
 
-  const HEADERS = [
-    "Course Code",
-    "Course Title",
-    "Section",
-    "Mode",
-    "Day 1",
-    "Room 1",
-    "Day 2",
-    "Room 2",
-    "Time",
-  ] as const;
-
   return (
-    <div className="space-y-8">
+    <div className="space-y-10">
       {(["Term 1", "Term 2", "Term 3"] as const).map((t) => (
-        <div key={t} className="rounded-xl border border-gray-200 overflow-hidden bg-white">
-          {/* Term header */}
-          <div className="px-4 py-3 text-sm font-semibold text-emerald-700 bg-gray-50 border-b">
-            {t}
-          </div>
+        <div key={t} className="space-y-3">
+          <div className="text-sm font-semibold text-emerald-700">{t}</div>
 
-          {/* Fixed table */}
-          <div>
-            <table className="w-full table-fixed border-t border-gray-200">
-              <colgroup>
-                <col className="w-[12ch]" /> {/* Code */}
-                <col className="w-[32ch]" /> {/* Title */}
-                <col className="w-[10ch]" /> {/* Section */}
-                <col className="w-[10ch]" /> {/* Mode */}
-                <col className="w-[8ch]" /> {/* Day 1 */}
-                <col className="w-[14ch]" /> {/* Room 1 */}
-                <col className="w-[8ch]" /> {/* Day 2 */}
-                <col className="w-[14ch]" /> {/* Room 2 */}
-                <col className="w-[16ch]" /> {/* Time */}
-              </colgroup>
-
-              <thead>
-                <tr className="text-xs text-gray-500">
-                  {HEADERS.map((h) => (
-                    <th key={h} className="px-3 py-2 font-semibold text-center">
-                      {h}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-
-              <tbody>
-                {(groups[t] ?? []).length === 0 ? (
+          <div className="border border-gray-200 bg-gray-50 shadow-sm overflow-visible rounded-xl">
+            <div className="overflow-x-auto rounded-xl">
+              <table className="w-full text-sm">
+                <thead className="bg-gray-50 border-b text-gray-700">
                   <tr>
-                    <td
-                      colSpan={HEADERS.length}
-                      className="px-4 py-6 text-center text-sm text-gray-500 bg-white"
-                    >
-                      No records.
-                    </td>
+                    <th className="text-left px-4 py-2">Course Code &amp; Title</th>
+                    <th className="text-left px-4 py-2">Section</th>
+                    <th className="text-center px-4 py-2">Units</th>
+                    <th className="text-left px-4 py-2">Day 1</th>
+                    <th className="text-left px-4 py-2">Begin 1</th>
+                    <th className="text-left px-4 py-2">End 1</th>
+                    <th className="text-left px-4 py-2">Day 2</th>
+                    <th className="text-left px-4 py-2">Begin 2</th>
+                    <th className="text-left px-4 py-2">End 2</th>
                   </tr>
-                ) : (
-                  groups[t].map((r, i) => (
-                    <tr key={`${t}-${i}`} className={cls("text-sm text-gray-700", i % 2 === 0 ? "bg-white" : "bg-gray-50")}>
-                      <td className="px-3 py-2 text-center whitespace-nowrap">{r.code}</td>
-                      <td className="px-3 py-2 text-center whitespace-normal break-words">
-                        {r.title}
-                      </td>
-                      <td className="px-3 py-2 text-center whitespace-nowrap">
-                        {r.section}
-                      </td>
-                      <td className="px-3 py-2 text-center whitespace-nowrap">
-                        {r.mode ?? ""}
-                      </td>
-                      <td className="px-3 py-2 text-center whitespace-nowrap">
-                        {r.day1 ?? ""}
-                      </td>
-                      <td className="px-3 py-2 text-center whitespace-nowrap">
-                        {r.room1 ?? ""}
-                      </td>
-                      <td className="px-3 py-2 text-center whitespace-nowrap">
-                        {r.day2 ?? ""}
-                      </td>
-                      <td className="px-3 py-2 text-center whitespace-nowrap">
-                        {r.room2 ?? ""}
-                      </td>
-                      <td className="px-3 py-2 text-center whitespace-nowrap">
-                        {r.time ?? ""}
+                </thead>
+                <tbody className="divide-y">
+                  {(groups[t] || []).length === 0 ? (
+                    <tr>
+                      <td colSpan={9} className="px-4 py-6 text-center text-gray-500">
+                        No records
                       </td>
                     </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
+                  ) : (
+                    (groups[t] || []).map((r, idx) => (
+                      <tr key={`${t}-${idx}`} className="hover:bg-gray-50">
+                        <td className="px-4 py-3 text-left font-semibold text-emerald-700">
+                          {r.code || "—"}
+                          <div className="text-xs text-gray-500">{r.title || "—"}</div>
+                        </td>
+                        <td className="px-4 py-3 text-left">{r.section || "—"}</td>
+                        <td className="px-4 py-3 text-center">{r.units ?? "—"}</td>
+                        <td className="px-4 py-3 text-left">{r.day1 || "—"}</td>
+                        <td className="px-4 py-3 text-left whitespace-nowrap">{r.begin1 || "—"}</td>
+                        <td className="px-4 py-3 text-left whitespace-nowrap">{r.end1 || "—"}</td>
+                        <td className="px-4 py-3 text-left">{r.day2 || "—"}</td>
+                        <td className="px-4 py-3 text-left whitespace-nowrap">{r.begin2 || "—"}</td>
+                        <td className="px-4 py-3 text-left whitespace-nowrap">{r.end2 || "—"}</td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
           </div>
         </div>
       ))}
@@ -354,12 +337,13 @@ export default function CHAIR_FacultyManagement() {
 
   // modal data
   const [schedule, setSchedule] = useState<any>(null);
-  
-  // History state (New logic: parallel load style)
-  const [historyRows, setHistoryRows] = useState<HistRow[]>([]);
-  const [historyAyOptions, setHistoryAyOptions] = useState<string[]>([]);
-  const [historyAy, setHistoryAy] = useState<string>("");
-  const [historyLoading, setHistoryLoading] = useState(false);
+
+  // Academic years for Teaching History (same as OM)
+  const [academicYears, setAcademicYears] = useState<number[]>([]);
+
+  // Teaching history (OM-style: flat rows w/ term field)
+  const [history, setHistory] = useState<{ teaching_history: HistRow[] } | null>(null);
+  const [historyYearIndex, setHistoryYearIndex] = useState(0);
 
   // Add / Edit Faculty forms
   const emptyAddForm: AddFacultyForm = {
@@ -548,6 +532,8 @@ export default function CHAIR_FacultyManagement() {
         if (!opt.ok) throw new Error("Failed to load options");
         setDeptOptions(["All Departments", ...(opt.departments || [])]);
         setTypeOptions(["All Type", ...(opt.facultyTypes || [])]);
+
+        setAcademicYears(opt.academicYears || []);
         
         const ay = opt.activeTerm?.acad_year_start;
         const tn = opt.activeTerm?.term_number;
@@ -587,132 +573,39 @@ export default function CHAIR_FacultyManagement() {
   const openModal = (type: Exclude<ModalType, null>, item: FacultyRow) => {
     setSelected(item);
     setActiveModal(type);
-    
-    if (type === "history") {
-      setHistoryRows([]);
-      setHistoryAyOptions([]);
-      setHistoryAy("");
-      setHistoryLoading(true);
-    }
   };
   
   const closeModal = () => {
     setActiveModal(null);
     setSelected(null);
     setSchedule(null);
-    setHistoryRows([]);
+    setHistory(null);
   };
 
-  // Load Modal Content
+  // Load Modal Content (match OM_FacultyManagement behavior)
   useEffect(() => {
     (async () => {
       if (!activeModal || !selected) return;
-
-      // SCHEDULE
-      if (activeModal === "schedule") {
-        try {
+      try {
+        if (activeModal === "schedule") {
           const data = await getChairFacultySchedule(selected.faculty_id);
           setSchedule(data);
-        } catch { /* ignore */ }
-      }
-
-      // HISTORY (Single load of everything)
-      if (activeModal === "history") {
-        try {
-          setHistoryLoading(true);
-          // Calls backend which now returns flat "rows"
-          const data = await getChairFacultyHistory(selected.faculty_id); 
-          const rawRows: HistRow[] = data?.rows || [];
-          
-          setHistoryRows(rawRows);
-
-          // Derive AY options client-side
-          const uniqAys = Array.from(new Set(rawRows.map((r) => r.ay))).sort().reverse();
-          setHistoryAyOptions(uniqAys);
-          if (uniqAys.length > 0) {
-            setHistoryAy(uniqAys[0]);
-          }
-        } catch { 
-          setHistoryRows([]);
-        } finally {
-          setHistoryLoading(false);
+        } else if (activeModal === "history") {
+          const ay = academicYears[historyYearIndex];
+          const data = await getChairFacultyHistory(selected.faculty_id, ay);
+          setHistory({ teaching_history: data?.teaching_history || [] });
         }
+      } catch {
+        /* ignore per-modal fetch errors */
       }
     })();
-  }, [activeModal, selected]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeModal, selected, historyYearIndex, academicYears]);
 
-  // Derived History Display
-  const filteredHistory = useMemo(() => {
-    if (!historyAy) return [];
-    return historyRows.filter((r) => r.ay === historyAy);
-  }, [historyRows, historyAy]);
-
-  const historyIndex = historyAyOptions.indexOf(historyAy);
-  const hasPrev = historyIndex < historyAyOptions.length - 1 && historyIndex !== -1;
-  const hasNext = historyIndex > 0 && historyIndex !== -1;
-
-  const goPrevAy = () => {
-    if (hasPrev) setHistoryAy(historyAyOptions[historyIndex + 1]);
-  };
-  const goNextAy = () => {
-    if (hasNext) setHistoryAy(historyAyOptions[historyIndex - 1]);
-  };
-
-  const renderTeachingLoadSummaryList = (s: any) => {
-    const TL = makeTeachingLoad(s?.teaching_load || []);
-    return (
-      <div className="space-y-6">
-        {TL.map((day) => (
-          <div key={day.day} className="rounded-xl border border-emerald-700/50 overflow-hidden bg-white">
-            <div className="px-5 py-3">
-              <div className="text-emerald-700 font-semibold text-[15px]">{day.day}</div>
-            </div>
-            <div className="px-4 pb-4">
-              <div className="rounded-xl border border-emerald-700/40">
-                <table className="w-full table-fixed">
-                  <colgroup>
-                    <col style={{ width: "12%" }} />
-                    <col style={{ width: "32%" }} />
-                    <col style={{ width: "8%" }} />
-                    <col style={{ width: "8%" }} />
-                    <col style={{ width: "12%" }} />
-                    <col style={{ width: "10%" }} />
-                    <col style={{ width: "10%" }} />
-                    <col style={{ width: "8%" }} />
-                  </colgroup>
-                  <thead>
-                    <tr className="text-[11.5px] uppercase tracking-wide text-emerald-800 bg-emerald-50">
-                      {["Course Code","Course Title","Section","Units","Campus","Mode","Room","Time"].map((h) => (
-                        <th key={h} className="px-3 py-2 font-semibold text-center border-b border-emerald-700/40">{h}</th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {day.items.length === 0 ? (
-                      <tr><td colSpan={8} className="px-4 py-6 text-center text-sm text-neutral-500 bg-white">No records.</td></tr>
-                    ) : (
-                      day.items.map((it, idx) => (
-                        <tr key={`${day.day}-${it.code}-${it.sec}-${idx}`} className={cls("text-neutral-900 text-[13px]", idx % 2 === 0 ? "bg-white" : "bg-neutral-50")}>
-                          <td className="px-3 py-2 text-center whitespace-nowrap border-t border-emerald-700/30">{it.code}</td>
-                          <td className="px-3 py-2 text-center whitespace-normal break-words border-t border-emerald-700/30">{it.title || "—"}</td>
-                          <td className="px-3 py-2 text-center whitespace-nowrap border-t border-emerald-700/30">{it.sec}</td>
-                          <td className="px-3 py-2 text-center whitespace-nowrap border-t border-emerald-700/30">{it.units}</td>
-                          <td className="px-3 py-2 text-center whitespace-nowrap border-t border-emerald-700/30">{it.campus}</td>
-                          <td className="px-3 py-2 text-center whitespace-nowrap border-t border-emerald-700/30">{it.mode}</td>
-                          <td className="px-3 py-2 text-center whitespace-nowrap border-t border-emerald-700/30">{it.room}</td>
-                          <td className="px-3 py-2 text-center whitespace-nowrap border-t border-emerald-700/30">{it.time}</td>
-                        </tr>
-                      ))
-                    )}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          </div>
-        ))}
-      </div>
-    );
-  };
+  const historyYearLabel = useMemo(() => {
+    const ay = academicYears[historyYearIndex];
+    return ay ? `AY ${ay}–${ay + 1}` : "—";
+  }, [historyYearIndex, academicYears]);
 
   return (
     <main className="w-full px-8 py-8">
@@ -810,7 +703,7 @@ export default function CHAIR_FacultyManagement() {
                 ) : (schedule?.teaching_load || []).length === 0 ? (
                   <div className="rounded-lg border border-neutral-200 bg-neutral-50 px-3 py-3 text-sm text-neutral-600">No schedule records for the current term.</div>
                 ) : (
-                  renderTeachingLoadSummaryList(schedule)
+                  renderScheduleTable(schedule?.teaching_load || [])
                 )}
               </>
             )}
@@ -822,43 +715,42 @@ export default function CHAIR_FacultyManagement() {
                   <p className="text-sm text-neutral-500">{selected?.name ?? ""}</p>
                 </div>
 
-                {/* Client-side pagination controls for AY */}
                 <div className="flex justify-between items-center mb-4">
                   <button
-                    onClick={goPrevAy}
-                    disabled={!hasPrev || historyLoading}
+                    onClick={() => setHistoryYearIndex((i) => Math.min(i + 1, academicYears.length - 1))}
+                    disabled={historyYearIndex >= academicYears.length - 1}
                     className={cls(
                       "px-3 py-1.5 rounded-lg text-sm font-medium border shadow-sm",
-                      (!hasPrev || historyLoading) ? "bg-gray-100 text-gray-400 cursor-not-allowed" : "bg-white hover:bg-gray-50 text-gray-700"
+                      historyYearIndex >= academicYears.length - 1
+                        ? "bg-gray-100 text-gray-400 cursor-not-allowed"
+                        : "bg-white hover:bg-gray-50 text-gray-700"
                     )}
                   >
                     ← Previous
                   </button>
 
-                  <span className="text-base font-semibold text-gray-800">
-                    {historyLoading ? "Loading..." : (historyAy || "—")}
-                  </span>
+                  <span className="text-base font-semibold text-gray-800">{historyYearLabel}</span>
 
                   <button
-                    onClick={goNextAy}
-                    disabled={!hasNext || historyLoading}
+                    onClick={() => setHistoryYearIndex((i) => Math.max(i - 1, 0))}
+                    disabled={historyYearIndex <= 0}
                     className={cls(
                       "px-3 py-1.5 rounded-lg text-sm font-medium border shadow-sm",
-                      (!hasNext || historyLoading) ? "bg-gray-100 text-gray-400 cursor-not-allowed" : "bg-white hover:bg-gray-50 text-gray-700"
+                      historyYearIndex <= 0
+                        ? "bg-gray-100 text-gray-400 cursor-not-allowed"
+                        : "bg-white hover:bg-gray-50 text-gray-700"
                     )}
                   >
                     Next →
                   </button>
                 </div>
 
-                {historyLoading ? (
+                {!history ? (
                   <div className="rounded-lg border border-neutral-200 bg-neutral-50 px-3 py-2 text-sm text-neutral-600">Loading history…</div>
-                ) : filteredHistory.length === 0 ? (
-                  <div className="rounded-lg border border-neutral-200 bg-neutral-50 px-3 py-3 text-sm text-neutral-600">
-                    {historyAyOptions.length === 0 ? "No history records found." : `No history records for ${historyAy}.`}
-                  </div>
+                ) : (history?.teaching_history || []).length === 0 ? (
+                  <div className="rounded-lg border border-neutral-200 bg-neutral-50 px-3 py-3 text-sm text-neutral-600">No teaching history found.</div>
                 ) : (
-                  renderTeachingHistoryLikeFacultyFromArray(filteredHistory)
+                  renderTeachingHistoryByTerm(history?.teaching_history || [])
                 )}
               </>
             )}

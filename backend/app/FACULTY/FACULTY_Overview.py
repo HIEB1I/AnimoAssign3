@@ -175,6 +175,54 @@ async def _send_email_via_user_gmail(
 
 RFC_TERMINAL = {"ACCEPTED", "APPROVED", "REJECTED"}
 
+
+def _coerce_dt(v: Any) -> Optional[datetime]:
+    """Best-effort parse for datetimes stored as datetime/ISO string/epoch seconds."""
+    if v is None:
+        return None
+    if isinstance(v, datetime):
+        return v if v.tzinfo else v.replace(tzinfo=timezone.utc)
+    # epoch seconds / millis
+    if isinstance(v, (int, float)):
+        try:
+            # heuristics: > 10^12 likely ms
+            if v > 1_000_000_000_000:
+                return datetime.fromtimestamp(v / 1000.0, tz=timezone.utc)
+            return datetime.fromtimestamp(v, tz=timezone.utc)
+        except Exception:
+            return None
+    s = str(v).strip()
+    if not s:
+        return None
+    # try ISO8601
+    try:
+        # normalize 'Z'
+        if s.endswith('Z'):
+            s = s[:-1] + '+00:00'
+        dt = datetime.fromisoformat(s)
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
+
+
+def _pick_dt(doc: Dict[str, Any], keys: List[str]) -> Optional[datetime]:
+    for k in keys:
+        if k in doc and doc.get(k) is not None:
+            dt = _coerce_dt(doc.get(k))
+            if dt:
+                return dt
+    return None
+
+
+def _proposal_ts(proposal: Dict[str, Any]) -> Optional[datetime]:
+    # Prefer 'forwarded/sent' time if present; otherwise updated/created.
+    return _pick_dt(proposal, ['forwarded_at', 'sent_at', 'submitted_at', 'updated_at', 'created_at', 'createdAt'])
+
+
+def _section_ts(section: Dict[str, Any]) -> Optional[datetime]:
+    # Prefer import/created time if present; otherwise updated.
+    return _pick_dt(section, ['imported_at', 'created_at', 'createdAt', 'updated_at', 'updatedAt'])
+
 def _hhmm_to_hm(v: object | None) -> str:
     """Convert 'HHMM' (e.g., '0730') to 'HH:MM'. Leaves other formats untouched."""
     if v is None:
@@ -674,10 +722,49 @@ async def overview_handler(
         is_final = bool(proposal and bool((proposal or {}).get("locked")))
         schedule_final = bool(is_final)
 
+        proposal_ts = _proposal_ts(proposal) if proposal else None
+
         proposed_load = []
         if show_proposal and isinstance(proposal.get("rows"), list):
             for rr in proposal.get("rows", []):
-                sec_id = (rr.get("section_id") or rr.get("id") or "").strip()
+                # NOTE: Proposal rows can outlive the underlying section/schedule docs
+                # (e.g., after an admin DB restore/clean). If the referenced section no
+                # longer exists, we must NOT surface the stale proposal row on the
+                # faculty side (otherwise schedule cards/list appear even though the
+                # DB has been cleaned).
+
+                # Best-effort section_id normalization.
+                sec_id = (rr.get("section_id") or rr.get("sectionId") or rr.get("id") or "").strip()
+
+                # If the row doesn't carry a section_id, try to resolve it from course+section.
+                if not sec_id:
+                    try:
+                        sec_id = await _resolve_section_id_from_code_and_section(
+                            term_id=term_id,
+                            course_code=str(rr.get("course") or rr.get("course_code") or ""),
+                            section_code=str(rr.get("section") or rr.get("section_code") or ""),
+                        )
+                    except Exception:
+                        sec_id = ""
+
+                # If we still can't resolve a valid section_id, skip the row.
+                if not sec_id:
+                    continue
+
+                # Guard: skip rows that point to a section that no longer exists for this term.
+                # This prevents stale proposals from displaying after DB clean.
+                sec_doc = await db[COL_SECTIONS].find_one(
+                    {"section_id": sec_id, "$or": [{"term_id": term_id}, {"termId": term_id}]},
+                    {"_id": 0, "section_id": 1, "imported_at": 1, "created_at": 1, "createdAt": 1, "updated_at": 1, "updatedAt": 1},
+                )
+                if not sec_doc:
+                    continue
+
+                # Additional stale guard: if this proposal predates the current section snapshot (e.g., after DB restore/clean
+                # then re-import), do not surface the old proposal even if the section_id matches again.
+                sec_ts = _section_ts(sec_doc)
+                if proposal_ts and sec_ts and proposal_ts < sec_ts:
+                    continue
 
                 # OM rows may come in multiple shapes depending on when/where they were created.
                 # Prefer the faculty schema (start/end/time1), but gracefully fall back to OM schema (begin1/end1).
@@ -706,7 +793,7 @@ async def overview_handler(
                     "finalized": bool(rr.get("finalized")),
                 })
 
-
+            # If all proposal rows were filtered out (stale), treat as no proposal.
             if proposed_load:
                 final_teaching_load = proposed_load
 
@@ -720,13 +807,20 @@ async def overview_handler(
                     summary["load_status"] = "Accepted"
                 else:
                     summary["load_status"] = "Proposed"
+            else:
+                # Proposal exists but is stale/empty after filtering; hide RFC thread as well.
+                rfc_norm = None
+                proposal_status = None
+                proposal_status_l = ""
+                schedule_final = False
 
         return {
             "ok": True,
             "term": term,
             "summary": summary,
             "teaching_load": final_teaching_load,
-            "is_proposed": bool(proposal and proposal_status_l in ("proposed", "reply", "replied")),
+            # Only report "proposed" state if we have a valid (non-stale) proposal payload to show.
+            "is_proposed": bool(proposed_load and proposal_status_l in ("proposed", "reply", "replied")),
             "proposal_status": proposal_status,
             "rfc": rfc_norm,
             "schedule_final": schedule_final,

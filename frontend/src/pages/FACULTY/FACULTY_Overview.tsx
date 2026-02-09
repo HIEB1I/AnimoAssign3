@@ -1088,6 +1088,23 @@ function ChangeRequestModal({
   const [otherText, setOtherText] = useState("");
   const [panel, setPanel] = useState<"request" | "conversation">("request");
 
+  const dayAbbrev = (d?: string) => {
+    const s = String(d || "").trim();
+    if (!s) return "";
+    const norm = s.toLowerCase();
+    if (norm.startsWith("mon")) return "M";
+    if (norm.startsWith("tue")) return "T";
+    if (norm.startsWith("wed")) return "W";
+    // Common local abbreviation: Thursday = H
+    if (norm.startsWith("thu")) return "H";
+    if (norm.startsWith("fri")) return "F";
+    if (norm.startsWith("sat")) return "S";
+    if (norm.startsWith("sun")) return "U";
+    // If the backend already provides a short code like "M" / "T" / "H" etc.
+    if (s.length <= 2) return s.toUpperCase();
+    return s.charAt(0).toUpperCase();
+  };
+
   useEffect(() => {
     if (!open) {
       setChoices([]);
@@ -1225,31 +1242,31 @@ function ChangeRequestModal({
 	                  View conversation
 	                </button>
 	              </div>
-	              <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
-	                <div className="rounded-xl border border-neutral-200 bg-white p-3">
-	                  <div className="text-xs font-semibold text-neutral-600">Meeting 1</div>
-	                  <div className="mt-1 text-sm text-neutral-800">
-	                    <span className="font-medium">{oi?.day1 || "TBA"}</span>
-	                    <span className="mx-2 text-neutral-300">•</span>
-	                    <span>{oi?.time1 || "TBA"}</span>
+	              {/* Compact meeting layout (Day / Time / Room columns) */}
+	              <div className="mt-3 overflow-hidden rounded-xl border border-neutral-200 bg-white">
+	                <div className="grid grid-cols-3 gap-0 border-b border-neutral-200 bg-neutral-50 px-3 py-2 text-xs font-semibold text-neutral-600">
+	                  <div>Day</div>
+	                  <div>Time</div>
+	                  <div className="text-right">Room</div>
+	                </div>
+	
+	                <div className="grid grid-cols-3 gap-0 px-3 py-2 text-sm">
+	                  <div className="font-medium text-neutral-800">{dayAbbrev(oi?.day1) || "TBA"}</div>
+	                  <div className="font-medium text-neutral-800">{String(oi?.time1 || "TBA")}</div>
+	                  <div className="text-right text-neutral-700">{String(oi?.room1 || "TBA")}</div>
+	                </div>
+
+	                {hasSecond ? (
+	                  <div className="grid grid-cols-3 gap-0 border-t border-neutral-100 px-3 py-2 text-sm">
+	                    <div className="font-medium text-neutral-800">{dayAbbrev(oi?.day2) || "TBA"}</div>
+	                    <div className="font-medium text-neutral-800">{String(oi?.time2 || "TBA")}</div>
+	                    <div className="text-right text-neutral-700">{String(oi?.room2 || "TBA")}</div>
 	                  </div>
-	                  <div className="mt-0.5 text-sm text-neutral-600">Room: {oi?.room1 || "—"}</div>
-	                </div>
-	                <div className="rounded-xl border border-neutral-200 bg-white p-3">
-	                  <div className="text-xs font-semibold text-neutral-600">Meeting 2</div>
-	                  {hasSecond ? (
-	                    <>
-	                      <div className="mt-1 text-sm text-neutral-800">
-	                        <span className="font-medium">{oi?.day2 || "TBA"}</span>
-	                        <span className="mx-2 text-neutral-300">•</span>
-	                        <span>{oi?.time2 || "TBA"}</span>
-	                      </div>
-	                      <div className="mt-0.5 text-sm text-neutral-600">Room: {oi?.room2 || "—"}</div>
-	                    </>
-	                  ) : (
-	                    <div className="mt-1 text-sm text-neutral-500">No second meeting</div>
-	                  )}
-	                </div>
+	                ) : (
+	                  <div className="grid grid-cols-3 border-t border-neutral-100 px-3 py-2 text-sm text-neutral-500">
+	                    <div className="col-span-3">No second meeting</div>
+	                  </div>
+	                )}
 	              </div>
 	            </div>
 	
