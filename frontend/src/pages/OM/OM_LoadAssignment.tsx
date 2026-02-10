@@ -651,7 +651,8 @@ const ForwardReviewModal: React.FC<{
 
   return (
     <div className="fixed inset-0 z-[120] grid place-items-center bg-black/40 p-4">
-      <div className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-2xl">
+      {/* Wider + taller so "Detected changes" is easier to read */}
+      <div className="w-full max-w-4xl rounded-2xl bg-white p-6 shadow-2xl">
         <div className="mx-auto mb-4 grid h-16 w-16 place-items-center rounded-full border-2 border-emerald-600 text-emerald-700">
           <Send className="h-8 w-8" strokeWidth={2.5} />
         </div>
@@ -674,7 +675,7 @@ const ForwardReviewModal: React.FC<{
             ) : null}
           </div>
 
-          <div className="mt-2 max-h-[260px] overflow-auto rounded-lg border border-slate-200 bg-slate-50 p-3">
+          <div className="mt-2 max-h-[65vh] overflow-auto rounded-lg border border-slate-200 bg-slate-50 p-4">
             {changes ? (
               <div className="space-y-4">
                 {/* Added */}
@@ -2616,7 +2617,12 @@ export default function OM_LoadAssignment() {
 
     try {
       setIsAssigning(true);
-      const res = await runOmAutoAssign({ user_id: userId });
+      // Send the currently viewed term id so the backend can fail fast
+      // if the user is accidentally in archive view.
+      const res = await runOmAutoAssign({
+        user_id: userId,
+        term_id: termId || activeTermId,
+      });
 
       // NEW: capture preferred units coming from backend debug
       const debug = (res as any)?.debug || {};
@@ -2661,6 +2667,8 @@ export default function OM_LoadAssignment() {
 
       setRows(normalizedNextRows);
       setTerm(typeof res?.term === "string" ? res.term : "");
+      // Keep term_id in sync so archive-view detection stays correct.
+      setTermId(typeof (res as any)?.term_id === "string" ? (res as any).term_id : termId);
       setMode("run");
       // Preserve the "Forward to Chair" final-state across auto-assign.
       setApproved((prev) => prev);
@@ -3694,7 +3702,35 @@ export default function OM_LoadAssignment() {
   }, [initialLoaded]);
 
   const addRow = () => {
-    setShowNewSectionModal(true);
+    // Inline add: insert an editable row directly into the table.
+    // Only rows added this way should be editable across all columns.
+    const newId = `manual-${Date.now()}`;
+    commitRows([
+      ...rows,
+      {
+        id: newId,
+        course: "",
+        title: "",
+        units: "",
+        section: "",
+        faculty: "",
+        faculty_id: undefined,
+        day1: "",
+        begin1: "",
+        end1: "",
+        room1: "",
+        day2: "",
+        begin2: "",
+        end2: "",
+        room2: "",
+        capacity: "",
+        mode: "",
+        status: "",
+        editable: true,
+      },
+    ]);
+    setMode("manual");
+    setApproved(false);
   };
 
   const getEditFlags = (r: Row) => {
@@ -4163,6 +4199,8 @@ export default function OM_LoadAssignment() {
     severity: "error" | "warning";
     facultyName?: string;
     facultyId?: string;
+    course?: string;
+    section?: string;
     courseSection?: string;
     message: string;
   };
@@ -4183,8 +4221,10 @@ export default function OM_LoadAssignment() {
       return h * 60 + m;
     };
 
+    const courseLabel = (r?: Row) => (r?.course || "").trim() || "?";
+    const sectionLabel = (r?: Row) => (r?.section || "").trim();
     const courseSectionLabel = (r?: Row) =>
-      `${r?.course || "?"} ${r?.section || ""}`.trim();
+      `${courseLabel(r)} ${sectionLabel(r)}`.trim();
 
     // 1) Build intervals per faculty+day from rows
     type Interval = {
@@ -4291,6 +4331,8 @@ export default function OM_LoadAssignment() {
             severity: "warning",
             facultyName,
             facultyId,
+            course: courseLabel(sample.row),
+            section: sectionLabel(sample.row),
             courseSection: courseSectionLabel(sample.row),
             message: `${courseSectionLabel(
               sample.row
@@ -4311,6 +4353,8 @@ export default function OM_LoadAssignment() {
           severity: "error",
           facultyName: r.faculty || undefined,
           facultyId: r.faculty_id,
+          course: courseLabel(r),
+          section: sectionLabel(r),
           courseSection: courseSectionLabel(r),
           message: `${courseSectionLabel(
             r
@@ -4333,6 +4377,8 @@ export default function OM_LoadAssignment() {
         severity: "error",
         facultyName: r.faculty || undefined,
         facultyId: r.faculty_id,
+        course: courseLabel(r),
+        section: sectionLabel(r),
         courseSection: courseSectionLabel(r),
         message: `${courseSectionLabel(r)}: KAC mismatch — ${
           r.faculty || "This faculty"
@@ -4358,6 +4404,8 @@ export default function OM_LoadAssignment() {
         severity: "error",
         facultyName: r.faculty || undefined,
         facultyId: r.faculty_id,
+        course: courseLabel(r),
+        section: sectionLabel(r),
         courseSection: courseSectionLabel(r),
         message: `${courseSectionLabel(r)}: Mode mismatch — ${
           r.faculty || "This faculty"
@@ -4379,6 +4427,8 @@ export default function OM_LoadAssignment() {
         severity: "error",
         facultyName: r.faculty || undefined,
         facultyId: r.faculty_id,
+        course: courseLabel(r),
+        section: sectionLabel(r),
         courseSection: courseSectionLabel(r),
         message: `${courseSectionLabel(r)}: ${
           dbl.message ||
@@ -4401,6 +4451,8 @@ export default function OM_LoadAssignment() {
         severity: flag.severity,
         facultyName: r.faculty || undefined,
         facultyId: r.faculty_id,
+        course: courseLabel(r),
+        section: sectionLabel(r),
         courseSection: courseSectionLabel(r),
         message: `${courseSectionLabel(r)}: ${flag.message}`,
       });
@@ -4420,6 +4472,8 @@ export default function OM_LoadAssignment() {
         severity: flag.severity,
         facultyName: r.faculty || undefined,
         facultyId: r.faculty_id,
+        course: courseLabel(r),
+        section: sectionLabel(r),
         courseSection: courseSectionLabel(r),
         message: `${courseSectionLabel(r)}: ${flag.message}`,
       });
@@ -4439,6 +4493,8 @@ export default function OM_LoadAssignment() {
         severity: flag.severity,
         facultyName: r.faculty || undefined,
         facultyId: r.faculty_id,
+        course: courseLabel(r),
+        section: sectionLabel(r),
         courseSection: courseSectionLabel(r),
         message: flag.message
           ? `${courseSectionLabel(r)}: ${flag.message}`
@@ -4462,6 +4518,8 @@ export default function OM_LoadAssignment() {
         severity: geFlag.severity,
         facultyName: r.faculty || undefined,
         facultyId: r.faculty_id,
+        course: courseLabel(r),
+        section: sectionLabel(r),
         courseSection: courseSectionLabel(r),
         message: geFlag.message
           ? `${courseSectionLabel(r)}: ${geFlag.message}`
@@ -4527,6 +4585,8 @@ export default function OM_LoadAssignment() {
           severity: "warning",
           facultyName: undefined,
           facultyId: undefined,
+          course: courseLabel(r),
+          section: sectionLabel(r),
           message:
             `Section ${r.course || "?"} ${r.section || ""} ` +
             `was left unassigned: ${r.conflictNote}`,
@@ -4547,6 +4607,8 @@ export default function OM_LoadAssignment() {
         a.severity,
         a.facultyName || "",
         a.facultyId || "",
+        a.course || "",
+        a.section || "",
         a.courseSection || "",
         a.message,
       ]
@@ -6044,7 +6106,10 @@ export default function OM_LoadAssignment() {
                                   Faculty
                                 </th>
                                 <th className="px-3 py-2 text-center font-semibold">
-                                  Course &amp; Section
+                                  Course
+                                </th>
+                                <th className="px-3 py-2 text-center font-semibold">
+                                  Section
                                 </th>
                                 <th className="px-3 py-2 text-left font-semibold">
                                   Message
@@ -6068,7 +6133,10 @@ export default function OM_LoadAssignment() {
                                     </div>
                                   </td>
                                   <td className="px-3 py-2 text-center align-top text-gray-600">
-                                    {a.courseSection || "—"}
+                                    {a.course || "—"}
+                                  </td>
+                                  <td className="px-3 py-2 text-center align-top text-gray-600">
+                                    {a.section || "—"}
                                   </td>
                                   <td className="px-3 py-2 align-top">
                                     {a.message}

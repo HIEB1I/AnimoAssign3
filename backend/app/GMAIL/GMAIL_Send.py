@@ -69,6 +69,25 @@ def _build_gmail_raw_message(
 
     return base64.urlsafe_b64encode(msg.as_bytes()).decode("utf-8")
 
+async def send_gmail_message_for_user(
+    *,
+    user_id: str,
+    to_email: str,
+    subject: str,
+    body_text: str,
+    body_html: Optional[str] = None,
+    from_name: str = "AnimoAssign",
+) -> Dict[str, Any]:
+    payload = GmailSendByUserRequest(
+        userId=user_id,
+        to=to_email,
+        subject=subject,
+        body=body_text,
+        body_html=body_html,
+        from_name=from_name,
+    )
+    return await gmail_send_by_user(payload)
+
 
 async def _refresh_access_token(refresh_token: str) -> Dict[str, Any]:
     client_id = os.getenv("GOOGLE_CLIENT_ID")
