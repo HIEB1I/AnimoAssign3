@@ -3908,20 +3908,28 @@ export default function OM_LoadAssignment() {
     });
   }, [deloadAllRows, search]);
 
-  // Sum deloading units per faculty (UI-only; used in Faculty Load Summary)
+  // Uses the most recently-updated deloading row per faculty.
   const deloadUnitsByFacultyId = useMemo(() => {
     const map: Record<string, number> = {};
+
+    // deloadAllRows is already sorted by updated_at DESC earlier,
+    // so the first occurrence per faculty is the "latest".
     for (const r of deloadAllRows) {
       const fid = String((r as any)?.faculty_id || "").trim();
       if (!fid) continue;
 
+      if (map[fid] != null) continue; // keep first (latest) only
+
       const raw = (r as any)?.units_deloaded;
       const units =
         typeof raw === "number" ? raw : parseFloat(String(raw ?? "0")) || 0;
-      map[fid] = (map[fid] || 0) + units;
+
+      map[fid] = units;
     }
+
     return map;
   }, [deloadAllRows]);
+
 
   useEffect(() => {
     if (!termId) return;
@@ -4049,7 +4057,7 @@ export default function OM_LoadAssignment() {
   }, [rows, facultyById, preferredByFaculty]);
 
   type UnitsFilterMode = "all" | "unassigned" | "issues";
-  type UnitsSortKey = "faculty" | "assigned" | "preferred" | "gap";
+  type UnitsSortKey = "faculty" | "assigned" | "preferred" | "deload" | "gap";
 
   const [showUnitsFilters, setShowUnitsFilters] = useState(false);
   const [unitsFilterMode, setUnitsFilterMode] =
@@ -4113,32 +4121,31 @@ export default function OM_LoadAssignment() {
     filtered.sort((a, b) => {
       const aName = a.facultyName ?? "";
       const bName = b.facultyName ?? "";
-
+    
       const aAssigned = Number(a.assignedUnits ?? 0);
       const bAssigned = Number(b.assignedUnits ?? 0);
-
+    
       const aPref =
-        a.preferredUnits == null
-          ? Number.POSITIVE_INFINITY
-          : Number(a.preferredUnits);
+        a.preferredUnits == null ? Number.POSITIVE_INFINITY : Number(a.preferredUnits);
       const bPref =
-        b.preferredUnits == null
-          ? Number.POSITIVE_INFINITY
-          : Number(b.preferredUnits);
-
+        b.preferredUnits == null ? Number.POSITIVE_INFINITY : Number(b.preferredUnits);
+    
       const aGap = a.diff == null ? Number.POSITIVE_INFINITY : Number(a.diff);
       const bGap = b.diff == null ? Number.POSITIVE_INFINITY : Number(b.diff);
-
+    
+      const aDeload = (a.facultyId && deloadUnitsByFacultyId[a.facultyId]) || 0;
+      const bDeload = (b.facultyId && deloadUnitsByFacultyId[b.facultyId]) || 0;
+    
       if (unitsSortKey === "faculty") return dir * aName.localeCompare(bName);
       if (unitsSortKey === "assigned") return dir * (aAssigned - bAssigned);
       if (unitsSortKey === "preferred") return dir * (aPref - bPref);
-
+          if (unitsSortKey === "deload") return dir * (aDeload - bDeload);
+    
       // default: gap
       if (aGap !== bGap) return dir * (aGap - bGap);
-
-      // tie-breaker: name
+    
       return aName.localeCompare(bName);
-    });
+    });    
 
     return filtered;
   }, [
@@ -5881,6 +5888,18 @@ export default function OM_LoadAssignment() {
                                     : ""}
                                 </button>
                               </th>
+                              
+                              <th className="px-3 py-2 text-right font-semibold">
+                                <button
+                                  type="button"
+                                  onClick={() => toggleUnitsSort("deload")}
+                                  className="inline-flex items-center gap-1 hover:underline"
+                                  title="Deloading units (from Faculty Deloading rows)"
+                                >
+                                  Deloading Units{" "}
+                                  {unitsSortKey === "deload" ? (unitsSortDir === "asc" ? "▲" : "▼") : ""}
+                                </button>
+                              </th>
 
                               <th className="px-3 py-2 text-right font-semibold">
                                 <button
@@ -5966,6 +5985,12 @@ export default function OM_LoadAssignment() {
                                           .toFixed(1)
                                           .replace(/\.0$/, "")
                                       : "—"}
+                                  </td>
+                                  
+                                  <td className="px-3 py-2 text-right align-middle">
+                                    {Number((f.facultyId && deloadUnitsByFacultyId[f.facultyId]) || 0)
+                                      .toFixed(1)
+                                      .replace(/\.0$/, "")}
                                   </td>
 
                                   <td className="px-3 py-2 text-right align-middle">

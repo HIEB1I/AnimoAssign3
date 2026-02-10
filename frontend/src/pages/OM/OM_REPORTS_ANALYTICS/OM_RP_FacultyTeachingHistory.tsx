@@ -17,6 +17,9 @@ type TeachingHistoryRow = {
   campus?: string;
   mode?: string;
 
+  employment_type?: string;
+  standard_load_units?: number;
+
   // Flattened Schedule
   day1?: string;
   room1?: string;
@@ -138,15 +141,20 @@ function parseBeginEnd(part: string): { begin?: string; end?: string } {
     };
   }
 
-  const tokens =
-    cleaned.match(/(\d{1,2}:\d{2}|\d{3,4})\s*(?:AM|PM)?/gi) || [];
+  const tokens = cleaned.match(/(\d{1,2}:\d{2}|\d{3,4})\s*(?:AM|PM)?/gi) || [];
   if (tokens.length >= 2) {
-    return { begin: fmtTimeToken(tokens[0] ?? ""), end: fmtTimeToken(tokens[1] ?? "") };
+    return {
+      begin: fmtTimeToken(tokens[0] ?? ""),
+      end: fmtTimeToken(tokens[1] ?? ""),
+    };
   }
   return { begin: fmtTimeToken(cleaned) };
 }
 
-function splitTimeForDays(time?: string | null, hasSecondDay?: boolean): {
+function splitTimeForDays(
+  time?: string | null,
+  hasSecondDay?: boolean
+): {
   begin1?: string;
   end1?: string;
   begin2?: string;
@@ -160,7 +168,11 @@ function splitTimeForDays(time?: string | null, hasSecondDay?: boolean): {
     .filter(Boolean);
 
   const first = parseBeginEnd(chunks[0] || "");
-  const second = chunks[1] ? parseBeginEnd(chunks[1]) : hasSecondDay ? first : {};
+  const second = chunks[1]
+    ? parseBeginEnd(chunks[1])
+    : hasSecondDay
+    ? first
+    : {};
 
   return {
     begin1: first.begin,
@@ -392,11 +404,14 @@ type UnitsByTerm = { key: string; units: number };
 function UnitsHistoryChart({
   data,
   avgLoad,
+  standardLoad = 12,
 }: {
   data: UnitsByTerm[];
   avgLoad: number;
+  standardLoad?: number;
 }) {
   if (!data || data.length === 0) return null;
+  const MAX_STANDARD = 30;
 
   const PAGE = 5;
   const [visibleCount, setVisibleCount] = useState(PAGE);
@@ -406,15 +421,16 @@ function UnitsHistoryChart({
     setVisibleCount(PAGE);
   }, [data.length]);
 
-  // data is already newest → oldest based on your sortedKeys,
-  // so showing first N = latest N
   const visibleData = data.slice(0, visibleCount);
   const canShowMore = visibleCount < data.length;
   const canShowLess = data.length > PAGE && visibleCount > PAGE;
 
-  let maxUnits = data.reduce((max, d) => Math.max(max, d.units), 0) * 1.1; // Add padding
-  if (avgLoad > maxUnits) maxUnits = avgLoad * 1.1;
+  const dataMax = data.reduce((max, d) => Math.max(max, d.units), 0);
+
+  const maxUnits = Math.max(MAX_STANDARD, dataMax, avgLoad, standardLoad);
+
   const scaleFactor = maxUnits > 0 ? 100 / maxUnits : 0;
+  const clampPct = (p: number) => Math.max(0, Math.min(100, p));
 
   return (
     // Replaced generic div with a styled card for visual impact
@@ -425,7 +441,13 @@ function UnitsHistoryChart({
 
       {/* Legend for context - Simplified */}
       <p className="text-xs text-gray-600 mb-4 border-b pb-3">
-        <span className="text-emerald-600 font-semibold">Standard</span> |
+        <span
+          className="text-emerald-700 font-semibold"
+          title="Standard teaching load baseline: FT=12 units, PT=6 units. Marker uses this faculty's employee type."
+        >
+          Standard (FT=12, PT=6) • Marker
+        </span>{" "}
+        |
         <span
           className="text-red-600 ml-3 font-semibold"
           title="Above Average: greater than Avg + 20%"
@@ -451,13 +473,21 @@ function UnitsHistoryChart({
       <div className="flex flex-col space-y-4 text-sm">
         {" "}
         {/* Increased spacing and font size */}
-        {visibleData.map((d) => {
+        {visibleData.map((d, idx) => {
           const percentage = d.units * scaleFactor;
-          const avgLinePosition = avgLoad * scaleFactor;
+          const avgLinePosition = clampPct(avgLoad * scaleFactor);
+          const standardLinePosition = clampPct(standardLoad * scaleFactor);
+          const markerAlignClass =
+            standardLinePosition < 8
+              ? "translate-x-0"
+              : standardLinePosition > 92
+              ? "-translate-x-full"
+              : "-translate-x-1/2";
 
           // Define thresholds for High/Low load (e.g., 20% deviation from average)
-          const isHigh = avgLoad > 0 && d.units > avgLoad * 1.2;
-          const isLow = avgLoad > 0 && d.units < avgLoad * 0.8;
+          const base = standardLoad > 0 ? standardLoad : avgLoad;
+          const isHigh = base > 0 && d.units > base * 1.2;
+          const isLow = base > 0 && d.units < base * 0.8;
           const barColor = isHigh
             ? "bg-red-500"
             : isLow
@@ -470,9 +500,9 @@ function UnitsHistoryChart({
               className="flex items-center"
               title={`${d.key}: ${d.units} units | Avg: ${avgLoad.toFixed(
                 1
-              )} | High if > ${(avgLoad * 1.2).toFixed(1)}, Low if < ${(
-                avgLoad * 0.8
-              ).toFixed(1)}`}
+              )} | Standard: ${base.toFixed(1)} | High if > ${(
+                base * 1.2
+              ).toFixed(1)}, Low if < ${(base * 0.8).toFixed(1)}`}
             >
               <span className="w-44 text-gray-700 font-medium whitespace-nowrap">
                 {d.key}
@@ -480,20 +510,49 @@ function UnitsHistoryChart({
               {/* Wider label */}
               {/* Bar Container */}
               <div className="flex items-center w-full ml-6 relative h-6">
-                {" "}
-                {/* Increased height */}
                 {/* Horizontal Bar */}
                 <div
                   className={`rounded h-full ${barColor} transition-all duration-300 pointer-events-none`}
                   style={{ width: `${percentage}%` }}
                 />
-                {/* Visual indicator for average load baseline - Changed color for contrast */}
+
+                {/* Visual indicator for average load baseline */}
                 {avgLoad > 0 && (
                   <div
                     className="absolute h-full w-[3px] bg-indigo-700 -translate-y-1/2 top-1/2 rounded-full pointer-events-none"
                     style={{ left: `${avgLinePosition}%` }}
                   />
                 )}
+
+                {/* Standard load baseline marker */}
+                {standardLoad > 0 && (
+                  <>
+                    <div
+                      className="absolute h-full w-[3px] bg-emerald-700 -translate-y-1/2 top-1/2 rounded-full pointer-events-none"
+                      style={{ left: `${standardLinePosition}%` }}
+                    />
+                    {/* Marker label under the green line */}
+                    <span
+                      className={`absolute -bottom-8 text-[10px] text-emerald-700 font-semibold whitespace-nowrap ${markerAlignClass}`}
+                      style={{ left: `${standardLinePosition}%` }}
+                    >
+                      {standardLoad} units
+                    </span>
+                  </>
+                )}
+
+                {/* Scale labels (show once) */}
+                {idx === 0 && (
+                  <>
+                    <span className="absolute -bottom-5 left-0 text-[10px] text-gray-500">
+                      0 units
+                    </span>
+                    <span className="absolute -bottom-5 right-0 text-[10px] text-gray-500">
+                      {maxUnits} units
+                    </span>
+                  </>
+                )}
+
                 {/* Label - Placed outside the bar for clarity if bar is small */}
                 <span className="ml-3 font-extrabold text-gray-800">
                   {d.units}
@@ -575,20 +634,27 @@ function HistoryTables({ rows }: { rows: TeachingHistoryRow[] }) {
 
     const acadYearsCovered = Array.from(new Set(rows.map((r) => r.ay))).length;
 
-    // Primary campus
-    const campusCounts: Record<string, number> = {};
+    // Primary campus (ignore N/A if any known campus exists; weight by units)
+    const campusWeights: Record<string, number> = {};
     const courseCounts: Record<string, number> = {};
 
     rows.forEach((r) => {
-      const c = r.campus || "N/A";
-      campusCounts[c] = (campusCounts[c] || 0) + 1;
+      const c = (r.campus || "").trim() || "N/A";
+      const w = Number(r.units ?? 0) || 1; // weight by units; fallback weight=1
+      campusWeights[c] = (campusWeights[c] || 0) + w;
 
       const code = r.course_code || "N/A";
       courseCounts[code] = (courseCounts[code] || 0) + 1;
     });
 
-    const primaryCampus =
-      Object.entries(campusCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || "N/A";
+    const knownCampuses = Object.entries(campusWeights).filter(
+      ([c]) => c !== "N/A"
+    );
+    const pickFrom = knownCampuses.length
+      ? knownCampuses
+      : Object.entries(campusWeights);
+
+    const primaryCampus = pickFrom.sort((a, b) => b[1] - a[1])[0]?.[0] || "N/A";
 
     const mostTaughtCourseEntry =
       Object.entries(courseCounts).sort((a, b) => b[1] - a[1])[0] || null;
@@ -614,6 +680,14 @@ function HistoryTables({ rows }: { rows: TeachingHistoryRow[] }) {
       return { key: k, units: totalUnits };
     });
   }, [rows, sortedKeys, grouped]);
+
+  const standardLoad = useMemo(() => {
+    const emp = (rows?.[0]?.employment_type || "").toUpperCase();
+    // prefer backend-provided numeric if present
+    const fromBackend = Number(rows?.[0]?.standard_load_units);
+    if (Number.isFinite(fromBackend) && fromBackend > 0) return fromBackend;
+    return emp === "PT" ? 6 : 12;
+  }, [rows]);
 
   return (
     <div className="space-y-8 mt-2">
@@ -666,11 +740,11 @@ function HistoryTables({ rows }: { rows: TeachingHistoryRow[] }) {
         </div>
       </div>
 
-
       {/* 2. Visual Overview of Load */}
       <UnitsHistoryChart
         data={unitsByTerm}
         avgLoad={globalSummary.avgUnitsPerTerm}
+        standardLoad={standardLoad}
       />
 
       {/* 3. Detailed Term History - Streamlined for focus */}
@@ -722,23 +796,24 @@ function HistoryTables({ rows }: { rows: TeachingHistoryRow[] }) {
 
       {activeKey && (
         <div className="space-y-4">
-
           {/* TERM TABLE */}
           <div className="border border-gray-200 bg-gray-50 shadow-sm overflow-visible rounded-xl">
             <div className="overflow-x-auto rounded-xl">
               <table className="w-full text-sm">
                 <thead className="bg-gray-50 border-b text-gray-700">
                   <tr>
-                    <th className="text-left px-4 py-2">Course Code &amp; Title</th>
+                    <th className="text-left px-4 py-2">
+                      Course Code &amp; Title
+                    </th>
                     <th className="text-left px-4 py-2">Section</th>
                     <th className="text-center px-4 py-2">Units</th>
-                                        <th className="text-left px-4 py-2">Day 1</th>
+                    <th className="text-left px-4 py-2">Day 1</th>
                     <th className="text-left px-4 py-2">Begin 1</th>
                     <th className="text-left px-4 py-2">End 1</th>
-                                        <th className="text-left px-4 py-2">Day 2</th>
+                    <th className="text-left px-4 py-2">Day 2</th>
                     <th className="text-left px-4 py-2">Begin 2</th>
                     <th className="text-left px-4 py-2">End 2</th>
-                                      </tr>
+                  </tr>
                 </thead>
 
                 <tbody className="divide-y">
@@ -754,14 +829,16 @@ function HistoryTables({ rows }: { rows: TeachingHistoryRow[] }) {
                         </td>
 
                         <td className="px-4 py-3">{r.section_code || "—"}</td>
-                        <td className="px-4 py-3 text-center">{r.units ?? "—"}</td>
+                        <td className="px-4 py-3 text-center">
+                          {r.units ?? "—"}
+                        </td>
                         <td className="px-4 py-3">{dayInitial(r.day1)}</td>
                         <td className="px-4 py-3">{t.begin1 ?? "—"}</td>
                         <td className="px-4 py-3">{t.end1 ?? "—"}</td>
                         <td className="px-4 py-3">{dayInitial(r.day2)}</td>
                         <td className="px-4 py-3">{t.begin2 ?? "—"}</td>
                         <td className="px-4 py-3">{t.end2 ?? "—"}</td>
-                                              </tr>
+                      </tr>
                     );
                   })}
                 </tbody>
