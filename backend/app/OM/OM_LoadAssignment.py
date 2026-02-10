@@ -973,11 +973,16 @@ async def _fetch_rows(user_id: str, term_id: str, db) -> Dict[str, Any]:
 
         # faculty_id -> proposal status
         proposal_status_by_fid: dict[str, str] = {}
-        # (faculty_id, course_code, section_code) keys
-        # - forwarded_keys: row exists in an OM->Faculty proposal (already sent to faculty)
-        # - finalized_keys: row is locked/finalized (cannot be edited further)
-        forwarded_keys: set[tuple[str, str, str]] = set()
-        finalized_keys: set[tuple[str, str, str]] = set()
+        # Matching strategy (to avoid false positives):
+        # 1) Prefer section_id match when present (most stable)
+        # 2) Fallback to (course_code, section_code) for legacy rows that don't carry section_id
+        #
+        # - forwarded_*: row exists in an OM->Faculty proposal (already sent to faculty)
+        # - finalized_*: row is locked/finalized (cannot be edited further)
+        forwarded_section_ids: set[tuple[str, str]] = set()  # (faculty_id, section_id)
+        finalized_section_ids: set[tuple[str, str]] = set()  # (faculty_id, section_id)
+        forwarded_keys: set[tuple[str, str, str]] = set()    # (faculty_id, course_code, section)
+        finalized_keys: set[tuple[str, str, str]] = set()    # (faculty_id, course_code, section)
 
         for p in proposals or []:
             fid = str(p.get("faculty_id") or "").strip()
@@ -990,28 +995,43 @@ async def _fetch_rows(user_id: str, term_id: str, db) -> Dict[str, Any]:
             for rr in (p.get("rows") or []):
                 if not isinstance(rr, dict):
                     continue
+                sid = str(rr.get("section_id") or rr.get("id") or rr.get("sectionId") or "").strip()
                 course = str(rr.get("course") or rr.get("course_code") or "").strip()
                 section = str(rr.get("section") or "").strip()
-                if not course or not section:
-                    continue
-                forwarded_keys.add((fid, course, section))
-                if locked_all or bool(rr.get("finalized")):
-                    finalized_keys.add((fid, course, section))
+
+                # Prefer stable section_id matching when available.
+                if sid:
+                    forwarded_section_ids.add((fid, sid))
+                    if locked_all or bool(rr.get("finalized")):
+                        finalized_section_ids.add((fid, sid))
+
+                # Legacy fallback: course+section (only if both are present)
+                if course and section:
+                    forwarded_keys.add((fid, course, section))
+                    if locked_all or bool(rr.get("finalized")):
+                        finalized_keys.add((fid, course, section))
 
         for r in rows:
             if not isinstance(r, dict):
                 continue
             fid = str(r.get("faculty_id") or "").strip()
+            sid = str(r.get("id") or r.get("section_id") or "").strip()
             course = str(r.get("course") or "").strip()
             section = str(r.get("section") or "").strip()
 
             # Highlight rows already forwarded to faculty (proposal exists)
-            forwarded = bool(fid and course and section and (fid, course, section) in forwarded_keys)
+            forwarded = False
+            if fid and sid and (fid, sid) in forwarded_section_ids:
+                forwarded = True
+            elif fid and course and section and (fid, course, section) in forwarded_keys:
+                forwarded = True
             if forwarded:
                 r["forwarded_to_faculty"] = True
 
             # Finalized/locked rows stay protected from auto-assign and can be rendered as finalized.
-            if fid and course and section and (fid, course, section) in finalized_keys:
+            if fid and sid and (fid, sid) in finalized_section_ids:
+                r["finalized"] = True
+            elif fid and course and section and (fid, course, section) in finalized_keys:
                 r["finalized"] = True
 
             # Faculty "Accept Schedule" must NOT lock/finalize rows.
@@ -2471,6 +2491,12 @@ async def om_send_to_faculty(payload: Dict[str, Any] = Body(...), db=Depends(get
 
     def _norm_row_for_faculty(r: Dict[str, Any]) -> Dict[str, Any]:
         rr = dict(r or {})
+
+        # IMPORTANT: persist a stable section identifier for matching/updates.
+        # Older payloads often only have `id`; downstream logic should prefer `section_id`.
+        sid = str(rr.get("section_id") or rr.get("id") or "").strip()
+        if sid and not str(rr.get("section_id") or "").strip():
+            rr["section_id"] = sid
         # course code/title
         rr.setdefault("course_code", (rr.get("course") or rr.get("course_code") or "").strip())
         rr.setdefault("course_title", (rr.get("title") or rr.get("course_title") or rr.get("courseTitle") or "").strip())
