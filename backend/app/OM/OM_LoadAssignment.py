@@ -3264,6 +3264,30 @@ async def run_auto_assignment(
         else:
             why.setdefault("slot2", "left_blank")
 
+        # Compatibility w/ OM_LoadAssignment v1 UI expectations:
+        # If the suggestion only produced a single meeting (slot1) but the day is
+        # part of a known paired pattern (M/H, T/F, W/S), auto-fill slot2 using
+        # the paired day with the same time window, as long as it does not create
+        # an exact duplicate slot for this faculty.
+        if (
+            fid
+            and (r.get("day1") and r.get("begin1") and r.get("end1"))
+            and not (r.get("day2") and r.get("begin2") and r.get("end2"))
+        ):
+            try:
+                d2_fill = DAY_PAIR.get(str(r.get("day1")).upper().strip())
+            except Exception:
+                d2_fill = None
+
+            if d2_fill:
+                b1_fill = r.get("begin1")
+                e1_fill = r.get("end1")
+                # Avoid creating an exact duplicate slot in the used-set
+                if not _would_reuse(fid, d2_fill, b1_fill, e1_fill):
+                    r["day2"], r["begin2"], r["end2"] = d2_fill, b1_fill, e1_fill
+                    _add_used(fid, d2_fill, b1_fill, e1_fill)
+                    why.setdefault("slot2", "autofilled_paired_day_from_slot1")
+
         # --- GOAL 2: if faculty has NO valid slots left for this section, drop assignment ---
         if not (r.get("day1") or r.get("day2")) and fid:
             # Clear faculty + schedule so this section is truly unassigned
@@ -6616,10 +6640,27 @@ async def run_milestone_e_phase7(term_id: str, db, department_id: str | None = N
         st = chosen_slot["st"]
         en = chosen_slot["en"]
 
+        # Compatibility w/ OM_LoadAssignment v1 UI expectations:
+        # The Load Assignment grid treats the schedule as a paired-day pattern
+        # (M/H, T/F, W/S). Some preference inputs can yield a "single-day" slot
+        # (day2 is None) which leaves Day 2/Begin 2/End 2 blank after auto-assign.
+        # To match v1 behavior, auto-fill a paired Day 2 when we have Day 1.
+        #
+        # We only do this inside Phase 7 (auto-proposed times for sections that
+        # have no registered section_schedules) so we don't mutate true one-day
+        # schedules coming from the registrar.
+        if d1 and not d2:
+            try:
+                d2 = DAY_PAIR.get(str(d1).upper().strip())
+            except Exception:
+                d2 = None
+
         # Update faculty's day-wise intervals (for streak checks later)
         day_ints = faculty_day_intervals.setdefault(fid, {})
-        day_ints.setdefault(d1, []).append((st, en))
-        day_ints.setdefault(d2, []).append((st, en))
+        if d1:
+            day_ints.setdefault(d1, []).append((st, en))
+        if d2:
+            day_ints.setdefault(d2, []).append((st, en))
 
         # Inject the proposed schedule into the assignment
         assn = dict(a)
