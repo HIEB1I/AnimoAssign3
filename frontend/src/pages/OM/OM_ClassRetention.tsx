@@ -27,7 +27,6 @@ function Pill({ text }: { text?: string }) {
     Approved: "bg-green-100 text-green-700",
     "Under Review": "bg-yellow-100 text-yellow-700",
     Dissolved: "bg-red-100 text-red-700",
-    "Special Class": "bg-blue-100 text-blue-700",
   };
   return (
     <span className={cls("inline-block rounded-full px-3 py-1 text-xs font-semibold", map[text || ""] || "bg-gray-100 text-gray-600")}>

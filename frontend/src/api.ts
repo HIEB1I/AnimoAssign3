@@ -98,10 +98,17 @@ export async function fetchTeachingHistory(facultyId: string) {
 }
 
 // Descriptive #2 (use ANALYTICS_BASE, not absolute path)
-export async function fetchCourseProfile(query: string) {
-  const url = `${ANALYTICS_BASE.replace(/\/+$/, "")}/course-profile-for?query=${encodeURIComponent(
-    query
-  )}`;
+export async function fetchCourseProfile(
+  query: string,
+  anchorTermId?: string,
+  direction: "current" | "next" | "prev" = "current"
+) {
+  const params = new URLSearchParams();
+  params.set("query", query);
+  if (anchorTermId) params.set("anchor_term_id", anchorTermId);
+  if (direction) params.set("direction", direction);
+
+  const url = `${ANALYTICS_BASE.replace(/\/+$/, "")}/course-profile-for?${params.toString()}`;
   const res = await fetch(url);
   if (!res.ok) throw new Error(await res.text().catch(() => res.statusText));
   return res.json();
@@ -2003,7 +2010,19 @@ export async function getFacultyProfile(facultyId: string) {
 export async function getFacultySchedule(
   facultyId: string,
   termId?: string
-): Promise<{ ok: boolean; term_id: string | null; teaching_load: any[] }> {
+): Promise<{ ok: boolean; term_id: string | null; teaching_load: Array<{
+  course_code: string;
+  course_title: string;
+  section: string;
+  units: number;
+  mode: string;
+  day1: string;
+  begin1: string;
+  end1: string;
+  day2: string;
+  begin2: string;
+  end2: string;
+}> }> {
   const { data } = await axios.post(
     `${API_BASE}/om/facultymanagement`,
     {},
@@ -2021,13 +2040,14 @@ export async function getFacultyHistory(
   code: string;
   title: string;
   section: string;
-  mode?: string | null;
-  day1?: string | null;
-  room1?: string | null;
-  day2?: string | null;
-  room2?: string | null;
-  time?: string | null;
-  term?: string | null;
+  units?: number;
+  day1?: string;
+  begin1?: string;
+  end1?: string;
+  day2?: string;
+  begin2?: string;
+  end2?: string;
+  term?: string;
 }> }> {
   const params: Record<string, any> = { action: "history", facultyId };
   if (typeof termOrAy === "number") params.acadYearStart = termOrAy; // AY start (e.g., 2024)
@@ -2042,16 +2062,21 @@ export async function getFacultyHistory(
     const termMatch = /Term\s*([123])/i.exec(termKey);
     const termLabel = termMatch ? `Term ${termMatch[1]}` : termKey.includes("Term") ? termKey : "Term 1";
     (list as any[]).forEach((r) => {
+      const n = (v: any) => {
+        const x = typeof v === "number" ? v : Number(v);
+        return Number.isFinite(x) ? x : 0;
+      };
       teaching_history.push({
         code: r.code ?? r.course_code ?? "",
         title: r.title ?? r.course_title ?? "",
         section: r.section ?? r.section_code ?? "",
-        mode: r.mode ?? "",
-        day1: r.day1 ?? "",
-        room1: r.room1 ?? "",
-        day2: r.day2 ?? "",
-        room2: r.room2 ?? "",
-        time: r.time ?? r.schedule ?? "",
+        units: n(r.units),
+        day1: (r.day1 ?? "") || "",
+        begin1: (r.begin1 ?? "") || "",
+        end1: (r.end1 ?? "") || "",
+        day2: (r.day2 ?? "") || "",
+        begin2: (r.begin2 ?? "") || "",
+        end2: (r.end2 ?? "") || "",
         term: termLabel,
       });
     });
@@ -2884,6 +2909,8 @@ export type OmLoadRow = {
   editable?: boolean;
   finalized?: boolean;
   pending_rfc?: boolean;
+  /** True when faculty assignment was synced from an accepted Faculty Service request. */
+  synced_from_faculty_service?: boolean;
 };
 
 // export async function getOmLoadAssignmentList(userId: string) {
@@ -2921,6 +2948,17 @@ export async function submitOmLoadAssignment(
     approved?: number;
     term?: string;
   };
+}
+
+/** Save OM remarks for a section (section is resolved via section_schedules.schedule_id). */
+export async function saveOmSectionRemarks(
+  userId: string,
+  payload: { schedule_id: string; remarks: string }
+) {
+  const { data } = await axios.post(`${API_BASE}/om/loadassignment`, payload, {
+    params: { userId, action: "save_remarks" },
+  });
+  return data as { ok: boolean; section_id?: string; remarks?: string };
 }
 
 /** Import SHS CSV file contents into OM Load Assignment (creates sections/schedules placeholders). */
@@ -3219,6 +3257,10 @@ export type FacultyServiceRow = {
   id?: string;
   fs_id?: string;
   course_code: string;
+  /** Specific section to target in OM Load Assignment (section_id from sections_submitted). */
+  section_id?: string;
+  /** Human-readable section code shown in OM Load Assignment (e.g., "BSIT 2-1"). */
+  section?: string;
   course_title: string;
   units: number | null;
   from_department: string; 
@@ -3236,19 +3278,28 @@ export type FacultyServiceRow = {
   updated_at?: string;
 };
 
-export async function getFSOptions(params?: { q?: string; toDepartment?: ToDept; requesterDepartment?: string }) {
+export async function getFSOptions(params?: {
+  q?: string;
+  toDepartment?: ToDept;
+  requesterDepartment?: string;
+  /** When provided, backend also returns sections for this course within the active/planning term. */
+  courseCode?: string;
+}) {
   const sp = new URLSearchParams();
   if (params?.q) sp.set("q", params.q);
   if (params?.toDepartment) sp.set("toDepartment", params.toDepartment);
   if (params?.requesterDepartment) sp.set("requesterDepartment", params.requesterDepartment);
+  if (params?.courseCode) sp.set("courseCode", params.courseCode);
   const { data } = await api.get(`/chair/faculty-service/options?${sp.toString()}`);
   return data as {
     ok: boolean;
     courses: Array<{ code: string; title: string; units?: number }>;
+    sections?: Array<{ section_id: string; section_code: string }>;
     departments: ToDept[];
     timeBegins: string[]; // renamed: begin options only
     days: DayShort[];
     facultyOptions?: Array<{ faculty_id: string; first_name: string; last_name: string; email?: string; label: string }>;
+    activeTerm?: any;
   };
 }
 
@@ -3272,9 +3323,12 @@ export async function listFacultyService(params?: {
 
 export async function createFacultyService(payload: {
   course_code: string;
+  section_id: string;
+  section?: string;
   course_title?: string;
   units?: number | null;
   to_department: ToDept;
+  remarks?: string;
   from_department?: string; // NEW
 }) {
   const { data } = await api.post(`/chair/faculty-service/create`, payload);
@@ -3303,6 +3357,25 @@ export async function respondFacultyService(fs_id: string, payload: {
 
 export async function rejectFacultyService(fs_id: string, payload?: { remarks?: string }) {
   const { data } = await api.post(`/chair/faculty-service/reject/${encodeURIComponent(fs_id)}`, payload || {});
+  return data as { ok: boolean; row: FacultyServiceRow };
+}
+
+// Restore/overwrite a faculty service row (used for Undo/Redo in CHAIR Faculty Service)
+export async function restoreFacultyService(
+  fs_id: string,
+  payload: Partial<Pick<FacultyServiceRow,
+    | "status"
+    | "faculty"
+    | "day1"
+    | "begin1"
+    | "end1"
+    | "day2"
+    | "begin2"
+    | "end2"
+    | "remarks"
+  >>
+) {
+  const { data } = await api.post(`/chair/faculty-service/restore/${encodeURIComponent(fs_id)}`, payload || {});
   return data as { ok: boolean; row: FacultyServiceRow };
 }
 
@@ -3446,23 +3519,79 @@ export async function addChairFacultyEntry(payload: FacultyUpsertPayload) {
 export async function getChairFacultySchedule(
   facultyId: string,
   termId?: string
-) {
-  const { data } = await axios.post(`${API_BASE}/chair/facultymanagement`, {}, {
-    params: { action: "schedule", facultyId, termId },
-  });
-  return data;
+) : Promise<{ ok: boolean; term_id: string | null; teaching_load: Array<{
+  course_code: string;
+  course_title: string;
+  section: string;
+  units: number;
+  mode: string;
+  day1: string;
+  begin1: string;
+  end1: string;
+  day2: string;
+  begin2: string;
+  end2: string;
+}> }> {
+  const { data } = await axios.post(
+    `${API_BASE}/chair/facultymanagement`,
+    {},
+    { params: { action: "schedule", facultyId, termId } }
+  );
+
+  // Normalize to always provide teaching_load array (mirror OM helper)
+  const tl = Array.isArray(data?.teaching_load) ? data.teaching_load : [];
+  return { ok: !!data?.ok, term_id: data?.term_id ?? null, teaching_load: tl };
 }
 
 export async function getChairFacultyHistory(
   facultyId: string,
   termOrAy?: string | number
-) {
+): Promise<{ ok: boolean; term_id: string | null; teaching_history: Array<{
+  code: string;
+  title: string;
+  section: string;
+  units?: number;
+  day1?: string;
+  begin1?: string;
+  end1?: string;
+  day2?: string;
+  begin2?: string;
+  end2?: string;
+  term?: string;
+}> }> {
   const params: Record<string, any> = { action: "history", facultyId };
   if (typeof termOrAy === "number") params.acadYearStart = termOrAy;
   else if (typeof termOrAy === "string" && termOrAy) params.termId = termOrAy;
 
   const { data } = await axios.post(`${API_BASE}/chair/facultymanagement`, {}, { params });
-  return data;
+
+  // Normalize backend response ({ terms: Record<string, any[]> }) to teaching_history[]
+  const teaching_history: Array<any> = [];
+  const termsObj = data?.terms || {};
+  Object.keys(termsObj).forEach((termKey) => {
+    const arr = Array.isArray(termsObj[termKey]) ? termsObj[termKey] : [];
+    arr.forEach((r: any) => {
+      teaching_history.push({
+        code: r?.code ?? r?.course_code ?? "",
+        title: r?.title ?? r?.course_title ?? "",
+        section: r?.section ?? "",
+        units: r?.units,
+        day1: r?.day1,
+        begin1: r?.begin1,
+        end1: r?.end1,
+        day2: r?.day2,
+        begin2: r?.begin2,
+        end2: r?.end2,
+        term: termKey,
+      });
+    });
+  });
+
+  return {
+    ok: !!data?.ok,
+    term_id: data?.term_id ?? null,
+    teaching_history,
+  };
 }
 
 export async function updateChairFacultyEntry(

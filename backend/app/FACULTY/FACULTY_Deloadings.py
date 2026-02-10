@@ -6,9 +6,19 @@ Direction = Literal["current", "next", "prev"]
 
 router = APIRouter(prefix="/faculty/deloadings", tags=["FACULTY: Deloadings"])
 
-async def _terms_list() -> List[Dict[str, Any]]:
+async def _terms_list_for_faculty(faculty_id: str) -> List[Dict[str, Any]]:
+    """Return only academic terms that have deloadings for the given faculty.
+
+    This ensures the UI will not show terms that would have an empty deloadings
+    table for the faculty.
+    """
+    term_ids = await db["deloadings"].distinct("term_id", {"faculty_id": faculty_id})
+    term_ids = [tid for tid in (term_ids or []) if tid]
+    if not term_ids:
+        return []
+
     terms: List[Dict[str, Any]] = await db["terms"] \
-        .find({}, {"_id": 0}) \
+        .find({"term_id": {"$in": term_ids}}, {"_id": 0}) \
         .sort([("acad_year_start", 1), ("term_number", 1)]) \
         .to_list(None)
     return terms
@@ -40,7 +50,20 @@ async def by_term(
             faculty = await db["faculty_profiles"].find_one({"email": user.get("email")})
     faculty_id = (faculty or {}).get("faculty_id")
 
-    terms = await _terms_list()
+    # If we cannot resolve the caller to a faculty profile, we cannot scope
+    # deloadings (and should not show unrelated terms).
+    if not faculty_id:
+        return {
+            "term": None,
+            "rows": [],
+            "has_prev": False,
+            "has_next": False,
+            "terms": [],
+            "current_index": None,
+        }
+
+    # Only return academic terms where the faculty actually has deloadings.
+    terms = await _terms_list_for_faculty(faculty_id)
     if not terms:
         return {
             "term": None,
@@ -75,31 +98,30 @@ async def by_term(
     target_term = terms[idx]
     target_term_id = target_term.get("term_id")
 
+    # Fetch deloadings for this faculty + term
     rows: List[Dict[str, Any]] = []
-    if faculty_id:
-        # Fetch deloadings for this faculty + term
-        deloadings = await db["deloadings"].find({
+    deloadings = await db["deloadings"].find({
+        "term_id": target_term_id,
+        "faculty_id": faculty_id,
+    }).to_list(None)
+
+    for d in deloadings:
+        dt = await db["deloading_types"].find_one({
+            "$or": [
+                {"type_id": d.get("type_id")},
+                {"deloadingtype_id": d.get("type_id")},
+            ]
+        })
+        rows.append({
+            "deloading_type": (dt or {}).get("type"),
+            "units_deloaded": d.get("units_deloaded"),
+            "notes": (d.get("notes") or d.get("deloading_notes") or "").strip() or None,
             "term_id": target_term_id,
-            "faculty_id": faculty_id,
-        }).to_list(None)
+            "updated_at": d.get("updated_at"),
+        })
 
-        for d in deloadings:
-            dt = await db["deloading_types"].find_one({
-                "$or": [
-                    {"type_id": d.get("type_id")},
-                    {"deloadingtype_id": d.get("type_id")},
-                ]
-            })
-            rows.append({
-                "deloading_type": (dt or {}).get("type"),
-                "units_deloaded": d.get("units_deloaded"),
-                "notes": (d.get("notes") or d.get("deloading_notes") or "").strip() or None,
-                "term_id": target_term_id,
-                "updated_at": d.get("updated_at"),
-            })
-
-        # Sort: by most recent update desc
-        rows.sort(key=lambda x: -(x["updated_at"].timestamp() if x.get("updated_at") else 0))
+    # Sort: by most recent update desc
+    rows.sort(key=lambda x: -(x["updated_at"].timestamp() if x.get("updated_at") else 0))
 
     return {
         "term": _term_lite(target_term),

@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { ChevronLeft, TrendingUp, AlertTriangle, Users, BarChart, CheckCircle } from "lucide-react"; 
 import { fetchPTRisk } from "../../../api";
+import SelectBox from "../../../component/SelectBox";
 
 /** ---------------- Types (from OM_pred2) ---------------- */
 type PTRow = {
@@ -148,6 +149,23 @@ export default function OM_RP_LoadRisk() {
   const [riskFilter, setRiskFilter] = useState<RiskFilter>("HIGH_MED");
   const [showLowRisk, setShowLowRisk] = useState(false);
 
+  type RiskTableSortKey = "course" | "demand" | "pt_needed" | "risk";
+  const [riskSortKey, setRiskSortKey] = useState<RiskTableSortKey>("risk");
+  const [riskSortDir, setRiskSortDir] = useState<"asc" | "desc">("desc");
+
+  const toggleRiskSort = (key: RiskTableSortKey) => {
+    if (riskSortKey === key) {
+      setRiskSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    } else {
+      setRiskSortKey(key);
+      setRiskSortDir("asc");
+    }
+  };
+
+  const sortArrow = (key: RiskTableSortKey) =>
+    riskSortKey === key ? (riskSortDir === "asc" ? "▲" : "▼") : "";
+
+
   // defaults (for Reset)
   const DEFAULT_DEPT = "DEPT0001";
   const DEFAULT_OVERLOAD = 0;
@@ -161,6 +179,21 @@ export default function OM_RP_LoadRisk() {
   };
 
   const canRun = Boolean(departmentId?.trim()) && histK >= 1 && histK <= 6;
+
+  // Dropdown options (match Course Management SelectBox style)
+  const deptOptions = useMemo(() => {
+    if (!departments || departments.length === 0) return [departmentId];
+    // Display department names only (no IDs in the dropdown)
+    return departments.map((d) => d.department_name);
+  }, [departments, departmentId]);
+
+  const deptValue = useMemo(() => {
+    if (!departments || departments.length === 0) return departmentId;
+    const match = departments.find((d) => d.department_id === departmentId);
+    return match?.department_name || deptOptions[0] || departmentId;
+  }, [departments, deptOptions, departmentId]);
+
+  const overloadOptions = useMemo(() => ["0", "3"], []);
 
 
   // data state
@@ -218,16 +251,42 @@ export default function OM_RP_LoadRisk() {
     const allCourses = data.rows.length;
     const lowRiskCount = allCourses - (data.summary.high_risk_course_count || 0) - (data.summary.medium_risk_course_count || 0);
 
-    // Risk sorting logic: High (1) > Medium (2) > Low (3)
-    const riskOrder = { 'High': 1, 'Medium': 2, 'Low': 3 };
+    const riskRank = (v?: string) => {
+      const s = (v || "").toLowerCase();
+      if (s.includes("high")) return 3;
+      if (s.includes("medium")) return 2;
+      if (s.includes("low")) return 1;
+      return 0;
+    };
+    
+    const dir = riskSortDir === "asc" ? 1 : -1;
+    
     const sortedRows = [...data.rows].sort((a, b) => {
-        const orderA = riskOrder[a.risk as keyof typeof riskOrder] || 4;
-        const orderB = riskOrder[b.risk as keyof typeof riskOrder] || 4;
-        return orderA - orderB;
-    });
+      const aCourse = String(a.course_code ?? "");
+      const bCourse = String(b.course_code ?? "");
+    
+      const aDemand = Number(a.demand_sections ?? 0);
+      const bDemand = Number(b.demand_sections ?? 0);
+    
+      const aPT = Number(a.pt_needed_sections ?? 0);
+      const bPT = Number(b.pt_needed_sections ?? 0);
+    
+      const aRisk = riskRank(a.risk);
+      const bRisk = riskRank(b.risk);
+    
+      if (riskSortKey === "course") return dir * aCourse.localeCompare(bCourse);
+      if (riskSortKey === "demand") return dir * (aDemand - bDemand);
+      if (riskSortKey === "pt_needed") return dir * (aPT - bPT);
+    
+      // risk
+      if (aRisk !== bRisk) return dir * (aRisk - bRisk);
+    
+      // tie-breaker
+      return aCourse.localeCompare(bCourse);
+    });    
 
     return { sortedRows, totals: { demand, ft, pt }, lowRiskCount };
-  }, [data]);
+  }, [data, riskSortKey, riskSortDir]);
 
   const displayedRows = useMemo(() => {
     const highs = sortedRows.filter((r) => r.risk === "High");
@@ -270,32 +329,23 @@ export default function OM_RP_LoadRisk() {
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4 items-end">
               <div>
               <label className="block text-xs text-gray-600 mb-1">Department</label>
-              <select
-                value={departmentId}
-                onChange={(e) => setDepartmentId(e.target.value)}
-                className="w-full rounded-lg border border-gray-300 px-3.5 py-2 text-sm shadow-sm bg-white focus:ring-2 focus:ring-emerald-500/30"
-              >
-                {departments.length === 0 ? (
-                  <option value={departmentId}>{departmentId}</option>
-                ) : (
-                  departments.map((d) => (
-                    <option key={d.department_id} value={d.department_id}>
-                      {d.department_name}
-                    </option>
-                  ))
-                )}
-              </select>
+              <SelectBox
+                value={deptValue}
+                onChange={(v) => {
+                  const nextName = (v || "").trim();
+                  const next = departments.find((d) => d.department_name === nextName);
+                  setDepartmentId(next?.department_id || departmentId);
+                }}
+                options={deptOptions}
+              />
               </div>
               <div>
                 <label className="block text-xs text-gray-600 mb-1">Overload allowance (units)</label>
-                <select
-                  value={overload}
-                  onChange={(e) => setOverload(Number(e.target.value))}
-                  className="w-full rounded-lg border border-gray-300 px-3.5 py-2 text-sm shadow-sm bg-white focus:ring-2 focus:ring-emerald-500/30"
-                >
-                  <option value={0}>0</option>
-                  <option value={3}>3</option>
-                </select>
+                <SelectBox
+                  value={String(overload)}
+                  onChange={(v) => setOverload(Number(v))}
+                  options={overloadOptions}
+                />
               </div>
 
               <div>
@@ -515,19 +565,57 @@ export default function OM_RP_LoadRisk() {
 
                   <thead className="bg-gray-50 text-gray-700 text-xs uppercase tracking-wide sticky top-0 z-[1]">
                     <tr>
-                      {[
-                          "Course",
-                          "Demand (sections)",
-                          "FT Capacity Used (estimated)",
-                          "Suggested FT Candidates (model)",
-                          "PT Needed",
-                          "Risk",
-                          "Confidence Level",
-                        ].map((h) => (
-                        <th key={h} className="px-4 py-2.5 text-center font-semibold whitespace-nowrap border-b">
-                          {h}
-                        </th>
-                      ))}
+                      <th className="px-4 py-2.5 text-center font-semibold whitespace-nowrap border-b">
+                        <button
+                          type="button"
+                          onClick={() => toggleRiskSort("course")}
+                          className="inline-flex items-center gap-1 hover:underline"
+                        >
+                          Course {sortArrow("course")}
+                        </button>
+                      </th>
+
+                      <th className="px-4 py-2.5 text-center font-semibold whitespace-nowrap border-b">
+                        <button
+                          type="button"
+                          onClick={() => toggleRiskSort("demand")}
+                          className="inline-flex items-center gap-1 hover:underline"
+                        >
+                          Demand (sections) {sortArrow("demand")}
+                        </button>
+                      </th>
+
+                      <th className="px-4 py-2.5 text-center font-semibold whitespace-nowrap border-b">
+                        FT Capacity Used (estimated)
+                      </th>
+
+                      <th className="px-4 py-2.5 text-center font-semibold whitespace-nowrap border-b">
+                        Suggested FT Candidates (model)
+                      </th>
+
+                      <th className="px-4 py-2.5 text-center font-semibold whitespace-nowrap border-b">
+                        <button
+                          type="button"
+                          onClick={() => toggleRiskSort("pt_needed")}
+                          className="inline-flex items-center gap-1 hover:underline"
+                        >
+                          PT Needed {sortArrow("pt_needed")}
+                        </button>
+                      </th>
+
+                      <th className="px-4 py-2.5 text-center font-semibold whitespace-nowrap border-b">
+                        <button
+                          type="button"
+                          onClick={() => toggleRiskSort("risk")}
+                          className="inline-flex items-center gap-1 hover:underline"
+                        >
+                          Risk {sortArrow("risk")}
+                        </button>
+                      </th>
+
+                      <th className="px-4 py-2.5 text-center font-semibold whitespace-nowrap border-b">
+                        Confidence Level
+                      </th>
                     </tr>
                   </thead>
 

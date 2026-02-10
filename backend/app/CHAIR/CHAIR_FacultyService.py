@@ -11,6 +11,7 @@
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
+import re
 
 from fastapi import APIRouter, Body, HTTPException, Query
 from ..main import db
@@ -21,6 +22,12 @@ router = APIRouter(prefix="/chair/faculty-service", tags=["chair", "faculty-serv
 # --- collections for term logic ---
 COL_TERMS = "terms"
 COL_PREEN_COUNT = "preenlistment_count"
+
+# OM collections (for reflecting accepted faculty-service into OM Load Assignment)
+COL_SECTIONS_SUBMITTED = "sections_submitted"
+COL_SECTIONS = "sections"
+COL_SCHED = "section_schedules"
+COL_ASSIGN = "faculty_assignments"
 
 # --- constants per spec ---
 DAYS = ["M", "T", "W", "H", "F", "S"]
@@ -105,6 +112,51 @@ async def _canon_dept_name(name: str | None) -> str:
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+# ------------------------ stale/restore guards ------------------------
+
+def _coerce_dt(v: Any) -> Optional[datetime]:
+    """Best-effort parse for datetimes stored as datetime/ISO string/epoch seconds."""
+    if v is None:
+        return None
+    if isinstance(v, datetime):
+        return v if v.tzinfo else v.replace(tzinfo=timezone.utc)
+    if isinstance(v, (int, float)):
+        try:
+            if v > 1_000_000_000_000:
+                return datetime.fromtimestamp(v / 1000.0, tz=timezone.utc)
+            return datetime.fromtimestamp(v, tz=timezone.utc)
+        except Exception:
+            return None
+    s = str(v).strip()
+    if not s:
+        return None
+    try:
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        dt = datetime.fromisoformat(s)
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
+
+
+def _pick_dt(doc: Dict[str, Any], keys: List[str]) -> Optional[datetime]:
+    for k in keys:
+        if k in doc and doc.get(k) is not None:
+            dt = _coerce_dt(doc.get(k))
+            if dt:
+                return dt
+    return None
+
+
+def _doc_ts(doc: Dict[str, Any]) -> Optional[datetime]:
+    return _pick_dt(doc, ["updated_at", "created_at", "createdAt", "updatedAt"])
+
+
+def _section_ts(sec_doc: Dict[str, Any]) -> Optional[datetime]:
+    # sections_submitted/sections may store any of these fields depending on import path
+    return _pick_dt(sec_doc, ["imported_at", "created_at", "createdAt", "updated_at", "updatedAt"])
 
 
 async def _active_term() -> Dict[str, Any]:
@@ -346,6 +398,124 @@ async def _chair_contacts_for_dept(dept_name: str | None) -> list[dict]:
     return out
 
 
+async def _om_user_ids_for_dept(dept_name: str | None) -> list[str]:
+    """Resolve Office Manager (OM) user_id(s) for a given department.
+
+    Faculty Service syncing writes into OM Load Assignment sources (assignments/schedules/remarks).
+    When a request is accepted/responded, OM(s) for the requesting department should be notified.
+
+    Strategy (robust across schema variants):
+      1) Legacy role_assignments with role in {office_manager, om} and department_id(s)
+      2) role-based resolution: user_roles(role_type contains om/office manager) -> role_assignments scoped to department
+      3) staff_profiles fallback: department match + position_title contains om/office manager
+
+    Returns a de-duplicated list. If nothing matches, returns [].
+    """
+
+    dept_name = await _canon_dept_name(dept_name)
+    if not dept_name:
+        return []
+
+    dept = await _find_department(dept_name)
+    dep_id = (dept or {}).get("department_id")
+    dep_code = (dept or {}).get("dept_code")
+
+    ids: list[str] = []
+
+    # 1) Legacy role_assignments(role=office_manager/om) with department_id(s)
+    try:
+        dept_or: list[dict] = []
+        if dep_id:
+            dept_or += [
+                {"department_id": dep_id},
+                {"department_ids": dep_id},
+                {"department_ids": {"$in": [dep_id]}},
+            ]
+        if dep_code:
+            dept_or += [
+                {"department_id": dep_code},
+                {"department_ids": dep_code},
+                {"department_ids": {"$in": [dep_code]}},
+            ]
+        # dept name as a last resort (some DBs store this string directly)
+        dept_or.append({"department_id": dept_name})
+        dept_or.append({"department_ids": dept_name})
+        dept_or.append({"department_ids": {"$in": [dept_name]}})
+
+        q = {
+            "role": {"$in": ["office_manager", "om"]},
+            "$or": dept_or,
+        }
+        cur = db.role_assignments.find(q, {"_id": 0, "user_id": 1})
+        async for d in cur:
+            if d.get("user_id"):
+                ids.append(d["user_id"])
+    except Exception:
+        pass
+
+    # 2) Newer role-based system: user_roles(role_type contains om/office manager)
+    if not ids:
+        try:
+            om_role_ids: list[str] = []
+            cur_roles = db.user_roles.find(
+                {"role_type": {"$regex": "(office[_ ]?manager|\\bom\\b)", "$options": "i"}},
+                {"_id": 0, "role_id": 1},
+            )
+            async for r in cur_roles:
+                if r.get("role_id"):
+                    om_role_ids.append(r["role_id"])
+
+            if om_role_ids:
+                scope_or: list[dict] = []
+                if dep_id:
+                    scope_or.append({"scope": {"$elemMatch": {"type": "department", "id": dep_id}}})
+                if dep_code:
+                    scope_or.append({"scope": {"$elemMatch": {"type": "department", "id": dep_code}}})
+                scope_or.append({"scope": {"$elemMatch": {"type": "department", "id": dept_name}}})
+
+                q = {"role_id": {"$in": om_role_ids}, "$or": scope_or}
+                cur_ra = db.role_assignments.find(q, {"_id": 0, "user_id": 1})
+                async for d in cur_ra:
+                    if d.get("user_id"):
+                        ids.append(d["user_id"])
+        except Exception:
+            pass
+
+    # 3) staff_profiles fallback (older schema)
+    if not ids:
+        try:
+            match_or: list[dict] = []
+            if dep_id:
+                match_or += [{"department_id": dep_id}, {"dept_id": dep_id}]
+            match_or += [
+                {"dept_name": {"$regex": f"^{dept_name}$", "$options": "i"}},
+                {"department": {"$regex": f"^{dept_name}$", "$options": "i"}},
+                {"department_name": {"$regex": f"^{dept_name}$", "$options": "i"}},
+            ]
+
+            cur = db.staff_profiles.find(
+                {
+                    "$or": match_or,
+                    "position_title": {"$regex": "(office[_ ]?manager|\\bom\\b)", "$options": "i"},
+                },
+                {"_id": 0, "user_id": 1},
+            )
+            async for d in cur:
+                if d.get("user_id"):
+                    ids.append(d["user_id"])
+        except Exception:
+            pass
+
+    # de-dupe while preserving order
+    out: list[str] = []
+    seen = set()
+    for uid in ids:
+        if uid and uid not in seen:
+            seen.add(uid)
+            out.append(uid)
+    return out
+
+
 async def _course_by_code(code: str) -> Optional[Dict[str, Any]]:
     if not code:
         return None
@@ -363,6 +533,298 @@ async def _course_by_code(code: str) -> Optional[Dict[str, Any]]:
     if doc:
         doc["course_code"] = _normalize_code(doc.get("course_code"))
     return doc
+
+
+def _sch_id_from_sec(section_id: str, slot: int = 1) -> str:
+    """Match OM schedule_id scheme so OM Load Assignment reflects changes."""
+    m = re.match(r"^SEC(\d+)$", (section_id or "").strip().upper())
+    if m:
+        return f"SCH{int(m.group(1)):04d}-{int(slot):02d}"
+    return f"SCH-{section_id}-{int(slot)}"
+
+
+def _asg_id_from_sec(section_id: str) -> str:
+    """Match OM assignment_id scheme."""
+    m = re.match(r"^SEC(\d+)$", (section_id or "").strip().upper())
+    if m:
+        return f"ASG{int(m.group(1)):04d}"
+    return f"ASG{uuid4().hex[:10].upper()}"
+
+
+async def _reflect_faculty_service_to_om(row: Dict[str, Any], update: Dict[str, Any]) -> None:
+    """Propagate an accepted faculty-service response into OM Load Assignment.
+
+    OM Load Assignment list is sourced from:
+      - sections_submitted (row universe)
+      - section_schedules (day/begin/end/room)
+      - faculty_assignments (faculty_id)
+      - sections (remarks)
+
+    Faculty Service requests are keyed by course_code (picked from OM rows), so we update
+    all submitted sections that match the requesting department + course_code in the active
+    OM working/planning term.
+    """
+
+    # Resolve active/planning term (same logic used by Faculty Service options)
+    active = await _active_term()
+    term_id = (active or {}).get("term_id")
+    if not term_id:
+        return
+
+    course_code = _normalize_code(row.get("course_code"))
+    if not course_code:
+        return
+
+    requested_section_id = str(row.get("section_id") or "").strip()
+
+    from_dept_name = await _canon_dept_name(row.get("from_department"))
+    from_dept = await _find_department(from_dept_name) if from_dept_name else None
+    from_dept_id = (from_dept or {}).get("department_id")
+
+    # Locate course_id for the requested course (prefer scoping to requesting dept if possible)
+    course_doc = await db.courses.find_one(
+        {
+            "$and": [
+                {"$or": [{"course_code": course_code}, {"course_code": [course_code]}]},
+                *([{"department_id": from_dept_id}] if from_dept_id else []),
+            ]
+        },
+        {"_id": 0, "course_id": 1},
+    )
+    if not course_doc:
+        # fallback: existing helper (no dept scope)
+        course_doc = await _course_by_code(course_code)
+
+    course_id = (course_doc or {}).get("course_id")
+    if not course_id:
+        return
+
+    # Prefer a specific section_id (if the request was created with Section dropdown)
+    requested_section_id = str(row.get("section_id") or "").strip()
+
+    # Find submitted sections for this (term, course). If a specific section was requested,
+    # validate it exists for this term/course; otherwise fall back to the old behavior
+    # (update all matching sections) for backwards compatibility.
+    match: Dict[str, Any] = {"term_id": term_id, "submitted_for_scheduling": True, "course_id": course_id}
+
+    section_ids: List[str] = []
+    if requested_section_id:
+        ok_sec = await db[COL_SECTIONS_SUBMITTED].find_one(
+            {**match, "section_id": requested_section_id},
+            {"_id": 0, "section_id": 1},
+        )
+        if ok_sec and (ok_sec.get("section_id") or "").strip():
+            section_ids = [requested_section_id]
+
+    if not section_ids:
+        sec_docs = await db[COL_SECTIONS_SUBMITTED].find(match, {"_id": 0, "section_id": 1}).to_list(None)
+        section_ids = [str(d.get("section_id") or "").strip() for d in (sec_docs or [])]
+        section_ids = [sid for sid in section_ids if sid]
+        if not section_ids:
+            return
+
+    ts = datetime.now(timezone.utc)
+
+    faculty = (update.get("faculty") or {}) if isinstance(update.get("faculty"), dict) else {}
+    faculty_id = str(faculty.get("faculty_id") or "").strip()
+
+    day1 = str(update.get("day1") or "").strip()
+    begin1 = str(update.get("begin1") or "").strip()
+    end1 = str(update.get("end1") or "").strip()
+    day2 = str(update.get("day2") or "").strip()
+    begin2 = str(update.get("begin2") or "").strip()
+    end2 = str(update.get("end2") or "").strip()
+    remarks = str(update.get("remarks") or "").strip()
+
+    for sid in section_ids:
+        # 1) Faculty assignment (upsert)
+        if faculty_id:
+            await db[COL_ASSIGN].update_one(
+                {"section_id": sid, "is_archived": {"$ne": True}},
+                {
+                    "$set": {
+                        "section_id": sid,
+                        "faculty_id": faculty_id,
+                        "updated_at": ts,
+                        "is_archived": False,
+                        "synced_from_faculty_service": True,
+                        "synced_from_faculty_service_at": ts,
+                    },
+                    "$setOnInsert": {
+                        "assignment_id": _asg_id_from_sec(sid),
+                        "user_id": "",
+                        "created_at": ts,
+                    },
+                },
+                upsert=True,
+            )
+
+        # 2) Schedule slots (upsert). Keep room_id untouched unless inserting.
+        await db[COL_SCHED].update_one(
+            {"section_id": sid, "schedule_id": _sch_id_from_sec(sid, 1)},
+            {
+                "$set": {
+                    "schedule_id": _sch_id_from_sec(sid, 1),
+                    "section_id": sid,
+                    "day": day1 or None,
+                    "start_time": begin1 or None,
+                    "end_time": end1 or None,
+                    "updated_at": ts,
+                },
+                "$setOnInsert": {"created_at": ts},
+            },
+            upsert=True,
+        )
+        await db[COL_SCHED].update_one(
+            {"section_id": sid, "schedule_id": _sch_id_from_sec(sid, 2)},
+            {
+                "$set": {
+                    "schedule_id": _sch_id_from_sec(sid, 2),
+                    "section_id": sid,
+                    "day": day2 or None,
+                    "start_time": begin2 or None,
+                    "end_time": end2 or None,
+                    "updated_at": ts,
+                },
+                "$setOnInsert": {"created_at": ts},
+            },
+            upsert=True,
+        )
+
+        # 3) Remarks live on the canonical `sections` collection.
+        # We preserve the previous remarks so we can revert when an Approved request
+        # is later changed to Rejected/Pending.
+        if remarks is not None:
+            try:
+                prev_doc = await db[COL_SECTIONS].find_one(
+                    {"section_id": sid},
+                    {"_id": 0, "remarks": 1, "synced_from_faculty_service_remarks": 1, "synced_from_faculty_service_prev_remarks": 1},
+                )
+            except Exception:
+                prev_doc = None
+
+            already_synced = bool((prev_doc or {}).get("synced_from_faculty_service_remarks"))
+            prev_remarks = (prev_doc or {}).get("remarks", "") if not already_synced else (prev_doc or {}).get(
+                "synced_from_faculty_service_prev_remarks", ""
+            )
+
+            set_fields: Dict[str, Any] = {
+                "remarks": remarks,
+                "updated_at": ts,
+                "synced_from_faculty_service_remarks": True,
+                "synced_from_faculty_service_remarks_at": ts,
+            }
+            if not already_synced:
+                set_fields["synced_from_faculty_service_prev_remarks"] = prev_remarks
+
+            await db[COL_SECTIONS].update_one(
+                {"section_id": sid},
+                {"$set": set_fields, "$setOnInsert": {"created_at": ts}},
+                upsert=True,
+            )
+
+
+async def _target_section_ids_for_faculty_service_row(row: Dict[str, Any]) -> List[str]:
+    """Resolve which submitted section_id(s) in the active/planning term should be affected
+    by a faculty service request.
+
+    Mirrors the targeting logic of _reflect_faculty_service_to_om().
+    """
+
+    active = await _active_term()
+    term_id = (active or {}).get("term_id")
+    if not term_id:
+        return []
+
+    course_code = _normalize_code(row.get("course_code"))
+    if not course_code:
+        return []
+
+    from_dept_name = await _canon_dept_name(row.get("from_department"))
+    from_dept = await _find_department(from_dept_name) if from_dept_name else None
+    from_dept_id = (from_dept or {}).get("department_id")
+
+    course_doc = await db.courses.find_one(
+        {
+            "$and": [
+                {"$or": [{"course_code": course_code}, {"course_code": [course_code]}]},
+                *([{"department_id": from_dept_id}] if from_dept_id else []),
+            ]
+        },
+        {"_id": 0, "course_id": 1},
+    )
+    if not course_doc:
+        course_doc = await _course_by_code(course_code)
+
+    course_id = (course_doc or {}).get("course_id")
+    if not course_id:
+        return []
+
+    requested_section_id = str(row.get("section_id") or "").strip()
+    match: Dict[str, Any] = {"term_id": term_id, "submitted_for_scheduling": True, "course_id": course_id}
+
+    section_ids: List[str] = []
+    if requested_section_id:
+        ok_sec = await db[COL_SECTIONS_SUBMITTED].find_one(
+            {**match, "section_id": requested_section_id},
+            {"_id": 0, "section_id": 1},
+        )
+        if ok_sec and (ok_sec.get("section_id") or "").strip():
+            section_ids = [requested_section_id]
+
+    if not section_ids:
+        sec_docs = await db[COL_SECTIONS_SUBMITTED].find(match, {"_id": 0, "section_id": 1}).to_list(None)
+        section_ids = [str(d.get("section_id") or "").strip() for d in (sec_docs or [])]
+        section_ids = [sid for sid in section_ids if sid]
+
+    return section_ids
+
+
+async def _unreflect_faculty_service_from_om(row: Dict[str, Any]) -> None:
+    """Undo faculty assignment reflections into OM Load Assignment.
+
+    Requirement: If a previously Approved (responded) request is later changed to Rejected (or Pending),
+    the corresponding Load Assignment row(s) should revert to having *no assigned faculty*.
+
+    We only remove assignments that were created/updated by Faculty Service syncing.
+    """
+
+    section_ids = await _target_section_ids_for_faculty_service_row(row)
+    if not section_ids:
+        return
+
+    # 1) Remove synced faculty assignments
+    try:
+        await db[COL_ASSIGN].delete_many({"section_id": {"$in": section_ids}, "synced_from_faculty_service": True})
+    except Exception:
+        pass
+
+    # 2) Revert remarks that were set via faculty-service syncing
+    # (Only revert when we previously marked the remarks as synced.)
+    for sid in section_ids:
+        try:
+            sdoc = await db[COL_SECTIONS].find_one(
+                {"section_id": sid},
+                {"_id": 0, "synced_from_faculty_service_remarks": 1, "synced_from_faculty_service_prev_remarks": 1},
+            )
+            if not sdoc or not sdoc.get("synced_from_faculty_service_remarks"):
+                continue
+            prev_remarks = sdoc.get("synced_from_faculty_service_prev_remarks", "")
+            await db[COL_SECTIONS].update_one(
+                {"section_id": sid},
+                {
+                    "$set": {"remarks": prev_remarks, "updated_at": datetime.now(timezone.utc)},
+                    "$unset": {
+                        "synced_from_faculty_service_remarks": "",
+                        "synced_from_faculty_service_remarks_at": "",
+                        "synced_from_faculty_service_prev_remarks": "",
+                    },
+                },
+            )
+        except Exception:
+            # Fail silently so Chair workflow doesn't break even if OM data is missing
+            continue
+
 
 async def _faculty_dropdown(dept_name: Optional[str]) -> List[Dict[str, Any]]:
     if not dept_name:
@@ -420,37 +882,178 @@ async def _faculty_dropdown(dept_name: Optional[str]) -> List[Dict[str, Any]]:
 async def fs_options(
     q: Optional[str] = Query(None, description="Search for course code/title"),
     toDepartment: Optional[str] = Query(None, description="Populate faculty options for this TO dept"),
-    requesterDepartment: Optional[str] = Query(None, description="Filter courses to this requester's department")
+    requesterDepartment: Optional[str] = Query(None, description="Filter courses to this requester's department"),
+    courseCode: Optional[str] = Query(None, description="When provided, also return sections for this course in the active term")
 ):
-    # courses (top 20), optionally filtered to the requester's department
+    # Courses shown in the Create Request table MUST reflect what's in the
+    # OM Load Assignment table (i.e., submitted sections for the active/planning term).
+    #
+    # Strategy:
+    # - For the requester's department, read distinct (course_code, title, units)
+    #   from `sections_submitted` + `courses` for the active term.
+    # - Optional `q` filters by code/title.
+    # - Fall back to the legacy `courses` collection lookup when we can't resolve
+    #   the department or active term.
+
+    active_term = await _active_term()
+    active_term_id = (active_term or {}).get("term_id")
+
     courses: List[Dict[str, Any]] = []
-    course_filter: Dict[str, Any] = {}
+
+    dept_id: Optional[str] = None
     if requesterDepartment:
         d = await _find_department(requesterDepartment)
         if d and d.get("department_id"):
-            course_filter["department_id"] = d["department_id"]
+            dept_id = d["department_id"]
 
-    if q:
-        course_filter["$or"] = [
-            {"course_code": {"$regex": q, "$options": "i"}},
-            {"course_title": {"$regex": q, "$options": "i"}},
+    # Only compute course options when the client is actually asking for them.
+    # (Some callers use /options solely to populate faculty dropdowns.)
+    wants_courses = bool(requesterDepartment or q)
+
+    if wants_courses and dept_id and active_term_id:
+        # Read from OM Load Assignment source (sections_submitted)
+        pipe: List[Dict[str, Any]] = [
+            {
+                "$match": {
+                    "term_id": active_term_id,
+                    "submitted_for_scheduling": True,
+                }
+            },
+            {
+                "$lookup": {
+                    "from": "courses",
+                    "localField": "course_id",
+                    "foreignField": "course_id",
+                    "as": "course",
+                }
+            },
+            {"$unwind": {"path": "$course", "preserveNullAndEmptyArrays": False}},
+            {"$match": {"course.department_id": dept_id}},
+            {
+                "$addFields": {
+                    "course_code_display": {
+                        "$cond": [
+                            {"$isArray": "$course.course_code"},
+                            {"$ifNull": [{"$arrayElemAt": ["$course.course_code", 0]}, ""]},
+                            {"$ifNull": ["$course.course_code", ""]},
+                        ]
+                    }
+                }
+            },
         ]
-    cur = db.courses.find(course_filter or {}, {"_id": 0, "course_code": 1, "course_title": 1, "units": 1}).limit(20)
-    async for c in cur:
-        courses.append({
-            "code": _normalize_code(c.get("course_code")),
-            "title": c.get("course_title") or "",
-            "units": c.get("units"),
-        })
+
+        if q:
+            pipe.append(
+                {
+                    "$match": {
+                        "$or": [
+                            {"course_code_display": {"$regex": q, "$options": "i"}},
+                            {"course.course_title": {"$regex": q, "$options": "i"}},
+                        ]
+                    }
+                }
+            )
+
+
+        pipe += [
+            {
+                "$group": {
+                    "_id": {
+                        "code": "$course_code_display",
+                        "title": "$course.course_title",
+                        "units": "$course.units",
+                    }
+                }
+            },
+            {
+                "$project": {
+                    "_id": 0,
+                    "code": "$_id.code",
+                    "title": "$_id.title",
+                    "units": "$_id.units",
+                }
+            },
+            {"$sort": {"code": 1, "title": 1}},
+            {"$limit": 500},
+        ]
+
+        async for r in db["sections_submitted"].aggregate(pipe):
+            courses.append(
+                {
+                    "code": _normalize_code(r.get("code")),
+                    "title": (r.get("title") or "").strip(),
+                    "units": r.get("units"),
+                }
+            )
+    elif wants_courses:
+        # Legacy fallback (keeps existing behavior when OM context isn't available)
+        course_filter: Dict[str, Any] = {}
+        if dept_id:
+            course_filter["department_id"] = dept_id
+        if q:
+            course_filter["$or"] = [
+                {"course_code": {"$regex": q, "$options": "i"}},
+                {"course_title": {"$regex": q, "$options": "i"}},
+            ]
+        cur = db.courses.find(
+            course_filter or {},
+            {"_id": 0, "course_code": 1, "course_title": 1, "units": 1},
+        ).limit(500)
+        async for c in cur:
+            courses.append(
+                {
+                    "code": _normalize_code(c.get("course_code")),
+                    "title": (c.get("course_title") or "").strip(),
+                    "units": c.get("units"),
+                }
+            )
+    else:
+        # Keep the endpoint lightweight for callers that only need departments/faculty.
+        courses = []
+
+    # Sections for a specific course (used by Create Request so the request targets a single OM row)
+    sections: List[Dict[str, Any]] = []
+    if courseCode and dept_id and active_term_id:
+        code = _normalize_code(courseCode)
+        # Locate the course_id (prefer scoping to the requester's dept, fallback otherwise)
+        course_doc = await db.courses.find_one(
+            {
+                "$and": [
+                    {"$or": [{"course_code": code}, {"course_code": [code]}]},
+                    {"department_id": dept_id},
+                ]
+            },
+            {"_id": 0, "course_id": 1},
+        )
+        if not course_doc:
+            course_doc = await _course_by_code(code)
+
+        course_id = (course_doc or {}).get("course_id")
+        if course_id:
+            cur = db["sections_submitted"].find(
+                {
+                    "term_id": active_term_id,
+                    "submitted_for_scheduling": True,
+                    "course_id": course_id,
+                },
+                {"_id": 0, "section_id": 1, "section_code": 1},
+            ).sort([("section_code", 1)])
+
+            seen: set[str] = set()
+            async for s in cur:
+                sid = str(s.get("section_id") or "").strip()
+                sc = str(s.get("section_code") or "").strip()
+                if not sid or sid in seen:
+                    continue
+                seen.add(sid)
+                sections.append({"section_id": sid, "section_code": sc})
 
     faculty_opts = await _faculty_dropdown(toDepartment) if toDepartment else []
-
-    # NEW: shared working / planning term
-    active_term = await _active_term()
 
     return {
         "ok": True,
         "courses": courses,
+        "sections": sections,
         "departments": await _list_department_names(),
         "timeBegins": BEGIN,
         "days": DAYS,
@@ -486,6 +1089,103 @@ async def fs_list(
 
     cur = db.faculty_service.find(q, {"_id": 0}).sort([("created_at", -1)])
     rows = [doc async for doc in cur]
+
+    # DB restore/clean guard:
+    # After an admin DB restore/clean, `sections_submitted` is usually cleared and then
+    # re-imported. However, the `faculty_service` collection may *not* be cleared, causing
+    # previously-approved/old requests to keep showing on the CHAIR page.
+    #
+    # We proactively remove stale faculty_service rows using a *global* snapshot timestamp:
+    #   - Let `snapshot_ts` be the most recent timestamp found in sections_submitted.
+    #   - Any faculty_service request whose created/updated timestamp is *older* than
+    #     snapshot_ts is considered pre-restore (or pre-reimport) and will be deleted.
+    #
+    # This matches the "after restore everything is clean" behavior you expect, even when
+    # section_ids happen to be reused.
+    try:
+        # 1) Determine the newest "section snapshot" timestamp (best-effort).
+        snap_doc = await db[COL_SECTIONS_SUBMITTED].find_one(
+            {},
+            {
+                "_id": 0,
+                "snapshot_at": 1,
+                "imported_at": 1,
+                "submitted_at": 1,
+                "created_at": 1,
+                "createdAt": 1,
+                "updated_at": 1,
+                "updatedAt": 1,
+            },
+            sort=[
+                ("snapshot_at", -1),
+                ("imported_at", -1),
+                ("submitted_at", -1),
+                ("updated_at", -1),
+                ("created_at", -1),
+            ],
+        )
+        # If there are *no* submitted sections at all, we are likely in a freshly
+        # restored/cleaned DB state. In that case, clear any existing faculty_service
+        # requests that may have survived the restore.
+        if not snap_doc:
+            fs_ids = [str(r.get("fs_id") or "").strip() for r in rows if str(r.get("fs_id") or "").strip()]
+            if fs_ids:
+                await db.faculty_service.delete_many({"fs_id": {"$in": fs_ids}})
+            return {"ok": True, "rows": []}
+
+        snapshot_ts = _section_ts(snap_doc)
+
+        section_ids = [str(r.get("section_id") or "").strip() for r in rows]
+        section_ids = [sid for sid in section_ids if sid]
+
+        sec_map: Dict[str, Dict[str, Any]] = {}
+        if section_ids:
+            s_cur = db[COL_SECTIONS_SUBMITTED].find(
+                {"section_id": {"$in": section_ids}},
+                {"_id": 0, "section_id": 1, "imported_at": 1, "created_at": 1, "createdAt": 1, "updated_at": 1, "updatedAt": 1},
+            )
+            async for s in s_cur:
+                sid = str(s.get("section_id") or "").strip()
+                if sid:
+                    sec_map[sid] = s
+
+        stale_ids: List[str] = []
+        kept: List[Dict[str, Any]] = []
+
+        for r in rows:
+            sid = str(r.get("section_id") or "").strip()
+            fs_id = str(r.get("fs_id") or "").strip()
+            if not sid or not fs_id:
+                # malformed record; keep it visible rather than risking data loss
+                kept.append(r)
+                continue
+
+            # 2) Global restore/re-import cleanup: if the request predates the latest
+            #    section snapshot, it is always stale.
+            req_ts = _doc_ts(r)
+            if snapshot_ts and req_ts and req_ts < snapshot_ts:
+                stale_ids.append(fs_id)
+                continue
+
+            sec_doc = sec_map.get(sid)
+            if not sec_doc:
+                stale_ids.append(fs_id)
+                continue
+
+            sec_ts = _section_ts(sec_doc)
+            if req_ts and sec_ts and req_ts < sec_ts:
+                stale_ids.append(fs_id)
+                continue
+
+            kept.append(r)
+
+        if stale_ids:
+            await db.faculty_service.delete_many({"fs_id": {"$in": stale_ids}})
+        rows = kept
+    except Exception:
+        # Never block listing if the cleanup guard fails.
+        pass
+
     return {"ok": True, "rows": rows}
 
 # --------------------------- CREATE ---------------------------
@@ -493,6 +1193,8 @@ async def fs_list(
 @router.post("/create")
 async def fs_create(payload: Dict[str, Any] = Body(...)):
     course_code = _normalize_code(payload.get("course_code"))
+    section_id = str(payload.get("section_id") or "").strip()
+    section_code = str(payload.get("section") or payload.get("section_code") or "").strip()
     units = payload.get("units", None)
     to_department = payload.get("to_department")
     course_title = (payload.get("course_title") or "").strip()
@@ -523,6 +1225,49 @@ async def fs_create(payload: Dict[str, Any] = Body(...)):
         raise HTTPException(status_code=400, detail="to_department cannot be the same as from_department.")
     if not course_code:
         raise HTTPException(status_code=400, detail="course_code is required.")
+    if not section_id:
+        raise HTTPException(status_code=400, detail="section_id is required.")
+
+    # Validate section belongs to the selected course in the active/planning term when possible.
+    try:
+        active_term = await _active_term()
+        term_id = (active_term or {}).get("term_id")
+        from_dept_id = (from_known or {}).get("department_id") if from_known else None
+
+        if term_id:
+            # Resolve course_id for the requested course (prefer scoping to requesting dept if possible)
+            course_doc = await db.courses.find_one(
+                {
+                    "$and": [
+                        {"$or": [{"course_code": course_code}, {"course_code": [course_code]}]},
+                        *([{"department_id": from_dept_id}] if from_dept_id else []),
+                    ]
+                },
+                {"_id": 0, "course_id": 1},
+            )
+            if not course_doc:
+                course_doc = await _course_by_code(course_code)
+
+            course_id = (course_doc or {}).get("course_id")
+            if course_id:
+                sec = await db[COL_SECTIONS_SUBMITTED].find_one(
+                    {
+                        "term_id": term_id,
+                        "submitted_for_scheduling": True,
+                        "course_id": course_id,
+                        "section_id": section_id,
+                    },
+                    {"_id": 0, "section_id": 1, "section_code": 1},
+                )
+                if not sec:
+                    raise HTTPException(status_code=400, detail="Selected section is not valid for this course in the active term.")
+                if not section_code:
+                    section_code = str(sec.get("section_code") or "").strip()
+    except HTTPException:
+        raise
+    except Exception:
+        # Do not block creation if OM context is unavailable; section_id will still be saved.
+        pass
 
     # resolve title/units from catalog if missing
     if not course_title or units is None:
@@ -545,6 +1290,8 @@ async def fs_create(payload: Dict[str, Any] = Body(...)):
         "from_department": from_department,
         "to_department": to_department,
         "course_code": course_code,
+        "section_id": section_id,
+        "section": section_code,
         "course_title": course_title,
         "units": units,
         "faculty": {},
@@ -566,7 +1313,10 @@ async def fs_create(payload: Dict[str, Any] = Body(...)):
 # Robust + idempotent: mark as sent and (optionally) log email. Lack of recipient mapping will NOT error.
 
 @router.post("/send/{fs_id}")
-async def fs_send(fs_id: str):
+async def fs_send(
+    fs_id: str,
+    userId: str | None = Query(None, description="(Optional) Acting user id; used as Gmail sender when available"),
+):
     row = await db.faculty_service.find_one({"fs_id": fs_id})
     if not row:
         raise HTTPException(status_code=404, detail="Not found.")
@@ -586,6 +1336,8 @@ async def fs_send(fs_id: str):
                 title="Faculty Service: New request received",
                 details=f"{row.get('from_department','')} sent a request for {row.get('course_code','')} – {row.get('course_title','')}.",
                 meta={"route": "/chair/faculty-service", "fs_id": fs_id, "kind": "faculty_service_received"},
+                send_email=True,
+                email_from_user_id=(userId or None),
             )
     except Exception:
         # notifications should not block the request flow
@@ -626,7 +1378,11 @@ async def fs_send(fs_id: str):
 # --------------------------- RESPOND ---------------------------
 
 @router.post("/respond/{fs_id}")
-async def fs_respond(fs_id: str, payload: Dict[str, Any] = Body(...)):
+async def fs_respond(
+    fs_id: str,
+    payload: Dict[str, Any] = Body(...),
+    userId: str | None = Query(None, description="(Optional) Acting user id; used as Gmail sender when available"),
+):
     row = await db.faculty_service.find_one({"fs_id": fs_id})
     if not row:
         raise HTTPException(status_code=404, detail="Not found.")
@@ -666,34 +1422,96 @@ async def fs_respond(fs_id: str, payload: Dict[str, Any] = Body(...)):
     }
     await db.faculty_service.update_one({"fs_id": fs_id}, {"$set": update})
 
+    # Mirror the accepted faculty service details back into OM Load Assignment
+    # sources so the requesting department sees the assigned faculty/schedule.
+    reflected_to_om = False
+    try:
+        await _reflect_faculty_service_to_om(row, update)
+        reflected_to_om = True
+    except Exception:
+        # Best-effort only; do not block the faculty service flow.
+        reflected_to_om = False
+
     # In-app notification back to the requesting department chair user(s)
     try:
         recipients = await _chair_user_ids_for_dept(row.get('from_department') or "")
         for uid in recipients:
             await create_notification(
                 user_id=uid,
-                title="Faculty Service: Request responded",
-                details=f"{row.get('to_department','')} responded to {row.get('course_code','')} – {row.get('course_title','')}.",
+                title="Faculty Service: Request Accepted",
+                details=f"{row.get('to_department','')} accepted {row.get('course_code','')} – {row.get('course_title','')}.",
                 meta={"route": "/chair/faculty-service", "fs_id": fs_id, "kind": "faculty_service_responded"},
+                send_email=True,
+                email_from_user_id=(userId or payload.get("user_id") or payload.get("userId") or None),
             )
     except Exception:
         pass
+
+    # ALSO notify OM(s) for the requesting department since the accepted response is synced
+    # into OM Load Assignment.
+    try:
+        om_uids = await _om_user_ids_for_dept(row.get("from_department") or "")
+        if om_uids:
+            fac_name = " ".join([
+                str((fac_out or {}).get("first_name") or "").strip(),
+                str((fac_out or {}).get("last_name") or "").strip(),
+            ]).strip()
+            fac_name = fac_name or (str((fac_out or {}).get("faculty_id") or "").strip() or "a faculty")
+
+            details = (
+                f"Faculty Service Request accepted for {row.get('course_code','')} – {row.get('course_title','')}. "
+                f"Assigned to {fac_name}."
+            )
+            if not reflected_to_om:
+                # In the rare case syncing failed, still inform OM so they can verify.
+                details += " (Load Assignment sync may need verification.)"
+
+            for uid in om_uids:
+                await create_notification(
+                    user_id=uid,
+                    title="Faculty Service: Load Assignment updated",
+                    details=details,
+                    meta={
+                        "route": "/om/load-assignment",
+                        "fs_id": fs_id,
+                        "kind": "faculty_service_synced_to_om",
+                        "course_code": row.get("course_code"),
+                        "section_id": row.get("section_id"),
+                    },
+                    send_email=True,
+                    email_from_user_id=(userId or payload.get("user_id") or payload.get("userId") or None),
+                )
+    except Exception:
+        # notifications should not block the response flow
+        pass
+
     doc = await db.faculty_service.find_one({"fs_id": fs_id}, {"_id": 0})
     return {"ok": True, "row": doc}
 
 # --------------------------- REJECT ---------------------------
 
 @router.post("/reject/{fs_id}")
-async def fs_reject(fs_id: str, payload: Dict[str, Any] = Body(default={})):
+async def fs_reject(
+    fs_id: str,
+    payload: Dict[str, Any] = Body(default={}),
+    userId: str | None = Query(None, description="(Optional) Acting user id; used as Gmail sender when available"),
+):
     row = await db.faculty_service.find_one({"fs_id": fs_id})
     if not row:
         raise HTTPException(status_code=404, detail="Not found.")
+
+    prev_status = (row.get("status") or "sent").strip()
 
     remarks = (payload.get("remarks") or "").strip()
     await db.faculty_service.update_one(
         {"fs_id": fs_id},
         {"$set": {"status": "rejected", "remarks": remarks, "updated_at": _now_iso()}}
     )
+
+    # If this was previously Approved/Responded and reflected into OM Load Assignment,
+    # undo the reflection so the Load Assignment row reverts to having no assigned faculty.
+    if prev_status == "responded":
+        await _unreflect_faculty_service_from_om(row)
 
     # In-app notification back to the requesting department chair user(s)
     try:
@@ -704,6 +1522,8 @@ async def fs_reject(fs_id: str, payload: Dict[str, Any] = Body(default={})):
                 title="Faculty Service: Request rejected",
                 details=f"{row.get('to_department','')} rejected {row.get('course_code','')} – {row.get('course_title','')}. Remarks: {remarks or '—'}",
                 meta={"route": "/chair/faculty-service", "fs_id": fs_id, "kind": "faculty_service_rejected"},
+                send_email=True,
+                email_from_user_id=(userId or payload.get("user_id") or payload.get("userId") or None),
             )
     except Exception:
         pass
@@ -735,5 +1555,88 @@ async def fs_reject(fs_id: str, payload: Dict[str, Any] = Body(default={})):
         })
     except Exception:
         pass
+    doc = await db.faculty_service.find_one({"fs_id": fs_id}, {"_id": 0})
+    return {"ok": True, "row": doc}
+
+
+# --------------------------- RESTORE (Undo/Redo helper) ---------------------------
+
+@router.post("/restore/{fs_id}")
+async def fs_restore(fs_id: str, payload: Dict[str, Any] = Body(default={})):
+    """Restore/overwrite a subset of fields on a Faculty Service row.
+
+    This endpoint is intentionally narrow and is used by the UI to support
+    Undo/Redo of *committed* actions (e.g., Respond / Reject) by restoring the
+    previous row snapshot.
+
+    Allowed fields: status, faculty, day1/begin1/end1, day2/begin2/end2, remarks.
+    """
+
+    row = await db.faculty_service.find_one({"fs_id": fs_id})
+    if not row:
+        raise HTTPException(status_code=404, detail="Not found.")
+
+    prev_status = (row.get("status") or "sent").strip()
+
+    allowed_status = {"sent", "responded", "rejected"}
+    status = (payload.get("status") or row.get("status") or "sent").strip()
+    if status not in allowed_status:
+        raise HTTPException(status_code=400, detail="Invalid status.")
+
+    faculty = payload.get("faculty") if isinstance(payload.get("faculty"), dict) else None
+    remarks = payload.get("remarks")
+
+    # schedule fields
+    day1 = payload.get("day1")
+    begin1 = payload.get("begin1")
+    end1 = payload.get("end1")
+    day2 = payload.get("day2")
+    begin2 = payload.get("begin2")
+    end2 = payload.get("end2")
+
+    # Normalize and compute end times if begin is present but end isn't.
+    if begin1 is not None and (end1 is None or end1 == ""):
+        end1 = END_BY_BEGIN.get(begin1, end1 or "")
+    if begin2 is not None and (end2 is None or end2 == ""):
+        end2 = END_BY_BEGIN.get(begin2, end2 or "")
+
+    update: Dict[str, Any] = {
+        "status": status,
+        "updated_at": _now_iso(),
+    }
+
+    if faculty is not None:
+        update["faculty"] = {
+            "faculty_id": faculty.get("faculty_id"),
+            "first_name": faculty.get("first_name"),
+            "last_name": faculty.get("last_name"),
+            "email": faculty.get("email"),
+        }
+
+    if day1 is not None:
+        update["day1"] = day1
+    if begin1 is not None:
+        update["begin1"] = begin1
+    if end1 is not None:
+        update["end1"] = end1
+    if day2 is not None:
+        update["day2"] = day2
+    if begin2 is not None:
+        update["begin2"] = begin2
+    if end2 is not None:
+        update["end2"] = end2
+    if remarks is not None:
+        update["remarks"] = str(remarks)
+
+    await db.faculty_service.update_one({"fs_id": fs_id}, {"$set": update})
+
+    # Keep OM Load Assignment reflection consistent with status transitions
+    # - moving away from responded => undo faculty assignment reflection
+    # - moving into responded => apply reflection using the restored snapshot
+    if prev_status == "responded" and status != "responded":
+        await _unreflect_faculty_service_from_om(row)
+    elif prev_status != "responded" and status == "responded":
+        merged = {**row, **update}
+        await _reflect_faculty_service_to_om(merged, merged)
     doc = await db.faculty_service.find_one({"fs_id": fs_id}, {"_id": 0})
     return {"ok": True, "row": doc}

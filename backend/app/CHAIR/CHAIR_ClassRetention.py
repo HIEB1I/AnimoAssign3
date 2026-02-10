@@ -1,353 +1,709 @@
-# backend/app/CHAIR/CHAIR_ClassRetention.py
+from __future__ import annotations
+
+from datetime import datetime
 from typing import Any, Dict, List, Optional
+
 from fastapi import APIRouter, HTTPException, Query, Body
+from pymongo import ASCENDING, ReturnDocument
+from pymongo.errors import DuplicateKeyError
+from bson import ObjectId
+
 from ..main import db
 
 router = APIRouter(prefix="/chair", tags=["chair"])
 
 # --- collections ---
+COL_CLASS_RETENTION = "class_retention"
 COL_TERMS = "terms"
 COL_COURSES = "courses"
 COL_SECTIONS = "sections"
-COL_ASSIGN = "faculty_assignments"
-COL_PROFILES = "faculty_profiles"
 COL_USERS = "users"
-COL_DEPARTMENTS = "departments"
-COL_ROLE_ASSIGN = "role_assignments"
-COL_USER_ROLES = "user_roles"
+COL_FAC_PROFILES = "faculty_profiles"
+COL_FAC_ASSIGN = "faculty_assignments"
+COL_PREEN_COUNT = "preenlistment_count" 
 
-# Class retention docs live here (1 doc per section per term)
-# Suggested shape:
-# { retention_id, term_id, section_id, course_id, status, remarks?, requested_at?, enrolled? }
-COL_CLASS_RETENTION = "class_retention"
+STATUS_OPTIONS = ["Approved", "Under Review", "Dissolved"]
 
 
-async def _active_term() -> Dict[str, Any]:
-    """Return the active term; fallback to latest AY/term_number."""
-    t = await db[COL_TERMS].find_one(
-        {"$or": [{"status": "active"}, {"is_current": True}]},
-        {"_id": 0, "term_id": 1, "acad_year_start": 1, "term_number": 1},
+def _status_to_section_remarks_tag(status: str) -> str:
+    """Map Class Retention status → sections.remarks tag used by APO + OM screens.
+
+    We only tag Dissolved in sections.remarks so APO_CourseOfferings and OM_LoadAssignment can see it.
+    """
+    s = (status or "").strip().lower()
+    if s == "dissolved":
+        return "DISSOLVED"
+    return ""
+
+
+async def _ensure_section_remarks_tag(section_id: Optional[str], status: str, now: datetime) -> None:
+    """Ensure sections.remarks contains a marker for Dissolved.
+
+    Notes:
+    - APO_CourseOfferings reads section remarks from `sections.remarks` and exposes it as `section_remarks`.
+    - OM_LoadAssignment also preloads remarks from `sections.remarks` (not from `sections_submitted`).
+    """
+    sid = (section_id or "").strip()
+    tag = _status_to_section_remarks_tag(status)
+    if not sid or not tag:
+        return
+
+    sec = await db[COL_SECTIONS].find_one({"section_id": sid}, {"_id": 0, "remarks": 1})
+    if not sec:
+        return
+    cur = str(sec.get("remarks") or "").strip()
+    if tag.lower() in cur.lower():
+        return
+
+    new_remarks = tag if not cur else f"{cur} | {tag}"
+    await db[COL_SECTIONS].update_one(
+        {"section_id": sid},
+        {"$set": {"remarks": new_remarks, "updated_at": now}},
     )
-    if t:
-        return t
-    last = (
-        await db[COL_TERMS]
-        .find({}, {"_id": 0, "term_id": 1, "acad_year_start": 1, "term_number": 1})
-        .sort([("acad_year_start", -1), ("term_number", -1)])
-        .limit(1)
-        .to_list(1)
+
+# indexes (safe with Motor or PyMongo; ignore failures)
+try:
+    db[COL_CLASS_RETENTION].create_index([("term_id", ASCENDING)])
+    db[COL_CLASS_RETENTION].create_index([("course_id", ASCENDING)])
+    db[COL_CLASS_RETENTION].create_index([("section_id", ASCENDING)])
+    db[COL_CLASS_RETENTION].create_index([("status", ASCENDING)])
+    db[COL_CLASS_RETENTION].create_index([("updated_at", ASCENDING)])
+    db[COL_FAC_ASSIGN].create_index([("section_id", ASCENDING), ("created_at", ASCENDING)])
+    # Prevent duplicates: one retention row per term + section
+    db[COL_CLASS_RETENTION].create_index(
+        [("term_id", ASCENDING), ("course_id", ASCENDING), ("section_id", ASCENDING)],
+        unique=True
     )
-    return last[0] if last else {}
+
+except Exception:
+    pass
 
 
-def _course_code_expr():
-    # Normalize string | array to a single display code
+def _course_code_expr() -> Dict[str, Any]:
+    # Handles array-or-scalar course_code
     return {
-        "$cond": [
-            {"$isArray": "$course.course_code"},
-            {"$ifNull": [{"$arrayElemAt": ["$course.course_code", 0]}, ""]},
+        "$ifNull": [
+            {"$arrayElemAt": ["$course.course_code", 0]},
             {"$ifNull": ["$course.course_code", ""]},
         ]
     }
 
 
-async def _resolve_department_for_user(userEmail: Optional[str], userId: Optional[str]) -> Optional[str]:
-    """Return department_id from the user's role scope (first 'department' scope found)."""
-    if not userEmail and not userId:
-        return None
-
-    match: Dict[str, Any] = {"user_id": userId} if userId else {"email": userEmail}
-
-    pipeline: List[Dict[str, Any]] = [
-        {"$match": match},
-        {"$project": {"_id": 0, "user_id": 1, "email": 1}},
-        {"$lookup": {
-            "from": COL_ROLE_ASSIGN,
-            "let": {"uid": "$user_id"},
-            "pipeline": [{"$match": {"$expr": {"$eq": ["$user_id", "$$uid"]}}}],
-            "as": "ra_list"
-        }},
-        {"$unwind": {"path": "$ra_list", "preserveNullAndEmptyArrays": True}},
-        {"$addFields": {
-            "department_id": {
-                "$let": {
-                    "vars": {"sc": {"$ifNull": ["$ra_list.scope", []]}},
-                    "in": {"$first": {
-                        "$map": {
-                            "input": {
-                                "$filter": {
-                                    "input": "$$sc",
-                                    "as": "s",
-                                    "cond": {"$eq": ["$$s.type", "department"]}
-                                }
-                            },
-                            "as": "d",
-                            "in": "$$d.id"
-                        }
-                    }}
+def _term_label_expr() -> Dict[str, Any]:
+    # Term {term_number} · AY {acad_year_start}-{acad_year_start+1}
+    return {
+        "$concat": [
+            "Term ",
+            {"$toString": {"$ifNull": ["$term.term_number", ""]}},
+            " · AY ",
+            {"$toString": {"$ifNull": ["$term.acad_year_start", ""]}},
+            "-",
+            {
+                "$toString": {
+                    "$add": [
+                        {"$ifNull": ["$term.acad_year_start", 0]},
+                        1,
+                    ]
                 }
-            }
-        }},
-        {"$project": {"department_id": 1}},
-        {"$limit": 1},
-    ]
-
-    docs = [d async for d in db[COL_USERS].aggregate(pipeline)]
-    if not docs:
-        return None
-    return docs[0].get("department_id")
-
-
-@router.post("/class-retention")
-async def chair_class_retention_handler(
-    action: str = Query("list", description="options | list | update | bulkForward | header"),
-    status: Optional[str] = Query(None, description="Filter by status (list)"),
-    search: Optional[str] = Query(None, description="Search by course code/title (list)"),
-    sectionId: Optional[str] = Query(None, description="For single update"),
-    termId: Optional[str] = Query(None, description="Override active term"),
-    userEmail: Optional[str] = Query(None, description="Header: user email (for scoping)"),
-    userId: Optional[str] = Query(None, description="Header: user id (for scoping)"),
-    payload: Optional[Dict[str, Any]] = Body(None),
-):
-    """
-    CHAIR Class Retention (department-scoped):
-      - header:     topbar profile (if needed later)
-      - options:    statuses + active term meta
-      - list:       list retention rows for chair's department in active term
-      - update:     update status/remarks of a single section in active term (scoped)
-      - bulkForward:set status for multiple section_ids in active term (scoped)
-    """
-
-    # ---------- HEADER (optional symmetry with SP; kept simple) ----------
-    if action == "header":
-        if not userEmail and not userId:
-            raise HTTPException(status_code=400, detail="userEmail or userId is required.")
-        # Minimal header; can be expanded to mirror SP if you later need it.
-        return {"ok": True}
-
-    # ---------- Ensure active term for list/update/bulk ----------
-    active = await _active_term()
-    current_term_id = termId or active.get("term_id")
-    if not current_term_id and action in {"list", "update", "bulkForward"}:
-        raise HTTPException(status_code=503, detail="No active term configured.")
-
-    # Department scoping (same as Student Petition) :contentReference[oaicite:5]{index=5}
-    department_id = await _resolve_department_for_user(userEmail, userId)
-
-    # ---------- OPTIONS ----------
-    if action == "options":
-        cfg = await db[COL_CLASS_RETENTION].find_one(
-            {"_id": "config", "doc_type": {"$in": ["config", "Config"]}},
-            {"_id": 0, "statuses": 1},
-        )
-        statuses = (cfg or {}).get("statuses") or [
-            "Approved",
-            "Under Review",
-            "Dissolved",
-            "Special Class",
-            "Forwarded",
+            },
         ]
-        return {
-            "ok": True,
-            "statuses": statuses,
-            "activeTerm": {
-                "term_id": active.get("term_id", ""),
-                "acad_year_start": active.get("acad_year_start"),
-                "term_number": active.get("term_number"),
+    }
+
+def _upper_last_first_from_user_expr() -> Dict[str, Any]:
+    """
+    Build "LASTNAME, FIRSTNAME" (ALL CAPS) from either faculty_profiles or users.
+    Joins are already unwound to 'fac' (faculty_profiles) and 'u' (users).
+    """
+    return {
+        "$let": {
+            "vars": {
+                "ln": {
+                    "$ifNull": [
+                        "$fac.last_name",
+                        {"$ifNull": ["$u.lastName", "$u.last_name"]},
+                    ]
+                },
+                "fn": {
+                    "$ifNull": [
+                        "$fac.first_name",
+                        {"$ifNull": ["$u.firstName", "$u.first_name"]},
+                    ]
+                },
+            },
+            "in": {
+                "$toUpper": {
+                    "$concat": [
+                        {"$ifNull": ["$$ln", ""]},
+                        ", ",
+                        {"$ifNull": ["$$fn", ""]},
+                    ]
+                }
             },
         }
+    }
 
-    # ---------- LIST ----------
-    if action == "list":
-        pipeline: List[Dict[str, Any]] = [
-            {"$match": {"term_id": current_term_id}},
-            {"$lookup": {
-                "from": COL_COURSES,
-                "localField": "course_id",
-                "foreignField": "course_id",
-                "as": "course"
-            }},
-            {"$unwind": {"path": "$course", "preserveNullAndEmptyArrays": True}},
-            {"$lookup": {
-                "from": COL_SECTIONS,
-                "localField": "section_id",
-                "foreignField": "section_id",
-                "as": "section"
-            }},
-            {"$unwind": {"path": "$section", "preserveNullAndEmptyArrays": True}},
-            # pull one faculty name (if any) assigned to this section
-            {"$lookup": {
-                "from": COL_ASSIGN,
+
+def _list_pipeline(term_id: Optional[str], status: Optional[str], q: Optional[str]) -> List[Dict[str, Any]]:
+    """
+    - Excludes rows with missing/blank section_id (garbage/orphans).
+    - Requires an actual section join.
+    - Filters by the joined section's term (authoritative).
+    - Deduplicates by section_id (keeps latest updated_at/_id).
+    - Derives faculty from latest non-archived faculty_assignments.
+    """
+    base_match: Dict[str, Any] = {
+        "section_id": {"$type": "string", "$ne": ""}
+    }
+    # Only consider retention rows that belong to the WORKING term
+    if term_id:
+        base_match["term_id"] = term_id
+
+    if status and status not in ("All Status", ""):
+        base_match["status"] = status
+
+    pipeline: List[Dict[str, Any]] = [
+        {"$match": base_match},
+
+        # join term (by retention.term_id), course, section (require section)
+        {"$lookup": {"from": COL_TERMS, "localField": "term_id", "foreignField": "term_id", "as": "term"}},
+        {"$unwind": {"path": "$term", "preserveNullAndEmptyArrays": True}},
+        {"$lookup": {"from": COL_COURSES, "localField": "course_id", "foreignField": "course_id", "as": "course"}},
+        {"$unwind": {"path": "$course", "preserveNullAndEmptyArrays": True}},
+        {"$lookup": {"from": COL_SECTIONS, "localField": "section_id", "foreignField": "section_id", "as": "section"}},
+        {"$unwind": {"path": "$section", "preserveNullAndEmptyArrays": False}},  # require existing section
+
+        # authoritative term filter: from the section's term
+        *([{ "$match": { "section.term_id": term_id } }] if term_id else []),
+
+        # authoritative faculty via latest non-archived assignment
+        {
+            "$lookup": {
+                "from": COL_FAC_ASSIGN,
                 "let": {"sid": "$section_id"},
                 "pipeline": [
-                    {"$match": {"$expr": {"$eq": ["$section_id", "$$sid"]}}},
+                    {"$match": {
+                        "$expr": {
+                            "$and": [
+                                {"$eq": ["$section_id", "$$sid"]},
+                                {"$ne": ["$is_archived", True]},
+                            ]
+                        }
+                    }},
                     {"$sort": {"created_at": -1}},
                     {"$limit": 1},
                 ],
-                "as": "asg"
-            }},
-            {"$unwind": {"path": "$asg", "preserveNullAndEmptyArrays": True}},
-            {"$lookup": {
-                "from": COL_PROFILES,
-                "localField": "asg.faculty_id",
-                "foreignField": "faculty_id",
-                "as": "prof"
-            }},
-            {"$unwind": {"path": "$prof", "preserveNullAndEmptyArrays": True}},
-            {"$lookup": {
+                "as": "fa"
+            }
+        },
+        {"$unwind": {"path": "$fa", "preserveNullAndEmptyArrays": True}},
+
+        # profiles & users from the derived assignment
+        {"$lookup": {
+            "from": COL_FAC_PROFILES,
+            "localField": "fa.faculty_id",
+            "foreignField": "faculty_id",
+            "as": "fac",
+        }},
+        {"$unwind": {"path": "$fac", "preserveNullAndEmptyArrays": True}},
+
+        # users: support both userId and user_id in the users collection
+        {
+            "$lookup": {
                 "from": COL_USERS,
-                "localField": "prof.user_id",
-                "foreignField": "user_id",
-                "as": "u"
-            }},
-            {"$unwind": {"path": "$u", "preserveNullAndEmptyArrays": True}},
-            {"$addFields": {
-                "course_code": _course_code_expr(),
-                "course_title": {"$ifNull": ["$course.course_title", ""]},
-                "department_id": {"$ifNull": ["$course.department_id", ""]},
-                "section_code": {"$ifNull": ["$section.section_code", ""]},
-                "faculty_name": {
-                    "$trim": {"input": {"$concat": [
-                        {"$ifNull": ["$u.last_name", ""]},
-                        { "$cond": [{ "$ifNull": ["$u.last_name", False]}, ", ", "" ]},
-                        {"$ifNull": ["$u.first_name", ""]},
-                    ]}}
-                },
-                "student_units": {"$ifNull": ["$course.units", None]},
-                "faculty_units": {"$ifNull": ["$course.units", None]},
-                "enrolled": {"$ifNull": ["$enrolled", {"$ifNull": ["$section.enrolled", 0]}]},
-            }},
-        ]
+                "let": {"uid": "$fac.user_id"},
+                "pipeline": [
+                    {
+                        "$match": {
+                            "$expr": {
+                                "$or": [
+                                    {"$eq": ["$userId", "$$uid"]},
+                                    {"$eq": ["$user_id", "$$uid"]},
+                                ]
+                            }
+                        }
+                    },
+                    {"$limit": 1},
+                ],
+                "as": "u",
+            }
+        },
+        {"$unwind": {"path": "$u", "preserveNullAndEmptyArrays": True}},
 
-        # Department scope filter
-        post_match: Dict[str, Any] = {}
-        if department_id:
-            post_match["department_id"] = department_id
+        # optional text filter
+        *([{
+            "$match": {
+                "$or": [
+                    {"course.course_code": {"$regex": q, "$options": "i"}},
+                    {"course.course_title": {"$regex": q, "$options": "i"}},
+                    {"section.section_code": {"$regex": q, "$options": "i"}},
+                ]
+            }
+        }] if q else []),
 
-        # Client filters
-        if status and status.strip().lower() != "all status":
-            post_match["status"] = status.strip()
-        if search and search.strip():
-            s = search.strip()
-            post_match["$or"] = [
-                {"course_code": {"$regex": s, "$options": "i"}},
-                {"course_title": {"$regex": s, "$options": "i"}},
-                {"section_code": {"$regex": s, "$options": "i"}},
+        # DEDUPE: keep only the latest row per (course, section)
+        {"$sort": {"updated_at": -1, "_id": -1}},
+        {"$group": {
+            "_id": {
+                "section_id": "$section_id",
+                "course_id": "$course_id",
+            },
+            "doc": { "$first": "$$ROOT" }
+        }},
+        {"$replaceRoot": { "newRoot": "$doc" }},
+
+        # final shape
+        {"$project": {
+            "_id": 0,
+            "retention_id": {"$toString": "$_id"},
+            "term_id": 1, "course_id": 1, "section_id": 1,
+            "faculty_id": {"$ifNull": ["$fa.faculty_id", None]},
+            "student_units": 1, "faculty_units": 1, "status": {"$cond": [{"$eq": ["$status", "Special Class"]}, "Dissolved", "$status"]},
+            "created_at": 1, "updated_at": 1,
+            "enrolled": {"$ifNull": ["$enrolled", "$section.enrolled"]},
+            "term_label": _term_label_expr(),
+            "course_code": _course_code_expr(),
+            "course_title": {"$ifNull": ["$course.course_title", ""]},
+            "section_code": {"$ifNull": ["$section.section_code", ""]},
+            "faculty_name": {
+                "$cond": [
+                    {"$gt": [{"$strLenCP": {"$ifNull": ["$fa.faculty_id", ""]}}, 0]},
+                    _upper_last_first_from_user_expr(),
+                    "UNASSIGNED"
+                ]
+            },
+        }},
+        {"$sort": {"course_code": 1, "section_code": 1}},
+    ]
+    return pipeline
+
+
+async def _find_active_term() -> Optional[Dict[str, Any]]:
+    """
+    Return the WORKING / PLANNING term for Class Retention.
+
+    Priority:
+    1) If there is an active (non-archived) pre-enlistment batch in
+       preenlistment_count, use that term_id.
+    2) Otherwise, use the *next* term after the current term
+       (where is_current/status flags it as current/active).
+    3) If there is no "next" term configured, fall back to the current/latest term.
+    """
+
+    # 1) Try to derive from an active pre-enlistment batch
+    pre_doc = await db[COL_PREEN_COUNT].find_one(
+        {"is_archived": {"$ne": True}},
+        {"_id": 0, "term_id": 1},
+    )
+    if pre_doc and pre_doc.get("term_id"):
+        t = await db[COL_TERMS].find_one(
+            {"term_id": pre_doc["term_id"]},
+            {"_id": 0, "term_id": 1, "term_number": 1, "acad_year_start": 1},
+        )
+        if t:
+            return t
+
+    # 2) Fallback: "current" term (any of the usual flags)
+    current = await db[COL_TERMS].find_one(
+        {
+            "$or": [
+                {"status": "active"},
+                {"status": "Active"},
+                {"is_current": True},
+                {"is_active": True},
+                {"active": True},
             ]
+        },
+        {"_id": 0, "term_id": 1, "term_number": 1, "acad_year_start": 1},
+    )
 
-        if post_match:
-            pipeline.append({"$match": post_match})
+    if not current:
+        # If nothing is flagged, use the latest by AY + term_number
+        last = await db[COL_TERMS].find(
+            {}, {"_id": 0, "term_id": 1, "term_number": 1, "acad_year_start": 1},
+        ).sort([("acad_year_start", -1), ("term_number", -1)]).limit(1).to_list(1)
+        current = last[0] if last else None
 
-        pipeline += [
+    if not current:
+        # No terms at all
+        return None
+
+    # 3) Compute the "next" term after the current term
+    next_terms = await db[COL_TERMS].find(
+        {
+            "$or": [
+                {"acad_year_start": {"$gt": current["acad_year_start"]}},
+                {
+                    "acad_year_start": current["acad_year_start"],
+                    "term_number": {"$gt": current["term_number"]},
+                },
+            ]
+        },
+        {"_id": 0, "term_id": 1, "term_number": 1, "acad_year_start": 1},
+    ).sort([("acad_year_start", 1), ("term_number", 1)]).limit(1).to_list(1)
+
+    if next_terms:
+        # Use the next term as the working/planning term
+        return next_terms[0]
+
+    # If no next term, stick with current (still better than nothing)
+    return current
+
+def _to_int_or_none(v) -> Optional[int]:
+    if v is None or v == "":
+        return None
+    try:
+        return int(v)
+    except Exception:
+        raise HTTPException(status_code=400, detail="enrolled must be an integer")
+
+
+async def _derive_faculty_for_section(section_id: Optional[str]) -> Optional[str]:
+    """Return faculty_id from latest non-archived assignment for the section."""
+    if not section_id:
+        return None
+    fa = await db[COL_FAC_ASSIGN].find_one(
+        {"section_id": section_id, "is_archived": {"$ne": True}},
+        sort=[("created_at", -1)]
+    )
+    return fa.get("faculty_id") if fa else None
+
+
+@router.get("/classretention")
+async def cr_get(
+    action: str = Query(...),
+    term_id: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    q: Optional[str] = Query(None),
+    course_id: Optional[str] = Query(None),  # for sectionOptions
+):
+    # --- page options (statuses, term list, active term label) ---
+    if action == "options":
+        cur = db[COL_TERMS].find(
+            {}, {"_id": 0, "term_id": 1, "term_number": 1, "acad_year_start": 1}
+        ).sort([("acad_year_start", -1), ("term_number", -1)])
+        terms = await cur.to_list(length=5000)
+
+        active = await _find_active_term()
+        label = ""
+        if active:
+            ay = active.get("acad_year_start", 0)
+            tn = active.get("term_number", "")
+            label = f"Term {tn} · AY {ay}-{ay+1}"
+        return {
+            "ok": True,
+            "statuses": STATUS_OPTIONS,
+            "terms": [
+                {
+                    "term_id": t["term_id"],
+                    "label": f"Term {t.get('term_number','')} · AY {t.get('acad_year_start','')}-{(t.get('acad_year_start') or 0)+1}",
+                    "term_number": t.get("term_number"),
+                    "acad_year_start": t.get("acad_year_start"),
+                } for t in terms
+            ],
+            "activeTerm": active,
+            "activeTermLabel": label,
+        }
+
+    # --- list table rows ---
+    if action == "list":
+        if not term_id:
+            active = await _find_active_term()
+            term_id = active.get("term_id") if active else None
+
+        # If we still don't have a working term, do NOT show old rows
+        if not term_id:
+            return {"ok": True, "rows": []}
+
+        rows = await db[COL_CLASS_RETENTION].aggregate(
+            _list_pipeline(term_id, status, q)
+        ).to_list(length=5000)
+        return {"ok": True, "rows": rows}
+
+    # --- dropdown helpers: course options for active term (courses that have sections this term) ---
+    if action == "courseOptions":
+        t = term_id
+        if not t:
+            active = await _find_active_term()
+            t = active.get("term_id") if active else None
+        if not t:
+            return {"ok": True, "options": []}
+
+        pipeline = [
+            {"$match": {"term_id": t}},
+            {"$group": {"_id": "$course_id"}},
+            {"$lookup": {"from": COL_COURSES, "localField": "_id", "foreignField": "course_id", "as": "c"}},
+            {"$unwind": {"path": "$c", "preserveNullAndEmptyArrays": True}},
+            {"$project": {
+                "_id": 0,
+                "course_id": {"$ifNull": ["$c.course_id", "$_id"]},
+                "course_code": {"$ifNull": ["$c.course_code", ""]},
+                "course_title": {"$ifNull": ["$c.course_title", ""]},
+            }},
+            {"$sort": {"course_code": 1}},
+        ]
+        opts = await db[COL_SECTIONS].aggregate(pipeline).to_list(length=5000)
+        return {"ok": True, "options": opts}
+
+    # --- dropdown helpers: section options by course for active term (includes faculty) ---
+    if action == "sectionOptions":
+        t = term_id
+        if not t:
+            active = await _find_active_term()
+            t = active.get("term_id") if active else None
+        if not t or not course_id:
+            return {"ok": True, "options": []}
+
+        pipeline = [
+            {"$match": {"term_id": t, "course_id": course_id}},
+
+            # latest non-archived faculty assignment per section
+            {
+                "$lookup": {
+                    "from": COL_FAC_ASSIGN,
+                    "let": {"sid": "$section_id"},
+                    "pipeline": [
+                        {"$match": {
+                            "$expr": {
+                                "$and": [
+                                    {"$eq": ["$section_id", "$$sid"]},
+                                    {"$ne": ["$is_archived", True]},
+                                ]
+                            }
+                        }},
+                        {"$sort": {"created_at": -1}},
+                        {"$limit": 1},
+                    ],
+                    "as": "fa"
+                }
+            },
+            {"$unwind": {"path": "$fa", "preserveNullAndEmptyArrays": True}},
+
+            # faculty_profiles (limit 1) via pipeline lookup to avoid fan-out
+            {
+                "$lookup": {
+                    "from": COL_FAC_PROFILES,
+                    "let": {"fid": "$fa.faculty_id"},
+                    "pipeline": [
+                        {"$match": {"$expr": {"$eq": ["$faculty_id", "$$fid"]}}},
+                        {"$sort": {"updated_at": -1}},
+                        {"$limit": 1},
+                    ],
+                    "as": "fac"
+                }
+            },
+            {"$unwind": {"path": "$fac", "preserveNullAndEmptyArrays": True}},
+
+            # users (limit 1) via pipeline lookup; support userId and user_id
+            {
+                "$lookup": {
+                    "from": COL_USERS,
+                    "let": {"uid": "$fac.user_id"},
+                    "pipeline": [
+                        {
+                            "$match": {
+                                "$expr": {
+                                    "$or": [
+                                        {"$eq": ["$userId", "$$uid"]},
+                                        {"$eq": ["$user_id", "$$uid"]},
+                                    ]
+                                }
+                            }
+                        },
+                        {"$limit": 1},
+                    ],
+                    "as": "u",
+                }
+            },
+            {"$unwind": {"path": "$u", "preserveNullAndEmptyArrays": True}},
+
+            # shape
             {"$project": {
                 "_id": 0,
                 "section_id": 1,
-                "course_id": 1,
-                "course_code": 1,
-                "course_title": 1,
                 "section_code": 1,
-                "stuUnits": "$student_units",
-                "facUnits": "$faculty_units",
                 "enrolled": 1,
-                "faculty": {"$ifNull": ["$faculty_name", ""]},
-                "status": {"$ifNull": ["$status", ""]},
-                "remarks": {"$ifNull": ["$remarks", ""]},
+                "faculty_id": {"$ifNull": ["$fa.faculty_id", None]},
+                "faculty_name": {
+                    "$cond": [
+                        {"$gt": [{"$strLenCP": {"$ifNull": ["$fa.faculty_id", ""]}}, 0]},
+                        {
+                            "$toUpper": {
+                                "$concat": [
+                                    {"$ifNull": ["$fac.last_name", {"$ifNull": ["$u.lastName", "$u.last_name"]} ]},
+                                    ", ",
+                                    {"$ifNull": ["$fac.first_name", {"$ifNull": ["$u.firstName", "$u.first_name"]}]},
+                                ]
+                            }
+                        },
+                        "UNASSIGNED"
+                    ]
+                },
             }},
-            {"$sort": {"course_code": 1, "section_code": 1}},
+
+            # SAFETY: collapse to one row per section_id in case any upstream join duplicates slipped through
+            {"$group": {"_id": "$section_id", "doc": {"$first": "$$ROOT"}}},
+            {"$replaceRoot": {"newRoot": "$doc"}},
+
+            {"$sort": {"section_code": 1}},
         ]
+        opts = await db[COL_SECTIONS].aggregate(pipeline).to_list(length=5000)
+        return {"ok": True, "options": opts}
 
-        rows = [r async for r in db[COL_CLASS_RETENTION].aggregate(pipeline)]
-        return {"ok": True, "rows": rows, "term_id": current_term_id}
+    # --- fallback ---
+    raise HTTPException(status_code=400, detail="Unsupported action")
 
-    # ---------- UPDATE ----------
-    if action == "update":
-        if not sectionId:
-            raise HTTPException(status_code=400, detail="sectionId is required.")
-        if not payload:
-            raise HTTPException(status_code=400, detail="payload is required.")
 
-        new_status = (payload.get("status") or "").strip()
-        remarks_present = "remarks" in payload
-        new_remarks = (payload.get("remarks") or "") if remarks_present else None
+@router.post("/classretention")
+async def cr_post(action: str = Query(...), payload: Dict[str, Any] = Body(default={})):
+    now = datetime.utcnow()
 
-        # validate against config.statuses (optional)
-        if new_status:
-            cfg = await db[COL_CLASS_RETENTION].find_one(
-                {"_id": "config", "doc_type": {"$in": ["config", "Config"]}},
-                {"_id": 0, "statuses": 1},
+    if action == "save":
+        rid = payload.get("retention_id")
+
+        # normalize & validate enrolled
+        if "enrolled" in payload:
+            payload["enrolled"] = _to_int_or_none(payload.get("enrolled"))
+            if payload["enrolled"] is not None and payload["enrolled"] < 0:
+                raise HTTPException(status_code=400, detail="enrolled must be >= 0")
+
+        # always ignore incoming faculty_id (auto-derived)
+        if "faculty_id" in payload:
+            payload.pop("faculty_id", None)
+
+        # UPDATE
+        if rid:
+            try:
+                _id = ObjectId(rid)
+            except Exception:
+                raise HTTPException(status_code=400, detail="Invalid retention_id")
+
+            allowed = [
+                "term_id", "course_id", "section_id",
+                "student_units", "faculty_units", "status", "enrolled",
+            ]
+            update_doc = {k: payload[k] for k in allowed if k in payload}
+            if "status" in update_doc:
+                s = (update_doc.get("status") or "").strip()
+                if s.lower() == "special class":
+                    # Status removed; treat legacy value as Dissolved.
+                    update_doc["status"] = "Dissolved"
+                if update_doc["status"] not in STATUS_OPTIONS:
+                    raise HTTPException(status_code=400, detail="Invalid status")
+            update_doc["updated_at"] = now
+
+            # derive faculty from (new/current) section
+            section_id_for_fac = update_doc.get("section_id")
+            existing_status = None
+            if not section_id_for_fac:
+                existing = await db[COL_CLASS_RETENTION].find_one(
+                    {"_id": _id},
+                    {"_id": 0, "section_id": 1, "status": 1},
+                )
+                section_id_for_fac = existing.get("section_id") if existing else None
+                existing_status = existing.get("status") if existing else None
+
+            derived_faculty_id = await _derive_faculty_for_section(section_id_for_fac)
+            update_doc["faculty_id"] = derived_faculty_id
+
+            try:
+                out = await db[COL_CLASS_RETENTION].find_one_and_update(
+                    {"_id": _id},
+                    {"$set": update_doc},
+                    return_document=ReturnDocument.AFTER,
+                )
+            except DuplicateKeyError:
+                raise HTTPException(status_code=409, detail="A row for this term and section already exists.")
+            if not out:
+                raise HTTPException(status_code=404, detail="Retention row not found")
+
+            # mirror enrolled → sections
+            if "enrolled" in payload:
+                section_id = section_id_for_fac
+                if section_id:
+                    await db[COL_SECTIONS].update_one(
+                        {"section_id": section_id},
+                        {"$set": {"enrolled": payload["enrolled"], "updated_at": now}},
+                    )
+
+            # If status is Dissolved, auto-write a marker into sections.remarks
+            # so APO_CourseOfferings + OM_LoadAssignment can display it.
+            status_effective = (update_doc.get("status") or existing_status or "").strip()
+            await _ensure_section_remarks_tag(section_id_for_fac, status_effective, now)
+            return {"ok": True, "retention_id": rid}
+
+        # CREATE
+        for k in ("term_id", "course_id", "section_id"):
+            if not payload.get(k):
+                raise HTTPException(status_code=400, detail=f"{k} is required")
+
+        status = payload.get("status", "Under Review")
+        s = (status or "").strip()
+        if s.lower() == "special class":
+            # Status removed; treat legacy value as Dissolved.
+            status = "Dissolved"
+        if status not in STATUS_OPTIONS:
+            raise HTTPException(status_code=400, detail="Invalid status")
+
+        derived_faculty_id = await _derive_faculty_for_section(payload.get("section_id"))
+
+        doc = {
+            "term_id": payload["term_id"],
+            "course_id": payload["course_id"],
+            "section_id": payload["section_id"],
+            "faculty_id": derived_faculty_id,  # snapshot only; UI derives from assignments for display
+            "student_units": payload.get("student_units"),
+            "faculty_units": payload.get("faculty_units"),
+            "status": status,
+            "enrolled": payload.get("enrolled"),
+            "created_at": now,
+            "updated_at": now,
+        }
+        try:
+            res = await db[COL_CLASS_RETENTION].insert_one(doc)
+        except DuplicateKeyError:
+            raise HTTPException(status_code=409, detail="A row for this term and section already exists.")
+
+        # mirror enrolled → section
+        if doc.get("enrolled") is not None:
+            await db[COL_SECTIONS].update_one(
+                {"section_id": doc["section_id"]},
+                {"$set": {"enrolled": doc["enrolled"], "updated_at": now}},
             )
-            allowed = set((cfg or {}).get("statuses") or [])
-            if allowed and new_status not in allowed:
-                raise HTTPException(status_code=400, detail="Invalid status value.")
 
-        # department scope check (via course)
-        if department_id:
-            doc = await db[COL_CLASS_RETENTION].find_one(
-                {"term_id": current_term_id, "section_id": sectionId},
-                {"course_id": 1},
-            )
-            if not doc:
-                raise HTTPException(status_code=404, detail="Class retention record not found.")
-            course = await db[COL_COURSES].find_one({"course_id": doc.get("course_id")}, {"department_id": 1})
-            if not course or course.get("department_id") != department_id:
-                raise HTTPException(status_code=403, detail="Section not in your department.")
+        # If status is Dissolved, auto-write a marker into sections.remarks
+        # so APO_CourseOfferings + OM_LoadAssignment can display it.
+        await _ensure_section_remarks_tag(doc.get("section_id"), doc.get("status") or "", now)
 
-        updates: Dict[str, Any] = {}
-        if new_status:
-            updates["status"] = new_status
-        if remarks_present:
-            updates["remarks"] = new_remarks
+        return {"ok": True, "retention_id": str(res.inserted_id)}
 
-        if not updates:
-            return {"ok": False, "message": "Nothing to update."}
+    if action == "delete":
+        rid = payload.get("retention_id")
+        if not rid:
+            raise HTTPException(status_code=400, detail="retention_id required")
+        try:
+            _id = ObjectId(rid)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid retention_id")
+        await db[COL_CLASS_RETENTION].delete_one({"_id": _id})
+        return {"ok": True}
 
+    if action == "forward":
+        ids = payload.get("ids") or []
+        new_status = payload.get("to_status") or "Under Review"
+        if new_status not in STATUS_OPTIONS:
+            raise HTTPException(status_code=400, detail="Invalid status")
+        obj_ids: List[ObjectId] = []
+        for s in ids:
+            try:
+                obj_ids.append(ObjectId(s))
+            except Exception:
+                continue
+        if not obj_ids:
+            return {"ok": True, "matched": 0, "modified": 0}
         res = await db[COL_CLASS_RETENTION].update_many(
-            {"term_id": current_term_id, "section_id": sectionId},
-            {"$set": updates},
+            {"_id": {"$in": obj_ids}},
+            {"$set": {"status": new_status, "updated_at": now}},
         )
         return {"ok": True, "matched": res.matched_count, "modified": res.modified_count}
 
-    # ---------- BULK FORWARD ----------
-    if action == "bulkForward":
-        if not payload or not isinstance(payload.get("section_ids"), list):
-            raise HTTPException(status_code=400, detail="payload.section_ids must be an array.")
-        target_status = (payload.get("status") or "Forwarded").strip()
-
-        cfg = await db[COL_CLASS_RETENTION].find_one(
-            {"_id": "config", "doc_type": {"$in": ["config", "Config"]}},
-            {"_id": 0, "statuses": 1},
-        )
-        allowed = set((cfg or {}).get("statuses") or [])
-        if allowed and target_status not in allowed:
-            raise HTTPException(status_code=400, detail="Invalid status value.")
-
-        section_ids: List[str] = payload["section_ids"]
-
-        # If scoped, limit sections to those in the chair's department
-        scoped_ids = section_ids
-        if department_id:
-            # map section -> course -> dept
-            rel = await db[COL_CLASS_RETENTION].aggregate([
-                {"$match": {"term_id": current_term_id, "section_id": {"$in": section_ids}}},
-                {"$lookup": {
-                    "from": COL_COURSES,
-                    "localField": "course_id",
-                    "foreignField": "course_id",
-                    "as": "c"
-                }},
-                {"$unwind": {"path": "$c", "preserveNullAndEmptyArrays": True}},
-                {"$match": {"c.department_id": department_id}},
-                {"$project": {"_id": 0, "section_id": 1}},
-            ]).to_list(None)
-            scoped_ids = [x["section_id"] for x in rel]
-
-        if not scoped_ids:
-            return {"ok": True, "matched": 0, "modified": 0, "status": target_status}
-
-        res = await db[COL_CLASS_RETENTION].update_many(
-            {"term_id": current_term_id, "section_id": {"$in": scoped_ids}},
-            {"$set": {"status": target_status}},
-        )
-        return {"ok": True, "matched": res.matched_count, "modified": res.modified_count, "status": target_status}
-
-    raise HTTPException(status_code=400, detail="Invalid action parameter.")
+    raise HTTPException(status_code=400, detail="Unsupported action")

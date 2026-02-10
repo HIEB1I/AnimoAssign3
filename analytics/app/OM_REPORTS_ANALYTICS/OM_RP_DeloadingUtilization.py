@@ -18,10 +18,19 @@ async def fetch_deloading_utilization_term_paged(
     db = get_db()
 
     # 1) Load and order all terms (ascending)
-    terms: List[Dict[str, Any]] = await db["terms"] \
+    terms_all: List[Dict[str, Any]] = await db["terms"] \
         .find({}, {"_id": 0}) \
         .sort([("acad_year_start", 1), ("term_number", 1)]) \
         .to_list(None)
+
+    # Skip terms that have no deloading records at all.
+    # This prevents "empty" academic terms from appearing in the term pager.
+    deloading_term_ids = set(
+        [str(x or "").strip() for x in await db["deloadings"].distinct("term_id")]
+    )
+    terms: List[Dict[str, Any]] = [
+        t for t in (terms_all or []) if str(t.get("term_id") or "").strip() in deloading_term_ids
+    ]
 
     if not terms:
         return {
@@ -58,6 +67,8 @@ async def fetch_deloading_utilization_term_paged(
             idx = len(terms) - 1
     else:
         current_idxs = [i for i, t in enumerate(terms) if t.get("is_current") is True]
+        # If the DB current term has no deloadings (and thus was filtered out),
+        # fall back to the most recent term that has deloadings.
         idx = current_idxs[0] if current_idxs else (len(terms) - 1)
 
     # 3) Apply direction
@@ -165,12 +176,23 @@ async def fetch_deloading_utilization_term_paged(
     # --- Next-term admin risk (Unchanged but remains) -------------------------
     next_term_admin_warnings: List[Dict[str, Any]] = []
 
-    if idx > 0:
-        prev_term_id = terms[idx - 1].get("term_id")
+    # For warnings, use the true chronological previous term (even if it has no deloadings),
+    # so we don't accidentally skip continuity checks.
+    prev_term_id: Optional[str] = None
+    try:
+        cur_term_id_for_prev = target_term_id
+        all_idx = next(
+            (i for i, t in enumerate(terms_all or []) if t.get("term_id") == cur_term_id_for_prev),
+            -1,
+        )
+        if all_idx > 0:
+            prev_term_id = (terms_all[all_idx - 1] or {}).get("term_id")
+    except Exception:
+        prev_term_id = None
 
-        prev_term_deloadings = await db["deloadings"].find(
-            {"term_id": prev_term_id}
-        ).to_list(None)
+    if prev_term_id:
+
+        prev_term_deloadings = await db["deloadings"].find({"term_id": prev_term_id}).to_list(None)
 
         for d in prev_term_deloadings:
             type_id = d.get("type_id") or d.get("deloadingtype_id")

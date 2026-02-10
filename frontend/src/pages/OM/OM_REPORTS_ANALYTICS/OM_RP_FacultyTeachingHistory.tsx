@@ -1,7 +1,7 @@
 // frontend/src/pages/OM/OM_RP_FacultyTeachingHistory.tsx
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { ChevronLeft, ChevronDown, ChevronRight } from "lucide-react";
+import { ChevronLeft, ChevronDown, ChevronRight, Calendar } from "lucide-react";
 import { fetchTeachingHistory, listFaculty } from "../../../api";
 
 /** -----------------------------
@@ -16,6 +16,9 @@ type TeachingHistoryRow = {
   units?: number;
   campus?: string;
   mode?: string;
+
+  employment_type?: string;
+  standard_load_units?: number;
 
   // Flattened Schedule
   day1?: string;
@@ -88,13 +91,104 @@ function searchKeys(name: string) {
   return Array.from(new Set(all)).join(" | ");
 }
 
+function dayInitial(day?: string | null): string {
+  const raw = String(day || "").trim();
+  if (!raw) return "—";
+  if (raw.length === 1) return raw.toUpperCase();
+
+  const d = raw.toLowerCase();
+  // In AnimoAssign, Thursday is commonly shown as "H".
+  if (d.startsWith("th")) return "H";
+  if (d.startsWith("tu")) return "T";
+  if (d.startsWith("t")) return "T";
+  if (d.startsWith("m")) return "M";
+  if (d.startsWith("w")) return "W";
+  if (d.startsWith("f")) return "F";
+  if (d.startsWith("sa")) return "S";
+  if (d.startsWith("su")) return "U";
+  if (d.startsWith("s")) return "S";
+  return raw[0]!.toUpperCase();
+}
+
+/** -----------------------------
+ * Schedule helpers for Teaching History table
+ * ----------------------------- */
+function fmtTimeToken(t: string): string {
+  const raw = String(t || "").trim();
+  if (!raw) return "";
+  const m1 = raw.match(/^(\d{1,2}):(\d{2})$/);
+  if (m1) return `${m1[1].padStart(2, "0")}:${m1[2]}`;
+  const m2 = raw.match(/^\d{3,4}$/);
+  if (m2) {
+    const s = raw.padStart(4, "0");
+    return `${s.slice(0, 2)}:${s.slice(2, 4)}`;
+  }
+  return raw;
+}
+
+function parseBeginEnd(part: string): { begin?: string; end?: string } {
+  const s = String(part || "").trim();
+  if (!s) return {};
+  const cleaned = s.replace(/[–—]/g, "-").replace(/\s+to\s+/gi, "-");
+  const pieces = cleaned
+    .split("-")
+    .map((x) => x.trim())
+    .filter(Boolean);
+  if (pieces.length >= 2) {
+    return {
+      begin: fmtTimeToken(pieces[0] ?? ""),
+      end: fmtTimeToken(pieces[pieces.length - 1] ?? ""),
+    };
+  }
+
+  const tokens = cleaned.match(/(\d{1,2}:\d{2}|\d{3,4})\s*(?:AM|PM)?/gi) || [];
+  if (tokens.length >= 2) {
+    return {
+      begin: fmtTimeToken(tokens[0] ?? ""),
+      end: fmtTimeToken(tokens[1] ?? ""),
+    };
+  }
+  return { begin: fmtTimeToken(cleaned) };
+}
+
+function splitTimeForDays(
+  time?: string | null,
+  hasSecondDay?: boolean
+): {
+  begin1?: string;
+  end1?: string;
+  begin2?: string;
+  end2?: string;
+} {
+  const raw = String(time || "").trim();
+  if (!raw) return {};
+  const chunks = raw
+    .split(/[|/;]/)
+    .map((c) => c.trim())
+    .filter(Boolean);
+
+  const first = parseBeginEnd(chunks[0] || "");
+  const second = chunks[1]
+    ? parseBeginEnd(chunks[1])
+    : hasSecondDay
+    ? first
+    : {};
+
+  return {
+    begin1: first.begin,
+    end1: first.end,
+    begin2: second.begin,
+    end2: second.end,
+  };
+}
+
 /** -----------------------------
  * Page Component
  * ----------------------------- */
 export default function OM_RP_FacultyTeachingHistory() {
   return (
     <div className="w-full px-8 py-8">
-      <h1 className="text-2xl font-bold mb-2">Teaching History of Faculty</h1>
+      <h1 className="text-2xl font-bold mb-2">Teaching History per Faculty</h1>
       <p className="text-sm text-gray-600 mb-6">
         Click a name to expand their complete teaching history.
       </p>
@@ -216,7 +310,7 @@ function FacultyAccordion() {
           <input
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
-            placeholder="Filter by faculty name…"
+            placeholder="Search by faculty…"
             className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30"
           />
           {!!filter && (
@@ -310,11 +404,14 @@ type UnitsByTerm = { key: string; units: number };
 function UnitsHistoryChart({
   data,
   avgLoad,
+  standardLoad = 12,
 }: {
   data: UnitsByTerm[];
   avgLoad: number;
+  standardLoad?: number;
 }) {
   if (!data || data.length === 0) return null;
+  const MAX_STANDARD = 30;
 
   const PAGE = 5;
   const [visibleCount, setVisibleCount] = useState(PAGE);
@@ -324,26 +421,33 @@ function UnitsHistoryChart({
     setVisibleCount(PAGE);
   }, [data.length]);
 
-  // data is already newest → oldest based on your sortedKeys,
-  // so showing first N = latest N
   const visibleData = data.slice(0, visibleCount);
   const canShowMore = visibleCount < data.length;
   const canShowLess = data.length > PAGE && visibleCount > PAGE;
 
-  let maxUnits = data.reduce((max, d) => Math.max(max, d.units), 0) * 1.1; // Add padding
-  if (avgLoad > maxUnits) maxUnits = avgLoad * 1.1;
+  const dataMax = data.reduce((max, d) => Math.max(max, d.units), 0);
+
+  const maxUnits = Math.max(MAX_STANDARD, dataMax, avgLoad, standardLoad);
+
   const scaleFactor = maxUnits > 0 ? 100 / maxUnits : 0;
+  const clampPct = (p: number) => Math.max(0, Math.min(100, p));
 
   return (
     // Replaced generic div with a styled card for visual impact
     <div className="p-5 rounded-xl border border-gray-200 bg-white shadow-lg">
       <h3 className="text-xl font-bold text-gray-800 mb-4 flex items-center gap-2">
-        📊 Teaching Load Trend (Units per Term)
+        Teaching Load Trend (Units per Term)
       </h3>
 
       {/* Legend for context - Simplified */}
       <p className="text-xs text-gray-600 mb-4 border-b pb-3">
-        <span className="text-emerald-600 font-semibold">Standard</span> |
+        <span
+          className="text-emerald-700 font-semibold"
+          title="Standard teaching load baseline: FT=12 units, PT=6 units. Marker uses this faculty's employee type."
+        >
+          Standard (FT=12, PT=6) • Marker
+        </span>{" "}
+        |
         <span
           className="text-red-600 ml-3 font-semibold"
           title="Above Average: greater than Avg + 20%"
@@ -369,13 +473,21 @@ function UnitsHistoryChart({
       <div className="flex flex-col space-y-4 text-sm">
         {" "}
         {/* Increased spacing and font size */}
-        {visibleData.map((d) => {
+        {visibleData.map((d, idx) => {
           const percentage = d.units * scaleFactor;
-          const avgLinePosition = avgLoad * scaleFactor;
+          const avgLinePosition = clampPct(avgLoad * scaleFactor);
+          const standardLinePosition = clampPct(standardLoad * scaleFactor);
+          const markerAlignClass =
+            standardLinePosition < 8
+              ? "translate-x-0"
+              : standardLinePosition > 92
+              ? "-translate-x-full"
+              : "-translate-x-1/2";
 
           // Define thresholds for High/Low load (e.g., 20% deviation from average)
-          const isHigh = avgLoad > 0 && d.units > avgLoad * 1.2;
-          const isLow = avgLoad > 0 && d.units < avgLoad * 0.8;
+          const base = standardLoad > 0 ? standardLoad : avgLoad;
+          const isHigh = base > 0 && d.units > base * 1.2;
+          const isLow = base > 0 && d.units < base * 0.8;
           const barColor = isHigh
             ? "bg-red-500"
             : isLow
@@ -388,9 +500,9 @@ function UnitsHistoryChart({
               className="flex items-center"
               title={`${d.key}: ${d.units} units | Avg: ${avgLoad.toFixed(
                 1
-              )} | High if > ${(avgLoad * 1.2).toFixed(1)}, Low if < ${(
-                avgLoad * 0.8
-              ).toFixed(1)}`}
+              )} | Standard: ${base.toFixed(1)} | High if > ${(
+                base * 1.2
+              ).toFixed(1)}, Low if < ${(base * 0.8).toFixed(1)}`}
             >
               <span className="w-44 text-gray-700 font-medium whitespace-nowrap">
                 {d.key}
@@ -398,20 +510,49 @@ function UnitsHistoryChart({
               {/* Wider label */}
               {/* Bar Container */}
               <div className="flex items-center w-full ml-6 relative h-6">
-                {" "}
-                {/* Increased height */}
                 {/* Horizontal Bar */}
                 <div
                   className={`rounded h-full ${barColor} transition-all duration-300 pointer-events-none`}
                   style={{ width: `${percentage}%` }}
                 />
-                {/* Visual indicator for average load baseline - Changed color for contrast */}
+
+                {/* Visual indicator for average load baseline */}
                 {avgLoad > 0 && (
                   <div
                     className="absolute h-full w-[3px] bg-indigo-700 -translate-y-1/2 top-1/2 rounded-full pointer-events-none"
                     style={{ left: `${avgLinePosition}%` }}
                   />
                 )}
+
+                {/* Standard load baseline marker */}
+                {standardLoad > 0 && (
+                  <>
+                    <div
+                      className="absolute h-full w-[3px] bg-emerald-700 -translate-y-1/2 top-1/2 rounded-full pointer-events-none"
+                      style={{ left: `${standardLinePosition}%` }}
+                    />
+                    {/* Marker label under the green line */}
+                    <span
+                      className={`absolute -bottom-8 text-[10px] text-emerald-700 font-semibold whitespace-nowrap ${markerAlignClass}`}
+                      style={{ left: `${standardLinePosition}%` }}
+                    >
+                      {standardLoad} units
+                    </span>
+                  </>
+                )}
+
+                {/* Scale labels (show once) */}
+                {idx === 0 && (
+                  <>
+                    <span className="absolute -bottom-5 left-0 text-[10px] text-gray-500">
+                      0 units
+                    </span>
+                    <span className="absolute -bottom-5 right-0 text-[10px] text-gray-500">
+                      {maxUnits} units
+                    </span>
+                  </>
+                )}
+
                 {/* Label - Placed outside the bar for clarity if bar is small */}
                 <span className="ml-3 font-extrabold text-gray-800">
                   {d.units}
@@ -493,27 +634,27 @@ function HistoryTables({ rows }: { rows: TeachingHistoryRow[] }) {
 
     const acadYearsCovered = Array.from(new Set(rows.map((r) => r.ay))).length;
 
-    // Primary campus + mode
-    const campusCounts: Record<string, number> = {};
-    const modeCounts: Record<string, number> = {};
+    // Primary campus (ignore N/A if any known campus exists; weight by units)
+    const campusWeights: Record<string, number> = {};
     const courseCounts: Record<string, number> = {};
 
     rows.forEach((r) => {
-      const c = r.campus || "N/A";
-      campusCounts[c] = (campusCounts[c] || 0) + 1;
-
-      const m = r.mode || "N/A";
-      modeCounts[m] = (modeCounts[m] || 0) + 1;
+      const c = (r.campus || "").trim() || "N/A";
+      const w = Number(r.units ?? 0) || 1; // weight by units; fallback weight=1
+      campusWeights[c] = (campusWeights[c] || 0) + w;
 
       const code = r.course_code || "N/A";
       courseCounts[code] = (courseCounts[code] || 0) + 1;
     });
 
-    const primaryCampus =
-      Object.entries(campusCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || "N/A";
+    const knownCampuses = Object.entries(campusWeights).filter(
+      ([c]) => c !== "N/A"
+    );
+    const pickFrom = knownCampuses.length
+      ? knownCampuses
+      : Object.entries(campusWeights);
 
-    const primaryMode =
-      Object.entries(modeCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || "N/A";
+    const primaryCampus = pickFrom.sort((a, b) => b[1] - a[1])[0]?.[0] || "N/A";
 
     const mostTaughtCourseEntry =
       Object.entries(courseCounts).sort((a, b) => b[1] - a[1])[0] || null;
@@ -525,8 +666,6 @@ function HistoryTables({ rows }: { rows: TeachingHistoryRow[] }) {
       acadYearsCovered,
       termCount,
       avgUnitsPerTerm,
-      totalUnitsOverall,
-      primaryMode,
       primaryCampus,
       mostTaughtCourse,
       mostTaughtCount,
@@ -542,74 +681,61 @@ function HistoryTables({ rows }: { rows: TeachingHistoryRow[] }) {
     });
   }, [rows, sortedKeys, grouped]);
 
+  const standardLoad = useMemo(() => {
+    const emp = (rows?.[0]?.employment_type || "").toUpperCase();
+    // prefer backend-provided numeric if present
+    const fromBackend = Number(rows?.[0]?.standard_load_units);
+    if (Number.isFinite(fromBackend) && fromBackend > 0) return fromBackend;
+    return emp === "PT" ? 6 : 12;
+  }, [rows]);
+
   return (
     <div className="space-y-8 mt-2">
       {/* 1. Global Performance Overview - Highlight the most insightful metrics */}
-      <div className="rounded-xl border border-emerald-200 bg-emerald-50/40 shadow-sm p-5">
-        <div className="flex items-start justify-between gap-3 mb-4">
+      <div className="rounded-xl border border-gray-200 bg-white shadow-sm p-5">
+        <div className="flex flex-wrap items-start justify-between gap-4 mb-4">
           <div>
-            <h3 className="text-lg font-bold text-emerald-800 flex items-center gap-2">
-              ⭐ Overall Faculty Profile
+            <h3 className="text-lg font-semibold text-gray-900">
+              Overall Faculty Profile
             </h3>
             <p className="text-xs text-gray-600 mt-1">
-              Covers {globalSummary.acadYearsCovered} Academic Year(s) •{" "}
+              {globalSummary.acadYearsCovered} Academic Year(s) •{" "}
               {globalSummary.termCount} Term(s)
             </p>
           </div>
         </div>
 
-        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4 text-sm">
-          {/* Avg Units per Term */}
-          <div className="rounded-lg border border-gray-200 bg-white p-3">
-            <div className="text-gray-500 font-medium">Avg Units / Term</div>
-            <div className="text-2xl font-extrabold text-emerald-600">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 text-sm">
+          {/* Highlighted insights */}
+          <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-3 h-full flex flex-col justify-between">
+            <div className="text-emerald-800 font-medium">Primary Campus</div>
+            <div className="mt-1 text-lg font-semibold text-emerald-900">
+              {globalSummary.primaryCampus}
+            </div>
+            <div className="text-xs text-emerald-800">Preferred location</div>
+          </div>
+
+          <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-3 h-full flex flex-col justify-between">
+            <div className="text-emerald-800 font-medium">Most Taught</div>
+            <div className="mt-1 text-base font-semibold text-emerald-900 truncate">
+              {globalSummary.mostTaughtCourse || "—"}
+            </div>
+            <div className="text-xs text-emerald-800">
+              {globalSummary.mostTaughtCount
+                ? `${globalSummary.mostTaughtCount} time(s)`
+                : "—"}
+            </div>
+          </div>
+
+          {/* Core load metrics */}
+          <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-3 h-full flex flex-col justify-between">
+            <div className="text-emerald-800 font-medium">Avg Units / Term</div>
+            <div className="text-2xl font-semibold text-emerald-900">
               {globalSummary.avgUnitsPerTerm.toFixed(1)}
             </div>
-            <div className="text-xs text-gray-600">
-              Across {globalSummary.termCount} term(s)
+            <div className="text-xs text-emerald-800">
+              Based on {globalSummary.termCount} term(s)
             </div>
-          </div>
-
-          {/* Total Terms Taught */}
-          <div className="rounded-lg border border-gray-200 bg-white p-3">
-            <div className="text-gray-500 font-medium">Total Terms Taught</div>
-            <div className="text-2xl font-extrabold text-sky-600">
-              {globalSummary.termCount}
-            </div>
-            <div className="text-xs text-gray-600">Terms covered</div>
-          </div>
-
-          {/* Most Taught Course */}
-          <div className="rounded-lg border border-gray-200 bg-white p-3">
-            <div className="text-gray-500 font-medium">Most Taught Course</div>
-            <div className="text-2xl font-extrabold text-indigo-600">
-              {globalSummary.mostTaughtCourse}
-            </div>
-            <div className="text-xs text-gray-600">
-              {globalSummary.mostTaughtCount} record(s)
-            </div>
-          </div>
-
-          {/* Primary Mode & Campus */}
-          <div className="rounded-lg border border-gray-200 bg-white p-3">
-            <div className="text-gray-500 font-medium">
-              Primary Mode & Campus
-            </div>
-            <div className="text-lg font-bold text-emerald-700/80">
-              {globalSummary.primaryMode}
-            </div>
-            <div className="text-xs text-gray-600">
-              @ {globalSummary.primaryCampus}
-            </div>
-          </div>
-
-          {/* Total Units Overall */}
-          <div className="rounded-lg border border-gray-200 bg-white p-3">
-            <div className="text-gray-500 font-medium">Total Units Overall</div>
-            <div className="text-2xl font-extrabold text-emerald-700">
-              {globalSummary.totalUnitsOverall.toFixed(1)}
-            </div>
-            <div className="text-xs text-gray-600">Across all terms</div>
           </div>
         </div>
       </div>
@@ -618,68 +744,106 @@ function HistoryTables({ rows }: { rows: TeachingHistoryRow[] }) {
       <UnitsHistoryChart
         data={unitsByTerm}
         avgLoad={globalSummary.avgUnitsPerTerm}
+        standardLoad={standardLoad}
       />
 
       {/* 3. Detailed Term History - Streamlined for focus */}
-      <h3 className="text-xl font-bold text-gray-800 border-b pb-2 flex items-center gap-2">
-        📅 Term-by-Term Course Details
-      </h3>
+      <div>
+        <div className="flex items-center gap-2">
+          <Calendar className="h-5 w-5" />
+          <h3 className="text-base font-semibold text-gray-900">
+            Term-by-Term Course Details
+          </h3>
+        </div>
 
-      <div className="flex items-center justify-between gap-2 my-3">
+        <hr className="mt-4 mx-1 border-gray-500" />
+      </div>
+
+      <div className="flex flex-wrap items-center justify-between gap-3 mt-3 mb-4">
         <button
-          className="rounded-lg border px-3 py-2 text-sm disabled:opacity-40"
+          className="inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm shadow-sm hover:bg-gray-50 disabled:opacity-40 disabled:hover:bg-white"
           disabled={termIdx >= sortedKeys.length - 1}
           onClick={() =>
             setTermIdx((i) => Math.min(i + 1, sortedKeys.length - 1))
           }
+          title="Previous term"
         >
-          ◀ Previous Term
+          <ChevronLeft className="h-4 w-4" />
+          <span>Previous</span>
         </button>
 
-        <div className="text-sm font-semibold text-gray-700">
-          {activeKey || "—"}
+        <div className="flex flex-col items-center gap-1">
+          <div className="rounded-full border border-emerald-100 bg-emerald-50 px-4 py-2 text-sm font-semibold text-emerald-800 shadow-sm">
+            {activeKey || "—"}
+          </div>
+          {sortedKeys.length > 0 && (
+            <div className="text-xs text-gray-500">
+              {termIdx + 1} of {sortedKeys.length}
+            </div>
+          )}
         </div>
 
         <button
-          className="rounded-lg border px-3 py-2 text-sm disabled:opacity-40"
+          className="inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm shadow-sm hover:bg-gray-50 disabled:opacity-40 disabled:hover:bg-white"
           disabled={termIdx <= 0}
           onClick={() => setTermIdx((i) => Math.max(i - 1, 0))}
+          title="Next term"
         >
-          Next Term ▶
+          <span>Next</span>
+          <ChevronRight className="h-4 w-4" />
         </button>
       </div>
 
       {activeKey && (
         <div className="space-y-4">
-          {/* TERM HEADER */}
-          <h4 className="text-lg font-semibold text-gray-700">{activeKey}</h4>
-
           {/* TERM TABLE */}
-          <div className="overflow-x-auto rounded-lg border">
-            <table className="min-w-full text-sm">
-              <thead className="bg-gray-50">
-                <tr>
-                  <th className="px-3 py-2 text-left">Course</th>
-                  <th className="px-3 py-2 text-left">Section</th>
-                  <th className="px-3 py-2 text-left">Units</th>
-                  <th className="px-3 py-2 text-left">Mode</th>
-                  <th className="px-3 py-2 text-left">Campus</th>
-                </tr>
-              </thead>
-              <tbody>
-                {activeRows.map((r, idx) => (
-                  <tr key={idx} className="border-t">
-                    <td className="px-3 py-2">
-                      {r.course_code} – {r.course_title}
-                    </td>
-                    <td className="px-3 py-2">{r.section_code}</td>
-                    <td className="px-3 py-2">{r.units ?? "—"}</td>
-                    <td className="px-3 py-2">{r.mode ?? "—"}</td>
-                    <td className="px-3 py-2">{r.campus ?? "—"}</td>
+          <div className="border border-gray-200 bg-gray-50 shadow-sm overflow-visible rounded-xl">
+            <div className="overflow-x-auto rounded-xl">
+              <table className="w-full text-sm">
+                <thead className="bg-gray-50 border-b text-gray-700">
+                  <tr>
+                    <th className="text-left px-4 py-2">
+                      Course Code &amp; Title
+                    </th>
+                    <th className="text-left px-4 py-2">Section</th>
+                    <th className="text-center px-4 py-2">Units</th>
+                    <th className="text-left px-4 py-2">Day 1</th>
+                    <th className="text-left px-4 py-2">Begin 1</th>
+                    <th className="text-left px-4 py-2">End 1</th>
+                    <th className="text-left px-4 py-2">Day 2</th>
+                    <th className="text-left px-4 py-2">Begin 2</th>
+                    <th className="text-left px-4 py-2">End 2</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+
+                <tbody className="divide-y">
+                  {activeRows.map((r, idx) => {
+                    const t = splitTimeForDays(r.time, !!r.day2);
+                    return (
+                      <tr key={idx} className="hover:bg-gray-50">
+                        <td className="px-4 py-3 text-left font-semibold text-emerald-700">
+                          {r.course_code || "—"}
+                          <div className="text-xs text-gray-500">
+                            {r.course_title || "—"}
+                          </div>
+                        </td>
+
+                        <td className="px-4 py-3">{r.section_code || "—"}</td>
+                        <td className="px-4 py-3 text-center">
+                          {r.units ?? "—"}
+                        </td>
+                        <td className="px-4 py-3">{dayInitial(r.day1)}</td>
+                        <td className="px-4 py-3">{t.begin1 ?? "—"}</td>
+                        <td className="px-4 py-3">{t.end1 ?? "—"}</td>
+                        <td className="px-4 py-3">{dayInitial(r.day2)}</td>
+                        <td className="px-4 py-3">{t.begin2 ?? "—"}</td>
+                        <td className="px-4 py-3">{t.end2 ?? "—"}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
           </div>
         </div>
       )}
