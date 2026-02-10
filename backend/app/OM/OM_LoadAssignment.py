@@ -1134,16 +1134,36 @@ def _row_is_locked(r: dict) -> bool:
     """
     Treat a row as 'locked' if it should not be altered by auto-assign.
 
-    Locked when:
+    Locked when (protected rows):
       - Row was explicitly finalized by OM (row['finalized'] truthy), OR
+      - Row is marked locked/terminal in any upstream workflow
+        (row['locked'], synced rows, approved/forwarded terminal states), OR
       - Row already has a concrete manual load:
           * faculty_id is set
           * and at least one full day/begin/end slot is filled.
 
     These rows will be preserved when running auto-assign.
     """
+    # Explicit locks/finalized/terminal states
     if bool(r.get("finalized")):
         return True
+
+    if bool(r.get("locked")):
+        return True
+
+    # Rows synced from Faculty Service (or another system) should never be altered.
+    if bool(r.get("synced_from_faculty_service")):
+        return True
+
+    # Rows that were forwarded and reached an "approved" terminal state should be protected.
+    try:
+        if bool(r.get("forwarded_to_faculty")):
+            st = str(r.get("status") or "").strip().lower()
+            if st in ("approved", "accepted", "forwarded", "submitted"):
+                return True
+    except Exception:
+        # Never block auto-assign due to a bad status shape.
+        pass
 
     fid = (r.get("faculty_id") or "").strip()
     if not fid:
@@ -2883,17 +2903,46 @@ async def om_finalize_course(payload: Dict[str, Any] = Body(...), db=Depends(get
 
 @router.post("/load-assignment/run")
 async def run_auto_assignment(
-    user_id: str = Query(..., alias="user_id"),
+    user_id: str | None = Query(None, alias="user_id"),
     department_id: str | None = Query(None),
+    term_id: str | None = Query(None),
+    payload: Optional[Dict[str, Any]] = Body(None),
     db = Depends(get_db),
 ):
+    # Accept either query parameters (legacy) or a JSON body (newer clients).
+    if not user_id and isinstance(payload, dict):
+        user_id = (payload.get("user_id") or payload.get("userId") or "").strip() or None
+    if not department_id and isinstance(payload, dict):
+        department_id = (payload.get("department_id") or payload.get("departmentId") or None)
+    if not term_id and isinstance(payload, dict):
+        term_id = (payload.get("term_id") or payload.get("termId") or None)
+
+    if not user_id:
+        raise HTTPException(status_code=400, detail="user_id is required")
+
     active = await _active_term()
     if not active:
         raise HTTPException(409, "No upcoming term found (is_current anchor missing?)")
 
+    # Auto-assign must run on the active term.
+    # If the client provides a term_id and it doesn't match the active one, fail fast
+    # to avoid wiping the UI table with an empty/mismatched term payload.
+    requested_term_id = (term_id or "").strip()
+    if requested_term_id and requested_term_id != active.get("term_id"):
+        raise HTTPException(
+            409,
+            f"Auto-assign is only available for the active term ({active.get('term_id')}). "
+            f"You are currently viewing term {requested_term_id}. Please switch back to the active term.",
+        )
+
+    # Canonical term id for this run
+    term_id = str(active.get("term_id") or "").strip() or None
+    if not term_id:
+        raise HTTPException(409, "Active term is missing term_id")
+
     # Require finished prefs for the upcoming term
     pref_cnt = await db[COL_PREFERENCES].count_documents(
-        {"term_id": active["term_id"], "is_finished": True}
+        {"term_id": term_id, "is_finished": True}
     )
     if pref_cnt == 0:
         raise HTTPException(
@@ -2902,7 +2951,7 @@ async def run_auto_assignment(
             "Auto-assign is disabled until submissions exist."
         )
 
-    base = await _fetch_rows(user_id, term_id=active["term_id"], db=db)
+    base = await _fetch_rows(user_id, term_id=term_id, db=db)
     rows = [dict(r) for r in base["rows"]]
 
     rows_by_id: dict[str, dict] = {
@@ -2931,7 +2980,7 @@ async def run_auto_assignment(
         department_id = om_dept_ids[0]  # OM should only see one dept
 
     ctx_for_prefs = await phase0_load(
-        active["term_id"],
+        term_id,
         db,
         department_id=department_id
     )
@@ -3106,13 +3155,14 @@ async def run_auto_assignment(
         _add_used(fid, r.get("day1"), r.get("begin1"), r.get("end1"))
         _add_used(fid, r.get("day2"), r.get("begin2"), r.get("end2"))
 
-    sugg = await compute_load_recommendations(term_id=active["term_id"], db=db)
+    sugg = await compute_load_recommendations(term_id=term_id, db=db)
     debug = sugg.get("debug", {}) or {}
     phase7_no_time = (debug.get("phase7_no_time_details") or {}) if isinstance(debug, dict) else {}
 
     if not sugg.get("assignments"):
         return {
             "term": _term_label(active),
+            "term_id": term_id,
             "rows": rows,
             "debug": {
                 "course_order_len": len(sugg.get("courses_order", [])),
@@ -3423,47 +3473,7 @@ async def run_auto_assignment(
                 if extra_msg not in existing_note:
                     weaker_row["conflictNote"] = (existing_note + " " + extra_msg).strip().lstrip()
 
-        # For each faculty/day, detect overlapping windows and flag both sections
-    hard_conflicts: dict[str, dict[str, list[tuple[str, str]]]] = {}
-
-    for fid, day_map in fac_day_windows.items():
-        for day, slots in day_map.items():
-            # sort by start time
-            slots.sort(key=lambda x: x[0])  # (st, en, sid)
-            prev_st = prev_en = None
-            prev_sid: str | None = None
-
-            for st, en, sid in slots:
-                if prev_st is not None and st < prev_en:
-                    # overlap between prev_sid and sid
-                    hard_conflicts.setdefault(fid, {}).setdefault(day, []).append((prev_sid, sid))
-                # keep the "outermost" interval as reference
-                if prev_en is None or en > prev_en:
-                    prev_st, prev_en, prev_sid = st, en, sid
-
-    # Apply flags to the rows
-    for fid, day_map in hard_conflicts.items():
-        for day, pairs in day_map.items():
-            for sid1, sid2 in pairs:
-                for sid in (sid1, sid2):
-                    row = rows_by_id.get(str(sid))
-                    if not row:
-                        continue
-                    if (row.get("faculty_id") or "").strip() != fid:
-                        continue
-
-                    # Don't override unassigned rows, but everything else becomes Conflict
-                    if (row.get("status") or "").lower() != "unassigned":
-                        row["status"] = "Conflict"
-
-                    # Build a readable message with the exact window(s)
-                    # (use existing times, since they’re already in the row)
-                    msg = f"Faculty schedule clash on {day} (overlapping time slot)."
-                    existing_note = (row.get("conflictNote") or "").strip()
-                    if msg not in existing_note:
-                        row["conflictNote"] = (existing_note + " " + msg).strip().lstrip()
-
-        # --- NEW: conservative SHS refill after conflicts (low-risk) ---
+    # --- NEW: conservative SHS refill after conflicts (low-risk) ---
     def _shs_refill_after_conflicts():
         """
         After all phases + conflict flags, try to use remaining capacity to
@@ -3655,6 +3665,7 @@ async def run_auto_assignment(
 
     return {
         "term": _term_label(active),
+        "term_id": term_id,
         "rows": rows,
         "debug": {**debug, **prefs_debug, "overlay_no_time_details": overlay_reasons},
     }
@@ -3705,32 +3716,64 @@ async def phase0_load(term_id: str, db, department_id: str | None = None) -> Con
     # ------------------------------
     # 0) Term-scoped Sections
     # ------------------------------
-    # 1. Load courses by department FIRST
-    course_q = {}
+    # IMPORTANT:
+    # We must remain compatible with deployments where *either*:
+    #   - sections carry department_id, OR
+    #   - courses carry department_id (and sections only reference course_id)
+    # A regression here can make the algorithm think there are "no sections" and
+    # return an empty assignments set, causing the UI to show a success toast but
+    # no auto-filled schedules.
+
+    section_projection = {
+        "_id": 0,
+        "section_id": 1,
+        "course_id": 1,
+        "department_id": 1,
+        "campus_id": 1,
+        "units": 1,
+        "mode": 1,
+        # schedule fields (if denormalized on sections)
+        "day1": 1,
+        "begin1": 1,
+        "end1": 1,
+        "room1": 1,
+        "day2": 1,
+        "begin2": 1,
+        "end2": 1,
+        "room2": 1,
+    }
+
+    # A) Prefer filtering by sections.department_id when it exists.
+    # If that yields no results, fall back to filtering by courses.department_id.
+    sections: list[dict] = []
+    section_q: dict[str, Any] = {"term_id": term_id}
     if department_id:
-        course_q["department_id"] = department_id
+        section_q_dept = {**section_q, "department_id": department_id}
+        sections = await db[COL_SECTIONS].find(section_q_dept, section_projection).sort(
+            [("course_id", 1), ("section_id", 1)]
+        ).to_list(None)
 
-    courses = await db[COL_COURSES].find(course_q).to_list(None)
+    if not sections:
+        # B) Fallback: derive section list from courses in the department.
+        course_q: dict[str, Any] = {}
+        if department_id:
+            course_q["department_id"] = department_id
+        course_rows_for_filter = await db[COL_COURSES].find(course_q, {"_id": 0, "course_id": 1}).to_list(None)
+        course_ids_for_filter = [c.get("course_id") for c in course_rows_for_filter if c.get("course_id")]
+        section_q_fallback = dict(section_q)
+        if course_ids_for_filter:
+            section_q_fallback["course_id"] = {"$in": course_ids_for_filter}
+        elif department_id:
+            # If a department filter was requested but we cannot resolve any course ids,
+            # do NOT pull the entire term's sections; treat as no sections for this dept.
+            section_q_fallback["course_id"] = {"$in": []}
 
-    course_ids = [c["course_id"] for c in courses]
+        sections = await db[COL_SECTIONS].find(section_q_fallback, section_projection).sort(
+            [("course_id", 1), ("section_id", 1)]
+        ).to_list(None)
 
-    # 2. Load sections ONLY for those courses
-    section_q = {"term_id": term_id}
-    if course_ids:
-        section_q["course_id"] = {"$in": course_ids}
-
-    sections = await db[COL_SECTIONS].find(
-        section_q,
-        {
-            "_id": 0,
-            "section_id": 1,
-            "course_id": 1,
-            "units": 1,
-            "mode": 1,
-            "day1": 1, "begin1": 1, "end1": 1, "room1": 1,
-            "day2": 1, "begin2": 1, "end2": 1, "room2": 1,
-        }
-    ).sort([("course_id", 1), ("section_id", 1)]).to_list(None)
+    # Derive course_ids from sections we actually found.
+    course_ids = [s.get("course_id") for s in sections if s.get("course_id")]
 
     # Early return if no sections
     if not sections:
@@ -3750,10 +3793,7 @@ async def phase0_load(term_id: str, db, department_id: str | None = None) -> Con
     # ------------------------------
     # 1) Courses (normalize units & type)
     # ------------------------------
-    course_rows = await db[COL_COURSES].find(
-        {"course_id": {"$in": course_ids}},
-        {"_id": 0}
-    ).to_list(None)
+    course_rows = await db[COL_COURSES].find({"course_id": {"$in": course_ids}}, {"_id": 0}).to_list(None)
 
     def _units(r: dict) -> int:
         v = r.get("units", r.get("units_per_section"))

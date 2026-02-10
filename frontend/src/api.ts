@@ -3067,14 +3067,24 @@ export async function getOmLoadAssignmentTerms() {
 export async function runOmAutoAssign(params: {
   user_id: string;
   department_id?: string;
+  /** Optional: currently viewed term id (used by backend to block auto-assign in archive view). */
+  term_id?: string;
 }) {
   const base = (typeof API_BASE !== "undefined" ? API_BASE : "").replace(/\/+$/, "");
+  // Keep user_id in query for backward compatibility, but also send JSON body so
+  // newer backend logic can read term_id / department_id reliably.
   const qs = new URLSearchParams({ user_id: params.user_id });
   if (params.department_id) qs.set("department_id", params.department_id);
+  if (params.term_id) qs.set("term_id", params.term_id);
+
   const url = `${base}/om/load-assignment/run?${qs.toString()}`;
-  const r = await fetch(url, { method: "POST" });
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(params),
+  });
   if (!r.ok) throw new Error(await r.text());
-  return r.json() as Promise<{ term: string; rows: OmLoadRow[] }>;
+  return r.json() as Promise<{ term: string; term_id?: string; rows: OmLoadRow[]; debug?: any }>;
 }
 
 /** Send OM proposed schedules to faculty (all rows per faculty) */

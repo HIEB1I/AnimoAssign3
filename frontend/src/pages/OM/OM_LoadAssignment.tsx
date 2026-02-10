@@ -2616,7 +2616,12 @@ export default function OM_LoadAssignment() {
 
     try {
       setIsAssigning(true);
-      const res = await runOmAutoAssign({ user_id: userId });
+      // Send the currently viewed term id so the backend can fail fast
+      // if the user is accidentally in archive view.
+      const res = await runOmAutoAssign({
+        user_id: userId,
+        term_id: termId || activeTermId,
+      });
 
       // NEW: capture preferred units coming from backend debug
       const debug = (res as any)?.debug || {};
@@ -2661,6 +2666,8 @@ export default function OM_LoadAssignment() {
 
       setRows(normalizedNextRows);
       setTerm(typeof res?.term === "string" ? res.term : "");
+      // Keep term_id in sync so archive-view detection stays correct.
+      setTermId(typeof (res as any)?.term_id === "string" ? (res as any).term_id : termId);
       setMode("run");
       // Preserve the "Forward to Chair" final-state across auto-assign.
       setApproved((prev) => prev);
