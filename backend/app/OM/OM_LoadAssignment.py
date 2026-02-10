@@ -6866,6 +6866,16 @@ async def _persist_rows_no_auto(term_id: str, rows: list[dict], db):
 
             cid = course_doc["course_id"]
 
+            # If OM entered a Units value for a manually-added row, prefer it.
+            # Otherwise fall back to the course's default units.
+            units_override = None
+            try:
+                uraw = r.get("units")
+                if uraw is not None and str(uraw).strip() != "":
+                    units_override = float(str(uraw).strip())
+            except Exception:
+                units_override = None
+
             # Generate a brand new section_id, e.g. SEC0042
             new_sid = f"SEC{next_section_seq:04d}"
             next_section_seq += 1
@@ -6876,7 +6886,7 @@ async def _persist_rows_no_auto(term_id: str, rows: list[dict], db):
                 "term_id": term_id,
                 "course_id": cid,
                 "section_code": (r.get("section") or "").strip(),
-                "units": course_doc.get("units"),
+                "units": units_override if units_override is not None else course_doc.get("units"),
                 "enrollment_cap": r.get("capacity") or None,
                 "campus_id": r.get("campus_id") or None,  # <-- ADD THIS
                 "created_at": now,
