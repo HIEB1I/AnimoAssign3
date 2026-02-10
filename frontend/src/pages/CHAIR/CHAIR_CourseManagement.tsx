@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import SelectBox from "../../component/SelectBox";
-import { Search as SearchIcon, MoreVertical, FileText, Edit3, Plus, X } from "lucide-react";
+import { Search as SearchIcon, MoreVertical, FileText, Edit, Plus, X } from "lucide-react";
 import {
   type CMOptions,
   type CMCourseRow,
@@ -53,7 +53,7 @@ function RowActions({ onView, onEdit }: { onView: () => void; onEdit: () => void
             onClick={() => { setOpen(false); onEdit(); }}
             className="flex w-full items-center gap-2 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
           >
-            <Edit3 className="h-4 w-4" /> <span>Edit People</span>
+            <Edit className="h-4 w-4" /> <span>Edit People</span>
           </button>
         </div>
       )}

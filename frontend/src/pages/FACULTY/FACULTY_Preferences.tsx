@@ -1332,7 +1332,7 @@ function EditForm({
                     </div>
                     {form.delivery && (
                       <div>
-                        <FieldLabel>Campus Preference (auto-set)</FieldLabel>
+                        <FieldLabel>Campus Preference</FieldLabel>
                         <input
                           type="text"
                           disabled

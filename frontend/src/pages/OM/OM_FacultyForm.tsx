@@ -146,9 +146,6 @@ function DeadlineBanner({
             {deadlineISO ? deadlineLabel : "TBA"}
           </span>
         </div>
-        <div className="mt-1 text-[12px] opacity-80">
-          Please finalize before the deadline. Drafts are allowed until lock.
-        </div>
       </div>
     </div>
   );
@@ -655,36 +652,12 @@ useEffect(() => {
                   </div>
 
                   <div className="min-w-0">
-                    <h2 className="text-lg font-semibold leading-tight">
-                      Faculty Preferences
+                    <h2 className="text-lg font-semibold leading-tight truncate">
+                      {selected.name || "—"}
                     </h2>
                     <p className="mt-0.5 text-sm text-white/90 truncate">
-                      {selected.name} • {selected.email}
+                      {selected.email || ""}
                     </p>
-
-                    <div className="mt-3 flex flex-wrap gap-2 text-xs">
-                      <span className="rounded-full bg-white/15 px-3 py-1 ring-1 ring-white/20">
-                        Active Term: {headerLabel}
-                      </span>
-
-                      {isFallbackShown && (
-                        <span className="rounded-full bg-white/15 px-3 py-1 ring-1 ring-white/20">
-                          Showing: {shownLabel}
-                        </span>
-                      )}
-
-                      <span className="rounded-full bg-white/15 px-3 py-1 ring-1 ring-white/20">
-                        Status:{" "}
-                        {pref?.submission?.status ?? selected.status ?? "—"}
-                      </span>
-                      <span className="rounded-full bg-white/15 px-3 py-1 ring-1 ring-white/20">
-                        Submitted:{" "}
-                        {fmtDate(
-                          (pref?.submission?.date as string | undefined) ||
-                            selected.submission_date
-                        )}
-                      </span>
-                    </div>
                   </div>
                 </div>
               </div>
@@ -883,7 +856,7 @@ useEffect(() => {
                 <div className="flex justify-end">
                   <button
                     onClick={closeView}
-                    className="rounded-lg bg-gray-100 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-200"
+                    className="px-4 py-2 rounded-lg bg-gray-100 hover:bg-gray-200 text-sm"
                   >
                     Close
                   </button>

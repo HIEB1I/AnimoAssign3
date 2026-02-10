@@ -117,7 +117,7 @@ const CONTROL =
 
 /* ---------------- Plantilla table design system (source of truth) ---------------- */
 const PLANTILLA_TABLE_WRAP =
-  "rounded-xl border border-gray-300 bg-white shadow-sm overflow-x-auto overflow-y-auto";
+  "rounded-xl border border-gray-200 bg-white shadow-sm overflow-x-auto overflow-y-auto";
 
 const PLANTILLA_TABLE =
   "min-w-full w-full text-sm table-fixed border-collapse leading-snug [&_td]:align-middle [&_td]:whitespace-normal [&_td]:break-words";
@@ -130,7 +130,7 @@ const PLANTILLA_TH = "px-3 py-2 text-center border border-gray-300";
 const PLANTILLA_TD = "px-3 py-2 text-center";
 const PLANTILLA_ROW = "hover:bg-gray-50 [&>td]:border [&>td]:border-gray-200";
 const PLANTILLA_SECTION_TITLE =
-  "px-5 py-3 text-sm font-semibold text-white text-center bg-emerald-700";
+  "px-5 py-3 text-sm font-semibold text-white text-center bg-emerald-600";
 
 /* ---------------- Dropdown (portal-less, fixed-positioned) ---------------- */
 function Dropdown({
@@ -400,7 +400,7 @@ const COLS_COMBINED = [
   "34ch", // course code & title
   "23ch", // section
   "8ch", // units
-  "30ch", // to
+  "40ch", // to
   "30ch", // faculty
   "10ch", // day1
   "10ch", // begin1

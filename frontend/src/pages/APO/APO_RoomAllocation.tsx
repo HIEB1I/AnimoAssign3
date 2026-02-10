@@ -1181,7 +1181,7 @@ const refresh = async (): Promise<RoomAllocationResponse | null> => {
 
               <button
                 onClick={() => setAdding(true)}
-                className="inline-flex items-center gap-2 rounded-md bg-[#008e4e] px-4 py-2 text-sm font-medium text-white shadow-sm hover:brightness-110"
+                className="inline-flex items-center gap-2 rounded-md bg-emerald-700 px-4 py-2 text-sm font-medium text-white shadow-sm"
               >
                 <Plus className="h-4 w-4" />
                 Add Room

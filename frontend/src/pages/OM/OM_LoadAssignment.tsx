@@ -1792,7 +1792,7 @@ const SendBlockedModal = ({
 
         <div className="mt-5 flex items-center justify-between gap-3">
           <div className="text-xs text-gray-500">
-            Tip: Required columns are marked with a{" "}
+            Required columns are marked with a{" "}
             <span className="text-red-600 font-bold">*</span> in the table
             header.
           </div>

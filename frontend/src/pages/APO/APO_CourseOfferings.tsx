@@ -3550,90 +3550,6 @@ const promptSaveEdit = () => {
                 onChange={(v: string) => setProgramCode(v)}
                 options={["All Programs", ...(data?.filters.programs || []).map((p) => p.program_code)]}
               />
-
-              {showCurrImportModal && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4">
-                  <div className="w-full max-w-2xl overflow-hidden rounded-2xl bg-white shadow-xl">
-                    <div className="p-6">
-                      <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-full border border-emerald-600 text-emerald-700">
-                        <Upload className="h-7 w-7" />
-                      </div>
-
-                      <h3 className="text-center text-xl font-semibold">
-                        Import List of Courses CSV
-                      </h3>
-
-                      <p className="mt-1 text-center text-sm text-slate-600">
-                        This will create or update curriculum rows for{" "}
-                        <span className="font-semibold">
-                          {(curr?.campus?.campus_name ?? data?.campus?.campus_name ?? "your campus")}
-                        </span>{" "}
-                        across multiple terms, based on <span className="font-semibold">Academic Year</span>{" "}
-                        and <span className="font-semibold">Term Number</span>.
-                      </p>
-
-                      <div className="mt-5 rounded-lg border border-emerald-200 bg-emerald-50 p-4 text-sm text-slate-700">
-                        <div className="mb-2 font-semibold text-emerald-800">CSV format</div>
-                        <ul className="list-disc space-y-1 pl-5">
-                          <li>
-                            Required columns: <span className="font-semibold">Batch, Program Level, Program, Term Number, Academic Year, Campus, Course 1...</span>
-                          </li>
-                          <li>
-                            Campus must match the selected campus shown above.
-                          </li>
-                          <li>
-                            Each row becomes one curriculum row for that batch/program in that term.
-                          </li>
-                        </ul>
-
-                        <button
-                          type="button"
-                          className="mt-3 inline-flex items-center gap-2 rounded-md border border-emerald-700 bg-white px-3 py-2 text-sm font-medium text-emerald-700 hover:bg-emerald-50"
-                          onClick={downloadCurriculumCsvTemplate}
-                          disabled={importBusy}
-                        >
-                          <Copy className="h-4 w-4" />
-                          Download CSV template
-                        </button>
-                        <div className="mt-1 text-xs text-slate-500">
-                          Use the template to avoid wrong columns / formatting.
-                        </div>
-                      </div>
-
-                      {currImportErr && (
-                        <div className="mt-4 whitespace-pre-line rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">
-                          {currImportErr}
-                        </div>
-                      )}
-                    </div>
-
-                    <div className="flex items-center justify-end gap-2 border-t p-4">
-                      <button
-                        type="button"
-                        className="rounded-md border px-4 py-2 text-sm"
-                        onClick={() => {
-                          setShowCurrImportModal(false);
-                          setCurrImportErr(null);
-                          if (fileInputRef.current) fileInputRef.current.value = "";
-                        }}
-                        disabled={importBusy}
-                      >
-                        Cancel
-                      </button>
-                      <button
-                        type="button"
-                        className="inline-flex items-center gap-2 rounded-md bg-emerald-700 px-4 py-2 text-sm font-medium text-white shadow-sm disabled:opacity-50"
-                        onClick={() => fileInputRef.current?.click()}
-                        disabled={importBusy}
-                      >
-                        <Upload className="h-4 w-4" />
-                        Choose File
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              )}
-
             </>
           )}
           {/* Right side of toolbar */}
@@ -3705,7 +3621,7 @@ const promptSaveEdit = () => {
 
                 {/* NEW: open global Edit Course modal */}
                 <button
-                  className="inline-flex items-center gap-2 rounded-md bg-emerald-600 px-4 py-2 text-sm font-medium text-white shadow-sm"
+                  className="inline-flex items-center gap-2 rounded-md bg-[#008e4e] px-4 py-2 text-sm font-medium text-white shadow-sm hover:brightness-110"
                   onClick={() => setShowEditCourseModal(true)}
                   title="Edit an existing course in the global catalog"
                 >
@@ -3858,7 +3774,7 @@ const promptSaveEdit = () => {
                           return;
                         }
                         // ---------- end validation ----------
-const response = await importCurriculumCsv(user.userId, {
+                    const response = await importCurriculumCsv(user.userId, {
                       rows,
                       term_id: termId,
                       campus_name: campusName,
@@ -4064,7 +3980,7 @@ const response = await importCurriculumCsv(user.userId, {
                   {Object.entries(groups).map(([idLabel, byProgram]) => (
                   <div   key={idLabel}
                     className="rounded-xl border border-gray-300 bg-white shadow-sm overflow-visible mb-6">
-                    <div className="bg-[#21804A] text-white px-4 py-3 text-center font-semibold">{idLabel}</div>
+                    <div className="bg-emerald-700 text-white px-4 py-3 text-center font-semibold">{idLabel}</div>
                     {Object.entries(byProgram).map(([progLabel, list]) => {
                       const key = `${idLabel}::${progLabel}`;
                       const isCollapsed = !!collapsedGroups[key];
@@ -5933,7 +5849,7 @@ const CapacityGapModal: React.FC<{
             </div>
             <div className="min-w-0">
               <div className="text-base sm:text-lg font-extrabold tracking-tight">
-                Capacity gap — review needed
+                Capacity gap
               </div>
               <div className="mt-1 text-sm text-white/90">
                 This list summarizes where planned slots are below demand.
