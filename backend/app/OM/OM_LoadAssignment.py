@@ -3782,7 +3782,11 @@ async def phase0_load(term_id: str, db, department_id: str | None = None) -> Con
         "campus_id": 1,
         "units": 1,
         "mode": 1,
-        # schedule fields (if denormalized on sections)
+        
+        "owner_program_id": 1,
+        "owner_batch_id": 1,
+        "batch_number": 1,
+
         "day1": 1,
         "begin1": 1,
         "end1": 1,
@@ -4258,12 +4262,9 @@ async def phase0_load(term_id: str, db, department_id: str | None = None) -> Con
     # Replace the pool used by downstream phases (B/6A/6B)
     ctx.faculty = eligible
 
-        # --- NEW: GE @ CMPS0002 windows (for slot pool + frontend tab) ---
-    # Build: campus_blocked[campus_id][day_index] = list[(st_min, en_min, section_id, course_id, section_code)]
-    campus_blocked: dict[str, dict[int, list[tuple[int, int, str, str, str]]]] = {}
+    # --- NEW: GE @ CMPS0002 windows (OWNER-scoped) ---
+    campus_blocked: dict[str, dict[tuple[str | None, str | None], dict[int, list[tuple[int, int, str, str, str]]]]] = {}
 
-    # Day → index helper
-    # Day → index helper (accept both single-letter codes and DB-friendly strings like "Mon", "Thu")
     day_to_idx = {
         "M": 1, "MON": 1, "MONDAY": 1,
         "T": 2, "TUE": 2, "TUES": 2, "TUESDAY": 2,
@@ -4273,52 +4274,50 @@ async def phase0_load(term_id: str, db, department_id: str | None = None) -> Con
         "S": 6, "SAT": 6, "SATURDAY": 6,
     }
 
-    sections = ctx.sections or []
-    courses = ctx.courses or {}
-    sched_by_sec = ctx.schedules_by_section or {}
+    sections0 = ctx.sections or []
+    courses0 = ctx.courses or {}
+    sched_by_sec0 = ctx.schedules_by_section or {}
 
-    for sec in sections:
+    for sec in sections0:
         sid = sec.get("section_id")
         if not sid:
             continue
-        campus_id = str(sec.get("campus_id") or "")
-        if not campus_id:
+
+        campus_id0 = str(sec.get("campus_id") or "").strip().upper()
+        if campus_id0 != "CMPS0002":
             continue
 
-        cid = sec.get("course_id")
+        cid = (sec.get("course_id") or "").strip()
         if not cid:
             continue
-        cinfo = courses.get(cid) or {}
 
-        # Only GE courses
-        ctype = str(
-            cinfo.get("type_of_course") or cinfo.get("type") or ""
-        ).strip().upper()
+        cinfo = courses0.get(cid) or {}
+        ctype = str(cinfo.get("type_of_course") or cinfo.get("type") or "").strip().upper()
         if ctype != "GE":
             continue
 
-        # Only campus CMPS0002
-        if campus_id != "CMPS0002":
-            continue
+        owner_key = (
+            (sec.get("owner_program_id") or None),
+            (sec.get("owner_batch_id") or None),
+        )
 
         sec_code = sec.get("section_code") or sec.get("section") or ""
 
-        # Look at all schedules for this section
-        for sch in sched_by_sec.get(sid, []):
+        for sch in sched_by_sec0.get(sid, []):
             d = (sch.get("day") or "").strip().upper()
             if d not in day_to_idx:
                 continue
+
             st = _to_min(sch.get("begin_time") or sch.get("start_time"))
             en = _to_min(sch.get("end_time"))
             if st is None or en is None or en <= st:
                 continue
 
-            idx = day_to_idx[d]
-            campus_blocked.setdefault(campus_id, {}).setdefault(idx, []).append(
+            di = day_to_idx[d]
+            campus_blocked.setdefault("CMPS0002", {}).setdefault(owner_key, {}).setdefault(di, []).append(
                 (st, en, sid, cid, sec_code)
             )
 
-    # Expose on ctx for later phases + /list route
     ctx.campus_blocked = campus_blocked
 
     print("[phase0] faculty:", len(all_fids),
@@ -6318,24 +6317,6 @@ async def run_milestone_e_phase7(term_id: str, db, department_id: str | None = N
     # Inverse map of day_int -> day_code (1->'M', etc.)
     INV_DAY_MAP = {v: k for k, v in _DAY_MAP.items()}
 
-    # helper: does this (day_idx, interval) hit a blocked GE@CMPS0002 window?
-    def _is_blocked_ge_cmps2_slot(section_id: str, day_idx: int, interval: tuple[int, int]) -> bool:
-        """
-        Returns True if the candidate (section_id, day_idx, [st,en]) overlaps
-        any GE@CMPS0002 blocked window.
-        """
-        campus_id = _section_campus(courses_ctx, section_id)
-        if campus_id != "CMPS0002":
-            return False
-
-        by_day = (campus_blocked.get("CMPS0002") or {}).get(day_idx, [])
-        st, en = interval
-        for bst, ben, _, _, _ in by_day:
-            # overlap if not (new ends before old starts OR new starts after old ends)
-            if not (en <= bst or st >= ben):
-                return True
-        return False
-
     def _all_pref_windows(fp: dict) -> list[tuple[int, int]]:
         """
         Return *all* usable preferred windows for a faculty as minute pairs.
@@ -6498,22 +6479,37 @@ async def run_milestone_e_phase7(term_id: str, db, department_id: str | None = N
 
     def _is_blocked_ge_cmps2_slot(sid: str, di: int, interval: tuple[int, int]) -> bool:
         """
-        CMPS0002 GE sections should not be scheduled in a time window that exactly
-        matches any existing CMPS0002 section (blocked windows).
+        Owner-scoped blocking:
+        A CMPS0002 GE blocked window only blocks sections that share the same
+        (owner_program_id, owner_batch_id).
         """
         sec = sections_by_id.get(sid, {})
         campus = (sec.get("campus_id") or "").strip().upper()
-        cid = sec.get("course_id")
-        c = (courses.get(cid) or {})
-        ttype = str(c.get("type_of_course") or c.get("type") or "").strip().upper()
-
-        if campus != "CMPS0002" or ttype != "GE":
+        if campus != "CMPS0002":
             return False
 
-        day_map = campus_blocked.get("CMPS0002", {})
-        blocked_arr = day_map.get(di, [])
-        return interval in blocked_arr
+        cid = (sec.get("course_id") or "").strip()
+        c = (courses.get(cid) or {})
+        ttype = str(c.get("type_of_course") or c.get("type") or "").strip().upper()
+        if ttype != "GE":
+            return False
 
+        owner_key = (
+            (sec.get("owner_program_id") or None),
+            (sec.get("owner_batch_id") or None),
+        )
+
+        # campus_blocked structure (from your updated phase0_load):
+        # campus_blocked["CMPS0002"][owner_key][day_idx] -> [(st,en,section_id,course_id,section_code), ...]
+        by_owner = (campus_blocked.get("CMPS0002") or {})
+        day_map = (by_owner.get(owner_key) or {})
+        blocked_arr = day_map.get(di, [])
+
+        st, en = interval
+        for bst, ben, *_rest in blocked_arr:
+            if not (en <= bst or st >= ben):  # overlap
+                return True
+        return False
 
     def _course_is_shs(cid: str) -> bool:
         t = (courses.get(cid) or {}).get("type") or (courses.get(cid) or {}).get("type_of_course")

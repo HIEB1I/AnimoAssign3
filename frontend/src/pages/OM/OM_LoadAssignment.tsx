@@ -4138,51 +4138,48 @@ export default function OM_LoadAssignment() {
 
   const facultySummaryView: FacultySummaryRow[] = useMemo(() => {
     const base = [...facultySummaryFiltered];
-
+  
     const filtered = base.filter((f) => {
       const assigned = Number(f.assignedUnits ?? 0);
       const hasPref = f.preferredUnits != null;
       const diff = f.diff;
-
+  
       if (hideNoPrefs && !hasPref) return false;
-
+  
       if (unitsFilterMode === "unassigned") return assigned === 0;
-      if (unitsFilterMode === "issues")
-        return hasPref && diff != null && diff !== 0;
+      if (unitsFilterMode === "issues") return hasPref && diff != null && diff !== 0;
       return true;
     });
-
+  
     const dir = unitsSortDir === "asc" ? 1 : -1;
-
+  
     filtered.sort((a, b) => {
       const aName = a.facultyName ?? "";
       const bName = b.facultyName ?? "";
-    
+  
       const aAssigned = Number(a.assignedUnits ?? 0);
       const bAssigned = Number(b.assignedUnits ?? 0);
-    
+  
       const aPref =
         a.preferredUnits == null ? Number.POSITIVE_INFINITY : Number(a.preferredUnits);
       const bPref =
         b.preferredUnits == null ? Number.POSITIVE_INFINITY : Number(b.preferredUnits);
-    
+  
       const aGap = a.diff == null ? Number.POSITIVE_INFINITY : Number(a.diff);
       const bGap = b.diff == null ? Number.POSITIVE_INFINITY : Number(b.diff);
-    
+  
       const aDeload = (a.facultyId && deloadUnitsByFacultyId[a.facultyId]) || 0;
       const bDeload = (b.facultyId && deloadUnitsByFacultyId[b.facultyId]) || 0;
-    
+  
       if (unitsSortKey === "faculty") return dir * aName.localeCompare(bName);
       if (unitsSortKey === "assigned") return dir * (aAssigned - bAssigned);
       if (unitsSortKey === "preferred") return dir * (aPref - bPref);
-          if (unitsSortKey === "deload") return dir * (aDeload - bDeload);
-    
-      // default: gap
+      if (unitsSortKey === "deload") return dir * (aDeload - bDeload);
+  
       if (aGap !== bGap) return dir * (aGap - bGap);
-    
       return aName.localeCompare(bName);
-    });    
-
+    });
+  
     return filtered;
   }, [
     facultySummaryFiltered,
@@ -4190,8 +4187,9 @@ export default function OM_LoadAssignment() {
     unitsSortKey,
     unitsSortDir,
     hideNoPrefs,
+    deloadUnitsByFacultyId, 
   ]);
-
+  
   // ---- Rule alerts for Tab 2 (violations / warnings) ----
   type RuleAlert = {
     id: string;
@@ -4628,6 +4626,9 @@ export default function OM_LoadAssignment() {
     day: string;
     begin: string;
     end: string;
+
+    program?: string; // or program_code/program_name depending on backend
+    batch?: string;   // string for safety (ex: "2023", "Batch 12")
   };
 
   const [blockedGeCmps2, setBlockedGeCmps2] = useState<BlockedGeCmps2Item[]>(
@@ -4640,37 +4641,36 @@ export default function OM_LoadAssignment() {
     section: string;
     campusId: string;
     campusName?: string;
+  
+    program?: string;
+    batch?: string;
   };
+  
+const blockedSections: BlockedSectionRow[] = useMemo(() => {
+  const bySection: Record<string, BlockedSectionRow> = {};
 
-  const blockedSections: BlockedSectionRow[] = useMemo(() => {
-    const bySection: Record<string, BlockedSectionRow> = {};
+  (blockedGeCmps2 || []).forEach((b) => {
+    const sid = String(b.section_id || "").trim();
+    if (!sid) return;
 
-    (blockedGeCmps2 || []).forEach(
-      (b) => {
-        const sid = b.section_id;
-        if (!sid) return;
+    if (!bySection[sid]) {
+      bySection[sid] = {
+        rowId: sid,
+        course: b.course_code || b.course_id || "—",
+        section: b.section_code || "—",
+        campusId: b.campus_id || "",
+        campusName: b.campus_name || "",
+        program: b.program || "",
+        batch: b.batch || "",
+      };
+    }
+  });
 
-        if (!bySection[sid]) {
-          bySection[sid] = {
-            rowId: sid,
-            course: b.course_code || b.course_id || "—",
-            section: b.section_code || "—",
-            campusId: b.campus_id || "",
-            campusName: b.campus_name || "",
-          };
-        }
-        return Object.values(bySection).filter(
-          (x) => (x.campusId || "").toUpperCase() === "CMPS0002"
-        );
-      },
-      [blockedGeCmps2]
-    );
-
-    // keep only CMPS0002 in this tab (optional)
-    return Object.values(bySection).filter(
-      (x) => (x.campusId || "").toUpperCase() === "CMPS0002"
-    );
-  }, [blockedGeCmps2]);
+  // keep only CMPS0002 in this tab
+  return Object.values(bySection).filter(
+    (x) => String(x.campusId || "").toUpperCase() === "CMPS0002"
+  );
+}, [blockedGeCmps2]);
 
   const blockedSectionsFiltered: BlockedSectionRow[] = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -6192,6 +6192,8 @@ export default function OM_LoadAssignment() {
                               <th className="px-3 py-2 text-left font-semibold">
                                 End 2
                               </th>
+                              <th className="px-3 py-2 text-left font-semibold">Program</th>
+                              <th className="px-3 py-2 text-left font-semibold">Batch</th>
                             </tr>
                           </thead>
                           <tbody className="divide-y divide-gray-100">
@@ -6279,6 +6281,8 @@ export default function OM_LoadAssignment() {
                                     <td className="px-3 py-2 text-gray-700">
                                       {end2}
                                     </td>
+                                    <td className="px-3 py-2 text-gray-700">{b.program || "—"}</td>
+                                    <td className="px-3 py-2 text-gray-700">{b.batch || "—"}</td>
                                   </tr>
                                 );
                               })

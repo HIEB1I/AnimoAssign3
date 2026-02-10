@@ -2325,12 +2325,16 @@ async def ensure_sections_from_demand(
                 await _provision_sched_and_assignment_for_new_section(doc)
 
 async def _create_sections(
-    *, term_id: str, campus_id: str, campus_prefix: str, course_id: str, count: int, capacity: int = DEFAULT_CAP
+    *, term_id: str, campus_id: str, campus_prefix: str, course_id: str,
+    count: int, capacity: int = DEFAULT_CAP,
+    owners: Optional[List[Tuple[str, str, int]]] = None,
 ) -> int:
     made = 0
-    for _ in range(max(0, int(count))):
+    owners = owners or []
+    for i in range(max(0, int(count))):
         code = await next_section_code(campus_prefix, term_id, course_id)
         sid = await _next_seq_id(COL_SECTIONS, "section_id", "SEC", 4)
+
         doc = {
             "section_id": sid,
             "section_code": code,
@@ -2343,7 +2347,18 @@ async def _create_sections(
             "status": "active",
             "created_at": now(),
             "updated_at": now(),
+
+            "owner_batch_id": None,
+            "owner_program_id": None,
+            "batch_number": None,
         }
+
+        if owners:
+            bid, pid, bn = owners[i % len(owners)]
+            doc["owner_batch_id"] = bid or None
+            doc["owner_program_id"] = pid or None
+            doc["batch_number"] = int(bn or 0)
+
         if await safe_insert_section(doc):
             await _provision_sched_and_assignment_for_new_section(doc)
             made += 1
@@ -5297,19 +5312,38 @@ async def post_course_offerings(
 
         curr = [x async for x in db[COL_CURRICULUM].find(
             {"term_id": term_id, "campus_id": campus_id},
-            {"_id":0,"program_id":1,"course_list":1}
+            {"_id": 0, "program_id": 1, "batch_id": 1, "course_list": 1}
         )]
-        course_to_programs: Dict[str, set] = {}
+
+        # batch_id -> batch_number (best effort)
+        batch_ids = sorted({(c.get("batch_id") or "").strip() for c in curr if (c.get("batch_id") or "").strip()})
+        batch_number_by_id: Dict[str, int] = {}
+        if batch_ids:
+            async for b in db[COL_BATCHES].find(
+                {"batch_id": {"$in": batch_ids}},
+                {"_id": 0, "batch_id": 1, "batch_number": 1, "batch_code": 1}
+            ):
+                bid = (b.get("batch_id") or "").strip()
+                if not bid:
+                    continue
+                batch_number_by_id[bid] = int(_extract_batch_number(b) or 0)
+
+        # course_id -> set of (batch_id, program_id, batch_number)
+        course_to_owner_set: Dict[str, set] = {}
         for c in curr:
-            pid = c.get("program_id")
+            pid = (c.get("program_id") or "").strip()
+            bid = (c.get("batch_id") or "").strip()
+            bn = int(batch_number_by_id.get(bid, 0))
             for cid in ensure_list(c.get("course_list")):
-                if pid:
-                    course_to_programs.setdefault(cid, set()).add(pid)
-        base_by_course: Dict[str, int] = {cid: max(1, len(ps)) for cid, ps in course_to_programs.items()}
+                if cid and pid and bid:
+                    course_to_owner_set.setdefault(cid, set()).add((bid, pid, bn))
+
+        # base sections per course = number of distinct owners (batch+program)
+        base_by_course: Dict[str, int] = {cid: max(1, len(owners)) for cid, owners in course_to_owner_set.items()}
 
         async def _choose_creation_prefix(cid: str) -> str:
             lvl = (await db[COL_COURSES].find_one({"course_id": cid}, {"_id":0,"program_level":1}) or {}).get("program_level")
-            owners = list(course_to_programs.get(cid, set()))
+            owners = sorted({pid for (_bid, pid, _bn) in course_to_owner_set.get(cid, set())})
             pname_list: List[str] = []
             if owners:
                 async for p in db[COL_PROGRAMS].find({"program_id": {"$in": owners}}, {"_id":0,"program_name":1}):
@@ -5368,13 +5402,15 @@ async def post_course_offerings(
                 need_base = max(0, base - existing)
                 if need_base:
                     creation_prefix = await _choose_creation_prefix(cid)
+                    owners_for_course = sorted(list(course_to_owner_set.get(cid, set())))
                     await _create_sections(
                         term_id=term_id,
                         campus_id=campus_id,
                         campus_prefix=creation_prefix,
                         course_id=cid,
                         count=need_base,
-                        capacity=await effective_section_capacity(term_id, campus.get("campus_name",""), cid)
+                        capacity=await effective_section_capacity(term_id, campus.get("campus_name",""), cid),
+                        owners=owners_for_course,
                     )
                     existing += need_base
 
@@ -5382,13 +5418,15 @@ async def post_course_offerings(
 
                 if by_sections:
                     creation_prefix = await _choose_creation_prefix(cid)
+                    owners_for_course = sorted(list(course_to_owner_set.get(cid, set())))
                     await _create_sections(
                         term_id=term_id,
                         campus_id=campus_id,
                         campus_prefix=creation_prefix,
                         course_id=cid,
                         count=by_sections,
-                        capacity=await effective_section_capacity(term_id, campus.get("campus_name",""), cid)
+                        capacity=await effective_section_capacity(term_id, campus.get("campus_name",""), cid),
+                        owners=owners_for_course,
                     )
 
             else:
