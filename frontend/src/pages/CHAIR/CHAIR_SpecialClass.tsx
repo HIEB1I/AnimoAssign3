@@ -381,21 +381,45 @@ export default function CHAIR_SpecialClass() {
   };
 
   const exportSelectedPdf = async () => {
+    // Export each selected application as its own PDF file (separate downloads)
+    const safe = (s: string) =>
+      (s || "")
+        .replace(/[\\/:*?"<>|]+/g, "_")
+        .replace(/\s+/g, "_")
+        .replace(/_+/g, "_")
+        .replace(/^_+|_+$/g, "");
+
+    const makeFileName = (id: string) => {
+      const r = rows.find((x) => x.special_id === id);
+      const date = new Date().toISOString().slice(0, 10);
+      const course = safe(r?.course_code || "Course");
+      const sec = safe(r?.section_code || "Section");
+      const stud = safe(String(r?.student_number || r?.student_name || ""));
+      const parts = ["SpecialClass", course, sec, stud, safe(id), date].filter(Boolean);
+      return `${parts.join("_")}.pdf`;
+    };
+
     try {
       setErr("");
       if (selectedList.length === 0) {
         setErr("Select at least one application to export.");
         return;
       }
+
       setLoading(true);
-      const blob = await exportOMSC_Pdf({ special_ids: selectedList });
-      downloadBlob(blob, `SpecialClass_Selected_${new Date().toISOString().slice(0, 10)}.pdf`);
+
+      // Always export as separate files when multiple are selected.
+      for (const id of selectedList) {
+        const blob = await exportOMSC_Pdf({ special_ids: [id] });
+        downloadBlob(blob, makeFileName(id));
+      }
     } catch (e: any) {
       setErr(e?.response?.data?.detail || e?.message || "Failed to export selected PDF.");
     } finally {
       setLoading(false);
     }
   };
+
 
   const presetOptions = useMemo(() => {
     const base = presets.map((p) => {

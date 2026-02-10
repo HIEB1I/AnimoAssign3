@@ -21,6 +21,49 @@ from ..main import db
 # In-app bell notifications (same pattern as Faculty Service)
 from ..Notifications import create_notification
 
+
+async def _ensure_user_gmail_address(user_id: str, db) -> None:
+    """Best-effort: ensure users.gmail is populated for email notifications.
+
+    In some deployments, Faculty/Chair user records have their address stored in
+    `email` (or similar) while `gmail` is blank. The notification email sender
+    typically looks for `gmail` first; when it's missing, the in-app notification
+    still works but the Gmail notification can be skipped.
+
+    This helper backfills users.gmail from the best available email field without
+    changing any other behavior. It is safe to call repeatedly.
+    """
+
+    uid = (user_id or "").strip()
+    if not uid:
+        return
+
+    try:
+        user = await db["users"].find_one(
+            {"user_id": uid},
+            {"_id": 0, "gmail": 1, "email": 1, "dlsu_email": 1, "google_email": 1},
+        ) or {}
+        gmail = str(user.get("gmail") or "").strip()
+        if gmail:
+            return
+
+        # Try common fallbacks
+        fallback = (
+            str(user.get("email") or "").strip()
+            or str(user.get("dlsu_email") or "").strip()
+            or str(user.get("google_email") or "").strip()
+        )
+        if not fallback:
+            return
+
+        await db["users"].update_one(
+            {"user_id": uid, "$or": [{"gmail": {"$exists": False}}, {"gmail": ""}, {"gmail": None}]},
+            {"$set": {"gmail": fallback}},
+        )
+    except Exception:
+        # Never fail a workflow due to best-effort backfill.
+        return
+
 import re 
 
 def get_db():
@@ -40,29 +83,45 @@ COL_DEPTS = "departments"
 COL_CAMPUSES = "campuses"
 
 
-async def _om_department_ids(user_id: str, db) -> List[str]:
-    """Departments this OM should see.
-    Tries role_assignments(role=office_manager/om) then staff_profiles.department_id.
+def _campus_name_to_id(val: str) -> str:
+    """Map Campus column values to campus_id.
+
+    Supported values (case-insensitive):
+      - Manila  -> CMPS0001
+      - Laguna  -> CMPS0002
+
+    Returns an empty string when the input is blank.
+    Raises ValueError for non-blank unknown values.
     """
+    s = (val or "").strip()
+    if not s:
+        return ""
+
+    s_norm = s.casefold()
+    if s_norm == "manila":
+        return "CMPS0001"
+    if s_norm == "laguna":
+        return "CMPS0002"
+
+    raise ValueError(f"Invalid Campus value: {s}")
+
+
+async def _om_department_ids(user_id: str, db) -> List[str]:
+    """Departments this OM should see (from role_assignments.scope)."""
     ra = await db.get_collection("role_assignments").find_one(
-        {"user_id": user_id, "role": {"$in": ["office_manager", "om"]}},
-        {"_id": 0, "department_ids": 1, "department_id": 1},
+        {"user_id": user_id, "role_id": "ROLE0006"},
+        {"_id": 0, "scope": 1},
     ) or {}
 
     dept_ids: List[str] = []
-    if isinstance(ra.get("department_ids"), list):
-        dept_ids = [str(x).strip() for x in ra["department_ids"] if str(x).strip()]
-    elif ra.get("department_id"):
-        dept_ids = [str(ra["department_id"]).strip()]
+    for sc in (ra.get("scope") or []):
+        if isinstance(sc, dict) and sc.get("type") == "department":
+            did = str(sc.get("id") or "").strip()
+            if did:
+                dept_ids.append(did)
 
-    if dept_ids:
-        return dept_ids
+    return dept_ids
 
-    staff = await db[COL_STAFF].find_one({"user_id": user_id}, {"_id": 0, "department_id": 1}) or {}
-    if staff.get("department_id"):
-        return [str(staff["department_id"]).strip()]
-
-    return []
 COL_LEAVES = "leaves"
 COL_PREFERENCES = "faculty_preferences"
 COL_FACULTY_LOADS = "faculty_loads"
@@ -327,6 +386,22 @@ async def _chair_user_ids_for_department_id(department_id: str, db) -> List[str]
             seen.add(x)
             out.append(x)
     return out
+
+async def get_office_manager_department(db, user_id: str) -> str | None:
+    role = await db.role_assignments.find_one({
+        "user_id": user_id,
+        "role_id": "ROLE0006",
+        "scope.type": "department",
+    })
+
+    if not role:
+        return None
+
+    for scope in role.get("scope", []):
+        if scope.get("type") == "department":
+            return scope.get("id")
+
+    return None
 
 async def _infer_department_id_from_rows(rows: List[Dict[str, Any]], db) -> Optional[str]:
     """Best-effort department_id inference for OM forward/update.
@@ -687,13 +762,15 @@ def _preferred_cap_for(ctx, fid: str) -> int:
 
 async def _fetch_rows(user_id: str, term_id: str, db) -> Dict[str, Any]:
     dept_ids = await _om_department_ids(user_id, db)
+    if not dept_ids:
+        return {"rows": []}
     pipe: List[Dict[str, Any]] = [
         {"$match": {"term_id": term_id, "submitted_for_scheduling": True}} if term_id else {"$match": {"submitted_for_scheduling": True}},
 
         {"$lookup": {"from": COL_COURSES, "localField": "course_id", "foreignField": "course_id", "as": "course"}},
-        {"$unwind": {"path": "$course", "preserveNullAndEmptyArrays": True}},
+        {"$unwind": {"path": "$course", "preserveNullAndEmptyArrays": False}},
         # Dept restriction (each OM only sees their department)
-        ({"$match": {"course.department_id": {"$in": dept_ids}}} if dept_ids else {"$match": {}}),
+        {"$match": {"course.department_id": {"$in": dept_ids}}},
         {
         "$match": {
             "$or": [
@@ -737,6 +814,26 @@ async def _fetch_rows(user_id: str, term_id: str, db) -> Dict[str, Any]:
     ]
 
     docs = [x async for x in db[COL_SECTIONS_SUBMITTED].aggregate(pipe)]
+
+    # Preload section remarks from the canonical `sections` collection.
+    # Remarks are stored in sections.remarks (not in sections_submitted).
+    section_ids_for_remarks = [
+        (d.get("section_id") or "").strip() for d in docs if (d.get("section_id") or "").strip()
+    ]
+    remarks_by_section_id: dict[str, str] = {}
+    if section_ids_for_remarks:
+        try:
+            sec_docs = await db["sections"].find(
+                {"section_id": {"$in": section_ids_for_remarks}},
+                {"_id": 0, "section_id": 1, "remarks": 1},
+            ).to_list(None)
+            remarks_by_section_id = {
+                (s.get("section_id") or "").strip(): str(s.get("remarks") or "")
+                for s in (sec_docs or [])
+                if (s.get("section_id") or "").strip()
+            }
+        except Exception:
+            remarks_by_section_id = {}
 
     # --- Preload rooms into a lookup: { room_id → room_number } ---
     room_docs = [
@@ -795,6 +892,13 @@ async def _fetch_rows(user_id: str, term_id: str, db) -> Dict[str, Any]:
         course_doc = (d.get("course") or {})
         scheds = (d.get("scheds") or [])
 
+        # Expose schedule_id(s) so the frontend can map back to the correct section via section_schedules.
+        schedule_ids = [
+            (s.get("schedule_id") or "").strip()
+            for s in (scheds[:2] if isinstance(scheds, list) else [])
+            if (s.get("schedule_id") or "").strip()
+        ]
+
         # --- Faculty preference mode for current term ---
         pref_mode = ""
         fid = (d.get("asg") or {}).get("faculty_id")
@@ -817,6 +921,9 @@ async def _fetch_rows(user_id: str, term_id: str, db) -> Dict[str, Any]:
 
         row = {
             "id": sid,
+            # Used by frontend for correct mapping when saving remarks.
+            # Backend resolves the section via section_schedules.schedule_id.
+            "schedule_ids": schedule_ids,
             # NEW: expose course_id for KAC checks
             "course_id": course_doc.get("course_id") or d.get("course_id") or "",
             "course": d.get("course_code_display") or "",
@@ -829,7 +936,15 @@ async def _fetch_rows(user_id: str, term_id: str, db) -> Dict[str, Any]:
             **pair,
             "capacity": d.get("enrollment_cap", "") or "",
             "mode": mode_display,
-            "status": "Pending" if (d.get("asg") or {}).get("faculty_id") else "Unassigned",
+            # Prefer canonical sections.remarks, but fall back to sections_submitted.remarks
+            # (needed for SHS imports which may store remarks on the submitted snapshot).
+            "remarks": remarks_by_section_id.get(sid, "") or str(d.get("remarks") or ""),
+            "status": (
+                "Approved"
+                if bool((d.get("asg") or {}).get("synced_from_faculty_service")) and (d.get("asg") or {}).get("faculty_id")
+                else ("Pending" if (d.get("asg") or {}).get("faculty_id") else "Unassigned")
+            ),
+            "synced_from_faculty_service": bool((d.get("asg") or {}).get("synced_from_faculty_service")),
         }
 
         # If there is **no faculty assigned**, keep schedule/capacity/mode intact so OM can
@@ -890,17 +1005,20 @@ async def _fetch_rows(user_id: str, term_id: str, db) -> Dict[str, Any]:
             course = str(r.get("course") or "").strip()
             section = str(r.get("section") or "").strip()
 
+            # Highlight rows already forwarded to faculty (proposal exists)
+            forwarded = bool(fid and course and section and (fid, course, section) in forwarded_keys)
+            if forwarded:
+                r["forwarded_to_faculty"] = True
+
+            # Finalized/locked rows stay protected from auto-assign and can be rendered as finalized.
             if fid and course and section and (fid, course, section) in finalized_keys:
                 r["finalized"] = True
 
-                # Only flip Pending -> Approved when faculty has actually approved/accepted
-                st = proposal_status_by_fid.get(fid, "")
-                if st in ("approved", "accepted"):
-                    r["status"] = "Approved"
-
-            # Highlight rows already forwarded to faculty (proposal exists)
-            if fid and course and section and (fid, course, section) in forwarded_keys:
-                r["forwarded_to_faculty"] = True
+            # Faculty "Accept Schedule" must NOT lock/finalize rows.
+            # However, OM should still see the row status as "Approved" once the faculty accepts.
+            st = proposal_status_by_fid.get(fid, "")
+            if forwarded and st in ("approved", "accepted"):
+                r["status"] = "Approved"
     except Exception:
         pass
 
@@ -1159,6 +1277,35 @@ async def loadassignment_handler(
             # keep any other fields you already return
         }
 
+    if action == "save_remarks":
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="Invalid payload; expected JSON object")
+
+        schedule_id = str(payload.get("schedule_id") or "").strip()
+        remarks = str(payload.get("remarks") or "")
+
+        if not schedule_id:
+            raise HTTPException(status_code=400, detail="schedule_id is required")
+
+        # Resolve section via section_schedules to avoid guessing/wrong section identifiers.
+        sched = await db[COL_SCHED].find_one(
+            {"schedule_id": schedule_id},
+            {"_id": 0, "section_id": 1},
+        )
+        if not sched or not (sched.get("section_id") or "").strip():
+            raise HTTPException(status_code=404, detail="Schedule not found")
+
+        section_id = str(sched.get("section_id") or "").strip()
+
+        res = await db["sections"].update_one(
+            {"section_id": section_id},
+            {"$set": {"remarks": remarks}},
+        )
+        if res.matched_count == 0:
+            raise HTTPException(status_code=404, detail="Section not found")
+
+        return {"ok": True, "section_id": section_id, "remarks": remarks}
+
     if action == "save":
         # same validation as approve
         if not isinstance(payload, dict) or not isinstance(payload.get("rows"), list):
@@ -1263,7 +1410,17 @@ async def loadassignment_handler(
             }
 
             for uid in recipients:
-                await create_notification(user_id=uid, title=title, details=details, meta=meta)
+                # Backfill missing users.gmail (some Chair accounts only have users.email).
+                await _ensure_user_gmail_address(uid, db)
+                # Send BOTH in-app + Gmail notification (best-effort) using the OM's connected Gmail.
+                await create_notification(
+                    user_id=uid,
+                    title=title,
+                    details=details,
+                    meta=meta,
+                    send_email=True,
+                    email_from_user_id=userId,
+                )
         except Exception:
             # Never break approval due to notification failure
             pass
@@ -1301,9 +1458,10 @@ async def loadassignment_handler(
         term_id = active.get("term_id")
         ts = datetime.utcnow()
 
-        # Best-effort campus_id from staff profile (optional)
+        # Best-effort campus_id fallback from staff profile (optional).
+        # Note: If the CSV includes a "Campus" column, per-row Campus will override this fallback.
         staff = await db[COL_STAFF].find_one({"user_id": userId}, {"_id": 0, "campus_id": 1}) or {}
-        campus_id = (staff.get("campus_id") or "").strip()
+        campus_id_fallback = (staff.get("campus_id") or "").strip()
 
         # Parse CSV
         reader = csv.DictReader(io.StringIO(csv_text))
@@ -1333,6 +1491,16 @@ async def loadassignment_handler(
         c_room2 = col("Room 2", "Room2")
         c_cap = col("Capacity", "Cap")
         c_mode = col("Mode")
+
+        # Optional: per-row campus (Manila/Laguna). Saved to sections_submitted.campus_id.
+        c_campus = col("Campus")
+
+        # Optional: per-row campus value ("Manila" or "Laguna").
+        c_campus = col("Campus")
+
+        # Optional: allow SHS import files to include per-section remarks
+        # (requested to be saved in sections_submitted.remarks and shown in the remarks column)
+        c_remarks = col("Remarks", "Remark", "Notes", "Note")
 
         missing = [
             n for n, c in [
@@ -1427,6 +1595,24 @@ async def loadassignment_handler(
 
             mode = str(raw.get(c_mode) or "").strip().upper()
 
+            # Optional per-row remarks.
+            remarks_val = ""
+            if c_remarks:
+                remarks_val = str(raw.get(c_remarks) or "").strip()
+
+            # Resolve campus_id.
+            campus_id = campus_id_fallback
+            if c_campus:
+                campus_raw = str(raw.get(c_campus) or "").strip()
+                if campus_raw:
+                    try:
+                        campus_id = _campus_name_to_id(campus_raw)
+                    except ValueError:
+                        raise HTTPException(
+                            status_code=422,
+                            detail=f"Invalid Campus value '{campus_raw}' for section '{section_code}'. Use Manila or Laguna.",
+                        )
+
             course_id = await ensure_course(course_code, course_title, units_val)
 
             # Create a new section_id. If the same section_code+course exists for term, upsert instead.
@@ -1454,6 +1640,13 @@ async def loadassignment_handler(
                 "submitted_by": userId,
                 "updated_at": ts,
             }
+
+            # Persist SHS import remarks.
+            # - Requested storage: sections_submitted.remarks
+            # - Also store it in sections.remarks so existing remarks-loading logic continues to work.
+            # Only set if provided to avoid wiping existing remarks.
+            if remarks_val:
+                sec_doc["remarks"] = remarks_val
 
             await db[COL_SECTIONS].update_one(
                 {"section_id": section_id},
@@ -1588,7 +1781,17 @@ async def om_notify_chair_load_forwarded(
 
     created = 0
     for uid in recipients:
-        await create_notification(user_id=uid, title=title, details=details, meta=meta)
+        # Backfill missing users.gmail (some Chair accounts only have users.email).
+        await _ensure_user_gmail_address(uid, db)
+        # Send BOTH in-app + Gmail notification (best-effort) using the OM's connected Gmail.
+        await create_notification(
+            user_id=uid,
+            title=title,
+            details=details,
+            meta=meta,
+            send_email=True,
+            email_from_user_id=userId,
+        )
         created += 1
 
     return {
@@ -1603,7 +1806,38 @@ async def om_notify_chair_load_forwarded(
 async def om_get_all_faculty(db = Depends(get_db)):
     pipeline = [
         {
-            "$match": {"is_archived": {"$ne": True}}
+            # Only include faculty under the required department.
+            "$match": {
+                "is_archived": {"$ne": True},
+                "department_id": "DEPT0001",
+            }
+        },
+        # Exclude faculty who are currently on an approved leave.
+        # NOTE: Per requirement, any APPROVED leave record is sufficient to exclude.
+        {
+            "$lookup": {
+                "from": COL_LEAVES,
+                "let": {"fid": "$faculty_id"},
+                "pipeline": [
+                    {
+                        "$match": {
+                            "$expr": {
+                                "$and": [
+                                    {"$eq": ["$faculty_id", "$$fid"]},
+                                    {"$eq": ["$approval_status", "APPROVED"]},
+                                ]
+                            }
+                        }
+                    },
+                    {"$project": {"_id": 0, "faculty_id": 1}},
+                ],
+                "as": "approved_leaves",
+            }
+        },
+        {
+            "$match": {
+                "approved_leaves.0": {"$exists": False}
+            }
         },
         {
             "$lookup": {
@@ -1615,6 +1849,9 @@ async def om_get_all_faculty(db = Depends(get_db)):
         },
         {
             "$unwind": "$user"
+        },
+        {
+            "$unset": "approved_leaves"
         },
         {
             "$set": {
@@ -1742,6 +1979,21 @@ async def om_load_assignment_terms(db=Depends(get_db)):
         tid = (t.get("term_id") or "").strip()
         if not tid:
             continue
+
+        # Skip academic terms that have no archived load data.
+        # Archived loads come from `sections_submitted` (submitted_for_scheduling=True),
+        # so if there are no submitted sections for a term, it shouldn't appear in the archive selector.
+        try:
+            has_archived = await db[COL_SECTIONS_SUBMITTED].find_one(
+                {"term_id": tid, "submitted_for_scheduling": True},
+                {"_id": 1},
+            )
+            if not has_archived:
+                continue
+        except Exception:
+            # Best-effort filter only; if the check fails, keep existing behavior (show term).
+            pass
+
         terms.append(
             {
                 "term_id": tid,
@@ -1981,11 +2233,26 @@ async def get_om_load_assignment_list(user_id: str, term_id: Optional[str] = Non
     campus_blocked = getattr(ctx, "campus_blocked", {}) or {}
     blocked_ge_cmps2: list[dict] = []
 
-    # Optional campus lookup if you have it on ctx
-    campus_lookup = {}
+    # Campus name lookup (DB first; fallback to campus_id)
+    campus_lookup: dict[str, str] = {}
+    try:
+        campus_ids = [str(cid) for cid in (campus_blocked or {}).keys() if cid]
+        if campus_ids:
+            docs = await db[COL_CAMPUSES].find(
+                {"campus_id": {"$in": campus_ids}},
+                {"_id": 0, "campus_id": 1, "campus_name": 1, "name": 1},
+            ).to_list(None)
+            for d in docs or []:
+                cid = d.get("campus_id")
+                if cid:
+                    campus_lookup[cid] = (d.get("campus_name") or d.get("name") or cid)
+    except Exception:
+        pass
+
+    # Fallback: if ctx already has campuses (older code paths), use it
     for c in getattr(ctx, "campuses", []) or []:
         cid = c.get("campus_id")
-        if cid:
+        if cid and cid not in campus_lookup:
             campus_lookup[cid] = c.get("campus_name") or c.get("name") or cid
 
     # Reverse day index
@@ -1996,20 +2263,94 @@ async def get_om_load_assignment_list(user_id: str, term_id: Optional[str] = Non
 
     # Quick maps
     sec_by_id = {s.get("section_id"): s for s in sections if s.get("section_id")}
-    for campus_id, day_map in campus_blocked.items():
-        if campus_id != "CMPS0002":
+
+    # Resolve section_code for blocked GE sections directly from the sections collection.
+    # We still keep ctx.sections as a fast fallback, but the DB is the source of truth.
+    section_code_by_id: dict[str, str] = {}
+    try:
+        blocked_section_ids: set[str] = set()
+        for _campus_id, _day_map in (campus_blocked or {}).items():
+            if str(_campus_id or "").strip().upper() != "CMPS0002":
+                continue
+            for _di, _slots in (_day_map or {}).items():
+                for _slot in (_slots or []):
+                    sid = None
+                    if isinstance(_slot, (list, tuple)):
+                        if len(_slot) >= 3:
+                            sid = _slot[2]
+                    elif isinstance(_slot, dict):
+                        sid = _slot.get("section_id") or _slot.get("id")
+                    if sid:
+                        blocked_section_ids.add(str(sid).strip())
+
+        blocked_section_ids = {s for s in blocked_section_ids if s}
+        if blocked_section_ids:
+            docs = await db[COL_SECTIONS].find(
+                {"section_id": {"$in": list(blocked_section_ids)}},
+                {
+                    "_id": 0,
+                    "section_id": 1,
+                    "section_code": 1,
+                    "section": 1,
+                    "section_name": 1,
+                },
+            ).to_list(None)
+            for d in docs or []:
+                sid = str(d.get("section_id") or "").strip()
+                if not sid:
+                    continue
+                code = (
+                    str(d.get("section_code") or "").strip()
+                    or str(d.get("section") or "").strip()
+                    or str(d.get("section_name") or "").strip()
+                )
+                if code:
+                    section_code_by_id[sid] = code
+                # Merge into ctx-derived map so later fallbacks work too
+                sec_by_id[sid] = {**(sec_by_id.get(sid) or {}), **d}
+    except Exception:
+        # Best-effort only; do not break /list if lookups fail.
+        section_code_by_id = {}
+
+    for campus_id, day_map in (campus_blocked or {}).items():
+        camp_norm = str(campus_id or "").strip().upper()
+        if camp_norm != "CMPS0002":
             continue
-        for day_idx, slots in day_map.items():
-            day = idx_to_day.get(day_idx, "")
-            for st_min, en_min, sid, cid, sec_code in slots:
+        for day_idx, slots in (day_map or {}).items():
+            try:
+                di = int(day_idx)
+            except Exception:
+                di = day_idx
+            day = idx_to_day.get(di, "")
+
+            for slot in (slots or []):
+                # Expected slot shape: (st_min, en_min, section_id, course_id, section_code)
+                if not isinstance(slot, (list, tuple)) or len(slot) < 4:
+                    continue
+                st_min = slot[0]
+                en_min = slot[1]
+                sid = str(slot[2] or "").strip() if len(slot) >= 3 else ""
+                cid = str(slot[3] or "").strip() if len(slot) >= 4 else ""
+                sec_code = str(slot[4] or "").strip() if len(slot) >= 5 else ""
+
+                if not sid or not cid:
+                    continue
+
                 cinfo = courses.get(cid) or {}
                 course_code = cinfo.get("course_code") or cinfo.get("course_id") or cid
                 sec = sec_by_id.get(sid) or {}
-                section_code = sec_code or sec.get("section_code") or sec.get("section") or ""
+                section_code = (
+                    sec_code
+                    or section_code_by_id.get(sid, "")
+                    or str(sec.get("section_code") or "").strip()
+                    or str(sec.get("section") or "").strip()
+                    or sid
+                )
+
                 blocked_ge_cmps2.append(
                     {
-                        "campus_id": campus_id,
-                        "campus_name": campus_lookup.get(campus_id, campus_id),
+                        "campus_id": camp_norm,
+                        "campus_name": campus_lookup.get(camp_norm, camp_norm),
                         "course_id": cid,
                         "course_code": course_code,
                         "section_id": sid,
@@ -2040,29 +2381,12 @@ async def get_om_load_assignment_list(user_id: str, term_id: Optional[str] = Non
     for r in rows:
         fid = str(r.get("faculty_id") or "").strip()
         sid = str(r.get("id") or r.get("section_id") or "").strip()
-        r["pending_rfc"] = bool(fid and sid and (fid, sid) in open_rfc_keys)
-
-    blocked_ge_cmps2: list[dict[str, Any]] = []
-    try:
-        idx_to_day = {1: "M", 2: "T", 3: "W", 4: "H", 5: "F", 6: "S"}
-        campus_map = getattr(ctx, "campus_blocked", {}) or {}
-        for di, items in (campus_map.get("CMPS0002") or {}).items():
-            for (st_min, en_min, section_id, course_id, section_code) in (items or []):
-                cinfo = (courses or {}).get(course_id) or {}
-                blocked_ge_cmps2.append(
-                    {
-                        "campus_id": "CMPS0002",
-                        "course_id": course_id,
-                        "course_code": cinfo.get("course_code") or cinfo.get("code"),
-                        "section_id": section_id,
-                        "section_code": section_code,
-                        "day": idx_to_day.get(int(di), str(di)),
-                        "begin": _mm_to_hhmm(int(st_min)),
-                        "end": _mm_to_hhmm(int(en_min)),
-                    }
-                )
-    except Exception:
-        blocked_ge_cmps2 = []
+        # Faculty assignments synced from Faculty Service should be treated as already approved.
+        # They should not show RFC notifications in OM Load Assignment.
+        if bool(r.get("synced_from_faculty_service")):
+            r["pending_rfc"] = False
+        else:
+            r["pending_rfc"] = bool(fid and sid and (fid, sid) in open_rfc_keys)
 
     return {
         "term": _term_label(active),
@@ -2170,48 +2494,127 @@ async def om_send_to_faculty(payload: Dict[str, Any] = Body(...), db=Depends(get
     if not by_fid:
         raise HTTPException(status_code=400, detail="No rows with faculty_id")
 
+    def _row_key(rr: Dict[str, Any]) -> tuple[str, str, str]:
+        """Key used to identify a row inside a proposal doc.
+
+        Prefer section_id when present (most stable), otherwise fall back to (course_code, section).
+        """
+        section_id = str(rr.get("id") or rr.get("section_id") or "").strip()
+        course_code = str(rr.get("course_code") or rr.get("course") or "").strip()
+        section = str(rr.get("section") or "").strip()
+        return (section_id, course_code, section)
+
+    def _cmp_payload(rr: Dict[str, Any]) -> Dict[str, str]:
+        """A reduced, stable comparison view of a row.
+
+        We intentionally compare only schedule-relevant fields so we can detect
+        whether a row truly changed since it was last forwarded.
+        """
+        return {
+            "section_id": str(rr.get("id") or rr.get("section_id") or "").strip(),
+            "course_code": str(rr.get("course_code") or rr.get("course") or "").strip(),
+            "course_title": str(rr.get("course_title") or rr.get("title") or "").strip(),
+            "section": str(rr.get("section") or "").strip(),
+            "faculty_id": str(rr.get("faculty_id") or "").strip(),
+            "day1": str(rr.get("day1") or "").strip(),
+            "start": str(rr.get("start") or rr.get("begin1") or "").strip(),
+            "end": str(rr.get("end") or rr.get("end1") or "").strip(),
+            "room1": str(rr.get("room1") or "").strip(),
+            "day2": str(rr.get("day2") or "").strip(),
+            "start2": str(rr.get("start2") or rr.get("begin2") or "").strip(),
+            "end2": str(rr.get("end2") or rr.get("end2") or "").strip(),
+            "room2": str(rr.get("room2") or "").strip(),
+            "mode": str(rr.get("mode") or "").strip(),
+            "capacity": str(rr.get("capacity") or "").strip(),
+            "units": str(rr.get("units") or "").strip(),
+        }
+
     sent = 0
     for fid, fac_rows in by_fid.items():
         fac = await db[COL_FACULTY].find_one({"faculty_id": fid}, {"_id": 0, "user_id": 1}) or {}
         fac_user_id = (fac.get("user_id") or "").strip()
 
-        # --- NEW: do not overwrite an already-finalized schedule ---
-        existing_prop = await db[COL_LOAD_PROPOSALS].find_one(
+        # Fetch existing proposal so we can append new rows without forcing previously forwarded rows
+        # to be re-sent (or re-accepted) unless they were edited.
+        existing = await db[COL_LOAD_PROPOSALS].find_one(
             {"faculty_id": fid, "term_id": term_id},
-            {"_id": 0, "status": 1, "locked": 1},
-        ) or None
-        if existing_prop:
-            st = str((existing_prop.get("status") or "")).lower()
-            if bool(existing_prop.get("locked")) or st in ("accepted", "approved"):
-                raise HTTPException(status_code=409, detail="Schedule is already finalized. You can no longer send/overwrite the proposal for this faculty.")
+            {"_id": 0, "status": 1, "locked": 1, "rows": 1, "created_at": 1},
+        ) or {}
+
+        existing_rows = list(existing.get("rows") or []) if isinstance(existing.get("rows"), list) else []
+        existing_by_key: Dict[tuple[str, str, str], Dict[str, Any]] = {}
+        existing_index_by_key: Dict[tuple[str, str, str], int] = {}
+        for i, rr in enumerate(existing_rows):
+            if not isinstance(rr, dict):
+                continue
+            k = _row_key(rr)
+            existing_by_key[k] = rr
+            existing_index_by_key[k] = i
+
+        changed = False
+        merged_rows = list(existing_rows)
+        for rr in fac_rows:
+            if not isinstance(rr, dict):
+                continue
+            k = _row_key(rr)
+            prev = existing_by_key.get(k)
+
+            # If no previous row, this is new.
+            if not prev:
+                merged_rows.append(rr)
+                changed = True
+                continue
+
+            # If schedule-relevant payload differs, replace in-place.
+            if _cmp_payload(prev) != _cmp_payload(rr):
+                idx = existing_index_by_key.get(k)
+                if idx is not None and 0 <= idx < len(merged_rows):
+                    merged_rows[idx] = rr
+                else:
+                    merged_rows.append(rr)
+                changed = True
+
+        # If nothing new/changed for this faculty, do not touch the proposal doc or notify.
+        if not changed and existing_rows:
+            continue
+
+        now = datetime.now(timezone.utc)
+        prior_status = str(existing.get("status") or "").strip() or "proposed"
+        # Any new/changed rows requires faculty attention; set status back to proposed.
+        next_status = "proposed" if changed else prior_status
 
         doc = {
             "faculty_id": fid,
             "term_id": term_id,
-            "status": "proposed",
+            "status": next_status,
             "om_user_id": user_id,
-            "rows": fac_rows,
-            "updated_at": datetime.now(timezone.utc),
+            "rows": merged_rows,
+            "locked": False,
+            "updated_at": now,
         }
 
         await db[COL_LOAD_PROPOSALS].update_one(
             {"faculty_id": fid, "term_id": term_id},
-            {"$set": doc, "$setOnInsert": {"created_at": datetime.now(timezone.utc)}},
+            {"$set": doc, "$setOnInsert": {"created_at": now}},
             upsert=True,
         )
 
         if fac_user_id:
-            # Notify faculty that a proposed schedule is available
+            # Backfill missing users.gmail (some Faculty accounts only have users.email).
+            await _ensure_user_gmail_address(fac_user_id, db)
+            # Send BOTH in-app + Gmail notification (best-effort) using the OM's connected Gmail.
             await create_notification(
                 user_id=fac_user_id,
-                title="Load Assignment: Proposed schedule available",
-                details="The Office Manager sent a proposed schedule for you. You can accept it or request changes (RFC).",
+                title="Load Assignment: Proposed schedule updated",
+                details="The Office Manager sent additional or updated load rows for you. You can review them and accept or request changes (RFC).",
                 meta={
                     "route": "/faculty/overview",
                     "kind": "load_proposed",
                     "term_id": term_id,
                     "faculty_id": fid,
                 },
+                send_email=True,
+                email_from_user_id=user_id,
             )
 
         sent += 1
@@ -2284,7 +2687,9 @@ async def respond_load_assignment_rfc(
         raise HTTPException(status_code=404, detail="No RFC found")
 
     rfc = _normalize_rfc_doc(rfc)
-    if (rfc.get("status") or "").upper() in RFC_TERMINAL:
+    # Only treat as locked when the explicit `locked` flag is set.
+    # Terminal statuses are informational and should not prevent continued edits/RFC.
+    if bool(rfc.get("locked")):
         raise HTTPException(status_code=409, detail="RFC is already locked")
 
     now = datetime.now(timezone.utc)
@@ -2307,29 +2712,16 @@ async def respond_load_assignment_rfc(
         locked = False
     elif action == "approve":
         new_status = "APPROVED"
-        locked = True
+        # Do NOT lock RFC/schedule on approval. Faculty and OM must be able to continue editing / RFC again.
+        locked = False
         extra["closed_at"] = now
 
-        # --- NEW: RFC APPROVED → schedule becomes FINAL/APPROVED and locked ---
-        try:
-            await db[COL_LOAD_PROPOSALS].update_one(
-                {"faculty_id": faculty_id, "term_id": term_id},
-                {
-                    "$set": {
-                        "status": "approved",
-                        "locked": True,
-                        "rows.$[].finalized": True,
-                        "updated_at": now,
-                    },
-                    "$setOnInsert": {"created_at": now},
-                },
-                upsert=True,
-            )
-        except Exception:
-            pass
+        # RFC APPROVED → notify faculty only.
+        # IMPORTANT: Do NOT change proposal/schedule status here; it becomes "Approved" only when faculty accepts.
     else:
         new_status = "REJECTED"
-        locked = True
+        # Keep the RFC closed, but do not hard-lock the workflow.
+        locked = False
         extra["closed_at"] = now
 
         # ✅ Reject behavior (hybrid):
@@ -2345,14 +2737,14 @@ async def respond_load_assignment_rfc(
             except Exception:
                 pass
         else:
+            # Schedule-wide RFC reject should not freeze the whole schedule.
+            # Keep the proposal editable; OM can re-send and faculty can RFC again.
             try:
                 await db[COL_LOAD_PROPOSALS].update_one(
                     {"faculty_id": faculty_id, "term_id": term_id},
                     {
                         "$set": {
-                            "status": "approved",
-                            "locked": True,
-                            "rows.$[].finalized": True,
+                            "locked": False,
                             "updated_at": now,
                         },
                         "$setOnInsert": {"created_at": now},
@@ -2392,6 +2784,8 @@ async def respond_load_assignment_rfc(
     fac_user_id = (fac.get("user_id") or "").strip()
 
     if fac_user_id:
+        # Backfill missing users.gmail (some Faculty accounts only have users.email).
+        await _ensure_user_gmail_address(fac_user_id, db)
         if action == "reply":
             title = "Load Assignment: OM replied to your Request for Change"
             details = message
@@ -2405,6 +2799,7 @@ async def respond_load_assignment_rfc(
             details = message or "Your Request for Change was rejected."
             kind = "load_rfc_rejected"
 
+        # Send BOTH in-app + Gmail notification (best-effort) using the OM's connected Gmail.
         await create_notification(
             user_id=fac_user_id,
             title=title,
@@ -2419,6 +2814,8 @@ async def respond_load_assignment_rfc(
                 "section_id": section_id,
                 "rfc_id": rfc_id,
             },
+            send_email=True,
+            email_from_user_id=user_id,
         )
 
     return {"ok": True, "status": new_status}
@@ -2444,6 +2841,9 @@ async def om_finalize_course(payload: Dict[str, Any] = Body(...), db=Depends(get
     fac_user_id = (fac.get("user_id") or "").strip()
 
     if fac_user_id:
+        # Backfill missing users.gmail (some Faculty accounts only have users.email).
+        await _ensure_user_gmail_address(fac_user_id, db)
+        # Send BOTH in-app + Gmail notification (best-effort) using the OM's connected Gmail.
         await create_notification(
             user_id=fac_user_id,
             title="Load Assignment: Added to final schedule",
@@ -2456,6 +2856,8 @@ async def om_finalize_course(payload: Dict[str, Any] = Body(...), db=Depends(get
                 "course_code": course_code,
                 "section": section,
             },
+            send_email=True,
+            email_from_user_id=user_id,
         )
 
     # Best-effort: mark finalized in proposal doc
@@ -2518,7 +2920,22 @@ async def run_auto_assignment(
     # ----------------------------------------------------------------------
 
     # Prefs (used for alt-window search on duplicates)
-    ctx_for_prefs = await phase0_load(active["term_id"], db, department_id=department_id)
+    # Resolve OM department if not explicitly provided
+    if not department_id:
+        om_dept_ids = await _om_department_ids(user_id, db)
+        if not om_dept_ids:
+            raise HTTPException(
+                status_code=403,
+                detail="Office Manager department not found"
+            )
+        department_id = om_dept_ids[0]  # OM should only see one dept
+
+    ctx_for_prefs = await phase0_load(
+        active["term_id"],
+        db,
+        department_id=department_id
+    )
+
     fac_prefs = ctx_for_prefs.prefs_by_faculty or {}
 
     # Build a quick map → faculty_id -> preferred_mode (from faculty_preferences.mode.mode)
@@ -3229,7 +3646,12 @@ async def run_auto_assignment(
     for r in rows:
         fid = str(r.get("faculty_id") or "").strip()
         sid = str(r.get("id") or r.get("section_id") or "").strip()
-        r["pending_rfc"] = bool(fid and sid and (fid, sid) in open_rfc_keys)
+        # Faculty assignments synced from Faculty Service should be treated as already approved.
+        # They should not show RFC notifications in OM Load Assignment.
+        if bool(r.get("synced_from_faculty_service")):
+            r["pending_rfc"] = False
+        else:
+            r["pending_rfc"] = bool(fid and sid and (fid, sid) in open_rfc_keys)
 
     return {
         "term": _term_label(active),
@@ -3283,24 +3705,31 @@ async def phase0_load(term_id: str, db, department_id: str | None = None) -> Con
     # ------------------------------
     # 0) Term-scoped Sections
     # ------------------------------
-    q = {"term_id": term_id}
+    # 1. Load courses by department FIRST
+    course_q = {}
     if department_id:
-        q["department_id"] = department_id
+        course_q["department_id"] = department_id
+
+    courses = await db[COL_COURSES].find(course_q).to_list(None)
+
+    course_ids = [c["course_id"] for c in courses]
+
+    # 2. Load sections ONLY for those courses
+    section_q = {"term_id": term_id}
+    if course_ids:
+        section_q["course_id"] = {"$in": course_ids}
 
     sections = await db[COL_SECTIONS].find(
-        q,
+        section_q,
         {
             "_id": 0,
             "section_id": 1,
             "course_id": 1,
-            "department_id": 1,
-            "campus_id": 1,
             "units": 1,
             "mode": 1,
-            # schedule fields (if denormalized on sections)
             "day1": 1, "begin1": 1, "end1": 1, "room1": 1,
             "day2": 1, "begin2": 1, "end2": 1, "room2": 1,
-        },
+        }
     ).sort([("course_id", 1), ("section_id", 1)]).to_list(None)
 
     # Early return if no sections
@@ -3321,7 +3750,10 @@ async def phase0_load(term_id: str, db, department_id: str | None = None) -> Con
     # ------------------------------
     # 1) Courses (normalize units & type)
     # ------------------------------
-    course_rows = await db[COL_COURSES].find({}, {"_id": 0}).to_list(None)
+    course_rows = await db[COL_COURSES].find(
+        {"course_id": {"$in": course_ids}},
+        {"_id": 0}
+    ).to_list(None)
 
     def _units(r: dict) -> int:
         v = r.get("units", r.get("units_per_section"))
@@ -6516,8 +6948,144 @@ async def _persist_rows_no_auto(term_id: str, rows: list[dict], db):
         fid_raw = (r.get("faculty_id") or "").strip()
         existing = await db[COL_ASSIGN].find_one(
             {"section_id": sid},
-            {"_id": 0, "assignment_id": 1, "load_id": 1, "status": 1},
+            {"_id": 0, "assignment_id": 1, "load_id": 1, "status": 1, "faculty_id": 1},
         ) or {}
+
+        existing_fid = str(existing.get("faculty_id") or "").strip()
+
+        # If OM edits a schedule row that is currently in "Approved" status,
+        # the approval becomes stale and must be re-sent to faculty.
+        # Automatically demote Approved → Pending and reset the faculty proposal to "proposed"
+        # (without notifying yet; OM will send again).
+        edit_resets_approval = False
+        try:
+            if str(existing.get("status") or "").strip().lower() == "approved":
+                def _c(v: str) -> str:
+                    return _to_compact_hhmm(_norm_hhmm(v) or "") if v else ""
+
+                # Current DB schedules (best-effort)
+                s1 = await db[COL_SCHED].find_one(
+                    {"schedule_id": _sched_id(sid, 1)},
+                    {"_id": 0, "day": 1, "start_time": 1, "end_time": 1},
+                ) or {}
+                s2 = await db[COL_SCHED].find_one(
+                    {"schedule_id": _sched_id(sid, 2)},
+                    {"_id": 0, "day": 1, "start_time": 1, "end_time": 1},
+                ) or {}
+
+                db_view = {
+                    "faculty_id": existing_fid,
+                    "day1": str(s1.get("day") or "").strip().upper(),
+                    "begin1": str(s1.get("start_time") or "").strip(),
+                    "end1": str(s1.get("end_time") or "").strip(),
+                    "day2": str(s2.get("day") or "").strip().upper(),
+                    "begin2": str(s2.get("start_time") or "").strip(),
+                    "end2": str(s2.get("end_time") or "").strip(),
+                }
+
+                in_view = {
+                    "faculty_id": fid_raw,
+                    "day1": str(r.get("day1") or "").strip().upper(),
+                    "begin1": _c(str(r.get("begin1") or "")),
+                    "end1": _c(str(r.get("end1") or "")),
+                    "day2": str(r.get("day2") or "").strip().upper(),
+                    "begin2": _c(str(r.get("begin2") or "")),
+                    "end2": _c(str(r.get("end2") or "")),
+                }
+
+                if db_view != in_view:
+                    edit_resets_approval = True
+        except Exception:
+            edit_resets_approval = False
+
+        if edit_resets_approval:
+            now = _utcnow()
+            # Ensure the persisted assignment becomes Pending
+            r["status"] = "Pending"
+
+            # Reset the faculty proposal row to the edited version and set proposal status back to "proposed"
+            # so Faculty must accept again; previous approved version is replaced.
+            def _norm_for_faculty(rr: dict) -> dict:
+                out = dict(rr or {})
+                out["course_code"] = (out.get("course_code") or out.get("course") or "").strip()
+                out["course_title"] = (out.get("course_title") or out.get("title") or "").strip()
+
+                b1 = str(out.get("start") or out.get("begin1") or "").strip()
+                e1 = str(out.get("end") or out.get("end1") or "").strip()
+                if b1 and re.fullmatch(r"\d{4}", b1):
+                    b1 = f"{b1[:2]}:{b1[2:]}"
+                if e1 and re.fullmatch(r"\d{4}", e1):
+                    e1 = f"{e1[:2]}:{e1[2:]}"
+                out["start"] = b1
+                out["end"] = e1
+                if b1 and e1:
+                    out["time1"] = out.get("time1") or f"{b1}–{e1}"
+
+                b2 = str(out.get("start2") or out.get("begin2") or "").strip()
+                e2 = str(out.get("end2") or out.get("end2") or "").strip()
+                if b2 and re.fullmatch(r"\d{4}", b2):
+                    b2 = f"{b2[:2]}:{b2[2:]}"
+                if e2 and re.fullmatch(r"\d{4}", e2):
+                    e2 = f"{e2[:2]}:{e2[2:]}"
+                out["start2"] = b2
+                out["end2"] = e2
+                if b2 and e2:
+                    out["time2"] = out.get("time2") or f"{b2}–{e2}"
+
+                # Keep stable identifiers
+                out["section_id"] = str(out.get("id") or out.get("section_id") or "").strip()
+                return out
+
+            def _proposal_row_key(pr: dict) -> str:
+                return str(pr.get("id") or pr.get("section_id") or "").strip()
+
+            async def _update_proposal_for(fid_target: str, remove: bool = False):
+                if not fid_target:
+                    return
+                prop = await db[COL_LOAD_PROPOSALS].find_one(
+                    {"faculty_id": fid_target, "term_id": term_id},
+                    {"_id": 0, "rows": 1, "status": 1},
+                ) or {}
+                rows0 = list(prop.get("rows") or []) if isinstance(prop.get("rows"), list) else []
+                sid_key = str(r.get("id") or r.get("section_id") or "").strip()
+
+                if remove:
+                    rows1 = [pr for pr in rows0 if _proposal_row_key(pr) != sid_key]
+                    await db[COL_LOAD_PROPOSALS].update_one(
+                        {"faculty_id": fid_target, "term_id": term_id},
+                        {"$set": {"rows": rows1, "status": "proposed", "locked": False, "updated_at": now}},
+                        upsert=True,
+                    )
+                    return
+
+                # Replace or append row
+                new_row = _norm_for_faculty(r)
+                replaced = False
+                rows1 = []
+                for pr in rows0:
+                    if _proposal_row_key(pr) == sid_key:
+                        rows1.append(new_row)
+                        replaced = True
+                    else:
+                        rows1.append(pr)
+                if not replaced:
+                    rows1.append(new_row)
+
+                await db[COL_LOAD_PROPOSALS].update_one(
+                    {"faculty_id": fid_target, "term_id": term_id},
+                    {"$set": {"rows": rows1, "status": "proposed", "locked": False, "updated_at": now},
+                     "$setOnInsert": {"created_at": now}},
+                    upsert=True,
+                )
+
+            try:
+                # If reassigned, remove from previous faculty proposal doc
+                if existing_fid and existing_fid != fid_raw:
+                    await _update_proposal_for(existing_fid, remove=True)
+                await _update_proposal_for(fid_raw, remove=False)
+            except Exception:
+                pass
+
 
         incoming_status = str(r.get("status") or "").strip()
         existing_status = str(existing.get("status") or "").strip()

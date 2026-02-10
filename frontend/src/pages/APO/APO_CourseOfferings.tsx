@@ -15,6 +15,8 @@ import {
   Copy,
   Undo2,
   Redo2,
+  Info,
+  BarChart3,
 } from "lucide-react";
 import TopBar from "../../component/TopBar";
 import Tabs from "../../component/Tabs";
@@ -365,12 +367,25 @@ const compactSlotGE = (
   return Object.keys(out).length ? out : undefined;
 };
 
-const normCode = (s?: string) =>
-  (s || "")
+// Normalize batch codes/labels (used by the "All ID" filter).
+// Backend data can contain variations like "ID122", "ID  122", "ID-122", or even digits-only "122".
+// We normalize all of them to "ID <digits>" so the dropdown de-dupes correctly.
+const normCode = (s?: string) => {
+  const t = (s || "")
+    .replace(/\u00A0/g, " ") // non‑breaking spaces
     .trim()
     .toUpperCase()
-    .replace(/\s+/g, " ")
-    .replace(/^ID\s*(\d+)$/, "ID $1");
+    .replace(/\s+/g, " ");
+
+  // digits-only: "122" -> "ID 122"
+  if (/^\d+$/.test(t)) return `ID ${t}`;
+
+  // "ID122", "ID 122", "ID-122" -> "ID 122"
+  const m = t.match(/^ID[\s-]*(\d+)$/);
+  if (m) return `ID ${m[1]}`;
+
+  return t;
+};
 
 const isGEType = (t?: string) => {
   const s = String(t || "").trim().toLowerCase();
@@ -461,6 +476,20 @@ type OfferingRow = {
     elective_placeholder_course_id?: string;
     fulfilled_placeholder_course_id?: string;
   };
+};
+
+type ActionRequiredItem = {
+  key: string;       // stable row key (sec:... or combo:...)
+  groupKey: string;  // `${ID}::${PROGRAM}` used by collapsedGroups
+  courseCode: string;
+  title: string;
+  batchCode: string;
+  programCode: string;
+  demand: number;
+  preEnlisted: number;
+  plannedCap: number;
+  deficit: number;
+  suggest: number;
 };
 
 type CourseOption = {
@@ -1094,7 +1123,7 @@ const EligibleRoomSelect: React.FC<{
   const [currSearch, setCurrSearch] = useState("");
 
   // per-program add selection (code-only select still stores course_id)
-  const [currAddSel, setCurrAddSel] = useState<Record<string, string>>({});
+  const [_currAddSel, setCurrAddSel] = useState<Record<string, string>>({});
   const [editorState, setEditorState] = useState<{
     open: boolean;
     program_id?: string;
@@ -1149,6 +1178,10 @@ const [currImportErr, setCurrImportErr] = useState<string | null>(null);
   };
 // Offerings collapse state (keyed by "ID::PROGRAM")
   const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
+
+  // Offerings: Action Required panel UI
+  const [showAllActionRequired, setShowAllActionRequired] = useState(false);
+  const [highlightRowKey, setHighlightRowKey] = useState<string | null>(null);
 
   const user = useMemo(() => {
     const raw = localStorage.getItem("animo.user");
@@ -1862,10 +1895,14 @@ useEffect(() => {
   }, [data?.filters.levels, data?.campus?.campus_name]);
 
   const idOptions = useMemo(() => {
+    // De-dupe by normalized label.
+    // Backend data can contain the same ID repeated under different raw strings ("122", "ID122", "ID 122")
+    // or duplicated rows. We only want one visible option per ID label.
     const seen = new Set<string>();
     const arr: string[] = ["All ID"];
     (data?.filters.ids || []).forEach((b) => {
       const label = normCode(b.batch_code);
+      if (!label) return;
       if (!seen.has(label)) {
         seen.add(label);
         arr.push(label);
@@ -1926,6 +1963,54 @@ useEffect(() => {
     }
     return out;
   }, [filtered]);
+
+  const actionRequired = useMemo<ActionRequiredItem[]>(() => {
+    const items = (filtered || [])
+      .filter((r) => (r?.sizing?.deficit || 0) > 0 || (r?.sizing?.suggest_additional || 0) > 0)
+      .map((r) => {
+        const idKey = normCode(r.batch.batch_code) || "—";
+        const progKey = r.program.program_code || "—";
+        const key = r.section.section_id
+          ? `sec:${r.section.section_id}`
+          : `combo:${r.batch.batch_id}|${r.program.program_id}|${r.course.course_id}`;
+        return {
+          key,
+          groupKey: `${idKey}::${progKey}`,
+          courseCode: r.course.course_code,
+          title: r.course.course_title,
+          batchCode: idKey,
+          programCode: progKey,
+          demand: r.sizing.planning_demand,
+          preEnlisted: r.sizing.preenlistment_total,
+          plannedCap: r.sizing.planned_capacity,
+          deficit: r.sizing.deficit,
+          suggest: r.sizing.suggest_additional,
+        };
+      })
+      .sort((a, b) => {
+        // Prioritize largest deficits; then suggested sections; then course code.
+        if (b.deficit !== a.deficit) return b.deficit - a.deficit;
+        if (b.suggest !== a.suggest) return b.suggest - a.suggest;
+        return a.courseCode.localeCompare(b.courseCode);
+      });
+    return items;
+  }, [filtered]);
+
+  const jumpToActionRequired = (it: ActionRequiredItem) => {
+    // Ensure the group is expanded
+    setCollapsedGroups((prev) => ({ ...prev, [it.groupKey]: false }));
+
+    // Scroll + transient highlight
+    const elId = `row-${it.key}`;
+    window.setTimeout(() => {
+      const el = document.getElementById(elId);
+      if (el) {
+        el.scrollIntoView({ behavior: "smooth", block: "center" });
+        setHighlightRowKey(it.key);
+        window.setTimeout(() => setHighlightRowKey((k) => (k === it.key ? null : k)), 2200);
+      }
+    }, 80);
+  };
 
   /* ---------------------------- offerings: editing --------------------------- */
 
@@ -3179,9 +3264,25 @@ const promptSaveEdit = () => {
     return arr.filter((x, idx) => arr.findIndex((a) => a.id === x.id) === idx);
   }, [curr?.items]);
 
-  const currBatches = useMemo(() => {
-    const arr = (curr?.items || []).map((i) => ({ id: i.batch_id, code: i.batch_code }));
-    return arr.filter((x, idx) => arr.findIndex((a) => a.id === x.id) === idx);
+
+  const currIdOptions = useMemo(() => {
+    const seen = new Set<string>();
+    const out: string[] = ["All ID"];
+
+    for (const it of curr?.items || []) {
+      const label = normCode(it.batch_code);
+      if (!label || label === "ALL ID") continue;
+      if (seen.has(label)) continue;
+      seen.add(label);
+      out.push(label);
+    }
+
+    // Sort IDs numerically when possible (keep "All ID" at top)
+    const head = out[0];
+    const rest = out
+      .slice(1)
+      .sort((a, b) => parseBatchNumber(a) - parseBatchNumber(b) || a.localeCompare(b));
+    return [head, ...rest];
   }, [curr?.items]);
 
   const selectedProgramId = useMemo(() => {
@@ -3189,10 +3290,10 @@ const promptSaveEdit = () => {
     return currPrograms.find((p) => p.code === programCode)?.id;
   }, [programCode, currPrograms]);
 
-  const selectedBatchId = useMemo(() => {
+  const selectedBatchLabel = useMemo(() => {
     if (batchCode === "All ID") return undefined;
-    return currBatches.find((b) => normCode(b.code) === normCode(batchCode))?.id;
-  }, [batchCode, currBatches]);
+    return normCode(batchCode);
+  }, [batchCode]);
 
   const optionsByProgram: Record<string, DeptCourseOption[]> = curr?.course_options_by_program || {};
 
@@ -3207,7 +3308,7 @@ const promptSaveEdit = () => {
     const map: Record<string, BatchGroup> = {};
     for (const it of curr?.items || []) {
       if (selectedProgramId && it.program_id !== selectedProgramId) continue;
-      if (selectedBatchId && it.batch_id !== selectedBatchId) continue;
+      if (selectedBatchLabel && normCode(it.batch_code) !== selectedBatchLabel) continue;
 
       const bkey = normCode(it.batch_code);
       if (!map[bkey]) {
@@ -3238,26 +3339,30 @@ const promptSaveEdit = () => {
     // turn into ordered array
     const arr = Object.values(map).sort((a, b) => a.batch_number - b.batch_number);
     return arr;
-  }, [curr?.items, selectedProgramId, selectedBatchId]);
+  }, [curr?.items, selectedProgramId, selectedBatchLabel]);
 
   // For "single-batch" view we still need per-program map + consistent order
   const singleBatchPrograms = useMemo(() => {
-    if (!selectedBatchId) return {};
+    if (!selectedBatchLabel) return {};
     const map: Record<string, CurriculumItem> = {};
     for (const i of curr?.items || []) {
-      if (i.batch_id !== selectedBatchId) continue;
+      if (normCode(i.batch_code) !== selectedBatchLabel) continue;
       if (selectedProgramId && i.program_id !== selectedProgramId) continue;
+
+      // For a given (program, batch_code) pair, batch_id should be stable; keep the first we see.
       if (!map[i.program_id]) map[i.program_id] = { ...i, courses: [...i.courses] };
       else map[i.program_id].courses = [...map[i.program_id].courses, ...i.courses];
     }
+
     Object.keys(map).forEach((pid) => {
       const seen = new Set<string>();
       map[pid].courses = map[pid].courses
         .filter((c) => (seen.has(c.course_id) ? false : (seen.add(c.course_id), true)))
         .sort((a, b) => a.code.localeCompare(b.code));
     });
+
     return map;
-  }, [curr?.items, selectedBatchId, selectedProgramId]);
+  }, [curr?.items, selectedBatchLabel, selectedProgramId]);
 
   const eligibleCourseIdsByProgram = useMemo(() => {
     const m: Record<string, Set<string>> = {};
@@ -3269,24 +3374,6 @@ const promptSaveEdit = () => {
   }, [curr?.items]);
 
   /* ------------------------------ curriculum CRUD ----------------------------- */
-
-  const handleCurrAdd = async (program_id: string, batch_id: string, course_id: string) => {
-    if (!user?.userId || !course_id) return;
-    await curriculumAddCourse(user.userId, { program_id, batch_id, course_id } as any);
-    setCurrAddSel((p) => ({ ...p, [program_id]: "" }));
-    await loadCurriculum();
-  };
-
-  const handleCurrAddCustom = async (
-    program_id: string,
-    batch_id: string,
-    newCourse: { course_code: string; course_title: string; department_id: string; program_level: string; units?: number }
-  ) => {
-    if (!user?.userId) return;
-    await curriculumAddCourse(user.userId, { program_id, batch_id, new_course: newCourse } as any);
-    setCurrAddSel((p) => ({ ...p, [program_id]: "" }));
-    await loadCurriculum();
-  };
 
   const handleCurrEditUnits = async (program_id: string, batch_id: string, course_id: string, units: number | null) => {
     if (!user?.userId) return;
@@ -3463,90 +3550,6 @@ const promptSaveEdit = () => {
                 onChange={(v: string) => setProgramCode(v)}
                 options={["All Programs", ...(data?.filters.programs || []).map((p) => p.program_code)]}
               />
-
-              {showCurrImportModal && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4">
-                  <div className="w-full max-w-2xl overflow-hidden rounded-2xl bg-white shadow-xl">
-                    <div className="p-6">
-                      <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-full border border-emerald-600 text-emerald-700">
-                        <Upload className="h-7 w-7" />
-                      </div>
-
-                      <h3 className="text-center text-xl font-semibold">
-                        Import List of Courses CSV
-                      </h3>
-
-                      <p className="mt-1 text-center text-sm text-slate-600">
-                        This will create or update curriculum rows for{" "}
-                        <span className="font-semibold">
-                          {(curr?.campus?.campus_name ?? data?.campus?.campus_name ?? "your campus")}
-                        </span>{" "}
-                        across multiple terms, based on <span className="font-semibold">Academic Year</span>{" "}
-                        and <span className="font-semibold">Term Number</span>.
-                      </p>
-
-                      <div className="mt-5 rounded-lg border border-emerald-200 bg-emerald-50 p-4 text-sm text-slate-700">
-                        <div className="mb-2 font-semibold text-emerald-800">CSV format</div>
-                        <ul className="list-disc space-y-1 pl-5">
-                          <li>
-                            Required columns: <span className="font-semibold">Batch, Program Level, Program, Term Number, Academic Year, Campus, Course 1...</span>
-                          </li>
-                          <li>
-                            Campus must match the selected campus shown above.
-                          </li>
-                          <li>
-                            Each row becomes one curriculum row for that batch/program in that term.
-                          </li>
-                        </ul>
-
-                        <button
-                          type="button"
-                          className="mt-3 inline-flex items-center gap-2 rounded-md border border-emerald-700 bg-white px-3 py-2 text-sm font-medium text-emerald-700 hover:bg-emerald-50"
-                          onClick={downloadCurriculumCsvTemplate}
-                          disabled={importBusy}
-                        >
-                          <Copy className="h-4 w-4" />
-                          Download CSV template
-                        </button>
-                        <div className="mt-1 text-xs text-slate-500">
-                          Use the template to avoid wrong columns / formatting.
-                        </div>
-                      </div>
-
-                      {currImportErr && (
-                        <div className="mt-4 whitespace-pre-line rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">
-                          {currImportErr}
-                        </div>
-                      )}
-                    </div>
-
-                    <div className="flex items-center justify-end gap-2 border-t p-4">
-                      <button
-                        type="button"
-                        className="rounded-md border px-4 py-2 text-sm"
-                        onClick={() => {
-                          setShowCurrImportModal(false);
-                          setCurrImportErr(null);
-                          if (fileInputRef.current) fileInputRef.current.value = "";
-                        }}
-                        disabled={importBusy}
-                      >
-                        Cancel
-                      </button>
-                      <button
-                        type="button"
-                        className="inline-flex items-center gap-2 rounded-md bg-emerald-700 px-4 py-2 text-sm font-medium text-white shadow-sm disabled:opacity-50"
-                        onClick={() => fileInputRef.current?.click()}
-                        disabled={importBusy}
-                      >
-                        <Upload className="h-4 w-4" />
-                        Choose File
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              )}
-
             </>
           )}
           {/* Right side of toolbar */}
@@ -3588,7 +3591,7 @@ const promptSaveEdit = () => {
                   setBatchCode(v);
                   setCurrAddSel({});
                 }}
-                options={["All ID", ...currBatches.map((b) => b.code)]}
+                options={currIdOptions}
               />
 
               {/* Right-side actions: Import CSV + Add Course + Edit Course */}
@@ -3618,7 +3621,7 @@ const promptSaveEdit = () => {
 
                 {/* NEW: open global Edit Course modal */}
                 <button
-                  className="inline-flex items-center gap-2 rounded-md bg-emerald-600 px-4 py-2 text-sm font-medium text-white shadow-sm"
+                  className="inline-flex items-center gap-2 rounded-md bg-[#008e4e] px-4 py-2 text-sm font-medium text-white shadow-sm hover:brightness-110"
                   onClick={() => setShowEditCourseModal(true)}
                   title="Edit an existing course in the global catalog"
                 >
@@ -3771,7 +3774,7 @@ const promptSaveEdit = () => {
                           return;
                         }
                         // ---------- end validation ----------
-const response = await importCurriculumCsv(user.userId, {
+                    const response = await importCurriculumCsv(user.userId, {
                       rows,
                       term_id: termId,
                       campus_name: campusName,
@@ -3936,7 +3939,7 @@ const response = await importCurriculumCsv(user.userId, {
 
                     <div className="flex items-center justify-end gap-2">
                       <button
-                        className="rounded-lg bg-emerald-700 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:brightness-110"
+                        className="rounded-lg bg-orange-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-orange-700"
                         onClick={() => setShowPlanModal(true)}
                       >
                         Review &amp; Approve
@@ -3964,10 +3967,20 @@ const response = await importCurriculumCsv(user.userId, {
                   </a>
                 </div>
               ) : (
-                Object.entries(groups).map(([idLabel, byProgram]) => (
+                <>
+                  {actionRequired.length > 0 && (
+                    <ActionRequiredPanel
+                      items={actionRequired}
+                      showAll={showAllActionRequired}
+                      onToggleShowAll={() => setShowAllActionRequired((v) => !v)}
+                      onJump={jumpToActionRequired}
+                    />
+                  )}
+
+                  {Object.entries(groups).map(([idLabel, byProgram]) => (
                   <div   key={idLabel}
                     className="rounded-xl border border-gray-300 bg-white shadow-sm overflow-visible mb-6">
-                    <div className="bg-[#21804A] text-white px-4 py-3 text-center font-semibold">{idLabel}</div>
+                    <div className="bg-emerald-700 text-white px-4 py-3 text-center font-semibold">{idLabel}</div>
                     {Object.entries(byProgram).map(([progLabel, list]) => {
                       const key = `${idLabel}::${progLabel}`;
                       const isCollapsed = !!collapsedGroups[key];
@@ -3991,24 +4004,19 @@ const response = await importCurriculumCsv(user.userId, {
                           {!isCollapsed && (
                             <div className="p-0">
                             <div className="overflow-x-auto relative" style={{ overflowY: "visible" }}>
-                              {/*
-                                NOTE (GE editing): Begin columns must be wider because GE uses a single
-                                TimeBandInput (e.g. "07:30 - 09:00") in the Begin column.
-                                With table-fixed + narrow <col> widths, the input will visually overlap
-                                adjacent cells.
-                              */}
+
                               <table className="w-full text-sm border-collapse table-fixed">
                                   <colgroup>
                                     <col style={{ width: 96 }} />   {/* Program No. */}
                                     <col style={{ width: 230 }} />  {/* Course Code & Title */}
                                     <col style={{ width: 90 }} />   {/* Section */}
                                     <col style={{ width: 180 }} />  {/* Faculty */}
-                                    <col style={{ width: 95 }} />   {/* Day 1 */}
+                                    <col style={{ width: 140 }} />   {/* Day 1 */}
                                     <col style={{ width: geEditing ? 170 : 70 }} />   {/* Begin 1 */}
                                     <col style={{ width: 70 }} />   {/* End 1 */}
                                     <col style={{ width: 120 }} />  {/* Room 1 */}
-                                    <col style={{ width: 95 }} />   {/* Day 2 */}
-                                    <col style={{ width: geEditing ? 170 : 70 }} />   {/* Begin 2 */}
+                                    <col style={{ width: 140 }} />   {/* Day 2 */}
+                                     <col style={{ width: geEditing ? 170 : 70 }} />   {/* Begin 2 */}
                                     <col style={{ width: 70 }} />   {/* End 2 */}
                                     <col style={{ width: 120 }} />  {/* Room 2 */}
                                     <col style={{ width: 80 }} />   {/* Capacity */}
@@ -4052,24 +4060,7 @@ const response = await importCurriculumCsv(user.userId, {
                                         r.course.course_title
                                       );
 
-                                      const suggestion =
-                                        r.sizing?.deficit > 0 || (r.sizing?.suggest_additional || 0) > 0 ? (
-                                          <div className="mt-1 text-xs text-gray-600">
-                                            <span className="mr-3">
-                                              Demand: <strong>{r.sizing.planning_demand}</strong>
-                                            </span>
-                                            <span className="mr-3">
-                                              Pre-enlisted: <strong>{r.sizing.preenlistment_total}</strong>
-                                            </span>
-                                            <span className="mr-3">
-                                              Planned cap: <strong>{r.sizing.planned_capacity}</strong>
-                                            </span>
-                                            {r.sizing.deficit > 0 && <span className="text-red-600 mr-3">Deficit: {r.sizing.deficit}</span>}
-                                            {r.sizing.suggest_additional > 0 && (
-                                              <span className="text-emerald-700">Suggest +{r.sizing.suggest_additional} section(s)</span>
-                                            )}
-                                          </div>
-                                        ) : null;
+                                      // Sizing alerts are shown in the "Action required" panel (keeps table rows clean)
 
                                       const campusName = data?.campus?.campus_name || "";
                                       const currentCode = (r.section.section_code || "").toUpperCase().replace(/\s+/g, "");
@@ -4078,7 +4069,14 @@ const response = await importCurriculumCsv(user.userId, {
                                       const showExpected = !currentCode || (suggestedCode && suggestedCode !== currentCode);
 
                                       const viewRow = (
-                                        <tr key={(r.section.section_id || r.course.course_id) + "-v"} className="hover:bg-neutral-50">
+                                        <tr
+                                          id={`row-${rowKey}`}
+                                          key={(r.section.section_id || r.course.course_id) + "-v"}
+                                          className={cls(
+                                            "hover:bg-neutral-50",
+                                            highlightRowKey === rowKey && "bg-amber-50"
+                                          )}
+                                        >
                                           <td className="px-3 py-2 border border-gray-300">
                                             {(r.program?.program_code || "—") +
                                               "-" +
@@ -4101,7 +4099,7 @@ const response = await importCurriculumCsv(user.userId, {
                                             <div className="text-xs text-gray-500 leading-snug break-words whitespace-normal">
                                               {r.course.course_title}
                                             </div>
-                                            {suggestion}
+
                                           </td>
                                           <td className="px-3 py-2 border border-gray-300">
                                             <div>{currentCode || "—"}</div>
@@ -4191,8 +4189,9 @@ const response = await importCurriculumCsv(user.userId, {
 
                                       const editRow = (
                                         <tr
+                                          id={`row-${rowKey}`}
                                           key={r.section.section_id + "-e"}
-                                          className="bg-white"
+                                          className={cls("bg-white", highlightRowKey === rowKey && "bg-amber-50")}
                                           style={{ boxShadow: "0 2px 10px rgba(0,0,0,0.05)" }}
                                         >
                                           <td className="px-3 py-2 border border-gray-200 bg-white">
@@ -4839,7 +4838,8 @@ const response = await importCurriculumCsv(user.userId, {
                       );
                     })}
                   </div>
-                ))
+                  ))}
+                </>
               )}
             </>
           )}
@@ -4849,17 +4849,11 @@ const response = await importCurriculumCsv(user.userId, {
             <div className="rounded-xl border border-gray-300 bg-white shadow-sm overflow-visible">
               {/* Header follows selection state */}
               <div className="bg-emerald-700 text-white px-4 py-3 text-center font-semibold">
-                {selectedBatchId
-                  ? `ID ${
-                      (curr?.items || [])
-                        .find((i) => i.batch_id === selectedBatchId)
-                        ?.batch_code?.replace(/^ID\s*/i, "") || "—"
-                    }`
-                  : "List of Courses"}
+                {selectedBatchLabel ? selectedBatchLabel : "List of Courses"}
               </div>
 
               {/* Single ID view */}
-              {selectedBatchId ? (
+              {selectedBatchLabel ? (
                 <div className="p-3"> {/* remove overflow-x-auto so grid can wrap */}
                   <div
                     className="grid gap-4"
@@ -4881,23 +4875,17 @@ const response = await importCurriculumCsv(user.userId, {
                         if (!itm) return null;
 
                         const programCode = itm?.program_code || "—";
-                        const deptId = itm?.department_id || "";
-                        const canAdd = !!selectedBatchId;
                         const opts = optionsByProgram[pid] || [];
-                        const selectedId = currAddSel[pid] || "";
 
                         const allowedIds = eligibleCourseIdsByProgram[pid] || new Set<string>();
                         const filteredOpts = (opts || []).filter((o) => allowedIds.has(o.course_id));
 
-                        const codeOptions = filteredOpts.map((o) => o.course_code);
                         const codeToId: Record<string, string> = {};
                         const idToCode: Record<string, string> = {};
                         filteredOpts.forEach((o) => {
                           codeToId[o.course_code] = o.course_id;
                           idToCode[o.course_id] = o.course_code;
                         });
-
-                        const selectedLabel = selectedId ? idToCode[selectedId] || "— Add course —" : "— Add course —";
 
                         const filteredCourses = (itm?.courses || []).filter((c) => {
                           if (!currSearch.trim()) return true;
@@ -4920,61 +4908,14 @@ const response = await importCurriculumCsv(user.userId, {
 
                               {/* controls should not claim the whole row */}
                               <div className="flex items-center gap-2 flex-none min-w-[280px]" style={{ minWidth: 0 }}>
-                                <div className="w-full min-w-0">
-                                  <SelectBox
-                                    value={selectedLabel}
-                                    onChange={(label: string) => {
-                                      const cid = codeToId[label] || "";
-                                      setCurrAddSel((p) => ({ ...p, [pid]: cid }));
-                                    }}
-                                    options={["— Add course —", ...codeOptions]}
-                                  />
-                                </div>
-
-                                <button
-                                  className="inline-flex items-center gap-2 rounded-md bg-emerald-700 px-3 py-1.5 text-sm font-medium text-white shadow-sm"
-                                  disabled={!canAdd || !selectedId}
-                                  onClick={() => {
-                                    if (!selectedBatchId || !selectedId) return;
-                                    handleCurrAdd(pid, itm.batch_id, selectedId);
-                                  }}
-                                >
-                                  <Plus className="h-4 w-4" />
-                                  Add
-                                </button>
-
-                                <button
-                                  className="inline-flex items-center gap-2 rounded-md border border-emerald-700 px-3 py-1.5 text-sm font-medium text-emerald-700"
-                                  onClick={() => {
-                                    if (!selectedBatchId) return;
-                                    const code = prompt("New course code:")?.trim();
-                                    const title = code ? prompt("Course title:")?.trim() : "";
-                                    const level = title
-                                      ? prompt("Program level (Undergraduate or Graduate Studies):")?.trim()
-                                      : "";
-                                    const unitsStr = level ? prompt("Units (number):")?.trim() : "";
-                                    const unitsNum = unitsStr ? Number(unitsStr) : undefined;
-                                    if (!code || !title || !level) return;
-                                    handleCurrAddCustom(pid, selectedBatchId, {
-                                      course_code: normCode(code),
-                                      course_title: title!,
-                                      department_id: deptId,
-                                      program_level: level!,
-                                      units: isNaN(unitsNum as number) ? undefined : (unitsNum as number),
-                                    });
-                                  }}
-                                >
-                                  <Plus className="h-4 w-4" />
-                                  Custom
-                                </button>
-                                <button
+<button
                                   className="inline-flex items-center gap-2 rounded-md bg-emerald-700 px-3 py-1.5 text-sm font-medium text-white shadow-sm"
                                   onClick={() =>
                                     setEditorState({
                                       open: true,
                                       program_id: pid,
                                       program_code: programCode,
-                                      batch_id: selectedBatchId!,   // single-ID view
+                                      batch_id: itm.batch_id,   // single-ID view
                                     })
                                   }
                                   title="Edit program courses"
@@ -5018,18 +4959,18 @@ const response = await importCurriculumCsv(user.userId, {
                                           placeholder="units"
                                           className="h-9 w-16 rounded border px-2 text-sm text-center"
                                           onBlur={(e) => {
-                                            if (!selectedBatchId) return;
+                                            if (!selectedBatchLabel) return;
                                             const v = e.currentTarget.value.trim();
                                             const num = v === "" ? null : Number(v);
                                             if (v === "" || !isNaN(num!)) {
-                                              handleCurrEditUnits(pid, selectedBatchId, c.course_id, num);
+                                              handleCurrEditUnits(pid, itm.batch_id, c.course_id, num);
                                             }
                                           }}
                                         />
                                         <button
                                           className="text-red-500 hover:text-red-700"
                                           title="Remove"
-                                          onClick={() => selectedBatchId && handleCurrRemove(pid, selectedBatchId, c.course_id)}
+                                          onClick={() => handleCurrRemove(pid, itm.batch_id, c.course_id)}
                                         >
                                           <Trash2 className="h-4 w-4" />
                                         </button>
@@ -5760,6 +5701,276 @@ const response = await importCurriculumCsv(user.userId, {
 
 /* --------------------------- Small helper components --------------------------- */
 
+const MiniMetric: React.FC<{
+  label: string;
+  value: number | string;
+  help: string;
+  tone?: "default" | "danger";
+}> = ({ label, value, help, tone = "default" }) => {
+  return (
+    <span className="inline-flex items-center gap-1.5 text-xs">
+      <span className="group relative inline-flex items-center gap-1 text-slate-700">
+        <span className="cursor-help underline decoration-dotted underline-offset-2">{label}</span>
+        <Info className="h-3.5 w-3.5 text-slate-400" />
+        <span className="pointer-events-none absolute left-0 top-full z-30 mt-2 w-[340px] rounded-xl border border-slate-200 bg-white px-3 py-2 text-[11px] leading-snug text-slate-700 opacity-0 shadow-xl transition-opacity group-hover:opacity-100">
+          <span className="font-semibold text-slate-900">{label}:</span> {help}
+        </span>
+      </span>
+      <span className={cls("font-semibold", tone === "danger" ? "text-rose-700" : "text-slate-900")}>
+        {value}
+      </span>
+    </span>
+  );
+};
+
+const ActionRequiredPanel: React.FC<{
+  items: ActionRequiredItem[];
+  showAll: boolean;
+  onToggleShowAll: () => void;
+  onJump: (it: ActionRequiredItem) => void;
+}> = ({ items, onJump }) => {
+  type CourseGroup = {
+    courseKey: string;
+    courseCode: string;
+    title: string;
+    demand: number;
+    preEnlisted: number;
+    plannedCap: number;
+    deficit: number;
+    suggest: number;
+    rows: ActionRequiredItem[];
+  };
+
+  const groups = React.useMemo<CourseGroup[]>(() => {
+    const map = new Map<string, CourseGroup>();
+    for (const it of items) {
+      const k = String(it.courseCode || "—");
+      const cur = map.get(k);
+      if (!cur) {
+        map.set(k, {
+          courseKey: k,
+          courseCode: it.courseCode,
+          title: it.title,
+          demand: it.demand,
+          preEnlisted: it.preEnlisted,
+          plannedCap: it.plannedCap,
+          deficit: it.deficit,
+          suggest: it.suggest,
+          rows: [it],
+        });
+      } else {
+        cur.rows.push(it);
+        cur.demand = Math.max(cur.demand, it.demand);
+        cur.preEnlisted = Math.max(cur.preEnlisted, it.preEnlisted);
+        cur.plannedCap = Math.max(cur.plannedCap, it.plannedCap);
+        cur.deficit = Math.max(cur.deficit, it.deficit);
+        cur.suggest = Math.max(cur.suggest, it.suggest);
+      }
+    }
+    return Array.from(map.values()).sort((a, b) => {
+      if (b.deficit !== a.deficit) return b.deficit - a.deficit;
+      return a.courseCode.localeCompare(b.courseCode);
+    });
+  }, [items]);
+
+  const [open, setOpen] = React.useState(false);
+
+  return (
+    <>
+      <div className="mb-4 rounded-xl border border-rose-300 bg-rose-50 px-4 py-3 text-rose-950 shadow-sm">
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex items-start gap-3">
+            <div className="mt-0.5 grid h-9 w-9 place-items-center rounded-full bg-rose-200 text-rose-900">
+              <BarChart3 className="h-5 w-5" />
+            </div>
+            <div>
+              <div className="flex items-center gap-1 font-semibold text-rose-950">
+                Capacity Gap
+              </div>
+              <div className="text-sm text-rose-900">
+                Some courses have fewer planned seats than demand. Review the details and consider adding sections.
+              </div>
+            </div>
+          </div>
+
+          <div className="flex items-center justify-end gap-2">
+            <span className="rounded-full bg-rose-100 px-2 py-0.5 text-xs font-semibold text-rose-900">
+              {groups.length} course{groups.length === 1 ? "" : "s"}
+            </span>
+            <button
+              type="button"
+              className="rounded-lg bg-rose-700 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:brightness-110"
+              onClick={() => setOpen(true)}
+            >
+              View
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <CapacityGapModal
+        open={open}
+        groups={groups}
+        onClose={() => setOpen(false)}
+        onJump={onJump}
+      />
+    </>
+  );
+};
+
+const CapacityGapModal: React.FC<{
+  open: boolean;
+  groups: Array<{
+    courseKey: string;
+    courseCode: string;
+    title: string;
+    demand: number;
+    preEnlisted: number;
+    plannedCap: number;
+    deficit: number;
+    rows: ActionRequiredItem[];
+  }>;
+  onClose: () => void;
+  onJump: (it: ActionRequiredItem) => void;
+}> = ({ open, groups, onClose }) => {
+  const [expanded, setExpanded] = React.useState<Record<string, boolean>>({});
+  if (!open) return null;
+
+  const totalGap = groups.reduce((s, g) => s + (g.deficit || 0), 0);
+
+  return (
+    <div className="fixed inset-0 z-[9999] flex items-start justify-center bg-black/50 p-3 sm:p-6">
+      <div className="w-[95vw] max-w-[980px] max-h-[90vh] mt-4 sm:mt-8 rounded-2xl bg-white shadow-2xl border border-rose-200 flex flex-col overflow-hidden">
+        {/* Header */}
+        <div className="bg-rose-600 text-white px-5 py-4">
+          <div className="flex items-start gap-3">
+            <div className="mt-0.5 grid h-10 w-10 place-items-center rounded-full bg-white/15">
+              <BarChart3 className="h-5 w-5" />
+            </div>
+            <div className="min-w-0">
+              <div className="text-base sm:text-lg font-extrabold tracking-tight">
+                Capacity gap
+              </div>
+              <div className="mt-1 text-sm text-white/90">
+                This list summarizes where planned slots are below demand.
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Summary */}
+        <div className="border-b border-rose-200 bg-rose-50 px-5 py-3">
+          <div className="flex flex-wrap items-center gap-2 text-sm text-rose-950">
+            <span className="inline-flex items-center rounded-full bg-rose-100 px-3 py-1 font-semibold">
+              Courses: {groups.length}
+            </span>
+            <span className="inline-flex items-center rounded-full bg-white px-3 py-1 font-semibold border border-rose-200">
+              Total gap: {totalGap}
+            </span>
+            <span className="ml-auto text-xs text-rose-900">
+              Hover labels for meaning.
+            </span>
+          </div>
+        </div>
+
+        {/* Body */}
+        <div className="flex-1 min-h-0 p-4 sm:p-5 overflow-auto">
+          {groups.length === 0 ? (
+            <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm text-slate-700">
+              No capacity gaps.
+            </div>
+          ) : (
+            <ul className="space-y-3">
+              {groups.map((g) => {
+                const isOpen = !!expanded[g.courseKey];
+                return (
+                  <li key={g.courseKey} className="rounded-xl border border-gray-200 bg-white p-3 shadow-sm">
+                    <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                      <div className="min-w-0">
+                        <div className="flex items-baseline gap-2">
+                          <span className="text-sm font-extrabold text-emerald-800">{g.courseCode}</span>
+                          <span className="min-w-0 truncate text-xs text-slate-700">{g.title}</span>
+                        </div>
+                        <div className="mt-1 text-xs text-slate-500">
+                          {g.rows.length} plan row{g.rows.length === 1 ? "" : "s"} affected
+                        </div>
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+                        <MiniMetric
+                          label="Pre‑enlisted"
+                          value={g.preEnlisted}
+                          help="Number of students who pre-enlisted in this course."
+                        />
+                        <MiniMetric
+                          label="Demand"
+                          value={g.demand}
+                          help="Planning demand (target seats) used for sizing. Derived from pre-enlistment statistics."
+                        />
+                        <MiniMetric
+                          label="Capacity"
+                          value={g.plannedCap}
+                          help="Current total planned seats for this course through capacity column."
+                        />
+                        <MiniMetric
+                          label="Gap"
+                          value={g.deficit}
+                          tone={g.deficit > 0 ? "danger" : "default"}
+                          help="Slots still needed to meet demand."
+                        />
+
+                        {g.rows.length > 1 && (
+                          <button
+                            type="button"
+                            onClick={() => setExpanded((p) => ({ ...p, [g.courseKey]: !p[g.courseKey] }))}
+                            className="ml-1 inline-flex items-center rounded-md border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-800 hover:bg-slate-50"
+                          >
+                            {isOpen ? `Hide (${g.rows.length})` : `Show (${g.rows.length})`}
+                          </button>
+                        )}
+                        {g.rows.length === 1 && (
+                          <span className="ml-1 inline-flex items-center rounded-md border border-rose-200 bg-rose-50 px-3 py-1.5 text-xs font-semibold text-rose-800">
+                            1 row
+                          </span>
+                        )}
+                      </div>
+                    </div>
+
+                    {isOpen && (
+                      <div className="mt-2 border-t border-slate-100 pt-2">
+                        <div className="flex flex-wrap gap-1.5">
+                          {g.rows
+                            .slice()
+                            .sort((a, b) => a.groupKey.localeCompare(b.groupKey))
+                            .map((r) => (
+                              <span key={r.key} className="rounded-full border border-slate-200 bg-white px-2 py-0.5 text-xs font-semibold text-slate-700">
+                                {r.batchCode} • {r.programCode}
+                              </span>
+                            ))}
+                        </div>
+                      </div>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div className="flex items-center justify-end gap-2 border-t px-5 py-4">
+          <button
+            className="rounded-lg border border-neutral-300 bg-neutral-100 px-4 py-2 text-sm font-medium hover:bg-neutral-200"
+            onClick={onClose}
+          >
+            Done
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const NoticeModal: React.FC<{
   open: boolean;
   title: string;
@@ -6457,7 +6668,7 @@ const GlobalCourseEditModal: React.FC<GlobalCourseEditModalProps> = ({
                 <input
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
-                  placeholder="Type code or title (min 2 characters)…"
+                  placeholder="Search by course code or title…"
                   className={cls(SOFT_INPUT, "pl-9")}
                 />
               </div>
@@ -6510,7 +6721,7 @@ const GlobalCourseEditModal: React.FC<GlobalCourseEditModalProps> = ({
                 <>
                   <div>
                     <label className="text-xs font-medium text-slate-700 mb-1 block">
-                      Course Codes (multiple allowed)
+                      Course Code
                     </label>
 
                     {codeInputs.map((code, idx) => (
@@ -6545,8 +6756,7 @@ const GlobalCourseEditModal: React.FC<GlobalCourseEditModalProps> = ({
                     </button>
 
                     <p className="mt-1 text-[11px] text-slate-500">
-                      Each row will be saved as a separate entry in the{" "}
-                      <code>course_code</code> array in the database.
+                      Each row will be saved as a separate entry.
                     </p>
                   </div>
 
@@ -6777,9 +6987,11 @@ const noMatches = query.trim().length >= 2 && list.length === 0;
           {/* Current courses */}
           <div className="rounded-lg border">
             <div className="px-3 py-2 bg-gray-50 font-semibold">Current courses</div>
-            <div className="max-h-[60vh] overflow-auto divide-y">
-              {current.length === 0 && <div className="p-3 text-sm text-neutral-500">No courses.</div>}
-              {current.map((c) => (
+            <div className="flex flex-col divide-y">
+            {current.length === 0 ? (
+              <div className="p-3 text-sm text-neutral-500">No courses.</div>
+            ) : (
+              current.map((c) => (
                 <div key={c.course_id} className="p-3 flex items-start justify-between gap-3">
                   <div className="min-w-0">
                     <div className="font-semibold text-emerald-700">{c.code}</div>
@@ -6795,8 +7007,9 @@ const noMatches = query.trim().length >= 2 && list.length === 0;
                     <Trash2 className="h-4 w-4" />
                   </button>
                 </div>
-              ))}
-            </div>
+              ))
+            )}
+          </div>
           </div>
 
           {/* Global catalog search */}
@@ -6808,7 +7021,7 @@ const noMatches = query.trim().length >= 2 && list.length === 0;
                 <input
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
-                  placeholder="Type code or title to search all courses…"
+                  placeholder="Search by course code or title…"
                   className={cls(SOFT_INPUT, "pl-9")}
                 />
               </div>
@@ -7007,7 +7220,7 @@ const CreateCourseModal: React.FC<{
               className={SOFT_INPUT}
               value={title}
               onChange={(e) => setTitle(e.target.value)}
-              placeholder="Course title"
+              placeholder=" "
             />
           </div>
 
@@ -7020,7 +7233,7 @@ const CreateCourseModal: React.FC<{
               className={SOFT_INPUT}
               value={units}
               onChange={(e) => setUnits(e.target.value)}
-              placeholder="3"
+              placeholder=" "
             />
           </div>
 
@@ -7054,7 +7267,7 @@ const CreateCourseModal: React.FC<{
               className={SOFT_INPUT}
               value={capacity}
               onChange={(e) => setCapacity(e.target.value)}
-              placeholder="45"
+              placeholder=" "
             />
           </div>
 
@@ -7071,12 +7284,12 @@ const CreateCourseModal: React.FC<{
 
           {/* Description */}
           <div className="md:col-span-2">
-            <label className="text-xs font-medium text-slate-700">Description</label>
+            <label className="text-xs font-medium text-slate-700">Description (Optional)</label>
             <textarea
               className={cls(SOFT_INPUT, "min-h-[96px]")}
               value={desc}
               onChange={(e) => setDesc(e.target.value)}
-              placeholder="Optional description…"
+              placeholder=" "
             />
           </div>
         </div>

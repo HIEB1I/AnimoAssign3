@@ -261,7 +261,16 @@ async def course_management(
         }},
 
         # -------------------------------------------------------------------------
-        # TEACHING COMPOSITION LOGIC (Qualified via KAC + All Past Instructors)
+        # TEACHING COMPOSITION LOGIC
+        #
+        # Requirement:
+        #   In Course Management, "Teaching Composition" should ONLY show faculty who
+        #   have a past teaching history for the specific course (same basis as the
+        #   Course Profile "Past Instructors Insight").
+        #
+        # Notes:
+        #   - We still compute KACs for cluster filtering and label display.
+        #   - We do NOT include KAC-qualified faculty who have never taught the course.
         # -------------------------------------------------------------------------
 
         # 1. Identify KACs for this course (Needed for KAC-Qualified Faculty)
@@ -282,20 +291,7 @@ async def course_management(
             "kac_ids":   {"$map": {"input": "$_kac_data", "as": "k", "in": "$$k.kac_id"}}
         }},
 
-        # 2. Find Faculty qualified via KAC (Intersection of course's KACs and faculty's qualified_kacs)
-        {"$lookup": {
-            "from": COL_FACULTY,
-            "let": {"kids": "$kac_ids"},
-            "pipeline": [
-                {"$match": {"$expr": {"$gt": [
-                    {"$size": {"$setIntersection": [{"$ifNull": ["$qualified_kacs", []]}, "$$kids"]}}, 0
-                ]}}},
-                {"$project": {"_id": 0, "faculty_id": 1}}
-            ],
-            "as": "_fac_via_kac"
-        }},
-
-        # 3. Find Faculty via History (Past Assignments for this course)
+        # 2. Find Faculty via History (Past Assignments for this course)
         #    (Lookup Sections matching course -> Lookup Assignments matching sections)
         {"$lookup": {
             "from": COL_SECTIONS,
@@ -319,12 +315,13 @@ async def course_management(
             "as": "_fac_via_hist"
         }},
 
-        # 4. Union unique Faculty IDs
+        # 3. Unique Faculty IDs from history
         {"$addFields": {
-            "_all_qual_fids": {"$setUnion": [
-                {"$map": {"input": "$_fac_via_kac", "as": "f", "in": "$$f.faculty_id"}},
-                {"$map": {"input": "$_fac_via_hist", "as": "f", "in": "$$f.faculty_id"}}
-            ]}
+            "_all_qual_fids": {
+                "$setUnion": [
+                    {"$map": {"input": "$_fac_via_hist", "as": "f", "in": "$$f.faculty_id"}}
+                ]
+            }
         }},
 
         # 5. Resolve Names via Faculty Profiles -> Users

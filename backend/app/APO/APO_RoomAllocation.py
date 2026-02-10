@@ -178,6 +178,21 @@ def denormalize_day(d: str) -> str:
 def day_aliases(day_full: str) -> List[str]:
     return DAY_ALIASES.get(day_full, [day_full])
 
+
+
+def _first_str(v: Any) -> str:
+    """Return first string if `v` is a list; else return `v` if it's a string; else ''.
+
+    Mongo fields like `room_type` sometimes come back as a list (e.g., ['Classroom']).
+    Normalizing here avoids mismatches between eligibility filtering and assign validation.
+    """
+    if isinstance(v, list):
+        for item in v:
+            if isinstance(item, str):
+                return item
+        return ""
+    return v if isinstance(v, str) else ""
+
 def normalize_room_type(rt: str) -> str:
     """Normalize physical room types.
 
@@ -464,7 +479,7 @@ async def get_room_allocation(
             {"_id": 0, "course_id": 1, "course_code": 1, "college_id": 1, "room_type": 1},
         )
         courses = [x async for x in cc]
-        course_room_type = {c["course_id"]: (c.get("room_type") or "") for c in courses}
+        course_room_type = {c["course_id"]: _first_str(c.get("room_type")) for c in courses}
 
     # ---- schedules ----
     # 1) Schedules for in-scope sections (these drive the Allocate modal)
@@ -488,7 +503,7 @@ async def get_room_allocation(
             "start_time": s.get("start_time", ""),
             "end_time": s.get("end_time", ""),
             "room_id": s.get("room_id"),
-            "room_type": normalize_room_type(s.get("room_type", "")) if s.get("room_type") else "",
+            "room_type": normalize_room_type(_first_str(s.get("room_type")) or "") if s.get("room_type") else "",
             "time_band": band_of(s.get("start_time", ""), s.get("end_time", "")),
         }
         for s in scoped_raw
@@ -608,7 +623,7 @@ async def get_room_allocation(
         def _fallback_course_room_type(sid: str) -> str:
             """Fallback required room_type from the section's course metadata."""
             cid = sec_meta.get(sid, {}).get("course_id", "")
-            return normalize_room_type(course_room_type.get(cid, "") or "")
+            return normalize_room_type(_first_str(course_room_type.get(cid, "")) or "")
 
         out = []
         for k, cell in schedule_by_room[rid].items():
@@ -621,7 +636,7 @@ async def get_room_allocation(
             # Room properties
             this_room = next((rr for rr in rooms if rr["room_id"] == rid), None)
             r_cap = int(this_room.get("capacity") or 0) if this_room else 0
-            r_type = normalize_room_type(this_room.get("room_type", "")) if this_room else ""
+            r_type = normalize_room_type(_first_str(this_room.get("room_type")) or "") if this_room else ""
 
             for s in scheds_open:
                 if normalize_day(s.get("day")) != day:
@@ -635,7 +650,7 @@ async def get_room_allocation(
                 if r_cap and _cap(sid) and r_cap < _cap(sid):
                     continue
                 # IMPORTANT: room_type is per-slot; prefer this schedule row's room_type
-                need_type = normalize_room_type(s.get("room_type") or "") or _fallback_course_room_type(sid)
+                need_type = normalize_room_type(_first_str(s.get("room_type")) or "") or _fallback_course_room_type(sid)
                 if need_type and r_type and (need_type != r_type):
                     continue
                 eligible.append(sid)
@@ -656,7 +671,7 @@ async def get_room_allocation(
         rooms_out.append({
             "room_id": rid,
             "room_number": r["room_number"],
-            "room_type": normalize_room_type(r.get("room_type", "")),
+            "room_type": normalize_room_type(_first_str(r.get("room_type")) or ""),
             "capacity": r.get("capacity", 0),
             "building": r.get("building", ""),
             "campus_id": r.get("campus_id", ""),
@@ -931,11 +946,11 @@ async def post_room_allocation(
             )
 
         # room_type check: prefer section_schedules.room_type, fallback to course.room_type
-        room_rt = normalize_room_type(r.get("room_type") or "")
+        room_rt = normalize_room_type(_first_str(r.get("room_type")) or "")
 
         sched_rt = ""
         if sched.get("room_type"):
-            sched_rt = normalize_room_type(sched.get("room_type") or "")
+            sched_rt = normalize_room_type(_first_str(sched.get("room_type")) or "")
 
         course_rt = ""
         if course and course.get("room_type"):

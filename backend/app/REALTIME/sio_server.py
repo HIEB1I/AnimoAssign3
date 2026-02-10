@@ -1,6 +1,7 @@
 # backend/app/REALTIME/sio_server.py
 import logging
 import re
+import asyncio
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, List
 
@@ -10,6 +11,10 @@ from fastapi.concurrency import run_in_threadpool
 
 from ..db import get_collection
 from ..MESSAGING.store import open_dm_conversation, insert_message
+
+# Best-effort Gmail notification when a new inbox message arrives.
+# Mirrors the Notifications -> Gmail flow style (refresh token + HTML email).
+from .inbox_email import maybe_send_inbox_email_notification
 
 # Optional imports (only exist if you applied the Phase 9 store.py drop-in)
 try:
@@ -719,6 +724,22 @@ async def message_send(sid: str, data: Dict[str, Any]):
             {"conversationId": conv_id, "unread": int(unread_map.get(uid, 0))},
             room=f"{USER_ROOM_PREFIX}{uid}",
         )
+
+        # ✅ Gmail notification (best-effort):
+        # Only email the receiver when this message is the *first unread* in the thread.
+        # This prevents spamming their inbox while they already have unread messages.
+        try:
+            if str(uid) != str(user_id) and int(unread_map.get(uid, 0) or 0) == 1:
+                asyncio.create_task(
+                    maybe_send_inbox_email_notification(
+                        recipient_user_id=str(uid),
+                        sender_user_id=str(user_id),
+                        sender_name=sender_name,
+                        preview=preview,
+                    )
+                )
+        except Exception:
+            pass
 
     return {"ok": True, "message": payload}
 

@@ -58,27 +58,36 @@ def _code_as_str(v: Any) -> str:
 # Core Logic
 # ---------------------------------------------------------
 
-async def _dept_fallback_campus_name(db, department_id: Optional[str]) -> Optional[str]:
-    if not department_id:
-        return None
-    dept = await db.departments.find_one({"department_id": department_id}, {"_id": 0, "campus_id": 1})
-    campus_ids = (dept or {}).get("campus_id") or []
-    first = campus_ids[0] if isinstance(campus_ids, list) and campus_ids else None
-    if not first:
-        return None
-    camp = await db.campuses.find_one({"campus_id": first}, {"_id": 0, "campus_name": 1})
-    return (camp or {}).get("campus_name")
+# async def _dept_fallback_campus_name(db, department_id: Optional[str]) -> Optional[str]:
+#     if not department_id:
+#         return None
+#     dept = await db.departments.find_one({"department_id": department_id}, {"_id": 0, "campus_id": 1})
+#     campus_ids = (dept or {}).get("campus_id") or []
+#     first = campus_ids[0] if isinstance(campus_ids, list) and campus_ids else None
+#     if not first:
+#         return None
+#     camp = await db.campuses.find_one({"campus_id": first}, {"_id": 0, "campus_name": 1})
+#     return (camp or {}).get("campus_name")
 
 
 async def fetch_teaching_history(faculty_id: str) -> List[Dict[str, Any]]:
     db = get_db()
 
-    # 1. Get faculty profile to determine department fallback
+    # # 1. Get faculty profile to determine department fallback
+    # faculty = await db.faculty_profiles.find_one({"faculty_id": faculty_id})
+    # if not faculty:
+    #     return []
+    
+    # dept_fallback_campus = await _dept_fallback_campus_name(db, faculty.get("department_id"))
+
+    # 1. Validate faculty exists (no campus fallback)
     faculty = await db.faculty_profiles.find_one({"faculty_id": faculty_id})
     if not faculty:
         return []
     
-    dept_fallback_campus = await _dept_fallback_campus_name(db, faculty.get("department_id"))
+    # Standard teaching units baseline depends on employment type
+    emp_type = (faculty.get("employment_type") or "").strip().upper()
+    standard_load_units = 6 if emp_type == "PT" else 12  # default FT=12
 
     # 2. Aggregation Pipeline
     # NOTE: Removed "is_archived": {"$ne": True} to ensure ALL history is shown, 
@@ -154,6 +163,19 @@ async def fetch_teaching_history(faculty_id: str) -> List[Dict[str, Any]]:
 
     for r in raw_rows:
         meetings = r.get("meetings") or []
+
+        # Campus should be derived purely from room_id -> rooms -> campuses,
+        # even if day/time are null. No fallback: N/A when missing.
+        campus_counts: Dict[str, int] = {}
+        for m in meetings:
+            c = (m.get("campus") or "").strip()
+            if not c:
+                continue
+            campus_counts[c] = campus_counts.get(c, 0) + 1
+
+        primary_campus = "N/A"
+        if campus_counts:
+            primary_campus = max(campus_counts.items(), key=lambda kv: kv[1])[0]
         
         # Normalize and sort by day order
         norm_meet: List[Tuple[int, Dict[str, Any]]] = []
@@ -189,7 +211,7 @@ async def fetch_teaching_history(faculty_id: str) -> List[Dict[str, Any]]:
             room2 = m2["room"] or "Online"
             campus_name = campus_name or m2["campus"]
         
-        campus_name = campus_name or dept_fallback_campus or "Online"
+        campus_name = campus_name or primary_campus or "N/A"
 
         if mode == "Online" and (not room1 or room1 == "Online"):
             room1 = "N/A"
@@ -202,6 +224,10 @@ async def fetch_teaching_history(faculty_id: str) -> List[Dict[str, Any]]:
             "course_title": r.get("course_title"),
             "section_code": r.get("section_code"),
             "units": r.get("units"),
+
+            "employment_type": emp_type or None,
+            "standard_load_units": standard_load_units,
+
             "campus": campus_name,
             "mode": mode or "Online",
             

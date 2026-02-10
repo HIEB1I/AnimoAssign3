@@ -36,6 +36,79 @@ _DAY_MAP = {
 }
 DAY_ORDER_MAP = {"Monday": 1, "Tuesday": 2, "Wednesday": 3, "Thursday": 4, "Friday": 5, "Saturday": 6}
 
+# Day initials expected by the OM-style Schedule/History tables (M/T/W/H/F/S)
+_DAY_INITIAL_MAP = {
+    "M": "M", "MON": "M", "MONDAY": "M",
+    "T": "T", "TU": "T", "TUE": "T", "TUESDAY": "T",
+    "W": "W", "WED": "W", "WEDNESDAY": "W",
+    "H": "H", "TH": "H", "THU": "H", "THUR": "H", "THURS": "H", "THURSDAY": "H", "R": "H",
+    "F": "F", "FRI": "F", "FRIDAY": "F",
+    "S": "S", "SAT": "S", "SATURDAY": "S",
+    "U": "U", "SUN": "U", "SUNDAY": "U",
+}
+
+_DAY_INITIAL_ORDER = {"M": 1, "T": 2, "W": 3, "H": 4, "F": 5, "S": 6, "U": 7}
+
+def _to_day_initial(day_val: Any) -> str:
+    s = (str(day_val) if day_val is not None else "").strip()
+    if not s:
+        return ""
+    up = s.strip().upper()
+
+    # Exact known tokens
+    if up in _DAY_INITIAL_MAP:
+        return _DAY_INITIAL_MAP[up]
+
+    # Full day names / prefixes
+    if up.startswith("MON"):
+        return "M"
+    if up.startswith("TUE"):
+        return "T"
+    if up.startswith("WED"):
+        return "W"
+    if up.startswith("THU") or up.startswith("THR") or up.startswith("TH"):
+        return "H"
+    if up.startswith("FRI"):
+        return "F"
+    if up.startswith("SAT"):
+        return "S"
+    if up.startswith("SUN"):
+        return "U"
+
+    # Fall back as-is (better than losing information)
+    return s
+
+def _extract_mode_from_remarks(remarks: Any) -> str:
+    """Mode is stored on sections.remarks (e.g., Hybrid, FOL, F2F/FTF, Online)."""
+    if remarks is None:
+        return "Online"
+    if isinstance(remarks, dict):
+        for k in ("mode", "delivery_mode", "class_mode", "section_mode"):
+            v = remarks.get(k)
+            if v:
+                return str(v).strip()
+        # fall back to a stringy representation
+        remarks = " ".join(str(v) for v in remarks.values() if v)
+
+    if isinstance(remarks, list):
+        # flatten list into a string and parse
+        remarks = " ".join(str(x) for x in remarks if x)
+
+    s = str(remarks).strip()
+    if not s:
+        return "Online"
+
+    up = s.upper()
+    # quick matches
+    if "HYBRID" in up:
+        return "Hybrid"
+    if "F2F" in up or "FTF" in up or "FACE" in up:
+        return "F2F"
+    if "FOL" in up or "ONLINE" in up or "ONL" in up:
+        return "Online"
+    # Otherwise return the remarks string (preserve existing behavior as much as possible)
+    return s
+
 def _to_full_day(day_val: str) -> str:
     s = (day_val or "").strip().upper()
     return _DAY_MAP.get(s, (day_val or "").strip() or "")
@@ -232,6 +305,7 @@ async def facultymanagement_handler(
     search: Optional[str] = Query(None),
     facultyId: Optional[str] = Query(None),
     termId: Optional[str] = Query(None),
+    acadYearStart: Optional[int] = Query(None),
     payload: Optional[Dict[str, Any]] = Body(None),
 ):
     payload = payload or {}
@@ -494,39 +568,30 @@ async def facultymanagement_handler(
 
     # ----- SCHEDULE -----
     if action == "schedule":
+        # Mirror OM_FacultyManagement "schedule" (same backend schema/logic)
         if not facultyId:
             raise HTTPException(status_code=400, detail="facultyId is required.")
+
+        # Resolve working term if not provided
         if not termId:
             active = await _active_term()
             termId = active.get("term_id")
 
-        # We remove "is_archived": False to get all assignments for the term
-        pipeline = [
-            {"$match": {"faculty_id": facultyId}},
-            {"$lookup": {
-                "from": "sections",
-                "localField": "section_id",
-                "foreignField": "section_id",
-                "as": "sec",
-            }},
+        pipeline: List[Dict[str, Any]] = [
+            {"$match": {"faculty_id": facultyId, "is_archived": False}},
+            {"$lookup": {"from": COL_SECTIONS, "localField": "section_id", "foreignField": "section_id", "as": "sec"}},
             {"$unwind": {"path": "$sec", "preserveNullAndEmptyArrays": True}},
         ]
 
         if termId:
             pipeline.append({"$match": {"sec.term_id": termId}})
-        else:
-            # If no term specified, just return empty
-            return {"ok": True, "term_id": termId, "teaching_load": []}
 
         pipeline.extend([
-            {"$lookup": {"from": "courses", "localField": "sec.course_id", "foreignField": "course_id", "as": "course"}},
+            {"$lookup": {"from": COL_COURSES, "localField": "sec.course_id", "foreignField": "course_id", "as": "course"}},
             {"$unwind": {"path": "$course", "preserveNullAndEmptyArrays": True}},
             {"$lookup": {"from": "section_schedules", "localField": "sec.section_id", "foreignField": "section_id", "as": "sched"}},
             {"$unwind": {"path": "$sched", "preserveNullAndEmptyArrays": True}},
-            {"$lookup": {"from": "rooms", "localField": "sched.room_id", "foreignField": "room_id", "as": "room"}},
-            {"$unwind": {"path": "$room", "preserveNullAndEmptyArrays": True}},
-            {"$lookup": {"from": "campuses", "localField": "room.campus_id", "foreignField": "campus_id", "as": "camp"}},
-            {"$unwind": {"path": "$camp", "preserveNullAndEmptyArrays": True}},
+
             {"$addFields": {
                 "course_code_display": {
                     "$cond": [
@@ -534,88 +599,121 @@ async def facultymanagement_handler(
                         {"$ifNull": [{"$arrayElemAt": ["$course.course_code", 0]}, ""]},
                         {"$ifNull": ["$course.course_code", ""]},
                     ]
-                },
-                "day_display": {
-                    "$switch": {
-                        "branches": [
-                            {"case": {"$in": [{"$toUpper": "$sched.day"}, ["M", "MON"]]}, "then": "Monday"},
-                            {"case": {"$in": [{"$toUpper": "$sched.day"}, ["T", "TU", "TUE"]]}, "then": "Tuesday"},
-                            {"case": {"$in": [{"$toUpper": "$sched.day"}, ["W", "WED"]]}, "then": "Wednesday"},
-                            # Added "H" here for Thursday consistency
-                            {"case": {"$in": [{"$toUpper": "$sched.day"}, ["TH", "THU", "R", "H"]]}, "then": "Thursday"},
-                            {"case": {"$in": [{"$toUpper": "$sched.day"}, ["F", "FRI"]]}, "then": "Friday"},
-                            {"case": {"$in": [{"$toUpper": "$sched.day"}, ["S", "SAT"]]}, "then": "Saturday"},
-                        ],
-                        "default": "$sched.day",
-                    }
-                },
+                }
             }},
+
             {"$project": {
                 "_id": 0,
-                "day": "$day_display",
+                "section_id": "$sec.section_id",
+                "section": "$sec.section_code",
                 "course_code": "$course_code_display",
                 "course_title": "$course.course_title",
-                "section": "$sec.section_code",
                 "units": {"$ifNull": ["$course.units", 0]},
-                "campus": {"$ifNull": ["$camp.campus_name", "Online"]},
-                "mode": {"$ifNull": ["$sched.room_type", "Online"]},
-                "room": {"$ifNull": ["$room.room_number", "Online"]},
-                "start_raw": "$sched.start_time",
-                "end_raw": "$sched.end_time",
+                "sched_day": "$sched.day",
+                "sched_start": "$sched.start_time",
+                "sched_end": "$sched.end_time",
+                "section_remarks": "$sec.remarks",
             }},
-            {"$sort": {"day": 1, "start_raw": 1, "section": 1}},
+
+            {"$group": {
+                "_id": "$section_id",
+                "section": {"$first": "$section"},
+                "course_code": {"$first": "$course_code"},
+                "course_title": {"$first": "$course_title"},
+                "units": {"$first": "$units"},
+                "section_remarks": {"$first": "$section_remarks"},
+                "meetings": {"$push": {
+                    "day": "$sched_day",
+                    "start": "$sched_start",
+                    "end": "$sched_end",
+                }},
+            }},
         ])
 
-        rows = [r async for r in db[COL_ASSIGNMENTS].aggregate(pipeline)]
-        teaching_load = []
-        for r in rows:
-            teaching_load.append({
-                "day": r.get("day", ""),
-                "course_code": r.get("course_code", ""),
-                "course_title": r.get("course_title", ""),
-                "section": r.get("section", ""),
+        raw_rows = [r async for r in db[COL_ASSIGNMENTS].aggregate(pipeline)]
+
+        # Flatten: 1 row per section, up to 2 meetings (Day/Begin/End)
+        out_rows: List[Dict[str, Any]] = []
+        for r in raw_rows:
+            meets = r.get("meetings") or []
+
+            norm: List[Tuple[int, str, Dict[str, Any]]] = []
+            for m in meets:
+                if not (m.get("day") or m.get("start") or m.get("end")):
+                    continue
+                day = _to_day_initial(m.get("day"))
+                begin = _fmt_hhmm(m.get("start"))
+                end = _fmt_hhmm(m.get("end"))
+                norm.append((_DAY_INITIAL_ORDER.get(day, 99), begin, {
+                    "day": day,
+                    "begin": begin,
+                    "end": end,
+                }))
+
+            norm.sort(key=lambda x: (x[0], x[1] or ""))
+
+            day1 = begin1 = end1 = day2 = begin2 = end2 = ""
+            mode_val = _extract_mode_from_remarks(r.get("section_remarks"))
+            if norm:
+                day1 = norm[0][2]["day"]
+                begin1 = norm[0][2]["begin"]
+                end1 = norm[0][2]["end"]
+            if len(norm) > 1:
+                day2 = norm[1][2]["day"]
+                begin2 = norm[1][2]["begin"]
+                end2 = norm[1][2]["end"]
+
+            code = r.get("course_code") or ""
+            if isinstance(code, list):
+                code = " / ".join(str(x) for x in code if x).strip()
+
+            out_rows.append({
+                "course_code": code,
+                "course_title": r.get("course_title") or "",
+                "section": r.get("section") or "",
+                "mode": mode_val,
                 "units": r.get("units", 0) or 0,
-                "campus": r.get("campus", "Online"),
-                "mode": r.get("mode", "Online"),
-                "room": r.get("room", "Online"),
-                "time": _fmt_time_band(r.get("start_raw"), r.get("end_raw")),
+                "day1": day1,
+                "begin1": begin1,
+                "end1": end1,
+                "day2": day2,
+                "begin2": begin2,
+                "end2": end2,
             })
 
-        return {"ok": True, "term_id": termId, "teaching_load": teaching_load}
+        out_rows.sort(key=lambda x: (x.get("course_code") or "", x.get("section") or ""))
+
+        return {"ok": True, "term_id": termId, "teaching_load": out_rows}
 
     # ----- HISTORY -----
     if action == "history":
+        # Mirror OM_FacultyManagement "history" (same backend schema/logic)
         if not facultyId:
             raise HTTPException(status_code=400, detail="facultyId is required.")
 
-        # Fetch Faculty to get department for fallback
-        fac_profile = await db[COL_FACULTY].find_one({"faculty_id": facultyId}, {"department_id": 1})
-        if not fac_profile:
-            raise HTTPException(status_code=404, detail="Faculty not found.")
-        
-        department_id = fac_profile.get("department_id")
-        dept_fallback_campus = await _dept_fallback_campus_name(department_id)
+        # Default AY = most recent
+        if acadYearStart is None:
+            latest = await db[COL_TERMS].find({}, {"_id": 0, "acad_year_start": 1}) \
+                .sort([("acad_year_start", -1)]).limit(1).to_list(1)
+            acadYearStart = latest[0]["acad_year_start"] if latest else None
+            if acadYearStart is None:
+                return {"ok": True, "acad_year_start": None, "terms": {}}
 
-        # Pipeline mirrors FACULTY_History "fetch"
-        # --- START CHANGE ---
-        # Removed "is_archived": False to fetch ALL history
         pipeline = [
-            {"$match": {"faculty_id": facultyId}},
-        # --- END CHANGE ---
-            {"$lookup": {"from": "sections", "localField": "section_id", "foreignField": "section_id", "as": "sec"}},
+            {"$match": {"faculty_id": facultyId, "is_archived": False}},
+            {"$lookup": {"from": COL_SECTIONS, "localField": "section_id", "foreignField": "section_id", "as": "sec"}},
             {"$unwind": {"path": "$sec", "preserveNullAndEmptyArrays": True}},
-            {"$lookup": {"from": "courses", "localField": "sec.course_id", "foreignField": "course_id", "as": "course"}},
+            {"$lookup": {"from": COL_COURSES, "localField": "sec.course_id", "foreignField": "course_id", "as": "course"}},
             {"$unwind": {"path": "$course", "preserveNullAndEmptyArrays": True}},
-            {"$lookup": {"from": "terms", "localField": "sec.term_id", "foreignField": "term_id", "as": "t"}},
+            {"$lookup": {"from": COL_TERMS, "localField": "sec.term_id", "foreignField": "term_id", "as": "t"}},
             {"$unwind": {"path": "$t", "preserveNullAndEmptyArrays": True}},
-            # schedules fan-out
+            {"$match": {"t.acad_year_start": acadYearStart}},
             {"$lookup": {"from": "section_schedules", "localField": "sec.section_id", "foreignField": "section_id", "as": "scheds"}},
             {"$unwind": {"path": "$scheds", "preserveNullAndEmptyArrays": True}},
             {"$lookup": {"from": "rooms", "localField": "scheds.room_id", "foreignField": "room_id", "as": "room"}},
             {"$unwind": {"path": "$room", "preserveNullAndEmptyArrays": True}},
             {"$lookup": {"from": "campuses", "localField": "room.campus_id", "foreignField": "campus_id", "as": "camp"}},
             {"$unwind": {"path": "$camp", "preserveNullAndEmptyArrays": True}},
-            # flatten for group
             {"$project": {
                 "_id": 0,
                 "section_id": "$sec.section_id",
@@ -624,7 +722,6 @@ async def facultymanagement_handler(
                 "course_title": "$course.course_title",
                 "units": {"$ifNull": ["$course.units", 0]},
                 "term_number": "$t.term_number",
-                "ay_start": "$t.acad_year_start",
                 "sched_day": "$scheds.day",
                 "sched_room_type": "$scheds.room_type",
                 "sched_start": "$scheds.start_time",
@@ -632,7 +729,6 @@ async def facultymanagement_handler(
                 "room_number": "$room.room_number",
                 "campus_name": "$camp.campus_name",
             }},
-            # Group back per section, collect meetings
             {"$group": {
                 "_id": "$section_id",
                 "section_code": {"$first": "$section_code"},
@@ -640,7 +736,6 @@ async def facultymanagement_handler(
                 "course_title": {"$first": "$course_title"},
                 "units": {"$first": "$units"},
                 "term_number": {"$first": "$term_number"},
-                "ay_start": {"$first": "$ay_start"},
                 "meetings": {"$push": {
                     "day": "$sched_day",
                     "room_type": "$sched_room_type",
@@ -652,74 +747,74 @@ async def facultymanagement_handler(
             }},
         ]
 
+        day_order = _DAY_INITIAL_ORDER
         rows = [r async for r in db[COL_ASSIGNMENTS].aggregate(pipeline)]
 
-        # Build UI rows
-        out = []
+        flat: List[Dict[str, Any]] = []
         for r in rows:
-            meetings = r.get("meetings") or []
-            # Normalize and sort by day order
-            norm_meet = []
-            for m in meetings:
-                full_day = _to_full_day(m.get("day"))
-                norm_meet.append((DAY_ORDER_MAP.get(full_day, 99), {
-                    "day": full_day,
-                    "room": m.get("room") or None,
-                    "mode": (m.get("room_type") or "Online"),
-                    "time": _fmt_time_band(m.get("start"), m.get("end")),
-                    "campus": m.get("campus") or None,
-                }))
-            norm_meet.sort(key=lambda x: (x[0], (x[1].get("time") or "")))
-            
-            # Take first two for day1/room1 and day2/room2
-            day1 = room1 = day2 = room2 = None
-            mode = None
-            time_band = ""
-            campus_name = None
-            
-            if norm_meet:
-                day1 = norm_meet[0][1]["day"]
-                room1 = norm_meet[0][1]["room"] or "Online"
-                mode = norm_meet[0][1]["mode"]
-                time_band = norm_meet[0][1]["time"]
-                campus_name = norm_meet[0][1]["campus"]
-            if len(norm_meet) > 1:
-                day2 = norm_meet[1][1]["day"]
-                room2 = norm_meet[1][1]["room"] or "Online"
-                campus_name = campus_name or norm_meet[1][1]["campus"]
+            meets = r.get("meetings") or []
+            norm: List[Tuple[int, str, Dict[str, Any]]] = []
+            for m in meets:
+                if not (m.get("day") or m.get("start") or m.get("end")):
+                    continue
+                day = _to_day_initial(m.get("day"))
+                begin = _fmt_hhmm(m.get("start"))
+                end = _fmt_hhmm(m.get("end"))
+                norm.append((day_order.get(day, 99), begin, {"day": day, "begin": begin, "end": end}))
+            norm.sort(key=lambda x: (x[0], x[1] or ""))
 
-            # Campus fallback rule
-            campus_name = campus_name or dept_fallback_campus or "Online"
+            day1 = begin1 = end1 = day2 = begin2 = end2 = None
+            if norm:
+                day1 = norm[0][2]["day"]
+                begin1 = norm[0][2]["begin"]
+                end1 = norm[0][2]["end"]
+            if len(norm) > 1:
+                day2 = norm[1][2]["day"]
+                begin2 = norm[1][2]["begin"]
+                end2 = norm[1][2]["end"]
 
-            out.append({
-                "ay": _ay_label(r.get("ay_start")),
-                "term": f"Term {r.get('term_number') or ''}".strip(),
-                "code": _code_as_str(r.get("course_code_raw")),
+            code = r.get("course_code_raw")
+            if isinstance(code, list):
+                code = " / ".join(str(x) for x in code if x).strip()
+            code = str(code or "")
+
+            term_num = r.get("term_number")
+            term_label = f"Term {term_num}" if term_num else "Term 1"
+
+            flat.append({
+                "code": code,
                 "title": r.get("course_title") or "",
                 "section": r.get("section_code") or "",
                 "units": r.get("units") or 0,
-                "campus": campus_name,
-                "mode": mode or "Online",
-                "day1": day1, "room1": room1,
-                "day2": day2, "room2": room2,
-                "time": time_band,
+                "day1": day1,
+                "begin1": begin1,
+                "end1": end1,
+                "day2": day2,
+                "begin2": begin2,
+                "end2": end2,
+                "term": term_label,
             })
 
-        # Sort newest first by AY then Term number
-        def sort_key(row: Dict[str, Any]):
-            ay_part = row.get("ay", "AY —").replace("AY", "").strip()
-            try:
-                ay0 = int((ay_part.split("-")[0] or "").strip())
-            except Exception:
-                ay0 = -1
-            try:
-                tnum = int(str(row.get("term","")).split()[-1])
-            except Exception:
-                tnum = -1
-            return (-ay0, -tnum, row.get("code",""))
-        out.sort(key=sort_key)
+        # Build terms object keyed by "Term 1/2/3"
+        terms_out: Dict[str, List[Dict[str, Any]]] = {"Term 1": [], "Term 2": [], "Term 3": []}
+        for r in flat:
+            tk = r.get("term") or "Term 1"
+            if tk not in terms_out:
+                terms_out[tk] = []
+            terms_out[tk].append({
+                "code": r.get("code", ""),
+                "title": r.get("title", ""),
+                "section": r.get("section", ""),
+                "units": r.get("units", 0),
+                "day1": r.get("day1"),
+                "begin1": r.get("begin1"),
+                "end1": r.get("end1"),
+                "day2": r.get("day2"),
+                "begin2": r.get("begin2"),
+                "end2": r.get("end2"),
+            })
 
-        return {"ok": True, "rows": out}
+        return {"ok": True, "acad_year_start": acadYearStart, "terms": terms_out}
 
     # ----- ADD -----
     if action == "add":

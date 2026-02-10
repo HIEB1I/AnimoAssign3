@@ -339,7 +339,7 @@ async def course_management(
                 "code_list": {
                     "$cond": [
                         {"$isArray": "$course_code"},
-                        {"$ifNull": ["$course_code", []]},
+                        "$course_code",
                         {"$cond": [{"$ne": ["$course_code", None]}, ["$course_code"], []]}
                     ]
                 }
@@ -353,7 +353,7 @@ async def course_management(
                             "initialValue": "",
                             "in": {"$concat": ["$$value",
                                                {"$cond": [{"$eq": ["$$value", ""]}, "", " / "]},
-                                               {"$toString": "$$this"}]}
+                                               "$$this"]}
                         }},
                         ""
                     ]
@@ -365,11 +365,7 @@ async def course_management(
                 "coord_ids": {
                     "$cond": [
                         {"$isArray": "$course_coordinator"},
-                        {"$filter": {
-                            "input": {"$ifNull": ["$course_coordinator", []]},
-                            "as": "tid",
-                            "cond": {"$and": [{"$ne": ["$$tid", None]}, {"$ne": ["$$tid", ""]}]}
-                        }},
+                        {"$ifNull": ["$course_coordinator", []]},
                         {"$cond": [
                             {"$ne": [{"$type": "$course_coordinator"}, "missing"]},
                             [{"$ifNull": ["$course_coordinator", ""]}],
@@ -402,7 +398,7 @@ async def course_management(
                         "in": {"name": "$$c.name", "email": {"$ifNull": ["$$c.email", ""]}}
                     }
                 },
-                "coordinator_email": {"$ifNull": [{"$arrayElemAt": ["$coord_users.email", 0]}, ""]},
+                "coordinator_email": {"$ifNull": [{"$first": "$coord_users.email"}, ""]},
                 "coordinator_name": {
                     "$reduce": {
                         "input": {"$map": {"input": {"$ifNull": ["$coord_users", []]}, "as": "c", "in": "$$c.name"}},
@@ -414,13 +410,16 @@ async def course_management(
 
             # -------------------------------------------------------------------------
             # TEACHING COMPOSITION LOGIC
-            # Union of:
-            # 1. Manually assigned 'teaching_team' (List of FacultyIDs)
-            # 2. Qualified via KAC (Intersection of course KACs & Faculty KACs)
-            # 3. History (Faculty who taught any section of this course)
+            #
+            # Requirement (mirror OM):
+            #   Only show faculty who have a past teaching history for the specific course.
+            #
+            # Notes:
+            #   - We still compute KACs for cluster filtering and label display.
+            #   - We do NOT include KAC-qualified faculty who have never taught the course.
             # -------------------------------------------------------------------------
 
-            # 1. Identify KACs for this course
+            # 1. Identify KACs for this course (for cluster filtering / label display)
             {"$lookup": {
                 "from": COL_KACS,
                 "let": {"cid": "$course_id", "deptId": dept_id},
@@ -438,20 +437,7 @@ async def course_management(
                 "kac_ids":   {"$map": {"input": "$_kac_data", "as": "k", "in": "$$k.kac_id"}}
             }},
 
-            # 2. Find Faculty qualified via KAC
-            {"$lookup": {
-                "from": COL_FACULTY,
-                "let": {"kids": "$kac_ids"},
-                "pipeline": [
-                    {"$match": {"$expr": {"$gt": [
-                        {"$size": {"$setIntersection": [{"$ifNull": ["$qualified_kacs", []]}, "$$kids"]}}, 0
-                    ]}}},
-                    {"$project": {"_id": 0, "faculty_id": 1}}
-                ],
-                "as": "_fac_via_kac"
-            }},
-
-            # 3. Find Faculty via History (Past Assignments for this course, ALL terms)
+            # 2. Find Faculty via History (Past Assignments for this course)
             {"$lookup": {
                 "from": COL_SECTIONS,
                 "let": {"cid": "$course_id", "codes": "$code_list"},
@@ -474,13 +460,13 @@ async def course_management(
                 "as": "_fac_via_hist"
             }},
 
-            # 4. Union unique Faculty IDs (Manual Team + KAC + History)
+            # 3. Unique Faculty IDs from history
             {"$addFields": {
-                "_all_qual_fids": {"$setUnion": [
-                    {"$ifNull": ["$teaching_team", []]},
-                    {"$map": {"input": "$_fac_via_kac", "as": "f", "in": "$$f.faculty_id"}},
-                    {"$map": {"input": "$_fac_via_hist", "as": "f", "in": "$$f.faculty_id"}}
-                ]}
+                "_all_qual_fids": {
+                    "$setUnion": [
+                        {"$map": {"input": "$_fac_via_hist", "as": "f", "in": "$$f.faculty_id"}}
+                    ]
+                }
             }},
 
             # 5. Resolve Names

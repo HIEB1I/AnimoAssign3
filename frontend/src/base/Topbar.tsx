@@ -259,7 +259,7 @@ export default function Topbar({
           <Inbox size={18} />
 
           {hasInboxUnread && (
-            <span className="absolute -top-1 -left-1 h-3 w-3 rounded-full bg-red-500 ring-2 ring-white" />
+            <span className="absolute -top-0.5 -right-0.5 h-3 w-3 rounded-full bg-red-500" />
           )}
         </button>
 

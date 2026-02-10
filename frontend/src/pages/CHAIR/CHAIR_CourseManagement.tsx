@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import SelectBox from "../../component/SelectBox";
-import { Search as SearchIcon, MoreVertical, FileText, Edit3, Plus, X } from "lucide-react";
+import { Search as SearchIcon, MoreVertical, FileText, Edit, Plus, X } from "lucide-react";
 import {
   type CMOptions,
   type CMCourseRow,
@@ -53,7 +53,7 @@ function RowActions({ onView, onEdit }: { onView: () => void; onEdit: () => void
             onClick={() => { setOpen(false); onEdit(); }}
             className="flex w-full items-center gap-2 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
           >
-            <Edit3 className="h-4 w-4" /> <span>Edit People</span>
+            <Edit className="h-4 w-4" /> <span>Edit People</span>
           </button>
         </div>
       )}
@@ -285,7 +285,8 @@ export default function CHAIR_CourseManagement() {
         setClusters(["All Clusters", ...(opt.clusters || [])]);
         const ay = opt.activeTerm?.acad_year_start;
         const tn = opt.activeTerm?.term_number;
-        setTermLabel(ay ? `AY ${ay}-${ay + 1} · Term ${tn ?? "—"}` : "");
+        // Mirror OM label format
+        setTermLabel(ay ? `Term ${tn ?? "—"} · AY ${ay}-${ay + 1}` : "");
       } catch (e: any) {
         setErr(e?.response?.data?.detail || e?.message || "Failed to load options.");
       }
@@ -317,34 +318,22 @@ export default function CHAIR_CourseManagement() {
     <main className="w-full px-8 py-8">
       <header className="mb-6">
         <h1 className="text-2xl font-bold">Course Management</h1>
-        <p className="text-sm text-gray-600">
-          Department offerings, coordinators, and syllabi {termLabel && `(${termLabel})`}
-        </p>
+          <p className="text-sm text-gray-600">
+            Manage courses with their coordinators, teaching composition, and syllabi for {termLabel || ""}
+          </p>
       </header>
 
       {err && <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{err}</div>}
 
       <div className="flex flex-wrap items-center gap-3 rounded-xl border border-gray-200 bg-white p-4 shadow-sm mb-6">
-        {/* Search with clear (×) button */}
         <div className="relative flex-1 min-w-[240px]">
           <SearchIcon className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-500" />
           <input
             value={searchInput}
             onChange={(e) => setSearchInput(e.target.value)}
             placeholder="Search by course code, title, or coordinator…"
-            className="w-full rounded-lg border border-gray-300 pl-9 pr-8 py-2 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30"
+            className="w-full rounded-lg border border-gray-300 px-9 py-2 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30"
           />
-          {searchInput && (
-            <button
-              type="button"
-              aria-label="Clear search"
-              title="Clear"
-              className="absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded hover:bg-gray-100 text-gray-500"
-              onClick={() => { setSearchInput(""); setSearch(""); }}
-            >
-              <X className="h-4 w-4" />
-            </button>
-          )}
         </div>
 
         <SelectBox value={cluster} onChange={setCluster} options={clusters} />
