@@ -3,23 +3,93 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { MessageSquare, Plus, Search, Send } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { getSocket } from "@/realtime/socket";
-import { emitAck } from "@/realtime/ack";
 
-const cls = (...s: (string | false | undefined)[]) => s.filter(Boolean).join(" ");
+const cls = (...s: (string | false | undefined | null)[]) => s.filter(Boolean).join(" ");
 
-const PACIFIC_TZ = "America/Los_Angeles";
-const pacificFormatter = new Intl.DateTimeFormat("en-US", {
-  timeZone: PACIFIC_TZ,
+// ----------------------------
+// Time helpers (real inbox style)
+// - Uses the viewer's local timezone.
+// - Relative timestamps for conversation list.
+// - Full timestamps (with seconds) for tooltips.
+// ----------------------------
+const fmtFull = new Intl.DateTimeFormat(undefined, {
   month: "short",
   day: "2-digit",
   year: "numeric",
   hour: "numeric",
   minute: "2-digit",
+  second: "2-digit",
   hour12: true,
-  timeZoneName: "short",
 });
 
-const pacificTime = (d: Date) => pacificFormatter.format(d);
+const fmtTime = new Intl.DateTimeFormat(undefined, {
+  hour: "numeric",
+  minute: "2-digit",
+  second: "2-digit",
+  hour12: true,
+});
+
+const fmtWeekday = new Intl.DateTimeFormat(undefined, { weekday: "short" });
+const fmtMonthDay = new Intl.DateTimeFormat(undefined, { month: "short", day: "2-digit" });
+const fmtMonthDayYear = new Intl.DateTimeFormat(undefined, {
+  month: "short",
+  day: "2-digit",
+  year: "numeric",
+});
+
+function fullStamp(d: Date) {
+  return fmtFull.format(d);
+}
+
+function timeOnly(d: Date) {
+  return fmtTime.format(d);
+}
+
+function startOfDay(d: Date) {
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate());
+}
+
+function daysBetween(a: Date, b: Date) {
+  const da = startOfDay(a).getTime();
+  const db = startOfDay(b).getTime();
+  return Math.round((da - db) / 86400000);
+}
+
+function inboxStamp(d: Date, now: Date) {
+  const diffMs = now.getTime() - d.getTime();
+  const sec = Math.floor(diffMs / 1000);
+  if (sec < 60) return `${Math.max(0, sec)}s`;
+
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m`;
+
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}h`;
+
+  const dayDiff = daysBetween(now, d);
+  if (dayDiff === 1) return "Yesterday";
+  if (dayDiff < 7) return fmtWeekday.format(d);
+
+  // Older: show month/day, and include year if different year
+  return d.getFullYear() === now.getFullYear() ? fmtMonthDay.format(d) : fmtMonthDayYear.format(d);
+}
+
+function threadSeparatorLabel(d: Date, now: Date) {
+  const dayDiff = daysBetween(now, d);
+  if (dayDiff === 0) return `Today · ${timeOnly(d)}`;
+  if (dayDiff === 1) return `Yesterday · ${timeOnly(d)}`;
+  if (dayDiff < 7) return `${fmtWeekday.format(d)} · ${timeOnly(d)}`;
+  return `${fmtMonthDayYear.format(d)} · ${timeOnly(d)}`;
+}
+
+function shouldShowSeparator(prev: Date | null, cur: Date) {
+  if (!prev) return true;
+  const prevDay = startOfDay(prev).getTime();
+  const curDay = startOfDay(cur).getTime();
+  if (prevDay !== curDay) return true;
+  const diffMin = Math.floor((cur.getTime() - prev.getTime()) / 60000);
+  return diffMin >= 7; // group messages within ~7 minutes
+}
 
 const initials = (name: string) =>
   name
@@ -51,30 +121,16 @@ function getSessionUser(): SessionUser | null {
 
 type ChatMessage = {
   key: string;
-  sender: string;
-  text: string;
+  messageId?: string;
+  senderId: string;
+  senderName: string;
+  body: string;
+  createdAt: Date;
   mine: boolean;
+  status?: "sending" | "sent" | "delivered";
+  deliveredAt?: Date;
+  deliveredToCount?: number;
 };
-
-function parseTranscript(transcript: string, me: { userId: string; fullName: string }): ChatMessage[] {
-  const blocks = String(transcript || "")
-    .split(/\n\n+/)
-    .map((x) => x.trim())
-    .filter(Boolean);
-
-  return blocks.map((block, i) => {
-    const idx = block.indexOf(":");
-    const sender = idx >= 0 ? block.slice(0, idx).trim() : "";
-    const text = idx >= 0 ? block.slice(idx + 1).trimStart() : block;
-    const mine = !!sender && (sender === me.fullName || sender === me.userId);
-    return {
-      key: `${i}-${sender}-${text.slice(0, 18)}`,
-      sender: sender || "User",
-      text,
-      mine,
-    };
-  });
-}
 
 export type Mail = {
   id: number;
@@ -83,7 +139,7 @@ export type Mail = {
   email: string;
   subject: string;
   preview: string;
-  body: string;
+  body: string; // kept for backward compat, not used as transcript anymore
   receivedAt: Date;
   unread: number;
   peerUserId?: string;
@@ -93,7 +149,7 @@ export type InboxShellProps = {
   title?: string;
   subtitle?: string;
   fallbackRoute: string;
-  closeEventName?: string; // optional (OM can pass "om:closeInbox")
+  closeEventName?: string;
 };
 
 export default function InboxShell({
@@ -102,12 +158,14 @@ export default function InboxShell({
   fallbackRoute,
   closeEventName,
 }: InboxShellProps) {
-  // Thread search (left list)
   const [query, setQuery] = useState("");
 
   const [mode, setMode] = useState<"default" | "compose" | "read">("default");
   const [mails, setMails] = useState<Mail[]>([]);
   const [selected, setSelected] = useState<Mail | null>(null);
+
+  // Thread
+  const [threadMessages, setThreadMessages] = useState<ChatMessage[]>([]);
 
   // Compose
   const [composeTo, setComposeTo] = useState("");
@@ -117,6 +175,14 @@ export default function InboxShell({
 
   // Reply
   const [replyText, setReplyText] = useState("");
+
+  // Real inbox: ticking "now" for relative timestamps + typing expiry
+  const [nowTick, setNowTick] = useState(0);
+  useEffect(() => {
+    const t = window.setInterval(() => setNowTick((x) => x + 1), 30_000);
+    return () => window.clearInterval(t);
+  }, []);
+  const now = useMemo(() => new Date(), [nowTick]);
 
   // Dedupe message_new vs ACK
   const seenMessageIdsRef = useRef<Set<string>>(new Set());
@@ -137,13 +203,25 @@ export default function InboxShell({
   // Throttle mark_read spam when messages arrive while reading
   const markReadTimerRef = useRef<number | null>(null);
 
-  // Message list scroll container (bubble chat)
+  // Message list scroll container
   const messagesScrollRef = useRef<HTMLDivElement | null>(null);
 
   // Make the inbox panel auto-fit whatever space the page layout provides.
-  // (Pure UI; does not touch inbox/socket logic.)
   const panelRef = useRef<HTMLDivElement | null>(null);
   const [panelHeight, setPanelHeight] = useState<number | null>(null);
+
+  // Typing + seen state
+  const [typingByConv, setTypingByConv] = useState<
+    Record<string, { userId: string; userName: string; until: number }>
+  >({});
+  const [seenAtByConv, setSeenAtByConv] = useState<Record<string, Date | null>>({});
+
+  // Delivered state (per message)
+  const [deliveredByMessageId, setDeliveredByMessageId] = useState<
+    Record<string, { deliveredAt: Date; deliveredToCount: number }>
+  >({});
+
+  const typingStopTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     const calc = () => {
@@ -159,6 +237,23 @@ export default function InboxShell({
     calc();
     window.addEventListener("resize", calc);
     return () => window.removeEventListener("resize", calc);
+  }, []);
+
+  // Expire typing state if stop event never arrives
+  useEffect(() => {
+    const t = window.setInterval(() => {
+      const ts = Date.now();
+      setTypingByConv((prev) => {
+        let changed = false;
+        const next: typeof prev = {};
+        for (const [cid, v] of Object.entries(prev)) {
+          if (v.until > ts) next[cid] = v;
+          else changed = true;
+        }
+        return changed ? next : prev;
+      });
+    }, 1000);
+    return () => window.clearInterval(t);
   }, []);
 
   const navigate = useNavigate();
@@ -193,13 +288,11 @@ export default function InboxShell({
     const s = getSocket();
     if (!s) return;
 
-    const resp = await emitAck<any>(s, "conversation_mark_read", { conversationId: cid });
-    if (!resp?.ok) return;
-
-    // Keep UI in sync immediately
-    setMails((prev) =>
-      prev.map((x) => (String(x.conversationId) === cid ? { ...x, unread: 0 } : x))
-    );
+    // fire-and-forget ack
+    s.emit("conversation_mark_read", { conversationId: cid }, (resp: any) => {
+      if (!resp?.ok) return;
+      setMails((prev) => prev.map((x) => (String(x.conversationId) === cid ? { ...x, unread: 0 } : x)));
+    });
   };
 
   const scheduleMarkRead = (conversationId: string) => {
@@ -220,7 +313,7 @@ export default function InboxShell({
     const s = getSocket();
     if (!s) return;
 
-    const resp = await emitAck<any>(s, "conversation_list", { limit: 50 });
+    const resp = await new Promise<any>((resolve) => s.emit("conversation_list", { limit: 50 }, resolve));
     if (!resp?.ok) {
       console.error("conversation_list failed", resp);
       return;
@@ -263,7 +356,7 @@ export default function InboxShell({
     const s = getSocket();
     if (!s) return false;
 
-    const joinResp = await emitAck<any>(s, "conversation_join", { conversationId: cid });
+    const joinResp = await new Promise<any>((resolve) => s.emit("conversation_join", { conversationId: cid }, resolve));
     if (!joinResp?.ok) {
       console.error("conversation_join failed", joinResp);
       return false;
@@ -278,13 +371,17 @@ export default function InboxShell({
     const s = getSocket();
     if (!s) return;
 
-    const resp = await emitAck<any>(s, "conversation_get", { conversationId });
+    const resp = await new Promise<any>((resolve) => s.emit("conversation_get", { conversationId }, resolve));
     if (!resp?.ok) return;
 
     const c = resp.conversation || {};
     const peer = c.peer || {};
     const lm = c.lastMessage || {};
     const ts = lm.createdAt || c.updatedAt || Date.now();
+
+    // capture peer read state
+    const peerLastReadAt = c.peerLastReadAt ? new Date(c.peerLastReadAt) : null;
+    setSeenAtByConv((prev) => ({ ...prev, [String(c.conversationId || conversationId)]: peerLastReadAt }));
 
     setMails((prev) => {
       const cid = String(c.conversationId || conversationId);
@@ -324,6 +421,31 @@ export default function InboxShell({
     });
   };
 
+  const toChatMessage = (m: any): ChatMessage => {
+    const createdAt = m?.createdAt ? new Date(m.createdAt) : new Date();
+    const senderId = String(m?.senderId || "");
+    const senderName = String(m?.senderName || senderId || "User");
+    const body = String(m?.body || "");
+    const messageId = m?.messageId ? String(m.messageId) : undefined;
+    // IMPORTANT: keep this strictly boolean (avoid `senderId && ...` which becomes string|boolean)
+    const mine = Boolean(senderId) && String(senderId) === String(me.userId);
+
+    const deliveredInfo = messageId ? deliveredByMessageId[messageId] : undefined;
+
+    return {
+      key: messageId ? `m:${messageId}` : `m:${createdAt.getTime()}-${Math.random().toString(16).slice(2)}`,
+      messageId,
+      senderId,
+      senderName,
+      body,
+      createdAt,
+      mine,
+      status: deliveredInfo ? "delivered" : "sent",
+      deliveredAt: deliveredInfo?.deliveredAt,
+      deliveredToCount: deliveredInfo?.deliveredToCount,
+    };
+  };
+
   // Incoming message handler (message_new + ACK)
   const handleIncomingMessage = (m: any) => {
     const mid = String(m?.messageId || "");
@@ -339,7 +461,7 @@ export default function InboxShell({
     const isReadingThis =
       modeRef.current === "read" && String(selectedConvIdRef.current || "") === convId;
 
-    // Update list preview/time (unread will be corrected by unread_update anyway)
+    // Update conversation list preview/time
     setMails((prev) => {
       const preview = body.length > 80 ? body.slice(0, 80).trimEnd() + "…" : body;
       const idx = prev.findIndex((x) => String(x.conversationId) === convId);
@@ -374,14 +496,22 @@ export default function InboxShell({
     });
 
     // Append to open thread if selected
-    setSelected((prev) => {
-      if (!prev) return prev;
-      if (String(prev.conversationId) !== convId) return prev;
+    setThreadMessages((prev) => {
+      if (!isReadingThis) return prev;
 
-      const name = m?.senderName || m?.senderId || "User";
-      const line = `${name}: ${body}`;
-      const nextBody = prev.body ? `${prev.body}\n\n${line}` : line;
-      return { ...prev, body: nextBody, receivedAt: createdAt };
+      const incoming = toChatMessage(m);
+
+      // Reconcile optimistic "sending" bubble for my own messages
+      if (incoming.mine) {
+        const idx = prev.findIndex((x) => x.mine && x.status === "sending" && x.body === incoming.body);
+        if (idx >= 0) {
+          const copy = [...prev];
+          copy[idx] = incoming;
+          return copy;
+        }
+      }
+
+      return [...prev, incoming];
     });
 
     // If you're actively reading this conversation, keep DB unread at 0
@@ -390,7 +520,7 @@ export default function InboxShell({
     }
   };
 
-  // Phase 3: load once
+  // Load once
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -421,7 +551,7 @@ export default function InboxShell({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Live socket events: message_new, conversation_updated, unread_update
+  // Live socket events
   useEffect(() => {
     const s = getSocket();
     if (!s) return;
@@ -489,27 +619,88 @@ export default function InboxShell({
       const unreadIncoming = Number(u?.unread || 0);
       const unread = isReadingThis ? 0 : (Number.isFinite(unreadIncoming) ? unreadIncoming : 0);
 
-      setMails((prev) =>
-        prev.map((x) => (String(x.conversationId) === cid ? { ...x, unread } : x))
-      );
+      setMails((prev) => prev.map((x) => (String(x.conversationId) === cid ? { ...x, unread } : x)));
 
-      // If backend says you have unread while you're reading, clean it up
       if (isReadingThis && unreadIncoming > 0) {
         scheduleMarkRead(cid);
       }
     };
 
+    const onTypingUpdate = (t: any) => {
+      const cid = String(t?.conversationId || "");
+      const uid = String(t?.userId || "");
+      if (!cid || !uid) return;
+      if (uid === String(me.userId)) return;
+
+      const name = String(t?.userName || uid);
+      const isTyping = !!t?.isTyping;
+
+      setTypingByConv((prev) => {
+        const copy = { ...prev };
+        if (!isTyping) {
+          delete copy[cid];
+          return copy;
+        }
+        copy[cid] = { userId: uid, userName: name, until: Date.now() + 6000 };
+        return copy;
+      });
+    };
+
+    const onConversationSeen = (p: any) => {
+      const cid = String(p?.conversationId || "");
+      const uid = String(p?.userId || "");
+      if (!cid || !uid) return;
+      if (uid === String(me.userId)) return;
+
+      const seenAt = p?.seenAt ? new Date(p.seenAt) : new Date();
+      setSeenAtByConv((prev) => ({ ...prev, [cid]: seenAt }));
+    };
+
+    const onMessageDelivered = (p: any) => {
+      const cid = String(p?.conversationId || "");
+      const mid = String(p?.messageId || "");
+      if (!cid || !mid) return;
+
+      const deliveredAt = p?.deliveredAt ? new Date(p.deliveredAt) : new Date();
+      const deliveredToCount = Number(p?.deliveredToCount || 0);
+
+      setDeliveredByMessageId((prev) => ({
+        ...prev,
+        [mid]: { deliveredAt, deliveredToCount: Number.isFinite(deliveredToCount) ? deliveredToCount : 0 },
+      }));
+
+      // If this thread is open, update the message status immediately.
+      setThreadMessages((prev) =>
+        prev.map((m) =>
+          m.messageId === mid
+            ? {
+                ...m,
+                status: "delivered",
+                deliveredAt,
+                deliveredToCount: Number.isFinite(deliveredToCount) ? deliveredToCount : 0,
+              }
+            : m
+        )
+      );
+    };
+
     s.on("message_new", onMessageNew);
     s.on("conversation_updated", onConversationUpdated);
     s.on("unread_update", onUnreadUpdate);
+    s.on("typing_update", onTypingUpdate);
+    s.on("conversation_seen", onConversationSeen);
+    s.on("message_delivered", onMessageDelivered);
 
     return () => {
       s.off("message_new", onMessageNew);
       s.off("conversation_updated", onConversationUpdated);
       s.off("unread_update", onUnreadUpdate);
+      s.off("typing_update", onTypingUpdate);
+      s.off("conversation_seen", onConversationSeen);
+      s.off("message_delivered", onMessageDelivered);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [me.userId]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -518,18 +709,13 @@ export default function InboxShell({
       .sort((a, b) => b.receivedAt.getTime() - a.receivedAt.getTime());
   }, [query, mails]);
 
-  const chatMessages = useMemo(() => {
-    if (mode !== "read" || !selected) return [] as ChatMessage[];
-    return parseTranscript(selected.body || "", me);
-  }, [mode, selected, me]);
-
   // Auto-scroll to bottom when thread updates
   useEffect(() => {
     if (mode !== "read") return;
     const el = messagesScrollRef.current;
     if (!el) return;
     el.scrollTop = el.scrollHeight;
-  }, [mode, selected?.conversationId, selected?.body]);
+  }, [mode, selected?.conversationId, threadMessages.length]);
 
   const openCompose = () => {
     setMode("compose");
@@ -539,6 +725,7 @@ export default function InboxShell({
     selectedConvIdRef.current = null;
 
     setReplyText("");
+    setThreadMessages([]);
 
     setComposeTo("");
     setComposeBody("");
@@ -550,8 +737,8 @@ export default function InboxShell({
     setSelected(m);
     setMode("read");
     setReplyText("");
+    setThreadMessages([]);
 
-    // IMPORTANT: update refs immediately (before awaits)
     modeRef.current = "read";
     selectedConvIdRef.current = String(m.conversationId);
 
@@ -569,20 +756,34 @@ export default function InboxShell({
     const s = getSocket();
     if (!s) return;
 
-    const resp = await emitAck<any>(s, "message_list", { conversationId: m.conversationId, limit: 50 });
+    // Fetch peer read state (for "Seen")
+    const viewResp = await new Promise<any>((resolve) =>
+      s.emit("conversation_get", { conversationId: m.conversationId }, resolve)
+    );
+    if (viewResp?.ok) {
+      const cid = String(m.conversationId);
+      const seenAt = viewResp?.conversation?.peerLastReadAt
+        ? new Date(viewResp.conversation.peerLastReadAt)
+        : null;
+      setSeenAtByConv((prev) => ({ ...prev, [cid]: seenAt }));
+    }
+
+    const resp = await new Promise<any>((resolve) =>
+      s.emit("message_list", { conversationId: m.conversationId, limit: 50 }, resolve)
+    );
     if (!resp?.ok) {
       console.error("message_list failed", resp);
       return;
     }
 
-    const msgs = resp.messages || [];
+    const msgs = Array.isArray(resp.messages) ? resp.messages : [];
     for (const x of msgs) {
       const mid = String(x?.messageId || "");
       if (mid) seenMessageIdsRef.current.add(mid);
     }
 
-    const transcript = msgs.map((x: any) => `${x.senderName || x.senderId}: ${x.body}`).join("\n\n");
-    setSelected({ ...m, body: transcript });
+    const mapped = msgs.map(toChatMessage);
+    setThreadMessages(mapped);
 
     // after loading, mark read again (safe)
     void markRead(m.conversationId);
@@ -596,6 +797,29 @@ export default function InboxShell({
     selectedConvIdRef.current = null;
 
     setReplyText("");
+    setThreadMessages([]);
+
+    // ensure typing is cleared
+    if (typingStopTimerRef.current) window.clearTimeout(typingStopTimerRef.current);
+  };
+
+  const emitTyping = (conversationId: string, isTyping: boolean) => {
+    const s = getSocket();
+    if (!s) return;
+    if (!conversationId) return;
+    s.emit(isTyping ? "typing_start" : "typing_stop", { conversationId });
+  };
+
+  const bumpTyping = (conversationId: string) => {
+    if (!conversationId) return;
+
+    emitTyping(conversationId, true);
+
+    if (typingStopTimerRef.current) window.clearTimeout(typingStopTimerRef.current);
+    typingStopTimerRef.current = window.setTimeout(() => {
+      emitTyping(conversationId, false);
+      typingStopTimerRef.current = null;
+    }, 1200);
   };
 
   const sendReply = async () => {
@@ -605,16 +829,77 @@ export default function InboxShell({
     const s = getSocket();
     if (!s) return;
 
-    const resp = await emitAck<any>(s, "message_send", { conversationId: selected.conversationId, body });
-    if (!resp?.ok) {
-      console.error("message_send failed", resp);
-      return;
-    }
+    // stop typing on send
+    emitTyping(selected.conversationId, false);
+
+    // optimistic bubble
+    const optimistic: ChatMessage = {
+      key: `tmp:${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      senderId: me.userId,
+      senderName: me.fullName,
+      body,
+      createdAt: new Date(),
+      mine: true,
+      status: "sending",
+    };
+
+    setThreadMessages((prev) => [...prev, optimistic]);
+
+    // update list preview immediately
+    setMails((prev) =>
+      prev
+        .map((x) =>
+          String(x.conversationId) === String(selected.conversationId)
+            ? { ...x, preview: body.length > 80 ? body.slice(0, 80).trimEnd() + "…" : body, receivedAt: new Date() }
+            : x
+        )
+        .sort((a, b) => b.receivedAt.getTime() - a.receivedAt.getTime())
+    );
 
     setReplyText("");
 
-    // If ACK includes message, render immediately (dedupe protects double render)
+    const resp = await new Promise<any>((resolve) =>
+      s.emit("message_send", { conversationId: selected.conversationId, body }, resolve)
+    );
+
+    if (!resp?.ok) {
+      console.error("message_send failed", resp);
+      // keep optimistic bubble; user will see it was typed (you can add "failed" state later)
+      return;
+    }
+
+    // If ACK includes message, render immediately (dedupe will prevent double-render)
     if (resp?.message) handleIncomingMessage(resp.message);
+
+    // If server also returns delivered info (peer online), update status.
+    try {
+      const mid = String(resp?.message?.messageId || "");
+      if (mid && resp?.delivered) {
+        const deliveredAt = resp.delivered.deliveredAt ? new Date(resp.delivered.deliveredAt) : new Date();
+        const deliveredToCount = Number(resp.delivered.deliveredToCount || 0);
+        const n = Number.isFinite(deliveredToCount) ? deliveredToCount : 0;
+        if (n > 0) {
+          setDeliveredByMessageId((prev) => ({
+            ...prev,
+            [mid]: { deliveredAt, deliveredToCount: n },
+          }));
+          setThreadMessages((prev) =>
+            prev.map((m) =>
+              m.messageId === mid
+                ? {
+                    ...m,
+                    status: "delivered",
+                    deliveredAt,
+                    deliveredToCount: n,
+                  }
+                : m
+            )
+          );
+        }
+      }
+    } catch {
+      // ignore
+    }
   };
 
   // User search (debounced) — only while composing
@@ -631,7 +916,7 @@ export default function InboxShell({
     }
 
     const t = setTimeout(async () => {
-      const resp = await emitAck<any>(s, "user_search", { q, limit: 10 });
+      const resp = await new Promise<any>((resolve) => s.emit("user_search", { q, limit: 10 }, resolve));
       if (!resp?.ok) {
         console.error("user_search failed", resp);
         setSearchResults([]);
@@ -656,7 +941,9 @@ export default function InboxShell({
     const s = getSocket();
     if (!s) return;
 
-    const openResp = await emitAck<any>(s, "conversation_open", { targetUserId: pickedUser.userId });
+    const openResp = await new Promise<any>((resolve) =>
+      s.emit("conversation_open", { targetUserId: pickedUser.userId }, resolve)
+    );
     if (!openResp?.ok) {
       console.error("conversation_open failed", openResp);
       return;
@@ -667,7 +954,9 @@ export default function InboxShell({
     const ok = await joinIfNeeded(conversationId);
     if (!ok) return;
 
-    const sendResp = await emitAck<any>(s, "message_send", { conversationId, body });
+    const sendResp = await new Promise<any>((resolve) =>
+      s.emit("message_send", { conversationId, body }, resolve)
+    );
     if (!sendResp?.ok) {
       console.error("message_send failed", sendResp);
       return;
@@ -688,7 +977,27 @@ export default function InboxShell({
       peerUserId: String(pickedUser.userId),
     };
 
-    if (sendResp?.message) handleIncomingMessage(sendResp.message);
+    if (sendResp?.message) {
+      handleIncomingMessage(sendResp.message);
+
+      // delivered info (peer online)
+      try {
+        const mid = String(sendResp?.message?.messageId || "");
+        if (mid && sendResp?.delivered) {
+          const deliveredAt = sendResp.delivered.deliveredAt ? new Date(sendResp.delivered.deliveredAt) : new Date();
+          const deliveredToCount = Number(sendResp.delivered.deliveredToCount || 0);
+          const n = Number.isFinite(deliveredToCount) ? deliveredToCount : 0;
+          if (n > 0) {
+            setDeliveredByMessageId((prev) => ({
+              ...prev,
+              [mid]: { deliveredAt, deliveredToCount: n },
+            }));
+          }
+        }
+      } catch {
+        // ignore
+      }
+    }
 
     await openRead(newMail);
 
@@ -696,6 +1005,32 @@ export default function InboxShell({
     setPickedUser(null);
     setSearchResults([]);
   };
+
+  // Derived helpers for the open thread
+  const typingHere = selected?.conversationId ? typingByConv[selected.conversationId] : undefined;
+  const peerSeenAt = selected?.conversationId ? seenAtByConv[selected.conversationId] : null;
+
+  const lastThreadMessage = threadMessages.length ? threadMessages[threadMessages.length - 1] : null;
+  const lastMineMessage =
+    lastThreadMessage && lastThreadMessage.mine ? lastThreadMessage : null;
+
+  const footerStatus = (() => {
+    if (!selected?.conversationId || !lastMineMessage) return null;
+    if (lastMineMessage.status === "sending") return "Sending…";
+
+    // Show "Seen" only if peer has read after the last message timestamp
+    if (peerSeenAt && peerSeenAt.getTime() >= lastMineMessage.createdAt.getTime()) {
+      return `Seen · ${timeOnly(peerSeenAt)}`;
+    }
+
+    if (lastMineMessage.status === "delivered") {
+      const n = Number(lastMineMessage.deliveredToCount || 0);
+      if (Number.isFinite(n) && n > 1) return `Delivered to ${n}`;
+      return "Delivered";
+    }
+
+    return "Sent";
+  })();
 
   return (
     <section className="w-full px-3 sm:px-6">
@@ -721,10 +1056,12 @@ export default function InboxShell({
         {/* Chat Layout */}
         <div className="grid flex-1 min-h-0 grid-cols-1 lg:grid-cols-[340px_1fr]">
           {/* Left: conversation list */}
-          <aside className={cls(
-            "bg-white lg:border-r border-gray-200",
-            mode === "default" ? "flex flex-col" : "hidden lg:flex lg:flex-col"
-          )}>
+          <aside
+            className={cls(
+              "bg-white lg:border-r border-gray-200",
+              mode === "default" ? "flex flex-col" : "hidden lg:flex lg:flex-col"
+            )}
+          >
             <div className="border-b border-gray-200 bg-white px-4 py-4">
               <div className="flex items-center justify-between gap-3">
                 <div>
@@ -762,15 +1099,15 @@ export default function InboxShell({
             <div className="flex-1 min-h-0 overflow-y-auto px-2 pb-3">
               {filtered.map((m) => {
                 const active = selected?.conversationId === m.conversationId && mode === "read";
+                const typing = typingByConv[m.conversationId];
+
                 return (
                   <button
                     key={m.conversationId}
                     onClick={() => openRead(m)}
                     className={cls(
                       "group w-full rounded-xl px-3 py-3 text-left transition",
-                      active
-                        ? "bg-emerald-50 shadow-sm ring-1 ring-emerald-200"
-                        : "hover:bg-gray-50"
+                      active ? "bg-emerald-50 shadow-sm ring-1 ring-emerald-200" : "hover:bg-gray-50"
                     )}
                   >
                     <div className="flex items-center gap-3">
@@ -787,17 +1124,15 @@ export default function InboxShell({
 
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center justify-between gap-2">
-                          <div className="truncate text-sm font-semibold text-gray-900">
-                            {m.from}
-                          </div>
-                          <div className="shrink-0 text-[11px] text-gray-500">
-                            {pacificTime(m.receivedAt)}
+                          <div className="truncate text-sm font-semibold text-gray-900">{m.from}</div>
+                          <div className="shrink-0 text-[11px] text-gray-500" title={fullStamp(m.receivedAt)}>
+                            {inboxStamp(m.receivedAt, now)}
                           </div>
                         </div>
 
                         <div className="mt-0.5 flex items-center justify-between gap-2">
                           <div className="min-w-0 flex-1 truncate text-xs text-gray-500">
-                            {m.preview || "—"}
+                            {typing ? <span className="italic text-gray-500">Typing…</span> : m.preview || "—"}
                           </div>
                           {m.unread > 0 && (
                             <span className="shrink-0 rounded-full bg-emerald-700 px-2 py-0.5 text-[11px] font-semibold text-white">
@@ -940,11 +1275,19 @@ export default function InboxShell({
 
                     <div className="min-w-0 flex-1">
                       <div className="truncate text-sm font-semibold text-gray-900">To: {selected.from}</div>
-                      <div className="truncate text-xs text-gray-500">{selected.email || selected.peerUserId || ""}</div>
+                      <div className="truncate text-xs text-gray-500">
+                        {typingHere ? (
+                          <span className="italic">{typingHere.userName} is typing…</span>
+                        ) : (
+                          selected.email || selected.peerUserId || ""
+                        )}
+                      </div>
                     </div>
 
                     <div className="flex items-center gap-3">
-                      <div className="hidden text-xs text-gray-400 sm:block">{pacificTime(selected.receivedAt)}</div>
+                      <div className="hidden text-xs text-gray-400 sm:block" title={fullStamp(selected.receivedAt)}>
+                        {fullStamp(selected.receivedAt)}
+                      </div>
                       <button
                         onClick={backToDefault}
                         className="rounded-lg border border-gray-300 px-3 py-1.5 text-xs hover:bg-gray-50"
@@ -960,57 +1303,100 @@ export default function InboxShell({
                   ref={messagesScrollRef}
                   className="flex-1 min-h-0 overflow-y-auto bg-gradient-to-b from-gray-50 to-white px-4 sm:px-6 lg:px-10 py-6"
                 >
-                  {chatMessages.length === 0 ? (
+                  {threadMessages.length === 0 ? (
                     <div className="text-sm text-gray-500">No messages yet.</div>
                   ) : (
                     <div className="min-h-full flex flex-col justify-end gap-2">
-                      {chatMessages.map((msg, idx) => {
-                        const prev = chatMessages[idx - 1];
-                        const showSender = !msg.mine && (!prev || prev.sender !== msg.sender);
+                      {threadMessages.map((msg, idx) => {
+                        const prev = threadMessages[idx - 1] || null;
+                        const showSep = shouldShowSeparator(prev ? prev.createdAt : null, msg.createdAt);
+                        const showSender = !msg.mine && (!prev || prev.senderId !== msg.senderId);
                         const showAvatar = showSender;
+
                         return (
-                          <div
-                            key={msg.key}
-                            className={cls(
-                              "flex w-full items-end gap-3",
-                              msg.mine ? "justify-end" : "justify-start"
-                            )}
-                          >
-                            {!msg.mine ? (
-                              <div className="w-9 shrink-0">
-                                {showAvatar ? (
-                                  <div className="grid h-8 w-8 place-items-center rounded-full border border-gray-200 bg-white text-[11px] font-bold text-gray-700">
-                                    {initials(msg.sender)}
-                                  </div>
-                                ) : null}
+                          <div key={msg.key} className="w-full">
+                            {showSep ? (
+                              <div className="my-3 flex justify-center">
+                                <span className="rounded-full border border-gray-200 bg-white px-3 py-1 text-[11px] text-gray-500 shadow-sm" title={fullStamp(msg.createdAt)}>
+                                  {threadSeparatorLabel(msg.createdAt, now)}
+                                </span>
                               </div>
                             ) : null}
 
                             <div
                               className={cls(
-                                "flex min-w-0 flex-1 flex-col",
-                                msg.mine ? "items-end" : "items-start"
+                                "group flex w-full items-end gap-3",
+                                msg.mine ? "justify-end" : "justify-start"
                               )}
                             >
-                              {showSender ? (
-                                <div className="mb-1 text-[11px] font-semibold text-gray-500">
-                                  {msg.sender}
+                              {!msg.mine ? (
+                                <div className="w-9 shrink-0">
+                                  {showAvatar ? (
+                                    <div className="grid h-8 w-8 place-items-center rounded-full border border-gray-200 bg-white text-[11px] font-bold text-gray-700">
+                                      {initials(msg.senderName)}
+                                    </div>
+                                  ) : null}
                                 </div>
                               ) : null}
 
                               <div
                                 className={cls(
-                                  "w-fit max-w-[88%] sm:max-w-[80%] lg:max-w-[72%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed shadow-sm",
-                                  msg.mine
-                                    ? "bg-emerald-700 text-white rounded-br-md"
-                                    : "bg-white text-gray-900 border border-gray-200 rounded-bl-md"
+                                  "flex min-w-0 flex-1 flex-col",
+                                  msg.mine ? "items-end" : "items-start"
                                 )}
                               >
-                                <div className="whitespace-pre-wrap break-words">{msg.text}</div>
+                                {showSender ? (
+                                  <div className="mb-1 text-[11px] font-semibold text-gray-500">{msg.senderName}</div>
+                                ) : null}
+
+                                <div
+                                  className={cls(
+                                    "w-fit max-w-[88%] sm:max-w-[80%] lg:max-w-[72%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed shadow-sm",
+                                    msg.mine
+                                      ? "bg-emerald-700 text-white rounded-br-md"
+                                      : "bg-white text-gray-900 border border-gray-200 rounded-bl-md"
+                                  )}
+                                >
+                                  <div className="whitespace-pre-wrap break-words">{msg.body}</div>
+                                </div>
+
+                                {/* Hover time (like a real inbox) */}
+                                <div
+                                  className={cls(
+                                    "mt-1 text-[10px] text-gray-400 opacity-0 transition group-hover:opacity-100",
+                                    msg.mine ? "text-right" : "text-left"
+                                  )}
+                                >
+                                  {timeOnly(msg.createdAt)}
+                                </div>
+
+                                {/* Footer status under the latest outgoing message */}
+                                {footerStatus && lastMineMessage && msg.key === lastMineMessage.key ? (
+                                  <div className="mt-1 text-[11px] text-gray-400">{footerStatus}</div>
+                                ) : null}
                               </div>
                             </div>
                           </div>
-                        );})}
+                        );
+                      })}
+
+                      {/* Typing indicator bubble at the bottom */}
+                      {typingHere ? (
+                        <div className="mt-2 flex items-end gap-3">
+                          <div className="w-9 shrink-0">
+                            <div className="grid h-8 w-8 place-items-center rounded-full border border-gray-200 bg-white text-[11px] font-bold text-gray-700">
+                              {initials(typingHere.userName)}
+                            </div>
+                          </div>
+                          <div className="rounded-2xl border border-gray-200 bg-white px-4 py-2.5 text-sm text-gray-700 shadow-sm">
+                            <span className="inline-flex items-center gap-1">
+                              <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-gray-400" />
+                              <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-gray-400" style={{ animationDelay: "120ms" }} />
+                              <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-gray-400" style={{ animationDelay: "240ms" }} />
+                            </span>
+                          </div>
+                        </div>
+                      ) : null}
                     </div>
                   )}
                 </div>
@@ -1020,7 +1406,10 @@ export default function InboxShell({
                   <div className="flex items-end gap-2">
                     <textarea
                       value={replyText}
-                      onChange={(e) => setReplyText(e.target.value)}
+                      onChange={(e) => {
+                        setReplyText(e.target.value);
+                        if (selected?.conversationId) bumpTyping(selected.conversationId);
+                      }}
                       onKeyDown={(e) => {
                         if (e.key === "Enter" && !e.shiftKey) {
                           e.preventDefault();
