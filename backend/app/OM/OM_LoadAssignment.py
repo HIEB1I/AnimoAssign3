@@ -2269,137 +2269,131 @@ async def get_om_load_assignment_list(user_id: str, term_id: Optional[str] = Non
         except:
             continue
 
-        # --- NEW: flatten blocked GE@CMPS0002 windows for frontend tab ---
     campus_blocked = getattr(ctx, "campus_blocked", {}) or {}
     blocked_ge_cmps2: list[dict] = []
 
-    # Campus name lookup (DB first; fallback to campus_id)
-    campus_lookup: dict[str, str] = {}
-    try:
-        campus_ids = [str(cid) for cid in (campus_blocked or {}).keys() if cid]
-        if campus_ids:
-            docs = await db[COL_CAMPUSES].find(
-                {"campus_id": {"$in": campus_ids}},
-                {"_id": 0, "campus_id": 1, "campus_name": 1, "name": 1},
-            ).to_list(None)
-            for d in docs or []:
-                cid = d.get("campus_id")
-                if cid:
-                    campus_lookup[cid] = (d.get("campus_name") or d.get("name") or cid)
-    except Exception:
-        pass
-
-    # Fallback: if ctx already has campuses (older code paths), use it
-    for c in getattr(ctx, "campuses", []) or []:
-        cid = c.get("campus_id")
-        if cid and cid not in campus_lookup:
-            campus_lookup[cid] = c.get("campus_name") or c.get("name") or cid
-
-    # Reverse day index
     idx_to_day = {1: "M", 2: "T", 3: "W", 4: "H", 5: "F", 6: "S"}
-
-    courses = ctx.courses or {}
-    sections = ctx.sections or []
-
-    # Quick maps
-    sec_by_id = {s.get("section_id"): s for s in sections if s.get("section_id")}
-
-    # Resolve section_code for blocked GE sections directly from the sections collection.
-    # We still keep ctx.sections as a fast fallback, but the DB is the source of truth.
+    sec_by_id = {s.get("section_id"): s for s in (ctx.sections or []) if s.get("section_id")}
     section_code_by_id: dict[str, str] = {}
-    try:
-        blocked_section_ids: set[str] = set()
-        for _campus_id, _day_map in (campus_blocked or {}).items():
-            if str(_campus_id or "").strip().upper() != "CMPS0002":
-                continue
-            for _di, _slots in (_day_map or {}).items():
-                for _slot in (_slots or []):
-                    sid = None
-                    if isinstance(_slot, (list, tuple)):
-                        if len(_slot) >= 3:
-                            sid = _slot[2]
-                    elif isinstance(_slot, dict):
-                        sid = _slot.get("section_id") or _slot.get("id")
-                    if sid:
-                        blocked_section_ids.add(str(sid).strip())
+    campus_lookup = {"CMPS0002": "CMPS0002"}  # keep simple; your UI uses Laguna wording anyway
 
-        blocked_section_ids = {s for s in blocked_section_ids if s}
-        if blocked_section_ids:
-            docs = await db[COL_SECTIONS].find(
-                {"section_id": {"$in": list(blocked_section_ids)}},
-                {
-                    "_id": 0,
-                    "section_id": 1,
-                    "section_code": 1,
-                    "section": 1,
-                    "section_name": 1,
-                },
+    def _iter_blocked_slots_for_cmps2(campus_blocked: dict):
+        cmps2 = campus_blocked.get("CMPS0002") or campus_blocked.get("cmps0002") or {}
+        if not isinstance(cmps2, dict):
+            return
+
+        def _looks_like_owner_key(k: Any) -> bool:
+            # supports actual tuple/list keys OR stringified tuple keys like "('PROG','BATCH')"
+            if isinstance(k, (tuple, list)) and len(k) == 2:
+                return True
+            if isinstance(k, str):
+                s = k.strip()
+                return s.startswith("(") and s.endswith(")") and "," in s
+            return False
+
+        owner_scoped = any(_looks_like_owner_key(k) for k in cmps2.keys())
+
+        if owner_scoped:
+            for _owner_key, day_map in cmps2.items():
+                if not isinstance(day_map, dict):
+                    continue
+                for day_idx, slots in day_map.items():
+                    if not isinstance(slots, list):
+                        continue
+                    for slot in slots:
+                        yield day_idx, slot
+        else:
+            for day_idx, slots in cmps2.items():
+                if not isinstance(slots, list):
+                    continue
+                for slot in slots:
+                    yield day_idx, slot
+
+    # extract blocked_section_ids (optional, keep if you use it later)
+    blocked_section_ids: set[str] = set()
+    for _day_idx, slot in _iter_blocked_slots_for_cmps2(campus_blocked):
+        if isinstance(slot, (list, tuple)) and len(slot) >= 3:
+            sid = str(slot[2] or "").strip()
+            if sid:
+                blocked_section_ids.add(sid)
+
+    # flatten blocked_ge_cmps2 (ONLY ONCE)
+    for day_idx, slot in _iter_blocked_slots_for_cmps2(campus_blocked):
+        if not isinstance(slot, (list, tuple)) or len(slot) < 4:
+            continue
+
+        try:
+            di = int(day_idx)
+        except Exception:
+            di = None
+        day = idx_to_day.get(di, "")
+
+        st_min = slot[0]
+        en_min = slot[1]
+        sid = str(slot[2] or "").strip()
+        cid = str(slot[3] or "").strip()
+        sec_code = str(slot[4] or "").strip() if len(slot) >= 5 else ""
+
+        if not sid or not cid:
+            continue
+
+        cinfo = courses.get(cid) or {}
+        course_code = cinfo.get("course_code") or cinfo.get("course_id") or cid
+        sec = sec_by_id.get(sid) or {}
+        prog_id = str(sec.get("owner_program_id") or "").strip()
+        batch_id = str(sec.get("owner_batch_id") or "").strip()
+        section_code = (
+            sec_code
+            or section_code_by_id.get(sid, "")
+            or str(sec.get("section_code") or "").strip()
+            or str(sec.get("section") or "").strip()
+            or sid
+        )
+
+        program_code_by_id: dict[str, str] = {}
+        batch_code_by_id: dict[str, str] = {}
+
+        # build from ctx.sections (or from blocked_section_ids)
+        prog_ids = set()
+        batch_ids = set()
+        for s in (ctx.sections or []):
+            p = str(s.get("owner_program_id") or "").strip()
+            b = str(s.get("owner_batch_id") or "").strip()
+            if p: prog_ids.add(p)
+            if b: batch_ids.add(b)
+
+        if prog_ids:
+            docs = await db["programs"].find(
+                {"program_id": {"$in": list(prog_ids)}},
+                {"_id": 0, "program_id": 1, "program_code": 1},
             ).to_list(None)
             for d in docs or []:
-                sid = str(d.get("section_id") or "").strip()
-                if not sid:
-                    continue
-                code = (
-                    str(d.get("section_code") or "").strip()
-                    or str(d.get("section") or "").strip()
-                    or str(d.get("section_name") or "").strip()
-                )
-                if code:
-                    section_code_by_id[sid] = code
-                # Merge into ctx-derived map so later fallbacks work too
-                sec_by_id[sid] = {**(sec_by_id.get(sid) or {}), **d}
-    except Exception:
-        # Best-effort only; do not break /list if lookups fail.
-        section_code_by_id = {}
+                program_code_by_id[str(d["program_id"])] = str(d.get("program_code") or "")
 
-    for campus_id, day_map in (campus_blocked or {}).items():
-        camp_norm = str(campus_id or "").strip().upper()
-        if camp_norm != "CMPS0002":
-            continue
-        for day_idx, slots in (day_map or {}).items():
-            try:
-                di = int(day_idx)
-            except Exception:
-                di = day_idx
-            day = idx_to_day.get(di, "")
+        if batch_ids:
+            docs = await db["batches"].find(
+                {"batch_id": {"$in": list(batch_ids)}},
+                {"_id": 0, "batch_id": 1, "batch_code": 1},
+            ).to_list(None)
+            for d in docs or []:
+                batch_code_by_id[str(d["batch_id"])] = str(d.get("batch_code") or "")
 
-            for slot in (slots or []):
-                # Expected slot shape: (st_min, en_min, section_id, course_id, section_code)
-                if not isinstance(slot, (list, tuple)) or len(slot) < 4:
-                    continue
-                st_min = slot[0]
-                en_min = slot[1]
-                sid = str(slot[2] or "").strip() if len(slot) >= 3 else ""
-                cid = str(slot[3] or "").strip() if len(slot) >= 4 else ""
-                sec_code = str(slot[4] or "").strip() if len(slot) >= 5 else ""
+        blocked_ge_cmps2.append(
+            {
+                "campus_id": "CMPS0002",
+                "campus_name": campus_lookup.get("CMPS0002", "CMPS0002"),
+                "course_id": cid,
+                "course_code": course_code,
+                "section_id": sid,
+                "section_code": section_code,
+                "day": day,
+                "begin": _mm_to_hhmm(st_min),
+                "end": _mm_to_hhmm(en_min),
 
-                if not sid or not cid:
-                    continue
-
-                cinfo = courses.get(cid) or {}
-                course_code = cinfo.get("course_code") or cinfo.get("course_id") or cid
-                sec = sec_by_id.get(sid) or {}
-                section_code = (
-                    sec_code
-                    or section_code_by_id.get(sid, "")
-                    or str(sec.get("section_code") or "").strip()
-                    or str(sec.get("section") or "").strip()
-                    or sid
-                )
-
-                blocked_ge_cmps2.append(
-                    {
-                        "campus_id": camp_norm,
-                        "campus_name": campus_lookup.get(camp_norm, camp_norm),
-                        "course_id": cid,
-                        "course_code": course_code,
-                        "section_id": sid,
-                        "section_code": section_code,
-                        "day": day,
-                        "begin": _mm_to_hhmm(st_min),
-                        "end": _mm_to_hhmm(en_min),
-                    }
-                )
+                "program": program_code_by_id.get(prog_id, prog_id) if prog_id else "",
+                "batch": batch_code_by_id.get(batch_id, batch_id) if batch_id else "",
+            }
+        )
     
     # --- NEW: pending RFC indicator per SECTION (for red dot in Actions) ---
     # RFCs are keyed by (faculty_id + term_id + section_id). The old implementation only keyed by faculty_id,

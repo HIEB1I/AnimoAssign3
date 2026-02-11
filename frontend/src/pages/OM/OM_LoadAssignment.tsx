@@ -1953,25 +1953,29 @@ const RequestChangeModal = ({
 
         <div className="p-6 pb-4">
           <h3 className="text-lg font-semibold text-emerald-700 mb-2">
-          Request for Change
-        </h3>
-        <div className="text-sm text-gray-600 mb-1">
-          From: <span className="font-semibold">{displayFaculty}</span>
-        </div>
-        {/* Status hidden per request (avoid showing code-like thread statuses in OM modal) */}
-
-        {loading && <div className="mb-4 text-sm text-gray-600">Loading…</div>}
-        {error && <div className="mb-4 text-sm text-red-600">{error}</div>}
-
-        {!loading && !error && !status && (
-          <div className="mb-4 rounded-lg border border-gray-200 bg-gray-50 p-3 text-sm text-gray-700">
-            No RFC thread found for this course.
+            Request for Change
+          </h3>
+          <div className="text-sm text-gray-600 mb-1">
+            From: <span className="font-semibold">{displayFaculty}</span>
           </div>
-        )}
+          {/* Status hidden per request (avoid showing code-like thread statuses in OM modal) */}
 
+          {loading && (
+            <div className="mb-4 text-sm text-gray-600">Loading…</div>
+          )}
+          {error && <div className="mb-4 text-sm text-red-600">{error}</div>}
+
+          {!loading && !error && !status && (
+            <div className="mb-4 rounded-lg border border-gray-200 bg-gray-50 p-3 text-sm text-gray-700">
+              No RFC thread found for this course.
+            </div>
+          )}
         </div>
 
-        <div ref={scrollRef} className="mx-6 mb-4 flex-1 min-h-0 overflow-auto rounded-lg border border-gray-200 bg-gray-50 p-3">
+        <div
+          ref={scrollRef}
+          className="mx-6 mb-4 flex-1 min-h-0 overflow-auto rounded-lg border border-gray-200 bg-gray-50 p-3"
+        >
           {messages.length ? (
             <div className="space-y-2">
               {messages.map((m: any, idx: number) => {
@@ -2030,13 +2034,15 @@ const RequestChangeModal = ({
         <div className="mx-6">
           <label className="block text-sm font-medium mb-1">Reply</label>
           <textarea
-          className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30 mb-6"
-          rows={4}
-          placeholder={isTerminal ? "This RFC is locked." : "Type your reply…"}
-          value={reply}
-          disabled={loading || !status || isTerminal}
-          onChange={(e) => setReply(e.target.value)}
-        />
+            className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30 mb-6"
+            rows={4}
+            placeholder={
+              isTerminal ? "This RFC is locked." : "Type your reply…"
+            }
+            value={reply}
+            disabled={loading || !status || isTerminal}
+            onChange={(e) => setReply(e.target.value)}
+          />
         </div>
 
         <div className="mx-6 pb-6 flex justify-end gap-2">
@@ -2668,7 +2674,11 @@ export default function OM_LoadAssignment() {
       setRows(normalizedNextRows);
       setTerm(typeof res?.term === "string" ? res.term : "");
       // Keep term_id in sync so archive-view detection stays correct.
-      setTermId(typeof (res as any)?.term_id === "string" ? (res as any).term_id : termId);
+      setTermId(
+        typeof (res as any)?.term_id === "string"
+          ? (res as any).term_id
+          : termId
+      );
       setMode("run");
       // Preserve the "Forward to Chair" final-state across auto-assign.
       setApproved((prev) => prev);
@@ -3966,7 +3976,6 @@ export default function OM_LoadAssignment() {
     return map;
   }, [deloadAllRows]);
 
-
   useEffect(() => {
     if (!termId) return;
 
@@ -4138,48 +4147,53 @@ export default function OM_LoadAssignment() {
 
   const facultySummaryView: FacultySummaryRow[] = useMemo(() => {
     const base = [...facultySummaryFiltered];
-  
+
     const filtered = base.filter((f) => {
       const assigned = Number(f.assignedUnits ?? 0);
       const hasPref = f.preferredUnits != null;
       const diff = f.diff;
-  
+
       if (hideNoPrefs && !hasPref) return false;
-  
+
       if (unitsFilterMode === "unassigned") return assigned === 0;
-      if (unitsFilterMode === "issues") return hasPref && diff != null && diff !== 0;
+      if (unitsFilterMode === "issues")
+        return hasPref && diff != null && diff !== 0;
       return true;
     });
-  
+
     const dir = unitsSortDir === "asc" ? 1 : -1;
-  
+
     filtered.sort((a, b) => {
       const aName = a.facultyName ?? "";
       const bName = b.facultyName ?? "";
-  
+
       const aAssigned = Number(a.assignedUnits ?? 0);
       const bAssigned = Number(b.assignedUnits ?? 0);
-  
+
       const aPref =
-        a.preferredUnits == null ? Number.POSITIVE_INFINITY : Number(a.preferredUnits);
+        a.preferredUnits == null
+          ? Number.POSITIVE_INFINITY
+          : Number(a.preferredUnits);
       const bPref =
-        b.preferredUnits == null ? Number.POSITIVE_INFINITY : Number(b.preferredUnits);
-  
+        b.preferredUnits == null
+          ? Number.POSITIVE_INFINITY
+          : Number(b.preferredUnits);
+
       const aGap = a.diff == null ? Number.POSITIVE_INFINITY : Number(a.diff);
       const bGap = b.diff == null ? Number.POSITIVE_INFINITY : Number(b.diff);
-  
+
       const aDeload = (a.facultyId && deloadUnitsByFacultyId[a.facultyId]) || 0;
       const bDeload = (b.facultyId && deloadUnitsByFacultyId[b.facultyId]) || 0;
-  
+
       if (unitsSortKey === "faculty") return dir * aName.localeCompare(bName);
       if (unitsSortKey === "assigned") return dir * (aAssigned - bAssigned);
       if (unitsSortKey === "preferred") return dir * (aPref - bPref);
       if (unitsSortKey === "deload") return dir * (aDeload - bDeload);
-  
+
       if (aGap !== bGap) return dir * (aGap - bGap);
       return aName.localeCompare(bName);
     });
-  
+
     return filtered;
   }, [
     facultySummaryFiltered,
@@ -4187,9 +4201,9 @@ export default function OM_LoadAssignment() {
     unitsSortKey,
     unitsSortDir,
     hideNoPrefs,
-    deloadUnitsByFacultyId, 
+    deloadUnitsByFacultyId,
   ]);
-  
+
   // ---- Rule alerts for Tab 2 (violations / warnings) ----
   type RuleAlert = {
     id: string;
@@ -4628,7 +4642,7 @@ export default function OM_LoadAssignment() {
     end: string;
 
     program?: string; // or program_code/program_name depending on backend
-    batch?: string;   // string for safety (ex: "2023", "Batch 12")
+    batch?: string; // string for safety (ex: "2023", "Batch 12")
   };
 
   const [blockedGeCmps2, setBlockedGeCmps2] = useState<BlockedGeCmps2Item[]>(
@@ -4641,36 +4655,36 @@ export default function OM_LoadAssignment() {
     section: string;
     campusId: string;
     campusName?: string;
-  
+
     program?: string;
     batch?: string;
   };
-  
-const blockedSections: BlockedSectionRow[] = useMemo(() => {
-  const bySection: Record<string, BlockedSectionRow> = {};
 
-  (blockedGeCmps2 || []).forEach((b) => {
-    const sid = String(b.section_id || "").trim();
-    if (!sid) return;
+  const blockedSections: BlockedSectionRow[] = useMemo(() => {
+    const bySection: Record<string, BlockedSectionRow> = {};
 
-    if (!bySection[sid]) {
-      bySection[sid] = {
-        rowId: sid,
-        course: b.course_code || b.course_id || "—",
-        section: b.section_code || "—",
-        campusId: b.campus_id || "",
-        campusName: b.campus_name || "",
-        program: b.program || "",
-        batch: b.batch || "",
-      };
-    }
-  });
+    (blockedGeCmps2 || []).forEach((b) => {
+      const sid = String(b.section_id || "").trim();
+      if (!sid) return;
 
-  // keep only CMPS0002 in this tab
-  return Object.values(bySection).filter(
-    (x) => String(x.campusId || "").toUpperCase() === "CMPS0002"
-  );
-}, [blockedGeCmps2]);
+      if (!bySection[sid]) {
+        bySection[sid] = {
+          rowId: sid,
+          course: b.course_code || b.course_id || "—",
+          section: b.section_code || "—",
+          campusId: b.campus_id || "",
+          campusName: b.campus_name || "",
+          program: b.program || "",
+          batch: b.batch || "",
+        };
+      }
+    });
+
+    // keep only CMPS0002 in this tab
+    return Object.values(bySection).filter(
+      (x) => String(x.campusId || "").toUpperCase() === "CMPS0002"
+    );
+  }, [blockedGeCmps2]);
 
   const blockedSectionsFiltered: BlockedSectionRow[] = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -5950,7 +5964,7 @@ const blockedSections: BlockedSectionRow[] = useMemo(() => {
                                     : ""}
                                 </button>
                               </th>
-                              
+
                               <th className="px-3 py-2 text-right font-semibold">
                                 <button
                                   type="button"
@@ -5959,7 +5973,11 @@ const blockedSections: BlockedSectionRow[] = useMemo(() => {
                                   title="Deloading units (from Faculty Deloading rows)"
                                 >
                                   Deloading Units{" "}
-                                  {unitsSortKey === "deload" ? (unitsSortDir === "asc" ? "▲" : "▼") : ""}
+                                  {unitsSortKey === "deload"
+                                    ? unitsSortDir === "asc"
+                                      ? "▲"
+                                      : "▼"
+                                    : ""}
                                 </button>
                               </th>
 
@@ -6048,9 +6066,13 @@ const blockedSections: BlockedSectionRow[] = useMemo(() => {
                                           .replace(/\.0$/, "")
                                       : "—"}
                                   </td>
-                                  
+
                                   <td className="px-3 py-2 text-right align-middle">
-                                    {Number((f.facultyId && deloadUnitsByFacultyId[f.facultyId]) || 0)
+                                    {Number(
+                                      (f.facultyId &&
+                                        deloadUnitsByFacultyId[f.facultyId]) ||
+                                        0
+                                    )
                                       .toFixed(1)
                                       .replace(/\.0$/, "")}
                                   </td>
@@ -6192,15 +6214,19 @@ const blockedSections: BlockedSectionRow[] = useMemo(() => {
                               <th className="px-3 py-2 text-left font-semibold">
                                 End 2
                               </th>
-                              <th className="px-3 py-2 text-left font-semibold">Program</th>
-                              <th className="px-3 py-2 text-left font-semibold">Batch</th>
+                              <th className="px-3 py-2 text-left font-semibold">
+                                Program
+                              </th>
+                              <th className="px-3 py-2 text-left font-semibold">
+                                Batch
+                              </th>
                             </tr>
                           </thead>
                           <tbody className="divide-y divide-gray-100">
                             {blockedSections.length === 0 ? (
                               <tr>
                                 <td
-                                  colSpan={8}
+                                  colSpan={10}
                                   className="py-6 text-center text-sm text-gray-500"
                                 >
                                   No blocked GE sections for Laguna.
@@ -6209,7 +6235,7 @@ const blockedSections: BlockedSectionRow[] = useMemo(() => {
                             ) : blockedSectionsFiltered.length === 0 ? (
                               <tr>
                                 <td
-                                  colSpan={8}
+                                  colSpan={10}
                                   className="py-6 text-center text-sm text-gray-500"
                                 >
                                   No blocked sections match your search.
@@ -6281,8 +6307,12 @@ const blockedSections: BlockedSectionRow[] = useMemo(() => {
                                     <td className="px-3 py-2 text-gray-700">
                                       {end2}
                                     </td>
-                                    <td className="px-3 py-2 text-gray-700">{b.program || "—"}</td>
-                                    <td className="px-3 py-2 text-gray-700">{b.batch || "—"}</td>
+                                    <td className="px-3 py-2 text-gray-700">
+                                      {b.program || "—"}
+                                    </td>
+                                    <td className="px-3 py-2 text-gray-700">
+                                      {b.batch || "—"}
+                                    </td>
                                   </tr>
                                 );
                               })
