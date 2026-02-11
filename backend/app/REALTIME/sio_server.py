@@ -45,13 +45,109 @@ sio = socketio.AsyncServer(
 CONV_ROOM_PREFIX = "conv:"
 USER_ROOM_PREFIX = "user:"
 
+# ----------------------------
+# Online presence (for Delivered status)
+#
+# "Delivered" in the UI means: at least one recipient currently has an active
+# socket connection (i.e., is online) at the moment the message is sent.
+#
+# We track:
+# - _user_sids: user_id -> set(sid)
+# - _sid_conv_ids: sid -> set(conversation_id) (for cleanup on disconnect)
+# - _conv_user_counts: conversation_id -> { user_id: join_count }
+# ----------------------------
+_user_sids: Dict[str, set] = {}
+_sid_conv_ids: Dict[str, set] = {}
+_conv_user_counts: Dict[str, Dict[str, int]] = {}
+
+
+def _track_user_connect(user_id: str, sid: str) -> None:
+    user_id = str(user_id).strip()
+    if not user_id:
+        return
+    _user_sids.setdefault(user_id, set()).add(str(sid))
+
+
+def _track_user_disconnect(user_id: str, sid: str) -> None:
+    user_id = str(user_id).strip()
+    sid = str(sid)
+    if not user_id:
+        return
+    sids = _user_sids.get(user_id)
+    if not sids:
+        return
+    sids.discard(sid)
+    if not sids:
+        _user_sids.pop(user_id, None)
+
+
+def _track_conv_join(user_id: str, sid: str, conversation_id: str) -> None:
+    user_id = str(user_id).strip()
+    conversation_id = str(conversation_id).strip()
+    sid = str(sid)
+    if not user_id or not conversation_id:
+        return
+
+    _sid_conv_ids.setdefault(sid, set()).add(conversation_id)
+    cmap = _conv_user_counts.setdefault(conversation_id, {})
+    cmap[user_id] = int(cmap.get(user_id) or 0) + 1
+
+
+def _track_conv_leave_all(user_id: str, sid: str) -> None:
+    """Remove a sid from all conversation join counts."""
+    user_id = str(user_id).strip()
+    sid = str(sid)
+    conv_ids = list(_sid_conv_ids.get(sid) or [])
+    if not conv_ids or not user_id:
+        _sid_conv_ids.pop(sid, None)
+        return
+
+    for cid in conv_ids:
+        cmap = _conv_user_counts.get(cid)
+        if not cmap:
+            continue
+        cur = int(cmap.get(user_id) or 0)
+        if cur <= 1:
+            cmap.pop(user_id, None)
+        else:
+            cmap[user_id] = cur - 1
+        if not cmap:
+            _conv_user_counts.pop(cid, None)
+
+    _sid_conv_ids.pop(sid, None)
+
+
+def _online_recipients(participants: List[str], sender_id: str) -> List[str]:
+    """Return recipient user_ids that currently have at least one active socket."""
+    sender_id = str(sender_id).strip()
+    out: List[str] = []
+    for uid in participants or []:
+        uid = str(uid).strip()
+        if not uid or uid == sender_id:
+            continue
+        if _user_sids.get(uid):
+            out.append(uid)
+    return out
+
 
 # ----------------------------
 # JSON-safe helpers
 # ----------------------------
+def _iso(dt: datetime) -> str:
+    """Return ISO timestamp in UTC with second precision and 'Z' suffix."""
+    try:
+        dt2 = dt.astimezone(timezone.utc).replace(microsecond=0)
+    except Exception:
+        dt2 = dt.replace(microsecond=0)
+    s = dt2.isoformat()
+    if s.endswith("+00:00"):
+        s = s[:-6] + "Z"
+    return s
+
+
 def _json_safe(v):
     if isinstance(v, datetime):
-        return v.isoformat()
+        return _iso(v)
     if isinstance(v, dict):
         return {k: _json_safe(val) for k, val in v.items()}
     if isinstance(v, list):
@@ -158,6 +254,16 @@ def _get_unread_for_user(conversation_id: str, user_id: str) -> int:
         return int(doc.get("unread") or 0)
     except Exception:
         return 0
+
+def _get_last_read_at(conversation_id: str, user_id: str) -> Optional[datetime]:
+    st = get_collection("conversation_state")
+    doc = st.find_one(
+        {"conversation_id": str(conversation_id), "user_id": str(user_id)},
+        {"_id": 0, "last_read_at": 1},
+    ) or {}
+    v = doc.get("last_read_at")
+    return v if isinstance(v, datetime) else None
+
 
 
 def _get_state_map_for_user(user_id: str, conversation_ids: List[str]) -> Dict[str, int]:
@@ -476,12 +582,15 @@ def _get_conversation_view(conversation_id: str, requester_id: str) -> Optional[
             "body": lm.get("body"),
         }
 
+    peer_last_read = _get_last_read_at(conversation_id, other_id) if other_id else None
+
     unread = _get_unread_for_user(conversation_id, requester_id)
 
     return {
         "conversationId": conv.get("conversation_id"),
         "peer": peer,
         "updatedAt": conv.get("updated_at"),
+        "peerLastReadAt": peer_last_read,
         "lastMessage": last_message,
         "unread": unread,
     }
@@ -511,6 +620,9 @@ async def connect(sid: str, environ: Dict[str, Any], auth: Optional[Dict[str, An
         await sio.save_session(sid, {"userId": user_id})
         await sio.enter_room(sid, f"{USER_ROOM_PREFIX}{user_id}")
 
+        # Track online presence (for Delivered status)
+        _track_user_connect(user_id, sid)
+
         logger.info(f"[socket] connect sid={sid} userId={user_id}")
         await sio.emit("socket:ready", {"ok": True, "userId": user_id}, to=sid)
 
@@ -524,7 +636,14 @@ async def connect(sid: str, environ: Dict[str, Any], auth: Optional[Dict[str, An
 @sio.event
 async def disconnect(sid: str):
     sess = await sio.get_session(sid)
-    logger.info(f"[socket] disconnect sid={sid} userId={(sess or {}).get('userId')}")
+    uid = str((sess or {}).get("userId") or "").strip()
+    try:
+        if uid:
+            _track_conv_leave_all(uid, sid)
+            _track_user_disconnect(uid, sid)
+    except Exception:
+        pass
+    logger.info(f"[socket] disconnect sid={sid} userId={uid}")
 
 
 @sio.event
@@ -579,6 +698,9 @@ async def conversation_open(sid: str, data: Dict[str, Any]):
         # join opener into conv room
         await sio.enter_room(sid, f"{CONV_ROOM_PREFIX}{conv_id}")
 
+        # track presence inside this conversation room (for Delivered)
+        _track_conv_join(str(user_id), sid, conv_id)
+
         # ensure conversation_state docs exist
         participants = [str(x) for x in (conv.get("participants") or [user_id, target_id])]
         await run_in_threadpool(_ensure_state, conv_id, participants)
@@ -616,6 +738,9 @@ async def conversation_join(sid: str, data: Dict[str, Any]):
 
     await sio.enter_room(sid, f"{CONV_ROOM_PREFIX}{conv_id}")
 
+    # track presence inside this conversation room (for Delivered)
+    _track_conv_join(str(user_id), sid, conv_id)
+
     # ensure state exists (safe)
     participants = [str(x) for x in (conv.get("participants") or [])]
     await run_in_threadpool(_ensure_state, conv_id, participants)
@@ -641,6 +766,20 @@ async def conversation_mark_read(sid: str, data: Dict[str, Any]):
         return {"ok": False, "error": "Not allowed"}
 
     await run_in_threadpool(_mark_read, conv_id, str(user_id))
+
+    # Notify other participants (read receipt)
+    try:
+        seen_at = _now_utc()
+        u = await run_in_threadpool(_find_user, str(user_id), "")
+        name = _full_name(u or {}) if u else str(user_id)
+        await sio.emit(
+            "conversation_seen",
+            _json_safe({"conversationId": conv_id, "userId": str(user_id), "userName": name, "seenAt": seen_at}),
+            room=f"{CONV_ROOM_PREFIX}{conv_id}",
+            skip_sid=sid,
+        )
+    except Exception:
+        pass
 
     await sio.emit(
         "unread_update",
@@ -741,9 +880,103 @@ async def message_send(sid: str, data: Dict[str, Any]):
         except Exception:
             pass
 
-    return {"ok": True, "message": payload}
+    # ----------------------------
+    # Delivered status
+    # "Delivered" means at least one recipient currently has an active socket.
+    # ----------------------------
+    delivered_to = _online_recipients(participants, str(user_id))
+    delivered_to_count = len(delivered_to)
+    delivered_at = _now_utc() if delivered_to_count > 0 else None
+
+    if delivered_to_count > 0:
+        try:
+            await sio.emit(
+                "message_delivered",
+                _json_safe({
+                    "conversationId": conv_id,
+                    "messageId": payload.get("messageId"),
+                    "deliveredAt": delivered_at,
+                    "deliveredToCount": delivered_to_count,
+                }),
+                room=f"{USER_ROOM_PREFIX}{user_id}",
+            )
+        except Exception:
+            pass
+
+    return {
+        "ok": True,
+        "message": payload,
+        "delivered": _json_safe({
+            "deliveredAt": delivered_at,
+            "deliveredToCount": delivered_to_count,
+        }),
+    }
 
 
+
+
+@sio.event
+async def typing_start(sid: str, data: Dict[str, Any]):
+    """Notify other participants that the user is typing in a conversation."""
+    sess = await sio.get_session(sid)
+    user_id = (sess or {}).get("userId")
+    if not user_id:
+        return {"ok": False, "error": "Not authenticated"}
+
+    conv_id = str((data or {}).get("conversationId") or "").strip()
+    if not conv_id:
+        return {"ok": False, "error": "Missing conversationId"}
+
+    conv_col = get_collection("conversations")
+    conv = await run_in_threadpool(lambda: conv_col.find_one({"conversation_id": conv_id}, {"_id": 0, "participants": 1}))
+    if not conv or user_id not in (conv.get("participants") or []):
+        return {"ok": False, "error": "Not allowed"}
+
+    try:
+        u = await run_in_threadpool(_find_user, str(user_id), "")
+        name = _full_name(u or {}) if u else str(user_id)
+        await sio.emit(
+            "typing_update",
+            _json_safe({"conversationId": conv_id, "userId": str(user_id), "userName": name, "isTyping": True}),
+            room=f"{CONV_ROOM_PREFIX}{conv_id}",
+            skip_sid=sid,
+        )
+    except Exception:
+        pass
+
+    return {"ok": True}
+
+
+@sio.event
+async def typing_stop(sid: str, data: Dict[str, Any]):
+    """Notify other participants that the user stopped typing."""
+    sess = await sio.get_session(sid)
+    user_id = (sess or {}).get("userId")
+    if not user_id:
+        return {"ok": False, "error": "Not authenticated"}
+
+    conv_id = str((data or {}).get("conversationId") or "").strip()
+    if not conv_id:
+        return {"ok": False, "error": "Missing conversationId"}
+
+    conv_col = get_collection("conversations")
+    conv = await run_in_threadpool(lambda: conv_col.find_one({"conversation_id": conv_id}, {"_id": 0, "participants": 1}))
+    if not conv or user_id not in (conv.get("participants") or []):
+        return {"ok": False, "error": "Not allowed"}
+
+    try:
+        u = await run_in_threadpool(_find_user, str(user_id), "")
+        name = _full_name(u or {}) if u else str(user_id)
+        await sio.emit(
+            "typing_update",
+            _json_safe({"conversationId": conv_id, "userId": str(user_id), "userName": name, "isTyping": False}),
+            room=f"{CONV_ROOM_PREFIX}{conv_id}",
+            skip_sid=sid,
+        )
+    except Exception:
+        pass
+
+    return {"ok": True}
 @sio.event
 async def user_search(sid: str, data: Dict[str, Any]):
     sess = await sio.get_session(sid)

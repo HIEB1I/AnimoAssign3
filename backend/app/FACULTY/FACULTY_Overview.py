@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 import re
 
+from html import escape as _html_escape
+
 import os
 import base64
 from email.message import EmailMessage
@@ -108,6 +110,7 @@ async def _send_email_via_user_gmail(
     to_email: str,
     subject: str,
     body: str,
+     html_body: Optional[str] = None,
 ) -> Tuple[bool, Optional[str]]:
 
     user = await db["users"].find_one({"user_id": user_id}, {"_id": 0, "google_token": 1})
@@ -124,8 +127,12 @@ async def _send_email_via_user_gmail(
     msg = EmailMessage()
     msg["To"] = to_email
     msg["Subject"] = subject
-    msg.set_content(body)
 
+    msg.set_content(body or "")
+
+    if html_body:
+        msg.add_alternative(html_body, subtype="html")
+        
     raw_b64 = base64.urlsafe_b64encode(msg.as_bytes()).decode("utf-8")
 
     async def _try_send(token: str) -> httpx.Response:
@@ -339,6 +346,170 @@ def _term_label(t: Dict[str, Any]) -> str:
     if tn:
         return f"Term {tn}"
     return "Term"
+
+def _aa_web_base() -> str:
+    # Prefer your deployed URL if set; fallback to localhost
+    base = (os.getenv("ANIMOASSIGN_WEB_URL") or os.getenv("FRONTEND_URL") or "http://localhost:5173").strip()
+    return base.rstrip("/")
+
+def _aa_login_link() -> str:
+    return _aa_web_base() + "/login"
+
+def _build_load_accept_email_text(*, faculty_name: str, term_label: str, rows: List[Dict[str, Any]], login_link: str) -> str:
+    lines = [
+        f"Hi {faculty_name},",
+        "",
+        f"You have ACCEPTED your teaching load for {term_label}.",
+        "",
+        "Teaching Load Summary:",
+        "Course | Section | Units | Mode | Day1 | Time1 | Room1 | Day2 | Time2 | Room2",
+        "-" * 86,
+    ]
+    for r in rows:
+        lines.append(
+            f"{(r.get('course_code') or '')} | {(r.get('section') or '')} | {(r.get('units') or '')} | {(r.get('mode') or '')} | "
+            f"{(r.get('day1') or '')} | {(r.get('time1') or '')} | {(r.get('room1') or '')} | "
+            f"{(r.get('day2') or '')} | {(r.get('time2') or '')} | {(r.get('room2') or '')}"
+        )
+
+    lines += [
+        "",
+        "To view your schedule inside AnimoAssign, log in here:",
+        login_link,
+        "",
+        "— AnimoAssign",
+    ]
+    return "\n".join(lines)
+
+def _build_load_accept_email_html(*, faculty_name: str, term_label: str, rows: List[Dict[str, Any]], login_link: str) -> str:
+    safe_name = _html_escape((faculty_name or "Faculty").strip() or "Faculty")
+    safe_term = _html_escape((term_label or "Term").strip() or "Term")
+    safe_link = _html_escape((login_link or "").strip())
+    preheader = _html_escape(f"Teaching load accepted for {term_label}"[:120])
+
+    # Build table rows
+    tr = []
+    for r in rows:
+        course = _html_escape(str(r.get("course_code") or ""))
+        sec = _html_escape(str(r.get("section") or ""))
+        units = _html_escape(str(r.get("units") or ""))
+        mode = _html_escape(str(r.get("mode") or ""))
+        day1 = _html_escape(str(r.get("day1") or ""))
+        time1 = _html_escape(str(r.get("time1") or ""))
+        room1 = _html_escape(str(r.get("room1") or ""))
+        day2 = _html_escape(str(r.get("day2") or ""))
+        time2 = _html_escape(str(r.get("time2") or ""))
+        room2 = _html_escape(str(r.get("room2") or ""))
+
+        tr.append(f"""
+          <tr>
+            <td style="padding:10px 10px;border-top:1px solid #e5e7eb;">{course}</td>
+            <td style="padding:10px 10px;border-top:1px solid #e5e7eb;text-align:center;">{sec}</td>
+            <td style="padding:10px 10px;border-top:1px solid #e5e7eb;text-align:center;">{units}</td>
+            <td style="padding:10px 10px;border-top:1px solid #e5e7eb;text-align:center;">{mode}</td>
+            <td style="padding:10px 10px;border-top:1px solid #e5e7eb;text-align:center;">{day1}</td>
+            <td style="padding:10px 10px;border-top:1px solid #e5e7eb;text-align:center;">{time1}</td>
+            <td style="padding:10px 10px;border-top:1px solid #e5e7eb;">{room1}</td>
+            <td style="padding:10px 10px;border-top:1px solid #e5e7eb;text-align:center;">{day2}</td>
+            <td style="padding:10px 10px;border-top:1px solid #e5e7eb;text-align:center;">{time2}</td>
+            <td style="padding:10px 10px;border-top:1px solid #e5e7eb;">{room2}</td>
+          </tr>
+        """)
+
+    rows_html = "\n".join(tr) if tr else """
+      <tr><td colspan="10" style="padding:12px;border-top:1px solid #e5e7eb;color:#6b7280;text-align:center;">
+        No schedule rows found.
+      </td></tr>
+    """
+
+    return f"""<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Teaching Load Accepted</title>
+  </head>
+  <body style="margin:0;padding:0;background:#f6f7fb;">
+    <div style="display:none;max-height:0;overflow:hidden;opacity:0;color:transparent;">{preheader}</div>
+
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f6f7fb;padding:24px 0;">
+      <tr>
+        <td align="center">
+          <table role="presentation" width="600" cellpadding="0" cellspacing="0"
+                 style="width:600px;max-width:92vw;background:#ffffff;border-radius:14px;overflow:hidden;box-shadow:0 6px 18px rgba(17,24,39,0.08);">
+            <tr>
+              <td style="padding:20px 24px;background:#0B6B3A;color:#ffffff;font-family:Arial,Helvetica,sans-serif;">
+                <div style="font-size:12px;letter-spacing:.08em;text-transform:uppercase;opacity:.9;">AnimoAssign</div>
+                <div style="font-size:20px;font-weight:700;margin-top:6px;line-height:1.25;">Teaching Load Accepted</div>
+              </td>
+            </tr>
+
+            <tr>
+              <td style="padding:22px 24px;font-family:Arial,Helvetica,sans-serif;color:#111827;font-size:14px;line-height:1.55;">
+                <p style="margin:0 0 10px 0;">Hi {safe_name},</p>
+                <p style="margin:0 0 16px 0;color:#374151;">
+                  This confirms you have <b>ACCEPTED</b> your teaching load for <b>{safe_term}</b>.
+                </p>
+
+                <div style="border:1px solid #e5e7eb;border-radius:12px;overflow:hidden;">
+                  <table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse;font-size:12px;">
+                    <thead style="background:#f3f4f6;color:#111827;">
+                      <tr>
+                        <th style="padding:10px 10px;text-align:left;">Course</th>
+                        <th style="padding:10px 10px;text-align:center;">Section</th>
+                        <th style="padding:10px 10px;text-align:center;">Units</th>
+                        <th style="padding:10px 10px;text-align:center;">Mode</th>
+                        <th style="padding:10px 10px;text-align:center;">Day 1</th>
+                        <th style="padding:10px 10px;text-align:center;">Time 1</th>
+                        <th style="padding:10px 10px;text-align:left;">Room 1</th>
+                        <th style="padding:10px 10px;text-align:center;">Day 2</th>
+                        <th style="padding:10px 10px;text-align:center;">Time 2</th>
+                        <th style="padding:10px 10px;text-align:left;">Room 2</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {rows_html}
+                    </tbody>
+                  </table>
+                </div>
+
+                <div style="text-align:center;margin:18px 0 10px 0;">
+                  <a href="{safe_link}" style="display:inline-block;background:#16A34A;color:#ffffff;text-decoration:none;padding:12px 22px;border-radius:10px;font-weight:700;">
+                    Log in to AnimoAssign
+                  </a>
+                </div>
+
+                <p style="margin:0;color:#6b7280;font-size:12px;">
+                  If the button doesn’t work, copy and paste this link:
+                  <a href="{safe_link}" style="color:#16A34A;word-break:break-all;">{safe_link}</a>
+                </p>
+              </td>
+            </tr>
+
+            <tr>
+              <td style="padding:14px 24px;background:#f9fafb;font-family:Arial,Helvetica,sans-serif;color:#6b7280;font-size:12px;line-height:1.4;">
+                You’re receiving this email because you accepted your teaching load in AnimoAssign.
+              </td>
+            </tr>
+
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>"""
+
+def _build_load_accept_email(*, faculty_name: str, term_label: str, rows: List[Dict[str, Any]]) -> Tuple[str, str, str]:
+    login_link = _aa_login_link()
+    subject = f"[AnimoAssign] Teaching Load Accepted - {term_label}"
+    text_body = _build_load_accept_email_text(
+        faculty_name=faculty_name, term_label=term_label, rows=rows, login_link=login_link
+    )
+    html_body = _build_load_accept_email_html(
+        faculty_name=faculty_name, term_label=term_label, rows=rows, login_link=login_link
+    )
+    return subject, text_body, html_body
+
 
 def _as_code_str(val) -> str:
     if isinstance(val, list):
@@ -670,6 +841,15 @@ async def overview_handler(
             "percent": int((total_units / pref_units_for_calc) * 100) if pref_units_for_calc > 0 else 0,
         }
 
+        # Warnings / flags (used by frontend to show limit-exceeded warnings)
+        # Note: If preferred units or max preps are 0, any positive current value is considered exceeded.
+        units_max = float(pref_units_for_calc or 0)
+        preps_max = int(max_preps or 0)
+        summary["exceeded_teaching_units"] = (total_units > units_max) if units_max > 0 else (total_units > 0)
+        summary["exceeded_course_preps"] = (course_preps > preps_max) if preps_max > 0 else (course_preps > 0)
+        summary["teaching_units_over_by"] = max(0, int(round(total_units - units_max))) if summary["exceeded_teaching_units"] else 0
+        summary["course_preps_over_by"] = max(0, int(course_preps - preps_max)) if summary["exceeded_course_preps"] else 0
+
         
         # --- Proposed schedule overlay (sent by OM via /om/load-assignment/to-faculty) ---
         proposal = await db[COL_LOAD_PROPOSALS].find_one({"faculty_id": faculty_id, "term_id": term_id}, {"_id": 0}) or None
@@ -687,6 +867,10 @@ async def overview_handler(
             summary["teaching_units"] = f"0/{int(pref_units_for_calc)}"
             summary["course_preps"] = f"0/{max_preps}"
             summary["percent"] = 0
+            summary["exceeded_teaching_units"] = False
+            summary["exceeded_course_preps"] = False
+            summary["teaching_units_over_by"] = 0
+            summary["course_preps_over_by"] = 0
             # keep the header-derived status if present, otherwise show Pending
             summary["load_status"] = (summary.get("load_status") or "Pending")
             return {
@@ -1033,6 +1217,15 @@ async def get_faculty_overview(userId: str = Query(...)):
         "percent": int((total_units / pref_units_for_calc) * 100) if pref_units_for_calc > 0 else 0,
     }
 
+    # Warnings / flags (used by frontend to show limit-exceeded warnings)
+    # Note: If preferred units or max preps are 0, any positive current value is considered exceeded.
+    units_max = float(pref_units_for_calc or 0)
+    preps_max = int(max_preps or 0)
+    summary["exceeded_teaching_units"] = (total_units > units_max) if units_max > 0 else (total_units > 0)
+    summary["exceeded_course_preps"] = (course_preps > preps_max) if preps_max > 0 else (course_preps > 0)
+    summary["teaching_units_over_by"] = max(0, int(round(total_units - units_max))) if summary["exceeded_teaching_units"] else 0
+    summary["course_preps_over_by"] = max(0, int(course_preps - preps_max)) if summary["exceeded_course_preps"] else 0
+
     # IMPORTANT BEHAVIOR CHANGE (mirrors POST /overview?action=fetch):
     # If this is a PLANNING term and OM has NOT forwarded a proposal yet,
     # hide any schedule/teaching load on the faculty side.
@@ -1047,6 +1240,10 @@ async def get_faculty_overview(userId: str = Query(...)):
             summary["teaching_units"] = f"0/{int(pref_units_for_calc)}"
             summary["course_preps"] = f"0/{max_preps}"
             summary["percent"] = 0
+            summary["exceeded_teaching_units"] = False
+            summary["exceeded_course_preps"] = False
+            summary["teaching_units_over_by"] = 0
+            summary["course_preps_over_by"] = 0
             summary["load_status"] = (summary.get("load_status") or "Pending")
 
     notifications = await db[COL_NOTIFICATIONS].find(
@@ -1349,17 +1546,102 @@ def _build_acceptance_email(term_label: str, rows: list[dict], recipient_email: 
       </table>
 
       <p style="margin-top:16px;">Thank you.<br/>AnimoAssign</p>
-      <p>Log in here: <a href="http://localhost:5173/login">http://localhost:5173/login</a></p>
+      <p>Log in here: <a href=" http://ccscloud.dlsu.edu.ph:11160/login">http://ccscloud.dlsu.edu.ph:11160/login</a></p>
     </div>
     """
+    return subject, body_text, body_html
+
+def _build_faculty_accept_email(
+    *,
+    term_label: str,
+    faculty_name: str,
+    rows: List[Dict[str, Any]],
+    login_url: str = " http://ccscloud.dlsu.edu.ph:11160/login",
+) -> Tuple[str, str, str]:
+    subject = f"[AnimoAssign] Accepted schedule • {term_label}"
+
+    def td(x: Any) -> str:
+        return _html_escape("" if x is None else str(x))
+
+    # Plain text fallback
+    lines = [
+        f"Dear {faculty_name},",
+        f"",
+        f"This confirms you have accepted your teaching load for {term_label}.",
+        "",
+        "Schedule:",
+    ]
+    for r in rows:
+        lines.append(
+            f"- {r.get('course_code','')} {r.get('section','')} | {r.get('units','')}u | "
+            f"{r.get('day1','')} {r.get('time1','')} {r.get('room1','')} | "
+            f"{(r.get('day2') or '')} {(r.get('time2') or '')} {(r.get('room2') or '')}"
+        )
+
+    lines += ["", f"Login: {login_url}", "", "— AnimoAssign"]
+    body_text = "\n".join(lines)
+
+    # HTML table (inbox-style)
+    tr_html = ""
+    for r in rows:
+        tr_html += f"""
+        <tr>
+          <td>{td(r.get("course_code",""))}</td>
+          <td style="text-align:center;">{td(r.get("section",""))}</td>
+          <td style="text-align:center;">{td(r.get("units",""))}</td>
+          <td style="text-align:center;">{td(r.get("mode",""))}</td>
+          <td style="text-align:center;">{td(r.get("day1",""))}</td>
+          <td style="text-align:center;">{td(r.get("time1",""))}</td>
+          <td>{td(r.get("room1",""))}</td>
+          <td style="text-align:center;">{td(r.get("day2",""))}</td>
+          <td style="text-align:center;">{td(r.get("time2",""))}</td>
+          <td>{td(r.get("room2",""))}</td>
+        </tr>
+        """
+
+    body_html = f"""
+    <div style="font-family:Arial,sans-serif;font-size:13px;color:#111;">
+      <p>Dear {td(faculty_name)},</p>
+      <p>This confirms you have <b>accepted</b> your teaching load for <b>{td(term_label)}</b>.</p>
+
+      <table border="1" cellpadding="6" cellspacing="0"
+             style="border-collapse:collapse;width:100%;font-size:12px;">
+        <thead style="background:#f3f4f6;">
+          <tr>
+            <th>Course</th>
+            <th>Section</th>
+            <th>Units</th>
+            <th>Mode</th>
+            <th>Day 1</th>
+            <th>Time 1</th>
+            <th>Room 1</th>
+            <th>Day 2</th>
+            <th>Time 2</th>
+            <th>Room 2</th>
+          </tr>
+        </thead>
+        <tbody>
+          {tr_html}
+        </tbody>
+      </table>
+
+      <p style="margin-top:14px;">
+        Login here: <a href="{td(login_url)}">{td(login_url)}</a>
+      </p>
+
+      <p style="margin-top:16px;">Thank you.<br/>AnimoAssign</p>
+    </div>
+    """
+
     return subject, body_text, body_html
 
 @router.post("/load-assignment/accept")
 async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[str, Any] = Body({})):
     faculty = await db[COL_FACULTY].find_one({"user_id": userId}, {"_id": 0})
-    user = await db["users"].find_one({"user_id": userId}, {"_id": 0, "email": 1, "gmail": 1, "google_token": 1})
     if not faculty:
         raise HTTPException(status_code=404, detail="Faculty not found")
+
+    user = await db["users"].find_one({"user_id": userId}, {"_id": 0, "email": 1, "gmail": 1, "google_token": 1, "first_name": 1, "last_name": 1}) or {}
 
     term_id = (payload.get("term_id") or "").strip()
     if not term_id:
@@ -1376,6 +1658,7 @@ async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[s
 
     proposal_rows = proposal.get("rows", []) or []
 
+    # do not allow accept if pending RFC exists
     pending_rfc = await db[COL_LOAD_RFC].find_one({"faculty_id": fid, "term_id": term_id}, {"_id": 0}) or None
     if pending_rfc:
         existing_norm = _normalize_rfc_doc(pending_rfc)
@@ -1386,87 +1669,56 @@ async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[s
                 detail="You have a pending RFC. Please wait for OM to respond before accepting the schedule."
             )
 
-    # IMPORTANT: "Accept Schedule" should NOT lock/finalize anything.
-    # It simply marks the proposal as approved/accepted on the OM side.
-    now = _now_utc()
     await db[COL_LOAD_PROPOSALS].update_one(
         {"faculty_id": fid, "term_id": term_id},
-        {"$set": {
-            # Keep OM-side status as "approved" once faculty accepts.
-            "status": "approved",
-            # Do not lock; OM can still edit/add/resend schedules.
-            "locked": False,
-            "accepted_at": now,
-            "updated_at": now,
-        }},
+        {"$set": {"status": "approved", "locked": True, "accepted_at": _now_utc(), "updated_at": _now_utc()},
+         "$setOnInsert": {"created_at": _now_utc()}},
     )
 
-    # Mark existing RFC threads as ACCEPTED (terminal) but do not lock them.
-    # Faculty can create a new RFC thread later; OM can still adjust proposals.
+    try:
+        await db[COL_LOAD_PROPOSALS].update_one(
+            {"faculty_id": fid, "term_id": term_id},
+            {"$set": {"rows.$[].finalized": True}},
+        )
+    except Exception:
+        pass
+
+    now = _now_utc()
     await db[COL_LOAD_RFC].update_many(
         {"faculty_id": fid, "term_id": term_id},
-        {"$set": {"status": "ACCEPTED", "locked": False, "updated_at": now}},
+        {"$set": {"status": "ACCEPTED", "locked": True, "updated_at": now}},
     )
 
+    # --- NEW: send acceptance email to the faculty (best-effort, non-blocking) ---
     recipient_email = (
-        ((user or {}).get("google_token") or {}).get("connected_email")
-        or (user or {}).get("gmail")
-        or (user or {}).get("email")
-        or ""
+        ((user.get("google_token") or {}).get("connected_email") or "").strip()
+        or (user.get("gmail") or "").strip()
+        or (user.get("email") or "").strip()
     )
 
-    term_doc = await db[COL_TERMS].find_one({"term_id": term_id}, {"_id": 0}) or {}
+    # Term label (best effort)
+    term_doc = await db[COL_TERMS].find_one({"term_id": term_id}, {"_id": 0, "acad_year_start": 1, "term_number": 1}) or {}
     term_label = _term_label(term_doc) if term_doc else term_id
 
-    header = "Course | Section | Day/Time | Room | Mode | Units"
-    sep = "-" * len(header)
-    lines = [header, sep]
-
-    for r in proposal_rows:
-        course = (r.get("course_code") or r.get("course") or "").strip()
-        sec = (r.get("section") or r.get("section_code") or "").strip()
-        mode = (r.get("mode") or "").strip()
-        units = str(r.get("units") or "")
-
-        d1 = (r.get("day1") or "TBA").strip()
-        t1 = (r.get("time1") or _fmt_time_band(
-            r.get("start") or r.get("begin1") or r.get("begin_1"),
-            r.get("end") or r.get("end1") or r.get("end_1"),
-        ) or "TBA").strip()
-        rm1 = (r.get("room1") or "Online").strip()
-
-        d2 = (r.get("day2") or "").strip()
-        t2 = (r.get("time2") or _fmt_time_band(
-            r.get("start2") or r.get("begin2") or r.get("begin_2"),
-            r.get("end2") or r.get("end2") or r.get("end_2"),
-        ) or "").strip()
-        rm2 = (r.get("room2") or "").strip()
-
-
-        day_time = f"{d1} {t1}" + (f" / {d2} {t2}" if d2 and t2 else "")
-        room = rm1 + (f" / {rm2}" if rm2 else "")
-
-        lines.append(f"{course} | {sec} | {day_time} | {room} | {mode} | {units}")
-
-    subject = f"[AnimoAssign] Schedule Accepted - {term_label}"
-    body = (
-        f"Your teaching load schedule has been ACCEPTED.\n\n"
-        f"Term: {term_label}\n"
-        f"Accepted At: {now.isoformat()}\n\n"
-        + "\n".join(lines) +
-        "\n\n[AnimoAssign]"
-    )
+    faculty_name = f"{(faculty.get('first_name') or '').strip()} {(faculty.get('last_name') or '').strip()}".strip() or "Faculty"
 
     email_sent = False
     email_error: Optional[str] = None
 
     if recipient_email:
+        subject, body_text, body_html = _build_faculty_accept_email(
+            term_label=term_label,
+            faculty_name=faculty_name,
+            rows=proposal_rows,
+            login_url=" http://ccscloud.dlsu.edu.ph:11160/login",
+        )
         try:
             email_sent, email_error = await _send_email_via_user_gmail(
                 user_id=userId,
                 to_email=recipient_email,
                 subject=subject,
-                body=body,
+                body=body_text,
+                html_body=body_html,
             )
         except Exception as e:
             email_sent = False
@@ -1475,6 +1727,7 @@ async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[s
         email_sent = False
         email_error = "No recipient email found for this user."
 
+    # optional rfc_id for notif (latest one)
     rfc_id = None
     lst = await db[COL_LOAD_RFC].find(
         {"faculty_id": fid, "term_id": term_id},
@@ -1496,8 +1749,7 @@ async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[s
                 "faculty_id": fid,
                 "rfc_id": rfc_id or "",
             },
-            send_email=True,
-            email_from_user_id=userId,
         )
 
+    # Keep old shape + add email fields (won't break existing callers)
     return {"ok": True, "status": "ACCEPTED", "email_sent": email_sent, "email_error": email_error}

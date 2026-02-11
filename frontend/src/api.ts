@@ -2934,6 +2934,57 @@ export async function getOmLoadAssignmentProfile(userId: string) {
   return data;
 }
 
+export type OmSubmittedCourseOption = {
+  code: string;
+  title: string;
+  units: number;
+  capacity: number;
+};
+
+/** Submitted Course Offerings (for OM "Add new line" course dropdown). */
+export async function getOmSubmittedCourses(user_id: string, term_id?: string) {
+  const base = (typeof API_BASE !== "undefined" ? API_BASE : "").replace(/\/+$/, "");
+  const qs = new URLSearchParams({ user_id });
+  if (term_id) qs.set("term_id", term_id);
+  const url = `${base}/om/load-assignment/submitted-courses?${qs.toString()}`;
+  const r = await fetch(url, { method: "GET" });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json() as Promise<{ ok: boolean; courses: OmSubmittedCourseOption[] }>;
+}
+
+export type OmNewLineSavePayload = {
+  course_code: string;
+  section_code: string;
+  faculty_id: string;
+  /** Campus context used for APO validation/routing (optional; backend may infer). */
+  campus_id?: string;
+  day1: string;
+  begin1: string;
+  end1: string;
+  day2?: string;
+  begin2?: string;
+  end2?: string;
+  mode: string;
+  units?: number;
+  capacity?: number;
+  remarks?: string;
+};
+
+/** Save an OM-created inline row and notify the routed APO. */
+export async function saveOmNewLine(user_id: string, payload: OmNewLineSavePayload, term_id?: string) {
+  const base = (typeof API_BASE !== "undefined" ? API_BASE : "").replace(/\/+$/, "");
+  const qs = new URLSearchParams({ user_id });
+  if (term_id) qs.set("term_id", term_id);
+  const url = `${base}/om/load-assignment/new-line?${qs.toString()}`;
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload ?? {}),
+  });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json() as Promise<{ ok: boolean; section_id?: string }>;
+}
+
 export async function submitOmLoadAssignment(
   userId: string,
   payload: { rows: OmLoadRow[] },

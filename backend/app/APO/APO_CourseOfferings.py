@@ -5864,6 +5864,21 @@ async def post_course_offerings(
 
             try:
                 await db[COL_SECTIONS].update_one({"section_id": section_id}, {"$set": sec_updates})
+
+                # Keep OM's load-assignment snapshot in sync for capacity edits (rooms are live via schedules).
+                # OM table reads sections_submitted.enrollment_cap, so update it immediately when APO edits capacity.
+                if 'enrollment_cap' in sec_updates:
+                    try:
+                        q = {'term_id': term_id, 'section_id': section_id}
+                        if campus_id:
+                            q['campus_id'] = campus_id
+                        await db[COL_SECTIONS_SUBMITTED].update_one(
+                            q,
+                            {'$set': {'enrollment_cap': sec_updates.get('enrollment_cap'), 'updated_at': now()}},
+                        )
+                    except Exception:
+                        pass
+
             except DuplicateKeyError:
                 raise HTTPException(status_code=409, detail={"ok": False, "errors": [
                     {"code": "SECTION_CODE_DUP", "message": "Section code already in use for this course and term."}
