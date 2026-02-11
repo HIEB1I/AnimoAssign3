@@ -106,6 +106,68 @@ def _campus_name_to_id(val: str) -> str:
     raise ValueError(f"Invalid Campus value: {s}")
 
 
+def _section_to_campus_id(section_code: str) -> str:
+    """APO routing by Section prefix.
+
+    - If section starts with S or G -> Manila (CMPS0001)
+    - If section starts with XX or XC -> Laguna (CMPS0002)
+    """
+    s = (section_code or "").strip().upper()
+    if not s:
+        return ""
+    if s.startswith("XX") or s.startswith("XC"):
+        return "CMPS0002"
+    if s.startswith("S") or s.startswith("G"):
+        return "CMPS0001"
+    return ""
+
+
+async def _apo_user_ids_for_campus(campus_id: str, db) -> list[str]:
+    """Return user_ids who have APO role scoped to the given campus."""
+    campus_id = (campus_id or "").strip().upper()
+    if not campus_id:
+        return []
+    ROLE_APO = "ROLE0004"
+
+    def _scope_has_campus(scope_val) -> bool:
+        if not scope_val:
+            return False
+        scopes = scope_val if isinstance(scope_val, list) else [scope_val]
+        for s in scopes:
+            if not isinstance(s, dict):
+                continue
+            typ = str(s.get("type") or s.get("scope_type") or "").strip().lower()
+            sid = str(s.get("id") or s.get("scope_id") or s.get("campus_id") or "").strip().upper()
+            if sid == campus_id and (typ in ("campus", "campuses", "") or "campus" in typ):
+                return True
+        return False
+
+    docs = await db["role_assignments"].find({"role_id": ROLE_APO}, {"_id": 0, "user_id": 1, "scope": 1}).to_list(None)
+    out: list[str] = []
+    for d in docs or []:
+        uid = str(d.get("user_id") or "").strip()
+        if not uid:
+            continue
+        if _scope_has_campus(d.get("scope")):
+            out.append(uid)
+    return sorted(list({u for u in out}))
+
+
+async def _find_course_by_code(course_code: str, db) -> dict:
+    """Find a course by course_code (supports string or array storage)."""
+    import re as _re
+    cc = (course_code or "").strip()
+    if not cc:
+        return {}
+    q = {"$or": [
+        {"course_code": {"$regex": rf"^{_re.escape(cc)}$", "$options": "i"}},
+        {"course_code": [cc]},
+        {"course_code": {"$in": [cc]}},
+        {"course_code": {"$elemMatch": {"$regex": rf"^{_re.escape(cc)}$", "$options": "i"}}},
+    ]}
+    return await db[COL_COURSES].find_one(q, {"_id": 0}) or {}
+
+
 async def _om_department_ids(user_id: str, db) -> List[str]:
     """Departments this OM should see (from role_assignments.scope)."""
     ra = await db.get_collection("role_assignments").find_one(
@@ -835,17 +897,24 @@ async def _fetch_rows(user_id: str, term_id: str, db) -> Dict[str, Any]:
         except Exception:
             remarks_by_section_id = {}
 
-    # --- Preload rooms into a lookup: { room_id → room_number } ---
+    # --- Preload rooms into lookups (number + capacity) so OM table can reflect
+    #     APO room/room-capacity changes without requiring manual edits. ---
     room_docs = [
         x async for x in db[COL_ROOMS].find(
             {},
-            {"room_id": 1, "room_number": 1, "_id": 0}
+            {"room_id": 1, "room_number": 1, "capacity": 1, "_id": 0}
         )
     ]
 
     rooms_map = {
         (r.get("room_id") or "").strip(): (r.get("room_number") or "").strip()
         for r in room_docs
+    }
+
+    rooms_capacity_map = {
+        (r.get("room_id") or "").strip(): r.get("capacity")
+        for r in room_docs
+        if (r.get("room_id") or "").strip()
     }
 
     def schedule_pair(
@@ -919,6 +988,18 @@ async def _fetch_rows(user_id: str, term_id: str, db) -> Dict[str, Any]:
         # Display uses the effective mode
         mode_display = effective_mode
 
+        # Capacity should reflect the section's enrollment cap (APO may edit this).
+        # If enrollment_cap is missing, fall back to the assigned room capacity when available.
+        cap_value = d.get("enrollment_cap", "") or ""
+        if cap_value in ("", None):
+            try:
+                s0 = (scheds[0] if len(scheds) > 0 else {}) or {}
+                rid1 = (s0.get("room_id") or "").strip()
+                if rid1 and rid1 in rooms_capacity_map and rooms_capacity_map[rid1] is not None:
+                    cap_value = rooms_capacity_map[rid1]
+            except Exception:
+                pass
+
         row = {
             "id": sid,
             # Used by frontend for correct mapping when saving remarks.
@@ -934,7 +1015,7 @@ async def _fetch_rows(user_id: str, term_id: str, db) -> Dict[str, Any]:
             "faculty_id": (d.get("asg") or {}).get("faculty_id") or "",
             "faculty": d.get("faculty_name_display", "") or "",
             **pair,
-            "capacity": d.get("enrollment_cap", "") or "",
+            "capacity": cap_value,
             "mode": mode_display,
             # Prefer canonical sections.remarks, but fall back to sections_submitted.remarks
             # (needed for SHS imports which may store remarks on the submitted snapshot).
@@ -2458,6 +2539,400 @@ async def get_om_load_assignment_list(user_id: str, term_id: Optional[str] = Non
         "courseTypeOfCourse": course_type_of_course,
         "blockedGeCmps2": blocked_ge_cmps2,
     }
+
+
+@router.get("/load-assignment/submitted-courses")
+async def om_get_submitted_course_offerings(
+    user_id: str,
+    term_id: Optional[str] = None,
+    db=Depends(get_db),
+):
+    """Return course options based on submitted course offerings.
+
+    Used by OM "Add new line" Course dropdown.
+    - Restricted to the OM's department scope.
+    - Restricted to submitted_for_scheduling=True in sections_submitted.
+    """
+    # Resolve term
+    if term_id:
+        active = await db[COL_TERMS].find_one(
+            {"term_id": term_id},
+            {"_id": 0, "term_id": 1},
+        )
+        if not active:
+            raise HTTPException(status_code=404, detail="term_id not found")
+    else:
+        active = await _active_term()
+    if not (active or {}).get("term_id"):
+        raise HTTPException(status_code=409, detail="No active/upcoming term found")
+
+    dept_ids = await _om_department_ids(user_id, db)
+    if not dept_ids:
+        return {"ok": True, "courses": []}
+
+    tid = active["term_id"]
+    pipe: list[dict[str, Any]] = [
+        {"$match": {"term_id": tid, "submitted_for_scheduling": True}},
+        {"$lookup": {"from": COL_COURSES, "localField": "course_id", "foreignField": "course_id", "as": "course"}},
+        {"$unwind": {"path": "$course", "preserveNullAndEmptyArrays": False}},
+        {"$match": {"course.department_id": {"$in": dept_ids}}},
+        {
+            "$match": {
+                "$or": [
+                    {"course.type_of_course": {"$in": ["Major", "Foundation", "SHS", "GS"]}},
+                    {"course.type": {"$in": ["Major", "Foundation", "SHS", "GS"]}},
+                ]
+            }
+        },
+        {
+            "$addFields": {
+                "course_code_display": {
+                    "$cond": [
+                        {"$isArray": "$course.course_code"},
+                        {"$ifNull": [{"$arrayElemAt": ["$course.course_code", 0]}, ""]},
+                        {"$ifNull": ["$course.course_code", ""]},
+                    ]
+                },
+                "course_title_display": {"$ifNull": ["$course.course_title", ""]},
+                "course_units_display": {"$ifNull": ["$course.units", {"$ifNull": ["$course.units_per_section", 0]}]},
+            }
+        },
+        {
+            "$group": {
+                "_id": "$course.course_id",
+                "code": {"$first": "$course_code_display"},
+                "title": {"$first": "$course_title_display"},
+                "units": {"$first": "$course_units_display"},
+                # Best-effort: capacity from submitted offerings (max enrollment_cap across sections)
+                "capacity": {"$max": {"$ifNull": ["$enrollment_cap", 0]}},
+            }
+        },
+        {"$project": {"_id": 0, "code": 1, "title": 1, "units": 1, "capacity": 1}},
+        {"$sort": {"code": 1}},
+    ]
+
+    docs = [x async for x in db[COL_SECTIONS_SUBMITTED].aggregate(pipe)]
+    # Sanitize
+    out: list[dict[str, Any]] = []
+    for d in docs or []:
+        code = str(d.get("code") or "").strip()
+        title = str(d.get("title") or "").strip()
+        if not code:
+            continue
+        try:
+            units = int(d.get("units") or 0)
+        except Exception:
+            units = 0
+        try:
+            cap = int(d.get("capacity") or 0)
+        except Exception:
+            cap = 0
+        out.append({"code": code, "title": title, "units": units, "capacity": cap})
+
+    return {"ok": True, "courses": out}
+
+
+@router.post("/load-assignment/new-line")
+async def om_save_new_line(
+    user_id: str,
+    payload: Dict[str, Any] = Body(...),
+    term_id: Optional[str] = None,
+    db=Depends(get_db),
+):
+    """Persist an OM-created inline row ("Add new line") and notify the routed APO.
+
+    Notes:
+    - Course must exist in submitted course offerings for the term.
+    - Course title is derived from courses.course_title (not user-editable).
+    - Rooms are left as TBA; APO will assign rooms.
+    """
+    # Resolve term
+    if term_id:
+        active = await db[COL_TERMS].find_one(
+            {"term_id": term_id},
+            {"_id": 0, "term_id": 1},
+        )
+        if not active:
+            raise HTTPException(status_code=404, detail="term_id not found")
+    else:
+        active = await _active_term()
+    if not (active or {}).get("term_id"):
+        raise HTTPException(status_code=409, detail="No active/upcoming term found")
+    tid = active["term_id"]
+
+    # Validate required payload fields
+    course_code = str(payload.get("course_code") or "").strip()
+    section_code = str(payload.get("section_code") or "").strip()
+    faculty_id = str(payload.get("faculty_id") or "").strip()
+    mode = str(payload.get("mode") or "").strip().upper()
+    day1 = str(payload.get("day1") or "").strip().upper()
+    begin1 = _norm_hhmm(str(payload.get("begin1") or "").strip())
+    end1 = _norm_hhmm(str(payload.get("end1") or "").strip())
+
+    if not course_code or not section_code or not faculty_id or not mode or not day1 or not begin1 or not end1:
+        raise HTTPException(status_code=422, detail="Missing required fields")
+
+    # Optional meeting 2
+    day2 = str(payload.get("day2") or "").strip().upper()
+    begin2 = _norm_hhmm(str(payload.get("begin2") or "").strip())
+    end2 = _norm_hhmm(str(payload.get("end2") or "").strip())
+    if any([day2, begin2, end2]) and not (day2 and begin2 and end2):
+        raise HTTPException(status_code=422, detail="Meeting 2 must include Day 2, Begin 2, and End 2")
+
+    # Course must be in OM scope AND exist in submitted offerings
+    dept_ids = await _om_department_ids(user_id, db)
+    if not dept_ids:
+        raise HTTPException(status_code=403, detail="OM has no department scope")
+
+    course_doc = await _find_course_by_code(course_code, db)
+    if not course_doc:
+        raise HTTPException(status_code=404, detail="Course not found")
+    if str(course_doc.get("department_id") or "").strip() not in dept_ids:
+        raise HTTPException(status_code=403, detail="Course not in OM department scope")
+
+    course_id = str(course_doc.get("course_id") or "").strip()
+    if not course_id:
+        raise HTTPException(status_code=500, detail="Course is missing course_id")
+
+    # --- APO validation helpers ---
+    def _apo_from_section_prefix(sec: str) -> str:
+        """Return 'APO Manila' or 'APO Laguna' based on section prefix."""
+        s = (sec or "").strip().upper()
+        if s.startswith("XX") or s.startswith("XC"):
+            return "APO Laguna"
+        if s.startswith("S") or s.startswith("G"):
+            return "APO Manila"
+        return ""
+
+    def _apo_from_campus_id(cid: str) -> str:
+        """Best-effort mapping of campus_id -> APO name."""
+        c = (cid or "").strip().upper()
+        # Project convention observed in other modules: CMPS0001=Manila, CMPS0002=Laguna
+        if c == "CMPS0001":
+            return "APO Manila"
+        if c == "CMPS0002":
+            return "APO Laguna"
+        return ""
+
+    async def _infer_om_campus_id() -> str:
+        """Infer OM campus_id from payload, OM role scope, or term offerings."""
+        # 1) explicit payload override
+        cid = str(payload.get("campus_id") or "").strip()
+        if cid:
+            return cid
+
+        # 2) OM role scope (ROLE0006) may include campus scopes
+        ra = await db.get_collection("role_assignments").find_one(
+            {"user_id": user_id, "role_id": "ROLE0006"},
+            {"_id": 0, "scope": 1},
+        ) or {}
+        for sc in (ra.get("scope") or []):
+            if not isinstance(sc, dict):
+                continue
+            typ = str(sc.get("type") or sc.get("scope_type") or "").strip().lower()
+            if typ in ("campus", "campuses") or "campus" in typ:
+                v = str(sc.get("id") or sc.get("scope_id") or sc.get("campus_id") or "").strip()
+                if v:
+                    return v
+
+        # 3) Infer from the submitted offerings for this OM's department scope in the term
+        try:
+            pipe = [
+                {"$match": {"term_id": tid, "submitted_for_scheduling": True}},
+                {"$lookup": {"from": COL_COURSES, "localField": "course_id", "foreignField": "course_id", "as": "course"}},
+                {"$unwind": {"path": "$course", "preserveNullAndEmptyArrays": False}},
+                {"$match": {"course.department_id": {"$in": dept_ids}}},
+                {"$group": {"_id": "$campus_id", "n": {"$sum": 1}}},
+                {"$sort": {"n": -1}},
+                {"$limit": 1},
+            ]
+            top = [x async for x in db[COL_SECTIONS_SUBMITTED].aggregate(pipe)]
+            if top and top[0].get("_id"):
+                return str(top[0]["_id"]).strip()
+        except Exception:
+            pass
+        return ""
+
+    # Ensure this course exists in submitted offerings for this term (same source as OM table)
+    offering_exists = await db[COL_SECTIONS_SUBMITTED].find_one(
+        {
+            "term_id": tid,
+            "submitted_for_scheduling": True,
+            "course_id": course_id,
+        },
+        {"_id": 0, "section_id": 1},
+    )
+    if not offering_exists:
+        raise HTTPException(status_code=409, detail="Course is not part of submitted course offerings")
+
+    # 1) Prevent duplicate sections per course (same course_code/course_id) for the active term
+    dup = await db[COL_SECTIONS_SUBMITTED].find_one(
+        {
+            "term_id": tid,
+            "submitted_for_scheduling": True,
+            "course_id": course_id,
+            "section_code": {"$regex": rf"^{re.escape(section_code)}$", "$options": "i"},
+        },
+        {"_id": 0, "section_id": 1},
+    )
+    if dup:
+        raise HTTPException(status_code=409, detail="Duplicate section: this section already exists for that course")
+
+    # 2) Enforce APO rules based on section prefix and OM campus context
+    section_apo = _apo_from_section_prefix(section_code)
+    if not section_apo:
+        raise HTTPException(
+            status_code=409,
+            detail="Invalid section: use S/G (APO Manila) or XX/XC (APO Laguna)",
+        )
+
+    om_campus_id = await _infer_om_campus_id()
+    om_apo = _apo_from_campus_id(om_campus_id)
+    if om_apo and section_apo != om_apo:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Invalid section: This section belongs to {section_apo}, but you’re assigning for {om_apo}.",
+        )
+
+    # Generate a new section_id in the existing SEC#### format
+    ctx = await phase0_load(tid, db, department_id=None)
+    seq = _next_section_seq_from_ctx(ctx)
+    section_id = f"SEC{seq:04d}"
+    # Very defensive: avoid collision
+    while await db[COL_SECTIONS].find_one({"section_id": section_id}, {"_id": 0, "section_id": 1}):
+        seq += 1
+        section_id = f"SEC{seq:04d}"
+
+    # Campus routing (best-effort) based on section prefix
+    campus_id = _section_to_campus_id(section_code)
+
+    # Units/capacity (title is derived)
+    try:
+        units = int(payload.get("units") or course_doc.get("units") or course_doc.get("units_per_section") or 0)
+    except Exception:
+        units = 0
+    try:
+        cap = int(payload.get("capacity") or 0)
+    except Exception:
+        cap = 0
+
+    remarks = str(payload.get("remarks") or "").strip()
+
+    now = _utcnow()
+
+    # 1) Canonical sections doc (remarks live here)
+    await db[COL_SECTIONS].insert_one(
+        {
+            "section_id": section_id,
+            "term_id": tid,
+            "course_id": course_id,
+            "section_code": section_code,
+            "department_id": str(course_doc.get("department_id") or "").strip(),
+            "campus_id": campus_id,
+            "units": units,
+            "enrollment_cap": cap,
+            "mode": mode,
+            "remarks": remarks,
+            "created_at": now,
+            "updated_at": now,
+        }
+    )
+
+    # 2) Submitted snapshot (drives OM table)
+    await db[COL_SECTIONS_SUBMITTED].insert_one(
+        {
+            "section_id": section_id,
+            "term_id": tid,
+            "course_id": course_id,
+            "section_code": section_code,
+            "submitted_for_scheduling": True,
+            "enrollment_cap": cap,
+            "campus_id": campus_id,
+            "remarks": remarks,
+            "created_at": now,
+            "updated_at": now,
+        }
+    )
+
+    # 3) Schedules (rooms are left blank/TBA)
+    sched_docs: list[dict[str, Any]] = []
+    sched_docs.append(
+        {
+            "schedule_id": _sched_id(section_id, 1),
+            "term_id": tid,
+            "section_id": section_id,
+            "day": day1,
+            "start_time": _to_compact_hhmm(begin1),
+            "end_time": _to_compact_hhmm(end1),
+            "room_id": "",
+            "created_at": now,
+            "updated_at": now,
+        }
+    )
+    if day2 and begin2 and end2:
+        sched_docs.append(
+            {
+                "schedule_id": _sched_id(section_id, 2),
+                "term_id": tid,
+                "section_id": section_id,
+                "day": day2,
+                "start_time": _to_compact_hhmm(begin2),
+                "end_time": _to_compact_hhmm(end2),
+                "room_id": "",
+                "created_at": now,
+                "updated_at": now,
+            }
+        )
+    if sched_docs:
+        await db[COL_SCHED].insert_many(sched_docs)
+
+    # 4) Faculty assignment (Pending)
+    assignment_doc = {
+        "assignment_id": f"ASG-{uuid.uuid4().hex[:10].upper()}",
+        "load_id": f"LOAD-{uuid.uuid4().hex[:10].upper()}",
+        "section_id": section_id,
+        "faculty_id": faculty_id,
+        "course_id": course_id,
+        "term_id": tid,
+        "status": "Pending",
+        "is_archived": False,
+        "synced_from_faculty_service": False,
+        "created_at": now,
+        "updated_at": now,
+    }
+    await db[COL_ASSIGN].insert_one(assignment_doc)
+
+    # 5) Notify routed APO (best-effort)
+    try:
+        apo_uids = await _apo_user_ids_for_campus(campus_id, db) if campus_id else []
+        if apo_uids:
+            details = (
+                f"A new section was added by OM and requires room assignment.\n\n"
+                f"Course: {course_code} — {str(course_doc.get('course_title') or '').strip()}\n"
+                f"Section: {section_code}\n"
+                f"Day/Time: {day1} {begin1}-{end1}" + (f"; {day2} {begin2}-{end2}" if day2 and begin2 and end2 else "")
+            ).strip()
+            meta = {
+                "route": "/apo/room-assignments",
+                "kind": "om_new_line",
+                "term_id": tid,
+                "section_id": section_id,
+                "campus_id": campus_id,
+            }
+            for uid in apo_uids:
+                await _ensure_user_gmail_address(uid, db)
+                await create_notification(
+                    user_id=uid,
+                    title="New section pending room assignment",
+                    details=details,
+                    meta=meta,
+                    send_email=True,
+                    email_from_user_id=user_id,
+                )
+    except Exception:
+        pass
+
+    return {"ok": True, "section_id": section_id}
 
 
 
