@@ -3299,7 +3299,7 @@ export default function OM_LoadAssignment() {
   // (e.g., `selected` comes from checkbox selection and must never be stored.)
   const stripUiFieldsForPersist = (r: Row): Row => {
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    const { selected, is_new_line, ...rest } = (r as any) || {};
+    const { selected, is_new_line, __local_only, ...rest } = (r as any) || {};
     return rest as Row;
   };
 
@@ -3580,6 +3580,20 @@ export default function OM_LoadAssignment() {
 
   const loadFromServer = async (overrideTermId?: string) => {
     if (!userId) return;
+
+    // Preserve client-only unsaved "Add new line" drafts.
+    // Saving one new-line row triggers a refresh; without this, other edited
+    // drafts disappear from the grid.
+    const localNewLineDrafts: Row[] = (rows || []).filter(
+      (rr) => !!(rr as any)?.__local_only
+    );
+
+    // Preserve current remarks drafts for client-only rows.
+    const remarksDraftSnapshot = { ...(remarksDraftBySection || {}) } as Record<
+      string,
+      string
+    >;
+
     const res = await getOmLoadAssignmentList(userId, overrideTermId);
 
     const prefMap = (res as any)?.preferred_units_by_faculty || {};
@@ -3622,11 +3636,22 @@ export default function OM_LoadAssignment() {
       begin2: normalizeServerTimeToHHMM(r?.begin2),
       end2: normalizeServerTimeToHHMM(r?.end2),
     }));
-    setRows(normalizedRows);
+    // Merge server rows with any client-only "Add new line" drafts that are still unsaved.
+    const serverIds = new Set(normalizedRows.map((x) => String((x as any)?.id)));
+    const mergedRows: Row[] = [
+      ...normalizedRows,
+      ...localNewLineDrafts.filter((x) => !serverIds.has(String((x as any)?.id))),
+    ];
+    setRows(mergedRows);
 
     // Initialize remarks state from DB values (sections.remarks) without affecting other save/undo behaviors.
     const initRemarks: Record<string, string> = {};
-    for (const rr of normalizedRows) {
+    for (const rr of mergedRows) {
+      // For client-only rows, preserve the current draft text (if any).
+      if (!!(rr as any)?.__local_only) {
+        initRemarks[rr.id] = String(remarksDraftSnapshot?.[rr.id] ?? (rr as any)?.remarks ?? "");
+        continue;
+      }
       initRemarks[rr.id] = String((rr as any)?.remarks ?? "");
     }
     setRemarksDraftBySection(initRemarks);
@@ -3784,6 +3809,9 @@ export default function OM_LoadAssignment() {
     ...rows,
     {
       id: newId,
+      // Client-only draft marker. This prevents other unsaved new-line rows from
+      // disappearing when we refresh after saving a single row.
+      __local_only: true as any,
       is_new_line: true as any,
       course: "",
       title: "",
@@ -4119,6 +4147,20 @@ async function handleSaveNewLineRow(r: Row) {
       remarks: String((r as any).remarks || "").trim(),
     });
     showToast("Saved. Status set to Pending and APO notified.", "success");
+    // Remove the just-saved client-only draft row before refreshing from server.
+    // This prevents the saved row from briefly duplicating (client draft + server row)
+    // and ensures other unsaved drafts remain visible after refresh.
+    commitRows(rows.filter((x) => x.id !== r.id), { markDirty: false });
+    setRemarksDraftBySection((p) => {
+      const next = { ...(p || {}) } as any;
+      delete next[r.id];
+      return next;
+    });
+    setRemarksSavedBySection((p) => {
+      const next = { ...(p || {}) } as any;
+      delete next[r.id];
+      return next;
+    });
     await loadFromServer();
   } catch (e: any) {
     const msg = String(e?.message || e || "");
@@ -6307,11 +6349,11 @@ const courseCodeToInfo = useMemo(() => {
                                 </button>
                               </th>
 
-                              <th className="px-3 py-2 text-right font-semibold">
+                              <th className="px-3 py-2 text-center font-semibold">
                                 <button
                                   type="button"
                                   onClick={() => toggleUnitsSort("assigned")}
-                                  className="inline-flex items-center gap-1 hover:underline"
+                                  className="inline-flex items-center justify-center gap-1 hover:underline"
                                 >
                                   Assigned Units{" "}
                                   {unitsSortKey === "assigned"
@@ -6322,11 +6364,11 @@ const courseCodeToInfo = useMemo(() => {
                                 </button>
                               </th>
 
-                              <th className="px-3 py-2 text-right font-semibold">
+                              <th className="px-3 py-2 text-center font-semibold">
                                 <button
                                   type="button"
                                   onClick={() => toggleUnitsSort("preferred")}
-                                  className="inline-flex items-center gap-1 hover:underline"
+                                  className="inline-flex items-center justify-center gap-1 hover:underline"
                                 >
                                   Preferred Units{" "}
                                   {unitsSortKey === "preferred"
@@ -6337,11 +6379,11 @@ const courseCodeToInfo = useMemo(() => {
                                 </button>
                               </th>
                               
-                              <th className="px-3 py-2 text-right font-semibold">
+                              <th className="px-3 py-2 text-center font-semibold">
                                 <button
                                   type="button"
                                   onClick={() => toggleUnitsSort("deload")}
-                                  className="inline-flex items-center gap-1 hover:underline"
+                                  className="inline-flex items-center justify-center gap-1 hover:underline"
                                   title="Deloading units (from Faculty Deloading rows)"
                                 >
                                   Deloading Units{" "}
@@ -6349,11 +6391,11 @@ const courseCodeToInfo = useMemo(() => {
                                 </button>
                               </th>
 
-                              <th className="px-3 py-2 text-right font-semibold">
+                              <th className="px-3 py-2 text-center font-semibold">
                                 <button
                                   type="button"
                                   onClick={() => toggleUnitsSort("gap")}
-                                  className="inline-flex items-center gap-1 hover:underline"
+                                  className="inline-flex items-center justify-center gap-1 hover:underline"
                                 >
                                   Load Gap (Units){" "}
                                   {unitsSortKey === "gap"
@@ -6421,13 +6463,13 @@ const courseCodeToInfo = useMemo(() => {
                                     </div>
                                   </td>
 
-                                  <td className="px-3 py-2 text-right align-middle">
+                                  <td className="px-3 py-2 text-center align-middle">
                                     {Number(f.assignedUnits ?? 0)
                                       .toFixed(1)
                                       .replace(/\.0$/, "")}
                                   </td>
 
-                                  <td className="px-3 py-2 text-right align-middle">
+                                  <td className="px-3 py-2 text-center align-middle">
                                     {hasPref
                                       ? Number(f.preferredUnits)
                                           .toFixed(1)
@@ -6435,13 +6477,13 @@ const courseCodeToInfo = useMemo(() => {
                                       : "—"}
                                   </td>
                                   
-                                  <td className="px-3 py-2 text-right align-middle">
+                                  <td className="px-3 py-2 text-center align-middle">
                                     {Number((f.facultyId && deloadUnitsByFacultyId[f.facultyId]) || 0)
                                       .toFixed(1)
                                       .replace(/\.0$/, "")}
                                   </td>
 
-                                  <td className="px-3 py-2 text-right align-middle">
+                                  <td className="px-3 py-2 text-center align-middle">
                                     {hasPref && f.diff != null
                                       ? f.diff > 0
                                         ? `+${f.diff}`
