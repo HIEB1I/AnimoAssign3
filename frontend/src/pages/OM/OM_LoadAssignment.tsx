@@ -3253,6 +3253,14 @@ export default function OM_LoadAssignment() {
     commitRows(next, { markDirty });
   };
 
+  // Remove UI-only fields before persisting rows to the database.
+  // (e.g., `selected` comes from checkbox selection and must never be stored.)
+  const stripUiFieldsForPersist = (r: Row): Row => {
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const { selected, ...rest } = (r as any) || {};
+    return rest as Row;
+  };
+
   // Selection in the load recommendation table is by faculty (not per subject):
   // if the OM selects any row for a faculty, we select *all* rows for that faculty.
   const facultyKeyOf = (r: Row) =>
@@ -3263,9 +3271,17 @@ export default function OM_LoadAssignment() {
       setCell(refRow.id, "selected", checked as any);
       return;
     }
-    const next = rows.map((r) =>
-      facultyKeyOf(r) === k ? { ...r, selected: checked } : r
-    );
+    // IMPORTANT:
+    // - Selection is UI-only and must never be treated as persisted state.
+    // - Selecting any row for a faculty should select ALL rows for that same faculty.
+    // - To prevent accidental cross-faculty sends (e.g., stale `selected` flags coming from DB restores),
+    //   when turning ON a faculty selection we clear selections for other faculties.
+    const next = rows.map((r) => {
+      const rk = facultyKeyOf(r);
+      if (rk === k) return { ...r, selected: checked };
+      if (checked) return { ...r, selected: false };
+      return r;
+    });
     commitRows(next, { markDirty: false });
   };
 
@@ -3469,7 +3485,8 @@ export default function OM_LoadAssignment() {
           (r.faculty_id || "").trim() || facultyNameToId[r.faculty] || "";
         return fid ? ({ ...r, faculty_id: fid } as Row) : r;
       })
-      .filter((r) => !!(r.faculty_id || "").trim());
+      .filter((r) => !!(r.faculty_id || "").trim())
+      .map(stripUiFieldsForPersist);
 
     if (!normalizedRowsToSend.length) {
       throw new Error("No rows with faculty_id");
@@ -3491,7 +3508,7 @@ export default function OM_LoadAssignment() {
       const fid =
         (r.faculty_id || "").trim() || facultyNameToId[r.faculty] || "";
       return fid ? ({ ...r, faculty_id: fid } as Row) : r;
-    });
+    }).map(stripUiFieldsForPersist);
     await submitOmLoadAssignment(userId, { rows: normalizedAllRows }, "save");
 
     // 3️⃣ Reset UI + reload from DB
@@ -3554,6 +3571,9 @@ export default function OM_LoadAssignment() {
       // Spreading would drop them; explicitly copy `mode` so the Mode column
       // remains populated after refresh/send.
       ...r,
+      // `selected` is a UI-only flag. Never hydrate it from the DB (clean-restore can bring back
+      // stale selections which can cause cross-faculty rows to be sent unintentionally).
+      selected: false,
       mode: (r as any)?.mode ?? (r as any)?.Mode ?? "",
       begin1: normalizeServerTimeToHHMM(r?.begin1),
       end1: normalizeServerTimeToHHMM(r?.end1),
@@ -3682,7 +3702,11 @@ export default function OM_LoadAssignment() {
   const handleForwardToChair = async () => {
     if (!userId) return;
     try {
-      const res = await submitOmLoadAssignment(userId, { rows }, "approve");
+      const res = await submitOmLoadAssignment(
+        userId,
+        { rows: rows.map(stripUiFieldsForPersist) },
+        "approve"
+      );
       await notifyChairLoadRecommendation(userId, {
         kind: (res as any)?.kind,
         reco_id: (res as any)?.reco_id,
@@ -3833,7 +3857,11 @@ export default function OM_LoadAssignment() {
     if (!userId) return;
 
     try {
-      await submitOmLoadAssignment(userId, { rows }, "save");
+      await submitOmLoadAssignment(
+        userId,
+        { rows: rows.map(stripUiFieldsForPersist) },
+        "save"
+      );
       await loadFromServer(); // pull fresh rows from DB
       setHasLocalEdits(false); // grid now matches DB
       showToast("Draft saved.", "success");

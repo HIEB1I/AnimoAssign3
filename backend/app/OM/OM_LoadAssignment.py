@@ -2079,6 +2079,15 @@ async def get_om_load_assignment_list(user_id: str, term_id: Optional[str] = Non
     base = await _fetch_rows(user_id, term_id=active["term_id"], db=db)
     rows = base["rows"]
 
+    # `selected` is a UI-only flag used by the OM table checkboxes.
+    # It must NEVER be treated as persisted data (clean-restores can reintroduce
+    # stale `selected: true` values, which can cause the OM "To Faculty" action
+    # to include unintended rows).
+    if isinstance(rows, list):
+        for r in rows:
+            if isinstance(r, dict):
+                r.pop("selected", None)
+
     # Overlay: finalized/locked flags from proposals so the OM UI can disable actions
     # (e.g., after per-course finalize or after RFC reject auto-locks the whole schedule).
     try:
