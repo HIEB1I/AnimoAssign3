@@ -1688,6 +1688,66 @@ const loadOfferings = async () => {
     return (data?.rows || []).some((r: any) => !!r.submitted_for_scheduling);
   }, [data]);
 
+
+const describeApiError = (e: any, fallback: string) => {
+  const status = e?.response?.status;
+  const data = e?.response?.data;
+  const detail = data?.detail ?? data;
+
+  const safeString = (v: any) => {
+    try {
+      return typeof v === "string" ? v : JSON.stringify(v);
+    } catch {
+      return String(v);
+    }
+  };
+
+  const cleanLoc = (loc: any[]) =>
+    (loc || [])
+      .filter((x: any) => x !== "body" && x !== "query" && x !== "path")
+      .map((x: any) => String(x))
+      .join(".");
+
+  if (detail) {
+    if (typeof detail === "string") return detail;
+
+    if (Array.isArray(detail)) {
+      const msgs = detail
+        .map((x: any) => {
+          const msg = x?.msg || x?.message || safeString(x);
+          const loc = Array.isArray(x?.loc) ? cleanLoc(x.loc) : "";
+          return loc ? `${loc}: ${msg}` : msg;
+        })
+        .filter(Boolean);
+      if (msgs.length) return msgs.join("\n");
+    }
+
+    if (typeof detail === "object") {
+      if (typeof (detail as any).message === "string") return (detail as any).message;
+
+      // Many APO handlers return: { ok:false, errors:[{code,message,...}] }
+      if (Array.isArray((detail as any).errors)) {
+        const msgs = (detail as any).errors
+          .map((x: any) => x?.message || x?.msg || safeString(x))
+          .filter(Boolean);
+        if (msgs.length) return msgs.join("\n");
+      }
+
+      if (typeof (detail as any).error === "string") return (detail as any).error;
+
+      const s = safeString(detail);
+      if (s && s !== "{}") return s;
+    }
+  }
+
+  const m = String(e?.message || "");
+  if (m && !m.toLowerCase().includes("status code")) return m;
+
+  if (status) return `Request failed (${status}).`;
+  return fallback;
+};
+
+
   const openNotice = (title: string, message: string) => {
     setNoticeDlg({ open: true, title, message });
   };
@@ -2724,7 +2784,7 @@ if (isGE) {
     setEditing(null);
     await loadOfferings();
   } catch (e: any) {
-    openNotice("Couldn't save changes", e?.message || "Failed to save changes.");
+    openNotice("Couldn't save changes", describeApiError(e, "Failed to save changes."));
     // Keep edit mode open so the user doesn't lose what they typed.
   }
 };
@@ -2867,7 +2927,7 @@ const promptSaveEdit = () => {
           });
         }
       } catch (e: any) {
-        openNotice("Couldn't save changes", e?.message || "Failed to save changes.");
+        openNotice("Couldn't save changes", describeApiError(e, "Failed to save changes."));
         setConfirmDlg((p) => ({ ...p, busy: false }));
       }
     },
@@ -3036,7 +3096,7 @@ const promptSaveEdit = () => {
         });
       }
     } catch (e: any) {
-      openNotice("Couldn't add this offering", e?.message || "Add failed.");
+      openNotice("Couldn't add this offering", describeApiError(e, "Add failed."));
     } finally {
       setAdding(false);
     }
@@ -3105,7 +3165,7 @@ const promptSaveEdit = () => {
           await doAddNow();
           closeConfirm();
         } catch (e: any) {
-          openNotice("Couldn't add this offering", e?.message || "Add failed.");
+          openNotice("Couldn't add this offering", describeApiError(e, "Add failed."));
           setConfirmDlg((p) => ({ ...p, busy: false }));
         }
       },
@@ -3217,7 +3277,7 @@ const promptSaveEdit = () => {
         details: "The row was removed from your plan. You can undo this using the Undo button.",
       });
     } catch (e: any) {
-      openNotice("Couldn't delete this row", e?.message || "Delete failed.");
+      openNotice("Couldn't delete this row", describeApiError(e, "Delete failed."));
       await loadOfferings();
     }
   };
@@ -3250,7 +3310,7 @@ const promptSaveEdit = () => {
           await doDeleteNow(row);
           closeConfirm();
         } catch (e: any) {
-          openNotice("Couldn't delete this row", e?.message || "Delete failed.");
+          openNotice("Couldn't delete this row", describeApiError(e, "Delete failed."));
           setConfirmDlg((p) => ({ ...p, busy: false }));
         }
       },
@@ -5576,10 +5636,8 @@ const promptSaveEdit = () => {
                   : "Your course offerings were submitted for scheduling and the Office Manager can now review them.",
               });
             } catch (e: any) {
-              const detail = e?.response?.data?.detail;
-              const msg = detail || e?.message || "Submit failed.";
-
-              if (String(detail || "").toLowerCase().includes("comment is required")) {
+              const msg = describeApiError(e, "Submit failed.");
+              if (String(msg || "").toLowerCase().includes("comment is required")) {
                 setForceRequireNote(true);
                 // Prepare change summary now that the comment field will show
                 setSubmitPrep({ loading: false, changes: null, suggestedNote: "", error: null });
