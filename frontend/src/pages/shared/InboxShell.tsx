@@ -10,7 +10,7 @@ const cls = (...s: (string | false | undefined | null)[]) => s.filter(Boolean).j
 // Time helpers (real inbox style)
 // - Uses the viewer's local timezone.
 // - Relative timestamps for conversation list.
-// - Full timestamps (with seconds) for tooltips.
+// - Full timestamps for tooltips.
 // ----------------------------
 const fmtFull = new Intl.DateTimeFormat(undefined, {
   month: "short",
@@ -18,14 +18,12 @@ const fmtFull = new Intl.DateTimeFormat(undefined, {
   year: "numeric",
   hour: "numeric",
   minute: "2-digit",
-  second: "2-digit",
   hour12: true,
 });
 
 const fmtTime = new Intl.DateTimeFormat(undefined, {
   hour: "numeric",
   minute: "2-digit",
-  second: "2-digit",
   hour12: true,
 });
 
