@@ -670,6 +670,15 @@ async def overview_handler(
             "percent": int((total_units / pref_units_for_calc) * 100) if pref_units_for_calc > 0 else 0,
         }
 
+        # Warnings / flags (used by frontend to show limit-exceeded warnings)
+        # Note: If preferred units or max preps are 0, any positive current value is considered exceeded.
+        units_max = float(pref_units_for_calc or 0)
+        preps_max = int(max_preps or 0)
+        summary["exceeded_teaching_units"] = (total_units > units_max) if units_max > 0 else (total_units > 0)
+        summary["exceeded_course_preps"] = (course_preps > preps_max) if preps_max > 0 else (course_preps > 0)
+        summary["teaching_units_over_by"] = max(0, int(round(total_units - units_max))) if summary["exceeded_teaching_units"] else 0
+        summary["course_preps_over_by"] = max(0, int(course_preps - preps_max)) if summary["exceeded_course_preps"] else 0
+
         
         # --- Proposed schedule overlay (sent by OM via /om/load-assignment/to-faculty) ---
         proposal = await db[COL_LOAD_PROPOSALS].find_one({"faculty_id": faculty_id, "term_id": term_id}, {"_id": 0}) or None
@@ -687,6 +696,10 @@ async def overview_handler(
             summary["teaching_units"] = f"0/{int(pref_units_for_calc)}"
             summary["course_preps"] = f"0/{max_preps}"
             summary["percent"] = 0
+            summary["exceeded_teaching_units"] = False
+            summary["exceeded_course_preps"] = False
+            summary["teaching_units_over_by"] = 0
+            summary["course_preps_over_by"] = 0
             # keep the header-derived status if present, otherwise show Pending
             summary["load_status"] = (summary.get("load_status") or "Pending")
             return {
@@ -1033,6 +1046,15 @@ async def get_faculty_overview(userId: str = Query(...)):
         "percent": int((total_units / pref_units_for_calc) * 100) if pref_units_for_calc > 0 else 0,
     }
 
+    # Warnings / flags (used by frontend to show limit-exceeded warnings)
+    # Note: If preferred units or max preps are 0, any positive current value is considered exceeded.
+    units_max = float(pref_units_for_calc or 0)
+    preps_max = int(max_preps or 0)
+    summary["exceeded_teaching_units"] = (total_units > units_max) if units_max > 0 else (total_units > 0)
+    summary["exceeded_course_preps"] = (course_preps > preps_max) if preps_max > 0 else (course_preps > 0)
+    summary["teaching_units_over_by"] = max(0, int(round(total_units - units_max))) if summary["exceeded_teaching_units"] else 0
+    summary["course_preps_over_by"] = max(0, int(course_preps - preps_max)) if summary["exceeded_course_preps"] else 0
+
     # IMPORTANT BEHAVIOR CHANGE (mirrors POST /overview?action=fetch):
     # If this is a PLANNING term and OM has NOT forwarded a proposal yet,
     # hide any schedule/teaching load on the faculty side.
@@ -1047,6 +1069,10 @@ async def get_faculty_overview(userId: str = Query(...)):
             summary["teaching_units"] = f"0/{int(pref_units_for_calc)}"
             summary["course_preps"] = f"0/{max_preps}"
             summary["percent"] = 0
+            summary["exceeded_teaching_units"] = False
+            summary["exceeded_course_preps"] = False
+            summary["teaching_units_over_by"] = 0
+            summary["course_preps_over_by"] = 0
             summary["load_status"] = (summary.get("load_status") or "Pending")
 
     notifications = await db[COL_NOTIFICATIONS].find(
