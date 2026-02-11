@@ -318,23 +318,29 @@ async def chair_plantilla_get(
                 "department_id": {"$in": dept_candidates},
                 "forwarded_to_chair": True,   # <-- NEW requirement
             },
-            {"_id": 1, "load_id": 1},
+            {"_id": 1, "load_id": 1, "forwarded_section_ids": 1},
         )
         if not forwarded:
             # Not forwarded yet → chair should not see plantilla rows
             return {"ok": True, "rows": []}
 
-        # Sections for that term
+        allowed_section_ids = [str(x).strip() for x in (forwarded.get("forwarded_section_ids") or []) if str(x).strip()]
+        allowed_set = set(allowed_section_ids)
+
+        # Sections for that term (restrict to the exact OM table snapshot if available)
         sec_match = {"term_id": term_id} if term_id else {}
+        if allowed_set:
+            sec_match = {**sec_match, "section_id": {"$in": list(allowed_set)}}
         section_docs = await db.sections.find(sec_match).to_list(10000)
         
 
         # Fallback: If no sections, try to guess from assignments
         asg_docs: List[dict] = []
         if not section_docs:
-            asg_docs = await db.faculty_assignments.find(
-                {"is_archived": {"$in": [False, None]}}
-            ).to_list(100000)
+            asg_filter = {"is_archived": {"$in": [False, None]}}
+            if allowed_set:
+                asg_filter = {**asg_filter, "section_id": {"$in": list(allowed_set)}}
+            asg_docs = await db.faculty_assignments.find(asg_filter).to_list(100000)
 
             sec_ids = list({a.get("section_id") for a in asg_docs if a.get("section_id")})
             if sec_ids:
