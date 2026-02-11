@@ -1412,11 +1412,15 @@ async def loadassignment_handler(
         await _approve_and_persist(active["term_id"], rows, db)
 
         # 2) create/update faculty_loads header for this term (also marks forwarded_to_chair=True)
+        # Snapshot the exact sections currently visible in the OM Load Assignment table.
+        fwd_section_ids = sorted({str(r.get('section_id') or r.get('id') or '').strip() for r in rows if str(r.get('section_id') or r.get('id') or '').strip()})
+
         await _upsert_faculty_load_header(
             active,
             db,
             department_id=dept_id_header,  # existing behavior
             user_id=userId,            # query param from the route
+            forwarded_section_ids=fwd_section_ids,
         )
 
         # fetch header again to get reco_id after upsert
@@ -7313,6 +7317,7 @@ async def _upsert_faculty_load_header(
     *,
     department_id: str,
     user_id: str,
+    forwarded_section_ids: list[str] | None = None,
 ) -> None:
     """
     Ensure a faculty_loads header exists for this term+department
@@ -7362,6 +7367,9 @@ async def _upsert_faculty_load_header(
             # NEW: marks that OM has forwarded/submitted to Chair
             "forwarded_to_chair": True,
             "forwarded_to_chair_at": now,
+            # Snapshot of sections forwarded from OM Load Assignment table
+            "forwarded_section_ids": sorted(list(set(forwarded_section_ids or []))),
+            "forwarded_row_count": len(set(forwarded_section_ids or [])),
         }
         await db[COL_FACULTY_LOADS].insert_one(doc)
     else:
@@ -7380,6 +7388,9 @@ async def _upsert_faculty_load_header(
                 # NEW: ensure it's marked forwarded; preserve first forwarded timestamp if it exists
                 "forwarded_to_chair": True,
                 "forwarded_to_chair_at": now,
+                # Always overwrite snapshot on re-forward so Chair sees exactly the current table rows
+                "forwarded_section_ids": sorted(list(set(forwarded_section_ids or []))),
+                "forwarded_row_count": len(set(forwarded_section_ids or [])),
             }
             },
         )
