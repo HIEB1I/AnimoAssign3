@@ -1203,12 +1203,26 @@ export interface ImportCurriculumCsvPayload {
   campus_name: string;
 }
 
+export type ImportCurriculumCsvRowResult = {
+  row: number;
+  term_id: string;
+  program_id: string;
+  batch_id: string;
+  campus_id: string;
+  added_course_codes: string[];
+  level_mismatch?: boolean;
+};
+
+export type ImportCurriculumCsvError = {
+  row: number;
+  detail: any;
+};
+
 export interface ImportCurriculumCsvResponse {
   ok: boolean;
-  imported?: number;
-  created_batches?: string[];
-  curricula?: { batch_id: string; curriculum_id: string; course_count: number }[];
-  errors?: any[];
+  imported_rows: number;
+  rows: ImportCurriculumCsvRowResult[];
+  errors: ImportCurriculumCsvError[];
 }
 
 export async function importCurriculumCsv(
