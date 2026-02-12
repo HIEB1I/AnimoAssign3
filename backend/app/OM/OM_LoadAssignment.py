@@ -822,6 +822,63 @@ def _preferred_cap_for(ctx, fid: str) -> int:
     pref = (getattr(ctx, "prefs_by_faculty", {}) or {}).get(fid, {}) or {}
     return int(pref.get("preferred_units") or pref.get("load_units") or 12)
 
+async def _notify_apo_room_allocation_ready(
+    *,
+    db,
+    om_user_id: str,
+    term_id: str,
+    faculty_id: str,
+    course_code: str,
+    section_code: str,
+) -> None:
+    # Resolve section_id + campus for routing (best-effort)
+    campus_id = _section_to_campus_id(section_code)
+    section_id = ""
+
+    try:
+        course_doc = await _find_course_by_code(course_code, db)
+        course_id = str(course_doc.get("course_id") or "").strip()
+
+        if course_id and term_id:
+            sec = await db[COL_SECTIONS].find_one(
+                {"term_id": term_id, "course_id": course_id, "section_code": section_code},
+                {"_id": 0, "section_id": 1, "campus_id": 1},
+            ) or {}
+            section_id = str(sec.get("section_id") or "").strip()
+            campus_id = str(sec.get("campus_id") or "").strip() or campus_id
+    except Exception:
+        pass
+
+    if not campus_id:
+        return
+
+    apo_uids = await _apo_user_ids_for_campus(campus_id, db)
+    if not apo_uids:
+        return
+
+    meta = {
+        "route": "/apo/room-assignments",
+        "kind": "om_room_allocation_ready",
+        "term_id": term_id,
+        "campus_id": campus_id,
+        "section_id": section_id,
+        "faculty_id": faculty_id,
+        "course_code": course_code,
+        "section": section_code,
+    }
+    details = f"Ready for room allocation: {course_code} – {section_code} (Faculty: {faculty_id})"
+
+    for uid in apo_uids:
+        await _ensure_user_gmail_address(uid, db)
+        await create_notification(
+            user_id=uid,
+            title="Room allocation needed",
+            details=details,
+            meta=meta,
+            send_email=True,
+            email_from_user_id=om_user_id,
+        )
+
 async def _fetch_rows(user_id: str, term_id: str, db) -> Dict[str, Any]:
     dept_ids = await _om_department_ids(user_id, db)
     if not dept_ids:
@@ -3403,6 +3460,18 @@ async def om_finalize_course(payload: Dict[str, Any] = Body(...), db=Depends(get
             {"faculty_id": faculty_id, "term_id": term_id},
             {"$set": {"rows.$[r].finalized": True}},
             array_filters=[{"r.course": course_code, "r.section": section}],
+        )
+    except Exception:
+        pass
+
+    try:
+        await _notify_apo_room_allocation_ready(
+            db=db,
+            om_user_id=user_id,
+            term_id=term_id,
+            faculty_id=faculty_id,
+            course_code=course_code,
+            section_code=section,
         )
     except Exception:
         pass
