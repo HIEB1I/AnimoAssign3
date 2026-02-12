@@ -123,11 +123,36 @@ def _section_to_campus_id(section_code: str) -> str:
 
 
 async def _apo_user_ids_for_campus(campus_id: str, db) -> list[str]:
-    """Return user_ids who have APO role scoped to the given campus."""
+    """Return APO user_ids who are scoped to the given campus.
+
+    BUGFIX (notifications): do NOT assume a fixed APO role_id.
+    In this codebase, APO modules resolve the APO role_id dynamically from
+    `user_roles` (role_type == "APO") and then read `role_assignments`.
+    If we hardcode ROLE0004 and the actual APO role_id differs, we will
+    resolve 0 APO recipients and NO in-app/Gmail notification will be sent.
+
+    We mirror APO_CourseOfferings.apo_scope()'s resolution logic here and add a
+    safe fallback to users.campus_id for legacy accounts without explicit scope.
+    """
+
     campus_id = (campus_id or "").strip().upper()
     if not campus_id:
         return []
-    ROLE_APO = "ROLE0004"
+
+    # Prefer dynamic APO role_id from user_roles (mirrors APO modules).
+    ROLE_APO = ""
+    try:
+        role_doc = await db.get_collection("user_roles").find_one(
+            {"role_type": {"$regex": "^APO$", "$options": "i"}},
+            {"_id": 0, "role_id": 1},
+        )
+        ROLE_APO = str((role_doc or {}).get("role_id") or "").strip()
+    except Exception:
+        ROLE_APO = ""
+
+    # Backward compatibility: older deployments used a fixed ID.
+    if not ROLE_APO:
+        ROLE_APO = "ROLE0004"
 
     def _scope_has_campus(scope_val) -> bool:
         if not scope_val:
@@ -142,15 +167,40 @@ async def _apo_user_ids_for_campus(campus_id: str, db) -> list[str]:
                 return True
         return False
 
-    docs = await db["role_assignments"].find({"role_id": ROLE_APO}, {"_id": 0, "user_id": 1, "scope": 1}).to_list(None)
-    out: list[str] = []
+    out: set[str] = set()
+
+    # 1) Role-assignment scoped users (primary behavior)
+    try:
+        docs = (
+            await db.get_collection("role_assignments")
+            .find({"role_id": ROLE_APO}, {"_id": 0, "user_id": 1, "scope": 1})
+            .to_list(None)
+        )
+    except Exception:
+        docs = []
+
     for d in docs or []:
         uid = str(d.get("user_id") or "").strip()
         if not uid:
             continue
         if _scope_has_campus(d.get("scope")):
-            out.append(uid)
-    return sorted(list({u for u in out}))
+            out.add(uid)
+
+    # 2) Legacy fallback: some APO accounts only have users.campus_id set
+    # (no explicit campus scope in role_assignments).
+    try:
+        cur = db.get_collection(COL_USERS).find(
+            {"role": {"$regex": "^APO$", "$options": "i"}, "campus_id": campus_id},
+            {"_id": 0, "user_id": 1},
+        )
+        async for u in cur:
+            uid = str(u.get("user_id") or "").strip()
+            if uid:
+                out.add(uid)
+    except Exception:
+        pass
+
+    return sorted(list(out))
 
 
 async def _find_course_by_code(course_code: str, db) -> dict:
@@ -2805,13 +2855,16 @@ async def om_save_new_line(
         return ""
 
     # Ensure this course exists in submitted offerings for this term (same source as OM table)
+    # NOTE: campus_id from the submitted offering is the source of truth for which
+    # APO/campus this course offering belongs to. This prevents false Manila/Laguna
+    # mismatches when an OM has Manila scope but is editing a Laguna offering (or vice versa).
     offering_exists = await db[COL_SECTIONS_SUBMITTED].find_one(
         {
             "term_id": tid,
             "submitted_for_scheduling": True,
             "course_id": course_id,
         },
-        {"_id": 0, "section_id": 1},
+        {"_id": 0, "section_id": 1, "campus_id": 1},
     )
     if not offering_exists:
         raise HTTPException(status_code=409, detail="Course is not part of submitted course offerings")
@@ -2829,7 +2882,9 @@ async def om_save_new_line(
     if dup:
         raise HTTPException(status_code=409, detail="Duplicate section: this section already exists for that course")
 
-    # 2) Enforce APO rules based on section prefix and OM campus context
+    # 2) Enforce APO rules based on section prefix AND the course offering's campus.
+    # The submitted course offering (sections_submitted) is treated as the source of truth
+    # for which campus/APO the course belongs to.
     section_apo = _apo_from_section_prefix(section_code)
     if not section_apo:
         raise HTTPException(
@@ -2837,12 +2892,15 @@ async def om_save_new_line(
             detail="Invalid section: use S/G (APO Manila) or XX/XC (APO Laguna)",
         )
 
-    om_campus_id = await _infer_om_campus_id()
-    om_apo = _apo_from_campus_id(om_campus_id)
-    if om_apo and section_apo != om_apo:
+    expected_campus_id = (
+        str(payload.get("campus_id") or "").strip()
+        or str(offering_exists.get("campus_id") or "").strip()
+    )
+    expected_apo = _apo_from_campus_id(expected_campus_id)
+    if expected_apo and section_apo != expected_apo:
         raise HTTPException(
             status_code=409,
-            detail=f"Invalid section: This section belongs to {section_apo}, but you’re assigning for {om_apo}.",
+            detail=f"Invalid section: This section belongs to {section_apo}, but you’re assigning for {expected_apo}.",
         )
 
     # Generate a new section_id in the existing SEC#### format
@@ -2854,8 +2912,9 @@ async def om_save_new_line(
         seq += 1
         section_id = f"SEC{seq:04d}"
 
-    # Campus routing (best-effort) based on section prefix
-    campus_id = _section_to_campus_id(section_code)
+    # Campus routing: prefer the course offering's campus_id (source of truth),
+    # fall back to section-prefix inference for safety.
+    campus_id = expected_campus_id or _section_to_campus_id(section_code)
 
     # Units/capacity (title is derived)
     try:
@@ -2954,34 +3013,56 @@ async def om_save_new_line(
     await db[COL_ASSIGN].insert_one(assignment_doc)
 
     # 5) Notify routed APO (best-effort)
+    # IMPORTANT: in-app notification must always be created; Gmail send is best-effort.
+    # The previous implementation swallowed any exception and could result in *no* in-app
+    # notification when campus routing couldn't resolve recipients.
+    details = (
+        f"A new section was added by OM and requires room assignment.\n\n"
+        f"Course: {course_code} — {str(course_doc.get('course_title') or '').strip()}\n"
+        f"Section: {section_code}\n"
+        f"Day/Time: {day1} {begin1}-{end1}" + (f"; {day2} {begin2}-{end2}" if day2 and begin2 and end2 else "")
+    ).strip()
+    meta = {
+        # Route should point to the APO screen where room assignment is handled.
+        "route": "/apo/load-assignment",
+        "kind": "om_new_line",
+        "term_id": tid,
+        "section_id": section_id,
+        "campus_id": campus_id,
+    }
+
+    apo_uids: list[str] = []
     try:
-        apo_uids = await _apo_user_ids_for_campus(campus_id, db) if campus_id else []
-        if apo_uids:
-            details = (
-                f"A new section was added by OM and requires room assignment.\n\n"
-                f"Course: {course_code} — {str(course_doc.get('course_title') or '').strip()}\n"
-                f"Section: {section_code}\n"
-                f"Day/Time: {day1} {begin1}-{end1}" + (f"; {day2} {begin2}-{end2}" if day2 and begin2 and end2 else "")
-            ).strip()
-            meta = {
-                "route": "/apo/room-assignments",
-                "kind": "om_new_line",
-                "term_id": tid,
-                "section_id": section_id,
-                "campus_id": campus_id,
-            }
-            for uid in apo_uids:
-                await _ensure_user_gmail_address(uid, db)
-                await create_notification(
-                    user_id=uid,
-                    title="New section pending room assignment",
-                    details=details,
-                    meta=meta,
-                    send_email=True,
-                    email_from_user_id=user_id,
-                )
+        if campus_id:
+            apo_uids = await _apo_user_ids_for_campus(campus_id, db)
     except Exception:
-        pass
+        apo_uids = []
+
+    # Fallback: if campus_id is blank or no APOs were found, re-infer using section prefix.
+    if not apo_uids:
+        try:
+            inferred_campus = _section_to_campus_id(section_code)
+            if inferred_campus:
+                apo_uids = await _apo_user_ids_for_campus(inferred_campus, db)
+                meta["campus_id"] = inferred_campus
+        except Exception:
+            apo_uids = []
+
+    # Create one notification per APO user.
+    for uid in apo_uids or []:
+        try:
+            await _ensure_user_gmail_address(uid, db)
+            await create_notification(
+                user_id=uid,
+                title="New section pending room assignment",
+                details=details,
+                meta=meta,
+                send_email=True,
+                email_from_user_id=user_id,
+            )
+        except Exception:
+            # Never fail the save due to notification issues.
+            continue
 
     return {"ok": True, "section_id": section_id}
 
