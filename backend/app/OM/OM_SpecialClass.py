@@ -31,6 +31,8 @@ COL_DEPARTMENTS = "departments"
 COL_COURSES = "courses"
 COL_ROOMS = "rooms"
 
+COL_SECTIONS_SUBMITTED = "sections_submitted"
+
 COL_SECTIONS = "sections"
 COL_SECTION_SCHEDULES = "section_schedules"
 COL_FAC_ASSIGN = "faculty_assignments"
@@ -448,6 +450,22 @@ async def _create_custom_section_bundle(
         "updated_at": now,
     }
     await db[COL_SECTIONS].insert_one(sec_doc)
+
+    await db[COL_SECTIONS_SUBMITTED].insert_one({
+        "section_id": section_id,
+        "term_id": term_id,
+        "course_id": course_id,
+        "section_code": section_code,
+        "submitted_for_scheduling": True,
+
+        "campus_id": "",
+        "mode": "HYB", 
+        "enrollment_cap": 45,
+        "batch_number": 0,
+
+        "created_at": now,
+        "updated_at": now,
+    })
 
     # --- create schedules ---
     # SEC0007 -> SCH0007-01 / SCH0007-02

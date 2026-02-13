@@ -304,7 +304,7 @@ export default function OM_RP_LoadRisk() {
   return (
     <div className="w-full max-w-[1400px] mx-auto px-8 py-8">
       {/* Header and subtitle retained (DO NOT MODIFY) */}
-      <h1 className="text-2xl font-bold mb-2">Faculty Load Risk Forecast</h1>
+      <h1 className="text-2xl font-bold mb-2">Course Staffing Risk Indicators</h1>
       <p className="text-sm text-gray-600 mb-6">
         Predictive analytics dashboard for staffing needs and departmental load stability.
       </p>

@@ -3834,7 +3834,6 @@ async def run_auto_assignment(
             },
         }
 
-
     suggestions = {s["section_id"]: s for s in sugg.get("assignments", [])}
 
     overlay_reasons: dict[str, dict] = {}
@@ -3864,6 +3863,10 @@ async def run_auto_assignment(
                 # we know there was a faculty_id in Phase 7 (info["faculty_id"])
                 r["faculty"] = ""
                 r["faculty_id"] = ""
+
+                for k in ("day1","begin1","end1","day2","begin2","end2","room1","room2"):
+                    r[k] = ""
+
                 # mark as unassigned but with a conflict note so it's traceable
                 r["status"] = "Unassigned"
                 r["conflictNote"] = (
@@ -4147,6 +4150,9 @@ async def run_auto_assignment(
                 weaker_row["faculty"] = ""
                 weaker_row["status"] = "Unassigned"
 
+                for k in ("day1","begin1","end1","day2","begin2","end2","room1","room2"):
+                    weaker_row[k] = ""
+
                 extra_msg = (
                     " Auto-assign dropped this faculty from this section due to a "
                     "schedule clash with a higher-priority class."
@@ -4345,13 +4351,22 @@ async def run_auto_assignment(
         else:
             r["pending_rfc"] = bool(fid and sid and (fid, sid) in open_rfc_keys)
 
+    for r in rows:
+        fid = (r.get("faculty_id") or r.get("facultyId") or "").strip()
+        fname = (r.get("faculty") or r.get("facultyName") or "").strip()
+
+        if (not fid) or (not fname):
+            for k in ("day1", "begin1", "end1", "day2", "begin2", "end2", "room1", "room2"):
+                r[k] = ""
+            if not fid:
+                r["status"] = "Unassigned"
+
     return {
         "term": _term_label(active),
         "term_id": term_id,
         "rows": rows,
         "debug": {**debug, **prefs_debug, "overlay_no_time_details": overlay_reasons},
     }
-
 
 #    ===========================================================
 #    =====================  LOAD RECO ==========================
@@ -5357,6 +5372,10 @@ def _flag_faculty_conflicts(rows: list[dict], resolve_conflicts: bool = False) -
                 weaker["faculty"] = ""
                 # Keep mode as-is; just unassign and mark appropriately
                 weaker["status"] = "Unassigned"
+
+                for k in ("day1","begin1","end1","day2","begin2","end2","room1","room2"):
+                    weaker[k] = ""
+
                 extra_msg = f" Auto-assign dropped this faculty due to clash with another section."
                 existing = (weaker.get("conflictNote") or "").strip()
                 if extra_msg not in existing:
