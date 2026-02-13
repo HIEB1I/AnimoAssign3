@@ -1669,7 +1669,7 @@ const loadOfferings = async () => {
     title: "",
     message: "",
   });
-  const [opAck, setOpAck] = useState<{ open: boolean; title: string; details: string }>({
+  const [opAck, setOpAck] = useState<{ open: boolean; title: string; details: string; content?: React.ReactNode; wide?: boolean }>({
     open: false,
     title: "",
     details: "",
@@ -1687,6 +1687,66 @@ const loadOfferings = async () => {
     if (s && typeof s.has_prior_submit === "boolean") return !!s.has_prior_submit;
     return (data?.rows || []).some((r: any) => !!r.submitted_for_scheduling);
   }, [data]);
+
+
+const describeApiError = (e: any, fallback: string) => {
+  const status = e?.response?.status;
+  const data = e?.response?.data;
+  const detail = data?.detail ?? data;
+
+  const safeString = (v: any) => {
+    try {
+      return typeof v === "string" ? v : JSON.stringify(v);
+    } catch {
+      return String(v);
+    }
+  };
+
+  const cleanLoc = (loc: any[]) =>
+    (loc || [])
+      .filter((x: any) => x !== "body" && x !== "query" && x !== "path")
+      .map((x: any) => String(x))
+      .join(".");
+
+  if (detail) {
+    if (typeof detail === "string") return detail;
+
+    if (Array.isArray(detail)) {
+      const msgs = detail
+        .map((x: any) => {
+          const msg = x?.msg || x?.message || safeString(x);
+          const loc = Array.isArray(x?.loc) ? cleanLoc(x.loc) : "";
+          return loc ? `${loc}: ${msg}` : msg;
+        })
+        .filter(Boolean);
+      if (msgs.length) return msgs.join("\n");
+    }
+
+    if (typeof detail === "object") {
+      if (typeof (detail as any).message === "string") return (detail as any).message;
+
+      // Many APO handlers return: { ok:false, errors:[{code,message,...}] }
+      if (Array.isArray((detail as any).errors)) {
+        const msgs = (detail as any).errors
+          .map((x: any) => x?.message || x?.msg || safeString(x))
+          .filter(Boolean);
+        if (msgs.length) return msgs.join("\n");
+      }
+
+      if (typeof (detail as any).error === "string") return (detail as any).error;
+
+      const s = safeString(detail);
+      if (s && s !== "{}") return s;
+    }
+  }
+
+  const m = String(e?.message || "");
+  if (m && !m.toLowerCase().includes("status code")) return m;
+
+  if (status) return `Request failed (${status}).`;
+  return fallback;
+};
+
 
   const openNotice = (title: string, message: string) => {
     setNoticeDlg({ open: true, title, message });
@@ -2724,7 +2784,7 @@ if (isGE) {
     setEditing(null);
     await loadOfferings();
   } catch (e: any) {
-    openNotice("Couldn't save changes", e?.message || "Failed to save changes.");
+    openNotice("Couldn't save changes", describeApiError(e, "Failed to save changes."));
     // Keep edit mode open so the user doesn't lose what they typed.
   }
 };
@@ -2867,7 +2927,7 @@ const promptSaveEdit = () => {
           });
         }
       } catch (e: any) {
-        openNotice("Couldn't save changes", e?.message || "Failed to save changes.");
+        openNotice("Couldn't save changes", describeApiError(e, "Failed to save changes."));
         setConfirmDlg((p) => ({ ...p, busy: false }));
       }
     },
@@ -3036,7 +3096,7 @@ const promptSaveEdit = () => {
         });
       }
     } catch (e: any) {
-      openNotice("Couldn't add this offering", e?.message || "Add failed.");
+      openNotice("Couldn't add this offering", describeApiError(e, "Add failed."));
     } finally {
       setAdding(false);
     }
@@ -3105,7 +3165,7 @@ const promptSaveEdit = () => {
           await doAddNow();
           closeConfirm();
         } catch (e: any) {
-          openNotice("Couldn't add this offering", e?.message || "Add failed.");
+          openNotice("Couldn't add this offering", describeApiError(e, "Add failed."));
           setConfirmDlg((p) => ({ ...p, busy: false }));
         }
       },
@@ -3217,7 +3277,7 @@ const promptSaveEdit = () => {
         details: "The row was removed from your plan. You can undo this using the Undo button.",
       });
     } catch (e: any) {
-      openNotice("Couldn't delete this row", e?.message || "Delete failed.");
+      openNotice("Couldn't delete this row", describeApiError(e, "Delete failed."));
       await loadOfferings();
     }
   };
@@ -3250,7 +3310,7 @@ const promptSaveEdit = () => {
           await doDeleteNow(row);
           closeConfirm();
         } catch (e: any) {
-          openNotice("Couldn't delete this row", e?.message || "Delete failed.");
+          openNotice("Couldn't delete this row", describeApiError(e, "Delete failed."));
           setConfirmDlg((p) => ({ ...p, busy: false }));
         }
       },
@@ -3784,21 +3844,96 @@ const promptSaveEdit = () => {
 
                     if (response.ok) {
                       const imported =
-                        response.imported ?? response.curricula?.length ?? 0;
+                        response.imported_rows ?? response.rows?.length ?? 0;
 
-                      // NEW: always fall back to an empty array
-                      const created = response.created_batches ?? [];
-                      const createdText = created.length
-                        ? `\nCreated batches: ${created.join(", ")}`
-                        : "";
+                      const serverRows = (response.rows || []) as any[];
+                      const summaries = serverRows.map((sr) => {
+                        const src = (rows && rows[sr.row - 1]) ? rows[sr.row - 1] : {};
+                        return {
+                          row: sr.row,
+                          batch: batchCol(src),
+                          program: progCol(src),
+                          term: termNoCol(src),
+                          ay: ayCol(src),
+                          added: Array.isArray(sr.added_course_codes) ? sr.added_course_codes.filter(Boolean) : [],
+};
+                      });
 
-                      alert(
-                        `CSV import successful.\n` +
-                          `Imported ${imported} row(s).` +
-                          createdText
-                      );
+                      // Close the import modal before showing the result dialog
+                      setShowCurrImportModal(false);
+                      setCurrImportErr(null);
 
-                        }
+                      // Refresh curriculum view so imported rows appear immediately
+                      await loadCurriculum();
+
+                      const maxShow = 200;
+                      const shown = summaries.slice(0, maxShow);
+
+                      setOpAck({
+                        open: true,
+                        title: "CSV import successful",
+                        details: `Imported ${imported} row(s).`,
+                        wide: true,
+                        content: (
+                          <div>
+                            <div className="max-h-[360px] overflow-auto rounded-lg border border-slate-200">
+                              <table className="min-w-full text-sm">
+                                <thead className="sticky top-0 bg-slate-50 text-slate-700">
+                                  <tr>
+                                    <th className="px-3 py-2 text-left font-semibold">Row</th>
+                                    <th className="px-3 py-2 text-left font-semibold">Batch</th>
+                                    <th className="px-3 py-2 text-left font-semibold">Program</th>
+                                    <th className="px-3 py-2 text-left font-semibold">AY</th>
+                                    <th className="px-3 py-2 text-left font-semibold">Term</th>
+                                    <th className="px-3 py-2 text-left font-semibold">Added course codes</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {shown.map((r) => (
+                                    <tr key={r.row} className="border-t border-slate-200">
+                                      <td className="px-3 py-2 font-medium text-slate-900">{r.row}</td>
+                                      <td className="px-3 py-2 text-slate-800">{r.batch || "—"}</td>
+                                      <td className="px-3 py-2 text-slate-800">
+                                        {r.program || "—"}
+</td>
+                                      <td className="px-3 py-2 text-slate-800">{r.ay || "—"}</td>
+                                      <td className="px-3 py-2 text-slate-800">{r.term || "—"}</td>
+                                      <td className="px-3 py-2 text-slate-800">
+                                        {r.added.length ? r.added.join(", ") : <span className="text-slate-500">No new courses</span>}
+                                      </td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          </div>
+                        ),
+                      });
+                    } else {
+                      const imported =
+                        response.imported_rows ?? response.rows?.length ?? 0;
+                      const errs = (response.errors || []) as any[];
+                      const msg =
+                        errs.length
+                          ? errs
+                              .map((e) => `Row ${e.row}: ${typeof e.detail === "string" ? e.detail : JSON.stringify(e.detail)}`)
+                              .join("\n")
+                          : "CSV import failed.";
+
+                      // Close import modal before showing the error dialog
+                      setShowCurrImportModal(false);
+                      setCurrImportErr(null);
+
+                      await loadCurriculum();
+
+                      setNoticeDlg({
+                        open: true,
+                        title: "CSV import completed with errors",
+                        message: `Imported ${imported} row(s).
+
+${msg}`,
+                      });
+                    }
                       } catch (err: any) {
                         console.error("CSV import failed:", err);
                         setCurrImportErr(err?.message || "CSV import failed");
@@ -3877,7 +4012,7 @@ const promptSaveEdit = () => {
                     <div className="flex items-center justify-end gap-2 border-t p-4">
                       <button
                         type="button"
-                        className="rounded-md border px-4 py-2 text-sm"
+                        className="rounded-lg border border-neutral-300 bg-neutral-100 px-4 py-2 text-sm hover:bg-neutral-200 disabled:opacity-50"
                         onClick={() => {
                           setShowCurrImportModal(false);
                           setCurrImportErr(null);
@@ -5576,10 +5711,8 @@ const promptSaveEdit = () => {
                   : "Your course offerings were submitted for scheduling and the Office Manager can now review them.",
               });
             } catch (e: any) {
-              const detail = e?.response?.data?.detail;
-              const msg = detail || e?.message || "Submit failed.";
-
-              if (String(detail || "").toLowerCase().includes("comment is required")) {
+              const msg = describeApiError(e, "Submit failed.");
+              if (String(msg || "").toLowerCase().includes("comment is required")) {
                 setForceRequireNote(true);
                 // Prepare change summary now that the comment field will show
                 setSubmitPrep({ loading: false, changes: null, suggestedNote: "", error: null });
@@ -5627,6 +5760,8 @@ const promptSaveEdit = () => {
           open={opAck.open}
           title={opAck.title}
           details={opAck.details}
+          content={opAck.content}
+          wide={opAck.wide}
           onClose={() => setOpAck({ open: false, title: "", details: "" })}
         />
       )}
@@ -5692,6 +5827,8 @@ const promptSaveEdit = () => {
             // refresh curriculum options so newly created course appears in editor/suggestions
             await loadCurriculum();
           }}
+          onAck={(title, details) => setOpAck({ open: true, title, details })}
+          onNotice={(title, message) => setNoticeDlg({ open: true, title, message })}
         />
       )}
 
@@ -6296,16 +6433,23 @@ const AckModal: React.FC<{
   open: boolean;
   title: string;
   details: string;
+  content?: React.ReactNode;
+  wide?: boolean;
   onClose: () => void;
-}> = ({ open, title, details, onClose }) =>
+}> = ({ open, title, details, content, wide = false, onClose }) =>
   !open ? null : (
     <div className="fixed inset-0 z-[120] grid place-items-center bg-black/40 p-4">
-      <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl">
+      <div className={cls("w-full rounded-2xl bg-white p-6 shadow-2xl", wide ? "max-w-2xl" : "max-w-md")}>
         <div className="mx-auto mb-4 grid h-16 w-16 place-items-center rounded-full border-2 border-emerald-600 text-emerald-700">
           <Check className="h-8 w-8" strokeWidth={2.5} />
         </div>
         <h3 className="mb-2 text-center text-2xl font-semibold">{title}</h3>
-        <p className="mx-auto mb-6 max-w-sm text-center text-sm text-neutral-600">{details}</p>
+        <p className={cls("mx-auto text-center text-sm text-neutral-600", content ? "mb-4" : "mb-6", "whitespace-pre-line")}>
+          {details}
+        </p>
+
+        {content && <div className="mb-6">{content}</div>}
+
         <div className="flex justify-end">
           <button
             onClick={onClose}
@@ -6317,6 +6461,7 @@ const AckModal: React.FC<{
       </div>
     </div>
   );
+
 
 const PlanReviewModal: React.FC<{
   changes: PlanningChange[];
@@ -7096,7 +7241,9 @@ const CreateCourseModal: React.FC<{
   departments: { id: string; name: string }[];
   onClose: () => void;
   onCreated: () => void | Promise<void>;
-}> = ({ departments, onClose, onCreated }) => {
+  onAck?: (title: string, details: string) => void;
+  onNotice?: (title: string, message: string) => void;
+}> = ({ departments, onClose, onCreated, onAck, onNotice }) => {
   // Show names in the SelectBox; map back to id on save
   const [deptName, setDeptName] = useState<string>(departments[0]?.name || "");
 
@@ -7157,13 +7304,13 @@ const CreateCourseModal: React.FC<{
 
       const res = await createCatalogCourse(user.userId, payload);
       if (res?.ok) {
-        alert(`Course ${payload.course_code} created (course_id: ${res.course?.course_id || "new"})`);
         await onCreated();
+        onAck?.("Course created", `Course ${payload.course_code} was created.`);
       } else {
-        alert(res?.message || "Failed to create course.");
+        onNotice?.("Create course failed", res?.message || "Failed to create course.");
       }
     } catch (e: any) {
-      alert(e?.message || "Failed to create course.");
+      onNotice?.("Create course failed", e?.message || "Failed to create course.");
     } finally {
       setBusy(false);
     }

@@ -16,6 +16,8 @@ import {
   sendOmLoadAssignmentsToFaculty,
   getOmLoadAssignmentRfc,
   respondOmLoadAssignmentRfc,
+  getOmSubmittedCourses,
+  saveOmNewLine,
 } from "../../api.ts";
 
 import {
@@ -47,6 +49,7 @@ import {
   Upload,
   Download,
   Save,
+  Trash2,
 } from "lucide-react";
 import { InboxContent as OMInboxContent } from "./OM_Inbox";
 
@@ -173,7 +176,8 @@ function SelectBox({
       {open && (
         <div
           ref={listRef}
-          className="absolute z-20 mt-1 max-h-60 w-full overflow-auto rounded-md border border-gray-200 bg-white py-1 shadow-lg"
+          // Always open upward so options aren't hidden/clipped near the bottom of the scroll container.
+          className="absolute z-30 bottom-full mb-1 max-h-60 w-full overflow-auto rounded-md border border-gray-200 bg-white py-1 shadow-lg"
         >
           {options.map((opt, i) => {
             const optValue = getValue(opt);
@@ -319,7 +323,8 @@ function TimeBeginInput({
       {open && (
         <div
           ref={listRef}
-          className="absolute z-20 mt-1 max-h-60 w-full overflow-auto rounded-md border border-gray-200 bg-white py-1 shadow-lg"
+          // Always open upward so options aren't hidden/clipped near the bottom of the scroll container.
+          className="absolute z-30 bottom-full mb-1 max-h-60 w-full overflow-auto rounded-md border border-gray-200 bg-white py-1 shadow-lg"
         >
           {filtered.length ? (
             filtered.map((opt, i) => {
@@ -359,23 +364,28 @@ function TimeBeginInput({
 function TextBox({
   value,
   onChange,
+  onBlur,
   placeholder = "",
   className = "",
   disabled = false,
   align = "left",
 }: {
+
   value: string;
   onChange: (v: string) => void;
+  onBlur?: () => void;
   placeholder?: string;
   className?: string;
   disabled?: boolean;
   align?: "left" | "center";
 }) {
+
   return (
     <input
       type="text"
       value={value}
-      onChange={(e) => onChange(e.target.value)}
+  onChange={(e) => onChange(e.target.value)}
+  onBlur={onBlur}
       placeholder={placeholder}
       disabled={disabled}
       className={cls(
@@ -398,6 +408,7 @@ function ComboBox({
   placeholder = "— Select or type —",
   className = "",
   clearable = true,
+  commitOnSelectOnly = false,
 }: {
   value?: string | null;
   onChange: (v: string) => void;
@@ -406,6 +417,8 @@ function ComboBox({
   className?: string;
   /** Show an "x" button to clear the current selection/text. */
   clearable?: boolean;
+  /** If true, typing only filters; value is committed only when selecting an option (or clearing). */
+  commitOnSelectOnly?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState(value ?? "");
@@ -417,11 +430,16 @@ function ComboBox({
   useEffect(() => {
     const onDoc = (e: MouseEvent) => {
       if (!wrapRef.current) return;
-      if (!wrapRef.current.contains(e.target as Node)) setOpen(false);
+      if (!wrapRef.current.contains(e.target as Node)) {
+        setOpen(false);
+        // If we're in "select-only" mode, revert any uncommitted typing
+        // back to the last committed value when closing.
+        if (commitOnSelectOnly) setQuery(value ?? "");
+      }
     };
     document.addEventListener("mousedown", onDoc);
     return () => document.removeEventListener("mousedown", onDoc);
-  }, []);
+  }, [commitOnSelectOnly, value]);
 
   const filtered = useMemo(() => {
     const safeOptions = (options ?? []).map((o) => (o ?? "").toString());
@@ -447,9 +465,15 @@ function ComboBox({
           const v = e.target.value;
           setQuery(v);
           setOpen(true);
-          onChange(v);
+          if (!commitOnSelectOnly) onChange(v);
         }}
         onFocus={() => setOpen(true)}
+        onBlur={() => {
+          // When commitOnSelectOnly is true, typing should only filter options.
+          // If the user tabs/clicks away without selecting, snap back to the
+          // last committed value so the input can't show a non-existent course.
+          if (commitOnSelectOnly) setQuery(value ?? "");
+        }}
         placeholder={placeholder}
       />
 
@@ -477,7 +501,7 @@ function ComboBox({
       <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-500" />
 
       {open && (
-        <div className="absolute z-30 mt-2 max-h-72 w-full overflow-auto rounded-xl border border-gray-300 bg-white shadow-xl">
+        <div className="absolute z-30 bottom-full mb-2 max-h-72 w-full overflow-auto rounded-xl border border-gray-300 bg-white shadow-xl">
           {filtered.length === 0 ? (
             <div className="px-4 py-2 text-sm text-gray-500">
               No matches{" "}
@@ -487,6 +511,13 @@ function ComboBox({
             filtered.map((opt) => (
               <button
                 key={opt}
+                onMouseDown={(e) => {
+                  // Prevent the input from blurring before we handle the click.
+                  // Without this, the input's onBlur can revert `query` back to the
+                  // previously committed value (especially in commitOnSelectOnly mode),
+                  // making the selection appear to "revert".
+                  e.preventDefault();
+                }}
                 onClick={() => {
                   onChange(opt);
                   setQuery(opt);
@@ -1953,25 +1984,29 @@ const RequestChangeModal = ({
 
         <div className="p-6 pb-4">
           <h3 className="text-lg font-semibold text-emerald-700 mb-2">
-          Request for Change
-        </h3>
-        <div className="text-sm text-gray-600 mb-1">
-          From: <span className="font-semibold">{displayFaculty}</span>
-        </div>
-        {/* Status hidden per request (avoid showing code-like thread statuses in OM modal) */}
-
-        {loading && <div className="mb-4 text-sm text-gray-600">Loading…</div>}
-        {error && <div className="mb-4 text-sm text-red-600">{error}</div>}
-
-        {!loading && !error && !status && (
-          <div className="mb-4 rounded-lg border border-gray-200 bg-gray-50 p-3 text-sm text-gray-700">
-            No RFC thread found for this course.
+            Request for Change
+          </h3>
+          <div className="text-sm text-gray-600 mb-1">
+            From: <span className="font-semibold">{displayFaculty}</span>
           </div>
-        )}
+          {/* Status hidden per request (avoid showing code-like thread statuses in OM modal) */}
 
+          {loading && (
+            <div className="mb-4 text-sm text-gray-600">Loading…</div>
+          )}
+          {error && <div className="mb-4 text-sm text-red-600">{error}</div>}
+
+          {!loading && !error && !status && (
+            <div className="mb-4 rounded-lg border border-gray-200 bg-gray-50 p-3 text-sm text-gray-700">
+              No RFC thread found for this course.
+            </div>
+          )}
         </div>
 
-        <div ref={scrollRef} className="mx-6 mb-4 flex-1 min-h-0 overflow-auto rounded-lg border border-gray-200 bg-gray-50 p-3">
+        <div
+          ref={scrollRef}
+          className="mx-6 mb-4 flex-1 min-h-0 overflow-auto rounded-lg border border-gray-200 bg-gray-50 p-3"
+        >
           {messages.length ? (
             <div className="space-y-2">
               {messages.map((m: any, idx: number) => {
@@ -2030,13 +2065,15 @@ const RequestChangeModal = ({
         <div className="mx-6">
           <label className="block text-sm font-medium mb-1">Reply</label>
           <textarea
-          className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30 mb-6"
-          rows={4}
-          placeholder={isTerminal ? "This RFC is locked." : "Type your reply…"}
-          value={reply}
-          disabled={loading || !status || isTerminal}
-          onChange={(e) => setReply(e.target.value)}
-        />
+            className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30 mb-6"
+            rows={4}
+            placeholder={
+              isTerminal ? "This RFC is locked." : "Type your reply…"
+            }
+            value={reply}
+            disabled={loading || !status || isTerminal}
+            onChange={(e) => setReply(e.target.value)}
+          />
         </div>
 
         <div className="mx-6 pb-6 flex justify-end gap-2">
@@ -2668,7 +2705,11 @@ export default function OM_LoadAssignment() {
       setRows(normalizedNextRows);
       setTerm(typeof res?.term === "string" ? res.term : "");
       // Keep term_id in sync so archive-view detection stays correct.
-      setTermId(typeof (res as any)?.term_id === "string" ? (res as any).term_id : termId);
+      setTermId(
+        typeof (res as any)?.term_id === "string"
+          ? (res as any).term_id
+          : termId
+      );
       setMode("run");
       // Preserve the "Forward to Chair" final-state across auto-assign.
       setApproved((prev) => prev);
@@ -2818,6 +2859,17 @@ export default function OM_LoadAssignment() {
   // Values: ALL | UG | GS | SHS
   const [levelFilter, setLevelFilter] = useState<string>("ALL");
   const [rows, setRows] = useState<Row[]>([]);
+
+  const [newLineSectionDraft, setNewLineSectionDraft] =
+  useState<Record<string, string>>({});
+
+  // Submitted Course Offerings options for the Course dropdown (CODE, Title, Units, Capacity).
+  const [submittedCourses, setSubmittedCourses] = useState<
+    { code: string; title: string; units: number; capacity: number }[]
+  >([]);
+
+  // Row-level save spinner for the inline Add New Line row.
+  const [savingNewLineId, setSavingNewLineId] = useState<string | null>(null);
 
   // Snapshot of the rows at the last successful Forward/Re-forward to Chair.
   // Used to generate an APO-style "Detected changes" preview on re-forward.
@@ -3253,6 +3305,14 @@ export default function OM_LoadAssignment() {
     commitRows(next, { markDirty });
   };
 
+  // Remove UI-only fields before persisting rows to the database.
+  // (e.g., `selected` comes from checkbox selection and must never be stored.)
+  const stripUiFieldsForPersist = (r: Row): Row => {
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const { selected, is_new_line, __local_only, ...rest } = (r as any) || {};
+    return rest as Row;
+  };
+
   // Selection in the load recommendation table is by faculty (not per subject):
   // if the OM selects any row for a faculty, we select *all* rows for that faculty.
   const facultyKeyOf = (r: Row) =>
@@ -3263,9 +3323,17 @@ export default function OM_LoadAssignment() {
       setCell(refRow.id, "selected", checked as any);
       return;
     }
-    const next = rows.map((r) =>
-      facultyKeyOf(r) === k ? { ...r, selected: checked } : r
-    );
+    // IMPORTANT:
+    // - Selection is UI-only and must never be treated as persisted state.
+    // - Selecting any row for a faculty should select ALL rows for that same faculty.
+    // - To prevent accidental cross-faculty sends (e.g., stale `selected` flags coming from DB restores),
+    //   when turning ON a faculty selection we clear selections for other faculties.
+    const next = rows.map((r) => {
+      const rk = facultyKeyOf(r);
+      if (rk === k) return { ...r, selected: checked };
+      if (checked) return { ...r, selected: false };
+      return r;
+    });
     commitRows(next, { markDirty: false });
   };
 
@@ -3469,7 +3537,8 @@ export default function OM_LoadAssignment() {
           (r.faculty_id || "").trim() || facultyNameToId[r.faculty] || "";
         return fid ? ({ ...r, faculty_id: fid } as Row) : r;
       })
-      .filter((r) => !!(r.faculty_id || "").trim());
+      .filter((r) => !!(r.faculty_id || "").trim())
+      .map(stripUiFieldsForPersist);
 
     if (!normalizedRowsToSend.length) {
       throw new Error("No rows with faculty_id");
@@ -3491,7 +3560,7 @@ export default function OM_LoadAssignment() {
       const fid =
         (r.faculty_id || "").trim() || facultyNameToId[r.faculty] || "";
       return fid ? ({ ...r, faculty_id: fid } as Row) : r;
-    });
+    }).map(stripUiFieldsForPersist);
     await submitOmLoadAssignment(userId, { rows: normalizedAllRows }, "save");
 
     // 3️⃣ Reset UI + reload from DB
@@ -3521,6 +3590,20 @@ export default function OM_LoadAssignment() {
 
   const loadFromServer = async (overrideTermId?: string) => {
     if (!userId) return;
+
+    // Preserve client-only unsaved "Add new line" drafts.
+    // Saving one new-line row triggers a refresh; without this, other edited
+    // drafts disappear from the grid.
+    const localNewLineDrafts: Row[] = (rows || []).filter(
+      (rr) => !!(rr as any)?.__local_only
+    );
+
+    // Preserve current remarks drafts for client-only rows.
+    const remarksDraftSnapshot = { ...(remarksDraftBySection || {}) } as Record<
+      string,
+      string
+    >;
+
     const res = await getOmLoadAssignmentList(userId, overrideTermId);
 
     const prefMap = (res as any)?.preferred_units_by_faculty || {};
@@ -3554,17 +3637,31 @@ export default function OM_LoadAssignment() {
       // Spreading would drop them; explicitly copy `mode` so the Mode column
       // remains populated after refresh/send.
       ...r,
+      // `selected` is a UI-only flag. Never hydrate it from the DB (clean-restore can bring back
+      // stale selections which can cause cross-faculty rows to be sent unintentionally).
+      selected: false,
       mode: (r as any)?.mode ?? (r as any)?.Mode ?? "",
       begin1: normalizeServerTimeToHHMM(r?.begin1),
       end1: normalizeServerTimeToHHMM(r?.end1),
       begin2: normalizeServerTimeToHHMM(r?.begin2),
       end2: normalizeServerTimeToHHMM(r?.end2),
     }));
-    setRows(normalizedRows);
+    // Merge server rows with any client-only "Add new line" drafts that are still unsaved.
+    const serverIds = new Set(normalizedRows.map((x) => String((x as any)?.id)));
+    const mergedRows: Row[] = [
+      ...normalizedRows,
+      ...localNewLineDrafts.filter((x) => !serverIds.has(String((x as any)?.id))),
+    ];
+    setRows(mergedRows);
 
     // Initialize remarks state from DB values (sections.remarks) without affecting other save/undo behaviors.
     const initRemarks: Record<string, string> = {};
-    for (const rr of normalizedRows) {
+    for (const rr of mergedRows) {
+      // For client-only rows, preserve the current draft text (if any).
+      if (!!(rr as any)?.__local_only) {
+        initRemarks[rr.id] = String(remarksDraftSnapshot?.[rr.id] ?? (rr as any)?.remarks ?? "");
+        continue;
+      }
       initRemarks[rr.id] = String((rr as any)?.remarks ?? "");
     }
     setRemarksDraftBySection(initRemarks);
@@ -3574,6 +3671,15 @@ export default function OM_LoadAssignment() {
       typeof (res as any)?.term_id === "string" ? (res as any).term_id : "";
     setTerm(typeof res?.term === "string" ? res.term : "");
     setTermId(nextTermId);
+
+    // Fetch submitted course offerings (for Course dropdown).
+    try {
+      const sc = await getOmSubmittedCourses(userId, overrideTermId || nextTermId);
+      setSubmittedCourses(Array.isArray((sc as any)?.courses) ? (sc as any).courses : []);
+    } catch (e) {
+      // Best-effort only; keep existing UX if this list fails.
+      setSubmittedCourses([]);
+    }
     // Capture the default active term id on normal loads so we can detect archive view.
     if (!overrideTermId && nextTermId) {
       setActiveTermId(nextTermId);
@@ -3682,7 +3788,11 @@ export default function OM_LoadAssignment() {
   const handleForwardToChair = async () => {
     if (!userId) return;
     try {
-      const res = await submitOmLoadAssignment(userId, { rows }, "approve");
+      const res = await submitOmLoadAssignment(
+        userId,
+        { rows: rows.map(stripUiFieldsForPersist) },
+        "approve"
+      );
       await notifyChairLoadRecommendation(userId, {
         kind: (res as any)?.kind,
         reco_id: (res as any)?.reco_id,
@@ -3702,36 +3812,57 @@ export default function OM_LoadAssignment() {
   }, [initialLoaded]);
 
   const addRow = () => {
-    // Inline add: insert an editable row directly into the table.
-    // Only rows added this way should be editable across all columns.
-    const newId = `manual-${Date.now()}`;
-    commitRows([
-      ...rows,
-      {
-        id: newId,
-        course: "",
-        title: "",
-        units: "",
-        section: "",
-        faculty: "",
-        faculty_id: undefined,
-        day1: "",
-        begin1: "",
-        end1: "",
-        room1: "",
-        day2: "",
-        begin2: "",
-        end2: "",
-        room2: "",
-        capacity: "",
-        mode: "",
-        status: "",
-        editable: true,
-      },
-    ]);
-    setMode("manual");
-    setApproved(false);
+  // Inline add: insert an editable row directly into the table.
+  // This row is treated as an OM-created pending request for APO room assignment.
+  const newId = `manual-${Date.now()}`;
+  commitRows([
+    ...rows,
+    {
+      id: newId,
+      // Client-only draft marker. This prevents other unsaved new-line rows from
+      // disappearing when we refresh after saving a single row.
+      __local_only: true as any,
+      is_new_line: true as any,
+      course: "",
+      title: "",
+      units: "", // auto-filled after course selection
+      section: "",
+      faculty: "",
+      faculty_id: undefined,
+      day1: "",
+      begin1: "",
+      end1: "",
+      room1: "TBA",
+      day2: "",
+      begin2: "",
+      end2: "",
+      room2: "TBA",
+      capacity: "", // auto-filled after course selection
+      mode: "",
+      status: "",
+      editable: true,
+    } as any,
+  ]);
+  setMode("manual");
+  setApproved(false);
+};
+
+  const handleDeleteNewLineRow = (rowId: string) => {
+    // New-line rows are client-only until saved, so delete is purely local.
+    commitRows(rows.filter((x) => x.id !== rowId));
+    // Best-effort cleanup of per-row remark drafts/saves.
+    setRemarksDraftBySection((p) => {
+      const next = { ...(p || {}) } as any;
+      delete next[rowId];
+      return next;
+    });
+    setRemarksSavedBySection((p) => {
+      const next = { ...(p || {}) } as any;
+      delete next[rowId];
+      return next;
+    });
   };
+
 
   const getEditFlags = (r: Row) => {
     // Rows synced from Faculty Service Request are view-only for OM.
@@ -3777,6 +3908,29 @@ export default function OM_LoadAssignment() {
       } as const;
     }
 
+
+// Newly added "Add new line" rows have special edit rules:
+// - Editable: all fields EXCEPT Room 1/2, Units, Capacity (auto-filled / APO-assigned).
+if (!!(r as any).is_new_line) {
+  const editSchedule = true; // allow editing day/time/mode/faculty for the pending request
+  return {
+    course: true,
+    title: false,
+    units: false,
+    section: true,
+    faculty: editSchedule,
+    day1: editSchedule,
+    begin1: editSchedule,
+    end1: editSchedule,
+    room1: false,
+    day2: editSchedule,
+    begin2: editSchedule,
+    end2: editSchedule,
+    room2: false,
+    capacity: false,
+    mode: editSchedule,
+  } as const;
+}
     const editAll = !!r.editable;
     const editSchedule = editAll || isRun;
     return {
@@ -3833,7 +3987,11 @@ export default function OM_LoadAssignment() {
     if (!userId) return;
 
     try {
-      await submitOmLoadAssignment(userId, { rows }, "save");
+      await submitOmLoadAssignment(
+        userId,
+        { rows: rows.map(stripUiFieldsForPersist) },
+        "save"
+      );
       await loadFromServer(); // pull fresh rows from DB
       setHasLocalEdits(false); // grid now matches DB
       showToast("Draft saved.", "success");
@@ -3842,6 +4000,186 @@ export default function OM_LoadAssignment() {
       showToast(`Save draft failed: ${String(e)}`, "error");
     }
   }
+async function handleSaveNewLineRow(r: Row) {
+  if (!userId) return;
+
+  const norm = (v: any) => String(v ?? "").trim();
+  const courseCode = norm(r.course);
+
+  // Duplicate/Existing section warning (prevent saving).
+  const sec = norm(r.section);
+  if (!sec) {
+    showToast("Section is required.", "error");
+    return;
+  }
+
+  // Must have course selected before validating duplicates/APO rules.
+  if (!courseCode) {
+    showToast("Please select a Course Code first.", "error");
+    return;
+  }
+
+  // 1) Prevent duplicate sections PER COURSE (case-insensitive)
+  const existsLocal = rows.some((x) => {
+    if (x.id === r.id) return false;
+    const xCourse = norm((x as any).course);
+    const xSec = norm((x as any).section);
+    return (
+      xCourse.toLowerCase() === courseCode.toLowerCase() &&
+      xSec.toLowerCase() === sec.toLowerCase()
+    );
+  });
+  if (existsLocal) {
+    showToast("Duplicate section: this section already exists for that course.", "error");
+    return;
+  }
+
+  // 2) Enforce APO rules based on section prefix + OM campus context
+  const inferSectionApo = (s: string): "APO Manila" | "APO Laguna" | "" => {
+    const up = norm(s).toUpperCase();
+    if (!up) return "";
+    if (up.startsWith("XX") || up.startsWith("XC")) return "APO Laguna";
+    if (up.startsWith("S") || up.startsWith("G")) return "APO Manila";
+    return "";
+  };
+
+  const inferOmCampusId = (): string => {
+    const s: any = session as any;
+    const candidate =
+      norm(s?.campus_id) ||
+      norm(s?.campusId) ||
+      norm(s?.campus?.campus_id) ||
+      norm(s?.campus?.id) ||
+      "";
+    if (candidate) return candidate;
+
+    // Fallback: infer from currently loaded rows (most common campus_id)
+    const counts: Record<string, number> = {};
+    for (const rr of rows) {
+      const cid = norm((rr as any).campus_id);
+      if (!cid) continue;
+      counts[cid] = (counts[cid] || 0) + 1;
+    }
+    let best = "";
+    let bestN = 0;
+    for (const [cid, n] of Object.entries(counts)) {
+      if (n > bestN) {
+        best = cid;
+        bestN = n;
+      }
+    }
+    return best;
+  };
+
+  const campusId = inferOmCampusId();
+  const inferOmApo = (cid: string): "APO Manila" | "APO Laguna" | "" => {
+    const up = norm(cid).toUpperCase();
+    if (!up) return "";
+    // Project convention: CMPS0001 = Manila, CMPS0002 = Laguna
+    if (up === "CMPS0001") return "APO Manila";
+    if (up === "CMPS0002") return "APO Laguna";
+    return "";
+  };
+
+  const sectionApo = inferSectionApo(sec);
+  if (!sectionApo) {
+    showToast(
+      "Invalid section: use S/G (APO Manila) or XX/XC (APO Laguna).",
+      "error"
+    );
+    return;
+  }
+
+  const omApo = inferOmApo(campusId);
+  if (omApo && sectionApo !== omApo) {
+    showToast(
+      `Invalid section: This section belongs to ${sectionApo}, but you’re assigning for ${omApo}.`,
+      "error"
+    );
+    return;
+  }
+
+  // Required fields for saving a pending request
+  // NOTE: Remarks are optional; everything else in the new-line row must be present.
+  const missing: string[] = [];
+  if (!courseCode) missing.push("Course");
+  if (!sec) missing.push("Section");
+  if (!norm((r as any).faculty_id)) missing.push("Faculty");
+  if (!norm((r as any).mode)) missing.push("Mode");
+  if (!norm((r as any).day1)) missing.push("Day 1");
+  if (!norm((r as any).begin1)) missing.push("Begin 1");
+  if (!norm((r as any).end1)) missing.push("End 1");
+
+  // Units + Capacity are auto-filled from the selected course, but still required before saving.
+  const unitsNum = Number((r as any).units);
+  const capNum = Number((r as any).capacity);
+  if (!Number.isFinite(unitsNum) || unitsNum <= 0) missing.push("Units");
+  if (!Number.isFinite(capNum) || capNum <= 0) missing.push("Capacity");
+
+  // Meeting 2 is optional, but if any field is provided then all are required.
+  const d2 = norm((r as any).day2);
+  const b2 = norm((r as any).begin2);
+  const e2 = norm((r as any).end2);
+  const hasAnyMeet2 = !!d2 || !!b2 || !!e2;
+  const hasAllMeet2 = !!d2 && !!b2 && !!e2;
+  if (hasAnyMeet2 && !hasAllMeet2) {
+    if (!d2) missing.push("Day 2");
+    if (!b2) missing.push("Begin 2");
+    if (!e2) missing.push("End 2");
+  }
+
+  if (missing.length) {
+    showToast(
+      `Please fill in: ${missing.join(", ")} (Remarks is optional).`,
+      "error"
+    );
+    return;
+  }
+
+  setSavingNewLineId(r.id);
+  try {
+    await saveOmNewLine(userId, {
+      // course is stored as course_code in the row
+      course_code: courseCode,
+      section_code: sec,
+      faculty_id: norm((r as any).faculty_id),
+      campus_id: campusId || undefined,
+      day1: norm((r as any).day1),
+      begin1: norm((r as any).begin1),
+      end1: norm((r as any).end1),
+      day2: norm((r as any).day2),
+      begin2: norm((r as any).begin2),
+      end2: norm((r as any).end2),
+      mode: norm((r as any).mode),
+      // units & capacity are auto-filled after course selection
+      units: Number((r as any).units || 0),
+      capacity: Number((r as any).capacity || 0),
+      remarks: String((r as any).remarks || "").trim(),
+    });
+    showToast("Saved. Status set to Pending and APO notified.", "success");
+    // Remove the just-saved client-only draft row before refreshing from server.
+    // This prevents the saved row from briefly duplicating (client draft + server row)
+    // and ensures other unsaved drafts remain visible after refresh.
+    commitRows(rows.filter((x) => x.id !== r.id), { markDirty: false });
+    setRemarksDraftBySection((p) => {
+      const next = { ...(p || {}) } as any;
+      delete next[r.id];
+      return next;
+    });
+    setRemarksSavedBySection((p) => {
+      const next = { ...(p || {}) } as any;
+      delete next[r.id];
+      return next;
+    });
+    await loadFromServer();
+  } catch (e: any) {
+    const msg = String(e?.message || e || "");
+    showToast(msg || "Failed to save new line.", "error");
+  } finally {
+    setSavingNewLineId(null);
+  }
+}
+
 
   // function RowFlagBadges({ flags }: { flags?: RowFlag[] }) {
   //   if (!flags || flags.length === 0) return null;
@@ -3965,7 +4303,6 @@ export default function OM_LoadAssignment() {
 
     return map;
   }, [deloadAllRows]);
-
 
   useEffect(() => {
     if (!termId) return;
@@ -4157,31 +4494,33 @@ export default function OM_LoadAssignment() {
     filtered.sort((a, b) => {
       const aName = a.facultyName ?? "";
       const bName = b.facultyName ?? "";
-    
+
       const aAssigned = Number(a.assignedUnits ?? 0);
       const bAssigned = Number(b.assignedUnits ?? 0);
-    
+
       const aPref =
-        a.preferredUnits == null ? Number.POSITIVE_INFINITY : Number(a.preferredUnits);
+        a.preferredUnits == null
+          ? Number.POSITIVE_INFINITY
+          : Number(a.preferredUnits);
       const bPref =
-        b.preferredUnits == null ? Number.POSITIVE_INFINITY : Number(b.preferredUnits);
-    
+        b.preferredUnits == null
+          ? Number.POSITIVE_INFINITY
+          : Number(b.preferredUnits);
+
       const aGap = a.diff == null ? Number.POSITIVE_INFINITY : Number(a.diff);
       const bGap = b.diff == null ? Number.POSITIVE_INFINITY : Number(b.diff);
-    
+
       const aDeload = (a.facultyId && deloadUnitsByFacultyId[a.facultyId]) || 0;
       const bDeload = (b.facultyId && deloadUnitsByFacultyId[b.facultyId]) || 0;
-    
+
       if (unitsSortKey === "faculty") return dir * aName.localeCompare(bName);
       if (unitsSortKey === "assigned") return dir * (aAssigned - bAssigned);
       if (unitsSortKey === "preferred") return dir * (aPref - bPref);
-          if (unitsSortKey === "deload") return dir * (aDeload - bDeload);
-    
-      // default: gap
+      if (unitsSortKey === "deload") return dir * (aDeload - bDeload);
+
       if (aGap !== bGap) return dir * (aGap - bGap);
-    
       return aName.localeCompare(bName);
-    });    
+    });
 
     return filtered;
   }, [
@@ -4190,6 +4529,7 @@ export default function OM_LoadAssignment() {
     unitsSortKey,
     unitsSortDir,
     hideNoPrefs,
+    deloadUnitsByFacultyId,
   ]);
 
   // ---- Rule alerts for Tab 2 (violations / warnings) ----
@@ -4628,6 +4968,9 @@ export default function OM_LoadAssignment() {
     day: string;
     begin: string;
     end: string;
+
+    program?: string; // or program_code/program_name depending on backend
+    batch?: string; // string for safety (ex: "2023", "Batch 12")
   };
 
   const [blockedGeCmps2, setBlockedGeCmps2] = useState<BlockedGeCmps2Item[]>(
@@ -4640,35 +4983,34 @@ export default function OM_LoadAssignment() {
     section: string;
     campusId: string;
     campusName?: string;
+
+    program?: string;
+    batch?: string;
   };
 
   const blockedSections: BlockedSectionRow[] = useMemo(() => {
     const bySection: Record<string, BlockedSectionRow> = {};
 
-    (blockedGeCmps2 || []).forEach(
-      (b) => {
-        const sid = b.section_id;
-        if (!sid) return;
+    (blockedGeCmps2 || []).forEach((b) => {
+      const sid = String(b.section_id || "").trim();
+      if (!sid) return;
 
-        if (!bySection[sid]) {
-          bySection[sid] = {
-            rowId: sid,
-            course: b.course_code || b.course_id || "—",
-            section: b.section_code || "—",
-            campusId: b.campus_id || "",
-            campusName: b.campus_name || "",
-          };
-        }
-        return Object.values(bySection).filter(
-          (x) => (x.campusId || "").toUpperCase() === "CMPS0002"
-        );
-      },
-      [blockedGeCmps2]
-    );
+      if (!bySection[sid]) {
+        bySection[sid] = {
+          rowId: sid,
+          course: b.course_code || b.course_id || "—",
+          section: b.section_code || "—",
+          campusId: b.campus_id || "",
+          campusName: b.campus_name || "",
+          program: b.program || "",
+          batch: b.batch || "",
+        };
+      }
+    });
 
-    // keep only CMPS0002 in this tab (optional)
+    // keep only CMPS0002 in this tab
     return Object.values(bySection).filter(
-      (x) => (x.campusId || "").toUpperCase() === "CMPS0002"
+      (x) => String(x.campusId || "").toUpperCase() === "CMPS0002"
     );
   }, [blockedGeCmps2]);
 
@@ -4688,21 +5030,33 @@ export default function OM_LoadAssignment() {
     "units"
   );
 
-  const courseOptions = useMemo(() => {
-    const map: Record<string, string> = {};
+const courseOptions = useMemo(() => {
+  return (submittedCourses || [])
+    .filter((c) => (c?.code || "").trim().length > 0)
+    .map((c) => ({
+      code: String(c.code || "").trim(),
+      title: String(c.title || "").trim(),
+      units: Number(c.units || 0),
+      capacity: Number(c.capacity || 0),
+    }))
+    .sort((a, b) => a.code.localeCompare(b.code));
+}, [submittedCourses]);
 
-    rows.forEach((r) => {
-      const code = (r.course || "").trim();
-      const title = (r.title || "").trim();
-      if (code && title && !map[code]) {
-        map[code] = title;
-      }
-    });
+const courseChoiceOptions = useMemo(() => {
+  // UI change: Course dropdown should show ONLY the course code.
+  // The title is displayed underneath after selection, so it is redundant in the options list.
+  return courseOptions.map((c) => c.code);
+}, [courseOptions]);
 
-    return Object.entries(map)
-      .map(([code, title]) => ({ code, title }))
-      .sort((a, b) => a.code.localeCompare(b.code));
-  }, [rows]);
+const courseCodeToInfo = useMemo(() => {
+  const m: Record<string, { code: string; title: string; units: number; capacity: number }> = {};
+  for (const c of courseOptions) {
+    m[c.code] = c;
+  }
+  return m;
+}, [courseOptions]);
+
+
 
   return (
     <AppShell
@@ -5085,28 +5439,48 @@ export default function OM_LoadAssignment() {
                   <ArchivedLoadsSummary rows={filtered} termLabel={term} />
                 ) : (
                   <div className="mt-3 max-h-[58vh] overflow-x-auto overflow-y-auto rounded-xl border border-gray-300 bg-white shadow-sm">
-                    <table className="min-w-full text-sm table-fixed border-collapse">
+                    {/*
+                      NOTE: Use w-max/min-w-max so the table can exceed the container width.
+                      This makes horizontal scrolling ("move") always work when columns are wide.
+                    */}
+                    <table className="w-max min-w-max text-sm table-fixed border-collapse">
                       <colgroup>
+                        {/* 1) Select */}
                         <col className="w-[46px]" />
-                        <col className="w-[160px]" />
-                        <col className="w-[26%]" />
+                        {/* 2) Course Code & Title */}
+                        <col className="w-[260px]" />
+                        {/* 3) Units */}
                         <col className="w-[70px]" />
-                        <col className="w-[80px]" />
-                        <col className="w-[18%]" />
+                        {/* 4) Section (WIDENED) */}
+                        <col className="w-[260px]" />
+                        {/* 5) Faculty */}
+                        <col className="w-[280px]" />
+                        {/* 6) Day 1 */}
                         <col className="w-[72px]" />
+                        {/* 7) Begin 1 */}
+                        <col className="w-[96px]" />
+                        {/* 8) End 1 */}
+                        <col className="w-[96px]" />
+                        {/* 9) Room 1 */}
                         <col className="w-[140px]" />
-                        <col className="w-[96px]" />
-                        <col className="w-[96px]" />
+                        {/* 10) Day 2 */}
                         <col className="w-[72px]" />
+                        {/* 11) Begin 2 */}
+                        <col className="w-[96px]" />
+                        {/* 12) End 2 */}
+                        <col className="w-[96px]" />
+                        {/* 13) Room 2 */}
                         <col className="w-[140px]" />
-                        <col className="w-[96px]" />
-                        <col className="w-[96px]" />
-                        <col className="w-[80px]" />
-                        <col className="w-[80px]" />
-                        {/* Wider remarks column (may contain full sentences) */}
+                        {/* 14) Capacity */}
+                        <col className="w-[90px]" />
+                        {/* 15) Mode */}
+                        <col className="w-[90px]" />
+                        {/* 16) Remarks */}
                         <col className="w-[320px]" />
-                        <col className="w-[100px]" />
+                        {/* 17) Status */}
                         <col className="w-[110px]" />
+                        {/* 18) Actions */}
+                        <col className="w-[120px]" />
                       </colgroup>
 
                       <thead className="bg-gray-50 text-emerald-800 sticky top-0 z-10">
@@ -5248,26 +5622,49 @@ export default function OM_LoadAssignment() {
                               <td className="px-4 py-2 align-top">
                                 {getEditFlags(r).course ? (
                                   <div className="flex flex-col gap-1">
-                                    {/* Course code dropdown */}
-                                    <SelectBox
-                                      value={r.course || ""}
-                                      onChange={(code) => {
-                                        const found = courseOptions.find(
-                                          (c) => c.code === code
-                                        );
-                                        updateRow(
-                                          r.id,
-                                          {
-                                            course: code,
-                                            title: (found?.title || "") as any,
-                                          },
-                                          { markDirty: true }
-                                        );
-                                      }}
-                                      options={courseOptions.map((c) => c.code)}
-                                      placeholder="— Select course —"
-                                      className="w-[160px]"
-                                    />
+                                    {/* Course code & title (submitted offerings only; searchable) */}
+<ComboBox
+  // UI change: dropdown shows only Course Code
+  value={String(r.course || "")}
+  onChange={(code) => {
+    const picked = String(code || "").trim();
+    // IMPORTANT: allow clearing the selection. If we don't, the input can look
+    // cleared, but the row value stays the old course and the ComboBox will
+    // snap back to it ("revert") on blur.
+    if (!picked) {
+      updateRow(
+        r.id,
+        {
+          course: "" as any,
+          course_id: "" as any,
+          title: "" as any,
+          units: "" as any,
+          capacity: "" as any,
+        },
+        { markDirty: true }
+      );
+      return;
+    }
+
+    const info = courseCodeToInfo[picked];
+    if (!info) return;
+    updateRow(
+      r.id,
+      {
+        course: info.code,
+        title: info.title as any,
+        units: String(info.units ?? "") as any,
+        capacity: String(info.capacity ?? "") as any,
+      },
+      { markDirty: true }
+    );
+  }}
+  options={courseChoiceOptions}
+  placeholder="— Select course —"
+  className="w-[240px]"
+  commitOnSelectOnly
+/>
+
 
                                     {/* Auto-filled course title (read-only text) */}
                                     <div className="text-gray-600 text-xs max-w-xs truncate">
@@ -5304,13 +5701,29 @@ export default function OM_LoadAssignment() {
                               </td>
 
                               <td className="px-2 py-2 text-center">
+                              {(r as any).is_new_line ? (
+                                <TextBox
+                                  value={newLineSectionDraft[r.id] ?? (r.section ?? "")}
+                                  onChange={(v) =>
+                                    setNewLineSectionDraft((p) => ({ ...p, [r.id]: v }))
+                                  }
+                                  onBlur={() => {
+                                    const v = (newLineSectionDraft[r.id] ?? r.section ?? "");
+                                    setCell(r.id, "section", v as any);
+                                  }}
+                                  className="w-[260px]"
+                                  align="center"
+                                />
+                              ) : (
                                 <Cell
                                   editable={e.section}
                                   value={r.section}
                                   onChange={(v) => setCell(r.id, "section", v)}
-                                  className="w-[68px]"
+                                  className="w-[260px]"
                                   align="center"
                                 />
+                              )}
+
                               </td>
 
                               <td className="px-4 py-2">
@@ -5558,49 +5971,78 @@ export default function OM_LoadAssignment() {
                               <td className="px-2 py-2 text-center">
                                 {isRunning && (
                                   <div className="relative flex items-center justify-center gap-3 text-emerald-700">
-                                    {!fromFacultyService && (
-                                      <button
-                                        className={cls(
-                                          "relative hover:brightness-110",
-                                          isArchiveView &&
-                                            "opacity-40 cursor-not-allowed hover:brightness-100"
-                                        )}
-                                        title="Message"
-                                        onClick={() => {
-                                          if (isArchiveView) return;
-                                          setReqChange({
-                                            open: true,
-                                            facultyName: r.faculty || "Faculty",
-                                            facultyId: (r as any).faculty_id,
-                                            sectionId:
-                                              (r as any).section_id || r.id,
-                                          });
-                                        }}
-                                      >
-                                        <MessageSquareText className="h-5 w-5" />
-                                        {unread && (
-                                          <span className="absolute -top-1 -right-1 h-2.5 w-2.5 rounded-full bg-red-600" />
-                                        )}
-                                      </button>
-                                    )}
+                                    {/* New-line rows: show Save + Delete only until saved. */}
+                                    {!fromFacultyService && !!(r as any).is_new_line ? (
+                                      <>
+                                        <button
+                                          type="button"
+                                          className="relative text-blue-600 hover:brightness-110 disabled:opacity-60"
+                                          title="Save"
+                                          disabled={
+                                            !!savingNewLineId && savingNewLineId === r.id
+                                          }
+                                          onClick={() => void handleSaveNewLineRow(r)}
+                                        >
+                                          <Save className="h-5 w-5" />
+                                        </button>
 
-                                    <button
-                                      className="relative hover:brightness-110"
-                                      title={
-                                        copiedRowId === r.id
-                                          ? "Copied!"
-                                          : "Copy"
-                                      }
-                                      onClick={() => handleCopyRow(r)}
-                                    >
-                                      {copiedRowId === r.id ? (
-                                        <span className="text-xs font-semibold text-emerald-700">
-                                          ✓
-                                        </span>
-                                      ) : (
-                                        <Copy className="h-4 w-4" />
-                                      )}
-                                    </button>
+                                        <button
+                                          type="button"
+                                          className="relative text-red-600 hover:brightness-110"
+                                          title="Delete row"
+                                          onClick={() => handleDeleteNewLineRow(r.id)}
+                                        >
+                                          <Trash2 className="h-5 w-5" />
+                                        </button>
+                                      </>
+                                    ) : (
+                                      <>
+                                        {!fromFacultyService && (
+                                          <button
+                                            className={cls(
+                                              "relative hover:brightness-110",
+                                              isArchiveView &&
+                                                "opacity-40 cursor-not-allowed hover:brightness-100"
+                                            )}
+                                            title="Message"
+                                            onClick={() => {
+                                              if (isArchiveView) return;
+                                              setReqChange({
+                                                open: true,
+                                                facultyName:
+                                                  r.faculty || "Faculty",
+                                                facultyId: (r as any).faculty_id,
+                                                sectionId:
+                                                  (r as any).section_id || r.id,
+                                              });
+                                            }}
+                                          >
+                                            <MessageSquareText className="h-5 w-5" />
+                                            {unread && (
+                                              <span className="absolute -top-1 -right-1 h-2.5 w-2.5 rounded-full bg-red-600" />
+                                            )}
+                                          </button>
+                                        )}
+
+                                        <button
+                                          className="relative hover:brightness-110"
+                                          title={
+                                            copiedRowId === r.id
+                                              ? "Copied!"
+                                              : "Copy"
+                                          }
+                                          onClick={() => handleCopyRow(r)}
+                                        >
+                                          {copiedRowId === r.id ? (
+                                            <span className="text-xs font-semibold text-emerald-700">
+                                              ✓
+                                            </span>
+                                          ) : (
+                                            <Copy className="h-4 w-4" />
+                                          )}
+                                        </button>
+                                      </>
+                                    )}
                                   </div>
                                 )}
                               </td>
@@ -5921,11 +6363,11 @@ export default function OM_LoadAssignment() {
                                 </button>
                               </th>
 
-                              <th className="px-3 py-2 text-right font-semibold">
+                              <th className="px-3 py-2 text-center font-semibold">
                                 <button
                                   type="button"
                                   onClick={() => toggleUnitsSort("assigned")}
-                                  className="inline-flex items-center gap-1 hover:underline"
+                                  className="inline-flex items-center justify-center gap-1 hover:underline"
                                 >
                                   Assigned Units{" "}
                                   {unitsSortKey === "assigned"
@@ -5936,11 +6378,11 @@ export default function OM_LoadAssignment() {
                                 </button>
                               </th>
 
-                              <th className="px-3 py-2 text-right font-semibold">
+                              <th className="px-3 py-2 text-center font-semibold">
                                 <button
                                   type="button"
                                   onClick={() => toggleUnitsSort("preferred")}
-                                  className="inline-flex items-center gap-1 hover:underline"
+                                  className="inline-flex items-center justify-center gap-1 hover:underline"
                                 >
                                   Preferred Units{" "}
                                   {unitsSortKey === "preferred"
@@ -5950,24 +6392,28 @@ export default function OM_LoadAssignment() {
                                     : ""}
                                 </button>
                               </th>
-                              
-                              <th className="px-3 py-2 text-right font-semibold">
+
+                              <th className="px-3 py-2 text-center font-semibold">
                                 <button
                                   type="button"
                                   onClick={() => toggleUnitsSort("deload")}
-                                  className="inline-flex items-center gap-1 hover:underline"
+                                  className="inline-flex items-center justify-center gap-1 hover:underline"
                                   title="Deloading units (from Faculty Deloading rows)"
                                 >
                                   Deloading Units{" "}
-                                  {unitsSortKey === "deload" ? (unitsSortDir === "asc" ? "▲" : "▼") : ""}
+                                  {unitsSortKey === "deload"
+                                    ? unitsSortDir === "asc"
+                                      ? "▲"
+                                      : "▼"
+                                    : ""}
                                 </button>
                               </th>
 
-                              <th className="px-3 py-2 text-right font-semibold">
+                              <th className="px-3 py-2 text-center font-semibold">
                                 <button
                                   type="button"
                                   onClick={() => toggleUnitsSort("gap")}
-                                  className="inline-flex items-center gap-1 hover:underline"
+                                  className="inline-flex items-center justify-center gap-1 hover:underline"
                                 >
                                   Load Gap (Units){" "}
                                   {unitsSortKey === "gap"
@@ -6035,13 +6481,13 @@ export default function OM_LoadAssignment() {
                                     </div>
                                   </td>
 
-                                  <td className="px-3 py-2 text-right align-middle">
+                                  <td className="px-3 py-2 text-center align-middle">
                                     {Number(f.assignedUnits ?? 0)
                                       .toFixed(1)
                                       .replace(/\.0$/, "")}
                                   </td>
 
-                                  <td className="px-3 py-2 text-right align-middle">
+                                  <td className="px-3 py-2 text-center align-middle">
                                     {hasPref
                                       ? Number(f.preferredUnits)
                                           .toFixed(1)
@@ -6049,13 +6495,13 @@ export default function OM_LoadAssignment() {
                                       : "—"}
                                   </td>
                                   
-                                  <td className="px-3 py-2 text-right align-middle">
+                                  <td className="px-3 py-2 text-center align-middle">
                                     {Number((f.facultyId && deloadUnitsByFacultyId[f.facultyId]) || 0)
                                       .toFixed(1)
                                       .replace(/\.0$/, "")}
                                   </td>
 
-                                  <td className="px-3 py-2 text-right align-middle">
+                                  <td className="px-3 py-2 text-center align-middle">
                                     {hasPref && f.diff != null
                                       ? f.diff > 0
                                         ? `+${f.diff}`
@@ -6192,13 +6638,19 @@ export default function OM_LoadAssignment() {
                               <th className="px-3 py-2 text-left font-semibold">
                                 End 2
                               </th>
+                              <th className="px-3 py-2 text-left font-semibold">
+                                Program
+                              </th>
+                              <th className="px-3 py-2 text-left font-semibold">
+                                Batch
+                              </th>
                             </tr>
                           </thead>
                           <tbody className="divide-y divide-gray-100">
                             {blockedSections.length === 0 ? (
                               <tr>
                                 <td
-                                  colSpan={8}
+                                  colSpan={10}
                                   className="py-6 text-center text-sm text-gray-500"
                                 >
                                   No blocked GE sections for Laguna.
@@ -6207,7 +6659,7 @@ export default function OM_LoadAssignment() {
                             ) : blockedSectionsFiltered.length === 0 ? (
                               <tr>
                                 <td
-                                  colSpan={8}
+                                  colSpan={10}
                                   className="py-6 text-center text-sm text-gray-500"
                                 >
                                   No blocked sections match your search.
@@ -6278,6 +6730,12 @@ export default function OM_LoadAssignment() {
                                     </td>
                                     <td className="px-3 py-2 text-gray-700">
                                       {end2}
+                                    </td>
+                                    <td className="px-3 py-2 text-gray-700">
+                                      {b.program || "—"}
+                                    </td>
+                                    <td className="px-3 py-2 text-gray-700">
+                                      {b.batch || "—"}
                                     </td>
                                   </tr>
                                 );

@@ -26,12 +26,7 @@ import OM_StudentPetition from "./pages/OM/OM_StudentPetition";
 import OM_SpecialClass from "./pages/OM/OM_SpecialClass";
 import OM_ClassRetention from "./pages/OM/OM_ClassRetention";
 import OM_Inbox from "./pages/OM/OM_Inbox";
-import OM_desc from "./pages/OM/OM_desc";
-import OM_desc2 from "./pages/OM/OM_desc2";
-import OM_desc3 from "./pages/OM/OM_desc3";
-import OM_pred1 from "./pages/OM/OM_pred1";
-import OM_pred2 from "./pages/OM/OM_pred2";
-import OM_LoadReco from "./pages/OM/OM_LoadReco";
+
 
 // ----- Reports & Analytics sub-pages -----
 import OM_RP_FacultyTeachingHistory from "@/pages/OM/OM_REPORTS_ANALYTICS/OM_RP_FacultyTeachingHistory";
@@ -143,13 +138,7 @@ export default function App() {
 
         {/* Protected */}
         <Route element={<RequireAuth />}>
-          {/* OM loose pages */}
-          <Route path="/om/desc" element={<OM_desc />} />
-          <Route path="/om/desc2" element={<OM_desc2 />} />
-          <Route path="/om/desc3" element={<OM_desc3 />} />
-          <Route path="/om/pred1" element={<OM_pred1 />} />
-          <Route path="/om/pred2" element={<OM_pred2 />} />
-          <Route path="/om/loadreco" element={<OM_LoadReco />} />
+
 
 {/* OM shell with children (ONE declaration only) */}
 <Route path="/om/home" element={<OM_LoadAssignment />}>
