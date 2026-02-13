@@ -61,7 +61,7 @@ const INSIGHT_CARDS: CardItem[] = [
 
 const FORECAST_CARDS: CardItem[] = [
   {
-    title: "Faculty Availability Forecasting",
+    title: "Time/Day Slot Availability Indicators",
     to: "availability-forecast",
     Icon: CalendarClock,
     accent: {
@@ -72,7 +72,7 @@ const FORECAST_CARDS: CardItem[] = [
     },
   },
   {
-    title: "Faculty Load Risk Forecast",
+    title: "Course Staffing Risk Indicators",
     to: "load-risk",
     Icon: AlertTriangle,
     accent: {

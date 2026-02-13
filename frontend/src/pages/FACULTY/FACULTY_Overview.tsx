@@ -31,7 +31,7 @@ import { useNavigate } from "react-router-dom";
    - Lightweight in-file toast stack (no extra deps)
    - Upper-right, beneath TopBar
    ========================================= */
-type ToastKind = "success" | "error" | "info";
+type ToastKind = "success" | "error" | "info" | "warning";
 type ToastItem = { id: string; kind: ToastKind; title?: string; message: string };
 
 function ToastViewport({
@@ -46,6 +46,7 @@ function ToastViewport({
   const tone = (k: ToastKind) => {
     if (k === "success") return "border-emerald-200 bg-emerald-50 text-emerald-900";
     if (k === "error") return "border-red-200 bg-red-50 text-red-900";
+    if (k === "warning") return "border-amber-200 bg-amber-50 text-amber-900";
     return "border-slate-200 bg-white text-slate-900";
   };
 
@@ -108,6 +109,9 @@ const pushToast = useCallback(
   [dismissToast]
 );
 
+  // Prevent warning toasts from spamming on refreshes/re-renders.
+  const lastWarnKey = useRef<string>("");
+
 
   const navigate = useNavigate();
 
@@ -169,7 +173,7 @@ const pushToast = useCallback(
     }));
 
     // Compose into the same shape the page already renders
-    setData({
+    const nextData = {
       ok: true,
       faculty: profile.faculty,
       term: list.term,
@@ -181,12 +185,49 @@ const pushToast = useCallback(
       proposal_status: (list as any).proposal_status,
       rfc: (list as any).rfc,
       schedule_final: (list as any).schedule_final,
-    });
+    };
+    setData(nextData);
     setError(null);
+
+    // Warn if limits are exceeded (teaching units / course prep).
+    const summary = (nextData as any)?.summary || {};
+    const parsePair = (v: any): [number, number] => {
+      const s = String(v ?? "0/0");
+      const [a, b] = s.split("/");
+      const left = Number(a);
+      const right = Number(b);
+      return [Number.isFinite(left) ? left : 0, Number.isFinite(right) ? right : 0];
+    };
+
+    const [uCur, uMax] = parsePair(summary?.teaching_units);
+    const [pCur, pMax] = parsePair(summary?.course_preps);
+    const overUnits = typeof summary?.exceeded_teaching_units === "boolean" ? summary.exceeded_teaching_units : (uMax > 0 ? uCur > uMax : uCur > 0);
+    const overPreps = typeof summary?.exceeded_course_preps === "boolean" ? summary.exceeded_course_preps : (pMax > 0 ? pCur > pMax : pCur > 0);
+
+    const warnKey = `${overUnits ? `U:${uCur}/${uMax}` : ""}|${overPreps ? `P:${pCur}/${pMax}` : ""}`;
+    if (warnKey !== lastWarnKey.current && (overUnits || overPreps)) {
+      lastWarnKey.current = warnKey;
+      if (overUnits) {
+        const overBy = typeof summary?.teaching_units_over_by === "number" ? summary.teaching_units_over_by : Math.max(0, uCur - uMax);
+        pushToast(
+          "warning",
+          `Teaching units exceeded (${summary?.teaching_units ?? `${uCur}/${uMax}`})${overBy ? ` — +${overBy}` : ""}.`,
+          "Warning"
+        );
+      }
+      if (overPreps) {
+        const overBy = typeof summary?.course_preps_over_by === "number" ? summary.course_preps_over_by : Math.max(0, pCur - pMax);
+        pushToast(
+          "warning",
+          `Course prep exceeded (${summary?.course_preps ?? `${pCur}/${pMax}`})${overBy ? ` — +${overBy}` : ""}.`,
+          "Warning"
+        );
+      }
+    }
   } catch (e: any) {
     setError(e?.response?.data?.detail || e?.message || "Failed to load faculty overview.");
   }
-}, [userId]);
+}, [userId, pushToast]);
 
 useEffect(() => {
   loadOverview();
@@ -270,20 +311,65 @@ useEffect(() => {
    1) Stat Cards (MODIFIED)
    ========================================= */
 function StatCards({ summary }: { summary: any }) {
-  // --- *** FIX: Calculate progress for Course Prep *** ---
+  const parsePair = (v: any): [number, number] => {
+    const s = String(v ?? "0/0");
+    const [a, b] = s.split("/");
+    const left = Number(a);
+    const right = Number(b);
+    return [Number.isFinite(left) ? left : 0, Number.isFinite(right) ? right : 0];
+  };
+
+  const unitsValue = summary?.teaching_units ?? "0/0";
   const prepValue = summary?.course_preps ?? "0/0";
-  const [prepCurrent, prepMax] = prepValue.split('/').map(Number);
-  // Handle division by zero if max preps is 0
-  const prepProgress = (prepMax > 0) ? Math.round((prepCurrent / prepMax) * 100) : 0;
+
+  const [unitsCurrent, unitsMax] = parsePair(unitsValue);
+  const [prepCurrent, prepMax] = parsePair(prepValue);
+
+  // Backwards compatible: prefer backend booleans if present
+  const unitsExceeded =
+    typeof summary?.exceeded_teaching_units === "boolean"
+      ? summary.exceeded_teaching_units
+      : (unitsMax > 0 ? unitsCurrent > unitsMax : unitsCurrent > 0);
+
+  const prepsExceeded =
+    typeof summary?.exceeded_course_preps === "boolean"
+      ? summary.exceeded_course_preps
+      : (prepMax > 0 ? prepCurrent > prepMax : prepCurrent > 0);
+
+  const unitsOverBy =
+    typeof summary?.teaching_units_over_by === "number"
+      ? summary.teaching_units_over_by
+      : Math.max(0, unitsCurrent - unitsMax);
+
+  const prepsOverBy =
+    typeof summary?.course_preps_over_by === "number"
+      ? summary.course_preps_over_by
+      : Math.max(0, prepCurrent - prepMax);
+
+  // Progress calculations (cap bar at 100% but keep % text meaningful)
+  const unitsProgress = Number.isFinite(Number(summary?.percent)) ? Number(summary?.percent) : (unitsMax > 0 ? Math.round((unitsCurrent / unitsMax) * 100) : 0);
+  const prepProgress = prepMax > 0 ? Math.round((prepCurrent / prepMax) * 100) : 0;
 
   const cards = [
-    { title: "Teaching Units", value: summary?.teaching_units ?? "0/0", progress: summary?.percent ?? 0 },
-    { title: "Course Prep", value: prepValue, progress: prepProgress }, // <-- Use calculated progress
+    {
+      title: "Teaching Units",
+      value: unitsValue,
+      progress: unitsProgress,
+      exceeded: unitsExceeded,
+      overBy: unitsOverBy,
+    },
+    {
+      title: "Course Prep",
+      value: prepValue,
+      progress: prepProgress,
+      exceeded: prepsExceeded,
+      overBy: prepsOverBy,
+    },
   ];
 
   return (
     <div className="mx-auto grid w-full max-w-screen-2xl grid-cols-1 gap-3 px-4 sm:grid-cols-2">
-      {cards.map(({ title, value, progress }) => (
+      {cards.map(({ title, value, progress, exceeded, overBy }) => (
         <div
           key={title}
           className="rounded-xl border border-neutral-200 bg-white p-4 shadow-sm hover:shadow-md transition"
@@ -292,14 +378,23 @@ function StatCards({ summary }: { summary: any }) {
             <div className="text-2xl font-semibold tracking-tight">{value}</div>
             <div className="text-[13px] text-neutral-700">{title}</div>
           </div>
+          {exceeded && (
+            <div className="mt-1 inline-flex items-center gap-2 rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-900">
+              <span>Exceeded</span>
+              {overBy > 0 && <span className="opacity-90">(+{overBy})</span>}
+            </div>
+          )}
           <div className="mt-2 flex items-center justify-between text-[11px] text-neutral-600">
             <span>Progress</span>
             <span>{progress}%</span>
           </div>
           <div className="mt-2 h-2 overflow-hidden rounded-full bg-neutral-200">
             <div
-              className="h-full bg-emerald-700 transition-all"
-              style={{ width: `${progress}%` }}
+              className={cls(
+                "h-full transition-all",
+                exceeded ? "bg-amber-600" : "bg-emerald-700"
+              )}
+              style={{ width: `${Math.min(100, Math.max(0, progress))}%` }}
             />
           </div>
         </div>

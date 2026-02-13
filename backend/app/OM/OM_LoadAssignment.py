@@ -106,6 +106,118 @@ def _campus_name_to_id(val: str) -> str:
     raise ValueError(f"Invalid Campus value: {s}")
 
 
+def _section_to_campus_id(section_code: str) -> str:
+    """APO routing by Section prefix.
+
+    - If section starts with S or G -> Manila (CMPS0001)
+    - If section starts with XX or XC -> Laguna (CMPS0002)
+    """
+    s = (section_code or "").strip().upper()
+    if not s:
+        return ""
+    if s.startswith("XX") or s.startswith("XC"):
+        return "CMPS0002"
+    if s.startswith("S") or s.startswith("G"):
+        return "CMPS0001"
+    return ""
+
+
+async def _apo_user_ids_for_campus(campus_id: str, db) -> list[str]:
+    """Return APO user_ids who are scoped to the given campus.
+
+    BUGFIX (notifications): do NOT assume a fixed APO role_id.
+    In this codebase, APO modules resolve the APO role_id dynamically from
+    `user_roles` (role_type == "APO") and then read `role_assignments`.
+    If we hardcode ROLE0004 and the actual APO role_id differs, we will
+    resolve 0 APO recipients and NO in-app/Gmail notification will be sent.
+
+    We mirror APO_CourseOfferings.apo_scope()'s resolution logic here and add a
+    safe fallback to users.campus_id for legacy accounts without explicit scope.
+    """
+
+    campus_id = (campus_id or "").strip().upper()
+    if not campus_id:
+        return []
+
+    # Prefer dynamic APO role_id from user_roles (mirrors APO modules).
+    ROLE_APO = ""
+    try:
+        role_doc = await db.get_collection("user_roles").find_one(
+            {"role_type": {"$regex": "^APO$", "$options": "i"}},
+            {"_id": 0, "role_id": 1},
+        )
+        ROLE_APO = str((role_doc or {}).get("role_id") or "").strip()
+    except Exception:
+        ROLE_APO = ""
+
+    # Backward compatibility: older deployments used a fixed ID.
+    if not ROLE_APO:
+        ROLE_APO = "ROLE0004"
+
+    def _scope_has_campus(scope_val) -> bool:
+        if not scope_val:
+            return False
+        scopes = scope_val if isinstance(scope_val, list) else [scope_val]
+        for s in scopes:
+            if not isinstance(s, dict):
+                continue
+            typ = str(s.get("type") or s.get("scope_type") or "").strip().lower()
+            sid = str(s.get("id") or s.get("scope_id") or s.get("campus_id") or "").strip().upper()
+            if sid == campus_id and (typ in ("campus", "campuses", "") or "campus" in typ):
+                return True
+        return False
+
+    out: set[str] = set()
+
+    # 1) Role-assignment scoped users (primary behavior)
+    try:
+        docs = (
+            await db.get_collection("role_assignments")
+            .find({"role_id": ROLE_APO}, {"_id": 0, "user_id": 1, "scope": 1})
+            .to_list(None)
+        )
+    except Exception:
+        docs = []
+
+    for d in docs or []:
+        uid = str(d.get("user_id") or "").strip()
+        if not uid:
+            continue
+        if _scope_has_campus(d.get("scope")):
+            out.add(uid)
+
+    # 2) Legacy fallback: some APO accounts only have users.campus_id set
+    # (no explicit campus scope in role_assignments).
+    try:
+        cur = db.get_collection(COL_USERS).find(
+            {"role": {"$regex": "^APO$", "$options": "i"}, "campus_id": campus_id},
+            {"_id": 0, "user_id": 1},
+        )
+        async for u in cur:
+            uid = str(u.get("user_id") or "").strip()
+            if uid:
+                out.add(uid)
+    except Exception:
+        pass
+
+    return sorted(list(out))
+
+
+async def _find_course_by_code(course_code: str, db) -> dict:
+    """Find a course by course_code (supports string or array storage)."""
+    import re as _re
+    cc = (course_code or "").strip()
+    if not cc:
+        return {}
+    q = {"$or": [
+        {"course_code": {"$regex": rf"^{_re.escape(cc)}$", "$options": "i"}},
+        {"course_code": [cc]},
+        {"course_code": {"$in": [cc]}},
+        {"course_code": {"$elemMatch": {"$regex": rf"^{_re.escape(cc)}$", "$options": "i"}}},
+    ]}
+    return await db[COL_COURSES].find_one(q, {"_id": 0}) or {}
+
+
 async def _om_department_ids(user_id: str, db) -> List[str]:
     """Departments this OM should see (from role_assignments.scope)."""
     ra = await db.get_collection("role_assignments").find_one(
@@ -760,6 +872,63 @@ def _preferred_cap_for(ctx, fid: str) -> int:
     pref = (getattr(ctx, "prefs_by_faculty", {}) or {}).get(fid, {}) or {}
     return int(pref.get("preferred_units") or pref.get("load_units") or 12)
 
+async def _notify_apo_room_allocation_ready(
+    *,
+    db,
+    om_user_id: str,
+    term_id: str,
+    faculty_id: str,
+    course_code: str,
+    section_code: str,
+) -> None:
+    # Resolve section_id + campus for routing (best-effort)
+    campus_id = _section_to_campus_id(section_code)
+    section_id = ""
+
+    try:
+        course_doc = await _find_course_by_code(course_code, db)
+        course_id = str(course_doc.get("course_id") or "").strip()
+
+        if course_id and term_id:
+            sec = await db[COL_SECTIONS].find_one(
+                {"term_id": term_id, "course_id": course_id, "section_code": section_code},
+                {"_id": 0, "section_id": 1, "campus_id": 1},
+            ) or {}
+            section_id = str(sec.get("section_id") or "").strip()
+            campus_id = str(sec.get("campus_id") or "").strip() or campus_id
+    except Exception:
+        pass
+
+    if not campus_id:
+        return
+
+    apo_uids = await _apo_user_ids_for_campus(campus_id, db)
+    if not apo_uids:
+        return
+
+    meta = {
+        "route": "/apo/room-assignments",
+        "kind": "om_room_allocation_ready",
+        "term_id": term_id,
+        "campus_id": campus_id,
+        "section_id": section_id,
+        "faculty_id": faculty_id,
+        "course_code": course_code,
+        "section": section_code,
+    }
+    details = f"Ready for room allocation: {course_code} – {section_code} (Faculty: {faculty_id})"
+
+    for uid in apo_uids:
+        await _ensure_user_gmail_address(uid, db)
+        await create_notification(
+            user_id=uid,
+            title="Room allocation needed",
+            details=details,
+            meta=meta,
+            send_email=True,
+            email_from_user_id=om_user_id,
+        )
+
 async def _fetch_rows(user_id: str, term_id: str, db) -> Dict[str, Any]:
     dept_ids = await _om_department_ids(user_id, db)
     if not dept_ids:
@@ -835,17 +1004,24 @@ async def _fetch_rows(user_id: str, term_id: str, db) -> Dict[str, Any]:
         except Exception:
             remarks_by_section_id = {}
 
-    # --- Preload rooms into a lookup: { room_id → room_number } ---
+    # --- Preload rooms into lookups (number + capacity) so OM table can reflect
+    #     APO room/room-capacity changes without requiring manual edits. ---
     room_docs = [
         x async for x in db[COL_ROOMS].find(
             {},
-            {"room_id": 1, "room_number": 1, "_id": 0}
+            {"room_id": 1, "room_number": 1, "capacity": 1, "_id": 0}
         )
     ]
 
     rooms_map = {
         (r.get("room_id") or "").strip(): (r.get("room_number") or "").strip()
         for r in room_docs
+    }
+
+    rooms_capacity_map = {
+        (r.get("room_id") or "").strip(): r.get("capacity")
+        for r in room_docs
+        if (r.get("room_id") or "").strip()
     }
 
     def schedule_pair(
@@ -919,6 +1095,18 @@ async def _fetch_rows(user_id: str, term_id: str, db) -> Dict[str, Any]:
         # Display uses the effective mode
         mode_display = effective_mode
 
+        # Capacity should reflect the section's enrollment cap (APO may edit this).
+        # If enrollment_cap is missing, fall back to the assigned room capacity when available.
+        cap_value = d.get("enrollment_cap", "") or ""
+        if cap_value in ("", None):
+            try:
+                s0 = (scheds[0] if len(scheds) > 0 else {}) or {}
+                rid1 = (s0.get("room_id") or "").strip()
+                if rid1 and rid1 in rooms_capacity_map and rooms_capacity_map[rid1] is not None:
+                    cap_value = rooms_capacity_map[rid1]
+            except Exception:
+                pass
+
         row = {
             "id": sid,
             # Used by frontend for correct mapping when saving remarks.
@@ -934,7 +1122,7 @@ async def _fetch_rows(user_id: str, term_id: str, db) -> Dict[str, Any]:
             "faculty_id": (d.get("asg") or {}).get("faculty_id") or "",
             "faculty": d.get("faculty_name_display", "") or "",
             **pair,
-            "capacity": d.get("enrollment_cap", "") or "",
+            "capacity": cap_value,
             "mode": mode_display,
             # Prefer canonical sections.remarks, but fall back to sections_submitted.remarks
             # (needed for SHS imports which may store remarks on the submitted snapshot).
@@ -1412,11 +1600,15 @@ async def loadassignment_handler(
         await _approve_and_persist(active["term_id"], rows, db)
 
         # 2) create/update faculty_loads header for this term (also marks forwarded_to_chair=True)
+        # Snapshot the exact sections currently visible in the OM Load Assignment table.
+        fwd_section_ids = sorted({str(r.get('section_id') or r.get('id') or '').strip() for r in rows if str(r.get('section_id') or r.get('id') or '').strip()})
+
         await _upsert_faculty_load_header(
             active,
             db,
             department_id=dept_id_header,  # existing behavior
             user_id=userId,            # query param from the route
+            forwarded_section_ids=fwd_section_ids,
         )
 
         # fetch header again to get reco_id after upsert
@@ -2079,6 +2271,15 @@ async def get_om_load_assignment_list(user_id: str, term_id: Optional[str] = Non
     base = await _fetch_rows(user_id, term_id=active["term_id"], db=db)
     rows = base["rows"]
 
+    # `selected` is a UI-only flag used by the OM table checkboxes.
+    # It must NEVER be treated as persisted data (clean-restores can reintroduce
+    # stale `selected: true` values, which can cause the OM "To Faculty" action
+    # to include unintended rows).
+    if isinstance(rows, list):
+        for r in rows:
+            if isinstance(r, dict):
+                r.pop("selected", None)
+
     # Overlay: finalized/locked flags from proposals so the OM UI can disable actions
     # (e.g., after per-course finalize or after RFC reject auto-locks the whole schedule).
     try:
@@ -2269,137 +2470,131 @@ async def get_om_load_assignment_list(user_id: str, term_id: Optional[str] = Non
         except:
             continue
 
-        # --- NEW: flatten blocked GE@CMPS0002 windows for frontend tab ---
     campus_blocked = getattr(ctx, "campus_blocked", {}) or {}
     blocked_ge_cmps2: list[dict] = []
 
-    # Campus name lookup (DB first; fallback to campus_id)
-    campus_lookup: dict[str, str] = {}
-    try:
-        campus_ids = [str(cid) for cid in (campus_blocked or {}).keys() if cid]
-        if campus_ids:
-            docs = await db[COL_CAMPUSES].find(
-                {"campus_id": {"$in": campus_ids}},
-                {"_id": 0, "campus_id": 1, "campus_name": 1, "name": 1},
-            ).to_list(None)
-            for d in docs or []:
-                cid = d.get("campus_id")
-                if cid:
-                    campus_lookup[cid] = (d.get("campus_name") or d.get("name") or cid)
-    except Exception:
-        pass
-
-    # Fallback: if ctx already has campuses (older code paths), use it
-    for c in getattr(ctx, "campuses", []) or []:
-        cid = c.get("campus_id")
-        if cid and cid not in campus_lookup:
-            campus_lookup[cid] = c.get("campus_name") or c.get("name") or cid
-
-    # Reverse day index
     idx_to_day = {1: "M", 2: "T", 3: "W", 4: "H", 5: "F", 6: "S"}
-
-    courses = ctx.courses or {}
-    sections = ctx.sections or []
-
-    # Quick maps
-    sec_by_id = {s.get("section_id"): s for s in sections if s.get("section_id")}
-
-    # Resolve section_code for blocked GE sections directly from the sections collection.
-    # We still keep ctx.sections as a fast fallback, but the DB is the source of truth.
+    sec_by_id = {s.get("section_id"): s for s in (ctx.sections or []) if s.get("section_id")}
     section_code_by_id: dict[str, str] = {}
-    try:
-        blocked_section_ids: set[str] = set()
-        for _campus_id, _day_map in (campus_blocked or {}).items():
-            if str(_campus_id or "").strip().upper() != "CMPS0002":
-                continue
-            for _di, _slots in (_day_map or {}).items():
-                for _slot in (_slots or []):
-                    sid = None
-                    if isinstance(_slot, (list, tuple)):
-                        if len(_slot) >= 3:
-                            sid = _slot[2]
-                    elif isinstance(_slot, dict):
-                        sid = _slot.get("section_id") or _slot.get("id")
-                    if sid:
-                        blocked_section_ids.add(str(sid).strip())
+    campus_lookup = {"CMPS0002": "CMPS0002"}  # keep simple; your UI uses Laguna wording anyway
 
-        blocked_section_ids = {s for s in blocked_section_ids if s}
-        if blocked_section_ids:
-            docs = await db[COL_SECTIONS].find(
-                {"section_id": {"$in": list(blocked_section_ids)}},
-                {
-                    "_id": 0,
-                    "section_id": 1,
-                    "section_code": 1,
-                    "section": 1,
-                    "section_name": 1,
-                },
+    def _iter_blocked_slots_for_cmps2(campus_blocked: dict):
+        cmps2 = campus_blocked.get("CMPS0002") or campus_blocked.get("cmps0002") or {}
+        if not isinstance(cmps2, dict):
+            return
+
+        def _looks_like_owner_key(k: Any) -> bool:
+            # supports actual tuple/list keys OR stringified tuple keys like "('PROG','BATCH')"
+            if isinstance(k, (tuple, list)) and len(k) == 2:
+                return True
+            if isinstance(k, str):
+                s = k.strip()
+                return s.startswith("(") and s.endswith(")") and "," in s
+            return False
+
+        owner_scoped = any(_looks_like_owner_key(k) for k in cmps2.keys())
+
+        if owner_scoped:
+            for _owner_key, day_map in cmps2.items():
+                if not isinstance(day_map, dict):
+                    continue
+                for day_idx, slots in day_map.items():
+                    if not isinstance(slots, list):
+                        continue
+                    for slot in slots:
+                        yield day_idx, slot
+        else:
+            for day_idx, slots in cmps2.items():
+                if not isinstance(slots, list):
+                    continue
+                for slot in slots:
+                    yield day_idx, slot
+
+    # extract blocked_section_ids (optional, keep if you use it later)
+    blocked_section_ids: set[str] = set()
+    for _day_idx, slot in _iter_blocked_slots_for_cmps2(campus_blocked):
+        if isinstance(slot, (list, tuple)) and len(slot) >= 3:
+            sid = str(slot[2] or "").strip()
+            if sid:
+                blocked_section_ids.add(sid)
+
+    # flatten blocked_ge_cmps2 (ONLY ONCE)
+    for day_idx, slot in _iter_blocked_slots_for_cmps2(campus_blocked):
+        if not isinstance(slot, (list, tuple)) or len(slot) < 4:
+            continue
+
+        try:
+            di = int(day_idx)
+        except Exception:
+            di = None
+        day = idx_to_day.get(di, "")
+
+        st_min = slot[0]
+        en_min = slot[1]
+        sid = str(slot[2] or "").strip()
+        cid = str(slot[3] or "").strip()
+        sec_code = str(slot[4] or "").strip() if len(slot) >= 5 else ""
+
+        if not sid or not cid:
+            continue
+
+        cinfo = courses.get(cid) or {}
+        course_code = cinfo.get("course_code") or cinfo.get("course_id") or cid
+        sec = sec_by_id.get(sid) or {}
+        prog_id = str(sec.get("owner_program_id") or "").strip()
+        batch_id = str(sec.get("owner_batch_id") or "").strip()
+        section_code = (
+            sec_code
+            or section_code_by_id.get(sid, "")
+            or str(sec.get("section_code") or "").strip()
+            or str(sec.get("section") or "").strip()
+            or sid
+        )
+
+        program_code_by_id: dict[str, str] = {}
+        batch_code_by_id: dict[str, str] = {}
+
+        # build from ctx.sections (or from blocked_section_ids)
+        prog_ids = set()
+        batch_ids = set()
+        for s in (ctx.sections or []):
+            p = str(s.get("owner_program_id") or "").strip()
+            b = str(s.get("owner_batch_id") or "").strip()
+            if p: prog_ids.add(p)
+            if b: batch_ids.add(b)
+
+        if prog_ids:
+            docs = await db["programs"].find(
+                {"program_id": {"$in": list(prog_ids)}},
+                {"_id": 0, "program_id": 1, "program_code": 1},
             ).to_list(None)
             for d in docs or []:
-                sid = str(d.get("section_id") or "").strip()
-                if not sid:
-                    continue
-                code = (
-                    str(d.get("section_code") or "").strip()
-                    or str(d.get("section") or "").strip()
-                    or str(d.get("section_name") or "").strip()
-                )
-                if code:
-                    section_code_by_id[sid] = code
-                # Merge into ctx-derived map so later fallbacks work too
-                sec_by_id[sid] = {**(sec_by_id.get(sid) or {}), **d}
-    except Exception:
-        # Best-effort only; do not break /list if lookups fail.
-        section_code_by_id = {}
+                program_code_by_id[str(d["program_id"])] = str(d.get("program_code") or "")
 
-    for campus_id, day_map in (campus_blocked or {}).items():
-        camp_norm = str(campus_id or "").strip().upper()
-        if camp_norm != "CMPS0002":
-            continue
-        for day_idx, slots in (day_map or {}).items():
-            try:
-                di = int(day_idx)
-            except Exception:
-                di = day_idx
-            day = idx_to_day.get(di, "")
+        if batch_ids:
+            docs = await db["batches"].find(
+                {"batch_id": {"$in": list(batch_ids)}},
+                {"_id": 0, "batch_id": 1, "batch_code": 1},
+            ).to_list(None)
+            for d in docs or []:
+                batch_code_by_id[str(d["batch_id"])] = str(d.get("batch_code") or "")
 
-            for slot in (slots or []):
-                # Expected slot shape: (st_min, en_min, section_id, course_id, section_code)
-                if not isinstance(slot, (list, tuple)) or len(slot) < 4:
-                    continue
-                st_min = slot[0]
-                en_min = slot[1]
-                sid = str(slot[2] or "").strip() if len(slot) >= 3 else ""
-                cid = str(slot[3] or "").strip() if len(slot) >= 4 else ""
-                sec_code = str(slot[4] or "").strip() if len(slot) >= 5 else ""
+        blocked_ge_cmps2.append(
+            {
+                "campus_id": "CMPS0002",
+                "campus_name": campus_lookup.get("CMPS0002", "CMPS0002"),
+                "course_id": cid,
+                "course_code": course_code,
+                "section_id": sid,
+                "section_code": section_code,
+                "day": day,
+                "begin": _mm_to_hhmm(st_min),
+                "end": _mm_to_hhmm(en_min),
 
-                if not sid or not cid:
-                    continue
-
-                cinfo = courses.get(cid) or {}
-                course_code = cinfo.get("course_code") or cinfo.get("course_id") or cid
-                sec = sec_by_id.get(sid) or {}
-                section_code = (
-                    sec_code
-                    or section_code_by_id.get(sid, "")
-                    or str(sec.get("section_code") or "").strip()
-                    or str(sec.get("section") or "").strip()
-                    or sid
-                )
-
-                blocked_ge_cmps2.append(
-                    {
-                        "campus_id": camp_norm,
-                        "campus_name": campus_lookup.get(camp_norm, camp_norm),
-                        "course_id": cid,
-                        "course_code": course_code,
-                        "section_id": sid,
-                        "section_code": section_code,
-                        "day": day,
-                        "begin": _mm_to_hhmm(st_min),
-                        "end": _mm_to_hhmm(en_min),
-                    }
-                )
+                "program": program_code_by_id.get(prog_id, prog_id) if prog_id else "",
+                "batch": batch_code_by_id.get(batch_id, batch_id) if batch_id else "",
+            }
+        )
     
     # --- NEW: pending RFC indicator per SECTION (for red dot in Actions) ---
     # RFCs are keyed by (faculty_id + term_id + section_id). The old implementation only keyed by faculty_id,
@@ -2445,6 +2640,431 @@ async def get_om_load_assignment_list(user_id: str, term_id: Optional[str] = Non
         "courseTypeOfCourse": course_type_of_course,
         "blockedGeCmps2": blocked_ge_cmps2,
     }
+
+
+@router.get("/load-assignment/submitted-courses")
+async def om_get_submitted_course_offerings(
+    user_id: str,
+    term_id: Optional[str] = None,
+    db=Depends(get_db),
+):
+    """Return course options based on submitted course offerings.
+
+    Used by OM "Add new line" Course dropdown.
+    - Restricted to the OM's department scope.
+    - Restricted to submitted_for_scheduling=True in sections_submitted.
+    """
+    # Resolve term
+    if term_id:
+        active = await db[COL_TERMS].find_one(
+            {"term_id": term_id},
+            {"_id": 0, "term_id": 1},
+        )
+        if not active:
+            raise HTTPException(status_code=404, detail="term_id not found")
+    else:
+        active = await _active_term()
+    if not (active or {}).get("term_id"):
+        raise HTTPException(status_code=409, detail="No active/upcoming term found")
+
+    dept_ids = await _om_department_ids(user_id, db)
+    if not dept_ids:
+        return {"ok": True, "courses": []}
+
+    tid = active["term_id"]
+    pipe: list[dict[str, Any]] = [
+        {"$match": {"term_id": tid, "submitted_for_scheduling": True}},
+        {"$lookup": {"from": COL_COURSES, "localField": "course_id", "foreignField": "course_id", "as": "course"}},
+        {"$unwind": {"path": "$course", "preserveNullAndEmptyArrays": False}},
+        {"$match": {"course.department_id": {"$in": dept_ids}}},
+        {
+            "$match": {
+                "$or": [
+                    {"course.type_of_course": {"$in": ["Major", "Foundation", "SHS", "GS"]}},
+                    {"course.type": {"$in": ["Major", "Foundation", "SHS", "GS"]}},
+                ]
+            }
+        },
+        {
+            "$addFields": {
+                "course_code_display": {
+                    "$cond": [
+                        {"$isArray": "$course.course_code"},
+                        {"$ifNull": [{"$arrayElemAt": ["$course.course_code", 0]}, ""]},
+                        {"$ifNull": ["$course.course_code", ""]},
+                    ]
+                },
+                "course_title_display": {"$ifNull": ["$course.course_title", ""]},
+                "course_units_display": {"$ifNull": ["$course.units", {"$ifNull": ["$course.units_per_section", 0]}]},
+            }
+        },
+        {
+            "$group": {
+                "_id": "$course.course_id",
+                "code": {"$first": "$course_code_display"},
+                "title": {"$first": "$course_title_display"},
+                "units": {"$first": "$course_units_display"},
+                # Best-effort: capacity from submitted offerings (max enrollment_cap across sections)
+                "capacity": {"$max": {"$ifNull": ["$enrollment_cap", 0]}},
+            }
+        },
+        {"$project": {"_id": 0, "code": 1, "title": 1, "units": 1, "capacity": 1}},
+        {"$sort": {"code": 1}},
+    ]
+
+    docs = [x async for x in db[COL_SECTIONS_SUBMITTED].aggregate(pipe)]
+    # Sanitize
+    out: list[dict[str, Any]] = []
+    for d in docs or []:
+        code = str(d.get("code") or "").strip()
+        title = str(d.get("title") or "").strip()
+        if not code:
+            continue
+        try:
+            units = int(d.get("units") or 0)
+        except Exception:
+            units = 0
+        try:
+            cap = int(d.get("capacity") or 0)
+        except Exception:
+            cap = 0
+        out.append({"code": code, "title": title, "units": units, "capacity": cap})
+
+    return {"ok": True, "courses": out}
+
+
+@router.post("/load-assignment/new-line")
+async def om_save_new_line(
+    user_id: str,
+    payload: Dict[str, Any] = Body(...),
+    term_id: Optional[str] = None,
+    db=Depends(get_db),
+):
+    """Persist an OM-created inline row ("Add new line") and notify the routed APO.
+
+    Notes:
+    - Course must exist in submitted course offerings for the term.
+    - Course title is derived from courses.course_title (not user-editable).
+    - Rooms are left as TBA; APO will assign rooms.
+    """
+    # Resolve term
+    if term_id:
+        active = await db[COL_TERMS].find_one(
+            {"term_id": term_id},
+            {"_id": 0, "term_id": 1},
+        )
+        if not active:
+            raise HTTPException(status_code=404, detail="term_id not found")
+    else:
+        active = await _active_term()
+    if not (active or {}).get("term_id"):
+        raise HTTPException(status_code=409, detail="No active/upcoming term found")
+    tid = active["term_id"]
+
+    # Validate required payload fields
+    course_code = str(payload.get("course_code") or "").strip()
+    section_code = str(payload.get("section_code") or "").strip()
+    faculty_id = str(payload.get("faculty_id") or "").strip()
+    mode = str(payload.get("mode") or "").strip().upper()
+    day1 = str(payload.get("day1") or "").strip().upper()
+    begin1 = _norm_hhmm(str(payload.get("begin1") or "").strip())
+    end1 = _norm_hhmm(str(payload.get("end1") or "").strip())
+
+    if not course_code or not section_code or not faculty_id or not mode or not day1 or not begin1 or not end1:
+        raise HTTPException(status_code=422, detail="Missing required fields")
+
+    # Optional meeting 2
+    day2 = str(payload.get("day2") or "").strip().upper()
+    begin2 = _norm_hhmm(str(payload.get("begin2") or "").strip())
+    end2 = _norm_hhmm(str(payload.get("end2") or "").strip())
+    if any([day2, begin2, end2]) and not (day2 and begin2 and end2):
+        raise HTTPException(status_code=422, detail="Meeting 2 must include Day 2, Begin 2, and End 2")
+
+    # Course must be in OM scope AND exist in submitted offerings
+    dept_ids = await _om_department_ids(user_id, db)
+    if not dept_ids:
+        raise HTTPException(status_code=403, detail="OM has no department scope")
+
+    course_doc = await _find_course_by_code(course_code, db)
+    if not course_doc:
+        raise HTTPException(status_code=404, detail="Course not found")
+    if str(course_doc.get("department_id") or "").strip() not in dept_ids:
+        raise HTTPException(status_code=403, detail="Course not in OM department scope")
+
+    course_id = str(course_doc.get("course_id") or "").strip()
+    if not course_id:
+        raise HTTPException(status_code=500, detail="Course is missing course_id")
+
+    # --- APO validation helpers ---
+    def _apo_from_section_prefix(sec: str) -> str:
+        """Return 'APO Manila' or 'APO Laguna' based on section prefix."""
+        s = (sec or "").strip().upper()
+        if s.startswith("XX") or s.startswith("XC"):
+            return "APO Laguna"
+        if s.startswith("S") or s.startswith("G"):
+            return "APO Manila"
+        return ""
+
+    def _apo_from_campus_id(cid: str) -> str:
+        """Best-effort mapping of campus_id -> APO name."""
+        c = (cid or "").strip().upper()
+        # Project convention observed in other modules: CMPS0001=Manila, CMPS0002=Laguna
+        if c == "CMPS0001":
+            return "APO Manila"
+        if c == "CMPS0002":
+            return "APO Laguna"
+        return ""
+
+    async def _infer_om_campus_id() -> str:
+        """Infer OM campus_id from payload, OM role scope, or term offerings."""
+        # 1) explicit payload override
+        cid = str(payload.get("campus_id") or "").strip()
+        if cid:
+            return cid
+
+        # 2) OM role scope (ROLE0006) may include campus scopes
+        ra = await db.get_collection("role_assignments").find_one(
+            {"user_id": user_id, "role_id": "ROLE0006"},
+            {"_id": 0, "scope": 1},
+        ) or {}
+        for sc in (ra.get("scope") or []):
+            if not isinstance(sc, dict):
+                continue
+            typ = str(sc.get("type") or sc.get("scope_type") or "").strip().lower()
+            if typ in ("campus", "campuses") or "campus" in typ:
+                v = str(sc.get("id") or sc.get("scope_id") or sc.get("campus_id") or "").strip()
+                if v:
+                    return v
+
+        # 3) Infer from the submitted offerings for this OM's department scope in the term
+        try:
+            pipe = [
+                {"$match": {"term_id": tid, "submitted_for_scheduling": True}},
+                {"$lookup": {"from": COL_COURSES, "localField": "course_id", "foreignField": "course_id", "as": "course"}},
+                {"$unwind": {"path": "$course", "preserveNullAndEmptyArrays": False}},
+                {"$match": {"course.department_id": {"$in": dept_ids}}},
+                {"$group": {"_id": "$campus_id", "n": {"$sum": 1}}},
+                {"$sort": {"n": -1}},
+                {"$limit": 1},
+            ]
+            top = [x async for x in db[COL_SECTIONS_SUBMITTED].aggregate(pipe)]
+            if top and top[0].get("_id"):
+                return str(top[0]["_id"]).strip()
+        except Exception:
+            pass
+        return ""
+
+    # Ensure this course exists in submitted offerings for this term (same source as OM table)
+    # NOTE: campus_id from the submitted offering is the source of truth for which
+    # APO/campus this course offering belongs to. This prevents false Manila/Laguna
+    # mismatches when an OM has Manila scope but is editing a Laguna offering (or vice versa).
+    offering_exists = await db[COL_SECTIONS_SUBMITTED].find_one(
+        {
+            "term_id": tid,
+            "submitted_for_scheduling": True,
+            "course_id": course_id,
+        },
+        {"_id": 0, "section_id": 1, "campus_id": 1},
+    )
+    if not offering_exists:
+        raise HTTPException(status_code=409, detail="Course is not part of submitted course offerings")
+
+    # 1) Prevent duplicate sections per course (same course_code/course_id) for the active term
+    dup = await db[COL_SECTIONS_SUBMITTED].find_one(
+        {
+            "term_id": tid,
+            "submitted_for_scheduling": True,
+            "course_id": course_id,
+            "section_code": {"$regex": rf"^{re.escape(section_code)}$", "$options": "i"},
+        },
+        {"_id": 0, "section_id": 1},
+    )
+    if dup:
+        raise HTTPException(status_code=409, detail="Duplicate section: this section already exists for that course")
+
+    # 2) Enforce APO rules based on section prefix AND the course offering's campus.
+    # The submitted course offering (sections_submitted) is treated as the source of truth
+    # for which campus/APO the course belongs to.
+    section_apo = _apo_from_section_prefix(section_code)
+    if not section_apo:
+        raise HTTPException(
+            status_code=409,
+            detail="Invalid section: use S/G (APO Manila) or XX/XC (APO Laguna)",
+        )
+
+    expected_campus_id = (
+        str(payload.get("campus_id") or "").strip()
+        or str(offering_exists.get("campus_id") or "").strip()
+    )
+    expected_apo = _apo_from_campus_id(expected_campus_id)
+    if expected_apo and section_apo != expected_apo:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Invalid section: This section belongs to {section_apo}, but you’re assigning for {expected_apo}.",
+        )
+
+    # Generate a new section_id in the existing SEC#### format
+    ctx = await phase0_load(tid, db, department_id=None)
+    seq = _next_section_seq_from_ctx(ctx)
+    section_id = f"SEC{seq:04d}"
+    # Very defensive: avoid collision
+    while await db[COL_SECTIONS].find_one({"section_id": section_id}, {"_id": 0, "section_id": 1}):
+        seq += 1
+        section_id = f"SEC{seq:04d}"
+
+    # Campus routing: prefer the course offering's campus_id (source of truth),
+    # fall back to section-prefix inference for safety.
+    campus_id = expected_campus_id or _section_to_campus_id(section_code)
+
+    # Units/capacity (title is derived)
+    try:
+        units = int(payload.get("units") or course_doc.get("units") or course_doc.get("units_per_section") or 0)
+    except Exception:
+        units = 0
+    try:
+        cap = int(payload.get("capacity") or 0)
+    except Exception:
+        cap = 0
+
+    remarks = str(payload.get("remarks") or "").strip()
+
+    now = _utcnow()
+
+    # 1) Canonical sections doc (remarks live here)
+    await db[COL_SECTIONS].insert_one(
+        {
+            "section_id": section_id,
+            "term_id": tid,
+            "course_id": course_id,
+            "section_code": section_code,
+            "department_id": str(course_doc.get("department_id") or "").strip(),
+            "campus_id": campus_id,
+            "units": units,
+            "enrollment_cap": cap,
+            "mode": mode,
+            "remarks": remarks,
+            "created_at": now,
+            "updated_at": now,
+        }
+    )
+
+    # 2) Submitted snapshot (drives OM table)
+    await db[COL_SECTIONS_SUBMITTED].insert_one(
+        {
+            "section_id": section_id,
+            "term_id": tid,
+            "course_id": course_id,
+            "section_code": section_code,
+            "submitted_for_scheduling": True,
+            "enrollment_cap": cap,
+            "campus_id": campus_id,
+            "remarks": remarks,
+            "created_at": now,
+            "updated_at": now,
+        }
+    )
+
+    # 3) Schedules (rooms are left blank/TBA)
+    sched_docs: list[dict[str, Any]] = []
+    sched_docs.append(
+        {
+            "schedule_id": _sched_id(section_id, 1),
+            "term_id": tid,
+            "section_id": section_id,
+            "day": day1,
+            "start_time": _to_compact_hhmm(begin1),
+            "end_time": _to_compact_hhmm(end1),
+            "room_id": "",
+            "created_at": now,
+            "updated_at": now,
+        }
+    )
+    if day2 and begin2 and end2:
+        sched_docs.append(
+            {
+                "schedule_id": _sched_id(section_id, 2),
+                "term_id": tid,
+                "section_id": section_id,
+                "day": day2,
+                "start_time": _to_compact_hhmm(begin2),
+                "end_time": _to_compact_hhmm(end2),
+                "room_id": "",
+                "created_at": now,
+                "updated_at": now,
+            }
+        )
+    if sched_docs:
+        await db[COL_SCHED].insert_many(sched_docs)
+
+    # 4) Faculty assignment (Pending)
+    assignment_doc = {
+        "assignment_id": f"ASG-{uuid.uuid4().hex[:10].upper()}",
+        "load_id": f"LOAD-{uuid.uuid4().hex[:10].upper()}",
+        "section_id": section_id,
+        "faculty_id": faculty_id,
+        "course_id": course_id,
+        "term_id": tid,
+        "status": "Pending",
+        "is_archived": False,
+        "synced_from_faculty_service": False,
+        "created_at": now,
+        "updated_at": now,
+    }
+    await db[COL_ASSIGN].insert_one(assignment_doc)
+
+    # 5) Notify routed APO (best-effort)
+    # IMPORTANT: in-app notification must always be created; Gmail send is best-effort.
+    # The previous implementation swallowed any exception and could result in *no* in-app
+    # notification when campus routing couldn't resolve recipients.
+    details = (
+        f"A new section was added by OM and requires room assignment.\n\n"
+        f"Course: {course_code} — {str(course_doc.get('course_title') or '').strip()}\n"
+        f"Section: {section_code}\n"
+        f"Day/Time: {day1} {begin1}-{end1}" + (f"; {day2} {begin2}-{end2}" if day2 and begin2 and end2 else "")
+    ).strip()
+    meta = {
+        # Route should point to the APO screen where room assignment is handled.
+        "route": "/apo/load-assignment",
+        "kind": "om_new_line",
+        "term_id": tid,
+        "section_id": section_id,
+        "campus_id": campus_id,
+    }
+
+    apo_uids: list[str] = []
+    try:
+        if campus_id:
+            apo_uids = await _apo_user_ids_for_campus(campus_id, db)
+    except Exception:
+        apo_uids = []
+
+    # Fallback: if campus_id is blank or no APOs were found, re-infer using section prefix.
+    if not apo_uids:
+        try:
+            inferred_campus = _section_to_campus_id(section_code)
+            if inferred_campus:
+                apo_uids = await _apo_user_ids_for_campus(inferred_campus, db)
+                meta["campus_id"] = inferred_campus
+        except Exception:
+            apo_uids = []
+
+    # Create one notification per APO user.
+    for uid in apo_uids or []:
+        try:
+            await _ensure_user_gmail_address(uid, db)
+            await create_notification(
+                user_id=uid,
+                title="New section pending room assignment",
+                details=details,
+                meta=meta,
+                send_email=True,
+                email_from_user_id=user_id,
+            )
+        except Exception:
+            # Never fail the save due to notification issues.
+            continue
+
+    return {"ok": True, "section_id": section_id}
 
 
 
@@ -2925,6 +3545,18 @@ async def om_finalize_course(payload: Dict[str, Any] = Body(...), db=Depends(get
     except Exception:
         pass
 
+    try:
+        await _notify_apo_room_allocation_ready(
+            db=db,
+            om_user_id=user_id,
+            term_id=term_id,
+            faculty_id=faculty_id,
+            course_code=course_code,
+            section_code=section,
+        )
+    except Exception:
+        pass
+
     return {"ok": True, "course_code": course_code, "section": section}
 
 @router.post("/load-assignment/run")
@@ -3202,7 +3834,6 @@ async def run_auto_assignment(
             },
         }
 
-
     suggestions = {s["section_id"]: s for s in sugg.get("assignments", [])}
 
     overlay_reasons: dict[str, dict] = {}
@@ -3232,6 +3863,10 @@ async def run_auto_assignment(
                 # we know there was a faculty_id in Phase 7 (info["faculty_id"])
                 r["faculty"] = ""
                 r["faculty_id"] = ""
+
+                for k in ("day1","begin1","end1","day2","begin2","end2","room1","room2"):
+                    r[k] = ""
+
                 # mark as unassigned but with a conflict note so it's traceable
                 r["status"] = "Unassigned"
                 r["conflictNote"] = (
@@ -3515,6 +4150,9 @@ async def run_auto_assignment(
                 weaker_row["faculty"] = ""
                 weaker_row["status"] = "Unassigned"
 
+                for k in ("day1","begin1","end1","day2","begin2","end2","room1","room2"):
+                    weaker_row[k] = ""
+
                 extra_msg = (
                     " Auto-assign dropped this faculty from this section due to a "
                     "schedule clash with a higher-priority class."
@@ -3713,13 +4351,22 @@ async def run_auto_assignment(
         else:
             r["pending_rfc"] = bool(fid and sid and (fid, sid) in open_rfc_keys)
 
+    for r in rows:
+        fid = (r.get("faculty_id") or r.get("facultyId") or "").strip()
+        fname = (r.get("faculty") or r.get("facultyName") or "").strip()
+
+        if (not fid) or (not fname):
+            for k in ("day1", "begin1", "end1", "day2", "begin2", "end2", "room1", "room2"):
+                r[k] = ""
+            if not fid:
+                r["status"] = "Unassigned"
+
     return {
         "term": _term_label(active),
         "term_id": term_id,
         "rows": rows,
         "debug": {**debug, **prefs_debug, "overlay_no_time_details": overlay_reasons},
     }
-
 
 #    ===========================================================
 #    =====================  LOAD RECO ==========================
@@ -3782,7 +4429,11 @@ async def phase0_load(term_id: str, db, department_id: str | None = None) -> Con
         "campus_id": 1,
         "units": 1,
         "mode": 1,
-        # schedule fields (if denormalized on sections)
+        
+        "owner_program_id": 1,
+        "owner_batch_id": 1,
+        "batch_number": 1,
+
         "day1": 1,
         "begin1": 1,
         "end1": 1,
@@ -4258,12 +4909,9 @@ async def phase0_load(term_id: str, db, department_id: str | None = None) -> Con
     # Replace the pool used by downstream phases (B/6A/6B)
     ctx.faculty = eligible
 
-        # --- NEW: GE @ CMPS0002 windows (for slot pool + frontend tab) ---
-    # Build: campus_blocked[campus_id][day_index] = list[(st_min, en_min, section_id, course_id, section_code)]
-    campus_blocked: dict[str, dict[int, list[tuple[int, int, str, str, str]]]] = {}
+    # --- NEW: GE @ CMPS0002 windows (OWNER-scoped) ---
+    campus_blocked: dict[str, dict[tuple[str | None, str | None], dict[int, list[tuple[int, int, str, str, str]]]]] = {}
 
-    # Day → index helper
-    # Day → index helper (accept both single-letter codes and DB-friendly strings like "Mon", "Thu")
     day_to_idx = {
         "M": 1, "MON": 1, "MONDAY": 1,
         "T": 2, "TUE": 2, "TUES": 2, "TUESDAY": 2,
@@ -4273,52 +4921,50 @@ async def phase0_load(term_id: str, db, department_id: str | None = None) -> Con
         "S": 6, "SAT": 6, "SATURDAY": 6,
     }
 
-    sections = ctx.sections or []
-    courses = ctx.courses or {}
-    sched_by_sec = ctx.schedules_by_section or {}
+    sections0 = ctx.sections or []
+    courses0 = ctx.courses or {}
+    sched_by_sec0 = ctx.schedules_by_section or {}
 
-    for sec in sections:
+    for sec in sections0:
         sid = sec.get("section_id")
         if not sid:
             continue
-        campus_id = str(sec.get("campus_id") or "")
-        if not campus_id:
+
+        campus_id0 = str(sec.get("campus_id") or "").strip().upper()
+        if campus_id0 != "CMPS0002":
             continue
 
-        cid = sec.get("course_id")
+        cid = (sec.get("course_id") or "").strip()
         if not cid:
             continue
-        cinfo = courses.get(cid) or {}
 
-        # Only GE courses
-        ctype = str(
-            cinfo.get("type_of_course") or cinfo.get("type") or ""
-        ).strip().upper()
+        cinfo = courses0.get(cid) or {}
+        ctype = str(cinfo.get("type_of_course") or cinfo.get("type") or "").strip().upper()
         if ctype != "GE":
             continue
 
-        # Only campus CMPS0002
-        if campus_id != "CMPS0002":
-            continue
+        owner_key = (
+            (sec.get("owner_program_id") or None),
+            (sec.get("owner_batch_id") or None),
+        )
 
         sec_code = sec.get("section_code") or sec.get("section") or ""
 
-        # Look at all schedules for this section
-        for sch in sched_by_sec.get(sid, []):
+        for sch in sched_by_sec0.get(sid, []):
             d = (sch.get("day") or "").strip().upper()
             if d not in day_to_idx:
                 continue
+
             st = _to_min(sch.get("begin_time") or sch.get("start_time"))
             en = _to_min(sch.get("end_time"))
             if st is None or en is None or en <= st:
                 continue
 
-            idx = day_to_idx[d]
-            campus_blocked.setdefault(campus_id, {}).setdefault(idx, []).append(
+            di = day_to_idx[d]
+            campus_blocked.setdefault("CMPS0002", {}).setdefault(owner_key, {}).setdefault(di, []).append(
                 (st, en, sid, cid, sec_code)
             )
 
-    # Expose on ctx for later phases + /list route
     ctx.campus_blocked = campus_blocked
 
     print("[phase0] faculty:", len(all_fids),
@@ -4726,6 +5372,10 @@ def _flag_faculty_conflicts(rows: list[dict], resolve_conflicts: bool = False) -
                 weaker["faculty"] = ""
                 # Keep mode as-is; just unassign and mark appropriately
                 weaker["status"] = "Unassigned"
+
+                for k in ("day1","begin1","end1","day2","begin2","end2","room1","room2"):
+                    weaker[k] = ""
+
                 extra_msg = f" Auto-assign dropped this faculty due to clash with another section."
                 existing = (weaker.get("conflictNote") or "").strip()
                 if extra_msg not in existing:
@@ -6318,24 +6968,6 @@ async def run_milestone_e_phase7(term_id: str, db, department_id: str | None = N
     # Inverse map of day_int -> day_code (1->'M', etc.)
     INV_DAY_MAP = {v: k for k, v in _DAY_MAP.items()}
 
-    # helper: does this (day_idx, interval) hit a blocked GE@CMPS0002 window?
-    def _is_blocked_ge_cmps2_slot(section_id: str, day_idx: int, interval: tuple[int, int]) -> bool:
-        """
-        Returns True if the candidate (section_id, day_idx, [st,en]) overlaps
-        any GE@CMPS0002 blocked window.
-        """
-        campus_id = _section_campus(courses_ctx, section_id)
-        if campus_id != "CMPS0002":
-            return False
-
-        by_day = (campus_blocked.get("CMPS0002") or {}).get(day_idx, [])
-        st, en = interval
-        for bst, ben, _, _, _ in by_day:
-            # overlap if not (new ends before old starts OR new starts after old ends)
-            if not (en <= bst or st >= ben):
-                return True
-        return False
-
     def _all_pref_windows(fp: dict) -> list[tuple[int, int]]:
         """
         Return *all* usable preferred windows for a faculty as minute pairs.
@@ -6498,22 +7130,37 @@ async def run_milestone_e_phase7(term_id: str, db, department_id: str | None = N
 
     def _is_blocked_ge_cmps2_slot(sid: str, di: int, interval: tuple[int, int]) -> bool:
         """
-        CMPS0002 GE sections should not be scheduled in a time window that exactly
-        matches any existing CMPS0002 section (blocked windows).
+        Owner-scoped blocking:
+        A CMPS0002 GE blocked window only blocks sections that share the same
+        (owner_program_id, owner_batch_id).
         """
         sec = sections_by_id.get(sid, {})
         campus = (sec.get("campus_id") or "").strip().upper()
-        cid = sec.get("course_id")
-        c = (courses.get(cid) or {})
-        ttype = str(c.get("type_of_course") or c.get("type") or "").strip().upper()
-
-        if campus != "CMPS0002" or ttype != "GE":
+        if campus != "CMPS0002":
             return False
 
-        day_map = campus_blocked.get("CMPS0002", {})
-        blocked_arr = day_map.get(di, [])
-        return interval in blocked_arr
+        cid = (sec.get("course_id") or "").strip()
+        c = (courses.get(cid) or {})
+        ttype = str(c.get("type_of_course") or c.get("type") or "").strip().upper()
+        if ttype != "GE":
+            return False
 
+        owner_key = (
+            (sec.get("owner_program_id") or None),
+            (sec.get("owner_batch_id") or None),
+        )
+
+        # campus_blocked structure (from your updated phase0_load):
+        # campus_blocked["CMPS0002"][owner_key][day_idx] -> [(st,en,section_id,course_id,section_code), ...]
+        by_owner = (campus_blocked.get("CMPS0002") or {})
+        day_map = (by_owner.get(owner_key) or {})
+        blocked_arr = day_map.get(di, [])
+
+        st, en = interval
+        for bst, ben, *_rest in blocked_arr:
+            if not (en <= bst or st >= ben):  # overlap
+                return True
+        return False
 
     def _course_is_shs(cid: str) -> bool:
         t = (courses.get(cid) or {}).get("type") or (courses.get(cid) or {}).get("type_of_course")
@@ -7304,6 +7951,7 @@ async def _upsert_faculty_load_header(
     *,
     department_id: str,
     user_id: str,
+    forwarded_section_ids: list[str] | None = None,
 ) -> None:
     """
     Ensure a faculty_loads header exists for this term+department
@@ -7353,6 +8001,9 @@ async def _upsert_faculty_load_header(
             # NEW: marks that OM has forwarded/submitted to Chair
             "forwarded_to_chair": True,
             "forwarded_to_chair_at": now,
+            # Snapshot of sections forwarded from OM Load Assignment table
+            "forwarded_section_ids": sorted(list(set(forwarded_section_ids or []))),
+            "forwarded_row_count": len(set(forwarded_section_ids or [])),
         }
         await db[COL_FACULTY_LOADS].insert_one(doc)
     else:
@@ -7371,6 +8022,9 @@ async def _upsert_faculty_load_header(
                 # NEW: ensure it's marked forwarded; preserve first forwarded timestamp if it exists
                 "forwarded_to_chair": True,
                 "forwarded_to_chair_at": now,
+                # Always overwrite snapshot on re-forward so Chair sees exactly the current table rows
+                "forwarded_section_ids": sorted(list(set(forwarded_section_ids or []))),
+                "forwarded_row_count": len(set(forwarded_section_ids or [])),
             }
             },
         )

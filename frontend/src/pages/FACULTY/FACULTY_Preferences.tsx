@@ -1659,10 +1659,16 @@ export default function FACULTY_Preferences() {
 
   const { past: openPassedPage } = useCountdown(prefsWindow.openISO || "");
   const { past: deadlinePassedPage } = useCountdown(prefsWindow.deadlineISO || "");
-  // const editingLocked = !openPassedPage || deadlinePassedPage;
-
-  // 🚫 TEMP: always allow editing so we can test DB updates
-  const editingLocked = false;
+  // Editing is allowed only while the submission window is active.
+  // - Locked before submissions open
+  // - Locked after the deadline passes
+  // - Locked when the OM has not configured a window yet (missing timestamps)
+  // If the OM resets/extends the deadline (backend returns a new deadlineISO), this will automatically re-enable.
+  const editingLocked =
+    !prefsWindow.openISO ||
+    !prefsWindow.deadlineISO ||
+    !openPassedPage ||
+    deadlinePassedPage;
 
   const [kacOptions, setKacOptions] = useState<Array<{ kac_id: string; kac_code: string; kac_name: string }>>([]);
   const [daysMaster, setDaysMaster] = useState<string[]>([]);
