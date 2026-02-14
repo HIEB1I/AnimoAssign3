@@ -635,6 +635,16 @@ async def list_notifications(
     userId: str = Query(..., description="Current logged-in user's id"),
     limit: int = Query(25, ge=1, le=100),
 ) -> Dict[str, Any]:
+    # IMPORTANT: This project doesn't rely on a background scheduler/cron.
+    # To ensure deadline reminders are still delivered, we opportunistically
+    # generate any *due* reminders whenever the user polls notifications.
+    #
+    # This is safe because reminders are deduped via meta.dedupe_key.
+    try:
+        await run_om_submit_deadline_reminders()
+    except Exception:
+        pass
+
     cur = (
         db[COL_NOTIFS]
         .find({"user_id": userId}, {"_id": 0})
@@ -649,9 +659,13 @@ async def list_notifications(
 COL_TERMS = "terms"
 COL_PRE_ENLIST = "preenlistment_count"
 COL_PREFS_WINDOWS = "faculty_prefs_windows"
+COL_OM_SUBMIT_WINDOWS = "om_submit_windows"
+COL_USER_ROLES = "user_roles"
+COL_ROLE_ASSIGN = "role_assignments"
 COL_FACULTY_PROFILES = "faculty_profiles"
 COL_FACULTY_PREFS = "faculty_preferences"
 COL_USERS = "users"  # adjust if your user collection name differs
+COL_DEPARTMENTS = "departments"
 
 
 def _parse_iso_dt(s: str) -> Optional[datetime]:
@@ -790,9 +804,9 @@ async def run_prefs_deadline_reminders() -> Dict[str, Any]:
         return {"ok": True, "did": "noop", "reason": "outside_window"}
 
     seconds_left = (deadline_dt - now).total_seconds()
-    days_left = 0
-
-    # days_left = int(seconds_left // 86400)  # floor
+    days_left = int(seconds_left // 86400)  # floor
+    if days_left < 0:
+        days_left = 0
 
     # Trigger days: 7, 1, 0
     if days_left not in (7, 1, 0):
@@ -855,6 +869,314 @@ async def run_prefs_deadline_reminders() -> Dict[str, Any]:
         "faculty_notified": len(faculty_user_ids),
         "om_notified": len(om_user_ids),
     }
+
+
+# --- Deadline reminders (OM submission deadline set by APO) -------------------
+
+async def _get_planning_term_doc() -> Optional[Dict[str, Any]]:
+    """Resolve the APO planning term (next term after current) using the same rules as APO_CourseOfferings."""
+
+    async def _current_term() -> Optional[Dict[str, Any]]:
+        t = await db[COL_TERMS].find_one(
+            {"is_current": True},
+            {"_id": 0, "term_id": 1, "acad_year_start": 1, "term_number": 1},
+        )
+        if t and t.get("term_id"):
+            return t
+
+        # Best-effort: use latest pre-enlistment_count term_id to mark current
+        try:
+            latest = (
+                await db[COL_PRE_ENLIST]
+                .find({}, {"_id": 0, "term_id": 1})
+                .sort([("created_at", -1)])
+                .to_list(length=1)
+            )
+            if latest:
+                tid = (latest[0] or {}).get("term_id")
+                if tid:
+                    await db[COL_TERMS].update_one({"term_id": tid}, {"$set": {"is_current": True}})
+                    t2 = await db[COL_TERMS].find_one(
+                        {"is_current": True},
+                        {"_id": 0, "term_id": 1, "acad_year_start": 1, "term_number": 1},
+                    )
+                    if t2 and t2.get("term_id"):
+                        return t2
+        except Exception:
+            pass
+
+        # fallback: latest term
+        t3 = await db[COL_TERMS].find_one(
+            {},
+            {"_id": 0, "term_id": 1, "acad_year_start": 1, "term_number": 1},
+            sort=[("acad_year_start", -1), ("term_number", -1)],
+        )
+        return t3
+
+    base = await _current_term()
+    if not base or not base.get("term_id"):
+        return None
+
+    base_year = base.get("acad_year_start")
+    base_no = base.get("term_number")
+
+    # TERM#### + 1 fallback
+    if base_year is None or base_no is None:
+        base_id = str(base.get("term_id") or "")
+        try:
+            prefix = base_id[:4]
+            num = int(base_id[4:])
+            next_id = f"{prefix}{num + 1:04d}"
+        except Exception:
+            return base
+
+        nxt = await db[COL_TERMS].find_one(
+            {"term_id": next_id},
+            {"_id": 0, "term_id": 1, "acad_year_start": 1, "term_number": 1},
+        )
+        return nxt or base
+
+    nxt = await db[COL_TERMS].find_one(
+        {
+            "$or": [
+                {"acad_year_start": {"$gt": base_year}},
+                {"acad_year_start": base_year, "term_number": {"$gt": base_no}},
+            ]
+        },
+        {"_id": 0, "term_id": 1, "acad_year_start": 1, "term_number": 1},
+        sort=[("acad_year_start", 1), ("term_number", 1)],
+    )
+
+    return nxt or base
+
+
+def _scope_matches_campus(scope_val: Any, campus_id: str) -> bool:
+    if not campus_id or not scope_val:
+        return False
+    scopes = []
+    if isinstance(scope_val, dict):
+        scopes = [scope_val]
+    elif isinstance(scope_val, list):
+        scopes = [s for s in scope_val if isinstance(s, dict)]
+
+    for s in scopes:
+        st = str(s.get("type") or "").strip().lower()
+        if st != "campus":
+            continue
+        cid = s.get("id") or s.get("campus_id") or s.get("campus")
+        if cid and str(cid).strip() == campus_id:
+            return True
+    return False
+
+
+def _scope_department_ids(scope_val: Any) -> list[str]:
+    if not scope_val:
+        return []
+    scopes = []
+    if isinstance(scope_val, dict):
+        scopes = [scope_val]
+    elif isinstance(scope_val, list):
+        scopes = [s for s in scope_val if isinstance(s, dict)]
+
+    out: list[str] = []
+    for s in scopes:
+        st = str(s.get("type") or "").strip().lower()
+        if st != "department":
+            continue
+        did = s.get("id") or s.get("department_id") or s.get("dept_id")
+        if did:
+            out.append(str(did).strip())
+    return out
+
+
+async def _om_and_gs_user_ids_for_campus(campus_id: str) -> list[str]:
+    """Find OM + GS Coordinator user_ids for a campus.
+
+    Role assignments may be scoped by campus OR department (departments have campus_id) OR global.
+    """
+
+    campus_id = (campus_id or "").strip()
+    ids: list[str] = []
+
+    # 1) Discover role_ids
+    role_ids: list[str] = []
+    try:
+        roles = await db[COL_USER_ROLES].find(
+            {
+                "$or": [
+                    {"role_type": {"$regex": r"(^OM$|Office Manager)", "$options": "i"}},
+                    {"role_type": {"$regex": r"GS\s*Coordinator", "$options": "i"}},
+                ]
+            },
+            {"_id": 0, "role_id": 1},
+        ).to_list(500)
+        role_ids = [r.get("role_id") for r in roles if r.get("role_id")]
+    except Exception:
+        role_ids = []
+
+    # 2) Filter role assignments by scope
+    try:
+        if role_ids:
+            ras = await db[COL_ROLE_ASSIGN].find(
+                {"role_id": {"$in": role_ids}},
+                {"_id": 0, "user_id": 1, "scope": 1},
+            ).to_list(2000)
+
+            dept_ids: set[str] = set()
+            for ra in ras:
+                for did in _scope_department_ids(ra.get("scope")):
+                    if did:
+                        dept_ids.add(did)
+
+            dept_to_campus: dict[str, str] = {}
+            if dept_ids:
+                cur = db[COL_DEPARTMENTS].find(
+                    {
+                        "$or": [
+                            {"department_id": {"$in": list(dept_ids)}},
+                            {"dept_id": {"$in": list(dept_ids)}},
+                            {"id": {"$in": list(dept_ids)}},
+                        ]
+                    },
+                    {"_id": 0, "department_id": 1, "dept_id": 1, "id": 1, "campus_id": 1},
+                )
+                async for d in cur:
+                    cid = str(d.get("campus_id") or "").strip()
+                    for k in (d.get("department_id"), d.get("dept_id"), d.get("id")):
+                        if k:
+                            dept_to_campus[str(k).strip()] = cid
+
+            for ra in ras:
+                uid = (ra.get("user_id") or "").strip()
+                if not uid:
+                    continue
+
+                scope = ra.get("scope")
+                if not scope:
+                    ids.append(uid)
+                    continue
+
+                if not campus_id:
+                    ids.append(uid)
+                    continue
+
+                if _scope_matches_campus(scope, campus_id):
+                    ids.append(uid)
+                    continue
+
+                for did in _scope_department_ids(scope):
+                    if dept_to_campus.get(did) == campus_id:
+                        ids.append(uid)
+                        break
+    except Exception:
+        pass
+
+    # 3) Fallback: users.role field
+    if not ids:
+        try:
+            cur2 = db[COL_USERS].find(
+                {"role": {"$in": ["OM", "Office Manager", "GS", "GS Coordinator"]}},
+                {"_id": 0, "user_id": 1},
+            )
+            async for u in cur2:
+                if u.get("user_id"):
+                    ids.append(u["user_id"])
+        except Exception:
+            pass
+
+    seen = set()
+    out: list[str] = []
+    for x in ids:
+        if x in seen:
+            continue
+        seen.add(x)
+        out.append(x)
+    return out
+
+
+@router.post("/run-om-submit-deadline-reminders")
+async def run_om_submit_deadline_reminders() -> Dict[str, Any]:
+    """Generate OM submission deadline reminders for windows set by APO.
+
+    Uses *time windows* so reminders aren't missed:
+      - 7 days before: [deadline-7d, deadline-6d)
+      - 3 days before: [deadline-3d, deadline-2d)
+      - 2 days before: [deadline-2d, deadline-1d)
+      - 1 day before : [deadline-1d, deadline)
+
+    Deadlines are stored per (planning term_id, campus_id).
+    """
+
+    term = await _get_planning_term_doc()
+    if not term:
+        return {"ok": True, "sent": 0, "reason": "no_term"}
+
+    term_id = (term.get("term_id") or "").strip()
+    if not term_id:
+        return {"ok": True, "sent": 0, "reason": "no_term_id"}
+
+    now = datetime.now(timezone.utc)
+
+    wins = [w async for w in db[COL_OM_SUBMIT_WINDOWS].find({"term_id": term_id}, {"_id": 0})]
+    if not wins:
+        return {"ok": True, "sent": 0, "reason": "no_windows"}
+
+    sent = 0
+    targets = (7, 3, 2, 1)
+
+    for w in wins:
+        campus_id = str(w.get("campus_id") or "").strip()
+        deadline_iso = str(w.get("deadlineISO") or "").strip()
+        open_iso = str(w.get("openISO") or "").strip()
+
+        deadline_dt = _parse_iso_dt(deadline_iso) if deadline_iso else None
+        open_dt = _parse_iso_dt(open_iso) if open_iso else None
+
+        if not deadline_dt:
+            continue
+        if open_dt and now < open_dt:
+            continue
+        if now >= deadline_dt:
+            continue
+
+        days_left = None
+        for d in targets:
+            start = deadline_dt - timedelta(days=d)
+            end = deadline_dt - timedelta(days=d - 1)
+            if start <= now < end:
+                days_left = d
+                break
+        if days_left is None:
+            continue
+
+        recipients = await _om_and_gs_user_ids_for_campus(campus_id)
+        if not recipients:
+            continue
+
+        when_txt = deadline_dt.astimezone(timezone.utc).strftime("%b %d, %Y %H:%M UTC")
+        title = "OM Submission Due in 1 day" if days_left == 1 else f"OM Submission Due in {days_left} days"
+        details = f"Please approve the OM Load Assignment for term {term_id} before {when_txt}."
+
+        base_key = f"om_submit_deadline::{term_id}::{campus_id}::{days_left}::{deadline_iso}"
+
+        for uid in recipients:
+            await _create_notification_once(
+                user_id=uid,
+                title=title,
+                details=details,
+                dedupe_key=f"{base_key}::{uid}",
+                meta={
+                    "kind": "om_submit_deadline_reminder",
+                    "term_id": term_id,
+                    "campus_id": campus_id,
+                    "deadlineISO": deadline_iso,
+                    "days_left": days_left,
+                    "route": "/om/load-assignment",
+                },
+            )
+            sent += 1
+
+    return {"ok": True, "sent": sent, "term_id": term_id}
 
 @router.post("/mark-seen")
 async def mark_seen(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:

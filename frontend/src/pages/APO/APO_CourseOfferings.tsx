@@ -11,6 +11,7 @@ import {
   Plus,
   ChevronDown,
   AlertTriangle,
+  CalendarClock,
   Upload,
   Copy,
   Undo2,
@@ -40,11 +41,13 @@ import {
   editCatalogCourse,  
   getSpecialClassData,
   updateApoSpecialClassRow,
+  setApoOmSubmitWindow,
   downloadBlob,
   exportOMSC_Pdf,
   type ApiConflict,
   type CreateCoursePayload,  
-  type CourseCatalogItem           
+  type CourseCatalogItem,
+  type OmSubmissionWindow,
 } from "../../api";
 
 /* --------------------------------- helpers --------------------------------- */
@@ -911,6 +914,22 @@ function defaultSectionCode(row: OfferingRow, campusName: string): string | null
   return rule ? `${rule.prefix}${rule.start}` : null;
 }
 
+function toIsoNoMs(d: Date): string {
+  return d.toISOString().replace(/\.\d{3}Z$/, "Z");
+}
+
+function toLocalInputValue(iso?: string | null): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(
+    d.getHours()
+  )}:${pad(d.getMinutes())}`;
+}
+
+
+
 /* --------------------------------- component -------------------------------- */
 
 export default function CourseOfferingsPage() {
@@ -923,6 +942,12 @@ export default function CourseOfferingsPage() {
 
   const [data, setData] = useState<OfferingsResponse | null>(null);
   const [rows, setRows] = useState<OfferingRow[]>([]);
+
+  // OM submission deadline window (set by APO; enforced on OM approve)
+  const [omDeadlineDraft, setOmDeadlineDraft] = useState<string>("");
+  const [omWindowSaving, setOmWindowSaving] = useState(false);
+  const [omWindowErr, setOmWindowErr] = useState<string>("");
+  const [nowTick, setNowTick] = useState<number>(Date.now());
   const [scData, setScData] = useState<SpecialClassResponse | null>(null);
   const [scRows, setScRows] = useState<SpecialClassRow[]>([]);
   const [scLoading, setScLoading] = useState(false);
@@ -1603,13 +1628,16 @@ const loadOfferings = async () => {
     if (view === "curriculum") loadCurriculum();
   }, [view, currentTermId, data?.term_id, curr?.term_id]);
 
+  // Fire-and-forget: if reminder time has passed, send the reminder notification/email.
+  useEffect(() => {
+    fetch("/api/notifications/run-om-submit-deadline-reminders", { method: "POST" }).catch(
+      () => {}
+    );
+  }, []);
+
   // Offerings: reload whenever dropdown filters change
   useEffect(() => {
     if (view !== "offerings") return;
-  if (blockedByImport) {
-    alert("You must import pre-enlistment data before making changes.");
-    return;
-  }
   if (blockedByImport) {
     alert("You must import pre-enlistment data before making changes.");
     return;
@@ -1633,6 +1661,60 @@ const loadOfferings = async () => {
   const hasPlanUpdates = view === "offerings" && !!data?.planning?.pending_changes?.length;
   // Show banner, but do NOT block editing
   const showApprovalBanner = view === "offerings" && !blockedByImport && hasPlanUpdates && !!data?.planning?.approval_required;
+  // Keep local datetime input in sync with server value
+  useEffect(() => {
+    const w = (data as any)?.om_submit_window as OmSubmissionWindow | undefined;
+    if (!omDeadlineDraft) {
+      setOmDeadlineDraft(toLocalInputValue(w?.deadlineISO || ""));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [(data as any)?.om_submit_window?.deadlineISO]);
+
+  // Live countdown ticker (same feel as OM_FacultyForm)
+  useEffect(() => {
+    const t = setInterval(() => setNowTick(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, []);
+
+  const saveOmDeadlineInline = async () => {
+    if (!user?.userId) return;
+    setOmWindowErr("");
+
+    const deadlineLocal = (omDeadlineDraft || "").trim();
+    if (!deadlineLocal) {
+      setOmWindowErr("Deadline is required.");
+      return;
+    }
+
+    const deadlineDt = new Date(deadlineLocal);
+    if (Number.isNaN(deadlineDt.getTime())) {
+      setOmWindowErr("Invalid deadline.");
+      return;
+    }
+
+    setOmWindowSaving(true);
+    try {
+      const resp = await setApoOmSubmitWindow(user.userId, {
+        deadlineISO: toIsoNoMs(deadlineDt),
+      });
+
+      setData((prev) =>
+        prev
+          ? ({
+              ...prev,
+              om_submit_window: (resp as any)?.om_submit_window || (prev as any).om_submit_window,
+            } as any)
+          : prev
+      );
+
+      // Fire-and-forget: if today is within 7/3/2/1 days before the deadline, send the reminder now.
+      fetch("/api/notifications/run-om-submit-deadline-reminders", { method: "POST" }).catch(() => {});
+    } catch (e: any) {
+      setOmWindowErr(e?.message || "Failed to save deadline.");
+    } finally {
+      setOmWindowSaving(false);
+    }
+  };
 
   const [showForward, setShowForward] = useState(false);
   const [showPlanModal, setShowPlanModal] = useState(false);
@@ -3473,7 +3555,7 @@ const promptSaveEdit = () => {
 
       {/* View toggle */}
       <div className="px-6 pt-4 w-full">
-        <div className="flex items-center justify-start">
+        <div className="flex items-center justify-between gap-3">
           <div className="inline-flex overflow-hidden rounded-lg border border-emerald-700">
           <button
             onClick={() => setView("offerings")}
@@ -3503,7 +3585,106 @@ const promptSaveEdit = () => {
             Special Class
           </button>
           </div>
+
+          {/* APO-set deadline window for OM approval (Course Offerings tab only) */}
+          {view === "offerings" && (
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-medium text-slate-700">Deadline</span>
+                <input
+                  type="datetime-local"
+                  className="h-9 rounded-md border border-gray-300 bg-white px-2 text-sm"
+                  value={omDeadlineDraft}
+                  onChange={(e) => setOmDeadlineDraft(e.target.value)}
+                />
+              </div>
+              <button
+                type="button"
+                onClick={saveOmDeadlineInline}
+                disabled={omWindowSaving}
+                className="inline-flex h-9 items-center rounded-md bg-emerald-700 px-3 text-sm font-semibold text-white shadow-sm hover:bg-emerald-800 disabled:opacity-50"
+                title="Set or update the OM submission deadline for this campus"
+              >
+                {omWindowSaving ? "Saving…" : ((data as any)?.om_submit_window?.deadlineISO ? "Update Deadline" : "Set Deadline")}
+              </button>
+            </div>
+          )}
         </div>
+
+        {view === "offerings" && (
+          (() => {
+            const w = (data as any)?.om_submit_window as OmSubmissionWindow | undefined;
+            const deadlineISO = (w?.deadlineISO || "").trim();
+            if (!deadlineISO) {
+              return (
+                <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
+                  <div className="flex items-start gap-3">
+                    <div className="mt-0.5 grid h-9 w-9 place-items-center rounded-full bg-slate-200 text-slate-700">
+                      <Info className="h-5 w-5" />
+                    </div>
+                    <div>
+                      <div className="font-semibold">No OM submission deadline set</div>
+                      <div className="text-xs text-slate-600">Set a deadline above. OM approval will be blocked after the deadline.</div>
+                    </div>
+                  </div>
+                </div>
+              );
+            }
+
+            const d = new Date(deadlineISO);
+            if (Number.isNaN(d.getTime())) return null;
+
+            const msLeft = d.getTime() - nowTick;
+            const when = d.toLocaleString(undefined, {
+              year: "numeric",
+              month: "short",
+              day: "2-digit",
+              hour: "2-digit",
+              minute: "2-digit",
+            });
+
+            if (msLeft <= 0) {
+              return (
+                <div className="mt-3 rounded-xl border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-900">
+                  <div className="flex items-start gap-3">
+                    <div className="mt-0.5 grid h-9 w-9 place-items-center rounded-full bg-red-200 text-red-900">
+                      <AlertTriangle className="h-5 w-5" />
+                    </div>
+                    <div>
+                      <div className="font-semibold">Submission deadline has passed</div>
+                      <div className="text-xs text-red-800">Deadline: {when}</div>
+                    </div>
+                  </div>
+                </div>
+              );
+            }
+
+            const totalSec = Math.floor(msLeft / 1000);
+            const days = Math.floor(totalSec / 86400);
+            const hrs = Math.floor((totalSec % 86400) / 3600);
+            const mins = Math.floor((totalSec % 3600) / 60);
+            const secs = totalSec % 60;
+
+            return (
+              <div className="mt-3 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-950">
+                <div className="flex items-start gap-3">
+                  <div className="mt-0.5 grid h-9 w-9 place-items-center rounded-full bg-amber-200 text-amber-900">
+                    <CalendarClock className="h-5 w-5" />
+                  </div>
+                  <div>
+                    <div className="font-semibold">Submission Deadline Approaching</div>
+                    <div className="text-xs text-amber-900">Deadline: {when} · {days}d {hrs}h {mins}m {secs}s</div>
+                    <div className="mt-1 text-[11px] text-amber-900/80">Reminders are sent automatically to OM and GS Coordinator 7, 3, 2, and 1 day(s) before the deadline.</div>
+                    {omWindowErr && (
+                      <div className="mt-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{omWindowErr}</div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            );
+          })()
+        )}
+
       </div>
 
       <main className="p-6 w-full">
@@ -5570,6 +5751,8 @@ ${msg}`,
           )}
         </div>
       </main>
+
+      {/* --------------------- OM Submission Deadline (APO-set) --------------------- */}
 
       {/* ----------------------------- Conflict Modal ----------------------------- */}
       {conflict && (

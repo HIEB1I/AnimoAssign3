@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from math import ceil
 import re
 import json
@@ -44,6 +44,7 @@ COL_PLANSTATE = "planning_state"
 COL_SPECIAL = "special_class"
 COL_APO_OFFERINGS_AUDIT = "apo_offerings_audit"
 COL_APO_SUBMISSIONS = "apo_scheduling_submissions"
+COL_OM_SUBMIT_WINDOWS = "om_submit_windows"
 
 # Undo/Redo support:
 # - When a section is SOFT-deleted we can restore it by flipping status back to active.
@@ -215,6 +216,132 @@ async def _om_and_gs_user_ids_for_department_id(dept_id: str, campus_id: Optiona
             out.append(u)
     return out
 
+
+
+async def _om_and_gs_user_ids_for_campus(campus_id: Optional[str], db) -> List[str]:
+    """Resolve OM + GS Coordinator user_id(s) for a campus (best effort).
+
+    Deadline windows are campus-specific (Manila vs Laguna). In many deployments,
+    OM/GS accounts are scoped to *departments* (not campus), so we must map
+    department -> campus_id via departments.campus_id.
+
+    Supports:
+      - role_assignments.scope campus
+      - role_assignments.scope department (mapped via departments.campus_id)
+      - global role assignments (no scope)
+      - fallback users.role + users.campus_id (legacy)
+    """
+
+    campus_id = (campus_id or "").strip()
+
+    # 1) Role IDs for OM + GS Coordinator
+    role_q = {
+        "$or": [
+            {"role_type": {"$regex": r"(^OM$|Office Manager)", "$options": "i"}},
+            {"role_type": {"$regex": r"GS\s*Coordinator", "$options": "i"}},
+        ]
+    }
+    roles = await db[COL_USER_ROLES].find(role_q, {"_id": 0, "role_id": 1}).to_list(200)
+    role_ids = [r.get("role_id") for r in roles if r.get("role_id")]
+
+    # 2) Build department_id -> campus_id map once
+    dept_to_campus: Dict[str, str] = {}
+    try:
+        cur_depts = db[COL_DEPARTMENTS].find({}, {"_id": 0, "department_id": 1, "campus_id": 1})
+        async for d in cur_depts:
+            did = str(d.get("department_id") or "").strip()
+            cid = str(d.get("campus_id") or "").strip()
+            if did and cid:
+                dept_to_campus[did] = cid
+    except Exception:
+        dept_to_campus = {}
+
+    # Scope helpers
+    def _scope_items(scope_val: Any) -> List[Dict[str, Any]]:
+        if not scope_val:
+            return []
+        if isinstance(scope_val, dict):
+            return [scope_val]
+        if isinstance(scope_val, list):
+            return [x for x in scope_val if isinstance(x, dict)]
+        return []
+
+    def _scope_has_campus(scope_val: Any, cid: str) -> bool:
+        for s in _scope_items(scope_val):
+            stype = str(s.get("type") or s.get("scope_type") or "").strip().lower()
+            sid = str(s.get("id") or s.get("scope_id") or s.get("campus_id") or "").strip()
+            if sid and cid and sid == cid and (stype in ("campus", "campuses", "") or "campus" in stype):
+                return True
+        return False
+
+    def _scope_department_ids(scope_val: Any) -> List[str]:
+        out: List[str] = []
+        for s in _scope_items(scope_val):
+            stype = str(s.get("type") or s.get("scope_type") or "").strip().lower()
+            if "dept" in stype or stype == "department":
+                sid = str(s.get("id") or s.get("scope_id") or s.get("department_id") or "").strip()
+                if sid:
+                    out.append(sid)
+        return out
+
+    recipients: List[str] = []
+
+    # 3) Primary: role_assignments for those role_ids
+    if role_ids:
+        ras = await db[COL_ROLE_ASSIGN].find(
+            {"role_id": {"$in": role_ids}},
+            {"_id": 0, "user_id": 1, "scope": 1},
+        ).to_list(2000)
+
+        for ra in ras:
+            uid = str(ra.get("user_id") or "").strip()
+            if not uid:
+                continue
+
+            scope = ra.get("scope")
+            if not scope:
+                # global assignment
+                recipients.append(uid)
+                continue
+
+            if _scope_has_campus(scope, campus_id):
+                recipients.append(uid)
+                continue
+
+            # department scoped -> map to campus
+            for did in _scope_department_ids(scope):
+                if dept_to_campus.get(did) == campus_id:
+                    recipients.append(uid)
+                    break
+
+    # 4) Fallback: users.role + users.campus_id
+    if not recipients:
+        try:
+            cur_users = db[COL_USERS].find(
+                {"role": {"$in": ["OM", "Office Manager", "GS", "GS Coordinator"]}},
+                {"_id": 0, "user_id": 1, "campus_id": 1},
+            )
+            async for u in cur_users:
+                uid = str(u.get("user_id") or "").strip()
+                if not uid:
+                    continue
+                if not campus_id:
+                    recipients.append(uid)
+                    continue
+                if str(u.get("campus_id") or "").strip() == campus_id:
+                    recipients.append(uid)
+        except Exception:
+            pass
+
+    # Deduplicate (stable)
+    out: List[str] = []
+    seen = set()
+    for u in recipients:
+        if u not in seen:
+            seen.add(u)
+            out.append(u)
+    return out
+
 # ---------- helpers for ID generation ----------
 
 async def _next_seq(col_name: str, id_field: str, prefix: str, width: int = 4) -> str:
@@ -307,6 +434,42 @@ async def _get_planning_term() -> Dict[str, Any]:
         "term_number": base_no,
     }
 
+
+
+def _parse_iso_dt(s: str) -> Optional[datetime]:
+    # Parse ISO8601 string into a timezone-aware UTC datetime.
+    if not s:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(s).replace('Z', '+00:00'))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+async def _get_om_submit_window(term_id: str, campus_id: str) -> Dict[str, str]:
+    # Read the OM submission deadline window for a planning term + campus.
+    term_id = (term_id or '').strip()
+    campus_id = (campus_id or '').strip()
+    if not term_id or not campus_id:
+        return {"openISO": "", "deadlineISO": ""}
+
+    w = await db[COL_OM_SUBMIT_WINDOWS].find_one(
+        {"term_id": term_id, "campus_id": campus_id},
+        {"_id": 0, "openISO": 1, "deadlineISO": 1},
+    )
+    if not w:
+        w = await db[COL_OM_SUBMIT_WINDOWS].find_one(
+            {"term_id": term_id, "campus_id": ""},
+            {"_id": 0, "openISO": 1, "deadlineISO": 1},
+        )
+
+    return {
+        "openISO": (w or {}).get("openISO") or "",
+        "deadlineISO": (w or {}).get("deadlineISO") or "",
+    }
 def _parse_course_seq(course_id: str) -> int:
     m = re.match(r"^CRS(\d+)$", course_id or "")
     return int(m.group(1)) if m else 0
@@ -2983,6 +3146,20 @@ async def get_course_offerings(
         raise HTTPException(status_code=400, detail="Unable to resolve APO campus from role_assignments.")
     campus = await campus_meta(campus_id)
     prefix_default = campus_section_prefix(campus.get("campus_name", "")) or ""
+
+    # OM submission deadline window (set by APO per campus + planning term)
+    om_submit_window = await _get_om_submit_window(term_id, campus_id)
+
+
+    # Lightweight fetch for pages that only need campus/term/deadline metadata (e.g., Inbox topbar label)
+    if action == "meta":
+        return {
+            "ok": True,
+            "campus": campus,
+            "term_id": term_id,
+            "term_label": term_label(planning_term),
+            "om_submit_window": om_submit_window,
+        }
     # ---- filtered room options for a given slot (frontend can call this) ----
     if action == "roomOptions":
         # Delegate to eligibleRooms to keep a single source of truth
@@ -3248,7 +3425,8 @@ async def get_course_offerings(
             "campus": campus,
             "term_id": term_id,
             "term_label": term_label(planning_term),
-        "submission": submission, 
+            "om_submit_window": om_submit_window,
+            "submission": submission, 
             "items": items,
             "course_options_by_program": course_options_by_program,
             "departments": departments
@@ -4380,6 +4558,7 @@ async def get_course_offerings(
         "course_options_by_group": options_by_group,
         "all_specific_electives": all_specific_electives,
         "room_options": room_opts,
+        "om_submit_window": om_submit_window,
         "planning": {
             "needs_import": needs_import,
             "approval_required": approval_required,
@@ -4399,7 +4578,8 @@ async def post_course_offerings(
         "courseCatalog", "search_catalog",
         "catalog.create", 
         "curriculumImportCsv", "curriculum.importCsv",
-        "import_curriculum_csv"
+        "import_curriculum_csv",
+        "setOmSubmitWindow"
     ] = Query(...),
     payload: Optional[Dict[str, Any]] = Body(None),
 ):
@@ -4419,8 +4599,143 @@ async def post_course_offerings(
         raise HTTPException(status_code=400, detail="Unable to resolve APO campus from role_assignments.")
     campus = await campus_meta(campus_id)
     prefix_default = campus_section_prefix(campus.get("campus_name", "")) or ""
-    
-    # ---------- SPECIAL CLASS (APO inline edit: remarks + optional room updates) ----------
+
+    # OM submission deadline window (set by APO per campus + planning term)
+    om_submit_window = await _get_om_submit_window(term_id, campus_id)
+
+    # ---------- OM SUBMISSION DEADLINE WINDOW (set by APO; consumed by OM) ----------
+    if action == "setOmSubmitWindow":
+        if payload is None or not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="Missing payload.")
+
+        deadline_iso = str(payload.get("deadlineISO") or payload.get("deadline_iso") or payload.get("deadline") or "").strip()
+        if not deadline_iso:
+            raise HTTPException(status_code=422, detail="deadlineISO is required")
+
+        deadline_dt = _parse_iso_dt(deadline_iso)
+        if not deadline_dt:
+            raise HTTPException(status_code=422, detail="Invalid deadlineISO; must be ISO8601")
+
+        now_dt = datetime.now(timezone.utc).replace(microsecond=0)
+        now_iso = now_dt.isoformat()
+
+        # Normalize to UTC + remove sub-second precision to keep the UI clean/consistent.
+        deadline_dt = deadline_dt.astimezone(timezone.utc).replace(microsecond=0)
+        deadline_iso_out = deadline_dt.isoformat()
+
+        await db[COL_OM_SUBMIT_WINDOWS].update_one(
+            {"term_id": term_id, "campus_id": campus_id},
+            {
+                "$set": {
+                    "term_id": term_id,
+                    "campus_id": campus_id,
+                    # window is considered open as soon as APO sets it
+                    "openISO": now_iso,
+                    "deadlineISO": deadline_iso_out,
+                    "updated_by": userId,
+                    "updated_at": now_iso,
+                },
+                "$setOnInsert": {"created_at": now_iso},
+            },
+            upsert=True,
+        )
+
+        # Notify OM + GS Coordinator immediately that a deadline was set/updated.
+        # Reminder notifications are automatic (7/3/2/1 days before deadline) via:
+        #   /api/notifications/run-om-submit-deadline-reminders
+        try:
+            recipients = await _om_and_gs_user_ids_for_campus(campus_id, db)
+            if recipients:
+                campus_name = (campus.get("campus_name") or str(campus_id) or "").strip()
+                deadline_txt = deadline_dt.strftime("%b %d, %Y %H:%M UTC")
+
+                title = "OM Submission Deadline Set"
+                details = (
+                    f"APO set the OM submission deadline for {term_id} ({campus_name}). "
+                    f"Deadline: {deadline_txt}. "
+                    f"Automatic reminders will be sent 7, 3, 2, and 1 day(s) before the deadline."
+                )
+
+                dedupe_key = f"om_submit_window_set::{term_id}::{campus_id}::{deadline_iso_out}"
+                for uid in recipients:
+                    hit = await db["notifications"].find_one(
+                        {"user_id": uid, "meta.dedupe_key": dedupe_key},
+                        {"_id": 1},
+                    )
+                    if hit:
+                        continue
+
+                    await create_notification(
+                        uid,
+                        title,
+                        details,
+                        meta={
+                            "kind": "om_submit_window_set",
+                            "term_id": term_id,
+                            "campus_id": campus_id,
+                            "deadlineISO": deadline_iso_out,
+                            "dedupe_key": dedupe_key,
+                            "route": "/om/load-assignment",
+                        },
+                        send_email=True,
+                        email_from_user_id=userId,
+                    )
+
+
+                # Also: if today already falls in a reminder window (7/3/2/1 days before),
+                # send that reminder immediately so APO can verify the reminder system.
+                # (Future reminders are still generated via /api/notifications/run-om-submit-deadline-reminders.)
+                targets = (7, 3, 2, 1)
+                for days_left in targets:
+                    start = deadline_dt - timedelta(days=days_left)
+                    end = deadline_dt - timedelta(days=days_left - 1)
+                    if not (start <= now_dt < end):
+                        continue
+
+                    when_txt2 = deadline_dt.strftime("%b %d, %Y %H:%M UTC")
+                    title2 = "OM Submission Due in 1 day" if days_left == 1 else f"OM Submission Due in {days_left} days"
+                    details2 = f"Please approve the OM Load Assignment for term {term_id} before {when_txt2}."
+
+                    dd = f"om_submit_deadline::{term_id}::{campus_id}::{days_left}::{deadline_iso_out}"
+                    for uid in recipients:
+                        hit2 = await db["notifications"].find_one(
+                            {"user_id": uid, "meta.dedupe_key": dd},
+                            {"_id": 1},
+                        )
+                        if hit2:
+                            continue
+
+                        await create_notification(
+                            uid,
+                            title2,
+                            details2,
+                            meta={
+                                "kind": "om_submit_deadline_reminder",
+                                "term_id": term_id,
+                                "campus_id": campus_id,
+                                "deadlineISO": deadline_iso_out,
+                                "days_left": days_left,
+                                "dedupe_key": dd,
+                                "route": "/om/load-assignment",
+                            },
+                            send_email=True,
+                            email_from_user_id=userId,
+                        )
+                    break
+        except Exception:
+            pass
+
+        return {
+            "ok": True,
+            "term_id": term_id,
+            "campus_id": campus_id,
+            "om_submit_window": {
+                "openISO": now_iso,
+                "deadlineISO": deadline_iso_out,
+            },
+        }
+
+# ---------- SPECIAL CLASS (APO inline edit: remarks + optional room updates) ----------
     if action == "specialclassUpdate":
         if payload is None:
             raise HTTPException(status_code=400, detail="Missing payload.")

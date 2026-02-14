@@ -40,22 +40,6 @@ export default function TopBar({
   const { unreadTotal } = useInboxBadge();
   const hasInboxUnread = unreadTotal > 0;
 
-    const pathname =
-    typeof window !== "undefined" && window.location?.pathname ? window.location.pathname : "";
-
-  const inferredInboxPath =
-    pathname.startsWith("/admin")
-      ? "/admin/inbox"
-      : pathname.startsWith("/chair")
-      ? "/chair/inbox"
-      : pathname.startsWith("/om")
-      ? "/om/inbox"
-      : pathname.startsWith("/apo")
-      ? "/apo/inbox"
-      : pathname.startsWith("/faculty")
-      ? "/faculty/inbox"
-      : "";
-
 
   const [menuOpen, setMenuOpen] = useState(false);
   const [notifOpen, setNotifOpen] = useState(false);
@@ -172,12 +156,11 @@ export default function TopBar({
   };
 
   // Inbox click:
-  // - If inboxPath provided -> navigate
-  // - Else -> dispatch existing custom event (backward compatible)
-    const handleInboxClick = () => {
-    const target = inboxPath || inferredInboxPath;
-    if (target) {
-      navigate(target);
+  // - If inboxPath provided -> navigate (route-style inbox)
+  // - Else -> dispatch existing custom event (embedded inbox inside current page)
+  const handleInboxClick = () => {
+    if (inboxPath) {
+      navigate(inboxPath);
       return;
     }
     window.dispatchEvent(new Event(inboxEvent));

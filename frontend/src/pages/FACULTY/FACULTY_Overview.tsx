@@ -279,7 +279,7 @@ useEffect(() => {
         />
       )}
 
-      <main className="w-full p-6 pb-24"> 
+      <main className={cls("w-full", showInbox ? "p-0" : "p-6 pb-24")}> 
         {/* If Inbox was requested via the TopBar icon, render it "like a tab" */}
         {showInbox ? (
           <InboxContent />

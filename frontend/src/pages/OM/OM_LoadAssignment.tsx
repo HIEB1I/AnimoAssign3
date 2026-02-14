@@ -3259,6 +3259,7 @@ export default function OM_LoadAssignment() {
   // Show the main Load Assignment content only on /om or /om/load-assignment
   const loc = useLocation();
   const isIndex = /^\/om(\/(load-assignment|home))?$/.test(loc.pathname);
+  const isInboxRoute = /\/om\/home\/inbox$/.test(loc.pathname);
 
   // === Inbox-as-tab behavior (mirrors Faculty) ===
   const [showInbox, setShowInbox] = useState(false);
@@ -5065,6 +5066,8 @@ const courseCodeToInfo = useMemo(() => {
       topbarProfileSubtitle={profileSubtitle || " "}
       // @ts-ignore
       topbarInboxEvent="om:openInbox"
+      // Inbox should be edge-to-edge (no side padding)
+      mainClassName={showInbox || isInboxRoute ? "flex-1 overflow-auto p-0" : undefined}
     >
       {/* If Inbox is opened from the TopBar, show it like a tab */}
       {showInbox ? (
