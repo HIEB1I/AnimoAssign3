@@ -3633,7 +3633,21 @@ export default function OM_LoadAssignment() {
     // Normalize time values coming from the server (often "HH:MM" or "HMM")
     // to 4-digit "HHMM" so SelectBox values still match TIME_*_OPTIONS.
     const serverRows: Row[] = Array.isArray(res?.rows) ? (res.rows as any) : [];
-    const normalizedRows: Row[] = serverRows.map((r: any) => ({
+
+    // Special Classes are managed in OM_SpecialClass and may create real section bundles.
+    // They must NOT appear in the OM Load Assignment table.
+    // Backend also filters these out, but we keep a frontend safeguard so legacy data
+    // (or future schema changes) won't accidentally surface them here.
+    const isSpecialClassRow = (r: any) => {
+      const remarks = String(r?.remarks ?? "").trim();
+      return /^SPECIAL\s*CLASS$/i.test(remarks);
+    };
+
+    const filteredServerRows: Row[] = serverRows.filter(
+      (r: any) => !isSpecialClassRow(r)
+    );
+
+    const normalizedRows: Row[] = filteredServerRows.map((r: any) => ({
       // NOTE: some backends/serializers can attach non-enumerable properties.
       // Spreading would drop them; explicitly copy `mode` so the Mode column
       // remains populated after refresh/send.

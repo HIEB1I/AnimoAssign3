@@ -81,33 +81,117 @@ def _scope_has_department(scope_val: Any, dept_id: str) -> bool:
 async def _find_chair_users_for_department(dept_id: str) -> List[Dict[str, Any]]:
     """Best-effort lookup of chair users for a department.
 
-    We mirror the same role_assignments/scope patterns used elsewhere in the system.
+    Why this exists:
+    - Some deployments store the chair role text directly on role_assignments (role/role_name/role_title).
+    - Others store only a role_id and keep the human-readable name in user_roles/roles collections.
+    - Some chairs are stored as staff_profiles with a position_title containing "Chair".
+
+    This function tries all of the above so CHAIR reliably receives notifications.
     """
     dept_id = _safe_str(dept_id)
     if not dept_id:
         return []
 
-    ras = await db.role_assignments.find(
-        {
-            "is_active": {"$in": [True, None]},
-            "$or": [
-                {"department_id": dept_id},
-                {"dept_id": dept_id},
-                {"scope": {"$exists": True}},
-            ],
-        },
-        {"_id": 0, "user_id": 1, "role": 1, "role_name": 1, "role_title": 1, "department_id": 1, "dept_id": 1, "scope": 1},
-    ).to_list(500)
+    # Known role_ids that represent a CHAIR in this deployment.
+    # Some databases don't populate the role catalog (user_roles/roles) with human-readable
+    # text ("Chair"), so we include an explicit fallback to ensure the correct recipient.
+    #
+    # Project-specific mapping:
+    # - ROLE0002 => Chair
+    CHAIR_ROLE_IDS = {"ROLE0002"}
 
-    chair_user_ids: List[str] = []
-    for r in ras or []:
-        role_text = " ".join([
+    # Cache role_id -> role text lookups (best-effort).
+    role_text_cache: Dict[str, str] = {}
+
+    async def _role_text_for_assignment(r: Dict[str, Any]) -> str:
+        parts = [
             _safe_str(r.get("role")),
             _safe_str(r.get("role_name")),
             _safe_str(r.get("role_title")),
-        ]).lower()
+            _safe_str(r.get("role_code")),
+        ]
+        rt = " ".join([p for p in parts if p]).strip().lower()
+        if "chair" in rt:
+            return rt
 
-        is_chair = "chair" in role_text
+        rid = _safe_str(r.get("role_id") or r.get("roleId") or r.get("roleID"))
+        if not rid:
+            return rt
+
+        if rid in role_text_cache:
+            return (rt + " " + role_text_cache[rid]).strip()
+
+        resolved = ""
+        # user_roles is used elsewhere in the codebase as the canonical role catalog.
+        try:
+            doc = await db.user_roles.find_one(
+                {"$or": [{"role_id": rid}, {"roleId": rid}, {"role_code": rid}, {"code": rid}]},
+                {"_id": 0, "role_id": 1, "role_name": 1, "role_title": 1, "name": 1, "title": 1, "code": 1},
+            ) or {}
+            resolved = " ".join([
+                _safe_str(doc.get("role_name")),
+                _safe_str(doc.get("role_title")),
+                _safe_str(doc.get("name")),
+                _safe_str(doc.get("title")),
+                _safe_str(doc.get("code")),
+            ]).strip().lower()
+        except Exception:
+            resolved = ""
+
+        # Some projects use a generic "roles" collection.
+        if (not resolved) and hasattr(db, "roles"):
+            try:
+                doc = await db.roles.find_one(
+                    {"$or": [{"role_id": rid}, {"roleId": rid}, {"code": rid}, {"name": rid}]},
+                    {"_id": 0, "role_name": 1, "role_title": 1, "name": 1, "title": 1, "code": 1},
+                ) or {}
+                resolved = " ".join([
+                    _safe_str(doc.get("role_name")),
+                    _safe_str(doc.get("role_title")),
+                    _safe_str(doc.get("name")),
+                    _safe_str(doc.get("title")),
+                    _safe_str(doc.get("code")),
+                ]).strip().lower()
+            except Exception:
+                resolved = ""
+
+        role_text_cache[rid] = resolved
+        return (rt + " " + resolved).strip()
+
+    chair_user_ids: List[str] = []
+
+    # 1) role_assignments (preferred; mirrors scoping logic used elsewhere)
+    try:
+        ras = await db.role_assignments.find(
+            {
+                "is_active": {"$in": [True, None]},
+                "$or": [
+                    {"department_id": dept_id},
+                    {"dept_id": dept_id},
+                    {"scope": {"$exists": True}},
+                ],
+            },
+            {
+                "_id": 0,
+                "user_id": 1,
+                "role": 1,
+                "role_name": 1,
+                "role_title": 1,
+                "role_code": 1,
+                "role_id": 1,
+                "roleId": 1,
+                "department_id": 1,
+                "dept_id": 1,
+                "scope": 1,
+            },
+        ).to_list(1000)
+    except Exception:
+        ras = []
+
+    for r in ras or []:
+        role_text = await _role_text_for_assignment(r)
+        rid = _safe_str(r.get("role_id") or r.get("roleId") or r.get("roleID"))
+        is_chair = ("chair" in role_text) or (rid in CHAIR_ROLE_IDS)
         dept_match = (_safe_str(r.get("department_id")) == dept_id) or (_safe_str(r.get("dept_id")) == dept_id)
         scope_match = _scope_has_department(r.get("scope"), dept_id)
 
@@ -116,7 +200,29 @@ async def _find_chair_users_for_department(dept_id: str) -> List[Dict[str, Any]]
             if uid:
                 chair_user_ids.append(uid)
 
-    chair_user_ids = list(dict.fromkeys(chair_user_ids))
+    # 2) staff_profiles fallback (position_title contains chair)
+    if not chair_user_ids:
+        try:
+            sp_docs = await db.staff_profiles.find(
+                {
+                    "$or": [{"department_id": dept_id}, {"dept_id": dept_id}],
+                    "user_id": {"$exists": True},
+                    "$or": [
+                        {"position_title": {"$regex": "chair", "$options": "i"}},
+                        {"position": {"$regex": "chair", "$options": "i"}},
+                        {"role_title": {"$regex": "chair", "$options": "i"}},
+                    ],
+                },
+                {"_id": 0, "user_id": 1},
+            ).to_list(50)
+            for sp in sp_docs or []:
+                uid = _safe_str(sp.get("user_id"))
+                if uid:
+                    chair_user_ids.append(uid)
+        except Exception:
+            pass
+
+    chair_user_ids = list(dict.fromkeys([u for u in chair_user_ids if u]))
     if not chair_user_ids:
         return []
 
@@ -125,6 +231,7 @@ async def _find_chair_users_for_department(dept_id: str) -> List[Dict[str, Any]]
         {"_id": 0, "user_id": 1, "email": 1, "first_name": 1, "last_name": 1},
     ).to_list(1000)
     return users or []
+
 
 
 async def _notify_user_inapp(user_id: str, title: str, message: str, data: Optional[Dict[str, Any]] = None) -> None:

@@ -13,6 +13,7 @@ import {
   ClipboardList,
   Star,
   Search as SearchIcon,
+  X,
 } from "lucide-react";
 
 import SelectBox from "../../component/SelectBox";
@@ -134,6 +135,7 @@ const DepartmentPlantilla: React.FC<{
   termLabel?: string;
 }> = ({ deptLabel, plantillaFile, rows, termLabel }) => {
   const tableRef = useRef<HTMLTableElement | null>(null);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
 
   const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
@@ -292,11 +294,32 @@ const DepartmentPlantilla: React.FC<{
         <div className="relative flex-1 min-w-[240px]">
           <SearchIcon className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-500" />
           <input
+            ref={searchInputRef}
             value={searchInput}
             onChange={(e) => setSearchInput(e.target.value)}
             placeholder="Search faculty, course, or section…"
-            className="w-full rounded-lg border border-gray-300 px-9 py-2 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30"
+            className="w-full rounded-lg border border-gray-300 pl-9 pr-10 py-2 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30"
           />
+
+          {/* Clear (x) button */}
+          {searchInput.trim().length > 0 && (
+            <button
+              type="button"
+              onClick={() => {
+                setSearchInput("");
+                setSearch("");
+                searchInputRef.current?.focus();
+              }}
+              className={cls(
+                "absolute right-2 top-1/2 -translate-y-1/2 rounded-md p-1",
+                "text-neutral-500 hover:bg-neutral-100 hover:text-neutral-700"
+              )}
+              aria-label="Clear search"
+              title="Clear"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          )}
         </div>
 
         {/* Filter: Special vs Regular (match CHAIR_FacultyManagement filters) */}
