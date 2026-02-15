@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 import io
+import uuid
 
 from fastapi import APIRouter, Body, HTTPException, Query
 from fastapi.responses import StreamingResponse
@@ -41,6 +42,169 @@ COL_FAC_LOADS = "faculty_loads"
 COL_PREEN_COUNT = "preenlistment_count"
 
 OM_ALLOWED_STATUSES = ["Forwarded To Department", "Approved", "Rejected"]
+
+# ---------------- notifications (CHAIR) ----------------
+# These collections are intentionally named generically so they can be consumed by
+# existing notification / email workers elsewhere in the codebase.
+COL_NOTIFICATIONS = "notifications"
+COL_EMAIL_QUEUE = "email_queue"
+
+
+def _now_utc() -> datetime:
+    return datetime.utcnow()
+
+
+def _safe_str(x: Any) -> str:
+    return str(x).strip() if x is not None else ""
+
+
+def _scope_has_department(scope_val: Any, dept_id: str) -> bool:
+    if not scope_val or not dept_id:
+        return False
+    if isinstance(scope_val, dict):
+        scope_val = [scope_val]
+    if not isinstance(scope_val, list):
+        return False
+    for s in scope_val:
+        if not isinstance(s, dict):
+            continue
+        stype = _safe_str(s.get("type")).lower()
+        if stype and stype != "department":
+            continue
+        cand = _safe_str(s.get("id") or s.get("department_id") or s.get("dept_id"))
+        if cand and cand == dept_id:
+            return True
+    return False
+
+
+async def _find_chair_users_for_department(dept_id: str) -> List[Dict[str, Any]]:
+    """Best-effort lookup of chair users for a department.
+
+    We mirror the same role_assignments/scope patterns used elsewhere in the system.
+    """
+    dept_id = _safe_str(dept_id)
+    if not dept_id:
+        return []
+
+    ras = await db.role_assignments.find(
+        {
+            "is_active": {"$in": [True, None]},
+            "$or": [
+                {"department_id": dept_id},
+                {"dept_id": dept_id},
+                {"scope": {"$exists": True}},
+            ],
+        },
+        {"_id": 0, "user_id": 1, "role": 1, "role_name": 1, "role_title": 1, "department_id": 1, "dept_id": 1, "scope": 1},
+    ).to_list(500)
+
+    chair_user_ids: List[str] = []
+    for r in ras or []:
+        role_text = " ".join([
+            _safe_str(r.get("role")),
+            _safe_str(r.get("role_name")),
+            _safe_str(r.get("role_title")),
+        ]).lower()
+
+        is_chair = "chair" in role_text
+        dept_match = (_safe_str(r.get("department_id")) == dept_id) or (_safe_str(r.get("dept_id")) == dept_id)
+        scope_match = _scope_has_department(r.get("scope"), dept_id)
+
+        if is_chair and (dept_match or scope_match):
+            uid = _safe_str(r.get("user_id"))
+            if uid:
+                chair_user_ids.append(uid)
+
+    chair_user_ids = list(dict.fromkeys(chair_user_ids))
+    if not chair_user_ids:
+        return []
+
+    users = await db[COL_USERS].find(
+        {"user_id": {"$in": chair_user_ids}},
+        {"_id": 0, "user_id": 1, "email": 1, "first_name": 1, "last_name": 1},
+    ).to_list(1000)
+    return users or []
+
+
+async def _notify_user_inapp(user_id: str, title: str, message: str, data: Optional[Dict[str, Any]] = None) -> None:
+    user_id = _safe_str(user_id)
+    if not user_id:
+        return
+    doc = {
+        "notification_id": f"notif_{uuid.uuid4().hex}",
+        "user_id": user_id,
+        "title": title,
+        "message": message,
+        "data": data or {},
+        "is_read": False,
+        "created_at": _now_utc(),
+        "updated_at": _now_utc(),
+        "channel": "in_app",
+    }
+    try:
+        await db[COL_NOTIFICATIONS].insert_one(doc)
+    except Exception:
+        # Notifications must never block the main update path.
+        return
+
+
+async def _queue_email(to_email: str, subject: str, text_body: str) -> None:
+    to_email = _safe_str(to_email)
+    if not to_email:
+        return
+    doc = {
+        "email_id": f"email_{uuid.uuid4().hex}",
+        "to": to_email,
+        "subject": subject,
+        "text": text_body,
+        "created_at": _now_utc(),
+        "updated_at": _now_utc(),
+        "status": "pending",
+        "provider": "gmail",
+    }
+    try:
+        await db[COL_EMAIL_QUEUE].insert_one(doc)
+    except Exception:
+        return
+
+
+async def _notify_chairs_for_specialclass(
+    dept_id: str,
+    kind: str,  # "new" | "update"
+    special_id: str,
+    summary: str,
+    extra: Optional[Dict[str, Any]] = None,
+) -> None:
+    dept_id = _safe_str(dept_id)
+    special_id = _safe_str(special_id)
+    if not dept_id or not special_id:
+        return
+
+    users = await _find_chair_users_for_department(dept_id)
+    if not users:
+        return
+
+    title = "New Special Class reflected" if kind == "new" else "Special Class updated"
+    msg = summary
+    data = {"type": "special_class", "kind": kind, "special_id": special_id, "department_id": dept_id}
+    if extra:
+        data.update(extra)
+
+    for u in users:
+        uid = _safe_str(u.get("user_id"))
+        await _notify_user_inapp(uid, title, msg, data)
+
+        # Queue email (best-effort). Worker/service should pick this up.
+        email = _safe_str(u.get("email"))
+        if email:
+            subj = f"[AnimoAssign] {title}"
+            body = (
+                f"{title}\n\n"
+                f"{msg}\n\n"
+                f"Special ID: {special_id}\n"
+                f"Department ID: {dept_id}\n"
+            )
+            await _queue_email(email, subj, body)
 
 # ---------------- indexes (safe) ----------------
 try:
@@ -1604,6 +1768,20 @@ async def om_specialclass_post(
         if payload is None:
             raise HTTPException(status_code=400, detail="payload is required.")
 
+        # Load the existing row for change detection + notifications.
+        existing_doc_full = await db[COL_SPECIAL].find_one(
+            {"term_id": current_term_id, "special_id": specialId},
+            {"_id": 0},
+        )
+        if not existing_doc_full:
+            raise HTTPException(status_code=404, detail="Application not found.")
+        prev_status = _safe_str(existing_doc_full.get("status"))
+        dept_id_for_notify = _safe_str(
+            existing_doc_full.get("department_id")
+            or existing_doc_full.get("dept_id")
+            or existing_doc_full.get("departmentId")
+        )
+
         updates_set: Dict[str, Any] = {}
         updates_unset: Dict[str, Any] = {}
 
@@ -1619,12 +1797,10 @@ async def om_specialclass_post(
             updates_set["remarks"] = payload.get("remarks") or ""
 
         # ---- load base doc (needed for course_id when creating custom section) ----
-        base_doc = await db[COL_SPECIAL].find_one(
-            {"term_id": current_term_id, "special_id": specialId},
-            {"_id": 0, "course_id": 1, "courseId": 1},
-        )
-        if not base_doc:
-            raise HTTPException(status_code=404, detail="Application not found.")
+        base_doc = {
+            "course_id": existing_doc_full.get("course_id"),
+            "courseId": existing_doc_full.get("courseId"),
+        }
 
         course_id_base = (base_doc.get("course_id") or base_doc.get("courseId") or "").strip()
         if not course_id_base:
@@ -1727,6 +1903,64 @@ async def om_specialclass_post(
             {"term_id": current_term_id, "special_id": specialId},
             {"$set": updates_set, "$unset": updates_unset},
         )
+
+        # ---------------- CHAIR notifications ----------------
+        # Notify when:
+        # - status transitions to Approved (new reflection)
+        # - any update while already Approved (update reflection)
+        try:
+            # Only attempt notifications if we can resolve a department.
+            if dept_id_for_notify and res.modified_count:
+                updated_doc = await db[COL_SPECIAL].find_one(
+                    {"term_id": current_term_id, "special_id": specialId},
+                    {"_id": 0, "status": 1, "course_id": 1, "courseId": 1, "section_id": 1, "section_code": 1},
+                )
+                new_status = _safe_str((updated_doc or {}).get("status"))
+
+                # Build a short summary for notifications.
+                course_id = _safe_str((updated_doc or {}).get("course_id") or (updated_doc or {}).get("courseId"))
+                course_code = ""
+                if course_id:
+                    c = await db[COL_COURSES].find_one({"course_id": course_id}, {"_id": 0, "course_code": 1})
+                    cc = (c or {}).get("course_code")
+                    if isinstance(cc, list) and cc:
+                        course_code = _safe_str(cc[0])
+                    else:
+                        course_code = _safe_str(cc)
+
+                section_code = _safe_str((updated_doc or {}).get("section_code"))
+                if not section_code:
+                    # derive from sections table if possible
+                    sid = _safe_str((updated_doc or {}).get("section_id"))
+                    if sid:
+                        sdoc = await db[COL_SECTIONS].find_one({"section_id": sid}, {"_id": 0, "section_code": 1})
+                        section_code = _safe_str((sdoc or {}).get("section_code"))
+
+                summary_parts = []
+                if course_code:
+                    summary_parts.append(course_code)
+                if section_code:
+                    summary_parts.append(section_code)
+                summary = " ".join(summary_parts).strip() or f"Special Class {specialId}"
+
+                if prev_status != "Approved" and new_status == "Approved":
+                    await _notify_chairs_for_specialclass(
+                        dept_id_for_notify,
+                        kind="new",
+                        special_id=specialId,
+                        summary=f"Approved Special Class reflected in Plantilla: {summary}",
+                    )
+                elif prev_status == "Approved" and new_status == "Approved":
+                    await _notify_chairs_for_specialclass(
+                        dept_id_for_notify,
+                        kind="update",
+                        special_id=specialId,
+                        summary=f"Reflected Special Class updated in Plantilla: {summary}",
+                    )
+        except Exception:
+            # Never block the update endpoint due to notification failures.
+            pass
+
         return {"ok": True, "matched": res.matched_count, "modified": res.modified_count}
 
     if action == "bulkUpdate":
@@ -1740,10 +1974,69 @@ async def om_specialclass_post(
         if allowed and target_status not in allowed:
             raise HTTPException(status_code=400, detail="Invalid status value.")
 
+        special_ids = [str(x).strip() for x in payload["special_ids"] if str(x).strip()]
+
+        # Snapshot previous statuses for notification logic (best-effort).
+        prev_docs = []
+        try:
+            prev_docs = await db[COL_SPECIAL].find(
+                {"term_id": current_term_id, "special_id": {"$in": special_ids}},
+                {"_id": 0, "special_id": 1, "status": 1, "department_id": 1, "dept_id": 1, "course_id": 1, "courseId": 1, "section_id": 1, "section_code": 1},
+            ).to_list(5000)
+        except Exception:
+            prev_docs = []
+
         res = await db[COL_SPECIAL].update_many(
-            {"term_id": current_term_id, "special_id": {"$in": payload["special_ids"]}},
+            {"term_id": current_term_id, "special_id": {"$in": special_ids}},
             {"$set": {"status": target_status, "updated_at": datetime.utcnow()}},
         )
+
+        # Notify chairs for approvals / updates (best-effort; never blocks).
+        try:
+            if target_status == "Approved" and prev_docs:
+                for d in prev_docs:
+                    sid = _safe_str(d.get("special_id"))
+                    dept_id_for_notify = _safe_str(d.get("department_id") or d.get("dept_id") or d.get("departmentId"))
+                    if not sid or not dept_id_for_notify:
+                        continue
+                    prev_status = _safe_str(d.get("status"))
+
+                    # Build a short summary (course code + section code if possible).
+                    course_id = _safe_str(d.get("course_id") or d.get("courseId"))
+                    course_code = ""
+                    if course_id:
+                        c = await db[COL_COURSES].find_one({"course_id": course_id}, {"_id": 0, "course_code": 1})
+                        cc = (c or {}).get("course_code")
+                        if isinstance(cc, list) and cc:
+                            course_code = _safe_str(cc[0])
+                        else:
+                            course_code = _safe_str(cc)
+
+                    section_code = _safe_str(d.get("section_code"))
+                    if not section_code:
+                        sec_id = _safe_str(d.get("section_id"))
+                        if sec_id:
+                            sdoc = await db[COL_SECTIONS].find_one({"section_id": sec_id}, {"_id": 0, "section_code": 1})
+                            section_code = _safe_str((sdoc or {}).get("section_code"))
+
+                    summary = " ".join([p for p in [course_code, section_code] if p]).strip() or f"Special Class {sid}"
+
+                    if prev_status != "Approved":
+                        await _notify_chairs_for_specialclass(
+                            dept_id_for_notify,
+                            kind="new",
+                            special_id=sid,
+                            summary=f"Approved Special Class reflected in Plantilla: {summary}",
+                        )
+                    else:
+                        await _notify_chairs_for_specialclass(
+                            dept_id_for_notify,
+                            kind="update",
+                            special_id=sid,
+                            summary=f"Reflected Special Class updated in Plantilla: {summary}",
+                        )
+        except Exception:
+            pass
         return {"ok": True, "matched": res.matched_count, "modified": res.modified_count, "status": target_status}
     # Export PDF: one or many rows
     if action == "exportPdf":
