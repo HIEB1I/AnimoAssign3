@@ -2646,14 +2646,39 @@ def _distribute_sections_round_robin(
     sections: List[Dict[str, Any]],
     owners: List[Tuple[str, str, int]]
 ) -> Dict[Tuple[str, str], List[Dict[str, Any]]]:
+    """Distribute section rows to curriculum blocks.
+
+    UX rule: a section created from a specific Batch+Program row in the APO UI must
+    remain under that same Batch+Program after refresh. We persist this intent in
+    COL_SECTIONS as owner_batch_id/owner_program_id.
+
+    - Owned sections -> placed in their owner block.
+    - Unowned/legacy sections -> distributed round-robin.
+    """
+
     secs = _sort_sections_by_number(sections)
     if not owners:
         return {}
-    n = len(owners)
+
+    owner_keys = [(bid, pid) for (bid, pid, _bn) in owners]
     alloc: Dict[Tuple[str, str], List[Dict[str, Any]]] = {(bid, pid): [] for (bid, pid, _bn) in owners}
-    for idx, s in enumerate(secs):
-        (bid, pid, _bn) = owners[idx % n]
-        alloc[(bid, pid)].append(s)
+
+    # 1) Place "owned" sections first.
+    unowned: List[Dict[str, Any]] = []
+    for s in secs:
+        ob = (s.get("owner_batch_id") or "").strip()
+        op = (s.get("owner_program_id") or "").strip()
+        if ob and op and (ob, op) in alloc:
+            alloc[(ob, op)].append(s)
+        else:
+            unowned.append(s)
+
+    # 2) Round-robin distribute remaining sections.
+    n = len(owner_keys)
+    for idx, s in enumerate(unowned):
+        k = owner_keys[idx % n]
+        alloc[k].append(s)
+
     return alloc
 
 # ---------- ensure sections by demand ----------
@@ -4443,7 +4468,9 @@ async def get_course_offerings(
 
         secs = [s async for s in db[COL_SECTIONS].find(
             sec_q, {"_id": 0, "section_id": 1, "section_code": 1, "enrollment_cap": 1, "remarks": 1, "batch_number": 1,
-                    "course_id": 1, "fulfilled_placeholder_course_id": 1}
+                    "course_id": 1, "fulfilled_placeholder_course_id": 1,
+                    # preserve user-intended placement in Offerings UI
+                    "owner_batch_id": 1, "owner_program_id": 1}
         )]
         campus_sec_by_course[cid] = secs
         planned_capacity_by_course[cid] = sum(int(s.get("enrollment_cap") or DEFAULT_CAP) for s in secs)
@@ -4884,7 +4911,7 @@ async def post_course_offerings(
 
                 title = "Schedule & Faculty Encoding Deadline Set"
                 details = (
-                    f"APO set the deadline for OM/GS to complete schedule and faculty encoding "
+                    f"APO set the deadline to complete schedule and faculty encoding "
                     f"for {term_label} ({campus_name}). "
                     f"Deadline: {deadline_txt}. "
                     f"Automatic reminders will be sent 7, 3, 2, and 1 day(s) before the deadline."
@@ -4935,7 +4962,7 @@ async def post_course_offerings(
                         else f"Schedule & Faculty Encoding Due in {days_left} days"
                     )
                     details2 = (
-                        f"Please complete schedule and faculty encoding for term {term_label} "
+                        f"Please complete schedule and faculty encoding for {term_label} "
                         f"before {when_txt2}."
                     )
 

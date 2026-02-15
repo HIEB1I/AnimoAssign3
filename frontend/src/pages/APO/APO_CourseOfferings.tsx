@@ -4442,7 +4442,9 @@ ${msg}`,
                                       const viewRow = (
                                         <tr
                                           id={`row-${rowKey}`}
-                                          key={(r.section.section_id || r.course.course_id) + "-v"}
+                                          // IMPORTANT: Use a stable unique key so rows don't "swap" between program groups
+                                          // after add/delete (React will reuse DOM nodes if keys collide).
+                                          key={rowKey + "-v"}
                                           className={cls(
                                             "hover:bg-neutral-50",
                                             highlightRowKey === rowKey && "bg-amber-50"
@@ -4561,7 +4563,7 @@ ${msg}`,
                                       const editRow = (
                                         <tr
                                           id={`row-${rowKey}`}
-                                          key={r.section.section_id + "-e"}
+                                          key={rowKey + "-e"}
                                           className={cls("bg-white", highlightRowKey === rowKey && "bg-amber-50")}
                                           style={{ boxShadow: "0 2px 10px rgba(0,0,0,0.05)" }}
                                         >
@@ -4952,7 +4954,7 @@ ${msg}`,
                                       const addInline =
                                         addAnchorKey === rowKey && (
                                           <tr
-                                            key={(r.section.section_id || r.course.course_id) + "-a"}
+                                            key={rowKey + "-a"}
                                             className="bg-white"
                                             style={{ boxShadow: "0 2px 10px rgba(0,0,0,0.05)" }}
                                           >
@@ -5194,7 +5196,8 @@ ${msg}`,
                                         );
 
                                       return (
-                                        <React.Fragment key={r.section.section_id || r.course.course_id}>
+                                        // Use the same stable key used for ordering/editing to prevent row identity bugs.
+                                        <React.Fragment key={rowKey}>
                                           {isEditing ? editRow : viewRow}
                                           {addInline}
                                         </React.Fragment>

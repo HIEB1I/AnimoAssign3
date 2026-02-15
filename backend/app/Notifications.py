@@ -934,6 +934,36 @@ async def _get_active_term_doc() -> Optional[Dict[str, Any]]:
     return term
 
 
+def _term_label_doc(t: Dict[str, Any]) -> str:
+    """Human-friendly term label: Term {n} · AY {ay}-{ay+1}."""
+    if not t:
+        return ""
+    n = t.get("term_number")
+    ay = t.get("acad_year_start") or t.get("acad_year")
+    try:
+        ay_int = int(ay) if ay is not None else None
+    except Exception:
+        ay_int = None
+    aye = (ay_int + 1) if ay_int is not None else None
+    if n and ay_int is not None and aye is not None:
+        return f"Term {n} · AY {ay_int}-{aye}"
+    return str(t.get("term_id") or "")
+
+
+async def _term_label_by_id(term_id: str) -> str:
+    tid = str(term_id or "").strip()
+    if not tid:
+        return ""
+    try:
+        t = await db[COL_TERMS].find_one(
+            {"term_id": tid},
+            {"_id": 0, "term_id": 1, "term_number": 1, "acad_year_start": 1, "acad_year": 1},
+        ) or {}
+        return _term_label_doc(t) or tid
+    except Exception:
+        return tid
+
+
 async def _get_prefs_window_for_term(term_id: str) -> Dict[str, str]:
     """
     Reads the manual/override window that both OM and Faculty UIs consume (openISO/deadlineISO).
@@ -1424,16 +1454,18 @@ async def run_om_submit_deadline_reminders() -> Dict[str, Any]:
             else f"Schedule & Faculty Encoding Due in {days_left} days"
         )
 
-        if has_apo_submit:
-            details = (
-                f"Please complete schedule and faculty encoding for APO-submitted course offerings "
-                f"for term {term_id} ({campus_name}) before {when_txt}."
-            )
-        else:
-            details = (
-                f"APO has not submitted course offerings yet for term {term_id} ({campus_name}). "
-                f"Once submitted, please complete schedule and faculty encoding before {when_txt}."
-            )
+        term_label = await _term_label_by_id(term_id)
+
+        # IMPORTANT: Only send schedule/faculty-encoding reminders *after* APO has submitted
+        # course offerings (i.e., sections are marked submitted_for_scheduling). If APO hasn't
+        # submitted yet, OM/GS should not receive "Due in X days" reminders.
+        if not has_apo_submit:
+            continue
+
+        details = (
+            f"Please complete schedule and faculty encoding for APO-submitted course offerings "
+            f"for {term_label} ({campus_name}) before {when_txt}."
+        )
 
         recipients = await _om_and_gs_user_ids_for_campus(campus_id)
         if not recipients:
