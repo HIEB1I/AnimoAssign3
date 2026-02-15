@@ -261,6 +261,21 @@ useEffect(() => {
   loadOverview();
 }, [loadOverview]);
 
+// Auto-refresh so room allocations (and other APO/OM updates) reflect
+// in both list + calendar views without requiring a manual page reload.
+useEffect(() => {
+  if (!userId) return;
+
+  // Modest cadence to keep the UI responsive without hammering the server.
+  const intervalMs = 15_000;
+  const id = window.setInterval(() => {
+    // Fire-and-forget; loadOverview handles its own errors.
+    loadOverview();
+  }, intervalMs);
+
+  return () => window.clearInterval(id);
+}, [userId, loadOverview]);
+
 
   if (error) return <div className="p-10 text-red-600">{error}</div>;
   if (!data) return <div className="p-10 text-gray-600">Loading faculty overview…</div>;

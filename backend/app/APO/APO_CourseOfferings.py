@@ -3918,19 +3918,31 @@ async def get_course_offerings(
             if sid:
                 section_ids.add(sid)
 
-        # section_id -> section_code + remarks + enrollment_cap
+        # section_id -> section_code + remarks + enrollment_cap + OM approval flags
         sec_map: Dict[str, str] = {}
         sec_remarks_map: Dict[str, str] = {}
         sec_cap_map: Dict[str, int] = {}
+        sec_om_approved_map: Dict[str, bool] = {}
+        sec_room_ready_map: Dict[str, bool] = {}
 
         if section_ids:
             async for s in db[COL_SECTIONS].find(
                 {"section_id": {"$in": sorted(section_ids)}},
-                {"_id": 0, "section_id": 1, "section_code": 1, "remarks": 1, "enrollment_cap": 1},
+                {
+                    "_id": 0,
+                    "section_id": 1,
+                    "section_code": 1,
+                    "remarks": 1,
+                    "enrollment_cap": 1,
+                    "om_approved": 1,
+                    "room_allocation_ready": 1,
+                },
             ):
                 sid0 = _s(s.get("section_id"))
                 sec_map[sid0] = _s(s.get("section_code"))
                 sec_remarks_map[sid0] = _s(s.get("remarks"))
+                sec_om_approved_map[sid0] = bool(s.get("om_approved"))
+                sec_room_ready_map[sid0] = bool(s.get("room_allocation_ready"))
                 try:
                     v = s.get("enrollment_cap")
                     cap = int(v) if v not in (None, "") else 0
@@ -4124,6 +4136,10 @@ async def get_course_offerings(
                     r["section_code"] = sec_map.get(sid, "")
                 if "section_remarks" not in r:
                     r["section_remarks"] = sec_remarks_map.get(sid, "")
+
+                # OM approval / room readiness flags
+                r["om_approved"] = bool(sec_om_approved_map.get(sid, False))
+                r["room_allocation_ready"] = bool(sec_room_ready_map.get(sid, False))
 
             # Provide a consistent min_capacity/capacity value for the frontend's EligibleRoomSelect.
             # This keeps Special Class room filtering consistent with Room Allocation.
@@ -6408,6 +6424,9 @@ async def post_course_offerings(
     if action == "editRow":
         section_id = (payload.get("section_id") or "").strip()
 
+        # Track room assignment changes (to notify both OM + APO).
+        room_changes: List[Dict[str, Any]] = []
+
         cid_for_edit = (payload.get("course_id") or "").strip()
         if not cid_for_edit:
             sec_doc = await db[COL_SECTIONS].find_one({"section_id": section_id}, {"_id": 0, "course_id": 1})
@@ -6478,6 +6497,9 @@ async def post_course_offerings(
             existing = await db[COL_SCHEDS].find_one(
                 {"section_id": section_id, "schedule_id": _sch_id_from_sec(section_id, idx)}
             )
+
+            prev_room_id = (existing or {}).get("room_id")
+            prev_room_id = (str(prev_room_id).strip() if prev_room_id is not None else "")
             # sanitize incoming values (treat any TBA text as empty)
             rid = (s.get("room_id") or "").strip()
             rtype = (s.get("room_type") or "").strip()
@@ -6547,6 +6569,20 @@ async def post_course_offerings(
                     update_doc["$unset"] = unset_fields
                 await db[COL_SCHEDS].update_one({"_id": existing["_id"]}, update_doc)
 
+                # Record room change for notifications (only when the payload explicitly touched room_id)
+                if "room_id" in s:
+                    new_room_id = rid
+                    if (prev_room_id or "") != (new_room_id or ""):
+                        room_changes.append({
+                            "slot": idx,
+                            "schedule_id": _sch_id_from_sec(section_id, idx),
+                            "day": day or (existing or {}).get("day") or "",
+                            "start_time": beg or (existing or {}).get("start_time") or "",
+                            "end_time": end or (existing or {}).get("end_time") or "",
+                            "from": prev_room_id or "",
+                            "to": new_room_id or "",
+                        })
+
             else:
                 # no existing schedule doc for this slot
                 if rid or has_time_now:
@@ -6566,6 +6602,188 @@ async def post_course_offerings(
                             doc["room_type"] = rtype
 
                     await db[COL_SCHEDS].insert_one(doc)
+
+                    # Room set on newly-created schedule doc
+                    if "room_id" in s:
+                        new_room_id = rid
+                        if (prev_room_id or "") != (new_room_id or ""):
+                            room_changes.append({
+                                "slot": idx,
+                                "schedule_id": _sch_id_from_sec(section_id, idx),
+                                "day": day or "",
+                                "start_time": beg or "",
+                                "end_time": end or "",
+                                "from": prev_room_id or "",
+                                "to": new_room_id or "",
+                            })
+
+        # --- Notifications for room assignment changes ---
+        # Requirement: BOTH OM and APO should receive notifications (in-app + Gmail) for updates.
+        if room_changes:
+            try:
+                # Resolve section + course context
+                sec = await db[COL_SECTIONS].find_one(
+                    {"section_id": section_id},
+                    {"_id": 0, "course_id": 1, "section_code": 1, "campus_id": 1},
+                ) or {}
+                cid = str(sec.get("course_id") or "").strip()
+                scode = str(sec.get("section_code") or "").strip() or (payload.get("section_code") or "")
+
+                course = await db[COL_COURSES].find_one(
+                    {"course_id": cid},
+                    {"_id": 0, "course_code": 1, "department_id": 1},
+                ) or {}
+                cc = course.get("course_code")
+                if isinstance(cc, list):
+                    cc = cc[0] if cc else ""
+                course_code = str(cc or "").strip() or cid
+                dept_id = str(course.get("department_id") or "").strip()
+
+                campus_name = (campus.get("campus_name") or str(campus_id) or "").strip()
+
+                def _fmt_hhmm(v: Any) -> str:
+                    s = str(v or "").strip()
+                    s = re.sub(r"[^\d]", "", s)
+                    if len(s) == 3:
+                        s = "0" + s
+                    return f"{s[:2]}:{s[2:]}" if len(s) == 4 else ""
+
+                async def _room_label(rid: str) -> str:
+                    rid = (rid or "").strip()
+                    if not rid:
+                        return "TBA"
+                    rdoc = await db[COL_ROOMS].find_one({"room_id": rid}, {"_id": 0, "room_number": 1})
+                    return str((rdoc or {}).get("room_number") or rid).strip() or rid
+
+                lines: List[str] = []
+                for ch in room_changes[:2]:
+                    d = str(ch.get("day") or "").strip()
+                    st = _fmt_hhmm(ch.get("start_time"))
+                    et = _fmt_hhmm(ch.get("end_time"))
+                    old_lbl = await _room_label(str(ch.get("from") or ""))
+                    new_lbl = await _room_label(str(ch.get("to") or ""))
+                    when = ""
+                    if d and st and et:
+                        when = f"{d} {st}-{et}"
+                    elif d:
+                        when = d
+                    if when:
+                        lines.append(f"{when}: {old_lbl} → {new_lbl}")
+                    else:
+                        lines.append(f"Slot {int(ch.get('slot') or 0)}: {old_lbl} → {new_lbl}")
+
+                title = "Room Assignment Updated"
+                details = (
+                    f"Room assignment updated for {course_code} – {scode} ({campus_name}).\n" +
+                    "\n".join(lines)
+                )
+
+                parts = []
+                for c in room_changes:
+                    parts.append(f"{c.get('schedule_id')}|{c.get('from')}|{c.get('to')}")
+                dedupe_key = f"room_assigned::{term_id}::{section_id}::" + ";".join(parts)
+                meta = {
+                    "kind": "apo_room_assignment_updated",
+                    "term_id": term_id,
+                    "campus_id": campus_id,
+                    "section_id": section_id,
+                    "course_id": cid,
+                    "course_code": course_code,
+                    "section_code": scode,
+                    "changes": room_changes,
+                    "dedupe_key": dedupe_key,
+                    "route": "/om/load-assignment",
+                }
+
+                # Notify OM + GS Coordinator for the department (best-effort)
+                if dept_id:
+                    recipients = await _om_and_gs_user_ids_for_department_id(dept_id, campus_id, db)
+                else:
+                    recipients = await _om_and_gs_user_ids_for_campus(campus_id, db)
+
+                for uid in recipients:
+                    try:
+                        hit = await db["notifications"].find_one(
+                            {"user_id": uid, "meta.dedupe_key": dedupe_key},
+                            {"_id": 1},
+                        )
+                        if hit:
+                            continue
+                        await create_notification(
+                            user_id=uid,
+                            title=title,
+                            details=details,
+                            meta=meta,
+                            send_email=True,
+                            email_from_user_id=userId,
+                        )
+                    except Exception:
+                        continue
+
+                # Notify APO (self) as confirmation
+                try:
+                    hit2 = await db["notifications"].find_one(
+                        {"user_id": userId, "meta.dedupe_key": dedupe_key},
+                        {"_id": 1},
+                    )
+                    if not hit2:
+                        await create_notification(
+                            user_id=userId,
+                            title=title,
+                            details=details,
+                            meta={**meta, "route": "/apo/courseofferings"},
+                            send_email=True,
+                            email_from_user_id=userId,
+                        )
+                except Exception:
+                    pass
+
+                # Notify Faculty assigned to this section (best-effort)
+                # Requirement: FACULTY must receive appropriate notifications (in-app + Gmail)
+                # whenever APO allocates/changes/clears a room.
+                try:
+                    fac_user_ids: set[str] = set()
+                    async for asg in db[COL_FAC_ASSIGN].find(
+                        {"section_id": section_id, "is_archived": {"$ne": True}},
+                        {"_id": 0, "user_id": 1, "faculty_id": 1},
+                    ):
+                        uid = str(asg.get("user_id") or "").strip()
+                        fid = str(asg.get("faculty_id") or "").strip()
+                        if uid:
+                            fac_user_ids.add(uid)
+                            continue
+                        if fid:
+                            fp = await db[COL_FAC_PROFILES].find_one(
+                                {"faculty_id": fid},
+                                {"_id": 0, "user_id": 1},
+                            ) or {}
+                            u2 = str(fp.get("user_id") or "").strip()
+                            if u2:
+                                fac_user_ids.add(u2)
+
+                    # Send notifications if any faculty recipients exist
+                    for fuid in sorted(list(fac_user_ids)):
+                        try:
+                            hitf = await db["notifications"].find_one(
+                                {"user_id": fuid, "meta.dedupe_key": dedupe_key},
+                                {"_id": 1},
+                            )
+                            if hitf:
+                                continue
+                            await create_notification(
+                                user_id=fuid,
+                                title=title,
+                                details=details,
+                                meta={**meta, "route": "/faculty/overview"},
+                                send_email=True,
+                                email_from_user_id=userId,
+                            )
+                        except Exception:
+                            continue
+                except Exception:
+                    pass
+            except Exception:
+                pass
 
         want_faculty_change = (
             ("faculty_user_id" in payload) or

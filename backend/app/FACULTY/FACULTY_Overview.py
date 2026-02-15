@@ -75,10 +75,14 @@ async def _room_number_from_schedule(sc: Dict[str, Any]) -> str:
     - Else -> "TBA"
     """
     raw_type = str(sc.get("room_type") or "").strip()
-    if raw_type.lower() == "online":
+    room_id = str(sc.get("room_id") or "").strip()
+
+    # IMPORTANT: If a physical room_id exists, display it even if room_type was (incorrectly)
+    # stored as "Online" (delivery mode). Only treat as ONLINE when room_id is blank/none or
+    # explicitly equals "ONLINE".
+    if raw_type.lower() == "online" and (not room_id or room_id.upper() == "ONLINE"):
         return "ONLINE"
 
-    room_id = sc.get("room_id")
     if room_id:
         r = await db[COL_ROOMS].find_one(
             {"room_id": room_id},
@@ -1062,6 +1066,71 @@ async def overview_handler(
                         "default": "$sched.day"
                     }
                 },
+
+                # IMPORTANT: Reflect room allocation changes consistently.
+                # Previously this defaulted to "Online" when room is missing, which made
+                # Face-to-Face schedules appear unchanged even after APO updates.
+                "room_display": {
+                    "$cond": [
+                        {
+                            "$and": [
+                                {"$eq": [{"$toLower": {"$ifNull": ["$sched.room_type", ""]}}, "online"]},
+                                {
+                                    "$or": [
+                                        {"$eq": ["$sched.room_id", None]},
+                                        {"$eq": ["$sched.room_id", ""]},
+                                        {"$eq": [{"$toUpper": {"$ifNull": ["$sched.room_id", ""]}}, "ONLINE"]},
+                                    ]
+                                },
+                            ]
+                        },
+                        "ONLINE",
+                        {"$cond": [
+                            {"$and": [
+                                {"$ne": [{"$type": "$room.room_number"}, "missing"]},
+                                {"$ne": ["$room.room_number", None]},
+                                {"$ne": ["$room.room_number", ""]},
+                            ]},
+                            "$room.room_number",
+                            {"$cond": [
+                                {"$and": [
+                                    {"$ne": [{"$type": "$sched.room_number"}, "missing"]},
+                                    {"$ne": ["$sched.room_number", None]},
+                                    {"$ne": ["$sched.room_number", ""]},
+                                ]},
+                                "$sched.room_number",
+                                "TBA",
+                            ]},
+                        ]},
+                    ]
+                },
+
+                "campus_display": {
+                    "$cond": [
+                        {
+                            "$and": [
+                                {"$eq": [{"$toLower": {"$ifNull": ["$sched.room_type", ""]}}, "online"]},
+                                {
+                                    "$or": [
+                                        {"$eq": ["$sched.room_id", None]},
+                                        {"$eq": ["$sched.room_id", ""]},
+                                        {"$eq": [{"$toUpper": {"$ifNull": ["$sched.room_id", ""]}}, "ONLINE"]},
+                                    ]
+                                },
+                            ]
+                        },
+                        "Online",
+                        {"$cond": [
+                            {"$and": [
+                                {"$ne": [{"$type": "$camp.campus_name"}, "missing"]},
+                                {"$ne": ["$camp.campus_name", None]},
+                                {"$ne": ["$camp.campus_name", ""]},
+                            ]},
+                            "$camp.campus_name",
+                            "TBA",
+                        ]},
+                    ]
+                },
             }},
             
             {"$project": {
@@ -1072,9 +1141,9 @@ async def overview_handler(
                 "course_title": "$course.course_title",
                 "section": "$sec.section_code",
                 "units": {"$ifNull": ["$course.units", 0]},
-                "campus": {"$ifNull": ["$camp.campus_name", "Online"]},
+                "campus": "$campus_display",
                 "mode": {"$ifNull": ["$sched.room_type", "Online"]},
-                "room": {"$ifNull": ["$room.room_number", "Online"]},
+                "room": "$room_display",
                 "start_raw": "$sched.start_time",
                 "end_raw": "$sched.end_time",
                 "syllabus": "$syllabus_display"

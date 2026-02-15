@@ -1423,14 +1423,38 @@ async def _fetch_rows(user_id: str, term_id: str, db) -> Dict[str, Any]:
             {"_id": 0, "faculty_id": 1, "status": 1, "locked": 1, "rows": 1},
         ).to_list(None)
 
-        # faculty_id -> proposal status
+        # Pending RFCs should revert an Approved row back to Pending (row-level).
+        # This is crucial when OM sends additional rows to a faculty: we must NOT demote
+        # previously accepted rows unless the faculty has an open RFC for that specific row.
+        pending_rfc_section_ids: set[tuple[str, str]] = set()  # (faculty_id, section_id)
+        try:
+            rfc_docs = await db[COL_LOAD_RFC].find(
+                {"term_id": term_id},
+                {"_id": 0, "faculty_id": 1, "section_id": 1, "status": 1},
+            ).to_list(None)
+            for rfc in rfc_docs or []:
+                if not isinstance(rfc, dict):
+                    continue
+                fid_r = str(rfc.get("faculty_id") or "").strip()
+                sid_r = str(rfc.get("section_id") or "").strip()
+                st_r = str(rfc.get("status") or "").strip().upper()
+                if fid_r and sid_r and st_r and st_r not in RFC_TERMINAL:
+                    pending_rfc_section_ids.add((fid_r, sid_r))
+        except Exception:
+            # Never block OM list due to RFC lookup failures.
+            pending_rfc_section_ids = set()
+
+        # faculty_id -> proposal status (header-level)
+        # NOTE: Header-level status is NOT sufficient for OM row status because updating/adding
+        # rows resets the header to "proposed". We still keep it for legacy behavior, but row-level
+        # "finalized" flags determine whether a specific row remains Approved.
         proposal_status_by_fid: dict[str, str] = {}
         # Matching strategy (to avoid false positives):
         # 1) Prefer section_id match when present (most stable)
         # 2) Fallback to (course_code, section_code) for legacy rows that don't carry section_id
         #
         # - forwarded_*: row exists in an OM->Faculty proposal (already sent to faculty)
-        # - finalized_*: row is locked/finalized (cannot be edited further)
+        # - finalized_*: row has been accepted by faculty (row-level finalized=True) OR proposal header locked
         forwarded_section_ids: set[tuple[str, str]] = set()  # (faculty_id, section_id)
         finalized_section_ids: set[tuple[str, str]] = set()  # (faculty_id, section_id)
         forwarded_keys: set[tuple[str, str, str]] = set()    # (faculty_id, course_code, section)
@@ -1488,9 +1512,23 @@ async def _fetch_rows(user_id: str, term_id: str, db) -> Dict[str, Any]:
 
             # Faculty "Accept Schedule" must NOT lock/finalize rows.
             # However, OM should still see the row status as "Approved" once the faculty accepts.
+            # IMPORTANT: When OM sends additional rows, proposal header status may be reset to
+            # "proposed". Do NOT demote previously finalized/accepted rows.
             st = proposal_status_by_fid.get(fid, "")
-            if forwarded and st in ("approved", "accepted"):
+            is_finalized_row = False
+            if fid and sid and (fid, sid) in finalized_section_ids:
+                is_finalized_row = True
+            elif fid and course and section and (fid, course, section) in finalized_keys:
+                is_finalized_row = True
+
+            # Row-level RFC overrides approval: any open RFC for this section sets it back to Pending.
+            has_open_rfc = bool(fid and sid and (fid, sid) in pending_rfc_section_ids)
+            if forwarded and (is_finalized_row or st in ("approved", "accepted")) and not has_open_rfc:
                 r["status"] = "Approved"
+            elif has_open_rfc:
+                # Keep as Pending even if finalized, until RFC is resolved.
+                r["status"] = "Pending"
+                r["pending_rfc"] = True
     except Exception:
         pass
 
@@ -3984,6 +4022,97 @@ async def om_finalize_course(payload: Dict[str, Any] = Body(...), db=Depends(get
             course_code=course_code,
             section_code=section,
         )
+    except Exception:
+        pass
+
+    # --- Mark the underlying section as OM-approved/room-allocation-ready ---
+    # Used by APO (per campus) to know which sections are ready for room assignment.
+    try:
+        # Best-effort resolve the section_id.
+        sec_doc = await db[COL_SECTIONS].find_one(
+            {"term_id": term_id, "section_code": section},
+            {"_id": 0, "section_id": 1, "campus_id": 1, "course_id": 1},
+        )
+
+        # If section_code isn't unique across campuses, narrow by course_code when possible.
+        if (not sec_doc) and course_code:
+            c = await db[COL_COURSES].find_one(
+                {"$or": [{"course_code": course_code}, {"course_code": [course_code]}]},
+                {"_id": 0, "course_id": 1},
+            )
+            cid = (c or {}).get("course_id")
+            if cid:
+                sec_doc = await db[COL_SECTIONS].find_one(
+                    {"term_id": term_id, "course_id": cid, "section_code": section},
+                    {"_id": 0, "section_id": 1, "campus_id": 1, "course_id": 1},
+                )
+
+        section_id = str((sec_doc or {}).get("section_id") or "").strip()
+        if section_id:
+            ts = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+            # Ensure campus_id exists (fallback derived from section_code).
+            campus_id = str((sec_doc or {}).get("campus_id") or "").strip()
+            if not campus_id:
+                try:
+                    campus_id = await _section_to_campus_id(section, db)
+                except Exception:
+                    campus_id = ""
+
+            await db[COL_SECTIONS].update_one(
+                {"section_id": section_id},
+                {"$set": {
+                    "om_approved": True,
+                    "om_approved_at": ts,
+                    "om_approved_by": user_id,
+                    "room_allocation_ready": True,
+                    "room_allocation_ready_at": ts,
+                    "room_allocation_ready_by": user_id,
+                    **({"campus_id": campus_id} if campus_id else {}),
+                    "updated_at": ts,
+                }},
+            )
+
+            # Keep snapshot in sync (some OM/APO screens read from sections_submitted).
+            try:
+                q = {"term_id": term_id, "section_id": section_id}
+                if campus_id:
+                    q["campus_id"] = campus_id
+                await db[COL_SECTIONS_SUBMITTED].update_one(
+                    q,
+                    {"$set": {
+                        "om_approved": True,
+                        "om_approved_at": ts,
+                        "om_approved_by": user_id,
+                        "room_allocation_ready": True,
+                        "room_allocation_ready_at": ts,
+                        "room_allocation_ready_by": user_id,
+                        "updated_at": ts,
+                    }},
+                )
+            except Exception:
+                pass
+
+            # Notify OM (self) that the row was approved and forwarded for room allocation.
+            # APO receives a separate notification via _notify_apo_room_allocation_ready().
+            try:
+                await create_notification(
+                    user_id=user_id,
+                    title="Load Assignment Approved",
+                    details=f"{course_code} – {section} is approved and ready for room allocation.",
+                    meta={
+                        "route": "/om/load-assignment",
+                        "kind": "om_load_approved",
+                        "term_id": term_id,
+                        "section_id": section_id,
+                        "course_code": course_code,
+                        "section_code": section,
+                    },
+                    send_email=True,
+                    email_from_user_id=user_id,
+                )
+            except Exception:
+                pass
     except Exception:
         pass
 
