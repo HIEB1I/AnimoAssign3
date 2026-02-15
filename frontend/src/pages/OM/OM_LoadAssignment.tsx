@@ -7,7 +7,7 @@ import React, {
 } from "react";
 import { Outlet, useLocation } from "react-router-dom";
 import AppShell from "../../base/AppShell";
-import { runOmAutoAssign } from "../../api.ts";
+import { runOmAutoAssign, fetchOmDeadlineWindow } from "../../api.ts";
 import {
   submitOmLoadAssignment,
   saveOmSectionRemarks,
@@ -39,6 +39,8 @@ import {
   Send,
   CheckCheck,
   AlertTriangle,
+  CalendarClock,
+  Info,
   Plus,
   MessageSquareText,
   Copy,
@@ -99,6 +101,17 @@ interface ValidationContext {
 
   campusNames?: Record<string, string>;
 }
+
+
+type OmDeadlineWindow = {
+  openISO: string;
+  deadlineISO: string;
+  term_id: string;
+  campus_id: string;
+};
+
+// NOTE: Deadline UI uses the same banner style as APO (amber / red / slate) and
+// computes the countdown inline at render time.
 
 /* ---------------- Small inputs ---------------- */
 
@@ -2451,6 +2464,44 @@ export default function OM_LoadAssignment() {
     (session as any)?.user_id ||
     (session as any)?.id ||
     "";
+
+
+// OM submission deadline window (set by APO per campus)
+const [deadlineWindow, setDeadlineWindow] = useState<OmDeadlineWindow | null>(null);
+const [deadlineNow, setDeadlineNow] = useState<Date>(() => new Date());
+const [deadlineWindowError, setDeadlineWindowError] = useState<string>("");
+
+const refreshDeadlineWindow = useCallback(async () => {
+  if (!userId) return;
+  try {
+    const res = await fetchOmDeadlineWindow(userId);
+    const w = (res as any)?.window;
+    if (w && typeof w === "object") {
+      setDeadlineWindow({
+        openISO: String(w.openISO || ""),
+        deadlineISO: String(w.deadlineISO || ""),
+        term_id: String(w.term_id || ""),
+        campus_id: String(w.campus_id || ""),
+      });
+    } else {
+      setDeadlineWindow(null);
+    }
+    setDeadlineWindowError("");
+  } catch (e: any) {
+    setDeadlineWindowError(e?.message || "Failed to load deadline window");
+  }
+}, [userId]);
+
+useEffect(() => {
+  refreshDeadlineWindow();
+  const tick = window.setInterval(() => setDeadlineNow(new Date()), 1000);
+  const poll = window.setInterval(() => refreshDeadlineWindow(), 60_000);
+  return () => {
+    window.clearInterval(tick);
+    window.clearInterval(poll);
+  };
+}, [refreshDeadlineWindow]);
+
 
   // Import SHS (match APO import UX)
   const shsFileInputRef = useRef<HTMLInputElement>(null);
@@ -5072,6 +5123,8 @@ const courseCodeToInfo = useMemo(() => {
 }, [courseOptions]);
 
 
+// (deadlineWindow + deadlineNow are used by the render-time countdown banner)
+
 
   return (
     <AppShell
@@ -5094,16 +5147,103 @@ const courseCodeToInfo = useMemo(() => {
           {/* Show the main Load Assignment UI only on /om or /om/load-assignment */}
           {isIndex && (
             <main className="w-full px-8 py-8">
-              <header className="mb-6 flex items-start justify-between">
-                <div>
-                  <h1 className="text-2xl font-bold">
-                    Load Assignment <span className="text-gray-400">|</span>{" "}
-                    <span className="font-black">{term}</span>
-                  </h1>
-                  <p className="text-sm text-gray-600">
-                    Manage course assignments and faculty workload distribution
-                  </p>
-                </div>
+              <header className="mb-3">
+                <h1 className="text-2xl font-bold">
+                  Load Assignment <span className="text-gray-400">|</span>{" "}
+                  <span className="font-black">{term}</span>
+                </h1>
+                <p className="text-sm text-gray-600">
+                  Manage course assignments and faculty workload distribution
+                </p>
+
+                {/* --------------------- OM Submission Deadline (APO-set) --------------------- */}
+                {(() => {
+                  if (deadlineWindowError) {
+                    return (
+                      <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+                        <div className="flex items-start gap-3">
+                          <div className="mt-0.5 grid h-9 w-9 place-items-center rounded-full bg-amber-200 text-amber-900">
+                            <AlertTriangle className="h-5 w-5" />
+                          </div>
+                          <div>
+                            <div className="font-semibold">Deadline status unavailable</div>
+                            <div className="text-xs text-amber-900/90">{deadlineWindowError}</div>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  }
+
+                  const deadlineISO = (deadlineWindow?.deadlineISO || "").trim();
+                  if (!deadlineISO) {
+                    return (
+                      <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
+                        <div className="flex items-start gap-3">
+                          <div className="mt-0.5 grid h-9 w-9 place-items-center rounded-full bg-slate-200 text-slate-700">
+                            <Info className="h-5 w-5" />
+                          </div>
+                          <div>
+                            <div className="font-semibold">No OM submission deadline set</div>
+                            <div className="text-xs text-slate-600">APO has not set a deadline yet.</div>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  }
+
+                  const d = new Date(deadlineISO);
+                  if (Number.isNaN(d.getTime())) return null;
+
+                  const msLeft = d.getTime() - deadlineNow.getTime();
+                  const when = d.toLocaleString(undefined, {
+                    year: "numeric",
+                    month: "short",
+                    day: "2-digit",
+                    hour: "2-digit",
+                    minute: "2-digit",
+                  });
+
+                  if (msLeft <= 0) {
+                    return (
+                      <div className="mt-3 rounded-xl border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-900">
+                        <div className="flex items-start gap-3">
+                          <div className="mt-0.5 grid h-9 w-9 place-items-center rounded-full bg-red-200 text-red-900">
+                            <AlertTriangle className="h-5 w-5" />
+                          </div>
+                          <div>
+                            <div className="font-semibold">Submission deadline has passed</div>
+                            <div className="text-xs text-red-800">Deadline: {when}</div>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  }
+
+                  const totalSec = Math.floor(msLeft / 1000);
+                  const days = Math.floor(totalSec / 86400);
+                  const hrs = Math.floor((totalSec % 86400) / 3600);
+                  const mins = Math.floor((totalSec % 3600) / 60);
+                  const secs = totalSec % 60;
+
+                  return (
+                    <div className="mt-3 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-950">
+                      <div className="flex items-start gap-3">
+                        <div className="mt-0.5 grid h-9 w-9 place-items-center rounded-full bg-amber-200 text-amber-900">
+                          <CalendarClock className="h-5 w-5" />
+                        </div>
+                        <div>
+                          <div className="font-semibold">Submission Deadline Approaching</div>
+                          <div className="text-xs text-amber-900">
+                            Deadline: {when} · {days}d {hrs}h {mins}m {secs}s
+                          </div>
+                          <div className="mt-1 text-[11px] text-amber-900/80">
+                            Reminders are sent automatically to OM and GS Coordinator 7, 3, 2, and 1 day(s) before the deadline.
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })()}
               </header>
 
               <div className="mb-6 flex flex-wrap items-center gap-3 rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
