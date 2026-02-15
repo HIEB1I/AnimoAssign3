@@ -24,11 +24,65 @@ from fastapi import APIRouter, Body, HTTPException, Query
 
 from .main import db
 
+try:
+    # Optional dependency in most FastAPI+Mongo stacks.
+    # If bson is unavailable, we simply won't attempt ObjectId -> user_id mapping.
+    from bson import ObjectId  # type: ignore
+except Exception:  # pragma: no cover
+    ObjectId = None  # type: ignore
+
 router = APIRouter(prefix="/notifications", tags=["notifications"])
 
 COL_NOTIFS = "notifications"
 
 logger = logging.getLogger("animoassign.notifications")
+
+
+async def _resolve_canonical_user_id(uid: str) -> str:
+    """Normalize a user identifier into the canonical `users.user_id`.
+
+    Why:
+    - Some frontends historically stored `animo.user.id` as Mongo ObjectId.
+    - Notifications are stored under `notifications.user_id` (e.g., "USR0155").
+    - If the UI queries /notifications?userId=<ObjectId>, the list will be empty
+      even though notifications exist and Gmail emails were sent.
+
+    We keep compatibility by resolving ObjectId -> users.user_id when possible.
+    """
+
+    s = (uid or "").strip()
+    if not s:
+        return ""
+
+    # If this is already a canonical id (e.g., USRxxxx), keep it.
+    if s.upper().startswith("USR"):
+        return s
+
+    # Best-effort: resolve Mongo ObjectId to users.user_id
+    if ObjectId is not None:
+        try:
+            if len(s) == 24:
+                oid = ObjectId(s)
+                u = await db.get_collection("users").find_one(
+                    {"_id": oid},
+                    {"_id": 0, "user_id": 1},
+                )
+                resolved = str((u or {}).get("user_id") or "").strip()
+                if resolved:
+                    return resolved
+        except Exception:
+            pass
+
+    return s
+
+
+def _scope_has_gmail_send(scope_val: Any) -> bool:
+    """Return True if the provided scope value contains gmail.send."""
+    try:
+        s = " ".join(scope_val) if isinstance(scope_val, list) else str(scope_val or "")
+        return "gmail.send" in s.lower()
+    except Exception:
+        return False
 
 
 def _now_iso() -> str:
@@ -257,6 +311,10 @@ async def _resolve_sender_user_id(email_from_user_id: str | None) -> str:
             try:
                 tok = await _get_user_google_token(candidate)
                 if tok:
+                    # Ensure the candidate can actually send Gmail.
+                    if not _scope_has_gmail_send(tok.get("scope")):
+                        raise RuntimeError("sender_missing_gmail_send_scope")
+
                     access_token = (tok.get("access_token") or "").strip()
                     refresh_token = (tok.get("refresh_token") or "").strip()
 
@@ -276,17 +334,84 @@ async def _resolve_sender_user_id(email_from_user_id: str | None) -> str:
 
     sender_user_id = (os.getenv("ANIMOASSIGN_EMAIL_SENDER_USER_ID") or "").strip()
     if sender_user_id:
-        return sender_user_id
+        # Only use the env sender if it can send Gmail.
+        try:
+            tok = await _get_user_google_token(sender_user_id)
+            if tok and _scope_has_gmail_send(tok.get("scope")):
+                return sender_user_id
+        except Exception:
+            pass
 
     sender_email = (os.getenv("ANIMOASSIGN_EMAIL_SENDER_EMAIL") or "").strip()
-    if not sender_email:
-        return ""
+    if sender_email:
+        sdoc = await db[COL_USERS].find_one(
+            {"$or": [{"email": sender_email}, {"gmail": sender_email}]},
+            {"_id": 0, "user_id": 1},
+        ) or {}
+        uid = (sdoc.get("user_id") or "").strip()
+        if uid:
+            try:
+                tok = await _get_user_google_token(uid)
+                if tok and _scope_has_gmail_send(tok.get("scope")):
+                    return uid
+            except Exception:
+                pass
 
-    sdoc = await db[COL_USERS].find_one(
-        {"$or": [{"email": sender_email}, {"gmail": sender_email}]},
-        {"_id": 0, "user_id": 1},
-    ) or {}
-    return (sdoc.get("user_id") or "").strip()
+    # Last-resort fallback:
+    # If the deployment forgot to configure a service sender via env vars and the
+    # actor has no usable token, try to find *any* connected account that can send
+    # Gmail (has a refresh token and gmail.send scope).
+    #
+    # This is intentionally best-effort: if it finds nothing, email sending will
+    # be skipped while in-app notifications still work.
+    try:
+        q = {
+            "google_token.refresh_token": {"$exists": True, "$ne": ""},
+            "google_token.scope": {"$regex": r"gmail\\.send", "$options": "i"},
+            "status": {"$ne": False},
+        }
+        sdoc = (
+            await db[COL_USERS]
+            .find(q, {"_id": 0, "user_id": 1, "google_token.updated_at": 1})
+            .sort([("google_token.updated_at", -1), ("user_id", 1)])
+            .to_list(length=1)
+        )
+        if sdoc:
+            uid = (sdoc[0].get("user_id") or "").strip()
+            if uid:
+                return uid
+    except Exception:
+        pass
+
+    return ""
+
+
+async def _pick_any_gmail_sender_excluding(excluded_user_ids: list[str]) -> str:
+    """Pick any connected account that can send Gmail (refresh token + gmail.send scope).
+
+    Used as a last-chance fallback when configured/actor senders fail.
+    """
+
+    try:
+        q = {
+            "google_token.refresh_token": {"$exists": True, "$ne": ""},
+            "google_token.scope": {"$regex": r"gmail\\.send", "$options": "i"},
+            "status": {"$ne": False},
+        }
+
+        cur = (
+            db[COL_USERS]
+            .find(q, {"_id": 0, "user_id": 1, "google_token.updated_at": 1})
+            .sort([("google_token.updated_at", -1), ("user_id", 1)])
+        )
+
+        async for d in cur:
+            uid = str(d.get("user_id") or "").strip()
+            if uid and uid not in (excluded_user_ids or []):
+                return uid
+    except Exception:
+        pass
+    return ""
 
 
 async def _get_env_sender_user_id() -> str:
@@ -580,6 +705,23 @@ async def _send_notification_email_best_effort(
             except Exception as e:
                 last_err = e
 
+        # If configured/actor senders fail (e.g., refresh token exists but lacks gmail.send
+        # scope), try a best-effort global sender so Gmail notifications still go out.
+        if last_err is not None:
+            try:
+                fallback_sid = await _pick_any_gmail_sender_excluding(sender_candidates)
+                if fallback_sid:
+                    await _send_email_via_user_gmail(
+                        sender_user_id=fallback_sid,
+                        to_email=to_email,
+                        subject=subject,
+                        text_body=text_body,
+                        html_body=html_body,
+                    )
+                    last_err = None
+            except Exception as e:
+                last_err = e
+
         if last_err is not None:
             raise last_err
     except Exception as e:
@@ -599,6 +741,10 @@ async def create_notification(
     email_from_user_id: str | None = None,
 ) -> Dict[str, Any]:
     """Create a single notification for a user."""
+
+    # Normalize to canonical users.user_id so listing works even if callers
+    # accidentally pass Mongo ObjectId from localStorage.
+    user_id = await _resolve_canonical_user_id(user_id)
 
     doc: Dict[str, Any] = {
         "notif_id": f"NTF{uuid4().hex[:12].upper()}",
@@ -632,7 +778,10 @@ async def create_notification(
 
 @router.get("")
 async def list_notifications(
-    userId: str = Query(..., description="Current logged-in user's id"),
+    # NOTE: Historically some frontends called this with `user_id` instead of `userId`.
+    # Keep both to avoid silent 422s (which can look like "no in-app notifications").
+    userId: Optional[str] = Query(None, description="Current logged-in user's id"),
+    user_id: Optional[str] = Query(None, description="Alias for userId"),
     limit: int = Query(25, ge=1, le=100),
 ) -> Dict[str, Any]:
     # IMPORTANT: This project doesn't rely on a background scheduler/cron.
@@ -645,9 +794,15 @@ async def list_notifications(
     except Exception:
         pass
 
+    uid = (userId or user_id or "").strip()
+    if not uid:
+        raise HTTPException(status_code=400, detail="userId is required")
+
+    uid = await _resolve_canonical_user_id(uid)
+
     cur = (
         db[COL_NOTIFS]
-        .find({"user_id": userId}, {"_id": 0})
+        .find({"user_id": uid}, {"_id": 0})
         .sort([("created_at", -1)])
         .limit(limit)
     )
@@ -1180,9 +1335,12 @@ async def run_om_submit_deadline_reminders() -> Dict[str, Any]:
 
 @router.post("/mark-seen")
 async def mark_seen(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
-    user_id = payload.get("userId")
+    # Accept both `userId` and `user_id` for backward compatibility.
+    user_id = (payload.get("userId") or payload.get("user_id") or "").strip()
     if not user_id:
         raise HTTPException(status_code=400, detail="userId is required")
+
+    user_id = await _resolve_canonical_user_id(user_id)
 
     ids = payload.get("ids") or []
     mark_all = bool(payload.get("all"))
