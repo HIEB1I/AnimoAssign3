@@ -6465,6 +6465,51 @@ async def post_course_offerings(
                         )
                 except Exception:
                     pass
+
+                # Notify Faculty assigned to this section (best-effort)
+                # Requirement: FACULTY must receive appropriate notifications (in-app + Gmail)
+                # whenever APO allocates/changes/clears a room.
+                try:
+                    fac_user_ids: set[str] = set()
+                    async for asg in db[COL_FAC_ASSIGN].find(
+                        {"section_id": section_id, "is_archived": {"$ne": True}},
+                        {"_id": 0, "user_id": 1, "faculty_id": 1},
+                    ):
+                        uid = str(asg.get("user_id") or "").strip()
+                        fid = str(asg.get("faculty_id") or "").strip()
+                        if uid:
+                            fac_user_ids.add(uid)
+                            continue
+                        if fid:
+                            fp = await db[COL_FAC_PROFILES].find_one(
+                                {"faculty_id": fid},
+                                {"_id": 0, "user_id": 1},
+                            ) or {}
+                            u2 = str(fp.get("user_id") or "").strip()
+                            if u2:
+                                fac_user_ids.add(u2)
+
+                    # Send notifications if any faculty recipients exist
+                    for fuid in sorted(list(fac_user_ids)):
+                        try:
+                            hitf = await db["notifications"].find_one(
+                                {"user_id": fuid, "meta.dedupe_key": dedupe_key},
+                                {"_id": 1},
+                            )
+                            if hitf:
+                                continue
+                            await create_notification(
+                                user_id=fuid,
+                                title=title,
+                                details=details,
+                                meta={**meta, "route": "/faculty/overview"},
+                                send_email=True,
+                                email_from_user_id=userId,
+                            )
+                        except Exception:
+                            continue
+                except Exception:
+                    pass
             except Exception:
                 pass
 
