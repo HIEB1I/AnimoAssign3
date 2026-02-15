@@ -18,7 +18,7 @@ import {
   respondOmLoadAssignmentRfc,
   getOmSubmittedCourses,
   saveOmNewLine,
-} from "../../api.ts";
+} from "../../api";
 
 import {
   getOmLoadAssignmentList,
@@ -30,6 +30,24 @@ import {
   type DeloadingRow,
 } from "../../api";
 
+// Some deployments may not yet expose a typed api.ts helper for this.
+// We call the endpoint directly to keep OM reminders working and avoid TS export mismatch.
+async function runOmSubmitDeadlineReminders(): Promise<any> {
+  const resp = await fetch("/api/notifications/run-om-submit-deadline-reminders", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "{}",
+  });
+  if (!resp.ok) {
+    throw new Error(`Failed to run OM submit deadline reminders (${resp.status})`);
+  }
+  try {
+    return await resp.json();
+  } catch {
+    return { ok: true };
+  }
+}
+
 import { cls } from "../../utilities/cls";
 import {
   ChevronDown,
@@ -39,6 +57,8 @@ import {
   Send,
   CheckCheck,
   AlertTriangle,
+  CalendarClock,
+  Info,
   Plus,
   MessageSquareText,
   Copy,
@@ -99,6 +119,10 @@ interface ValidationContext {
 
   campusNames?: Record<string, string>;
 }
+
+
+// NOTE: Deadline UI uses the same banner style as APO (amber / red / slate) and
+// computes the countdown inline at render time.
 
 /* ---------------- Small inputs ---------------- */
 
@@ -2452,6 +2476,15 @@ export default function OM_LoadAssignment() {
     (session as any)?.id ||
     "";
 
+
+// Local tick for countdown display.
+const [deadlineNow, setDeadlineNow] = useState<Date>(() => new Date());
+useEffect(() => {
+  const tick = window.setInterval(() => setDeadlineNow(new Date()), 1000);
+  return () => window.clearInterval(tick);
+}, []);
+
+
   // Import SHS (match APO import UX)
   const shsFileInputRef = useRef<HTMLInputElement>(null);
   const [showShsImportModal, setShowShsImportModal] = useState(false);
@@ -2860,6 +2893,13 @@ export default function OM_LoadAssignment() {
   const [levelFilter, setLevelFilter] = useState<string>("ALL");
   const [rows, setRows] = useState<Row[]>([]);
 
+  // APO-set deadline windows (schedule + faculty encoding) for OM/GS.
+// Deadlines are campus-specific (e.g., Manila and Laguna can differ).
+const [omSubmitWindows, setOmSubmitWindows] = useState<
+  { campus_id: string; campus_name: string; openISO: string; deadlineISO: string; deadline_passed?: boolean; has_apo_submission?: boolean }[]
+>([]);
+const [omDeadlinePassed, setOmDeadlinePassed] = useState<boolean>(false);
+
   const [newLineSectionDraft, setNewLineSectionDraft] =
   useState<Record<string, string>>({});
 
@@ -3258,8 +3298,7 @@ export default function OM_LoadAssignment() {
 
   // Show the main Load Assignment content only on /om or /om/load-assignment
   const loc = useLocation();
-  const isIndex = /^\/om(\/(load-assignment|home))?$/.test(loc.pathname);
-  const isInboxRoute = /\/om\/home\/inbox$/.test(loc.pathname);
+  const isIndex = /^\/om(\/(load-assignment|home)(\/load-assignment)?)?$/.test(loc.pathname);
 
   // === Inbox-as-tab behavior (mirrors Faculty) ===
   const [showInbox, setShowInbox] = useState(false);
@@ -3607,6 +3646,23 @@ export default function OM_LoadAssignment() {
 
     const res = await getOmLoadAssignmentList(userId, overrideTermId);
 
+    // Deadline window info for OM/GS (set by APO per campus + planning term)
+    try {
+      setOmDeadlinePassed(Boolean((res as any)?.om_submit_deadline_passed));
+      const ws = (res as any)?.om_submit_windows;
+      setOmSubmitWindows(Array.isArray(ws) ? (ws as any[]) : []);
+    } catch {
+      setOmSubmitWindows([]);
+      setOmDeadlinePassed(false);
+    }
+
+    // Best-effort: run reminder generation on page load (fallback if no scheduler/cron)
+    try {
+      runOmSubmitDeadlineReminders();
+    } catch {
+      // ignore
+    }
+
     const prefMap = (res as any)?.preferred_units_by_faculty || {};
     setPreferredByFaculty(prefMap);
 
@@ -3633,7 +3689,21 @@ export default function OM_LoadAssignment() {
     // Normalize time values coming from the server (often "HH:MM" or "HMM")
     // to 4-digit "HHMM" so SelectBox values still match TIME_*_OPTIONS.
     const serverRows: Row[] = Array.isArray(res?.rows) ? (res.rows as any) : [];
-    const normalizedRows: Row[] = serverRows.map((r: any) => ({
+
+    // Special Classes are managed in OM_SpecialClass and may create real section bundles.
+    // They must NOT appear in the OM Load Assignment table.
+    // Backend also filters these out, but we keep a frontend safeguard so legacy data
+    // (or future schema changes) won't accidentally surface them here.
+    const isSpecialClassRow = (r: any) => {
+      const remarks = String(r?.remarks ?? "").trim();
+      return /^SPECIAL\s*CLASS$/i.test(remarks);
+    };
+
+    const filteredServerRows: Row[] = serverRows.filter(
+      (r: any) => !isSpecialClassRow(r)
+    );
+
+    const normalizedRows: Row[] = filteredServerRows.map((r: any) => ({
       // NOTE: some backends/serializers can attach non-enumerable properties.
       // Spreading would drop them; explicitly copy `mode` so the Mode column
       // remains populated after refresh/send.
@@ -5058,6 +5128,8 @@ const courseCodeToInfo = useMemo(() => {
 }, [courseOptions]);
 
 
+// (deadlineWindow + deadlineNow are used by the render-time countdown banner)
+
 
   return (
     <AppShell
@@ -5066,8 +5138,6 @@ const courseCodeToInfo = useMemo(() => {
       topbarProfileSubtitle={profileSubtitle || " "}
       // @ts-ignore
       topbarInboxEvent="om:openInbox"
-      // Inbox should be edge-to-edge (no side padding)
-      mainClassName={showInbox || isInboxRoute ? "flex-1 overflow-auto p-0" : undefined}
     >
       {/* If Inbox is opened from the TopBar, show it like a tab */}
       {showInbox ? (
@@ -5080,17 +5150,106 @@ const courseCodeToInfo = useMemo(() => {
           {/* Show the main Load Assignment UI only on /om or /om/load-assignment */}
           {isIndex && (
             <main className="w-full px-8 py-8">
-              <header className="mb-6 flex items-start justify-between">
-                <div>
-                  <h1 className="text-2xl font-bold">
-                    Load Assignment <span className="text-gray-400">|</span>{" "}
-                    <span className="font-black">{term}</span>
-                  </h1>
-                  <p className="text-sm text-gray-600">
-                    Manage course assignments and faculty workload distribution
-                  </p>
-                </div>
+              <header className="mb-3">
+                <h1 className="text-2xl font-bold">
+                  Load Assignment <span className="text-gray-400">|</span>{" "}
+                  <span className="font-black">{term}</span>
+                </h1>
+                <p className="text-sm text-gray-600">
+                  Manage course assignments and faculty workload distribution
+                </p>
+
+                {/* Deadline banner is rendered below using om_submit_windows from /om/load-assignment/list. */}
               </header>
+
+	              {/* APO-set deadline banner (shows BOTH Manila + Laguna deadlines if available) */}
+	              <div className="mb-6 rounded-xl border border-slate-200 bg-white p-4">
+	                <div className="flex items-start justify-between gap-3">
+	                  <div>
+	                    <div className="flex items-center gap-2 text-sm font-semibold text-slate-800">
+	                      <span className="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-amber-100 text-amber-700">
+	                        <CalendarClock className="h-4 w-4" />
+	                      </span>
+	                      <span>Scheduling &amp; Faculty Encoding Deadlines</span>
+	                    </div>
+	                    <div className="mt-1 flex items-start gap-2 text-xs text-slate-600">
+	                      <Info className="mt-0.5 h-3.5 w-3.5 flex-none" />
+	                      <span>
+	                        Deadlines are campus-specific. Reminders are sent automatically to OM and the GS Coordinator 7, 3, 2, and 1 day(s) before each campus deadline.
+	                      </span>
+	                    </div>
+	                  </div>
+	                  {omDeadlinePassed ? (
+	                    <span className="inline-flex items-center rounded-full bg-red-600 px-2.5 py-1 text-xs font-semibold text-white">Locked</span>
+	                  ) : null}
+	                </div>
+
+	                <div className="mt-3 space-y-3">
+	                  {(omSubmitWindows || []).length === 0 ? (
+	                    <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">
+	                      No OM submission deadline set yet for Manila or Laguna.
+	                    </div>
+	                  ) : (
+	                    (omSubmitWindows || []).map((w) => {
+	                      const iso = String(w?.deadlineISO || "").trim();
+	                      const d = iso ? new Date(iso) : null;
+	                      const valid = !!d && !Number.isNaN(d.getTime());
+	                      const msLeft = valid ? (d!.getTime() - deadlineNow.getTime()) : null;
+	                      const daysLeft = msLeft === null ? null : Math.ceil(msLeft / (1000 * 60 * 60 * 24));
+	                      const when = valid
+	                        ? d!.toLocaleString(undefined, { year: "numeric", month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit" })
+	                        : iso;
+	
+	                      const passed = Boolean(w?.deadline_passed) || (msLeft !== null && msLeft <= 0);
+	                      const hasApo = Boolean(w?.has_apo_submission);
+	
+	                      return (
+	                        <div
+	                          key={`${w.campus_id}::${w.deadlineISO}`}
+	                          className={cls(
+	                            "rounded-lg border border-l-4 px-4 py-3",
+	                            passed
+	                              ? "border-red-200 border-l-red-500 bg-red-50"
+	                              : !hasApo
+	                                ? "border-slate-200 border-l-slate-400 bg-slate-50"
+	                                : (daysLeft ?? 999) <= 7
+	                                  ? "border-amber-200 border-l-amber-500 bg-amber-50"
+	                                  : "border-emerald-200 border-l-emerald-500 bg-emerald-50"
+	                          )}
+	                        >
+	                          <div className="flex items-start justify-between gap-3">
+	                            <div>
+	                              <div className={cls("text-sm font-semibold", passed ? "text-red-800" : "text-slate-800")}>
+	                                {w.campus_name || w.campus_id}
+	                              </div>
+	                              <div className="mt-0.5 text-sm text-slate-700">
+	                                Deadline: <span className="font-semibold">{when}</span>
+	                              </div>
+	                              <div className="mt-0.5 text-xs text-slate-600">
+	                                {passed
+	                                  ? "Submitting/approving is locked for this campus because the deadline has passed."
+	                                  : hasApo
+	                                    ? "Please complete schedule and faculty encoding for the APO-submitted course offerings."
+	                                    : "Awaiting APO’s submission of the course offerings. Once submitted, please complete schedule and faculty encoding by the deadline."}
+	                              </div>
+	                            </div>
+	
+	                            <div className="flex items-center gap-2">
+	                              {passed ? (
+	                                <span className="inline-flex items-center rounded-full bg-red-600 px-2.5 py-1 text-xs font-semibold text-white">Locked</span>
+	                              ) : daysLeft !== null ? (
+	                                <span className="inline-flex items-center rounded-full bg-white/70 px-2.5 py-1 text-xs font-semibold text-slate-700">
+	                                  {daysLeft <= 0 ? "Due today" : `${daysLeft} day(s) left`}
+	                                </span>
+	                              ) : null}
+	                            </div>
+	                          </div>
+	                        </div>
+	                      );
+	                    })
+	                  )}
+	                </div>
+	              </div>
 
               <div className="mb-6 flex flex-wrap items-center gap-3 rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
                 <button
@@ -5183,16 +5342,27 @@ const courseCodeToInfo = useMemo(() => {
                     To Faculty
                   </button>
                   <button
-                    disabled={!hasReco || isArchiveView}
+                    // NOTE: `loading` is scoped to RequestChangeModal; use `isAssigning` + row states here.
+                    disabled={!hasReco || isArchiveView || omDeadlinePassed || isAssigning}
                     className={cls(
                       // Match the typography/size of the other toolbar controls
                       "inline-flex h-10 min-w-[160px] items-center justify-center gap-2 rounded-md px-4 py-2 text-sm font-medium shadow-sm",
-                      !(!hasReco || isArchiveView)
+                      !(!hasReco || isArchiveView || omDeadlinePassed || isAssigning)
                         ? "bg-emerald-600 text-white hover:bg-emerald-700" // enabled (GREEN)
                         : "bg-gray-200 text-gray-400 cursor-not-allowed" // disabled
                     )}
+                    title={
+                      isArchiveView
+                        ? "Archived view: forwarding is disabled"
+                        : omDeadlinePassed
+                        ? "Locked: deadline has passed"
+                        : !hasReco
+                        ? "No recommendations to forward"
+                        : "Forward to Chair"
+                    }
                     onClick={async () => {
                       if (isArchiveView) return;
+                      if (omDeadlinePassed) return;
                       // Soft-check only: allow forwarding even if some rows are incomplete.
                       const incomplete = rows.filter(
                         isRowIncompleteForApproval

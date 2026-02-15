@@ -988,10 +988,27 @@ const RoomSelectBox: React.FC<{
     rooms.find(r => String(r.room_number || "").replace(/[-–—]/g, "").trim().toUpperCase() === "TBA")
       ?.room_id ?? null;
 
-  const opts = React.useMemo(
-    () => rooms.map(r => ({ id: r.room_id, label: r.room_number || r.room_id })),
-    [rooms]
-  );
+  // IMPORTANT: SelectBox is label-based (string), so labels must be unique.
+  // If multiple rooms share the same room_number (common when data includes building variants),
+  // the UI can "snap back" or appear to not hold the selection because we can't map label->id reliably.
+  const opts = React.useMemo(() => {
+    const base = (rooms || []).map((r) => ({
+      id: String(r.room_id || ""),
+      room_number: String(r.room_number || "").trim() || String(r.room_id || "").trim(),
+      building: String((r as any).building || "").trim(),
+      room_type: String((r as any).room_type || "").trim(),
+    }));
+
+    const counts = new Map<string, number>();
+    for (const b of base) counts.set(b.room_number, (counts.get(b.room_number) || 0) + 1);
+
+    return base.map((b) => {
+      const isDup = (counts.get(b.room_number) || 0) > 1;
+      const suffix = b.building || b.room_type || (b.id ? b.id.slice(-4) : "");
+      const label = isDup && suffix ? `${b.room_number} • ${suffix}` : b.room_number;
+      return { id: b.id, label };
+    });
+  }, [rooms]);
 
   const currentLabel = React.useMemo(() => {
     const currentId = (value ?? tbaId ?? "") as string;
@@ -1576,8 +1593,46 @@ const loadOfferings = async () => {
           : [row.slot1, row.slot2].filter(Boolean);
       const next = [...(seBase as any[])].map((x) => ({ ...x }));
 
-      if (next[0]) next[0].room_id = scEditRoom1 || null;
-      if (next[1]) next[1].room_id = scEditRoom2 || null;
+      // Keep the displayed room label in-sync immediately after saving.
+      // Many rows include `room_number`/`room_name` from the backend; if we only update `room_id`,
+      // the table can keep showing the previous `room_number` until a full reload.
+      const resolveRoomLabel = (specialId: string, idx: 1 | 2, roomId: string | null) => {
+        const rid = String(roomId || "").trim();
+        if (!rid) return { room_number: null as any, room_name: null as any };
+
+        const key = `${specialId}:${idx}`;
+        const pools: any[] = [
+          ...(Array.isArray((scEligibleRooms as any)?.[key]) ? ((scEligibleRooms as any)[key] as any[]) : []),
+          ...(((data as any)?.room_options || []) as any[]),
+        ];
+
+        const hit = pools.find((r) => String(r?.room_id || "").trim() === rid);
+        const label = String(hit?.room_number || hit?.room_name || "").trim();
+
+        return {
+          room_number: label || null,
+          room_name: label || null,
+        };
+      };
+
+      const sid = String(row.special_id || "").trim();
+
+      if (next[0]) {
+        const rid = scEditRoom1 ? String(scEditRoom1).trim() : null;
+        next[0].room_id = rid || null;
+        const lab = resolveRoomLabel(sid, 1, rid);
+        // Mirror label fields so the read-only view updates instantly
+        next[0].room_number = lab.room_number;
+        next[0].room_name = lab.room_name;
+      }
+
+      if (next[1]) {
+        const rid = scEditRoom2 ? String(scEditRoom2).trim() : null;
+        next[1].room_id = rid || null;
+        const lab = resolveRoomLabel(sid, 2, rid);
+        next[1].room_number = lab.room_number;
+        next[1].room_name = lab.room_name;
+      }
 
       await updateApoSpecialClassRow(userId, {
         special_id: row.special_id,
@@ -4387,7 +4442,9 @@ ${msg}`,
                                       const viewRow = (
                                         <tr
                                           id={`row-${rowKey}`}
-                                          key={(r.section.section_id || r.course.course_id) + "-v"}
+                                          // IMPORTANT: Use a stable unique key so rows don't "swap" between program groups
+                                          // after add/delete (React will reuse DOM nodes if keys collide).
+                                          key={rowKey + "-v"}
                                           className={cls(
                                             "hover:bg-neutral-50",
                                             highlightRowKey === rowKey && "bg-amber-50"
@@ -4506,7 +4563,7 @@ ${msg}`,
                                       const editRow = (
                                         <tr
                                           id={`row-${rowKey}`}
-                                          key={r.section.section_id + "-e"}
+                                          key={rowKey + "-e"}
                                           className={cls("bg-white", highlightRowKey === rowKey && "bg-amber-50")}
                                           style={{ boxShadow: "0 2px 10px rgba(0,0,0,0.05)" }}
                                         >
@@ -4897,7 +4954,7 @@ ${msg}`,
                                       const addInline =
                                         addAnchorKey === rowKey && (
                                           <tr
-                                            key={(r.section.section_id || r.course.course_id) + "-a"}
+                                            key={rowKey + "-a"}
                                             className="bg-white"
                                             style={{ boxShadow: "0 2px 10px rgba(0,0,0,0.05)" }}
                                           >
@@ -5139,7 +5196,8 @@ ${msg}`,
                                         );
 
                                       return (
-                                        <React.Fragment key={r.section.section_id || r.course.course_id}>
+                                        // Use the same stable key used for ordering/editing to prevent row identity bugs.
+                                        <React.Fragment key={rowKey}>
                                           {isEditing ? editRow : viewRow}
                                           {addInline}
                                         </React.Fragment>

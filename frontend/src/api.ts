@@ -88,6 +88,17 @@ export async function fetchOmProfile(userId: string) {
   return r.json();
 }
 
+
+export async function fetchOmDeadlineWindow(userId: string) {
+  const url = join(
+    API_BASE,
+    `om/loadassignment?userId=${encodeURIComponent(userId)}&action=deadline_window`
+  );
+  const r = await fetch(url, { method: "POST" });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
 // Descriptive #1
 export async function fetchTeachingHistory(facultyId: string) {
   const base = (ANALYTICS_BASE || API_BASE).replace(/\/+$/, "");
@@ -1860,6 +1871,18 @@ export async function getStudentSpecialClassProfile(
     `${API_BASE}/student/specialclass`,
     {},
     { params: { userId, action: "profile" } }
+  );
+  return data;
+}
+
+export async function getStudentSpecialClassCourseInfo(
+  userId: string,
+  courseCode: string
+): Promise<{ ok: boolean; course_code: string; course_title: string; units: number; department_name: string }> {
+  const { data } = await axios.post(
+    `${API_BASE}/student/specialclass`,
+    {},
+    { params: { userId, action: "courseInfo", courseCode } }
   );
   return data;
 }
