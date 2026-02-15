@@ -161,7 +161,7 @@ const pushToast = useCallback(
     if (!list?.ok) throw new Error(list?.detail || "Failed to load list.");
     if (!profile?.ok) throw new Error(profile?.detail || "Failed to load profile.");
 
-    const teachingLoadNormalized = (list?.teaching_load || []).map((x: any) => ({
+    const teachingLoadNormalizedRaw = (list?.teaching_load || []).map((x: any) => ({
       ...x,
       // normalize section_id no matter what the backend sends
       section_id:
@@ -171,6 +171,34 @@ const pushToast = useCallback(
         x.section?.id ||
         "",
     }));
+
+    // De-duplicate rows (prevents Special Class duplicates from multiple backend versions)
+    const seen = new Set<string>();
+    const teachingLoadNormalized = teachingLoadNormalizedRaw.filter((x: any) => {
+      const isSpecial = Boolean(x?.is_special_class);
+      const baseId = String(isSpecial ? (x?.special_id || "") : (x?.section_id || "")).trim();
+      const fallback = [
+        x?.course_code,
+        x?.section,
+        x?.day1,
+        x?.time1,
+        x?.room1,
+        x?.day2,
+        x?.time2,
+        x?.room2,
+        isSpecial ? "special" : "regular",
+      ]
+        .map((v) => String(v ?? "").trim())
+        .join("|");
+
+      const key = isSpecial
+        ? `SPECIAL:${baseId || fallback}`
+        : `REG:${baseId || fallback}`;
+
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
 
     // Compose into the same shape the page already renders
     const nextData = {
@@ -461,6 +489,9 @@ function normalizeDay(raw?: string): DayLong | null {
 // --- *** NEW: This type matches the backend (Python) output *** ---
 type TLItem = {
   section_id: string;
+  // Special Class reflection (OM_SpecialClass -> Faculty)
+  is_special_class?: boolean;
+  special_id?: string;
   course_code: string;
   course_title: string;
   section: string;
@@ -486,6 +517,8 @@ type TLItemForCalendar = {
   room: string; // The specific room for this day
   time: string; // The specific time for this day
   syllabus?: string;
+  is_special_class?: boolean;
+  special_id?: string;
   // Store original item for modal
   originalItem: TLItem;
 };
@@ -577,9 +610,13 @@ function placeItems(teachingLoad: TLItem[]): Placed[] {
           sec: it.section,
           units: it.units,
           mode: it.mode,
-          room: room || "Online",
+          // IMPORTANT: Even if there is no assigned room yet, the schedule must still reflect.
+          // Use a neutral placeholder instead of implying an online room.
+          room: (room && String(room).trim()) ? String(room).trim() : "TBA",
           time: time,
           syllabus: it.syllabus,
+          is_special_class: Boolean((it as any)?.is_special_class),
+          special_id: (it as any)?.special_id,
           originalItem: it, // Pass the full original item
         },
       });
@@ -616,7 +653,10 @@ const ClassBlock = ({ onClick, it }: { onClick?: () => void; it: TLItemForCalend
     onClick={onClick}
     className={cls(
       "flex w-full flex-col items-center justify-center rounded-xl border shadow-sm",
-      "border-emerald-200 bg-emerald-50/90 hover:bg-emerald-50"
+      it.is_special_class
+        ? "border-purple-200 bg-purple-100/80 hover:bg-purple-100"
+        : "border-emerald-200 bg-emerald-50/90 hover:bg-emerald-50",
+      it.is_special_class && "cursor-default"
     )}
     title={`${it.code} • ${it.sec} | ${it.room} • ${it.mode}`}
   >
@@ -892,7 +932,13 @@ const scheduleFinalLabel = (() => {
                         <ClassBlock
                           key={j}
                           it={it}
-                          onClick={() => { if (scheduleFinal) return; setModal({ day: g.day, item: it }); }}
+                          onClick={() => {
+                            if (scheduleFinal) return;
+                            // Reflected Special Classes are distinct from the regular OM schedule.
+                            // They must NOT allow RFC.
+                            if (it.is_special_class) return;
+                            setModal({ day: g.day, item: it });
+                          }}
                         />
                       ))}
                     </div>
@@ -944,10 +990,20 @@ const scheduleFinalLabel = (() => {
                         const d1 = it.day1 && it.day1 !== "TBA" ? it.day1 : "—";
                         const d2 = it.day2 && it.day2 !== "TBA" ? it.day2 : "—";
 
+                        const isSpecial = Boolean((it as any)?.is_special_class);
+                        // In List view: Special Classes should NOT show "Special Class" in the Mode column.
+                        const modeRaw = String(it.mode || "").trim();
+                        const modeDisplay = isSpecial
+                          ? modeRaw && modeRaw.toLowerCase() !== "special class" ? modeRaw : "—"
+                          : modeRaw || "—";
+
                         return (
                           <tr
                             key={idx}
-                            className={cls("bg-white", "[&>td]:border-t [&>td]:border-gray-100")}
+                            className={cls(
+                              isSpecial ? "bg-purple-50" : "bg-white",
+                              "[&>td]:border-t [&>td]:border-gray-100"
+                            )}
                           >
                             <td className="px-4 py-3 align-middle">
                               <div className="leading-tight">
@@ -964,7 +1020,7 @@ const scheduleFinalLabel = (() => {
                             <td className="px-4 py-3 align-middle">{t2.begin}</td>
                             <td className="px-4 py-3 align-middle">{t2.end}</td>
                             <td className="px-4 py-3 align-middle">{it.room2 || "—"}</td>
-                            <td className="px-4 py-3 align-middle text-gray-800">{it.mode || "—"}</td>
+                            <td className="px-4 py-3 align-middle text-gray-800">{modeDisplay}</td>
                             <td className="px-4 py-3 align-middle">
                               <button
                                 type="button"
