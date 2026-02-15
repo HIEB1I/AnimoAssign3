@@ -129,6 +129,16 @@ export async function fetchDeloadingsByTerm(
   return res.json();
 }
 
+export async function fetchDeloadingHistoryAllTerms(q: string) {
+  const params = new URLSearchParams();
+  if (q && q.trim()) params.set("q", q.trim());
+
+  const url = `${ANALYTICS_BASE.replace(/\/+$/, "")}/deloadings/history?${params.toString()}`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(await res.text().catch(() => res.statusText));
+  return res.json();
+}
+
 // Predictive #1 (updated)
 export async function fetchFacultyAvailabilityHeatmap<T = unknown>(params?: {
   course_id?: string;
