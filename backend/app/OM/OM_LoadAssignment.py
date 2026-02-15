@@ -3703,6 +3703,97 @@ async def om_finalize_course(payload: Dict[str, Any] = Body(...), db=Depends(get
     except Exception:
         pass
 
+    # --- Mark the underlying section as OM-approved/room-allocation-ready ---
+    # Used by APO (per campus) to know which sections are ready for room assignment.
+    try:
+        # Best-effort resolve the section_id.
+        sec_doc = await db[COL_SECTIONS].find_one(
+            {"term_id": term_id, "section_code": section},
+            {"_id": 0, "section_id": 1, "campus_id": 1, "course_id": 1},
+        )
+
+        # If section_code isn't unique across campuses, narrow by course_code when possible.
+        if (not sec_doc) and course_code:
+            c = await db[COL_COURSES].find_one(
+                {"$or": [{"course_code": course_code}, {"course_code": [course_code]}]},
+                {"_id": 0, "course_id": 1},
+            )
+            cid = (c or {}).get("course_id")
+            if cid:
+                sec_doc = await db[COL_SECTIONS].find_one(
+                    {"term_id": term_id, "course_id": cid, "section_code": section},
+                    {"_id": 0, "section_id": 1, "campus_id": 1, "course_id": 1},
+                )
+
+        section_id = str((sec_doc or {}).get("section_id") or "").strip()
+        if section_id:
+            ts = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+            # Ensure campus_id exists (fallback derived from section_code).
+            campus_id = str((sec_doc or {}).get("campus_id") or "").strip()
+            if not campus_id:
+                try:
+                    campus_id = await _section_to_campus_id(section, db)
+                except Exception:
+                    campus_id = ""
+
+            await db[COL_SECTIONS].update_one(
+                {"section_id": section_id},
+                {"$set": {
+                    "om_approved": True,
+                    "om_approved_at": ts,
+                    "om_approved_by": user_id,
+                    "room_allocation_ready": True,
+                    "room_allocation_ready_at": ts,
+                    "room_allocation_ready_by": user_id,
+                    **({"campus_id": campus_id} if campus_id else {}),
+                    "updated_at": ts,
+                }},
+            )
+
+            # Keep snapshot in sync (some OM/APO screens read from sections_submitted).
+            try:
+                q = {"term_id": term_id, "section_id": section_id}
+                if campus_id:
+                    q["campus_id"] = campus_id
+                await db[COL_SECTIONS_SUBMITTED].update_one(
+                    q,
+                    {"$set": {
+                        "om_approved": True,
+                        "om_approved_at": ts,
+                        "om_approved_by": user_id,
+                        "room_allocation_ready": True,
+                        "room_allocation_ready_at": ts,
+                        "room_allocation_ready_by": user_id,
+                        "updated_at": ts,
+                    }},
+                )
+            except Exception:
+                pass
+
+            # Notify OM (self) that the row was approved and forwarded for room allocation.
+            # APO receives a separate notification via _notify_apo_room_allocation_ready().
+            try:
+                await create_notification(
+                    user_id=user_id,
+                    title="Load Assignment Approved",
+                    details=f"{course_code} – {section} is approved and ready for room allocation.",
+                    meta={
+                        "route": "/om/load-assignment",
+                        "kind": "om_load_approved",
+                        "term_id": term_id,
+                        "section_id": section_id,
+                        "course_code": course_code,
+                        "section_code": section,
+                    },
+                    send_email=True,
+                    email_from_user_id=user_id,
+                )
+            except Exception:
+                pass
+    except Exception:
+        pass
+
     return {"ok": True, "course_code": course_code, "section": section}
 
 @router.post("/load-assignment/run")
