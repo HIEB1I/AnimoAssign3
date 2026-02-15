@@ -1686,6 +1686,68 @@ async def loadassignment_handler(
             "statuses": ["Confirmed", "Pending", "Unassigned", "Conflict"],
         }
 
+    # APO-set schedule + faculty encoding deadline windows.
+    # Frontend compatibility: some UI calls /om/loadassignment?action=deadline_window.
+    # Return BOTH campus deadlines (Manila + Laguna) so OM can see them at once.
+    if action == "deadline_window":
+        active = await _active_term()
+        if not active or not active.get("term_id"):
+            raise HTTPException(status_code=409, detail="No active/upcoming term found")
+
+        term_id = str(active.get("term_id") or "").strip()
+
+        # Prefer known campuses; also include any additional campus_id values found in storage.
+        known = ["CMPS0001", "CMPS0002"]
+        windows: list[dict] = []
+
+        docs = await db[COL_OM_SUBMIT_WINDOWS].find(
+            {"term_id": term_id},
+            {"_id": 0, "campus_id": 1, "openISO": 1, "deadlineISO": 1},
+        ).to_list(None)
+
+        found_norm: set[str] = set()
+        for d in docs or []:
+            raw = str((d or {}).get("campus_id") or "").strip()
+            if not raw:
+                continue
+            found_norm.add((await _normalize_campus_id(raw, db)) or raw)
+
+        campus_ids = list(dict.fromkeys([*known, *sorted(found_norm)]))
+
+        for cid in campus_ids:
+            w = await _get_om_submit_window(term_id, cid, db)
+            if not w or not (w.get("deadlineISO") or "").strip():
+                continue
+
+            campus_name = cid
+            try:
+                camp = await db["campuses"].find_one(
+                    {"campus_id": cid},
+                    {"_id": 0, "campus_name": 1},
+                ) or {}
+                campus_name = (camp.get("campus_name") or cid).strip() or cid
+            except Exception:
+                campus_name = cid
+
+            has_apo = await _has_apo_submission(term_id, cid, db)
+            windows.append(
+                {
+                    "campus_id": cid,
+                    "campus_name": campus_name,
+                    "openISO": w.get("openISO") or "",
+                    "deadlineISO": w.get("deadlineISO") or "",
+                    "deadline_passed": _deadline_passed(w),
+                    "has_apo_submission": bool(has_apo),
+                }
+            )
+
+        return {
+            "ok": True,
+            "term": _term_label(active),
+            "term_id": term_id,
+            "windows": windows,
+        }
+
     # --- inside loadassignment_handler(), replace the current "profile" branch ---
     if action == "profile":
         # --- existing lookups (users/staff) can stay as-is ---
@@ -2942,6 +3004,7 @@ async def get_om_load_assignment_list(user_id: str, term_id: Optional[str] = Non
     # APO-set schedule + faculty encoding deadline window (campus-specific)
     campus_id = (await _infer_campus_id_for_user(user_id, db)) or ""
     om_submit_window = None
+    om_submit_windows: list[dict] = []
     om_submit_has_apo_submission = False
     om_submit_deadline_passed = False
     try:
@@ -2949,6 +3012,29 @@ async def get_om_load_assignment_list(user_id: str, term_id: Optional[str] = Non
             om_submit_window = await _get_om_submit_window(active.get("term_id"), campus_id, db)
             om_submit_has_apo_submission = await _has_apo_submission(active.get("term_id"), campus_id, db)
             om_submit_deadline_passed = _deadline_passed(om_submit_window)
+
+        # Also return BOTH Manila + Laguna windows for display in OM.
+        for cid in ["CMPS0001", "CMPS0002"]:
+            w = await _get_om_submit_window(active.get("term_id"), cid, db)
+            if not w or not (w.get("deadlineISO") or "").strip():
+                continue
+            cname = cid
+            try:
+                camp = await db["campuses"].find_one({"campus_id": cid}, {"_id": 0, "campus_name": 1}) or {}
+                cname = (camp.get("campus_name") or cid).strip() or cid
+            except Exception:
+                cname = cid
+            has_apo = await _has_apo_submission(active.get("term_id"), cid, db)
+            om_submit_windows.append(
+                {
+                    "campus_id": cid,
+                    "campus_name": cname,
+                    "openISO": w.get("openISO") or "",
+                    "deadlineISO": w.get("deadlineISO") or "",
+                    "deadline_passed": _deadline_passed(w),
+                    "has_apo_submission": bool(has_apo),
+                }
+            )
     except Exception:
         pass
 
@@ -2959,6 +3045,7 @@ async def get_om_load_assignment_list(user_id: str, term_id: Optional[str] = Non
         "forwarded_to_chair": forwarded_to_chair,
         "campus_id": campus_id,
         "om_submit_window": om_submit_window,
+        "om_submit_windows": om_submit_windows,
         "om_submit_deadline_passed": bool(om_submit_deadline_passed),
         "om_submit_has_apo_submission": bool(om_submit_has_apo_submission),
         "preferred_units_by_faculty": preferred_units_by_faculty,

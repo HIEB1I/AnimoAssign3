@@ -1321,13 +1321,35 @@ async def run_om_submit_deadline_reminders() -> Dict[str, Any]:
     sent_total = 0
     campuses_checked = 0
 
+    # If a global window (campus_id == "") exists alongside campus-specific windows,
+    # ignore the global window to avoid duplicate reminders.
+    has_specific = any(str((w or {}).get("campus_id") or "").strip() for w in (windows or []))
+
+    # Dedupe processing per normalized campus_id + canonical deadline
+    seen_window_keys: set[tuple[str, str]] = set()
+
     for w in windows:
         campus_raw = str((w or {}).get("campus_id") or "").strip()
+        if has_specific and not campus_raw:
+            continue
+
         campus_id = (await _normalize_campus_id(campus_raw)) or campus_raw
         open_dt = _parse_iso_dt(str((w or {}).get("openISO") or ""))
         deadline_dt = _parse_iso_dt(str((w or {}).get("deadlineISO") or ""))
         if not open_dt or not deadline_dt:
             continue
+
+        # Canonicalize deadline to seconds (UTC) so dedupe doesn't break when the same deadline
+        # is stored with different offset/Z formats.
+        try:
+            canon_deadline = deadline_dt.astimezone(timezone.utc).replace(microsecond=0).isoformat()
+        except Exception:
+            canon_deadline = str((w or {}).get("deadlineISO") or "").strip()
+
+        win_key = (campus_id, canon_deadline)
+        if win_key in seen_window_keys:
+            continue
+        seen_window_keys.add(win_key)
 
         # Only remind while the window is open and not past deadline
         if now < open_dt or now > deadline_dt:
@@ -1417,8 +1439,8 @@ async def run_om_submit_deadline_reminders() -> Dict[str, Any]:
         if not recipients:
             continue
 
-        # Dedupe per (term, campus, days_left, exact deadline)
-        dedupe_base = f"om_schedule_deadline::{term_id}::{campus_id}::{days_left}::{(w or {}).get('deadlineISO') or ''}"
+        # Dedupe per (term, campus, days_left, canonical deadline)
+        dedupe_base = f"om_schedule_deadline::{term_id}::{campus_id}::{days_left}::{canon_deadline}"
 
         for uid in recipients:
             await _create_notification_once(
@@ -1431,7 +1453,7 @@ async def run_om_submit_deadline_reminders() -> Dict[str, Any]:
                     "term_id": term_id,
                     "campus_id": campus_id,
                     "days_left": days_left,
-                    "deadlineISO": (w or {}).get("deadlineISO") or "",
+                    "deadlineISO": canon_deadline,
                     "route": "/om/home/load-assignment",
                 },
             )

@@ -533,6 +533,36 @@ async def _get_planning_term() -> Dict[str, Any]:
 
 
 
+
+def _term_label_doc(t: dict) -> str:
+    """Human-friendly term label: Term {n} · AY {ay}-{ay+1}."""
+    if not t:
+        return ""
+    n = t.get("term_number")
+    ay = t.get("acad_year_start") or t.get("acad_year")
+    try:
+        ay_int = int(ay) if ay is not None else None
+    except Exception:
+        ay_int = None
+    aye = (ay_int + 1) if ay_int is not None else None
+    if n and ay_int is not None and aye is not None:
+        return f"Term {n} · AY {ay_int}-{aye}"
+    return str(t.get("term_id") or "")
+
+async def _term_label_by_id(term_id: str) -> str:
+    tid = (term_id or "").strip()
+    if not tid:
+        return ""
+    try:
+        t = await db[COL_TERMS].find_one(
+            {"term_id": tid},
+            {"_id": 0, "term_id": 1, "term_number": 1, "acad_year_start": 1, "acad_year": 1},
+        ) or {}
+        return _term_label_doc(t) or tid
+    except Exception:
+        return tid
+
+
 def _parse_iso_dt(s: str) -> Optional[datetime]:
     """Parse an ISO8601 datetime string into a timezone-aware UTC datetime.
 
@@ -4850,10 +4880,12 @@ async def post_course_offerings(
                 manila = timezone(timedelta(hours=8))
                 deadline_txt = deadline_dt.astimezone(manila).strftime("%b %d, %Y %H:%M PHT")
 
+                term_label = await _term_label_by_id(term_id)
+
                 title = "Schedule & Faculty Encoding Deadline Set"
                 details = (
                     f"APO set the deadline for OM/GS to complete schedule and faculty encoding "
-                    f"for {term_id} ({campus_name}). "
+                    f"for {term_label} ({campus_name}). "
                     f"Deadline: {deadline_txt}. "
                     f"Automatic reminders will be sent 7, 3, 2, and 1 day(s) before the deadline."
                 )
@@ -4903,7 +4935,7 @@ async def post_course_offerings(
                         else f"Schedule & Faculty Encoding Due in {days_left} days"
                     )
                     details2 = (
-                        f"Please complete schedule and faculty encoding for term {term_id} "
+                        f"Please complete schedule and faculty encoding for term {term_label} "
                         f"before {when_txt2}."
                     )
 

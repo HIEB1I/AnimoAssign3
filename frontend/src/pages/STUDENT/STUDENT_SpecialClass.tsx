@@ -10,6 +10,7 @@ import {
   getStudentSpecialClassOptions,
   getStudentSpecialClassProfile,
   getStudentSpecialClasses,
+  getStudentSpecialClassCourseInfo,
   submitStudentSpecialClass,
   type SpecialClassOptions,
   type SpecialClassSubmitPayload,
@@ -550,16 +551,49 @@ export default function STUDENT_SpecialClass() {
 
   const section4Ok = section3Ok && form.agree === true;
 
-  const handleCoursePick = (code: string) => {
+  const handleCoursePick = async (code: string) => {
     const cleaned = String(code || "").trim().toUpperCase();
-    const hit = courseMap.get(cleaned);
+    if (!cleaned) {
+      setForm((prev) => ({
+        ...prev,
+        courseCode: "",
+        courseTitle: "",
+        units: "",
+      }));
+      return;
+    }
 
+    // Optimistic fill (from options list) while fetching DB-truth
+    const hit = courseMap.get(cleaned);
     setForm((prev) => ({
       ...prev,
       courseCode: cleaned,
-      courseTitle: hit?.title || "",
+      courseTitle: hit?.title || prev.courseTitle || "",
       department: hit?.dept && options.departments.includes(hit.dept) ? hit.dept : prev.department,
+      units: hit?.units ? String(hit.units) : prev.units,
     }));
+
+    // Fetch course info from DB to guarantee correct units/title/department
+    try {
+      const info = await getStudentSpecialClassCourseInfo(userId!, cleaned);
+      if (!info?.ok) return;
+
+      setForm((prev) => ({
+        ...prev,
+        courseCode: String(info.course_code || cleaned).trim().toUpperCase(),
+        courseTitle: info.course_title || prev.courseTitle,
+        units: info.units != null ? String(info.units) : prev.units,
+        department:
+          info.department_name && options.departments.includes(info.department_name)
+            ? info.department_name
+            : prev.department,
+      }));
+    } catch (e: any) {
+      // Keep optimistic values, but show a gentle error
+      setError(
+        e?.response?.data?.detail || e?.message || "Failed to fetch course units. Please try again."
+      );
+    }
   };
 
   // If user types a course code that matches, autofill title/department immediately
@@ -822,13 +856,10 @@ export default function STUDENT_SpecialClass() {
                       </label>
                       <input
                         value={form.units}
-                        onChange={(e) => {
-                          const digits = e.target.value.replace(/\D/g, "");
-                          setForm((prev) => ({ ...prev, units: digits }));
-                        }}
+                        readOnly
                         disabled={!section2Ok}
-                        placeholder="Number only"
-                        className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm disabled:bg-gray-100"
+                        placeholder="Auto-filled"
+                        className="w-full bg-gray-100 rounded-lg border border-gray-300 px-3 py-2 text-sm disabled:bg-gray-100"
                       />
                     </div>
 

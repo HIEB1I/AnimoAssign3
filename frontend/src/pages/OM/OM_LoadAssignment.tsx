@@ -7,7 +7,7 @@ import React, {
 } from "react";
 import { Outlet, useLocation } from "react-router-dom";
 import AppShell from "../../base/AppShell";
-import { runOmAutoAssign, fetchOmDeadlineWindow } from "../../api.ts";
+import { runOmAutoAssign } from "../../api.ts";
 import {
   submitOmLoadAssignment,
   saveOmSectionRemarks,
@@ -120,13 +120,6 @@ interface ValidationContext {
   campusNames?: Record<string, string>;
 }
 
-
-type OmDeadlineWindow = {
-  openISO: string;
-  deadlineISO: string;
-  term_id: string;
-  campus_id: string;
-};
 
 // NOTE: Deadline UI uses the same banner style as APO (amber / red / slate) and
 // computes the countdown inline at render time.
@@ -2484,41 +2477,12 @@ export default function OM_LoadAssignment() {
     "";
 
 
-// OM submission deadline window (set by APO per campus)
-const [deadlineWindow, setDeadlineWindow] = useState<OmDeadlineWindow | null>(null);
+// Local tick for countdown display.
 const [deadlineNow, setDeadlineNow] = useState<Date>(() => new Date());
-const [deadlineWindowError, setDeadlineWindowError] = useState<string>("");
-
-const refreshDeadlineWindow = useCallback(async () => {
-  if (!userId) return;
-  try {
-    const res = await fetchOmDeadlineWindow(userId);
-    const w = (res as any)?.window;
-    if (w && typeof w === "object") {
-      setDeadlineWindow({
-        openISO: String(w.openISO || ""),
-        deadlineISO: String(w.deadlineISO || ""),
-        term_id: String(w.term_id || ""),
-        campus_id: String(w.campus_id || ""),
-      });
-    } else {
-      setDeadlineWindow(null);
-    }
-    setDeadlineWindowError("");
-  } catch (e: any) {
-    setDeadlineWindowError(e?.message || "Failed to load deadline window");
-  }
-}, [userId]);
-
 useEffect(() => {
-  refreshDeadlineWindow();
   const tick = window.setInterval(() => setDeadlineNow(new Date()), 1000);
-  const poll = window.setInterval(() => refreshDeadlineWindow(), 60_000);
-  return () => {
-    window.clearInterval(tick);
-    window.clearInterval(poll);
-  };
-}, [refreshDeadlineWindow]);
+  return () => window.clearInterval(tick);
+}, []);
 
 
   // Import SHS (match APO import UX)
@@ -2929,10 +2893,12 @@ useEffect(() => {
   const [levelFilter, setLevelFilter] = useState<string>("ALL");
   const [rows, setRows] = useState<Row[]>([]);
 
-  // APO-set deadline window (schedule + faculty encoding) for this OM/GS campus
-  const [omSubmitWindow, setOmSubmitWindow] = useState<{ openISO: string; deadlineISO: string } | null>(null);
-  const [omDeadlinePassed, setOmDeadlinePassed] = useState<boolean>(false);
-  const [omHasApoSubmission, setOmHasApoSubmission] = useState<boolean>(false);
+  // APO-set deadline windows (schedule + faculty encoding) for OM/GS.
+// Deadlines are campus-specific (e.g., Manila and Laguna can differ).
+const [omSubmitWindows, setOmSubmitWindows] = useState<
+  { campus_id: string; campus_name: string; openISO: string; deadlineISO: string; deadline_passed?: boolean; has_apo_submission?: boolean }[]
+>([]);
+const [omDeadlinePassed, setOmDeadlinePassed] = useState<boolean>(false);
 
   const [newLineSectionDraft, setNewLineSectionDraft] =
   useState<Record<string, string>>({});
@@ -3682,14 +3648,12 @@ useEffect(() => {
 
     // Deadline window info for OM/GS (set by APO per campus + planning term)
     try {
-      const w = (res as any)?.om_submit_window ?? null;
-      setOmSubmitWindow(w && w.deadlineISO ? w : null);
       setOmDeadlinePassed(Boolean((res as any)?.om_submit_deadline_passed));
-      setOmHasApoSubmission(Boolean((res as any)?.om_submit_has_apo_submission));
+      const ws = (res as any)?.om_submit_windows;
+      setOmSubmitWindows(Array.isArray(ws) ? (ws as any[]) : []);
     } catch {
-      setOmSubmitWindow(null);
+      setOmSubmitWindows([]);
       setOmDeadlinePassed(false);
-      setOmHasApoSubmission(false);
     }
 
     // Best-effort: run reminder generation on page load (fallback if no scheduler/cron)
@@ -5195,143 +5159,97 @@ const courseCodeToInfo = useMemo(() => {
                   Manage course assignments and faculty workload distribution
                 </p>
 
-                {/* --------------------- OM Submission Deadline (APO-set) --------------------- */}
-                {(() => {
-                  if (deadlineWindowError) {
-                    return (
-                      <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
-                        <div className="flex items-start gap-3">
-                          <div className="mt-0.5 grid h-9 w-9 place-items-center rounded-full bg-amber-200 text-amber-900">
-                            <AlertTriangle className="h-5 w-5" />
-                          </div>
-                          <div>
-                            <div className="font-semibold">Deadline status unavailable</div>
-                            <div className="text-xs text-amber-900/90">{deadlineWindowError}</div>
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  }
-
-                  const deadlineISO = (deadlineWindow?.deadlineISO || "").trim();
-                  if (!deadlineISO) {
-                    return (
-                      <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
-                        <div className="flex items-start gap-3">
-                          <div className="mt-0.5 grid h-9 w-9 place-items-center rounded-full bg-slate-200 text-slate-700">
-                            <Info className="h-5 w-5" />
-                          </div>
-                          <div>
-                            <div className="font-semibold">No OM submission deadline set</div>
-                            <div className="text-xs text-slate-600">APO has not set a deadline yet.</div>
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  }
-
-                  const d = new Date(deadlineISO);
-                  if (Number.isNaN(d.getTime())) return null;
-
-                  const msLeft = d.getTime() - deadlineNow.getTime();
-                  const when = d.toLocaleString(undefined, {
-                    year: "numeric",
-                    month: "short",
-                    day: "2-digit",
-                    hour: "2-digit",
-                    minute: "2-digit",
-                  });
-
-                  if (msLeft <= 0) {
-                    return (
-                      <div className="mt-3 rounded-xl border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-900">
-                        <div className="flex items-start gap-3">
-                          <div className="mt-0.5 grid h-9 w-9 place-items-center rounded-full bg-red-200 text-red-900">
-                            <AlertTriangle className="h-5 w-5" />
-                          </div>
-                          <div>
-                            <div className="font-semibold">Submission deadline has passed</div>
-                            <div className="text-xs text-red-800">Deadline: {when}</div>
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  }
-
-                  const totalSec = Math.floor(msLeft / 1000);
-                  const days = Math.floor(totalSec / 86400);
-                  const hrs = Math.floor((totalSec % 86400) / 3600);
-                  const mins = Math.floor((totalSec % 3600) / 60);
-                  const secs = totalSec % 60;
-
-                  return (
-                    <div className="mt-3 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-950">
-                      <div className="flex items-start gap-3">
-                        <div className="mt-0.5 grid h-9 w-9 place-items-center rounded-full bg-amber-200 text-amber-900">
-                          <CalendarClock className="h-5 w-5" />
-                        </div>
-                        <div>
-                          <div className="font-semibold">Submission Deadline Approaching</div>
-                          <div className="text-xs text-amber-900">
-                            Deadline: {when} · {days}d {hrs}h {mins}m {secs}s
-                          </div>
-                          <div className="mt-1 text-[11px] text-amber-900/80">
-                            Reminders are sent automatically to OM and GS Coordinator 7, 3, 2, and 1 day(s) before the deadline.
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })()}
+                {/* Deadline banner is rendered below using om_submit_windows from /om/load-assignment/list. */}
               </header>
 
-              {/* APO-set deadline banner (appears once deadline exists; shown for OM + GS) */}
-              {omSubmitWindow?.deadlineISO && (
-                <div
-                  className={cls(
-                    "mb-6 rounded-xl border p-4",
-                    omDeadlinePassed
-                      ? "border-red-200 bg-red-50"
-                      : !omHasApoSubmission
-                        ? "border-slate-200 bg-slate-50"
-                        : (omDaysLeft ?? 999) <= 7
-                          ? "border-amber-200 bg-amber-50"
-                          : "border-emerald-200 bg-emerald-50"
-                  )}
-                >
-                  <div className="flex items-start justify-between gap-3">
-                    <div>
-                      <div className={cls("text-sm font-semibold", omDeadlinePassed ? "text-red-800" : "text-slate-800")}> 
-                        Scheduling & Faculty Encoding Deadline
-                      </div>
-                      <div className="mt-1 text-sm text-slate-700">
-                        Deadline: <span className="font-semibold">{omDeadlineLabel || String(omSubmitWindow.deadlineISO)}</span>
-                      </div>
-                      <div className="mt-1 text-xs text-slate-600">
-                        {omDeadlinePassed ? (
-                          "Submitting/approving is locked because the deadline has passed."
-                        ) : omHasApoSubmission ? (
-                          "Please complete schedule and faculty encoding for the APO-submitted course offerings."
-                        ) : (
-                          "Awaiting APO’s submission of the course offerings. Once submitted, please complete schedule and faculty encoding by the deadline."
-                        )}
-                      </div>
-                    </div>
+	              {/* APO-set deadline banner (shows BOTH Manila + Laguna deadlines if available) */}
+	              <div className="mb-6 rounded-xl border border-slate-200 bg-white p-4">
+	                <div className="flex items-start justify-between gap-3">
+	                  <div>
+	                    <div className="flex items-center gap-2 text-sm font-semibold text-slate-800">
+	                      <span className="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-amber-100 text-amber-700">
+	                        <CalendarClock className="h-4 w-4" />
+	                      </span>
+	                      <span>Scheduling &amp; Faculty Encoding Deadlines</span>
+	                    </div>
+	                    <div className="mt-1 flex items-start gap-2 text-xs text-slate-600">
+	                      <Info className="mt-0.5 h-3.5 w-3.5 flex-none" />
+	                      <span>
+	                        Deadlines are campus-specific. Reminders are sent automatically to OM and the GS Coordinator 7, 3, 2, and 1 day(s) before each campus deadline.
+	                      </span>
+	                    </div>
+	                  </div>
+	                  {omDeadlinePassed ? (
+	                    <span className="inline-flex items-center rounded-full bg-red-600 px-2.5 py-1 text-xs font-semibold text-white">Locked</span>
+	                  ) : null}
+	                </div>
 
-                    <div className="flex items-center gap-2">
-                      {omDeadlinePassed ? (
-                        <span className="inline-flex items-center rounded-full bg-red-600 px-2.5 py-1 text-xs font-semibold text-white">
-                          Locked
-                        </span>
-                      ) : omDaysLeft !== null ? (
-                        <span className="inline-flex items-center rounded-full bg-white/70 px-2.5 py-1 text-xs font-semibold text-slate-700">
-                          {omDaysLeft <= 0 ? "Due today" : `${omDaysLeft} day(s) left`}
-                        </span>
-                      ) : null}
-                    </div>
-                  </div>
-                </div>
-              )}
+	                <div className="mt-3 space-y-3">
+	                  {(omSubmitWindows || []).length === 0 ? (
+	                    <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">
+	                      No OM submission deadline set yet for Manila or Laguna.
+	                    </div>
+	                  ) : (
+	                    (omSubmitWindows || []).map((w) => {
+	                      const iso = String(w?.deadlineISO || "").trim();
+	                      const d = iso ? new Date(iso) : null;
+	                      const valid = !!d && !Number.isNaN(d.getTime());
+	                      const msLeft = valid ? (d!.getTime() - deadlineNow.getTime()) : null;
+	                      const daysLeft = msLeft === null ? null : Math.ceil(msLeft / (1000 * 60 * 60 * 24));
+	                      const when = valid
+	                        ? d!.toLocaleString(undefined, { year: "numeric", month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit" })
+	                        : iso;
+	
+	                      const passed = Boolean(w?.deadline_passed) || (msLeft !== null && msLeft <= 0);
+	                      const hasApo = Boolean(w?.has_apo_submission);
+	
+	                      return (
+	                        <div
+	                          key={`${w.campus_id}::${w.deadlineISO}`}
+	                          className={cls(
+	                            "rounded-lg border border-l-4 px-4 py-3",
+	                            passed
+	                              ? "border-red-200 border-l-red-500 bg-red-50"
+	                              : !hasApo
+	                                ? "border-slate-200 border-l-slate-400 bg-slate-50"
+	                                : (daysLeft ?? 999) <= 7
+	                                  ? "border-amber-200 border-l-amber-500 bg-amber-50"
+	                                  : "border-emerald-200 border-l-emerald-500 bg-emerald-50"
+	                          )}
+	                        >
+	                          <div className="flex items-start justify-between gap-3">
+	                            <div>
+	                              <div className={cls("text-sm font-semibold", passed ? "text-red-800" : "text-slate-800")}>
+	                                {w.campus_name || w.campus_id}
+	                              </div>
+	                              <div className="mt-0.5 text-sm text-slate-700">
+	                                Deadline: <span className="font-semibold">{when}</span>
+	                              </div>
+	                              <div className="mt-0.5 text-xs text-slate-600">
+	                                {passed
+	                                  ? "Submitting/approving is locked for this campus because the deadline has passed."
+	                                  : hasApo
+	                                    ? "Please complete schedule and faculty encoding for the APO-submitted course offerings."
+	                                    : "Awaiting APO’s submission of the course offerings. Once submitted, please complete schedule and faculty encoding by the deadline."}
+	                              </div>
+	                            </div>
+	
+	                            <div className="flex items-center gap-2">
+	                              {passed ? (
+	                                <span className="inline-flex items-center rounded-full bg-red-600 px-2.5 py-1 text-xs font-semibold text-white">Locked</span>
+	                              ) : daysLeft !== null ? (
+	                                <span className="inline-flex items-center rounded-full bg-white/70 px-2.5 py-1 text-xs font-semibold text-slate-700">
+	                                  {daysLeft <= 0 ? "Due today" : `${daysLeft} day(s) left`}
+	                                </span>
+	                              ) : null}
+	                            </div>
+	                          </div>
+	                        </div>
+	                      );
+	                    })
+	                  )}
+	                </div>
+	              </div>
 
               <div className="mb-6 flex flex-wrap items-center gap-3 rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
                 <button

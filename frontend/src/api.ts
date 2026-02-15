@@ -1865,6 +1865,18 @@ export async function getStudentSpecialClassProfile(
   return data;
 }
 
+export async function getStudentSpecialClassCourseInfo(
+  userId: string,
+  courseCode: string
+): Promise<{ ok: boolean; course_code: string; course_title: string; units: number; department_name: string }> {
+  const { data } = await axios.post(
+    `${API_BASE}/student/specialclass`,
+    {},
+    { params: { userId, action: "courseInfo", courseCode } }
+  );
+  return data;
+}
+
 export async function submitStudentSpecialClass(
   userId: string,
   payload: SpecialClassSubmitPayload
