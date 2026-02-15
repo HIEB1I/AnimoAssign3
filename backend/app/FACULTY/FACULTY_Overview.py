@@ -35,11 +35,130 @@ COL_CAMPUSES = "campuses"
 COL_COURSES = "courses"
 COL_DEPTS = "departments"
 
+# Special Class reflection (OM_SpecialClass -> Faculty)
+COL_SPECIAL_CLASS = "special_class"
+
 # OM <-> Faculty proposal + RFC collections
 COL_LOAD_PROPOSALS = "faculty_load_proposals"
 COL_LOAD_RFC = "faculty_rfc"
 
 import uuid
+
+
+def _to_hhmm(v: Any) -> str:
+    """Normalize various DB time formats to 4-digit HHMM used by _hhmm_to_hm.
+
+    Accepts: "730", "0730", 730, "07:30", "7:30".
+    Returns: "0730" or "" if cannot parse.
+    """
+    if v is None:
+        return ""
+    s = str(v).strip()
+    if not s:
+        return ""
+    if re.fullmatch(r"\d{3,4}", s):
+        return f"0{s}" if len(s) == 3 else s
+    m = re.fullmatch(r"(\d{1,2})\s*:\s*(\d{2})", s)
+    if m:
+        hh = str(int(m.group(1))).zfill(2)
+        mm = m.group(2)
+        return f"{hh}{mm}"
+    return ""
+
+
+async def _room_number_from_schedule(sc: Dict[str, Any]) -> str:
+    """Return room label for a schedule row.
+
+    Rules (match CHAIR_Plantilla behavior):
+    - If room_type is Online -> "ONLINE"
+    - Else if room_id exists -> lookup rooms.room_number, fallback "TBA"
+    - Else -> "TBA"
+    """
+    raw_type = str(sc.get("room_type") or "").strip()
+    if raw_type.lower() == "online":
+        return "ONLINE"
+
+    room_id = sc.get("room_id")
+    if room_id:
+        r = await db[COL_ROOMS].find_one(
+            {"room_id": room_id},
+            {"_id": 0, "room_number": 1},
+        )
+        rn = (r or {}).get("room_number")
+        return str(rn).strip() if rn else "TBA"
+
+    return "TBA"
+
+
+async def _special_class_schedule_two(
+    *,
+    section_id: str | None,
+    schedule_id1: str | None,
+    schedule_id2: str | None,
+    schedule_cleared: bool,
+) -> Dict[str, Any]:
+    """Derive Day/Time/Room fields for a Special Class.
+
+    The special_class collection typically stores schedule_id1/2 (not day/begin/end/room).
+    Faculty Overview must compute schedule from section_schedules so List/Calendar are correct
+    even when rooms are not yet assigned.
+    """
+    if schedule_cleared:
+        return {
+            "day1": "TBA",
+            "begin1": "",
+            "end1": "",
+            "room1": "TBA",
+            "day2": "",
+            "begin2": "",
+            "end2": "",
+            "room2": "",
+            "room1_room_type": "",
+            "room2_room_type": "",
+        }
+
+    sids = [str(x).strip() for x in [schedule_id1, schedule_id2] if str(x or "").strip()]
+    scheds: List[Dict[str, Any]] = []
+
+    if sids:
+        scheds = await db[COL_SCHED].find(
+            {"schedule_id": {"$in": sids}},
+            {"_id": 0, "schedule_id": 1, "day": 1, "start_time": 1, "end_time": 1, "room_type": 1, "room_id": 1},
+        ).to_list(10)
+        scheds.sort(key=lambda x: str(x.get("schedule_id") or ""))
+    elif section_id:
+        scheds = await db[COL_SCHED].find(
+            {"section_id": section_id},
+            {"_id": 0, "schedule_id": 1, "day": 1, "start_time": 1, "end_time": 1, "room_type": 1, "room_id": 1},
+        ).to_list(10)
+        scheds.sort(key=lambda x: str(x.get("schedule_id") or ""))
+
+    def _empty():
+        return {"day": "TBA", "begin": "", "end": "", "room": "TBA", "room_type": ""}
+
+    slots = [_empty(), _empty()]
+    for i in range(min(2, len(scheds))):
+        sc = scheds[i] or {}
+        slots[i] = {
+            "day": (sc.get("day") or "TBA"),
+            "begin": _to_hhmm(sc.get("start_time")),
+            "end": _to_hhmm(sc.get("end_time")),
+            "room": await _room_number_from_schedule(sc),
+            "room_type": str(sc.get("room_type") or "").strip(),
+        }
+
+    return {
+        "day1": slots[0]["day"],
+        "begin1": slots[0]["begin"],
+        "end1": slots[0]["end"],
+        "room1": slots[0]["room"],
+        "room1_room_type": slots[0]["room_type"],
+        "day2": slots[1]["day"] if len(scheds) > 1 else "",
+        "begin2": slots[1]["begin"] if len(scheds) > 1 else "",
+        "end2": slots[1]["end"] if len(scheds) > 1 else "",
+        "room2": slots[1]["room"] if len(scheds) > 1 else "",
+        "room2_room_type": slots[1]["room_type"] if len(scheds) > 1 else "",
+    }
 
 async def _resolve_section_id_from_code_and_section(term_id: str, course_code: str, section_code: str) -> str:
     course_code = (course_code or "").strip()
@@ -238,6 +357,276 @@ def _hhmm_to_hm(v: object | None) -> str:
     if re.fullmatch(r"\d{4}", s):
         return f"{s[:2]}:{s[2:]}"
     return s
+
+
+def _day_code_to_long(v: Any) -> str:
+    s = ("" if v is None else str(v)).strip().upper()
+    if not s:
+        return "TBA"
+    if s in ("M", "MON"):
+        return "Monday"
+    if s in ("T", "TU", "TUE"):
+        return "Tuesday"
+    if s in ("W", "WED"):
+        return "Wednesday"
+    if s in ("H", "TH", "THU", "R"):
+        return "Thursday"
+    if s in ("F", "FRI"):
+        return "Friday"
+    if s in ("S", "SAT"):
+        return "Saturday"
+    # Already long?
+    cap = s[:1].upper() + s[1:].lower()
+    if cap in ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"):
+        return cap
+    return cap
+
+
+def _fmt_band_from_hhmm(begin: Any, end: Any) -> str:
+    b = _hhmm_to_hm(begin)
+    e = _hhmm_to_hm(end)
+    if not b or not e:
+        return "TBA"
+    return f"{b} – {e}"
+
+
+async def _latest_faculty_id_for_section(section_id: str) -> str:
+    section_id = (section_id or "").strip()
+    if not section_id:
+        return ""
+    row = (
+        await db[COL_ASSIGN]
+        .find(
+            {"section_id": section_id, "is_archived": {"$ne": True}},
+            {"_id": 0, "faculty_id": 1},
+        )
+        .sort([("created_at", -1)])
+        .limit(1)
+        .to_list(1)
+    )
+    return ((row[0] or {}).get("faculty_id") or "").strip() if row else ""
+
+
+async def _fetch_reflected_special_classes_for_faculty(
+    *,
+    term_id: str,
+    faculty_id: str,
+    limit: int = 500,
+) -> List[Dict[str, Any]]:
+    """Fetch Approved Special Class rows that belong to a faculty.
+
+    These are reflected to Faculty calendar + list with a distinct styling and RFC disabled.
+    """
+
+    term_id = (term_id or "").strip()
+    faculty_id = (faculty_id or "").strip()
+    if not term_id or not faculty_id:
+        return []
+
+    docs = await db[COL_SPECIAL_CLASS].find(
+        {"term_id": term_id, "status": "Approved"},
+        {
+            "_id": 0,
+            "special_id": 1,
+            "course_id": 1,
+            "courseId": 1,
+            "course_code": 1,
+            "courseCode": 1,
+            "course_title": 1,
+            "courseTitle": 1,
+            "course_units": 1,
+            "units": 1,
+            "section_id": 1,
+            "section_code": 1,
+            "section": 1,
+            "assignment_id": 1,
+            "faculty_assignment_id": 1,
+            "schedule_cleared": 1,
+            "schedule_id1": 1,
+            "schedule_id2": 1,
+            "day1": 1,
+            "begin1": 1,
+            "end1": 1,
+            "day2": 1,
+            "begin2": 1,
+            "end2": 1,
+            "room1": 1,
+            "room2": 1,
+            "room1_room_type": 1,
+            "room2_room_type": 1,
+            "updated_at": 1,
+        },
+    ).sort([("updated_at", -1)]).limit(limit).to_list(limit)
+
+    out: List[Dict[str, Any]] = []
+    # NOTE: The special_class collection can contain multiple versions of the same
+    # special_id over time. The UI must show only the latest Approved row.
+    # We sort by updated_at DESC above, so first-seen wins.
+    seen_special: set[str] = set()
+
+    for d in docs or []:
+        special_id = (d.get("special_id") or "").strip()
+        if not special_id:
+            continue
+        if special_id in seen_special:
+            continue
+        seen_special.add(special_id)
+
+        # Determine owning faculty
+        assignment_id = (d.get("assignment_id") or d.get("faculty_assignment_id") or "").strip()
+        sec_id = (d.get("section_id") or "").strip()
+
+        fac_id = ""
+        if assignment_id:
+            asg = await db[COL_ASSIGN].find_one(
+                {"assignment_id": assignment_id, "is_archived": {"$ne": True}},
+                {"_id": 0, "faculty_id": 1},
+            )
+            fac_id = ((asg or {}).get("faculty_id") or "").strip()
+        if not fac_id and sec_id:
+            fac_id = await _latest_faculty_id_for_section(sec_id)
+
+        if not fac_id or fac_id != faculty_id:
+            continue
+
+        # Resolve course details best-effort
+        course_id = (d.get("course_id") or d.get("courseId") or "").strip()
+        course_code = (d.get("course_code") or d.get("courseCode") or "").strip()
+        course_title = (d.get("course_title") or d.get("courseTitle") or "").strip()
+        units = d.get("course_units")
+        if units in (None, ""):
+            units = d.get("units")
+
+        if (not course_code or not course_title or units in (None, "")) and course_id:
+            cdoc = await db[COL_COURSES].find_one(
+                {"course_id": course_id},
+                {"_id": 0, "course_code": 1, "course_title": 1, "units": 1, "syllabus": 1},
+            ) or {}
+            if not course_code:
+                cc = cdoc.get("course_code")
+                if isinstance(cc, list):
+                    course_code = (cc[0] if cc else "") or ""
+                else:
+                    course_code = (cc or "").strip()
+            if not course_title:
+                course_title = (cdoc.get("course_title") or "").strip()
+            if units in (None, ""):
+                units = cdoc.get("units")
+
+        # ---------------- SECTION (CRITICAL)
+        # Special Class rows may store section_code inconsistently (or not at all).
+        # CHAIR_Plantilla derives the section display from the sections table.
+        # Faculty Overview must do the same so both List + Calendar views show the correct section.
+        sec_id_real = (d.get("section_id") or "").strip()
+        section_display = (d.get("section_code") or d.get("section") or "").strip()
+
+        # If we have section_id but no section code text, derive it from sections.
+        if sec_id_real and not section_display:
+            sdoc = await db[COL_SECTIONS].find_one(
+                {"section_id": sec_id_real},
+                {"_id": 0, "section_code": 1, "section": 1, "section_name": 1},
+            ) or {}
+            section_display = (
+                (sdoc.get("section_code") or sdoc.get("section") or sdoc.get("section_name") or "").strip()
+            )
+
+        # If we only have a section text but no section_id (older/edge docs), attempt to resolve.
+        if (not sec_id_real) and section_display and course_code:
+            resolved_sec_id = await _resolve_section_id_from_code_and_section(
+                term_id=term_id,
+                course_code=course_code,
+                section_code=section_display,
+            )
+            if resolved_sec_id:
+                sec_id_real = resolved_sec_id
+                sdoc = await db[COL_SECTIONS].find_one(
+                    {"section_id": sec_id_real},
+                    {"_id": 0, "section_code": 1, "section": 1, "section_name": 1},
+                ) or {}
+                section_display = (
+                    (sdoc.get("section_code") or sdoc.get("section") or sdoc.get("section_name") or section_display).strip()
+                )
+
+        # Schedule (IMPORTANT: special_class usually stores schedule_id1/2, not day/begin/end)
+        sch = await _special_class_schedule_two(
+            section_id=(sec_id_real or (d.get("section_id") or "").strip()) or None,
+            schedule_id1=(d.get("schedule_id1") or "").strip() or None,
+            schedule_id2=(d.get("schedule_id2") or "").strip() or None,
+            schedule_cleared=bool(d.get("schedule_cleared")),
+        )
+
+        day1 = _day_code_to_long(sch.get("day1"))
+        time1 = _fmt_band_from_hhmm(sch.get("begin1"), sch.get("end1"))
+        room1 = (sch.get("room1") or "TBA")
+
+        day2_raw = _day_code_to_long(sch.get("day2")) if sch.get("day2") else ""
+        time2_raw = _fmt_band_from_hhmm(sch.get("begin2"), sch.get("end2")) if (sch.get("begin2") or sch.get("end2")) else ""
+        room2_raw = (sch.get("room2") or "").strip()
+
+        if day2_raw and day2_raw != "TBA" and time2_raw and time2_raw != "TBA":
+            day2 = day2_raw
+            time2 = time2_raw
+            room2 = room2_raw or "TBA"
+        else:
+            day2 = None
+            time2 = None
+            room2 = None
+
+        mode = (sch.get("room1_room_type") or sch.get("room2_room_type") or "Special Class")
+
+        # Units can be stored as float/int/string; normalize to number
+        units_num = 0
+        try:
+            units_num = int(float(units or 0))
+        except Exception:
+            units_num = 0
+
+        out.append({
+            # Use a unique surrogate section_id so RFC/GCal de-dup does not collide with real sections.
+            "section_id": f"SPECIAL:{special_id}",
+            "special_id": special_id,
+            "is_special_class": True,
+            "course_code": course_code,
+            "course_title": course_title,
+            "section": section_display or "—",
+            "units": units_num,
+            "mode": mode,
+            "day1": day1,
+            "time1": time1,
+            "room1": room1,
+            "day2": day2,
+            "time2": time2,
+            "room2": room2,
+            "syllabus": "",
+        })
+
+    # Keep stable ordering: sort by course_code then section.
+    out.sort(key=lambda x: (x.get("course_code", ""), x.get("section", "")))
+    return out
+
+
+def _calc_units_and_preps(teaching_load: List[Dict[str, Any]]) -> Tuple[float, int]:
+    """Compute teaching units + course preps for the faculty overview.
+
+    Rules:
+    - Units are counted once per unique section_id.
+    - Course preps are unique by course_code.
+    - Special Classes are expected to carry a unique synthetic section_id (e.g., 'SPECIAL:<id>').
+    """
+    uniq_units: Dict[str, float] = {}
+    for r in teaching_load or []:
+        sid = str(r.get("section_id") or "").strip()
+        if not sid:
+            continue
+        try:
+            u = float(r.get("units") or 0)
+        except Exception:
+            u = 0.0
+        uniq_units[sid] = u
+
+    total_units = float(sum(uniq_units.values()))
+    preps = len({str(r.get("course_code") or "").strip() for r in teaching_load or [] if str(r.get("course_code") or "").strip()})
+    return total_units, preps
 
 def _fmt_time_band(begin: str | None, end: str | None) -> str:
     b = _hhmm_to_hm(begin)
@@ -713,13 +1102,8 @@ async def overview_handler(
         rows = [r async for r in db.faculty_assignments.aggregate(pipeline)]
 
         final_teaching_load: List[Dict[str, Any]] = []
-        unique_units_calc = {}
 
         for r in rows:
-            sec_id = r.get("_id")
-            if sec_id:
-                unique_units_calc[sec_id] = r.get("units", 0) or 0
-            
             meetings = r.get("meetings", [])
             
             norm_meet: List[Tuple[int, Dict[str, Any]]] = []
@@ -766,6 +1150,8 @@ async def overview_handler(
 
             final_teaching_load.append({
                 "section_id": sec_id,
+                "special_id": "",
+                "is_special_class": False,
 
                 "course_code": _as_code_str(r.get("course_code")),
                 "course_title": r.get("course_title", ""),
@@ -823,8 +1209,8 @@ async def overview_handler(
         else: 
             max_preps = 0
             
-        total_units = sum(unique_units_calc.values())
-        course_preps = len(set(r.get("course_code", "") for r in final_teaching_load if r.get("course_code")))
+        # NOTE: total units / preps are computed AFTER proposal overlay + special class merge,
+        # so they always reflect what the faculty actually sees.
         # --- *** END OF MODIFICATION *** ---
 
 
@@ -834,21 +1220,19 @@ async def overview_handler(
         )
         status = (load_header or {}).get("status", "pending").capitalize()
 
-        summary = {
-            "teaching_units": f"{total_units}/{int(pref_units_for_calc)}",
-            "course_preps": f"{course_preps}/{max_preps}",
+        # Summary is computed at the end after:
+        # - proposal overlay selection
+        # - special class merge
+        summary: Dict[str, Any] = {
+            "teaching_units": f"0/{int(pref_units_for_calc)}",
+            "course_preps": f"0/{max_preps}",
             "load_status": status,
-            "percent": int((total_units / pref_units_for_calc) * 100) if pref_units_for_calc > 0 else 0,
+            "percent": 0,
+            "exceeded_teaching_units": False,
+            "exceeded_course_preps": False,
+            "teaching_units_over_by": 0,
+            "course_preps_over_by": 0,
         }
-
-        # Warnings / flags (used by frontend to show limit-exceeded warnings)
-        # Note: If preferred units or max preps are 0, any positive current value is considered exceeded.
-        units_max = float(pref_units_for_calc or 0)
-        preps_max = int(max_preps or 0)
-        summary["exceeded_teaching_units"] = (total_units > units_max) if units_max > 0 else (total_units > 0)
-        summary["exceeded_course_preps"] = (course_preps > preps_max) if preps_max > 0 else (course_preps > 0)
-        summary["teaching_units_over_by"] = max(0, int(round(total_units - units_max))) if summary["exceeded_teaching_units"] else 0
-        summary["course_preps_over_by"] = max(0, int(course_preps - preps_max)) if summary["exceeded_course_preps"] else 0
 
         
         # --- Proposed schedule overlay (sent by OM via /om/load-assignment/to-faculty) ---
@@ -863,26 +1247,13 @@ async def overview_handler(
         is_planning_term = bool(term and not term.get("is_current"))
         if is_planning_term and not proposal:
             # Hide any pre-populated assignments for the planning term until OM forwards.
+            # HOWEVER: Special Classes are independent of OM load forwarding and must
+            # still reflect on the faculty side.
             final_teaching_load = []
-            summary["teaching_units"] = f"0/{int(pref_units_for_calc)}"
-            summary["course_preps"] = f"0/{max_preps}"
-            summary["percent"] = 0
-            summary["exceeded_teaching_units"] = False
-            summary["exceeded_course_preps"] = False
-            summary["teaching_units_over_by"] = 0
-            summary["course_preps_over_by"] = 0
-            # keep the header-derived status if present, otherwise show Pending
-            summary["load_status"] = (summary.get("load_status") or "Pending")
-            return {
-                "ok": True,
-                "term": term,
-                "summary": summary,
-                "teaching_load": final_teaching_load,
-                "is_proposed": False,
-                "proposal_status": None,
-                "rfc": None,
-                "schedule_final": False,
-            }
+            proposal_status = None
+            proposal_status_l = ""
+            schedule_final = False
+            rfc_norm = None
 
         proposal_status = (proposal or {}).get("status")
         proposal_status_l = str(proposal_status or "").lower()
@@ -965,6 +1336,8 @@ async def overview_handler(
                     "course_title": _as_code_str(rr.get("course_title") or rr.get("title") or rr.get("courseTitle")),
                     "section": rr.get("section") or "",
                     "section_id": sec_id,   # <-- ADD THIS
+                    "special_id": "",
+                    "is_special_class": False,
                     "units": rr.get("units") or 0,
                     "mode": rr.get("mode") or "",
                     "day1": rr.get("day1") or "TBA",
@@ -998,11 +1371,36 @@ async def overview_handler(
                 proposal_status_l = ""
                 schedule_final = False
 
+        # Merge reflected Special Classes (Approved in OM_SpecialClass) as separate purple entries.
+        special_rows = await _fetch_reflected_special_classes_for_faculty(
+            term_id=term.get("term_id"),
+            faculty_id=faculty.get("faculty_id"),
+        )
+
+        merged_load = (final_teaching_load or []) + (special_rows or [])
+        merged_load.sort(key=lambda x: (x.get("course_code", ""), x.get("section", ""), str(bool(x.get("is_special_class")))))
+
+        # IMPORTANT: Special Classes must be reflected in the Faculty schedule views,
+        # but they must NOT be included in the teaching units and course prep calculations.
+        calc_load = [r for r in (merged_load or []) if not bool(r.get("is_special_class"))]
+        total_units, course_preps = _calc_units_and_preps(calc_load)
+
+        summary["teaching_units"] = f"{int(round(total_units))}/{int(pref_units_for_calc)}"
+        summary["course_preps"] = f"{course_preps}/{max_preps}"
+        summary["percent"] = int((total_units / pref_units_for_calc) * 100) if pref_units_for_calc > 0 else 0
+
+        units_max = float(pref_units_for_calc or 0)
+        preps_max = int(max_preps or 0)
+        summary["exceeded_teaching_units"] = (total_units > units_max) if units_max > 0 else (total_units > 0)
+        summary["exceeded_course_preps"] = (course_preps > preps_max) if preps_max > 0 else (course_preps > 0)
+        summary["teaching_units_over_by"] = max(0, int(round(total_units - units_max))) if summary["exceeded_teaching_units"] else 0
+        summary["course_preps_over_by"] = max(0, int(course_preps - preps_max)) if summary["exceeded_course_preps"] else 0
+
         return {
             "ok": True,
             "term": term,
             "summary": summary,
-            "teaching_load": final_teaching_load,
+            "teaching_load": merged_load,
             # Only report "proposed" state if we have a valid (non-stale) proposal payload to show.
             "is_proposed": bool(proposed_load and proposal_status_l in ("proposed", "reply", "replied")),
             "proposal_status": proposal_status,
@@ -1109,13 +1507,8 @@ async def get_faculty_overview(userId: str = Query(...)):
     rows = [r async for r in db.faculty_assignments.aggregate(pipeline)]
 
     final_teaching_load: List[Dict[str, Any]] = []
-    unique_units_calc = {}
 
     for r in rows:
-        sec_id = r.get("_id")
-        if sec_id:
-            unique_units_calc[sec_id] = r.get("units", 0) or 0
-        
         meetings = r.get("meetings", [])
         
         norm_meet: List[Tuple[int, Dict[str, Any]]] = []
@@ -1200,8 +1593,7 @@ async def get_faculty_overview(userId: str = Query(...)):
     else: 
         max_preps = 0
         
-    total_units = sum(unique_units_calc.values())
-    course_preps = len(set(r.get("course_code", "") for r in final_teaching_load if r.get("course_code")))
+    # Units/preps are computed after special class merge so the summary matches what the faculty sees.
     # --- *** END OF MODIFICATION *** ---
 
     load_header = await db.faculty_loads.find_one(
@@ -1210,25 +1602,21 @@ async def get_faculty_overview(userId: str = Query(...)):
     )
     status = (load_header or {}).get("status", "pending").capitalize()
 
-    summary = {
-        "teaching_units": f"{total_units}/{int(pref_units_for_calc)}",
-        "course_preps": f"{course_preps}/{max_preps}",
+    summary: Dict[str, Any] = {
+        "teaching_units": f"0/{int(pref_units_for_calc)}",
+        "course_preps": f"0/{max_preps}",
         "load_status": status,
-        "percent": int((total_units / pref_units_for_calc) * 100) if pref_units_for_calc > 0 else 0,
+        "percent": 0,
+        "exceeded_teaching_units": False,
+        "exceeded_course_preps": False,
+        "teaching_units_over_by": 0,
+        "course_preps_over_by": 0,
     }
-
-    # Warnings / flags (used by frontend to show limit-exceeded warnings)
-    # Note: If preferred units or max preps are 0, any positive current value is considered exceeded.
-    units_max = float(pref_units_for_calc or 0)
-    preps_max = int(max_preps or 0)
-    summary["exceeded_teaching_units"] = (total_units > units_max) if units_max > 0 else (total_units > 0)
-    summary["exceeded_course_preps"] = (course_preps > preps_max) if preps_max > 0 else (course_preps > 0)
-    summary["teaching_units_over_by"] = max(0, int(round(total_units - units_max))) if summary["exceeded_teaching_units"] else 0
-    summary["course_preps_over_by"] = max(0, int(course_preps - preps_max)) if summary["exceeded_course_preps"] else 0
 
     # IMPORTANT BEHAVIOR CHANGE (mirrors POST /overview?action=fetch):
     # If this is a PLANNING term and OM has NOT forwarded a proposal yet,
     # hide any schedule/teaching load on the faculty side.
+    # Special Classes are independent of OM forwarding and must still reflect.
     is_planning_term = bool(term and not term.get("is_current"))
     if is_planning_term:
         proposal = await db[COL_LOAD_PROPOSALS].find_one(
@@ -1237,14 +1625,29 @@ async def get_faculty_overview(userId: str = Query(...)):
         )
         if not proposal:
             final_teaching_load = []
-            summary["teaching_units"] = f"0/{int(pref_units_for_calc)}"
-            summary["course_preps"] = f"0/{max_preps}"
-            summary["percent"] = 0
-            summary["exceeded_teaching_units"] = False
-            summary["exceeded_course_preps"] = False
-            summary["teaching_units_over_by"] = 0
-            summary["course_preps_over_by"] = 0
             summary["load_status"] = (summary.get("load_status") or "Pending")
+
+    # Merge reflected Special Classes and compute summary against what will be displayed.
+    special_rows = await _fetch_reflected_special_classes_for_faculty(
+        term_id=term.get("term_id"),
+        faculty_id=faculty.get("faculty_id"),
+    )
+    merged_load = (final_teaching_load or []) + (special_rows or [])
+
+    # IMPORTANT: Special Classes must be reflected in the Faculty schedule views,
+    # but they must NOT be included in the teaching units and course prep calculations.
+    calc_load = [r for r in (merged_load or []) if not bool(r.get("is_special_class"))]
+    total_units, course_preps = _calc_units_and_preps(calc_load)
+    summary["teaching_units"] = f"{int(round(total_units))}/{int(pref_units_for_calc)}"
+    summary["course_preps"] = f"{course_preps}/{max_preps}"
+    summary["percent"] = int((total_units / pref_units_for_calc) * 100) if pref_units_for_calc > 0 else 0
+
+    units_max = float(pref_units_for_calc or 0)
+    preps_max = int(max_preps or 0)
+    summary["exceeded_teaching_units"] = (total_units > units_max) if units_max > 0 else (total_units > 0)
+    summary["exceeded_course_preps"] = (course_preps > preps_max) if preps_max > 0 else (course_preps > 0)
+    summary["teaching_units_over_by"] = max(0, int(round(total_units - units_max))) if summary["exceeded_teaching_units"] else 0
+    summary["course_preps_over_by"] = max(0, int(course_preps - preps_max)) if summary["exceeded_course_preps"] else 0
 
     notifications = await db[COL_NOTIFICATIONS].find(
         {"user_id": userId}, {"_id": 0}
@@ -1280,7 +1683,7 @@ async def get_faculty_overview(userId: str = Query(...)):
         if email_local:
             full_name = email_local.replace(".", " ").replace("_", " ").title()
             
-    final_teaching_load.sort(key=lambda x: (x.get("day", ""), x.get("time", ""), x.get("section", "")))
+    merged_load.sort(key=lambda x: (x.get("course_code", ""), x.get("section", ""), str(bool(x.get("is_special_class")))))
 
     return {
         "ok": True,
@@ -1292,7 +1695,7 @@ async def get_faculty_overview(userId: str = Query(...)):
         },
         "term": term,
         "summary": summary,
-        "teaching_load": final_teaching_load,
+        "teaching_load": merged_load,
         "notifications": notifications,
     }
 
@@ -1657,6 +2060,16 @@ async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[s
         return {"ok": True, "message": "No proposal to accept."}
 
     proposal_rows = proposal.get("rows", []) or []
+
+    # Include reflected Special Classes in the acceptance email (Approved -> reflected to Faculty).
+    try:
+        sc_rows = await _fetch_reflected_special_classes_for_faculty(term_id=term_id, faculty_id=fid)
+        if sc_rows:
+            # Email builder expects the same keys used by teaching load rows.
+            proposal_rows = list(proposal_rows) + sc_rows
+    except Exception:
+        # Never block accept due to Special Class reflection failures.
+        pass
 
     # do not allow accept if pending RFC exists
     pending_rfc = await db[COL_LOAD_RFC].find_one({"faculty_id": fid, "term_id": term_id}, {"_id": 0}) or None

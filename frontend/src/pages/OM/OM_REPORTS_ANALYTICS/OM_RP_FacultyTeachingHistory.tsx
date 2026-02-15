@@ -1,7 +1,7 @@
 // frontend/src/pages/OM/OM_RP_FacultyTeachingHistory.tsx
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { ChevronLeft, ChevronDown, ChevronRight, Calendar } from "lucide-react";
+import { ChevronLeft, ChevronDown, ChevronRight, Calendar, Search as SearchIcon } from "lucide-react";
 import { fetchTeachingHistory, listFaculty } from "../../../api";
 import SelectBox from "../../../component/SelectBox";
 
@@ -210,6 +210,30 @@ export default function OM_RP_FacultyTeachingHistory() {
  * ----------------------------- */
 type PrimaryCampus = "Manila" | "Laguna" | "Both" | "N/A";
 
+function computePrimaryCourseFromRows(rows: TeachingHistoryRow[]): { code: string; title: string } {
+  const counts: Record<string, { times: number; title: string; firstIdx: number }> = {};
+  (rows || []).forEach((r, idx) => {
+    const code = String(r.course_code || "").trim();
+    if (!code) return;
+    const title = String(r.course_title || "").trim();
+    if (!counts[code]) counts[code] = { times: 0, title, firstIdx: idx };
+    counts[code].times += 1;
+    if (!counts[code].title && title) counts[code].title = title;
+  });
+
+  const best = Object.entries(counts)
+    .sort((a, b) => {
+      const A = a[1];
+      const B = b[1];
+      if (B.times !== A.times) return B.times - A.times;
+      return A.firstIdx - B.firstIdx;
+    })
+    .map(([code, meta]) => ({ code, title: meta.title }))
+    .find((x) => x.code);
+
+  return best || { code: "N/A", title: "" };
+}
+
 function inferCampusFromSection(sectionCode?: string | null): "Manila" | "Laguna" | null {
   const s = String(sectionCode || "").trim().toUpperCase();
   if (!s) return null;
@@ -247,10 +271,14 @@ function FacultyAccordion() {
 
   const [filter, setFilter] = useState("");
 
+  // Advanced filters (computed from teaching history, cached)
+  const [primaryCourseFilter, setPrimaryCourseFilter] = useState("");
+
   type CampusFilterLabel = "All campuses" | "Manila" | "Laguna" | "Both";
   const campusOptions: CampusFilterLabel[] = ["All campuses", "Manila", "Laguna", "Both"];
   const [campusFilter, setCampusFilter] = useState<CampusFilterLabel>("All campuses");
-  const [campusComputing, setCampusComputing] = useState(false);
+  const [filterComputingCount, setFilterComputingCount] = useState(0);
+  const isFilterComputing = filterComputingCount > 0;
 
   const [openIds, setOpenIds] = useState<Set<string>>(new Set());
   const [cache, setCache] = useState<Record<string, TeachingHistoryRow[]>>({});
@@ -259,6 +287,9 @@ function FacultyAccordion() {
 
   // Primary campus per faculty (computed from teaching history; cached)
   const [primaryCampusByFaculty, setPrimaryCampusByFaculty] = useState<Record<string, PrimaryCampus>>({});
+  const [primaryCourseByFaculty, setPrimaryCourseByFaculty] = useState<
+    Record<string, { code: string; title: string }>
+  >({});
 
   useEffect(() => {
     let cancelled = false;
@@ -303,7 +334,7 @@ function FacultyAccordion() {
 
       if (missing.length === 0) return;
 
-      setCampusComputing(true);
+      setFilterComputingCount((c) => c + 1);
 
       const updates: Record<string, PrimaryCampus> = {};
       const CONCURRENCY = 6;
@@ -326,7 +357,7 @@ function FacultyAccordion() {
 
       if (cancelled) return;
       setPrimaryCampusByFaculty((prev) => ({ ...prev, ...updates }));
-      setCampusComputing(false);
+      setFilterComputingCount((c) => Math.max(0, c - 1));
     }
 
     computeMissing();
@@ -335,6 +366,52 @@ function FacultyAccordion() {
       cancelled = true;
     };
   }, [campusFilter, allFaculty, primaryCampusByFaculty]);
+
+  // When a primary course filter is used, compute primary course for all faculty (if missing)
+  useEffect(() => {
+    if (!primaryCourseFilter.trim()) return;
+
+    let cancelled = false;
+
+    async function computeMissing() {
+      const missing = allFaculty
+        .map((f) => f.faculty_id)
+        .filter((id) => !(id in primaryCourseByFaculty));
+
+      if (missing.length === 0) return;
+
+      setFilterComputingCount((c) => c + 1);
+
+      const updates: Record<string, { code: string; title: string }> = {};
+      const CONCURRENCY = 6;
+      let ptr = 0;
+
+      const workers = new Array(CONCURRENCY).fill(0).map(async () => {
+        while (ptr < missing.length && !cancelled) {
+          const id = missing[ptr++];
+          try {
+            const data = await fetchTeachingHistory(id);
+            const rows = Array.isArray(data?.rows) ? (data.rows as TeachingHistoryRow[]) : [];
+            updates[id] = computePrimaryCourseFromRows(rows);
+          } catch {
+            updates[id] = { code: "N/A", title: "" };
+          }
+        }
+      });
+
+      await Promise.all(workers);
+
+      if (cancelled) return;
+      setPrimaryCourseByFaculty((prev) => ({ ...prev, ...updates }));
+      setFilterComputingCount((c) => Math.max(0, c - 1));
+    }
+
+    computeMissing();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [primaryCourseFilter, allFaculty, primaryCourseByFaculty]);
 
   const filteredSorted = useMemo(() => {
     const q = norm(filter);
@@ -356,8 +433,20 @@ function FacultyAccordion() {
       });
     }
 
+    // primary course filter (most taught course code/title)
+    if (primaryCourseFilter.trim()) {
+      const cq = norm(primaryCourseFilter);
+      const ctokens = cq ? cq.split(" ") : [];
+      base = base.filter((f) => {
+        const info = primaryCourseByFaculty[f.faculty_id];
+        if (!info) return false;
+        const hay = norm(`${info.code} ${info.title}`);
+        return ctokens.every((t) => hay.includes(t));
+      });
+    }
+
     return [...base].sort((a, b) => compareLastFirst(a.name, b.name));
-  }, [allFaculty, filter, campusFilter, primaryCampusByFaculty]);
+  }, [allFaculty, filter, campusFilter, primaryCampusByFaculty, primaryCourseFilter, primaryCourseByFaculty]);
 
   useEffect(() => {
     const visibleIds = new Set(filteredSorted.map((f) => f.faculty_id));
@@ -395,6 +484,11 @@ function FacultyAccordion() {
           if (prev[id]) return prev;
           return { ...prev, [id]: computePrimaryCampusFromRows(rows) };
         });
+
+        setPrimaryCourseByFaculty((prev) => {
+          if (prev[id]) return prev;
+          return { ...prev, [id]: computePrimaryCourseFromRows(rows) };
+        });
       } catch (err: any) {
         setErrors((m) => ({
           ...m,
@@ -424,27 +518,12 @@ function FacultyAccordion() {
         </Link>
 
         <div className="relative flex-1 min-w-[260px]">
-          <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-gray-400">
-            <svg
-              viewBox="0 0 24 24"
-              width="16"
-              height="16"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              aria-hidden="true"
-            >
-              <circle cx="11" cy="11" r="8" />
-              <path d="m21 21-4.3-4.3" />
-            </svg>
-          </span>
+          <SearchIcon className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-500" />
           <input
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
-            placeholder="Search by faculty…"
-            className="w-full rounded-lg border border-gray-300 pl-9 pr-9 py-2 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30"
+            placeholder="Search by faculty name…"
+            className="w-full rounded-lg border border-gray-300 px-9 py-2 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30"
           />
           {!!filter && (
             <button
@@ -457,19 +536,34 @@ function FacultyAccordion() {
           )}
         </div>
 
-        {/* Campus filter (SelectBox style matching Course Staffing Risk Indicators) */}
-        <div className="min-w-[180px]">
-          <SelectBox
-            value={campusFilter}
-            onChange={(v) => setCampusFilter(v as CampusFilterLabel)}
-            options={campusOptions as unknown as string[]}
+        <SelectBox
+          value={campusFilter}
+          onChange={(v) => setCampusFilter(v as CampusFilterLabel)}
+          options={campusOptions as unknown as string[]}
+        />
+
+        <div className="relative flex-1 min-w-[260px]">
+          <input
+            value={primaryCourseFilter}
+            onChange={(e) => setPrimaryCourseFilter(e.target.value)}
+            placeholder="Primary course (most taught)… e.g. CCPROG 2"
+            className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30"
           />
+          {!!primaryCourseFilter && (
+            <button
+              onClick={() => setPrimaryCourseFilter("")}
+              className="absolute right-2 top-1/2 -translate-y-1/2 inline-flex h-5 w-5 items-center justify-center rounded-full text-gray-500 hover:bg-gray-100"
+              aria-label="Clear primary course filter"
+            >
+              ×
+            </button>
+          )}
         </div>
       </div>
 
-      {campusComputing && campusFilter !== "All campuses" && (
+      {isFilterComputing && (campusFilter !== "All campuses" || !!primaryCourseFilter.trim()) && (
         <div className="px-4 py-2 text-xs text-gray-500 border-b border-gray-100">
-          Computing primary campus from teaching history…
+          Computing filter fields from teaching history…
         </div>
       )}
 

@@ -1,6 +1,6 @@
 // frontend/src/pages/OM/OM_REPORTS_ANALYTICS/OM-RP_AvailabilityForecasting.tsx
 import { useEffect, useMemo, useState } from "react";
-import { ChevronLeft, ChevronRight, Users, Clock, TrendingUp, AlertTriangle } from "lucide-react";
+import { ChevronLeft, Users, Clock, TrendingUp, AlertTriangle } from "lucide-react";
 import { fetchFacultyAvailabilityHeatmap } from "../../../api";
 import { Link } from "react-router-dom";
 
@@ -349,16 +349,6 @@ export default function OM_RP_AvailabilityForecasting() {
     return "—";
   }, [data?.term, data?.term_label, data?.term_id]);
 
-  const hasPrev = useMemo(() => {
-    if (typeof data?.has_prev === "boolean") return data.has_prev;
-    return terms.length > 0 ? currentIndex > 0 : false;
-  }, [data?.has_prev, terms.length, currentIndex]);
-
-  const hasNext = useMemo(() => {
-    if (typeof data?.has_next === "boolean") return data.has_next;
-    return terms.length > 0 ? currentIndex < terms.length - 1 : false;
-  }, [data?.has_next, terms.length, currentIndex]);
-
   const hasAnyPredictions = useMemo(() => {
     if (!data?.slots) return false;
     return Object.values(data.slots).some((v) => (v?.count ?? 0) > 0);
@@ -450,8 +440,8 @@ export default function OM_RP_AvailabilityForecasting() {
   ) : null;
 
   return (
-    // CENTER + MAX WIDTH CONTAINER
-    <div className="w-full max-w-[1400px] mx-auto px-4 sm:px-6 lg:px-8 py-8">
+    // FULL-WIDTH, RESPONSIVE CONTAINER (supports split-screen)
+    <div className="w-full h-full min-h-0 px-4 sm:px-6 lg:px-8 py-8">
       <div className="flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
         <div>
         <h1 className="text-2xl font-bold mb-2">Time/Day Slot Availability Indicators</h1>
@@ -462,8 +452,7 @@ export default function OM_RP_AvailabilityForecasting() {
         {right}
       </div>
 
-      <div className="w-full px-4 sm:px-6 lg:px-8 py-6 space-y-6">
-      </div>
+  
 
       {/* Top Bar (match Deloading Utilization term navigation styling) */}
       <div className="rounded-xl border border-gray-200 bg-white shadow-sm mb-4">
@@ -478,29 +467,8 @@ export default function OM_RP_AvailabilityForecasting() {
             <span>Back</span>
           </Link>
 
-          <div className="flex flex-1 items-center justify-between">
-            <button
-              type="button"
-              className="inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm shadow-sm hover:bg-gray-50 disabled:opacity-40 disabled:hover:bg-white"
-              disabled={!hasPrev || loading}
-              onClick={() => loadHeatmap("prev")}
-              title="Previous term"
-            >
-              <ChevronLeft className="h-4 w-4" />
-              <span>Previous Term</span>
-            </button>
-
-            <button
-              type="button"
-              className="inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm shadow-sm hover:bg-gray-50 disabled:opacity-40 disabled:hover:bg-white"
-              disabled={!hasNext || loading}
-              onClick={() => loadHeatmap("next")}
-              title="Next term"
-            >
-              <span>Next Term</span>
-              <ChevronRight className="h-4 w-4" />
-            </button>
-          </div>
+          {/* Term navigation buttons removed per requirement */}
+          <div className="flex-1" />
 
           <div className="pointer-events-none absolute left-1/2 -translate-x-1/2 flex flex-col items-center gap-1">
             <div className="inline-flex items-center rounded-full border border-emerald-100 bg-emerald-50 px-4 py-2 text-sm font-semibold text-emerald-800 shadow-sm">

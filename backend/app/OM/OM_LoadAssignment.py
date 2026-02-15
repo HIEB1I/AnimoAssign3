@@ -1170,7 +1170,8 @@ async def _notify_apo_room_allocation_ready(
         return
 
     meta = {
-        "route": "/apo/room-assignments",
+        # APO frontend route (see APO sidebar)
+        "route": "/apo/roomallocation",
         "kind": "om_room_allocation_ready",
         "term_id": term_id,
         "campus_id": campus_id,
@@ -3355,8 +3356,10 @@ async def om_save_new_line(
         f"Day/Time: {day1} {begin1}-{end1}" + (f"; {day2} {begin2}-{end2}" if day2 and begin2 and end2 else "")
     ).strip()
     meta = {
-        # Route should point to the APO screen where room assignment is handled.
-        "route": "/apo/load-assignment",
+        # Route must match APO frontend (see APO sidebar).
+        # Some UIs filter notifications by route prefix; using an OM-only route can
+        # make APO recipients think they did not receive the notification.
+        "route": "/apo/courseofferings",
         "kind": "om_new_line",
         "term_id": tid,
         "section_id": section_id,
@@ -3381,9 +3384,17 @@ async def om_save_new_line(
             apo_uids = []
 
     # Create one notification per APO user.
+    # IMPORTANT: in-app notifications must still be created even if Gmail address
+    # backfill fails (e.g., legacy accounts). Email sending is already best-effort
+    # inside create_notification.
     for uid in apo_uids or []:
         try:
-            await _ensure_user_gmail_address(uid, db)
+            try:
+                # Best-effort: backfill missing users.gmail for legacy accounts.
+                await _ensure_user_gmail_address(uid, db)
+            except Exception:
+                pass
+
             await create_notification(
                 user_id=uid,
                 title="New section pending room assignment",
