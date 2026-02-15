@@ -1223,14 +1223,38 @@ async def _fetch_rows(user_id: str, term_id: str, db) -> Dict[str, Any]:
             {"_id": 0, "faculty_id": 1, "status": 1, "locked": 1, "rows": 1},
         ).to_list(None)
 
-        # faculty_id -> proposal status
+        # Pending RFCs should revert an Approved row back to Pending (row-level).
+        # This is crucial when OM sends additional rows to a faculty: we must NOT demote
+        # previously accepted rows unless the faculty has an open RFC for that specific row.
+        pending_rfc_section_ids: set[tuple[str, str]] = set()  # (faculty_id, section_id)
+        try:
+            rfc_docs = await db[COL_LOAD_RFC].find(
+                {"term_id": term_id},
+                {"_id": 0, "faculty_id": 1, "section_id": 1, "status": 1},
+            ).to_list(None)
+            for rfc in rfc_docs or []:
+                if not isinstance(rfc, dict):
+                    continue
+                fid_r = str(rfc.get("faculty_id") or "").strip()
+                sid_r = str(rfc.get("section_id") or "").strip()
+                st_r = str(rfc.get("status") or "").strip().upper()
+                if fid_r and sid_r and st_r and st_r not in RFC_TERMINAL:
+                    pending_rfc_section_ids.add((fid_r, sid_r))
+        except Exception:
+            # Never block OM list due to RFC lookup failures.
+            pending_rfc_section_ids = set()
+
+        # faculty_id -> proposal status (header-level)
+        # NOTE: Header-level status is NOT sufficient for OM row status because updating/adding
+        # rows resets the header to "proposed". We still keep it for legacy behavior, but row-level
+        # "finalized" flags determine whether a specific row remains Approved.
         proposal_status_by_fid: dict[str, str] = {}
         # Matching strategy (to avoid false positives):
         # 1) Prefer section_id match when present (most stable)
         # 2) Fallback to (course_code, section_code) for legacy rows that don't carry section_id
         #
         # - forwarded_*: row exists in an OM->Faculty proposal (already sent to faculty)
-        # - finalized_*: row is locked/finalized (cannot be edited further)
+        # - finalized_*: row has been accepted by faculty (row-level finalized=True) OR proposal header locked
         forwarded_section_ids: set[tuple[str, str]] = set()  # (faculty_id, section_id)
         finalized_section_ids: set[tuple[str, str]] = set()  # (faculty_id, section_id)
         forwarded_keys: set[tuple[str, str, str]] = set()    # (faculty_id, course_code, section)
@@ -1288,9 +1312,23 @@ async def _fetch_rows(user_id: str, term_id: str, db) -> Dict[str, Any]:
 
             # Faculty "Accept Schedule" must NOT lock/finalize rows.
             # However, OM should still see the row status as "Approved" once the faculty accepts.
+            # IMPORTANT: When OM sends additional rows, proposal header status may be reset to
+            # "proposed". Do NOT demote previously finalized/accepted rows.
             st = proposal_status_by_fid.get(fid, "")
-            if forwarded and st in ("approved", "accepted"):
+            is_finalized_row = False
+            if fid and sid and (fid, sid) in finalized_section_ids:
+                is_finalized_row = True
+            elif fid and course and section and (fid, course, section) in finalized_keys:
+                is_finalized_row = True
+
+            # Row-level RFC overrides approval: any open RFC for this section sets it back to Pending.
+            has_open_rfc = bool(fid and sid and (fid, sid) in pending_rfc_section_ids)
+            if forwarded and (is_finalized_row or st in ("approved", "accepted")) and not has_open_rfc:
                 r["status"] = "Approved"
+            elif has_open_rfc:
+                # Keep as Pending even if finalized, until RFC is resolved.
+                r["status"] = "Pending"
+                r["pending_rfc"] = True
     except Exception:
         pass
 
