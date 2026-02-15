@@ -1,5 +1,5 @@
 from __future__ import annotations
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, Iterable, List, Literal, Optional, Tuple
 
 from fastapi import APIRouter, Body, HTTPException, Query, Depends
@@ -15,6 +15,7 @@ from collections import defaultdict
 import csv
 import io
 import uuid
+import re
 
 from ..main import db
 
@@ -75,13 +76,16 @@ COL_FACULTY = "faculty_profiles"
 COL_ASSIGN = "faculty_assignments"
 COL_SECTIONS = "sections"
 COL_SECTIONS_SUBMITTED = "sections_submitted"
+COL_APO_SUBMISSIONS = "apo_scheduling_submissions"
+COL_OM_SUBMIT_WINDOWS = "om_submit_windows"
+COL_DEPARTMENTS = "departments"
+COL_ROLE_ASSIGN = "role_assignments"
 COL_SCHED = "section_schedules"
 COL_ROOMS = "rooms"
 COL_COURSES = "courses"
 COL_TERMS = "terms"
 COL_DEPTS = "departments"
 COL_CAMPUSES = "campuses"
-COL_OM_SUBMIT_WINDOWS = "om_submit_windows"
 
 
 def _campus_name_to_id(val: str) -> str:
@@ -609,68 +613,6 @@ async def _active_term() -> Dict[str, Any]:
 
     return (nxt[0] if nxt else {})
 
-
-
-async def _om_campus_id_for_user(user_id: str, db) -> str:
-    # Best-effort infer OM campus id from role_assignments scope, fallback to staff_profiles.
-    uid = (user_id or "").strip()
-    if not uid:
-        return ""
-
-    try:
-        ra = await db[COL_ROLE_ASSIGN].find_one(
-            {"user_id": uid},
-            {"_id": 0, "scope": 1, "updated_at": 1, "created_at": 1, "role_assignment_id": 1},
-            sort=[("updated_at", -1), ("created_at", -1), ("role_assignment_id", -1)],
-        )
-        scope_val = (ra or {}).get("scope")
-        scopes = []
-        if isinstance(scope_val, dict):
-            scopes = [scope_val]
-        elif isinstance(scope_val, list):
-            scopes = [s for s in scope_val if isinstance(s, dict)]
-
-        for s in scopes:
-            st = str(s.get("type") or "").strip().lower()
-            if st != "campus":
-                continue
-            cid = s.get("id") or s.get("campus_id") or s.get("campus")
-            if cid:
-                return str(cid).strip()
-    except Exception:
-        pass
-
-    try:
-        sp = await db[COL_STAFF].find_one({"user_id": uid}, {"_id": 0, "campus_id": 1}) or {}
-        return str(sp.get("campus_id") or "").strip()
-    except Exception:
-        return ""
-
-
-async def _get_om_submit_window(term_id: str, campus_id: str, db) -> Dict[str, Any]:
-    term_id = (term_id or "").strip()
-    campus_id = (campus_id or "").strip()
-    if not term_id:
-        return {}
-
-    q = {"term_id": term_id}
-    if campus_id:
-        q["campus_id"] = campus_id
-
-    w = await db[COL_OM_SUBMIT_WINDOWS].find_one(q, {"_id": 0})
-    if not w and campus_id:
-        w = await db[COL_OM_SUBMIT_WINDOWS].find_one({"term_id": term_id, "campus_id": ""}, {"_id": 0})
-    return w or {}
-
-
-def _parse_iso_dt(s: str):
-    try:
-        if not s:
-            return None
-        return datetime.fromisoformat(str(s).replace('Z', '+00:00')).astimezone(timezone.utc)
-    except Exception:
-        return None
-
 def _fmt_time(hhmm: Optional[Any]) -> str:
     """
     Return a string time in HH:MM. Accepts:
@@ -725,6 +667,264 @@ async def _faculty_on_leave_map(db, active_term_id: str):
 
     print(f"[DEBUG] Active term: {active_term_id}, blocked faculty: {blocked}")
     return blocked
+
+
+# --- APO-set deadline window (OM/GS schedule + faculty encoding) -------------
+
+def _parse_iso_dt(s: str) -> Optional[datetime]:
+    if not s:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(s).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+async def _infer_campus_id_for_user(user_id: str, db) -> Optional[str]:
+    """Best-effort campus resolver for OM/GS users."""
+
+    uid = (user_id or "").strip()
+    if not uid:
+        return None
+
+    # 1) role_assignments scope campus / department -> departments.campus_id
+    # IMPORTANT: prefer role_assignments over users.campus_id because many
+    # deployments store users.campus_id as a *campus name* (e.g., "Manila"),
+    # which won't match sections.campus_id / campuses.campus_id (e.g., "CMPS0001").
+    try:
+        ras = await db[COL_ROLE_ASSIGN].find(
+            {"user_id": uid},
+            {"_id": 0, "scope": 1, "updated_at": 1, "created_at": 1, "role_assignment_id": 1},
+        ).sort([("updated_at", -1), ("created_at", -1), ("role_assignment_id", -1)]).to_list(25)
+
+        def _scope_items(scope_val: Any) -> list[dict]:
+            if not scope_val:
+                return []
+            if isinstance(scope_val, dict):
+                return [scope_val]
+            if isinstance(scope_val, list):
+                return [x for x in scope_val if isinstance(x, dict)]
+            return []
+
+        for ra in ras or []:
+            for s in _scope_items(ra.get("scope")):
+                stype = str(s.get("type") or s.get("scope_type") or "").strip().lower()
+                sid = str(s.get("id") or s.get("scope_id") or s.get("campus_id") or "").strip()
+                if sid and (stype in ("campus", "campuses") or "campus" in stype):
+                    return await _normalize_campus_id(sid, db)
+
+                if sid and ("dept" in stype or stype == "department"):
+                    d = await db[COL_DEPARTMENTS].find_one(
+                        {"department_id": sid},
+                        {"_id": 0, "campus_id": 1},
+                    ) or {}
+                    cid2 = str(d.get("campus_id") or "").strip()
+                    if cid2:
+                        return await _normalize_campus_id(cid2, db)
+    except Exception:
+        pass
+
+    # 2) users.campus_id (legacy fallback)
+    try:
+        u = await db[COL_USERS].find_one({"user_id": uid}, {"_id": 0, "campus_id": 1}) or {}
+        cid = str(u.get("campus_id") or "").strip()
+        if cid:
+            return await _normalize_campus_id(cid, db)
+    except Exception:
+        pass
+
+    return None
+
+
+async def _normalize_campus_id(raw: Optional[str], db) -> Optional[str]:
+    """Normalize a campus identifier to campuses.campus_id when possible.
+
+    Some datasets store campus as a name ("Manila"), others as an id ("CMPS0001").
+    Returning a canonical campuses.campus_id ensures:
+      - window lookups match,
+      - sections/submissions queries match,
+      - reminders can resolve recipients by campus.
+    """
+
+    v = str(raw or "").strip()
+    if not v:
+        return None
+
+    # Direct match
+    try:
+        doc = await db["campuses"].find_one({"campus_id": v}, {"_id": 0, "campus_id": 1})
+        if doc and doc.get("campus_id"):
+            return str(doc["campus_id"]).strip()
+    except Exception:
+        pass
+
+    # Case-normalized match
+    try:
+        doc = await db["campuses"].find_one({"campus_id": v.upper()}, {"_id": 0, "campus_id": 1})
+        if doc and doc.get("campus_id"):
+            return str(doc["campus_id"]).strip()
+    except Exception:
+        pass
+
+    # Exact campus_name match
+    try:
+        doc = await db["campuses"].find_one(
+            {"campus_name": {"$regex": f"^{re.escape(v)}$", "$options": "i"}},
+            {"_id": 0, "campus_id": 1},
+        )
+        if doc and doc.get("campus_id"):
+            return str(doc["campus_id"]).strip()
+    except Exception:
+        pass
+
+    # Heuristic: contains match
+    try:
+        doc = await db["campuses"].find_one(
+            {"campus_name": {"$regex": re.escape(v), "$options": "i"}},
+            {"_id": 0, "campus_id": 1},
+        )
+        if doc and doc.get("campus_id"):
+            return str(doc["campus_id"]).strip()
+    except Exception:
+        pass
+
+    return v
+
+
+async def _get_om_submit_window(term_id: str, campus_id: str, db) -> Optional[Dict[str, str]]:
+    term_id = str(term_id or "").strip()
+    cid_raw = str(campus_id or "").strip()
+    cid = (await _normalize_campus_id(cid_raw, db)) or cid_raw
+
+    doc = await db[COL_OM_SUBMIT_WINDOWS].find_one(
+        {"term_id": term_id, "campus_id": cid},
+        {"_id": 0, "openISO": 1, "deadlineISO": 1},
+    )
+
+    # Backward-compat: some windows were stored using campus_name ("Manila")
+    # instead of campuses.campus_id ("CMPS0001").
+    if not doc and cid_raw and cid_raw != cid:
+        doc = await db[COL_OM_SUBMIT_WINDOWS].find_one(
+            {"term_id": term_id, "campus_id": cid_raw},
+            {"_id": 0, "openISO": 1, "deadlineISO": 1},
+        )
+
+    if not doc and cid:
+        try:
+            camp = await db["campuses"].find_one(
+                {"campus_id": cid}, {"_id": 0, "campus_name": 1}
+            ) or {}
+            cname = str(camp.get("campus_name") or "").strip()
+            if cname:
+                doc = await db[COL_OM_SUBMIT_WINDOWS].find_one(
+                    {"term_id": term_id, "campus_id": {"$regex": f"^{re.escape(cname)}$", "$options": "i"}},
+                    {"_id": 0, "openISO": 1, "deadlineISO": 1},
+                )
+        except Exception:
+            pass
+
+    # Global fallback (campus_id == "")
+    if not doc:
+        doc = await db[COL_OM_SUBMIT_WINDOWS].find_one(
+            {"term_id": term_id, "campus_id": ""},
+            {"_id": 0, "openISO": 1, "deadlineISO": 1},
+        )
+
+    if not doc:
+        return None
+    return {
+        "openISO": str(doc.get("openISO") or ""),
+        "deadlineISO": str(doc.get("deadlineISO") or ""),
+    }
+
+
+async def _has_apo_submission(term_id: str, campus_id: str, db) -> bool:
+    term_id = str(term_id or "").strip()
+    cid = (await _normalize_campus_id(campus_id, db)) or str(campus_id or "").strip()
+
+    # Primary: apo_scheduling_submissions
+    try:
+        sub = await db[COL_APO_SUBMISSIONS].find_one(
+            {"term_id": term_id, "campus_id": cid},
+            {"_id": 0, "submit_count": 1},
+        ) or {}
+        if int(sub.get("submit_count") or 0) > 0:
+            return True
+    except Exception:
+        pass
+
+    # Fallback: any section marked submitted_for_scheduling
+    try:
+        hit = await db[COL_SECTIONS].find_one(
+            {"term_id": term_id, "campus_id": cid, "submitted_for_scheduling": True},
+            {"_id": 0, "section_id": 1},
+        )
+        return bool(hit)
+    except Exception:
+        return False
+
+
+async def _infer_campus_id_from_rows(rows: List[Dict[str, Any]], db) -> Optional[str]:
+    """Infer campus_id from the submitted grid rows (best-effort).
+
+    This is used as a fallback when the OM/GS user's campus cannot be resolved
+    via profile/role scope, but we still want the deadline lock to apply.
+    """
+
+    if not rows:
+        return None
+
+    # 1) Direct campus fields in row payload
+    for k in ("campus_id", "campusId", "campus"):
+        for r in rows:
+            v = str((r or {}).get(k) or "").strip()
+            if v:
+                return await _normalize_campus_id(v, db)
+
+    # 2) Resolve via section_id -> sections.campus_id
+    sids: List[str] = []
+    for r in rows:
+        sid = str((r or {}).get("id") or (r or {}).get("section_id") or "").strip()
+        if sid:
+            sids.append(sid)
+    if not sids:
+        return None
+
+    # Keep query bounded
+    sids = sids[:200]
+
+    counts: Dict[str, int] = {}
+    try:
+        cur = db[COL_SECTIONS].find(
+            {"section_id": {"$in": sids}},
+            {"_id": 0, "campus_id": 1},
+        )
+        async for s in cur:
+            cid = str(s.get("campus_id") or "").strip()
+            if not cid:
+                continue
+            counts[cid] = counts.get(cid, 0) + 1
+    except Exception:
+        return None
+
+    if not counts:
+        return None
+
+    # Choose the most common campus among sections
+    best = max(counts.items(), key=lambda kv: kv[1])[0]
+    return await _normalize_campus_id(best, db)
+
+
+def _deadline_passed(window: Optional[Dict[str, str]]) -> bool:
+    if not window:
+        return False
+    deadline_dt = _parse_iso_dt(window.get("deadlineISO") or "")
+    if not deadline_dt:
+        return False
+    return datetime.now(timezone.utc) >= deadline_dt
 
 # --- Day-pair normalization helpers -----------------------------------------
 DAY_PAIR = {
@@ -1397,9 +1597,23 @@ async def build_load_recommendations(
 
 # ----------------------------------------------------------
 def _term_label(t: dict) -> str:
-    if not t: return ""
-    ay = t["acad_year_start"]
-    return f"AY {ay}-{ay+1} T{t['term_number']}"
+    """Human-friendly term label.
+
+    Prefer showing Term Number + Academic Year (AY) instead of internal term_id.
+    Format: 'Term {term_number} · AY {acad_year_start}-{acad_year_start+1}'.
+    """
+    if not t:
+        return ""
+    n = t.get('term_number')
+    ay = t.get('acad_year_start')
+    try:
+        ay_int = int(ay) if ay is not None else None
+    except Exception:
+        ay_int = None
+    aye = (ay_int + 1) if ay_int is not None else None
+    if n and ay_int is not None and aye is not None:
+        return f"Term {n} · AY {ay_int}-{aye}"
+    return str(t.get('term_id') or '')
 
 def _row_is_locked(r: dict) -> bool:
     """
@@ -1471,24 +1685,7 @@ async def loadassignment_handler(
             "statuses": ["Confirmed", "Pending", "Unassigned", "Conflict"],
         }
 
-    
-
-    if action == "deadline_window":
-        active = await _active_term()
-        if not active:
-            raise HTTPException(409, "No upcoming term found (is_current anchor missing?)")
-
-        campus_id = await _om_campus_id_for_user(userId, db)
-        w = await _get_om_submit_window(active.get("term_id"), campus_id, db)
-        out = {
-            "openISO": (w or {}).get("openISO") or "",
-            "deadlineISO": (w or {}).get("deadlineISO") or "",
-            "term_id": active.get("term_id"),
-            "campus_id": campus_id,
-        } if w else None
-
-        return {"ok": True, "window": out}
-# --- inside loadassignment_handler(), replace the current "profile" branch ---
+    # --- inside loadassignment_handler(), replace the current "profile" branch ---
     if action == "profile":
         # --- existing lookups (users/staff) can stay as-is ---
         staff = await db["staff_profiles"].find_one(
@@ -1644,6 +1841,27 @@ async def loadassignment_handler(
         if not isinstance(payload, dict) or not isinstance(payload.get("rows"), list):
             raise HTTPException(status_code=400, detail="Invalid payload; expected { rows: [...] }")
         submitted_rows = payload["rows"]
+
+        # Block submit after APO-set deadline (schedule + faculty encoding)
+        try:
+            active = await _active_term()
+            if active and active.get("term_id"):
+                campus_id = (await _infer_campus_id_for_user(userId, db)) or ""
+                if not campus_id:
+                    campus_id = (await _infer_campus_id_from_rows(submitted_rows, db)) or ""
+                if campus_id:
+                    w = await _get_om_submit_window(active["term_id"], campus_id, db)
+                    if _deadline_passed(w):
+                        raise HTTPException(
+                            status_code=403,
+                            detail="Submission is locked because the APO-set deadline has passed.",
+                        )
+        except HTTPException:
+            raise
+        except Exception:
+            # Best-effort: do not block if window cannot be resolved.
+            pass
+
         return {"ok": True, "rows": submitted_rows}
 
     if action == "approve":
@@ -1659,24 +1877,24 @@ async def loadassignment_handler(
                 409, "No upcoming term found (is_current anchor missing?)"
             )
 
-        
+        rows = payload["rows"]
 
-        # Enforce APO-set OM submission deadline (if configured for this campus + upcoming term)
+        # Block approve/forward after APO-set deadline
         try:
-            campus_id = await _om_campus_id_for_user(userId, db)
-            w = await _get_om_submit_window(active.get("term_id"), campus_id, db)
-            deadline_iso = str((w or {}).get("deadlineISO") or "").strip()
-            deadline_dt = _parse_iso_dt(deadline_iso) if deadline_iso else None
-            if deadline_dt and datetime.now(timezone.utc) > deadline_dt:
-                raise HTTPException(
-                    status_code=403,
-                    detail=f"Submission deadline has passed ({deadline_dt.strftime('%Y-%m-%d %H:%M UTC')}). Please contact APO.",
-                )
+            campus_id = (await _infer_campus_id_for_user(userId, db)) or ""
+            if not campus_id:
+                campus_id = (await _infer_campus_id_from_rows(rows, db)) or ""
+            if campus_id:
+                w = await _get_om_submit_window(active.get("term_id"), campus_id, db)
+                if _deadline_passed(w):
+                    raise HTTPException(
+                        status_code=403,
+                        detail="Approval is locked because the APO-set deadline has passed.",
+                    )
         except HTTPException:
             raise
         except Exception:
             pass
-        rows = payload["rows"]
 
         # Determine whether this is the first forward (new header) or a re-forward/update.
         # Keep your existing header behavior, but resolve recipients robustly for notifications.
@@ -2720,11 +2938,28 @@ async def get_om_load_assignment_list(user_id: str, term_id: Optional[str] = Non
         else:
             r["pending_rfc"] = bool(fid and sid and (fid, sid) in open_rfc_keys)
 
+    # APO-set schedule + faculty encoding deadline window (campus-specific)
+    campus_id = (await _infer_campus_id_for_user(user_id, db)) or ""
+    om_submit_window = None
+    om_submit_has_apo_submission = False
+    om_submit_deadline_passed = False
+    try:
+        if campus_id:
+            om_submit_window = await _get_om_submit_window(active.get("term_id"), campus_id, db)
+            om_submit_has_apo_submission = await _has_apo_submission(active.get("term_id"), campus_id, db)
+            om_submit_deadline_passed = _deadline_passed(om_submit_window)
+    except Exception:
+        pass
+
     return {
         "term": _term_label(active),
         "term_id": active.get("term_id"),
         "rows": rows,
         "forwarded_to_chair": forwarded_to_chair,
+        "campus_id": campus_id,
+        "om_submit_window": om_submit_window,
+        "om_submit_deadline_passed": bool(om_submit_deadline_passed),
+        "om_submit_has_apo_submission": bool(om_submit_has_apo_submission),
         "preferred_units_by_faculty": preferred_units_by_faculty,
         "courseToKac": course_kac_simple,
         "facultyToKacs": faculty_to_kacs,
