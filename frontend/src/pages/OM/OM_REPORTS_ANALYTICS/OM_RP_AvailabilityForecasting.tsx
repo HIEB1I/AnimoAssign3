@@ -48,6 +48,13 @@ type HeatPerson = {
   confidence_pct: number;
   reason: string;
   notes?: string[];
+  score_breakdown?: {
+    base: number;
+    pref_boost: number;
+    history_signal: number;
+    history_boost: number;
+    total: number;
+  };
 };
 
 type HeatSlot = { count: number; list: HeatPerson[] };
@@ -174,7 +181,7 @@ function usePairMinMax(data: AvailabilityHeatmap | null) {
       }
     }
     const pairMin = counts.length ? Math.min(...counts) : 0;
-    const pairMax = data.most_supported_slot_count; // Use the backend's max count for the full scale
+    const pairMax = counts.length ? Math.max(...counts) : 0;
     return { pairMin, pairMax };
   }, [data]);
 }
@@ -201,7 +208,7 @@ function SummaryCards({ data }: { data: AvailabilityHeatmap | null }) {
       value: data.total_faculty_considered,
       icon: <Users className="h-5 w-5 text-emerald-600" />,
       tooltip:
-        "Number of unique faculty included in the forecast after applying department, qualification, and approved-leave filters.",
+        "Faculty who submitted preferences and taught in the last 3 terms.",
       color: "text-emerald-700",
     },
     {
@@ -215,7 +222,7 @@ function SummaryCards({ data }: { data: AvailabilityHeatmap | null }) {
     },
     {
       label: "Slots with Low Faculty Support",
-      value: `${lowSupportCells} / ${totalCells}`,
+      value: `${lowSupportCells} out of ${totalCells}`,
       icon: <AlertTriangle className="h-5 w-5 text-rose-600" />,
       tooltip:
         "Number of time slots with little to no historical faculty support (0–1), indicating potential scheduling risk.",
@@ -479,15 +486,6 @@ export default function OM_RP_AvailabilityForecasting() {
                 </span>
               )}
             </div>
-            {terms.length > 0 ? (
-              <div className="text-xs text-gray-500">
-                {currentIndex + 1} of {terms.length}
-              </div>
-            ) : (
-              <div className="text-xs text-gray-500">
-                Term scope: <span className="font-semibold text-emerald-700">Pre-survey</span>
-              </div>
-            )}
           </div>
         </div>
 
@@ -604,13 +602,40 @@ export default function OM_RP_AvailabilityForecasting() {
                 <div className="font-semibold text-emerald-700 mb-2">Predicted Faculty</div>
                 {modalData.cell.list.length === 0 && <div className="text-gray-500">None</div>}
                 {modalData.cell.list.slice(0, 100).map((p) => (
-                  <div key={p.faculty_id} className="flex flex-col py-1.5 border-b border-gray-50 last:border-b-0">
+                  <div
+                    key={p.faculty_id}
+                    className="group relative flex flex-col py-1.5 border-b border-gray-50 last:border-b-0"
+                  >
                     <div className="flex items-center justify-between">
-                      <span className="font-medium" title={p.email ? `${p.name} · ${p.email}` : p.name}>{p.name}</span>
-                      <span className="text-gray-700 font-semibold">{p.confidence_pct}%</span>
+                      <span className="font-medium" title={p.email ? `${p.name} · ${p.email}` : p.name}>
+                        {p.name}
+                      </span>
+
+                      {/* hover the % */}
+                      <span className="text-gray-700 font-semibold cursor-help">
+                        {p.confidence_pct}%
+                      </span>
+
+                      {p.score_breakdown && (
+                        <div className="pointer-events-none absolute right-0 top-0 z-10 opacity-0 group-hover:opacity-100">
+                          <div className="mt-7 w-72 rounded-md border border-gray-200 bg-white px-3 py-2 text-xs text-gray-700 shadow-sm whitespace-normal break-words leading-snug">
+                            <div className="font-semibold text-gray-900 mb-1">Score breakdown</div>
+                            <div>Base: <span className="font-medium">{p.score_breakdown.base}</span></div>
+                            <div>Preference boost: <span className="font-medium">{p.score_breakdown.pref_boost}</span></div>
+                            <div>History signal (raw): <span className="font-medium">{p.score_breakdown.history_signal}</span></div>
+                            <div>History boost: <span className="font-medium">{p.score_breakdown.history_boost}</span></div>
+                            <div className="mt-1 pt-1 border-t border-gray-100">
+                              Total: <span className="font-semibold">{p.score_breakdown.total}</span>{" "}
+                              → <span className="font-semibold">{p.confidence_pct}%</span>
+                            </div>
+                          </div>
+                        </div>
+                      )}
                     </div>
-                    {/* NEW: Display Reason */}
-                    <div className="text-xs text-gray-500 italic mt-0.5" title="Reason for this prediction">{p.reason}</div>
+
+                    <div className="text-xs text-gray-500 italic mt-0.5" title="Reason for this prediction">
+                      {p.reason}
+                    </div>
                   </div>
                 ))}
                 {modalData.cell.list.length > 100 && (

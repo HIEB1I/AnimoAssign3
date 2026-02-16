@@ -1,5 +1,5 @@
 # analytics/app/OM_REPORTS_ANALYTICS/OM_RP_AvailabilityForecasting.py
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Depends
 from typing import Any, Dict, List, Optional, Tuple
 
 # Reuse the shared DB connection from db_async
@@ -87,6 +87,7 @@ def _recency_weights(term_ids: List[str]) -> Dict[str, float]:
 
 # ------------------------ Core: availability heatmap --------------------------
 async def build_faculty_availability_heatmap(
+    db=Depends(get_db),
     course_id: Optional[str] = None,
     dept_id: Optional[str] = None,
     threshold: float = 0.50,
@@ -108,8 +109,6 @@ async def build_faculty_availability_heatmap(
       }
     }
     """
-    db = get_db()
-
     # Resolve the anchor term (defaults to the system current term), and allow
     # simple Prev/Next navigation that mirrors other OM_RP tabs.
     terms = await _ordered_terms(db)
@@ -168,7 +167,62 @@ async def build_faculty_availability_heatmap(
     if hist_terms:
         sec_ids_hist = await db.sections.distinct("section_id", {"term_id": {"$in": hist_terms}})
 
-    async for fp in db.faculty_profiles.find({}):
+    active_term = await db.terms.find_one({"is_current": True}, {"_id": 0, "term_id": 1})
+    if not active_term or not active_term.get("term_id"):
+        return {
+            "warnings": ["No active term found in terms (is_current=true)."],
+            "slots": {},
+            "total_faculty_considered": 0,
+            "faculty_with_recent_pref": 0,
+            "faculty_with_recent_history": 0,
+            "most_supported_slot_count": 0,
+        }
+
+    curr_term_id = active_term["term_id"]
+
+    # last 3 terms (relative to active term)
+    hist_terms = await _prev_n_terms(db, curr_term_id, 3)
+
+    # only faculty who SUBMITTED preferences for the active term
+    # (use is_finished if that’s your “submitted” flag; otherwise remove it)
+    pref_fids = await db.faculty_preferences.distinct(
+        "faculty_id",
+        {"term_id": curr_term_id, "is_finished": True},
+    )
+
+    pref_fids_set = set(pref_fids or [])
+    if not pref_fids_set:
+        return {
+            "warnings": [f"No submitted faculty preferences found for active term {curr_term_id}."],
+            "slots": {},
+            "total_faculty_considered": 0,
+            "faculty_with_recent_pref": 0,
+            "faculty_with_recent_history": 0,
+            "most_supported_slot_count": 0,
+        }
+
+    # only faculty who TAUGHT in the latest past 3 terms
+    sec_ids_hist = []
+    if hist_terms:
+        sec_ids_hist = await db.sections.distinct("section_id", {"term_id": {"$in": hist_terms}})
+
+    hist_fids = set()
+    if sec_ids_hist:
+        hist_fids = set(await db.faculty_assignments.distinct("faculty_id", {"section_id": {"$in": sec_ids_hist}}))
+
+    # final eligible pool = submitted prefs AND taught in last 3 terms
+    eligible_fids = pref_fids_set.intersection(hist_fids)
+    if not eligible_fids:
+        return {
+            "warnings": [f"No faculty matched: submitted prefs ({curr_term_id}) AND taught in last 3 terms."],
+            "slots": {},
+            "total_faculty_considered": 0,
+            "faculty_with_recent_pref": 0,
+            "faculty_with_recent_history": 0,
+            "most_supported_slot_count": 0,
+        }
+
+    async for fp in db.faculty_profiles.find({"faculty_id": {"$in": list(eligible_fids)}}):
         if dept_id and fp.get("department_id") != dept_id:
             continue
         if course_id:
@@ -276,43 +330,60 @@ async def build_faculty_availability_heatmap(
                             if d in DAY_CODES:
                                 pref_keys.add((d, label))
 
-        # Score & keep Top-N
-        scored: List[Tuple[Tuple[str, str], float, str]] = []
+        # Score & keep Top-N (now also keep f + preferred so we can show a breakdown)
+        scored: List[Tuple[Tuple[str, str], float, str, float, bool]] = []
         for key in freq.keys():
-            f = freq.get(key, 0.0)
+            f = float(freq.get(key, 0.0))
             preferred = key in pref_keys
+
             base = 0.30
             pref_boost = 0.20 if preferred else 0.0
-            score = _clamp(base + pref_boost + _clamp(f, 0.0, 1.0) * 0.50, 0.0, 1.0)
+            history_signal = _clamp(f, 0.0, 1.0)
+            history_boost = history_signal * 0.50
+
+            score = _clamp(base + pref_boost + history_boost, 0.0, 1.0)
+
             if f > 0 and preferred: reason = "Commonly taught in recent terms & preferred last term"
             elif f > 0:             reason = "Commonly taught in recent terms"
             elif preferred:         reason = "Preferred in previous term"
             else:                   reason = "Pattern signal"
-            scored.append((key, score, reason))
+
+            scored.append((key, score, reason, f, preferred))
 
         # Handle preference-only case (no history but previous preference exists)
         if not has_history_detailed and pref_keys:
-            # Only add if the slot wasn't already scored with history (which is unlikely if has_history_detailed is false, but safe)
             existing_keys = {item[0] for item in scored}
             for key in pref_keys:
                 if key not in existing_keys:
-                    score = _clamp(0.30 + 0.20, 0.0, 1.0)  # preference-only
-                    scored.append((key, score, "Preferred in previous term"))
+                    base = 0.30
+                    pref_boost = 0.20
+                    f = 0.0
+                    preferred = True
+                    history_signal = 0.0
+                    history_boost = 0.0
+                    score = _clamp(base + pref_boost, 0.0, 1.0)
+                    scored.append((key, score, "Preferred in previous term", f, preferred))
 
         scored.sort(key=lambda x: x[1], reverse=True)
         topN = scored[:TOP_N_PER_FACULTY]
 
         notes = []
-        if not pref_curr: notes.append("No current-term preference on record.")
-        # Note: 'No leaves recorded for this term.' is implicit for considered faculty
-        if has_prev_pref: notes.append("Candidate criterion: previous-term preference.")
-        if has_history_any: notes.append("Candidate criterion: has assignment history in last 3 terms.")
-        
-        # Determine current faculty's top-N reason
-        
-        for (day, label), score, reason in topN:
+        if not pref_curr:
+            notes.append("No current-term preference on record.")
+        if has_prev_pref:
+            notes.append("Candidate criterion: previous-term preference.")
+        if has_history_any:
+            notes.append("Candidate criterion: has assignment history in last 3 terms.")
+
+        for (day, label), score, reason, f, preferred in topN:
             if score < threshold:
                 continue
+
+            base = 0.30
+            pref_boost = 0.20 if preferred else 0.0
+            history_signal = _clamp(float(f), 0.0, 1.0)
+            history_boost = history_signal * 0.50
+
             grid[(day, label)]["count"] += 1
             grid[(day, label)]["list"].append({
                 "faculty_id": fid,
@@ -321,6 +392,13 @@ async def build_faculty_availability_heatmap(
                 "confidence_pct": round(score * 100),
                 "reason": reason,
                 "notes": notes,
+                "score_breakdown": {
+                    "base": round(base, 2),
+                    "pref_boost": round(pref_boost, 2),
+                    "history_signal": round(float(f), 2),      # raw f (may be >1)
+                    "history_boost": round(history_boost, 2),  # clamped×0.50
+                    "total": round(float(score), 2),
+                },
             })
 
     # Calculate Most Supported Slot Count
@@ -376,9 +454,10 @@ async def faculty_availability_heatmap_endpoint(
     threshold: float = Query(0.50),
     term_id: Optional[str] = Query(None),
     direction: str = Query("current"),
+    db=Depends(get_db),
 ):
     return await build_faculty_availability_heatmap(
-        course_id=course_id, dept_id=dept_id, threshold=threshold, term_id=term_id, direction=direction
+        db=db, course_id=course_id, dept_id=dept_id, threshold=threshold, term_id=term_id, direction=direction
     )
 
 # add this alias just under the existing endpoint
@@ -389,7 +468,8 @@ async def availability_forecast_alias(
     threshold: float = Query(0.50),
     term_id: Optional[str] = Query(None),
     direction: str = Query("current"),
+    db=Depends(get_db),
 ):
     return await build_faculty_availability_heatmap(
-        course_id=course_id, dept_id=dept_id, threshold=threshold, term_id=term_id, direction=direction
+        db=db, course_id=course_id, dept_id=dept_id, threshold=threshold, term_id=term_id, direction=direction
     )
