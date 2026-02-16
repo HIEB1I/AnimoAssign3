@@ -465,22 +465,26 @@ async def chair_plantilla_get(
                 raw_type = str(sc.get("room_type") or "").strip()
                 room_id = sc.get("room_id")
 
-                # CASE A: Online Course
-                # Check if type is "Online" (case-insensitive)
-                if raw_type.lower() == "online":
-                    room_parts.append("ONLINE")
+                # IMPORTANT:
+                # Some Special Class / APO flows may leave `room_type` as "Online" even after a
+                # physical room has been allocated (room_id is populated). In those cases, we must
+                # prefer the actual room_id over the room_type flag so CHAIR_Plantilla reflects
+                # the same room assignment shown in OM_SpecialClass.
+                #
+                # Rule:
+                # - If a room_id exists, display the room number (physical room).
+                # - Else, if room_type is Online, display ONLINE.
+                # - Else, TBA.
 
-                # CASE B: Classroom / Physical Room
-                # If there is a room_id, look it up in the rooms table
-                elif room_id:
+                if room_id:
                     r_obj = by_room.get(room_id)
                     if r_obj and r_obj.get("room_number"):
                         room_parts.append(str(r_obj["room_number"]))
                     else:
                         # room_id exists but not found in DB (or has no number)
                         room_parts.append("TBA")
-                
-                # CASE C: Fallback (No ID, not Online)
+                elif raw_type.lower() == "online":
+                    room_parts.append("ONLINE")
                 else:
                     room_parts.append("TBA")
 
