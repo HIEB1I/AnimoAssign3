@@ -1184,11 +1184,75 @@ async def _get_all_om_user_ids() -> list[str]:
     - If you store role in users.role: query that.
     - If you store it in a separate OM profile collection: switch to that.
     """
-    # Option A: users.role == "OM"
-    cur = db[COL_USERS].find({"role": {"$in": ["OM", "Office Manager"]}}, {"_id": 0, "user_id": 1})
-    rows = [r async for r in cur]
-    ids = [r.get("user_id") for r in rows if r.get("user_id")]
-    return list(dict.fromkeys(ids))
+    ids: list[str] = []
+
+    # ------------------------------------------------------------------
+    # Option A (legacy): users.role == "OM"
+    # ------------------------------------------------------------------
+    try:
+        cur = db[COL_USERS].find(
+            {"role": {"$in": ["OM", "Office Manager", "OfficeManager"]}},
+            {"_id": 0, "user_id": 1},
+        )
+        rows = [r async for r in cur]
+        ids.extend([r.get("user_id") for r in rows if r.get("user_id")])
+    except Exception:
+        pass
+
+    # ------------------------------------------------------------------
+    # Option B (current): role_assignments -> user_roles
+    # Most deployments do NOT populate users.role and instead use:
+    #   role_assignments(user_id, role_id, scope[]) + user_roles(role_id, role_type)
+    # ------------------------------------------------------------------
+    role_ids: list[str] = []
+    try:
+        # 1) Explicit role_id constant used across the codebase for OM.
+        role_ids.append("ROLE0006")
+
+        # 2) Best-effort discover additional OM role_ids by role_type.
+        # Accept: "om", "office manager", etc.
+        cur_roles = db["user_roles"].find(
+            {"role_type": {"$regex": r"(office\\s*manager|\\bom\\b)", "$options": "i"}},
+            {"_id": 0, "role_id": 1},
+        )
+        async for r in cur_roles:
+            rid = (r.get("role_id") or "").strip()
+            if rid:
+                role_ids.append(rid)
+    except Exception:
+        pass
+
+    role_ids = list(dict.fromkeys([r for r in role_ids if r]))
+
+    if role_ids:
+        try:
+            # Primary: role_assignments.role_id in discovered OM role_ids.
+            cur_ra = db["role_assignments"].find(
+                {"role_id": {"$in": role_ids}},
+                {"_id": 0, "user_id": 1},
+            )
+            async for ra in cur_ra:
+                uid = (ra.get("user_id") or "").strip()
+                if uid:
+                    ids.append(uid)
+        except Exception:
+            pass
+
+        try:
+            # Some legacy records store a human-readable role string on role_assignments.role.
+            cur_ra2 = db["role_assignments"].find(
+                {"role": {"$regex": r"(office\\s*manager|\\bom\\b)", "$options": "i"}},
+                {"_id": 0, "user_id": 1},
+            )
+            async for ra in cur_ra2:
+                uid = (ra.get("user_id") or "").strip()
+                if uid:
+                    ids.append(uid)
+        except Exception:
+            pass
+
+    # De-dupe and filter empties.
+    return list(dict.fromkeys([x for x in ids if x]))
 
 
 async def _get_not_finished_faculty_user_ids(term_id: str) -> list[str]:

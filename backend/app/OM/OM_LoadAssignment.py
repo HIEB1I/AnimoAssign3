@@ -88,6 +88,109 @@ COL_DEPTS = "departments"
 COL_CAMPUSES = "campuses"
 
 
+async def _special_class_section_ids(term_id: str, db) -> set[str]:
+    """Collect section_ids that belong to Special Class records for a term.
+
+    Requirement: OM_LoadAssignment must *not* reflect Special Classes in its
+    load assignment tables.
+
+    Special Class rows live in the `special_class` collection and may reference
+    a section via different legacy shapes:
+      - special_class.section_id
+      - special_class.assignment_id -> faculty_assignments.section_id
+      - schedule_id within schedule_entries / slot1 / slot2 -> section_schedules.section_id
+
+    We resolve all of the above best-effort and return a set of section_ids.
+    """
+
+    term_id = (term_id or "").strip()
+    if not term_id:
+        return set()
+
+    try:
+        sc_rows = await db.get_collection("special_class").find(
+            {"term_id": term_id},
+            {
+                "_id": 0,
+                "section_id": 1,
+                "assignment_id": 1,
+                "schedule_entries": 1,
+                "slot1": 1,
+                "slot2": 1,
+            },
+        ).to_list(None)
+    except Exception:
+        sc_rows = []
+
+    if not sc_rows:
+        return set()
+
+    out: set[str] = set()
+    asg_ids: set[str] = set()
+    sched_ids: set[str] = set()
+
+    def _s(x: Any) -> str:
+        return (str(x).strip() if x is not None else "")
+
+    def _collect_schedule_ids(val: Any) -> None:
+        if not val:
+            return
+        if isinstance(val, dict):
+            sid = _s(val.get("schedule_id") or val.get("id"))
+            if sid:
+                sched_ids.add(sid)
+            return
+        if isinstance(val, list):
+            for e in val:
+                if isinstance(e, dict):
+                    sid = _s(e.get("schedule_id") or e.get("id"))
+                    if sid:
+                        sched_ids.add(sid)
+
+    for r in sc_rows:
+        sid = _s(r.get("section_id"))
+        if sid:
+            out.add(sid)
+
+        aid = _s(r.get("assignment_id"))
+        if aid:
+            asg_ids.add(aid)
+
+        _collect_schedule_ids(r.get("schedule_entries"))
+        _collect_schedule_ids(r.get("slot1"))
+        _collect_schedule_ids(r.get("slot2"))
+
+    # Resolve assignment_id -> section_id
+    if asg_ids:
+        try:
+            asg_docs = await db.get_collection(COL_ASSIGN).find(
+                {"assignment_id": {"$in": sorted(asg_ids)}, "is_archived": {"$ne": True}},
+                {"_id": 0, "assignment_id": 1, "section_id": 1},
+            ).to_list(None)
+            for a in asg_docs or []:
+                sid = _s(a.get("section_id"))
+                if sid:
+                    out.add(sid)
+        except Exception:
+            pass
+
+    # Resolve schedule_id -> section_id
+    if sched_ids:
+        try:
+            sched_docs = await db.get_collection(COL_SCHED).find(
+                {"schedule_id": {"$in": sorted(sched_ids)}},
+                {"_id": 0, "schedule_id": 1, "section_id": 1},
+            ).to_list(None)
+            for s in sched_docs or []:
+                sid = _s(s.get("section_id"))
+                if sid:
+                    out.add(sid)
+        except Exception:
+            pass
+
+    return out
+
+
 def _campus_name_to_id(val: str) -> str:
     """Map Campus column values to campus_id.
 
@@ -1197,8 +1300,17 @@ async def _fetch_rows(user_id: str, term_id: str, db) -> Dict[str, Any]:
     dept_ids = await _om_department_ids(user_id, db)
     if not dept_ids:
         return {"rows": []}
+
+    # Exclude Special Class sections from OM Load Assignment.
+    # Special Classes are handled in their own workflow (special_class collection)
+    # and must not appear in the OM load assignment table.
+    special_section_ids = await _special_class_section_ids(term_id, db)
+
     pipe: List[Dict[str, Any]] = [
         {"$match": {"term_id": term_id, "submitted_for_scheduling": True}} if term_id else {"$match": {"submitted_for_scheduling": True}},
+
+        # Filter out Special Class section_ids (best-effort). Keep this early for performance.
+        ({"$match": {"section_id": {"$nin": sorted(list(special_section_ids))}}} if special_section_ids else {"$match": {}}),
 
         {"$lookup": {"from": COL_COURSES, "localField": "course_id", "foreignField": "course_id", "as": "course"}},
         {"$unwind": {"path": "$course", "preserveNullAndEmptyArrays": False}},
@@ -3130,8 +3242,12 @@ async def om_get_submitted_course_offerings(
         return {"ok": True, "courses": []}
 
     tid = active["term_id"]
+
+    # Keep course options aligned with the main OM table: do not consider Special Class sections.
+    special_section_ids = await _special_class_section_ids(tid, db)
     pipe: list[dict[str, Any]] = [
         {"$match": {"term_id": tid, "submitted_for_scheduling": True}},
+        ({"$match": {"section_id": {"$nin": sorted(list(special_section_ids))}}} if special_section_ids else {"$match": {}}),
         {"$lookup": {"from": COL_COURSES, "localField": "course_id", "foreignField": "course_id", "as": "course"}},
         {"$unwind": {"path": "$course", "preserveNullAndEmptyArrays": False}},
         {"$match": {"course.department_id": {"$in": dept_ids}}},

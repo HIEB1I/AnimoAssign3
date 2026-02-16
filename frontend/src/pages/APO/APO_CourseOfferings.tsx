@@ -932,49 +932,6 @@ function toLocalInputValue(iso?: string | null): string {
 
 /* --------------------------------- component -------------------------------- */
 
-export default function CourseOfferingsPage() {
-  const [view, setView] = useState<ViewMode>("offerings");
-  const [search, setSearch] = useState("");
-  const [level, setLevel] = useState<string>("All Levels");
-  const [departmentName, setDepartmentName] = useState<string>("All Departments");
-  const [programCode, setProgramCode] = useState<string>("All Programs");
-  const [batchCode, setBatchCode] = useState<string>("All ID");
-
-  const [data, setData] = useState<OfferingsResponse | null>(null);
-  const [rows, setRows] = useState<OfferingRow[]>([]);
-
-  // OM submission deadline window (set by APO; enforced on OM approve)
-  const [omDeadlineDraft, setOmDeadlineDraft] = useState<string>("");
-  const [omWindowSaving, setOmWindowSaving] = useState(false);
-  const [omWindowErr, setOmWindowErr] = useState<string>("");
-  const [nowTick, setNowTick] = useState<number>(Date.now());
-  const [scData, setScData] = useState<SpecialClassResponse | null>(null);
-  const [scRows, setScRows] = useState<SpecialClassRow[]>([]);
-  const [scLoading, setScLoading] = useState(false);
-  const [scErr, setScErr] = useState<string | null>(null);
-
-  const [scSelectedIds, setScSelectedIds] = useState<Record<string, boolean>>({});
-  const [scExporting, setScExporting] = useState(false);
-  const [scExportErr, setScExportErr] = useState<string>("");
-
-  /** ------------------ Editing state ------------------ */
-  const [scEditingId, setScEditingId] = useState<string | null>(null);
-  const [scEditRemarks, setScEditRemarks] = useState<string>("");
-
-  /** room edits (we store room_id because backend update wants room_id) */
-  const [scEditRoom1, setScEditRoom1] = useState<string>(""); // room_id or "ONLINE"
-  const [scEditRoom2, setScEditRoom2] = useState<string>("");
-
-  /** eligible rooms cache per slot key `${special_id}:1` or `${special_id}:2` */
-  const [scEligibleRooms, setScEligibleRooms] = useState<Record<string, any[]>>({});
-  const [scEligibleRoomsLoading, setScEligibleRoomsLoading] = useState<Record<string, boolean>>({});
-  const [scSaveLoadingId, setScSaveLoadingId] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [err, setErr] = useState<string | null>(null);
-  const [conflict, setConflict] = useState<ConflictState | null>(null);
-  const [conflictBusy, setConflictBusy] = useState(false);
-  const [globalElectives, setGlobalElectives] = useState<CourseOption[]>([]);
-  const [electiveOptionsCache, setElectiveOptionsCache] = useState<Record<string, CourseOption[]>>({});
 // ---------- RoomSelectBox (SelectBox-powered) ----------
 const RoomSelectBox: React.FC<{
   rooms: RoomOption[];
@@ -1160,7 +1117,50 @@ const EligibleRoomSelect: React.FC<{
   );
 };
 
-  // curriculum state
+export default function CourseOfferingsPage() {
+  const [view, setView] = useState<ViewMode>("offerings");
+  const [search, setSearch] = useState("");
+  const [level, setLevel] = useState<string>("All Levels");
+  const [departmentName, setDepartmentName] = useState<string>("All Departments");
+  const [programCode, setProgramCode] = useState<string>("All Programs");
+  const [batchCode, setBatchCode] = useState<string>("All ID");
+
+  const [data, setData] = useState<OfferingsResponse | null>(null);
+  const [rows, setRows] = useState<OfferingRow[]>([]);
+
+  // OM submission deadline window (set by APO; enforced on OM approve)
+  const [omDeadlineDraft, setOmDeadlineDraft] = useState<string>("");
+  const [omWindowSaving, setOmWindowSaving] = useState(false);
+  const [omWindowErr, setOmWindowErr] = useState<string>("");
+  const [nowTick, setNowTick] = useState<number>(Date.now());
+  const [scData, setScData] = useState<SpecialClassResponse | null>(null);
+  const [scRows, setScRows] = useState<SpecialClassRow[]>([]);
+  const [scLoading, setScLoading] = useState(false);
+  const [scErr, setScErr] = useState<string | null>(null);
+
+  const [scSelectedIds, setScSelectedIds] = useState<Record<string, boolean>>({});
+  const [scExporting, setScExporting] = useState(false);
+  const [scExportErr, setScExportErr] = useState<string>("");
+
+  /** ------------------ Editing state ------------------ */
+  const [scEditingId, setScEditingId] = useState<string | null>(null);
+  const [scEditRemarks, setScEditRemarks] = useState<string>("");
+
+  /** room edits (we store room_id because backend update wants room_id) */
+  const [scEditRoom1, setScEditRoom1] = useState<string>(""); // room_id or "ONLINE"
+  const [scEditRoom2, setScEditRoom2] = useState<string>("");
+
+  /** eligible rooms cache per slot key `${special_id}:1` or `${special_id}:2` */
+  const [scEligibleRooms, setScEligibleRooms] = useState<Record<string, any[]>>({});
+  const [scEligibleRoomsLoading, setScEligibleRoomsLoading] = useState<Record<string, boolean>>({});
+  const [scSaveLoadingId, setScSaveLoadingId] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState<string | null>(null);
+  const [conflict, setConflict] = useState<ConflictState | null>(null);
+  const [conflictBusy, setConflictBusy] = useState(false);
+  const [globalElectives, setGlobalElectives] = useState<CourseOption[]>([]);
+  const [electiveOptionsCache, setElectiveOptionsCache] = useState<Record<string, CourseOption[]>>({});
+// curriculum state
   const [curr, setCurr] = useState<CurriculumResponse | null>(null);
   const [currSearch, setCurrSearch] = useState("");
 
