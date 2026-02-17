@@ -65,7 +65,7 @@ type Payload = {
 
 // --- MOCK CHART COMPONENT (for demonstration of visualization) ---
 // In a real application, you would integrate a charting library like Recharts or Chart.js here.
-const MockBarChart = ({
+/*const MockBarChart = ({
   data,
   totalUnits,
 }: {
@@ -106,7 +106,7 @@ const MockBarChart = ({
         ))}
     </div>
   );
-};
+}; */
 // --- END MOCK CHART COMPONENT ---
 
 export default function OM_RP_DeloadingUtilization() {
