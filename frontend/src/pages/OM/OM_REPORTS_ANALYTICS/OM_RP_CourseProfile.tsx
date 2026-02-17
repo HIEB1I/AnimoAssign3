@@ -10,7 +10,6 @@ import {
   BarChart2,
   Users,
   Layers,
-  TrendingUp,
 } from "lucide-react";
 import { fetchCourseProfile, type CMCourseRow } from "@/api";
 

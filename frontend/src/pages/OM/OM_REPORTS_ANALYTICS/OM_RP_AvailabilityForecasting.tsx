@@ -295,13 +295,13 @@ export default function OM_RP_AvailabilityForecasting() {
     }
   }
 
-  const currentIndex = useMemo(() => {
+ /* const currentIndex = useMemo(() => {
     if (typeof data?.current_index === "number") return data.current_index;
     const tid = (data?.term?.term_id || data?.term_id || "").trim();
     if (!tid) return 0;
     const idx = terms.findIndex((t) => t.term_id === tid);
     return idx >= 0 ? idx : 0;
-  }, [data?.current_index, data?.term?.term_id, data?.term_id, terms]);
+  }, [data?.current_index, data?.term?.term_id, data?.term_id, terms]); */
 
   const planningTermId = useMemo(() => {
     // Planning term = next term after the DB's is_current anchor.
