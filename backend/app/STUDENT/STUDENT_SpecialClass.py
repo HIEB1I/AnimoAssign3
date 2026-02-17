@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException, Query, Body
 from pymongo import ReturnDocument
 
 from ..main import db
+from .. import Notifications as _notifications
 
 router = APIRouter(prefix="/student", tags=["student"])
 
@@ -471,6 +472,7 @@ async def _bulk_assignment_info(section_ids: List[str]) -> Dict[str, Dict[str, A
 async def special_class_handler(
     userId: str = Query(..., min_length=3),
     action: str = Query("fetch", description="fetch | submit | options | profile"),
+    courseCode: Optional[str] = Query(None, description="Course code (used by courseInfo)"),
     payload: Optional[Dict[str, Any]] = Body(None),
 ):
     # ---------- FETCH (list) ----------
@@ -732,6 +734,38 @@ async def special_class_handler(
             "statuses": cfg.get("statuses", []),
         }
 
+    # ---------- COURSE INFO (units/title/department from DB) ----------
+    # Used by Student Special Class form to auto-fill units when course is selected.
+    if action == "courseInfo":
+        code = str(courseCode or "").strip().upper()
+        if not code:
+            raise HTTPException(status_code=400, detail="Missing courseCode")
+
+        course = await _find_course_by_code(code)
+        if not course:
+            raise HTTPException(status_code=404, detail="Course code not found")
+
+        dept_name = ""
+        if course.get("department_id"):
+            dept = await db[COL_DEPARTMENTS].find_one(
+                {"department_id": course["department_id"]},
+                {"_id": 0, "department_name": 1, "dept_name": 1},
+            )
+            dept_name = (dept or {}).get("department_name") or (dept or {}).get("dept_name") or ""
+
+        try:
+            units = int(course.get("units") or 0)
+        except Exception:
+            units = 0
+
+        return {
+            "ok": True,
+            "course_code": course.get("course_code", code),
+            "course_title": course.get("course_title", "") or "",
+            "units": units,
+            "department_name": dept_name,
+        }
+
     # ---------- SUBMIT ----------
     if action == "submit":
         if not payload:
@@ -797,12 +831,14 @@ async def special_class_handler(
         if course.get("department_id") and dept.get("department_id") and course["department_id"] != dept["department_id"]:
             raise HTTPException(status_code=400, detail="Course does not belong to the selected department.")
 
+        # IMPORTANT: always derive units from the DB to keep student submissions consistent.
+        # (Frontend auto-fills units on course selection, but we still enforce DB truth here.)
         try:
-            course_units = int(payload["units"])
+            course_units = int(course.get("units") or 0)
         except Exception:
-            raise HTTPException(status_code=400, detail="Units must be a number.")
+            course_units = 0
         if course_units <= 0:
-            raise HTTPException(status_code=400, detail="Units must be greater than 0.")
+            raise HTTPException(status_code=400, detail="Course units not found for the selected course.")
 
         active_term = await _active_term()
         term_id = active_term.get("term_id", "")
@@ -846,6 +882,61 @@ async def special_class_handler(
         }
 
         await db[COL_SPECIAL].insert_one(doc)
+
+        # ------------------------------------------------------------------
+        # Notify OM (in-app + Gmail) about the newly submitted Special Class.
+        # IMPORTANT: Best-effort only — student submission must succeed even
+        # if notification delivery fails due to missing OM accounts/tokens.
+        # ------------------------------------------------------------------
+        try:
+            om_ids = await _notifications._get_all_om_user_ids()
+            if om_ids:
+                # Resolve student display name (best-effort)
+                student = await db[COL_USERS].find_one(
+                    {"user_id": userId},
+                    {"_id": 0, "first_name": 1, "last_name": 1, "email": 1, "gmail": 1, "student_number": 1},
+                ) or {}
+                student_name = (f"{(student.get('first_name') or '').strip()} {(student.get('last_name') or '').strip()}".strip() or userId)
+
+                course_code_disp = course.get("course_code", "")
+                if isinstance(course_code_disp, list):
+                    course_code_disp = course_code_disp[0] if course_code_disp else ""
+                course_code_disp = str(course_code_disp or "").strip() or str(payload.get("courseCode") or "").strip()
+
+                title = "New Special Class submission"
+                details = (
+                    f"Student: {student_name}\n"
+                    f"Student No.: {sn}\n"
+                    f"Special ID: {special_id}\n"
+                    f"Course: {course_code_disp} — {course.get('course_title', '')}\n"
+                    f"Department: {dept_name}\n"
+                    f"Term: AY {active_term.get('acad_year_start')} — Term {active_term.get('term_number')}"
+                )
+
+                meta = {
+                    "kind": "student_specialclass_submitted",
+                    "route": "/om/home/special-class",
+                    "special_id": special_id,
+                    "term_id": term_id,
+                    "course_id": course.get("course_id"),
+                    "student_user_id": userId,
+                }
+
+                for om_uid in om_ids:
+                    try:
+                        await _notifications.create_notification(
+                            om_uid,
+                            title=title,
+                            details=details,
+                            meta=meta,
+                            send_email=True,
+                            email_from_user_id=userId,
+                        )
+                    except Exception:
+                        # best-effort per recipient
+                        continue
+        except Exception:
+            pass
 
         return {"ok": True, "application": {
             "special_id": special_id,

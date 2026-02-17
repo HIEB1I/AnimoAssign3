@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from math import ceil
 import re
 import json
@@ -44,6 +44,7 @@ COL_PLANSTATE = "planning_state"
 COL_SPECIAL = "special_class"
 COL_APO_OFFERINGS_AUDIT = "apo_offerings_audit"
 COL_APO_SUBMISSIONS = "apo_scheduling_submissions"
+COL_OM_SUBMIT_WINDOWS = "om_submit_windows"
 
 # Undo/Redo support:
 # - When a section is SOFT-deleted we can restore it by flipping status back to active.
@@ -215,6 +216,229 @@ async def _om_and_gs_user_ids_for_department_id(dept_id: str, campus_id: Optiona
             out.append(u)
     return out
 
+
+
+async def _om_and_gs_user_ids_for_campus(campus_id: Optional[str], db) -> List[str]:
+    """Resolve OM + GS Coordinator user_id(s) for a campus (best effort).
+
+    This is intentionally *inclusive* (mirrors Faculty Preferences notifications):
+    it's better to notify a slightly wider audience than to miss OM/GS entirely.
+
+    Handles real-world scope variants:
+      - scope is list[dict], dict, str, list[str]
+      - scope dict keys may be: type/id OR scope_type/scope_id OR campus_id/campus/campus_name
+      - OM/GS may be scoped by department; we map departments -> campus_id
+      - Some deployments don't populate users.role; we prioritize role_assignments
+    """
+
+    campus_raw = str(campus_id or "").strip()
+    campus_id_norm = (await _normalize_campus_id(campus_raw)) or campus_raw
+    campus_id_norm = str(campus_id_norm or "").strip()
+
+    # Build campus alias map: lower(campus_id|campus_name) -> campus_id
+    campus_alias: Dict[str, str] = {}
+    try:
+        cur_c = db[COL_CAMPUSES].find({}, {"_id": 0, "campus_id": 1, "campus_name": 1})
+        async for c in cur_c:
+            cid = str(c.get("campus_id") or "").strip()
+            cname = str(c.get("campus_name") or "").strip()
+            if cid:
+                campus_alias[cid.lower()] = cid
+            if cname:
+                campus_alias[cname.lower()] = cid
+    except Exception:
+        campus_alias = {}
+
+    def _norm_cid(v: Any) -> str:
+        s = str(v or "").strip()
+        if not s:
+            return ""
+        return campus_alias.get(s.lower(), s)
+
+    campus_id_norm = _norm_cid(campus_id_norm)
+
+    # 1) Role IDs for OM + GS Coordinator (be generous with naming)
+    role_q = {
+        "$or": [
+            {"role_type": {"$regex": r"(^OM$|Office\s*Manager|Office\s*Management|Operations\s*Manager)", "$options": "i"}},
+            {"role_type": {"$regex": r"(GS\s*Coordinator|Graduate\s*Studies|Grad\s*Studies)", "$options": "i"}},
+        ]
+    }
+    roles = await db[COL_USER_ROLES].find(role_q, {"_id": 0, "role_id": 1}).to_list(400)
+    role_ids = [str(r.get("role_id") or "").strip() for r in roles if str(r.get("role_id") or "").strip()]
+
+    # 2) Department -> campus map (normalize campus identifiers)
+    dept_to_campus: Dict[str, str] = {}
+    try:
+        cur_depts = db[COL_DEPARTMENTS].find({}, {"_id": 0, "department_id": 1, "campus_id": 1, "campus": 1})
+        async for d in cur_depts:
+            did = str(d.get("department_id") or d.get("dept_id") or d.get("id") or "").strip()
+            cid = _norm_cid(d.get("campus_id") or d.get("campus") or "")
+            if did and cid:
+                dept_to_campus[did] = cid
+    except Exception:
+        dept_to_campus = {}
+
+    def _scope_items(scope_val: Any) -> List[Dict[str, Any]]:
+        """Normalize scope into list[dict]. Supports dict/list/str/list[str]."""
+        if not scope_val:
+            return []
+        if isinstance(scope_val, dict):
+            return [scope_val]
+        if isinstance(scope_val, str):
+            # treat raw string as campus identifier or 'all'
+            return [{"type": "campus", "id": scope_val}]
+        if isinstance(scope_val, list):
+            out: List[Dict[str, Any]] = []
+            for x in scope_val:
+                if isinstance(x, dict):
+                    out.append(x)
+                elif isinstance(x, str):
+                    out.append({"type": "campus", "id": x})
+            return out
+        return []
+
+    def _is_global_scope(scope_val: Any) -> bool:
+        # explicit global / all-campus markers
+        if isinstance(scope_val, str):
+            s = scope_val.strip().lower()
+            return s in ("all", "all campuses", "global", "*")
+        if isinstance(scope_val, list):
+            for x in scope_val:
+                if isinstance(x, str) and x.strip().lower() in ("all", "all campuses", "global", "*"):
+                    return True
+        return False
+
+    def _scope_has_campus(scope_val: Any, cid_norm: str) -> bool:
+        if not cid_norm:
+            return True  # if we can't resolve campus, treat as match to avoid missing recipients
+        for s in _scope_items(scope_val):
+            stype = str(s.get("type") or s.get("scope_type") or "").strip().lower()
+            # support alternate key names
+            raw = (
+                s.get("id")
+                or s.get("scope_id")
+                or s.get("campus_id")
+                or s.get("campus")
+                or s.get("campus_name")
+                or ""
+            )
+            sid = _norm_cid(raw)
+            # If type is missing but a campus-like id is present, still treat it as campus.
+            if sid and sid == cid_norm and (not stype or stype in ("campus", "campuses") or "campus" in stype):
+                return True
+        return False
+
+    def _scope_department_ids(scope_val: Any) -> List[str]:
+        out: List[str] = []
+        for s in _scope_items(scope_val):
+            stype = str(s.get("type") or s.get("scope_type") or "").strip().lower()
+            if "dept" in stype or stype == "department":
+                sid = str(s.get("id") or s.get("scope_id") or s.get("department_id") or s.get("dept_id") or "").strip()
+                if sid:
+                    out.append(sid)
+        return out
+
+    recipients: List[str] = []
+
+    # 3) Primary: role_assignments for OM/GS role_ids
+    if role_ids:
+        ras = await db[COL_ROLE_ASSIGN].find(
+            {"role_id": {"$in": role_ids}},
+            {"_id": 0, "user_id": 1, "scope": 1, "campus_id": 1, "department_id": 1},
+        ).to_list(8000)
+
+        for ra in ras:
+            uid = str(ra.get("user_id") or "").strip()
+            if not uid:
+                continue
+
+            scope = ra.get("scope")
+
+            # If scope is absent OR explicitly global -> include
+            if not scope or _is_global_scope(scope):
+                recipients.append(uid)
+                continue
+
+            # Some schemas store scope as raw campus/department fields
+            ra_campus = _norm_cid(ra.get("campus_id") or "")
+            if ra_campus and ra_campus == campus_id_norm:
+                recipients.append(uid)
+                continue
+
+            ra_dept = str(ra.get("department_id") or "").strip()
+            if ra_dept and dept_to_campus.get(ra_dept) == campus_id_norm:
+                recipients.append(uid)
+                continue
+
+            # Proper structured scope checks
+            if _scope_has_campus(scope, campus_id_norm):
+                recipients.append(uid)
+                continue
+
+            # department scoped -> map to campus
+            matched = False
+            for did in _scope_department_ids(scope):
+                if dept_to_campus.get(did) == campus_id_norm:
+                    recipients.append(uid)
+                    matched = True
+                    break
+
+            if matched:
+                continue
+
+            # If scope exists but we can't interpret it, include (prevents silent drops)
+            recipients.append(uid)
+
+    # 4) Secondary fallback: users.role field (legacy installs)
+    if not recipients:
+        try:
+            cur_users = db[COL_USERS].find(
+                {
+                    "$or": [
+                        {"role": {"$regex": r"(^OM$|Office\s*Manager|GS\s*Coordinator|Graduate\s*Studies)", "$options": "i"}},
+                        {"role_type": {"$regex": r"(^OM$|Office\s*Manager|GS\s*Coordinator|Graduate\s*Studies)", "$options": "i"}},
+                    ]
+                },
+                {"_id": 0, "user_id": 1, "campus_id": 1},
+            )
+            async for u in cur_users:
+                uid = str(u.get("user_id") or "").strip()
+                if not uid:
+                    continue
+                if not campus_id_norm:
+                    recipients.append(uid)
+                    continue
+                if _norm_cid(u.get("campus_id")) == campus_id_norm:
+                    recipients.append(uid)
+        except Exception:
+            pass
+
+    # 5) Final fallback: if still empty but there are OM/GS roles in the catalog,
+    # include ALL role_assignments with those role_ids (global notify).
+    if not recipients and role_ids:
+        try:
+            ras2 = await db[COL_ROLE_ASSIGN].find(
+                {"role_id": {"$in": role_ids}},
+                {"_id": 0, "user_id": 1},
+            ).to_list(8000)
+            for ra in ras2:
+                uid = str(ra.get("user_id") or "").strip()
+                if uid:
+                    recipients.append(uid)
+        except Exception:
+            pass
+
+    # Deduplicate (stable)
+    out: List[str] = []
+    seen = set()
+    for u in recipients:
+        if u and u not in seen:
+            seen.add(u)
+            out.append(u)
+    return out
+
+
 # ---------- helpers for ID generation ----------
 
 async def _next_seq(col_name: str, id_field: str, prefix: str, width: int = 4) -> str:
@@ -307,6 +531,101 @@ async def _get_planning_term() -> Dict[str, Any]:
         "term_number": base_no,
     }
 
+
+
+
+def _term_label_doc(t: dict) -> str:
+    """Human-friendly term label: Term {n} · AY {ay}-{ay+1}."""
+    if not t:
+        return ""
+    n = t.get("term_number")
+    ay = t.get("acad_year_start") or t.get("acad_year")
+    try:
+        ay_int = int(ay) if ay is not None else None
+    except Exception:
+        ay_int = None
+    aye = (ay_int + 1) if ay_int is not None else None
+    if n and ay_int is not None and aye is not None:
+        return f"Term {n} · AY {ay_int}-{aye}"
+    return str(t.get("term_id") or "")
+
+async def _term_label_by_id(term_id: str) -> str:
+    tid = (term_id or "").strip()
+    if not tid:
+        return ""
+    try:
+        t = await db[COL_TERMS].find_one(
+            {"term_id": tid},
+            {"_id": 0, "term_id": 1, "term_number": 1, "acad_year_start": 1, "acad_year": 1},
+        ) or {}
+        return _term_label_doc(t) or tid
+    except Exception:
+        return tid
+
+
+def _parse_iso_dt(s: str) -> Optional[datetime]:
+    """Parse an ISO8601 datetime string into a timezone-aware UTC datetime.
+
+    NOTE:
+    - Browsers send <input type="datetime-local"> values as *naive* ISO strings (no timezone).
+    - For APO/OM scheduling workflows, naive inputs are treated as Asia/Manila (UTC+8).
+    """
+
+    if not s:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(s).replace('Z', '+00:00'))
+        if dt.tzinfo is None:
+            manila = timezone(timedelta(hours=8))
+            dt = dt.replace(tzinfo=manila)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+async def _get_om_submit_window(term_id: str, campus_id: str) -> Dict[str, str]:
+    # Read the OM submission deadline window for a planning term + campus.
+    term_id = (term_id or '').strip()
+    campus_raw = (campus_id or '').strip()
+    campus_id = (await _normalize_campus_id(campus_raw)) or campus_raw
+    if not term_id or not campus_id:
+        return {"openISO": "", "deadlineISO": ""}
+
+    w = await db[COL_OM_SUBMIT_WINDOWS].find_one(
+        {"term_id": term_id, "campus_id": campus_id},
+        {"_id": 0, "openISO": 1, "deadlineISO": 1},
+    )
+
+    # Backward-compat: some old windows were stored using campus_name (e.g., "Manila")
+    # instead of campuses.campus_id (e.g., "CMPS0001").
+    if not w and campus_raw and campus_raw != campus_id:
+        w = await db[COL_OM_SUBMIT_WINDOWS].find_one(
+            {"term_id": term_id, "campus_id": campus_raw},
+            {"_id": 0, "openISO": 1, "deadlineISO": 1},
+        )
+    if not w:
+        try:
+            camp = await db[COL_CAMPUSES].find_one(
+                {"campus_id": campus_id}, {"_id": 0, "campus_name": 1}
+            ) or {}
+            cname = str(camp.get("campus_name") or "").strip()
+            if cname:
+                w = await db[COL_OM_SUBMIT_WINDOWS].find_one(
+                    {"term_id": term_id, "campus_id": {"$regex": f"^{re.escape(cname)}$", "$options": "i"}},
+                    {"_id": 0, "openISO": 1, "deadlineISO": 1},
+                )
+        except Exception:
+            pass
+    if not w:
+        w = await db[COL_OM_SUBMIT_WINDOWS].find_one(
+            {"term_id": term_id, "campus_id": ""},
+            {"_id": 0, "openISO": 1, "deadlineISO": 1},
+        )
+
+    return {
+        "openISO": (w or {}).get("openISO") or "",
+        "deadlineISO": (w or {}).get("deadlineISO") or "",
+    }
 def _parse_course_seq(course_id: str) -> int:
     m = re.match(r"^CRS(\d+)$", course_id or "")
     return int(m.group(1)) if m else 0
@@ -952,16 +1271,82 @@ async def apo_scope(user_id: str) -> Tuple[Optional[str], Optional[str]]:
             if isinstance(scope, dict):
                 scope = [scope]
             for s in scope:
-                if isinstance(s, dict) and s.get("type") == "campus":
-                    campus_id = s.get("id")
-                if isinstance(s, dict) and s.get("type") == "college":
-                    college_id = s.get("id")
+                if not isinstance(s, dict):
+                    continue
+                stype = str(s.get("type") or s.get("scope_type") or "").strip().lower()
+                sid = str(s.get("id") or s.get("scope_id") or s.get("campus_id") or "").strip()
+                if sid and (stype in ("campus", "campuses") or "campus" in stype):
+                    campus_id = sid
+                if sid and (stype == "college" or "college" in stype):
+                    college_id = sid
 
     if not campus_id:
         u = await db[COL_USERS].find_one({"user_id": user_id}, {"_id": 0, "campus_id": 1})
         campus_id = (u or {}).get("campus_id")
 
+    # Normalize campus_id to match campuses.campus_id.
+    # Some legacy datasets store users.campus_id as a *name* (e.g., "Manila").
+    campus_id = await _normalize_campus_id(campus_id)
+
     return (campus_id, college_id)
+
+
+async def _normalize_campus_id(raw: Optional[str]) -> Optional[str]:
+    """Normalize a campus identifier.
+
+    Accepts either:
+      - campus_id (e.g., CMPS0001)
+      - campus_name (e.g., Manila, Laguna)
+
+    Returns the canonical campuses.campus_id when resolvable.
+    """
+    v = str(raw or "").strip()
+    if not v:
+        return None
+
+    # 1) Direct campus_id match
+    try:
+        doc = await db[COL_CAMPUSES].find_one(
+            {"campus_id": v}, {"_id": 0, "campus_id": 1}
+        )
+        if doc and doc.get("campus_id"):
+            return str(doc["campus_id"]).strip()
+    except Exception:
+        pass
+
+    # 2) Case-normalized campus_id match
+    try:
+        doc = await db[COL_CAMPUSES].find_one(
+            {"campus_id": v.upper()}, {"_id": 0, "campus_id": 1}
+        )
+        if doc and doc.get("campus_id"):
+            return str(doc["campus_id"]).strip()
+    except Exception:
+        pass
+
+    # 3) campus_name match (exact, case-insensitive)
+    try:
+        doc = await db[COL_CAMPUSES].find_one(
+            {"campus_name": {"$regex": f"^{re.escape(v)}$", "$options": "i"}},
+            {"_id": 0, "campus_id": 1},
+        )
+        if doc and doc.get("campus_id"):
+            return str(doc["campus_id"]).strip()
+    except Exception:
+        pass
+
+    # 4) Heuristic match on campus_name (contains)
+    try:
+        doc = await db[COL_CAMPUSES].find_one(
+            {"campus_name": {"$regex": re.escape(v), "$options": "i"}},
+            {"_id": 0, "campus_id": 1},
+        )
+        if doc and doc.get("campus_id"):
+            return str(doc["campus_id"]).strip()
+    except Exception:
+        pass
+
+    return v
 async def apo_import_curriculum_csv(userId: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     """
     Import curriculum rows (List of Courses / flowcharts) from CSV.
@@ -2261,14 +2646,39 @@ def _distribute_sections_round_robin(
     sections: List[Dict[str, Any]],
     owners: List[Tuple[str, str, int]]
 ) -> Dict[Tuple[str, str], List[Dict[str, Any]]]:
+    """Distribute section rows to curriculum blocks.
+
+    UX rule: a section created from a specific Batch+Program row in the APO UI must
+    remain under that same Batch+Program after refresh. We persist this intent in
+    COL_SECTIONS as owner_batch_id/owner_program_id.
+
+    - Owned sections -> placed in their owner block.
+    - Unowned/legacy sections -> distributed round-robin.
+    """
+
     secs = _sort_sections_by_number(sections)
     if not owners:
         return {}
-    n = len(owners)
+
+    owner_keys = [(bid, pid) for (bid, pid, _bn) in owners]
     alloc: Dict[Tuple[str, str], List[Dict[str, Any]]] = {(bid, pid): [] for (bid, pid, _bn) in owners}
-    for idx, s in enumerate(secs):
-        (bid, pid, _bn) = owners[idx % n]
-        alloc[(bid, pid)].append(s)
+
+    # 1) Place "owned" sections first.
+    unowned: List[Dict[str, Any]] = []
+    for s in secs:
+        ob = (s.get("owner_batch_id") or "").strip()
+        op = (s.get("owner_program_id") or "").strip()
+        if ob and op and (ob, op) in alloc:
+            alloc[(ob, op)].append(s)
+        else:
+            unowned.append(s)
+
+    # 2) Round-robin distribute remaining sections.
+    n = len(owner_keys)
+    for idx, s in enumerate(unowned):
+        k = owner_keys[idx % n]
+        alloc[k].append(s)
+
     return alloc
 
 # ---------- ensure sections by demand ----------
@@ -2975,14 +3385,28 @@ async def get_course_offerings(
             "planning": {"needs_import": True, "approval_required": False}
         }
 
-    # Mark sections “active” for the PLANNING term, others “inactive”
-    await _sync_section_status_flags(term_id)
-
     campus_id, _ = await apo_scope(userId)
     if not campus_id:
         raise HTTPException(status_code=400, detail="Unable to resolve APO campus from role_assignments.")
     campus = await campus_meta(campus_id)
     prefix_default = campus_section_prefix(campus.get("campus_name", "")) or ""
+
+    # OM submission deadline window (set by APO per campus + planning term)
+    om_submit_window = await _get_om_submit_window(term_id, campus_id)
+
+    # Lightweight meta fetch (for UI widgets that only need term/campus/window).
+    if action == "meta":
+        return {
+            "ok": True,
+            "campus": campus,
+            "term_id": term_id,
+            "term_label": term_label(planning_term),
+            "om_submit_window": om_submit_window,
+        }
+
+    # Mark sections “active” for the PLANNING term, others “inactive”
+    await _sync_section_status_flags(term_id)
+
     # ---- filtered room options for a given slot (frontend can call this) ----
     if action == "roomOptions":
         # Delegate to eligibleRooms to keep a single source of truth
@@ -3248,7 +3672,8 @@ async def get_course_offerings(
             "campus": campus,
             "term_id": term_id,
             "term_label": term_label(planning_term),
-        "submission": submission, 
+            "om_submit_window": om_submit_window,
+            "submission": submission, 
             "items": items,
             "course_options_by_program": course_options_by_program,
             "departments": departments
@@ -3493,19 +3918,31 @@ async def get_course_offerings(
             if sid:
                 section_ids.add(sid)
 
-        # section_id -> section_code + remarks + enrollment_cap
+        # section_id -> section_code + remarks + enrollment_cap + OM approval flags
         sec_map: Dict[str, str] = {}
         sec_remarks_map: Dict[str, str] = {}
         sec_cap_map: Dict[str, int] = {}
+        sec_om_approved_map: Dict[str, bool] = {}
+        sec_room_ready_map: Dict[str, bool] = {}
 
         if section_ids:
             async for s in db[COL_SECTIONS].find(
                 {"section_id": {"$in": sorted(section_ids)}},
-                {"_id": 0, "section_id": 1, "section_code": 1, "remarks": 1, "enrollment_cap": 1},
+                {
+                    "_id": 0,
+                    "section_id": 1,
+                    "section_code": 1,
+                    "remarks": 1,
+                    "enrollment_cap": 1,
+                    "om_approved": 1,
+                    "room_allocation_ready": 1,
+                },
             ):
                 sid0 = _s(s.get("section_id"))
                 sec_map[sid0] = _s(s.get("section_code"))
                 sec_remarks_map[sid0] = _s(s.get("remarks"))
+                sec_om_approved_map[sid0] = bool(s.get("om_approved"))
+                sec_room_ready_map[sid0] = bool(s.get("room_allocation_ready"))
                 try:
                     v = s.get("enrollment_cap")
                     cap = int(v) if v not in (None, "") else 0
@@ -3699,6 +4136,10 @@ async def get_course_offerings(
                     r["section_code"] = sec_map.get(sid, "")
                 if "section_remarks" not in r:
                     r["section_remarks"] = sec_remarks_map.get(sid, "")
+
+                # OM approval / room readiness flags
+                r["om_approved"] = bool(sec_om_approved_map.get(sid, False))
+                r["room_allocation_ready"] = bool(sec_room_ready_map.get(sid, False))
 
             # Provide a consistent min_capacity/capacity value for the frontend's EligibleRoomSelect.
             # This keeps Special Class room filtering consistent with Room Allocation.
@@ -4043,7 +4484,9 @@ async def get_course_offerings(
 
         secs = [s async for s in db[COL_SECTIONS].find(
             sec_q, {"_id": 0, "section_id": 1, "section_code": 1, "enrollment_cap": 1, "remarks": 1, "batch_number": 1,
-                    "course_id": 1, "fulfilled_placeholder_course_id": 1}
+                    "course_id": 1, "fulfilled_placeholder_course_id": 1,
+                    # preserve user-intended placement in Offerings UI
+                    "owner_batch_id": 1, "owner_program_id": 1}
         )]
         campus_sec_by_course[cid] = secs
         planned_capacity_by_course[cid] = sum(int(s.get("enrollment_cap") or DEFAULT_CAP) for s in secs)
@@ -4380,6 +4823,7 @@ async def get_course_offerings(
         "course_options_by_group": options_by_group,
         "all_specific_electives": all_specific_electives,
         "room_options": room_opts,
+        "om_submit_window": om_submit_window,
         "planning": {
             "needs_import": needs_import,
             "approval_required": approval_required,
@@ -4399,7 +4843,8 @@ async def post_course_offerings(
         "courseCatalog", "search_catalog",
         "catalog.create", 
         "curriculumImportCsv", "curriculum.importCsv",
-        "import_curriculum_csv"
+        "import_curriculum_csv",
+        "setOmSubmitWindow"
     ] = Query(...),
     payload: Optional[Dict[str, Any]] = Body(None),
 ):
@@ -4419,8 +4864,166 @@ async def post_course_offerings(
         raise HTTPException(status_code=400, detail="Unable to resolve APO campus from role_assignments.")
     campus = await campus_meta(campus_id)
     prefix_default = campus_section_prefix(campus.get("campus_name", "")) or ""
-    
-    # ---------- SPECIAL CLASS (APO inline edit: remarks + optional room updates) ----------
+
+    # OM submission deadline window (set by APO per campus + planning term)
+    om_submit_window = await _get_om_submit_window(term_id, campus_id)
+
+    # ---------- OM SUBMISSION DEADLINE WINDOW (set by APO; consumed by OM) ----------
+    if action == "setOmSubmitWindow":
+        if payload is None or not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="Missing payload.")
+
+        deadline_iso = str(payload.get("deadlineISO") or payload.get("deadline_iso") or payload.get("deadline") or "").strip()
+        if not deadline_iso:
+            raise HTTPException(status_code=422, detail="deadlineISO is required")
+
+        deadline_dt = _parse_iso_dt(deadline_iso)
+        if not deadline_dt:
+            raise HTTPException(status_code=422, detail="Invalid deadlineISO; must be ISO8601")
+
+        # Ensure we store a canonical campus_id (e.g., CMPS0001) even if
+        # some users/role scopes use campus *names* (e.g., "Manila").
+        campus_id = ((await _normalize_campus_id(campus_id)) or str(campus_id or "")).strip()
+        campus = await campus_meta(campus_id)
+
+        now_dt = datetime.now(timezone.utc).replace(microsecond=0)
+        now_iso = now_dt.isoformat()
+
+        # Normalize to UTC + remove sub-second precision to keep the UI clean/consistent.
+        deadline_dt = deadline_dt.astimezone(timezone.utc).replace(microsecond=0)
+        deadline_iso_out = deadline_dt.isoformat()
+
+        await db[COL_OM_SUBMIT_WINDOWS].update_one(
+            {"term_id": term_id, "campus_id": campus_id},
+            {
+                "$set": {
+                    "term_id": term_id,
+                    "campus_id": campus_id,
+                    # Helpful for audits/debugging (optional; safe to add)
+                    "campus_name": (campus.get("campus_name") or "") if isinstance(campus, dict) else "",
+                    # window is considered open as soon as APO sets it
+                    "openISO": now_iso,
+                    "deadlineISO": deadline_iso_out,
+                    "updated_by": userId,
+                    "updated_at": now_iso,
+                },
+                "$setOnInsert": {"created_at": now_iso},
+            },
+            upsert=True,
+        )
+
+        # Notify OM + GS Coordinator immediately that a deadline was set/updated.
+        # Reminder notifications are automatic (7/3/2/1 days before deadline) via:
+        #   /api/notifications/run-om-submit-deadline-reminders
+        notified_count = 0
+        try:
+            recipients = await _om_and_gs_user_ids_for_campus(campus_id, db)
+            if recipients:
+                campus_name = (campus.get("campus_name") or str(campus_id) or "").strip()
+                manila = timezone(timedelta(hours=8))
+                deadline_txt = deadline_dt.astimezone(manila).strftime("%b %d, %Y %H:%M PHT")
+
+                term_label = await _term_label_by_id(term_id)
+
+                title = "Schedule & Faculty Encoding Deadline Set"
+                details = (
+                    f"APO set the deadline to complete schedule and faculty encoding "
+                    f"for {term_label} ({campus_name}). "
+                    f"Deadline: {deadline_txt}. "
+                    f"Automatic reminders will be sent 7, 3, 2, and 1 day(s) before the deadline."
+                )
+
+                dedupe_key = f"om_submit_window_set::{term_id}::{campus_id}::{deadline_iso_out}"
+                for uid in recipients:
+                    hit = await db["notifications"].find_one(
+                        {"user_id": uid, "meta.dedupe_key": dedupe_key},
+                        {"_id": 1},
+                    )
+                    if hit:
+                        continue
+
+                    await create_notification(
+                        uid,
+                        title,
+                        details,
+                        meta={
+                            "kind": "om_schedule_deadline_set",
+                            "term_id": term_id,
+                            "campus_id": campus_id,
+                            "deadlineISO": deadline_iso_out,
+                            "dedupe_key": dedupe_key,
+                            "route": "/om/home/load-assignment",
+                        },
+                        send_email=True,
+                        email_from_user_id=userId,
+                    )
+                    notified_count += 1
+
+
+                # Also: if today already falls in a reminder window (7/3/2/1 days before),
+                # send that reminder immediately so APO can verify the reminder system.
+                # (Future reminders are still generated via /api/notifications/run-om-submit-deadline-reminders.)
+                targets = (7, 3, 2, 1)
+                for days_left in targets:
+                    start = deadline_dt - timedelta(days=days_left)
+                    end = deadline_dt - timedelta(days=days_left - 1)
+                    if not (start <= now_dt < end):
+                        continue
+
+                    manila2 = timezone(timedelta(hours=8))
+                    when_txt2 = deadline_dt.astimezone(manila2).strftime("%b %d, %Y %H:%M PHT")
+                    title2 = (
+                        "Schedule & Faculty Encoding Due in 1 day"
+                        if days_left == 1
+                        else f"Schedule & Faculty Encoding Due in {days_left} days"
+                    )
+                    details2 = (
+                        f"Please complete schedule and faculty encoding for {term_label} "
+                        f"before {when_txt2}."
+                    )
+
+                    dd = f"om_submit_deadline::{term_id}::{campus_id}::{days_left}::{deadline_iso_out}"
+                    for uid in recipients:
+                        hit2 = await db["notifications"].find_one(
+                            {"user_id": uid, "meta.dedupe_key": dd},
+                            {"_id": 1},
+                        )
+                        if hit2:
+                            continue
+
+                        await create_notification(
+                            uid,
+                            title2,
+                            details2,
+                            meta={
+                                "kind": "om_schedule_deadline_reminder",
+                                "term_id": term_id,
+                                "campus_id": campus_id,
+                                "deadlineISO": deadline_iso_out,
+                                "days_left": days_left,
+                                "dedupe_key": dd,
+                                "route": "/om/home/load-assignment",
+                            },
+                            send_email=True,
+                            email_from_user_id=userId,
+                        )
+                        notified_count += 1
+                    break
+        except Exception:
+            pass
+
+        return {
+            "ok": True,
+            "term_id": term_id,
+            "campus_id": campus_id,
+            "notified_count": notified_count,
+            "om_submit_window": {
+                "openISO": now_iso,
+                "deadlineISO": deadline_iso_out,
+            },
+        }
+
+# ---------- SPECIAL CLASS (APO inline edit: remarks + optional room updates) ----------
     if action == "specialclassUpdate":
         if payload is None:
             raise HTTPException(status_code=400, detail="Missing payload.")
@@ -5821,6 +6424,9 @@ async def post_course_offerings(
     if action == "editRow":
         section_id = (payload.get("section_id") or "").strip()
 
+        # Track room assignment changes (to notify both OM + APO).
+        room_changes: List[Dict[str, Any]] = []
+
         cid_for_edit = (payload.get("course_id") or "").strip()
         if not cid_for_edit:
             sec_doc = await db[COL_SECTIONS].find_one({"section_id": section_id}, {"_id": 0, "course_id": 1})
@@ -5891,6 +6497,9 @@ async def post_course_offerings(
             existing = await db[COL_SCHEDS].find_one(
                 {"section_id": section_id, "schedule_id": _sch_id_from_sec(section_id, idx)}
             )
+
+            prev_room_id = (existing or {}).get("room_id")
+            prev_room_id = (str(prev_room_id).strip() if prev_room_id is not None else "")
             # sanitize incoming values (treat any TBA text as empty)
             rid = (s.get("room_id") or "").strip()
             rtype = (s.get("room_type") or "").strip()
@@ -5960,6 +6569,20 @@ async def post_course_offerings(
                     update_doc["$unset"] = unset_fields
                 await db[COL_SCHEDS].update_one({"_id": existing["_id"]}, update_doc)
 
+                # Record room change for notifications (only when the payload explicitly touched room_id)
+                if "room_id" in s:
+                    new_room_id = rid
+                    if (prev_room_id or "") != (new_room_id or ""):
+                        room_changes.append({
+                            "slot": idx,
+                            "schedule_id": _sch_id_from_sec(section_id, idx),
+                            "day": day or (existing or {}).get("day") or "",
+                            "start_time": beg or (existing or {}).get("start_time") or "",
+                            "end_time": end or (existing or {}).get("end_time") or "",
+                            "from": prev_room_id or "",
+                            "to": new_room_id or "",
+                        })
+
             else:
                 # no existing schedule doc for this slot
                 if rid or has_time_now:
@@ -5979,6 +6602,188 @@ async def post_course_offerings(
                             doc["room_type"] = rtype
 
                     await db[COL_SCHEDS].insert_one(doc)
+
+                    # Room set on newly-created schedule doc
+                    if "room_id" in s:
+                        new_room_id = rid
+                        if (prev_room_id or "") != (new_room_id or ""):
+                            room_changes.append({
+                                "slot": idx,
+                                "schedule_id": _sch_id_from_sec(section_id, idx),
+                                "day": day or "",
+                                "start_time": beg or "",
+                                "end_time": end or "",
+                                "from": prev_room_id or "",
+                                "to": new_room_id or "",
+                            })
+
+        # --- Notifications for room assignment changes ---
+        # Requirement: BOTH OM and APO should receive notifications (in-app + Gmail) for updates.
+        if room_changes:
+            try:
+                # Resolve section + course context
+                sec = await db[COL_SECTIONS].find_one(
+                    {"section_id": section_id},
+                    {"_id": 0, "course_id": 1, "section_code": 1, "campus_id": 1},
+                ) or {}
+                cid = str(sec.get("course_id") or "").strip()
+                scode = str(sec.get("section_code") or "").strip() or (payload.get("section_code") or "")
+
+                course = await db[COL_COURSES].find_one(
+                    {"course_id": cid},
+                    {"_id": 0, "course_code": 1, "department_id": 1},
+                ) or {}
+                cc = course.get("course_code")
+                if isinstance(cc, list):
+                    cc = cc[0] if cc else ""
+                course_code = str(cc or "").strip() or cid
+                dept_id = str(course.get("department_id") or "").strip()
+
+                campus_name = (campus.get("campus_name") or str(campus_id) or "").strip()
+
+                def _fmt_hhmm(v: Any) -> str:
+                    s = str(v or "").strip()
+                    s = re.sub(r"[^\d]", "", s)
+                    if len(s) == 3:
+                        s = "0" + s
+                    return f"{s[:2]}:{s[2:]}" if len(s) == 4 else ""
+
+                async def _room_label(rid: str) -> str:
+                    rid = (rid or "").strip()
+                    if not rid:
+                        return "TBA"
+                    rdoc = await db[COL_ROOMS].find_one({"room_id": rid}, {"_id": 0, "room_number": 1})
+                    return str((rdoc or {}).get("room_number") or rid).strip() or rid
+
+                lines: List[str] = []
+                for ch in room_changes[:2]:
+                    d = str(ch.get("day") or "").strip()
+                    st = _fmt_hhmm(ch.get("start_time"))
+                    et = _fmt_hhmm(ch.get("end_time"))
+                    old_lbl = await _room_label(str(ch.get("from") or ""))
+                    new_lbl = await _room_label(str(ch.get("to") or ""))
+                    when = ""
+                    if d and st and et:
+                        when = f"{d} {st}-{et}"
+                    elif d:
+                        when = d
+                    if when:
+                        lines.append(f"{when}: {old_lbl} → {new_lbl}")
+                    else:
+                        lines.append(f"Slot {int(ch.get('slot') or 0)}: {old_lbl} → {new_lbl}")
+
+                title = "Room Assignment Updated"
+                details = (
+                    f"Room assignment updated for {course_code} – {scode} ({campus_name}).\n" +
+                    "\n".join(lines)
+                )
+
+                parts = []
+                for c in room_changes:
+                    parts.append(f"{c.get('schedule_id')}|{c.get('from')}|{c.get('to')}")
+                dedupe_key = f"room_assigned::{term_id}::{section_id}::" + ";".join(parts)
+                meta = {
+                    "kind": "apo_room_assignment_updated",
+                    "term_id": term_id,
+                    "campus_id": campus_id,
+                    "section_id": section_id,
+                    "course_id": cid,
+                    "course_code": course_code,
+                    "section_code": scode,
+                    "changes": room_changes,
+                    "dedupe_key": dedupe_key,
+                    "route": "/om/load-assignment",
+                }
+
+                # Notify OM + GS Coordinator for the department (best-effort)
+                if dept_id:
+                    recipients = await _om_and_gs_user_ids_for_department_id(dept_id, campus_id, db)
+                else:
+                    recipients = await _om_and_gs_user_ids_for_campus(campus_id, db)
+
+                for uid in recipients:
+                    try:
+                        hit = await db["notifications"].find_one(
+                            {"user_id": uid, "meta.dedupe_key": dedupe_key},
+                            {"_id": 1},
+                        )
+                        if hit:
+                            continue
+                        await create_notification(
+                            user_id=uid,
+                            title=title,
+                            details=details,
+                            meta=meta,
+                            send_email=True,
+                            email_from_user_id=userId,
+                        )
+                    except Exception:
+                        continue
+
+                # Notify APO (self) as confirmation
+                try:
+                    hit2 = await db["notifications"].find_one(
+                        {"user_id": userId, "meta.dedupe_key": dedupe_key},
+                        {"_id": 1},
+                    )
+                    if not hit2:
+                        await create_notification(
+                            user_id=userId,
+                            title=title,
+                            details=details,
+                            meta={**meta, "route": "/apo/courseofferings"},
+                            send_email=True,
+                            email_from_user_id=userId,
+                        )
+                except Exception:
+                    pass
+
+                # Notify Faculty assigned to this section (best-effort)
+                # Requirement: FACULTY must receive appropriate notifications (in-app + Gmail)
+                # whenever APO allocates/changes/clears a room.
+                try:
+                    fac_user_ids: set[str] = set()
+                    async for asg in db[COL_FAC_ASSIGN].find(
+                        {"section_id": section_id, "is_archived": {"$ne": True}},
+                        {"_id": 0, "user_id": 1, "faculty_id": 1},
+                    ):
+                        uid = str(asg.get("user_id") or "").strip()
+                        fid = str(asg.get("faculty_id") or "").strip()
+                        if uid:
+                            fac_user_ids.add(uid)
+                            continue
+                        if fid:
+                            fp = await db[COL_FAC_PROFILES].find_one(
+                                {"faculty_id": fid},
+                                {"_id": 0, "user_id": 1},
+                            ) or {}
+                            u2 = str(fp.get("user_id") or "").strip()
+                            if u2:
+                                fac_user_ids.add(u2)
+
+                    # Send notifications if any faculty recipients exist
+                    for fuid in sorted(list(fac_user_ids)):
+                        try:
+                            hitf = await db["notifications"].find_one(
+                                {"user_id": fuid, "meta.dedupe_key": dedupe_key},
+                                {"_id": 1},
+                            )
+                            if hitf:
+                                continue
+                            await create_notification(
+                                user_id=fuid,
+                                title=title,
+                                details=details,
+                                meta={**meta, "route": "/faculty/overview"},
+                                send_email=True,
+                                email_from_user_id=userId,
+                            )
+                        except Exception:
+                            continue
+                except Exception:
+                    pass
+            except Exception:
+                pass
 
         want_faculty_change = (
             ("faculty_user_id" in payload) or

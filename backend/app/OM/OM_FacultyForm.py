@@ -454,6 +454,8 @@ async def facultyforms_handler(
     facultyId: Optional[str] = Query(None),
     termId: Optional[str] = Query(None),
     durationDays: Optional[int] = Query(None),  # NEW
+    openISO: Optional[str] = Query(None, description="(Optional) Exact open datetime in ISO 8601"),
+    deadlineISO: Optional[str] = Query(None, description="(Optional) Exact deadline datetime in ISO 8601"),
 ):
 
     # ----- OPTIONS -----
@@ -531,18 +533,37 @@ async def facultyforms_handler(
         ) or {}
         old_deadline_iso = (prev_override.get("deadlineISO") or "").strip()
 
-        # Default duration: 7 days after start, unless caller overrides
-        days = durationDays if durationDays is not None else 7
-        try:
-            days = int(days)
-        except Exception:
-            days = 7
-        if days <= 0:
-            raise HTTPException(status_code=400, detail="durationDays must be a positive integer.")
+        def _parse_iso_as_utc(s: Optional[str]) -> Optional[datetime]:
+            if not s:
+                return None
+            try:
+                dt = datetime.fromisoformat(str(s).replace("Z", "+00:00"))
+            except Exception:
+                return None
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc)
 
-        now = datetime.now(timezone.utc)
-        open_dt = now
-        deadline_dt = now + timedelta(days=days)
+        # Prefer exact schedule (like APO_CourseOfferings). If not provided, keep legacy duration-based behavior.
+        open_dt = _parse_iso_as_utc(openISO)
+        deadline_dt = _parse_iso_as_utc(deadlineISO)
+
+        if open_dt and deadline_dt:
+            if deadline_dt <= open_dt:
+                raise HTTPException(status_code=400, detail="deadlineISO must be after openISO.")
+        else:
+            # Legacy: Default duration: 7 days after start, unless caller overrides
+            days = durationDays if durationDays is not None else 7
+            try:
+                days = int(days)
+            except Exception:
+                days = 7
+            if days <= 0:
+                raise HTTPException(status_code=400, detail="durationDays must be a positive integer.")
+
+            now = datetime.now(timezone.utc)
+            open_dt = now
+            deadline_dt = now + timedelta(days=days)
 
         # Upsert override for this term
         await db[COL_PREFS_WINDOWS].update_one(

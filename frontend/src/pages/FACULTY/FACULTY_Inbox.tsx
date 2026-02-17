@@ -1,6 +1,12 @@
+import { useEffect } from "react";
+import { useNavigate } from "react-router-dom";
+
 import InboxShell from "@/pages/shared/InboxShell";
 
-function FACULTYInboxMain() {
+/**
+ * Embedded Inbox (used inside FACULTY_Overview when showInbox=true)
+ */
+export function InboxContent() {
   return (
     <InboxShell
       title="Inbox"
@@ -11,9 +17,19 @@ function FACULTYInboxMain() {
   );
 }
 
-// Keep this export (your current file already uses this pattern)
-export function InboxContent() {
-  return <FACULTYInboxMain />;
-}
+/**
+ * Route entry for /faculty/inbox.
+ * We redirect back to /faculty/overview and open the embedded inbox,
+ * so the TopBar + layout remain visible ("like a tab").
+ */
+export default function FACULTYInboxRoute() {
+  const navigate = useNavigate();
 
-export default FACULTYInboxMain;
+  useEffect(() => {
+    navigate("/faculty/overview", { replace: true });
+    // open inbox on the next tick so the Overview listeners are mounted
+    window.setTimeout(() => window.dispatchEvent(new Event("faculty:openInbox")), 0);
+  }, [navigate]);
+
+  return null;
+}

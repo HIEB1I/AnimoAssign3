@@ -1031,11 +1031,12 @@ export default function InboxShell({
   })();
 
   return (
-    <section className="w-full px-3 sm:px-6">
+    // Full-width shell (no fixed max width). Padding is handled by the page layout.
+    <section className="w-full">
       <div
         ref={panelRef}
         style={panelHeight ? { height: panelHeight } : undefined}
-        className="mx-auto mt-4 flex w-full max-w-7xl flex-col overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-sm min-h-[520px]"
+        className="flex w-full flex-col overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-sm min-h-[520px]"
       >
         {/* Page Header */}
         <div className="flex items-center justify-between border-b border-gray-200 px-5 py-4">

@@ -852,6 +852,17 @@ function EditForm({
                 }}
                 options={prefUnitOptions}
               />
+              {/* Preferred units guidance */}
+              {form.prefUnits !== TEACHING_BREAK && form.prefUnits !== ZERO_LOAD_LABEL && (
+                <div className="mt-2 flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 p-2 text-[12px] text-amber-900">
+                  <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-700" />
+                  <span>
+                    If you have deloading, subtract it from your <span className="font-semibold">Preferred Teaching Units</span>{" "}
+                    before submitting.
+                  </span>
+                </div>
+              )}
+
               {!!prepNote && form.prefUnits !== TEACHING_BREAK && (
                 <div className="mt-2 flex items-start gap-2 text-[12px] text-neutral-600">
                   <Info className="mt-0.5 h-3.5 w-3.5 text-amber-600" />

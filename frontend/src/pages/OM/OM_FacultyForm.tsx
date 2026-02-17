@@ -19,7 +19,6 @@ import {
   getOMFPreference,
   type OMFOptions,
   type OMFRow,
-  startOMFWindow, // NEW
   userHasRole, // already exported from api.ts
 } from "../../api";
 
@@ -217,7 +216,9 @@ export default function OM_FacultyForm() {
   });
 
   const [startingWindow, setStartingWindow] = useState(false);
-  const [durationDays, setDurationDays] = useState<string>("7"); // NEW: configurable duration
+  // Exact window schedule (like APO_CourseOfferings)
+  const [openDraft, setOpenDraft] = useState<string>("");
+  const [deadlineDraft, setDeadlineDraft] = useState<string>("");
   const isOm = userHasRole("Office Manager");
 
   // table rows
@@ -264,17 +265,24 @@ export default function OM_FacultyForm() {
   const handleStartWindow = async () => {
     if (startingWindow) return;
 
-    // Validate duration input
-    const days = parseInt(durationDays || "0", 10);
-    if (!Number.isFinite(days) || days <= 0) {
-      setErr("Duration (days) must be a positive number.");
+    // Validate draft datetimes
+    const openDate = new Date(openDraft);
+    const deadlineDate = new Date(deadlineDraft);
+    if (!openDraft || Number.isNaN(openDate.getTime())) {
+      setErr("Please provide a valid opening date and time.");
+      return;
+    }
+    if (!deadlineDraft || Number.isNaN(deadlineDate.getTime())) {
+      setErr("Please provide a valid deadline date and time.");
+      return;
+    }
+    if (deadlineDate.getTime() <= openDate.getTime()) {
+      setErr("Deadline must be after the opening date and time.");
       return;
     }
 
     const verb = prefsWindow.openISO ? "Restart" : "Start";
-    const message = `${verb} submission window now for ${days} day${
-      days === 1 ? "" : "s"
-    }? This will override the existing schedule.`;
+    const message = `${verb} submission window with the following schedule? This will override the existing schedule.\n\nOpens: ${openDate.toLocaleString()}\nDeadline: ${deadlineDate.toLocaleString()}`;
 
     const ok = await openConfirm({
       title: `${verb} submission window?`,
@@ -288,10 +296,23 @@ export default function OM_FacultyForm() {
       setStartingWindow(true);
       setErr("");
 
-      const data = await startOMFWindow({
-        termId: activeTerm?.term_id,
-        durationDays: days,
+      // NOTE: We intentionally call the endpoint directly instead of using the
+      // startOMFWindow helper from ../../api because its TypeScript payload type
+      // may not include openISO/deadlineISO in some codebases.
+      // This keeps the change isolated to this page and avoids TS errors.
+      const params = new URLSearchParams();
+      params.set("action", "startWindow");
+      if (activeTerm?.term_id) params.set("termId", activeTerm.term_id);
+      params.set("openISO", openDate.toISOString());
+      params.set("deadlineISO", deadlineDate.toISOString());
+
+      const res = await fetch(`/api/om/facultyforms?${params.toString()}`, {
+        method: "POST",
       });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data?.detail || "Failed to start submission window.");
+      }
 
       if (!data?.ok || !data.prefs_window) {
         throw new Error("Failed to start submission window.");
@@ -330,6 +351,31 @@ useEffect(() => {
           openISO: opt?.prefs_window?.openISO || "",
           deadlineISO: opt?.prefs_window?.deadlineISO || "",
         });
+
+        // Initialize datetime drafts (prefer existing schedule; else prefill with now + 7 days)
+        const toLocalInput = (isoOrDate: string) => {
+          const d = new Date(isoOrDate);
+          if (Number.isNaN(d.getTime())) return "";
+          const pad = (n: number) => String(n).padStart(2, "0");
+          const yyyy = d.getFullYear();
+          const mm = pad(d.getMonth() + 1);
+          const dd = pad(d.getDate());
+          const hh = pad(d.getHours());
+          const mi = pad(d.getMinutes());
+          return `${yyyy}-${mm}-${dd}T${hh}:${mi}`;
+        };
+
+        const existingOpen = (opt?.prefs_window?.openISO || "").trim();
+        const existingDeadline = (opt?.prefs_window?.deadlineISO || "").trim();
+        if (existingOpen && existingDeadline) {
+          setOpenDraft(toLocalInput(existingOpen));
+          setDeadlineDraft(toLocalInput(existingDeadline));
+        } else {
+          const now = new Date();
+          const plus7 = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
+          setOpenDraft(toLocalInput(now.toISOString()));
+          setDeadlineDraft(toLocalInput(plus7.toISOString()));
+        }
       } catch (e: any) {
         setErr(
           e?.response?.data?.detail ||
@@ -412,7 +458,8 @@ useEffect(() => {
   const isFallbackShown = Boolean((pref as any)?.meta?.is_fallback && shownLabel);
 
   return (
-    <main className="w-full px-8 py-8">
+    <div className="min-h-screen w-full bg-gray-50 text-slate-900">
+    <main className="w-full px-6 py-6">
       {/* Header */}
       <header className="mb-4 flex items-center justify-between">
         <div>
@@ -425,32 +472,40 @@ useEffect(() => {
         <div className="flex items-center gap-3">
           {activeTerm?.submission_deadline && (
             <p className="text-sm font-semibold text-red-600">
-              Due Date:{" "}
-              <span className="text-gray-800">
-                {fmtDate(activeTerm.submission_deadline)}
-              </span>
             </p>
           )}
 
           {isOm && (
-            <div className="flex items-center gap-2">
-              <label className="flex items-center gap-2 text-xs text-gray-600">
-                <span>Duration (days)</span>
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-medium text-slate-700">Opens</span>
                 <input
-                  type="number"
-                  min={1}
-                  value={durationDays}
-                  onChange={(e) => setDurationDays(e.target.value)}
-                  className="w-20 rounded-md border border-gray-300 px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500/40"
+                  type="datetime-local"
+                  className="h-9 rounded-md border border-gray-300 bg-white px-2 text-sm"
+                  value={openDraft}
+                  onChange={(e) => setOpenDraft(e.target.value)}
                 />
-              </label>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-medium text-slate-700">Deadline</span>
+                <input
+                  type="datetime-local"
+                  className="h-9 rounded-md border border-gray-300 bg-white px-2 text-sm"
+                  value={deadlineDraft}
+                  onChange={(e) => setDeadlineDraft(e.target.value)}
+                />
+              </div>
               <button
                 type="button"
                 onClick={handleStartWindow}
                 disabled={startingWindow}
-                className="rounded-lg bg-emerald-600 px-3 py-2 text-xs font-semibold text-white shadow-sm hover:bg-emerald-700 disabled:opacity-60"
+                className="inline-flex h-9 items-center rounded-md bg-emerald-700 px-3 text-sm font-semibold text-white shadow-sm hover:bg-emerald-800 disabled:opacity-50"
               >
-                {prefsWindow.openISO ? "Restart Window" : "Start Submission Window"}
+                {startingWindow
+                  ? "Saving…"
+                  : prefsWindow.openISO
+                    ? "Restart Window"
+                    : "Start Window"}
               </button>
             </div>
           )}
@@ -867,5 +922,6 @@ useEffect(() => {
         )}
       </div>
     </main>
+    </div>
   );
 }

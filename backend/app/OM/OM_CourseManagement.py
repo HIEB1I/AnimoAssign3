@@ -403,6 +403,8 @@ async def course_management(
             {"course_title": {"$regex": s, "$options": "i"}},
             {"coordinator_name": {"$regex": s, "$options": "i"}},
             {"kac_label": {"$regex": s, "$options": "i"}},
+            # Teaching Composition (array of faculty names)
+            {"composition": {"$elemMatch": {"$regex": s, "$options": "i"}}},
         ]}})
 
     pipeline.extend([

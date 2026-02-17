@@ -13,7 +13,10 @@ import {
   ClipboardList,
   Star,
   Search as SearchIcon,
+  X,
 } from "lucide-react";
+
+import SelectBox from "../../component/SelectBox";
 
 function ClipboardStarIcon({
   size = 18,
@@ -110,6 +113,9 @@ type PlantillaRow = {
   premium_4th_prep: number | null;
   premium_overload: number | null;
   remarks: string;
+  // Distinguish rows mirrored from OM_SpecialClass.
+  source?: string | null; // e.g., "SPECIALCLASS"
+  source_id?: string | null;
 };
 
 type HeaderResp = {
@@ -129,25 +135,47 @@ const DepartmentPlantilla: React.FC<{
   termLabel?: string;
 }> = ({ deptLabel, plantillaFile, rows, termLabel }) => {
   const tableRef = useRef<HTMLTableElement | null>(null);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
 
   const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
+
+  type FilterMode = "ALL" | "REGULAR" | "SPECIAL";
+  const [filterMode, setFilterMode] = useState<FilterMode>("ALL");
 
   useEffect(() => {
     const t = setTimeout(() => setSearch(searchInput.trim()), 250);
     return () => clearTimeout(t);
   }, [searchInput]);
 
+  const filterOptions = useMemo(
+    () => ["All Classes", "Regular Classes", "Special Classes"],
+    []
+  );
+
+  const filterValueLabel =
+    filterMode === "ALL"
+      ? "All Classes"
+      : filterMode === "REGULAR"
+        ? "Regular Classes"
+        : "Special Classes";
+
   const filteredRows = useMemo(() => {
     const q = (search || "").toLowerCase();
-    if (!q) return rows;
-    return (rows || []).filter((r) => {
+    const base = (rows || []).filter((r) => {
+      if (filterMode === "SPECIAL") return r.source === "SPECIALCLASS";
+      if (filterMode === "REGULAR") return r.source !== "SPECIALCLASS";
+      return true;
+    });
+
+    if (!q) return base;
+    return base.filter((r) => {
       const name = String(r.faculty_name || "").toLowerCase();
       const course = String(r.course_code || "").toLowerCase();
       const section = String(r.section_code || "").toLowerCase();
       return name.includes(q) || course.includes(q) || section.includes(q);
     });
-  }, [rows, search]);
+  }, [rows, search, filterMode]);
 
   const safeExcelFilename =
     (plantillaFile && plantillaFile.replace(/\.pdf$/i, ".xls")) || "Faculty_Plantilla.xls";
@@ -266,10 +294,45 @@ const DepartmentPlantilla: React.FC<{
         <div className="relative flex-1 min-w-[240px]">
           <SearchIcon className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-500" />
           <input
+            ref={searchInputRef}
             value={searchInput}
             onChange={(e) => setSearchInput(e.target.value)}
             placeholder="Search faculty, course, or section…"
-            className="w-full rounded-lg border border-gray-300 px-9 py-2 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30"
+            className="w-full rounded-lg border border-gray-300 pl-9 pr-10 py-2 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30"
+          />
+
+          {/* Clear (x) button */}
+          {searchInput.trim().length > 0 && (
+            <button
+              type="button"
+              onClick={() => {
+                setSearchInput("");
+                setSearch("");
+                searchInputRef.current?.focus();
+              }}
+              className={cls(
+                "absolute right-2 top-1/2 -translate-y-1/2 rounded-md p-1",
+                "text-neutral-500 hover:bg-neutral-100 hover:text-neutral-700"
+              )}
+              aria-label="Clear search"
+              title="Clear"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          )}
+        </div>
+
+        {/* Filter: Special vs Regular (match CHAIR_FacultyManagement filters) */}
+        <div className="min-w-[200px]">
+          <SelectBox
+            value={filterValueLabel}
+            onChange={(v) => {
+              const next = (v || "All Classes").toLowerCase();
+              if (next.includes("special")) setFilterMode("SPECIAL");
+              else if (next.includes("regular")) setFilterMode("REGULAR");
+              else setFilterMode("ALL");
+            }}
+            options={filterOptions}
           />
         </div>
 
@@ -387,7 +450,13 @@ const DepartmentPlantilla: React.FC<{
               </tr>
             ) : (
               filteredRows.map((r, i) => (
-                <tr key={i} className="hover:bg-gray-50 [&>td]:border [&>td]:border-gray-200">
+                <tr
+                  key={i}
+                  className={cls(
+                    "hover:bg-gray-50 [&>td]:border [&>td]:border-gray-200",
+                    r.source === "SPECIALCLASS" && "bg-purple-50"
+                  )}
+                >
                   <td className="px-3 py-2 text-center">{r.rank ?? ""}</td>
                   <td className="px-3 py-2 text-left font-semibold text-emerald-700">
                     {r.faculty_name || "—"}

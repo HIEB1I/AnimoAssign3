@@ -56,58 +56,125 @@ async def get_course_profile_for(
 
     kac_ids = [k["kac_id"] for k in kac_docs]
 
-    # -------- Qualified faculty (union of: taught this course ∪ qualified via KAC) --------
     qualified: List[Dict[str, Any]] = []
-    # ... (Keep existing qualified faculty logic) ...
+
+    # A) taught THIS course (ALWAYS compute)
+    sec_ids = await db.sections.distinct("section_id", {"course_id": course_id})
+    taught_ids: set = set()
+    if sec_ids:
+        taught_ids = set(
+            await db.faculty_assignments.distinct("faculty_id", {"section_id": {"$in": sec_ids}})
+        )
+
+    # B) KAC-qualified (ONLY if kac_ids exists)
+    kac_qualified_ids: set = set()
     if kac_ids:
-        # A) taught THIS course
-        sec_ids = await db.sections.distinct("section_id", {"course_id": course_id})
-        taught_ids = set()
-        if sec_ids:
-            taught_ids = set(await db.faculty_assignments.distinct(
-                "faculty_id", {"section_id": {"$in": sec_ids}}
-            ))
+        kac_qualified_ids = set(
+            await db.faculty_profiles.distinct("faculty_id", {"qualified_kacs": {"$in": kac_ids}})
+        )
 
-        # B) KAC-qualified
-        kac_qualified_ids = set(await db.faculty_profiles.distinct(
-            "faculty_id", {"qualified_kacs": {"$in": kac_ids}}
-        ))
+    # Union: teaching history is enough to be "qualified"
+    fac_ids = sorted(taught_ids | kac_qualified_ids)
 
-        fac_ids = sorted(taught_ids | kac_qualified_ids)
-        if fac_ids:
-            fps = await db.faculty_profiles.find(
-                {"faculty_id": {"$in": fac_ids}}, {"faculty_id": 1, "user_id": 1}
-            ).to_list(None)
-            prof_by_fid = {fp["faculty_id"]: fp for fp in fps}
+    if fac_ids:
+        fps = await db.faculty_profiles.find(
+            {"faculty_id": {"$in": fac_ids}}, {"faculty_id": 1, "user_id": 1}
+        ).to_list(None)
+        prof_by_fid = {fp["faculty_id"]: fp for fp in fps}
 
-            # Gather all relevant user_ids for name lookup
-            user_ids = {fp.get("user_id") for fp in fps if fp.get("user_id")} | set(fac_ids)
-            users = await db.users.find(
-                {"user_id": {"$in": list(user_ids)}},
-                {"user_id": 1, "first_name": 1, "last_name": 1, "email": 1}
-            ).to_list(None)
-            # Combine lookups into a single map based on uid or fid
-            user_by_id = {u["user_id"]: u for u in users}
+        # Gather all relevant user_ids for name lookup
+        user_ids = {fp.get("user_id") for fp in fps if fp.get("user_id")} | set(fac_ids)
+        users = await db.users.find(
+            {"user_id": {"$in": list(user_ids)}},
+            {"user_id": 1, "first_name": 1, "last_name": 1, "email": 1}
+        ).to_list(None)
+        user_by_id = {u["user_id"]: u for u in users}
 
-            for fid in fac_ids:
-                # Prioritize user_id from faculty_profiles if available, otherwise use faculty_id
-                uid = (prof_by_fid.get(fid) or {}).get("user_id") or fid
-                u = user_by_id.get(uid, user_by_id.get(fid, {})) # check both uid and fid
-                
-                source_bits = []
-                if fid in kac_qualified_ids:
-                    source_bits.append("Qualified KAC")
-                if fid in taught_ids:
-                    source_bits.append("Teaching History")
+    # CODE SNIPPET CHANGE/ADDITION:
+    # This version:
+    # - builds teaching history per faculty with a LIST of (AY, Term) occurrences
+    # - includes it in qualified_faculty payload
+    # - fixes the indentation bug (build qualified list ONCE, outside the aggregate loop)
 
-                qualified.append({
-                    "faculty_id": fid,
-                    "first_name": u.get("first_name"),
-                    "last_name":  u.get("last_name"),
-                    "email":      u.get("email"),
-                    "source":     " & ".join(source_bits) if source_bits else "—",
-                })
-    # -------- End of Qualified faculty --------
+    teach_hist_by_fid: Dict[str, Dict[str, Any]] = {}
+
+    pipeline_teach_hist = [
+        {"$match": {"course_id": course_id}},
+        {"$lookup": {
+            "from": "terms",
+            "localField": "term_id",
+            "foreignField": "term_id",
+            "as": "term"
+        }},
+        {"$unwind": {"path": "$term", "preserveNullAndEmptyArrays": True}},
+        {"$lookup": {
+            "from": "faculty_assignments",
+            "localField": "section_id",
+            "foreignField": "section_id",
+            "as": "fa"
+        }},
+        {"$unwind": {"path": "$fa", "preserveNullAndEmptyArrays": False}},
+        {"$project": {
+            "_id": 0,
+            "faculty_id": "$fa.faculty_id",
+            "acad_year_start": "$term.acad_year_start",
+            "term_number": "$term.term_number",
+        }},
+        # unique list of (AY, Term) where they taught the course
+        {"$group": {
+            "_id": "$faculty_id",
+            "terms": {"$addToSet": {"ay": "$acad_year_start", "term": "$term_number"}},
+        }},
+        {"$project": {
+            "_id": 0,
+            "faculty_id": {"$toString": "$_id"},
+            "terms": 1,
+        }},
+    ]
+
+    rows_th = await db.sections.aggregate(pipeline_teach_hist, allowDiskUse=True).to_list(None)
+
+    for r in rows_th:
+        terms_raw = r.get("terms") or []
+        # keep only valid ints
+        terms_clean = [
+            {"acad_year_start": t.get("ay"), "term_number": t.get("term")}
+            for t in terms_raw
+            if isinstance(t.get("ay"), int) and isinstance(t.get("term"), int)
+        ]
+        # sort newest -> oldest
+        terms_clean.sort(key=lambda x: (x["acad_year_start"], x["term_number"]), reverse=True)
+
+        teach_hist_by_fid[r["faculty_id"]] = {
+            "count": len(terms_clean),  # count of distinct term occurrences
+            "terms": terms_clean,       # list of AY/Term occurrences
+        }
+
+    # Build qualified list
+    qualified = []
+    for fid in fac_ids:
+        uid = (prof_by_fid.get(fid) or {}).get("user_id") or fid
+        u = user_by_id.get(uid, user_by_id.get(fid, {}))
+
+        source_bits = []
+        if fid in taught_ids:
+            source_bits.append("Teaching History")
+        if fid in kac_qualified_ids:
+            source_bits.append("Qualified KAC")
+
+        out = {
+            "faculty_id": fid,
+            "first_name": u.get("first_name"),
+            "last_name":  u.get("last_name"),
+            "email":      u.get("email"),
+            "source":     " & ".join(source_bits) if source_bits else "—",
+        }
+
+        # Attach detailed teaching history for hover UI
+        if fid in taught_ids:
+            out["teaching_history"] = teach_hist_by_fid.get(str(fid), {"count": 0, "terms": []})
+
+        qualified.append(out)
 
     # -------- Past instructors (aggregated) AND NEW METRICS CALCULATION --------
     past: List[Dict[str, Any]] = []
@@ -226,72 +293,80 @@ async def get_course_profile_for(
 
     history_data = await db.sections.aggregate(pipeline_history, allowDiskUse=True).to_list(None)
 
+    # WHOLE REPLACEMENT BLOCK (paste this in place of the block above)
+    # This outputs ay_demand_visual rows with { ay, t1, t2, t3 }.
+
     # Calculate metrics from history_data
-    # FIX: Initialize the set here
     unique_sections_for_count: set = set()
-    total_sections: int = 0
     unique_instructors: set = set()
     academic_years: set = set()
-    ay_section_counts: Dict[int, int] = defaultdict(int)
+
+    # per AY -> per term -> count (T1/T2/T3)
+    ay_term_counts: Dict[int, Dict[int, int]] = defaultdict(lambda: defaultdict(int))
+
     most_recent_ay: Optional[int] = None
     most_recent_term: Optional[int] = None
 
     for entry in history_data:
-        # A section only counts once, even if it had multiple instructors
-        if entry.get("section_id"):
-             # Ensure we count each section only once for the total and AY counts
-            if entry.get("section_id") not in unique_sections_for_count:
-                # total_sections += 1 # Not needed if we use len() later
-                unique_sections_for_count.add(entry.get("section_id"))
-                
-                ay = entry.get("acad_year_start")
-                if ay:
-                    academic_years.add(ay)
-                    ay_section_counts[ay] += 1
-        
-            # Track unique instructors
-            fid = entry.get("faculty_id")
-            if fid:
-                unique_instructors.add(fid)
+        sid = entry.get("section_id")
+        if not sid:
+            continue
+
+        # count each section only once overall (avoids duplicates from multiple faculty_assignments rows)
+        if sid not in unique_sections_for_count:
+            unique_sections_for_count.add(sid)
+
+            ay = entry.get("acad_year_start")
+            tn = entry.get("term_number")
+
+            if isinstance(ay, int):
+                academic_years.add(ay)
+
+                # bucket into T1/T2/T3
+                if isinstance(tn, int) and tn in (1, 2, 3):
+                    ay_term_counts[ay][tn] += 1
+
+        # Track unique instructors (still okay even if duplicates)
+        fid = entry.get("faculty_id")
+        if fid:
+            unique_instructors.add(fid)
 
         # Track Most Recent Term Taught
         ay = entry.get("acad_year_start")
         term = entry.get("term_number")
-        
         if ay is not None and term is not None:
             if most_recent_ay is None or ay > most_recent_ay:
                 most_recent_ay = ay
                 most_recent_term = term
             elif ay == most_recent_ay and (most_recent_term is None or term > most_recent_term):
                 most_recent_term = term
-                
-    # New Metric: Total Sections Taught
-    # FIX: Use the length of the set for the count
+
+    # Total sections across all terms (unique section_id)
     total_sections = len(unique_sections_for_count)
-    
-    # New Metric: Number of Unique Instructors
+
+    # Number of unique instructors
     num_unique_instructors = len(unique_instructors)
-    
-    # New Metric: Total Academic Years covered
+
+    # Total academic years covered
     num_acad_years = len(academic_years)
-    
-    # New Metric: Average Teaching Frequency
+
+    # Average teaching frequency (per AY)
     avg_teaching_frequency = round(total_sections / num_acad_years, 2) if num_acad_years > 0 else 0.0
 
-    # New Metric: Top 3 Past Instructors
-    # The 'past' list is already sorted by count descending
+    # Format AY term counts for the frontend table (AY, T1, T2, T3)
+    ay_demand_visual: List[Dict[str, Any]] = []
+    for ay in sorted(ay_term_counts.keys()):
+        ay_demand_visual.append({
+            "ay": ay,
+            "t1": int(ay_term_counts[ay].get(1, 0)),
+            "t2": int(ay_term_counts[ay].get(2, 0)),
+            "t3": int(ay_term_counts[ay].get(3, 0)),
+        })
+    
     top_3_instructors = past[:3]
-    remaining_instructors_count = len(past) - len(top_3_instructors)
-
-    # Other instructors beyond top 3 (for expandable UI)
+    remaining_instructors_count = max(len(past) - len(top_3_instructors), 0)
     other_instructors = past[3:] if len(past) > 3 else []
 
-    # Format AY section counts for the Demand Visual (Frontend)
-    ay_demand_visual = [
-        {"ay": ay, "sections": count} 
-        for ay, count in sorted(ay_section_counts.items())
-    ]
-    
     # -------- Term context + Preferences --------
     # This report follows the same term paging logic used in Deloading Utilization.
     # The default view is the *planning* term = next term after the DB's is_current.
