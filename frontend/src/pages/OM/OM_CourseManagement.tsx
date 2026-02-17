@@ -1,6 +1,13 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import SelectBox from "../../component/SelectBox";
-import { Search as SearchIcon, MoreVertical, FileText, X as XIcon } from "lucide-react";
+import {
+  ChevronDown,
+  ChevronUp,
+  Search as SearchIcon,
+  FileText,
+  X as XIcon,
+  Users,
+} from "lucide-react";
 import {
   getCMOptions,
   listCMCourses,
@@ -8,24 +15,120 @@ import {
   type CMCourseRow,
 } from "../../api";
 
-function RowActions({ onView }: { onView: () => void }) {
-  const [open, setOpen] = useState(false);
+function ViewSyllabusButton({ onView }: { onView: () => void }) {
   return (
-    <div className="relative">
-      <button onClick={() => setOpen((v) => !v)} className="rounded-full p-2 hover:bg-gray-100 text-gray-700">
-        <MoreVertical className="h-4 w-4" />
+    <div className="relative inline-flex justify-center group">
+      <button
+        type="button"
+        aria-label="View Syllabus"
+        onClick={onView}
+        className="inline-flex items-center gap-2  px-3 py-2 text-xs font-medium text-gray-800 hover:bg-gray-50"
+      >
+        <FileText className="h-4 w-4" />
+        <span>Syllabus</span>
       </button>
-      {open && (
-        <div className="absolute right-0 mt-2 w-48 rounded-xl border border-gray-200 bg-white shadow-xl py-1 z-50">
-          <button
-            onClick={() => { setOpen(false); onView(); }}
-            className="flex w-full items-center gap-2 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
-          >
-            <FileText className="h-4 w-4" /> <span>View Syllabus</span>
-          </button>
+
+      {/* Tooltip */}
+      <div className="pointer-events-none absolute -top-10 left-1/2 -translate-x-1/2 opacity-0 transition-opacity group-hover:opacity-100">
+        <div className="rounded-md bg-gray-900 px-2 py-1 text-xs text-white shadow">
+          View Syllabus
         </div>
+        <div className="mx-auto h-0 w-0 border-x-8 border-x-transparent border-t-8 border-t-gray-900" />
+      </div>
+    </div>
+  );
+}
+
+function Badge({ children, tone = "gray" }: { children: ReactNode; tone?: "gray" | "emerald" | "blue" }) {
+  const cls =
+    tone === "emerald"
+      ? "bg-emerald-50 text-emerald-700 ring-emerald-200"
+      : tone === "blue"
+        ? "bg-sky-50 text-sky-700 ring-sky-200"
+        : "bg-gray-100 text-gray-700 ring-gray-200";
+  return (
+    <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ring-1 ring-inset ${cls}`}>
+      {children}
+    </span>
+  );
+}
+
+function InitialsAvatar({ name }: { name: string }) {
+  const initials = useMemo(() => {
+    const parts = (name || "").trim().split(/\s+/).filter(Boolean);
+    const a = parts[0]?.[0] ?? "?";
+    const b = parts.length > 1 ? parts[parts.length - 1]?.[0] ?? "" : "";
+    return (a + b).toUpperCase();
+  }, [name]);
+
+  return (
+    <span
+      aria-hidden="true"
+      className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-gray-100 text-[11px] font-semibold text-gray-700 ring-1 ring-inset ring-gray-200"
+    >
+      {initials}
+    </span>
+  );
+}
+
+function CompactPeopleList({
+  people,
+  max = 3,
+}: {
+  people: Array<{ name?: string; email?: string }>;
+  max?: number;
+}) {
+  const shown = people.slice(0, max);
+  const remaining = Math.max(0, people.length - shown.length);
+  return (
+    <div className="space-y-2">
+      {shown.map((p, idx) => {
+        const label = p.name || p.email || "—";
+        return (
+          <div key={`${label}-${idx}`} className="flex items-start gap-2 rounded-xl bg-gray-50 p-2">
+            <InitialsAvatar name={label} />
+            <div className="min-w-0">
+              <div className="truncate text-sm font-medium text-gray-900">{p.name || "—"}</div>
+              {p.email && <div className="truncate text-xs text-gray-500">{p.email}</div>}
+            </div>
+          </div>
+        );
+      })}
+
+      {remaining > 0 && (
+        <span className="inline-flex items-center rounded-full bg-gray-100 px-2 py-1 text-xs font-medium text-gray-700 ring-1 ring-inset ring-gray-200">
+          +{remaining} more
+        </span>
       )}
     </div>
+  );
+}
+
+type Person = { name?: string; email?: string };
+
+function isPerson(v: unknown): v is Person {
+  return !!v && typeof v === "object" && ("name" in (v as any) || "email" in (v as any));
+}
+
+function NameWithEmailTooltip({ person }: { person: Person }) {
+  const name = person.name || person.email || "—";
+  const email = person.email?.trim();
+
+  return (
+    <span className="relative inline-flex items-center gap-2 rounded-full bg-gray-50 px-2 py-1 text-xs text-gray-800 ring-1 ring-inset ring-gray-200 group">
+      <InitialsAvatar name={name} />
+      <span className="max-w-[240px] truncate">{name}</span>
+
+      {/* Email tooltip (only when present) */}
+      {email ? (
+        <span className="pointer-events-none absolute -top-10 left-1/2 -translate-x-1/2 opacity-0 transition-opacity group-hover:opacity-100">
+          <span className="block rounded-md bg-gray-900 px-2 py-1 text-xs text-white shadow">
+            {email}
+          </span>
+          <span className="mx-auto block h-0 w-0 border-x-8 border-x-transparent border-t-8 border-t-gray-900" />
+        </span>
+      ) : null}
+    </span>
   );
 }
 
@@ -36,6 +139,7 @@ const toPreview = (u: string) =>
   : u;
 
 export default function OM_CourseManagement() {
+  const TEACHING_COMPOSITION_PREVIEW_COUNT = 7;
   const session = useMemo(() => {
     try { return JSON.parse(localStorage.getItem("animo.user") || "null"); } catch { return null; }
   }, []);
@@ -57,6 +161,17 @@ export default function OM_CourseManagement() {
 
   const [syllabusUrl, setSyllabusUrl] = useState<string>("");
   const [showSyllabus, setShowSyllabus] = useState(false);
+
+  const [expandedCourseId, setExpandedCourseId] = useState<string | number | null>(null);
+
+  const grouped = useMemo(() => {
+    const by: Record<string, CMCourseRow[]> = {};
+    for (const r of rows) {
+      const key = (r.kac || "Uncategorized").trim() || "Uncategorized";
+      (by[key] ||= []).push(r);
+    }
+    return Object.entries(by).sort(([a], [b]) => a.localeCompare(b));
+  }, [rows]);
 
   useEffect(() => {
     (async () => {
@@ -104,7 +219,8 @@ export default function OM_CourseManagement() {
 
       {err && <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{err}</div>}
 
-      <div className="flex flex-wrap items-center gap-3 rounded-xl border border-gray-200 bg-white p-4 shadow-sm mb-6">
+      <div className="sticky top-0 z-10 mb-6 -mx-8 px-8 pt-2">
+        <div className="flex flex-wrap items-center gap-3 rounded-2xl border border-gray-200 bg-white/90 p-4 shadow-sm backdrop-blur">
         <div className="relative flex-1 min-w-[240px]">
           <SearchIcon className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-500" />
           <input
@@ -132,75 +248,182 @@ export default function OM_CourseManagement() {
           )}
         </div>
         <SelectBox value={cluster} onChange={setCluster} options={clusters} />
+        </div>
       </div>
 
-      <div className="border border-gray-200 bg-gray-50 shadow-sm overflow-visible rounded-xl">
-        <table className="w-full text-sm">
-          <thead className="bg-gray-50 border-b text-gray-700">
-            <tr>
-              <th className="text-left px-4 py-2">Knowledge Area Cluster</th>
-              <th className="text-left px-4 py-2">Course Code & Title</th>
-              <th className="text-center px-4 py-2">Units</th>
-              <th className="text-left px-4 py-2">Course Coordinator(s)</th>
-              <th className="text-left px-4 py-2">Teaching Composition</th>
-              <th className="text-center px-4 py-2">Actions</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y">
-            {loading ? (
-              <tr><td colSpan={6} className="px-4 py-6 text-center text-gray-500">Loading…</td></tr>
-            ) : rows.length === 0 ? (
-              <tr><td colSpan={6} className="px-4 py-6 text-center text-gray-500">No results</td></tr>
-            ) : (
-              rows.map((r) => (
-                <tr key={r.course_id} className="hover:bg-gray-50">
-                  <td className="px-4 py-3">{r.kac || "—"}</td>
+      {/* Modern card layout (keeps all data, reduces “information dump”) */}
+      <section className="space-y-6">
+        {loading ? (
+          <div className="grid gap-4">
+            {Array.from({ length: 6 }).map((_, i) => (
+              <div key={i} className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm">
+                <div className="h-4 w-48 rounded bg-gray-100" />
+                <div className="mt-3 h-3 w-72 rounded bg-gray-100" />
+                <div className="mt-4 h-8 w-full rounded bg-gray-50" />
+              </div>
+            ))}
+          </div>
+        ) : rows.length === 0 ? (
+          <div className="rounded-2xl border border-dashed border-gray-300 bg-white p-10 text-center">
+            <div className="mx-auto mb-2 grid h-12 w-12 place-items-center rounded-2xl bg-gray-50">
+              <Users className="h-6 w-6 text-gray-400" />
+            </div>
+            <div className="text-sm font-medium text-gray-900">No results</div>
+            <div className="mt-1 text-sm text-gray-500">Try a different search term or cluster filter.</div>
+          </div>
+        ) : (
+          grouped.map(([kac, items]) => (
+            <div key={kac} className="space-y-3">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <h2 className="text-sm font-semibold text-gray-900">{kac}</h2>
+                  <Badge tone="blue">{items.length} course{items.length === 1 ? "" : "s"}</Badge>
+                </div>
+              </div>
 
-                  <td className="px-4 py-3 text-left font-semibold text-emerald-700">
-                    {r.code || "—"}
-                    <div className="text-xs text-gray-500">{r.title || "—"}</div>
-                  </td>
+              <div className="grid gap-4">
+                {items.map((r) => {
+                  const coordinators =
+                    r.coordinators && r.coordinators.length > 0
+                      ? r.coordinators
+                      : [{ name: r.coordinator_name, email: r.coordinator_email }];
+                  const compositionRaw = Array.isArray(r.composition) ? r.composition.filter(Boolean) : [];
+                  const composition: Person[] = compositionRaw
+                    .map((v) => (typeof v === "string" ? ({ name: v } as Person) : isPerson(v) ? v : ({ name: String(v) } as Person)))
+                    .filter((p) => (p.name || p.email) && String(p.name || p.email).trim().length > 0);
+                  const sortedComposition = composition
+                    .slice()
+                    .sort((a, b) => String(a.name || a.email || "").localeCompare(String(b.name || b.email || ""), undefined, { sensitivity: "base" }));
+                  const hasMoreDetails =
+                    (coordinators?.filter((c) => c?.name || c?.email).length || 0) > 2 ||
+                    sortedComposition.length > TEACHING_COMPOSITION_PREVIEW_COUNT;
+                  const isExpanded = expandedCourseId === r.course_id;
 
-                  <td className="px-4 py-3 text-center">{r.units ?? "—"}</td>
+                  return (
+                    <div
+                      key={r.course_id}
+                      className="rounded-2xl border border-gray-200 bg-white shadow-sm transition hover:shadow"
+                    >
+                      <div className="flex flex-col gap-3 p-4 sm:flex-row sm:items-start sm:justify-between">
+                        <button
+                          type="button"
+                          disabled={!hasMoreDetails}
+                          onClick={() => {
+                            if (!hasMoreDetails) return;
+                            setExpandedCourseId(isExpanded ? null : r.course_id);
+                          }}
+                          className={`group flex-1 text-left ${hasMoreDetails ? "cursor-pointer" : "cursor-default"}`}
+                        >
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="text-sm font-semibold text-emerald-700 group-hover:underline">
+                              {r.code || "—"}
+                            </span>
+                            <Badge tone="emerald">{r.units ?? "—"} unit{Number(r.units) === 1 ? "" : "s"}</Badge>
+                          </div>
+                          <div className="mt-1 text-sm text-gray-800">{r.title || "—"}</div>
+                          <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-gray-500">
+                            <span className="inline-flex items-center gap-1">
+                              <Users className="h-3.5 w-3.5" />
+                              {sortedComposition.length
+                                ? `${sortedComposition.length} instructor${sortedComposition.length === 1 ? "" : "s"}`
+                                : "No teaching composition"}
+                            </span>
+                          </div>
+                        </button>
 
-                  <td className="px-4 py-3">
-                    {(r.coordinators && r.coordinators.length > 0) ? (
-                      r.coordinators.map((c, i) => (
-                        <div key={i} className="text-sm">
-                          <div className="text-gray-900">{c.name || "—"}</div>
-                          {c.email && <div className="text-xs text-gray-500">{c.email}</div>}
+                        <div className="flex items-center justify-between gap-2 sm:flex-col sm:items-end">
+                          <ViewSyllabusButton
+                            onView={() => {
+                              setSyllabusUrl(r.syllabus || "");
+                              setShowSyllabus(true);
+                            }}
+                          />
+                          {hasMoreDetails && (
+                            <button
+                              type="button"
+                              onClick={() => setExpandedCourseId(isExpanded ? null : r.course_id)}
+                              className="inline-flex items-center gap-1 rounded-lg px-2 py-1 text-xs font-medium text-gray-700 hover:bg-gray-50"
+                            >
+                              {isExpanded ? (
+                                <>
+                                  Less <ChevronUp className="h-4 w-4" />
+                                </>
+                              ) : (
+                                <>
+                                  See more <ChevronDown className="h-4 w-4" />
+                                </>
+                              )}
+                            </button>
+                          )}
                         </div>
-                      ))
-                    ) : (
-                      <>
-                        {r.coordinator_name || "—"}
-                        {r.coordinator_email && (
-                          <div className="text-xs text-gray-500">{r.coordinator_email}</div>
-                        )}
-                      </>
-                    )}
-                  </td>
+                      </div>
 
-                  <td className="px-4 py-3">
-                    {Array.isArray(r.composition) && r.composition.length
-                      ? r.composition.map((n, i) => <div key={i}>{n}</div>)
-                      : <span className="text-gray-500">—</span>}
-                  </td>
+                      <div className="border-t border-gray-100">
+                        <div className="p-4">
+                          <div className="grid gap-4 md:grid-cols-4">
+                            <div className="md:col-span-1">
+                              <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">
+                                Course Coordinator(s)
+                              </div>
+                              {coordinators.some((c) => c?.name || c?.email) ? (
+                                isExpanded ? (
+                                  <div className="space-y-2">
+                                    {coordinators.map((c, idx) => (
+                                      <div key={idx} className="flex items-start gap-2 rounded-xl bg-gray-50 p-2">
+                                        <InitialsAvatar name={c.name || c.email || "—"} />
+                                        <div className="min-w-0">
+                                          <div className="truncate text-sm font-medium text-gray-900">{c.name || "—"}</div>
+                                          {c.email && <div className="truncate text-xs text-gray-500">{c.email}</div>}
+                                        </div>
+                                      </div>
+                                    ))}
+                                  </div>
+                                ) : (
+                                  <CompactPeopleList people={coordinators} max={2} />
+                                )
+                              ) : (
+                                <div className="text-sm text-gray-500">—</div>
+                              )}
+                            </div>
 
-                  <td className="px-4 py-3 text-center">
-                    <RowActions
-                      onView={() => {
-                        setSyllabusUrl(r.syllabus || "");
-                        setShowSyllabus(true);
-                      }}
-                    />
-                  </td>
-                </tr>
-              ))
-            )}
-          </tbody>
-        </table>
-      </div>
+                            <div className="md:col-span-3">
+                              <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">
+                                Teaching Composition
+                              </div>
+                              {sortedComposition.length ? (
+                                isExpanded ? (
+                                  <div className="flex flex-wrap gap-2">
+                                    {sortedComposition.map((p, idx) => (
+                                      <NameWithEmailTooltip key={`${p.name || p.email || "—"}-${idx}`} person={p} />
+                                    ))}
+                                  </div>
+                                ) : (
+                                  <div className="flex flex-wrap gap-2">
+                                    {sortedComposition.slice(0, TEACHING_COMPOSITION_PREVIEW_COUNT).map((p, idx) => (
+                                      <NameWithEmailTooltip key={`${p.name || p.email || "—"}-${idx}`} person={p} />
+                                    ))}
+                                    {sortedComposition.length > TEACHING_COMPOSITION_PREVIEW_COUNT && (
+                                      <span className="inline-flex items-center rounded-full bg-gray-100 px-2 py-1 text-xs font-medium text-gray-700 ring-1 ring-inset ring-gray-200">
+                                        +{sortedComposition.length - TEACHING_COMPOSITION_PREVIEW_COUNT} more
+                                      </span>
+                                    )}
+                                  </div>
+                                )
+                              ) : (
+                                <div className="text-sm text-gray-500">—</div>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ))
+        )}
+      </section>
 
       {showSyllabus && (
         <div className="fixed inset-0 z-[100] grid place-items-center bg-black/40 p-4">

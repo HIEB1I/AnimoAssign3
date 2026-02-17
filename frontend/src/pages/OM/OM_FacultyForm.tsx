@@ -4,7 +4,6 @@ import SelectBox from "../../component/SelectBox";
 import { cls } from "../../utilities/cls";
 import {
   Search as SearchIcon,
-  MoreVertical,
   Eye,
   GraduationCap,
   MapPin,
@@ -151,42 +150,18 @@ function DeadlineBanner({
 }
 /* ------------------------------------------------------------------------- */
 
-/* ---- Row actions menu ---- */
-function ActionMenu({ onView }: { onView: () => void }) {
-  const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const close = (e: MouseEvent) =>
-      open && !ref.current?.contains(e.target as Node) && setOpen(false);
-    document.addEventListener("mousedown", close);
-    return () => document.removeEventListener("mousedown", close);
-  }, [open]);
-
+/* ---- Row action: view preference ---- */
+function ViewPreferenceButton({ onView }: { onView: () => void }) {
   return (
-    <div ref={ref} className="relative">
-      <button
-        onClick={() => setOpen((v) => !v)}
-        className="rounded-full p-2 hover:bg-gray-100 text-gray-700"
-        title="Actions"
-        aria-label="Actions"
-      >
-        <MoreVertical className="h-4 w-4" />
-      </button>
-
-      {open && (
-        <div className="absolute right-0 mt-2 w-48 rounded-xl border border-gray-200 bg-white shadow-xl py-1 text-left z-50">
-          <button
-            onClick={() => {
-              setOpen(false);
-              onView();
-            }}
-            className="flex w-full items-center gap-2 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
-          >
-            <Eye className="h-4 w-4" /> <span>View Preference</span>
-          </button>
-        </div>
-      )}
-    </div>
+    <button
+      type="button"
+      onClick={onView}
+      className="inline-flex items-center justify-center rounded-full p-2 text-gray-700 hover:bg-gray-100"
+      title="View Preference"
+      aria-label="View Preference"
+    >
+      <Eye className="h-4 w-4" />
+    </button>
   );
 }
 
@@ -554,15 +529,15 @@ useEffect(() => {
 
       {/* Table */}
       <div className="border border-gray-200 bg-gray-50 shadow-sm overflow-visible rounded-xl">
-        <table className="w-full text-sm">
+        <table className="w-full table-fixed text-sm">
           <thead className="bg-gray-50 border-b text-gray-700">
             <tr>
-              <th className="text-left px-4 py-2">Faculty</th>
-              <th className="text-left px-4 py-2">Department</th>
-              <th className="text-center px-4 py-2">Faculty Type</th>
-              <th className="text-center px-4 py-2">Submission Date</th>
-              <th className="text-center px-4 py-2">Status</th>
-              <th className="text-center px-4 py-2">Actions</th>
+              <th className="w-[32%] text-left px-4 py-3">Faculty</th>
+              <th className="w-[32%] text-center px-4 py-3">Department</th>
+              <th className="w-[13.5%] text-center px-4 py-3">Faculty Type</th>
+              <th className="w-[13.5%] text-center px-4 py-3">Submission Date</th>
+              <th className="w-[13.5%] text-center px-4 py-3">Status</th>
+              <th className="w-[14%] text-center px-4 py-3">Preference</th>
             </tr>
           </thead>
           <tbody className="divide-y">
@@ -585,10 +560,10 @@ useEffect(() => {
                     {r.name}
                     <div className="text-xs text-gray-500">{r.email}</div>
                   </td>
-                  <td className="px-4 py-3">{r.department || "—"}</td>
-                  <td className="text-center">{r.type || "—"}</td>
-                  <td className="text-center">{fmtDate(r.submission_date)}</td>
-                  <td className="text-center">
+                  <td className="text-center">{r.department || "—"}</td>
+                  <td className="px-4 py-3 text-center">{r.type || "—"}</td>
+                  <td className="px-4 py-3 text-center">{fmtDate(r.submission_date)}</td>
+                  <td className="px-4 py-3 text-center">
                     <span
                       className={cls(
                         "inline-block rounded-full px-3 py-1 text-xs font-semibold",
@@ -600,8 +575,8 @@ useEffect(() => {
                       {r.status || "—"}
                     </span>
                   </td>
-                  <td className="text-center">
-                    <ActionMenu onView={() => openView(r)} />
+                  <td className="px-4 py-3 text-center">
+                    <ViewPreferenceButton onView={() => openView(r)} />
                   </td>
                 </tr>
               ))
@@ -906,17 +881,6 @@ useEffect(() => {
                 )}
               </div>
 
-              {/* Footer */}
-              <div className="flex-none border-t border-gray-100 bg-white px-6 py-4">
-                <div className="flex justify-end">
-                  <button
-                    onClick={closeView}
-                    className="px-4 py-2 rounded-lg bg-gray-100 hover:bg-gray-200 text-sm"
-                  >
-                    Close
-                  </button>
-                </div>
-              </div>
             </div>
           </div>
         )}
