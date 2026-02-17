@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from fastapi import APIRouter, Query
 from pydantic import BaseModel
@@ -15,6 +15,7 @@ router = APIRouter(prefix="/chair", tags=["chair"])
 COL_TERMS = "terms"
 COL_PREEN_COUNT = "preenlistment_count"
 COL_FACULTY_LOADS = "faculty_loads"
+COL_SPECIAL = "special_class"
 
 
 async def _active_term() -> Dict[str, Any]:
@@ -103,6 +104,9 @@ class PlantillaRow(BaseModel):
     premium_4th_prep: Optional[float] = None
     premium_overload: Optional[float] = None
     remarks: str = "—"
+    # Distinguish rows that originate from OM_SpecialClass reflections.
+    source: Optional[str] = None  # e.g., "SPECIALCLASS"
+    source_id: Optional[str] = None  # e.g., special_id
 
 
 def _fmt_time(start: str, end: str) -> str:
@@ -320,17 +324,43 @@ async def chair_plantilla_get(
             },
             {"_id": 1, "load_id": 1, "forwarded_section_ids": 1},
         )
-        if not forwarded:
-            # Not forwarded yet → chair should not see plantilla rows
+        allowed_section_ids = [
+            str(x).strip()
+            for x in (((forwarded or {}).get("forwarded_section_ids")) or [])
+            if str(x).strip()
+        ]
+        allowed_set: Set[str] = set(allowed_section_ids)
+
+        # OM_SpecialClass reflections are separate from OM load assignments.
+        # Approved special_class rows must be visible even when OM hasn't forwarded the plantilla.
+        special_docs = await db[COL_SPECIAL].find(
+            {
+                "term_id": term_id,
+                "status": "Approved",
+                "$or": [
+                    {"department_id": {"$in": dept_candidates}},
+                    {"dept_id": {"$in": dept_candidates}},
+                    {"departmentId": {"$in": dept_candidates}},
+                ],
+            },
+            {"_id": 0, "special_id": 1, "section_id": 1},
+        ).to_list(5000)
+
+        special_section_ids = [str(d.get("section_id") or "").strip() for d in (special_docs or [])]
+        special_section_ids = [s for s in special_section_ids if s]
+
+        # If neither forwarded rows nor approved SpecialClass rows exist, return empty.
+        if not forwarded and not special_section_ids:
             return {"ok": True, "rows": []}
 
-        allowed_section_ids = [str(x).strip() for x in (forwarded.get("forwarded_section_ids") or []) if str(x).strip()]
-        allowed_set = set(allowed_section_ids)
-
-        # Sections for that term (restrict to the exact OM table snapshot if available)
-        sec_match = {"term_id": term_id} if term_id else {}
-        if allowed_set:
-            sec_match = {**sec_match, "section_id": {"$in": list(allowed_set)}}
+        # Sections for that term.
+        # If OM forwarded a snapshot, restrict to that set.
+        # Always include approved SpecialClass sections (mirror rows).
+        sec_match: Dict[str, Any] = {"term_id": term_id} if term_id else {}
+        combined_section_ids: Set[str] = set(allowed_set)
+        combined_section_ids.update(special_section_ids)
+        if combined_section_ids:
+            sec_match = {**sec_match, "section_id": {"$in": list(combined_section_ids)}}
         section_docs = await db.sections.find(sec_match).to_list(10000)
         
 
@@ -338,8 +368,8 @@ async def chair_plantilla_get(
         asg_docs: List[dict] = []
         if not section_docs:
             asg_filter = {"is_archived": {"$in": [False, None]}}
-            if allowed_set:
-                asg_filter = {**asg_filter, "section_id": {"$in": list(allowed_set)}}
+            if combined_section_ids:
+                asg_filter = {**asg_filter, "section_id": {"$in": list(combined_section_ids)}}
             asg_docs = await db.faculty_assignments.find(asg_filter).to_list(100000)
 
             sec_ids = list({a.get("section_id") for a in asg_docs if a.get("section_id")})
@@ -393,6 +423,14 @@ async def chair_plantilla_get(
             leave_docs = await db.leaves.find({"faculty_id": {"$in": faculty_ids}}).to_list(10000)
         on_leave_now = {lv["faculty_id"] for lv in leave_docs if lv.get("is_active")}
 
+        # Mark which sections came from SpecialClass so the UI can color them.
+        special_by_section: Dict[str, str] = {}
+        for d in (special_docs or []):
+            sid = str(d.get("section_id") or "").strip()
+            spid = str(d.get("special_id") or "").strip()
+            if sid and spid:
+                special_by_section[sid] = spid
+
         rows: List[PlantillaRow] = []
 
         for asg in asg_docs:
@@ -427,22 +465,26 @@ async def chair_plantilla_get(
                 raw_type = str(sc.get("room_type") or "").strip()
                 room_id = sc.get("room_id")
 
-                # CASE A: Online Course
-                # Check if type is "Online" (case-insensitive)
-                if raw_type.lower() == "online":
-                    room_parts.append("ONLINE")
+                # IMPORTANT:
+                # Some Special Class / APO flows may leave `room_type` as "Online" even after a
+                # physical room has been allocated (room_id is populated). In those cases, we must
+                # prefer the actual room_id over the room_type flag so CHAIR_Plantilla reflects
+                # the same room assignment shown in OM_SpecialClass.
+                #
+                # Rule:
+                # - If a room_id exists, display the room number (physical room).
+                # - Else, if room_type is Online, display ONLINE.
+                # - Else, TBA.
 
-                # CASE B: Classroom / Physical Room
-                # If there is a room_id, look it up in the rooms table
-                elif room_id:
+                if room_id:
                     r_obj = by_room.get(room_id)
                     if r_obj and r_obj.get("room_number"):
                         room_parts.append(str(r_obj["room_number"]))
                     else:
                         # room_id exists but not found in DB (or has no number)
                         room_parts.append("TBA")
-                
-                # CASE C: Fallback (No ID, not Online)
+                elif raw_type.lower() == "online":
+                    room_parts.append("ONLINE")
                 else:
                     room_parts.append("TBA")
 
@@ -503,6 +545,8 @@ async def chair_plantilla_get(
                     premium_4th_prep=premium_4th_prep,
                     premium_overload=premium_overload,
                     remarks="—",
+                    source=("SPECIALCLASS" if (sec.get("section_id") or "") in special_by_section else None),
+                    source_id=special_by_section.get(sec.get("section_id") or ""),
                 ).dict()
             )
 

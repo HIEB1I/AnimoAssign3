@@ -1,6 +1,6 @@
 // frontend/src/pages/OM/OM_REPORTS_ANALYTICS/OM-RP_AvailabilityForecasting.tsx
 import { useEffect, useMemo, useState } from "react";
-import { ChevronLeft, ChevronRight, Users, Clock, TrendingUp, AlertTriangle } from "lucide-react";
+import { ChevronLeft, Users, Clock, TrendingUp, AlertTriangle } from "lucide-react";
 import { fetchFacultyAvailabilityHeatmap } from "../../../api";
 import { Link } from "react-router-dom";
 
@@ -48,6 +48,13 @@ type HeatPerson = {
   confidence_pct: number;
   reason: string;
   notes?: string[];
+  score_breakdown?: {
+    base: number;
+    pref_boost: number;
+    history_signal: number;
+    history_boost: number;
+    total: number;
+  };
 };
 
 type HeatSlot = { count: number; list: HeatPerson[] };
@@ -174,7 +181,7 @@ function usePairMinMax(data: AvailabilityHeatmap | null) {
       }
     }
     const pairMin = counts.length ? Math.min(...counts) : 0;
-    const pairMax = data.most_supported_slot_count; // Use the backend's max count for the full scale
+    const pairMax = counts.length ? Math.max(...counts) : 0;
     return { pairMin, pairMax };
   }, [data]);
 }
@@ -201,7 +208,7 @@ function SummaryCards({ data }: { data: AvailabilityHeatmap | null }) {
       value: data.total_faculty_considered,
       icon: <Users className="h-5 w-5 text-emerald-600" />,
       tooltip:
-        "Number of unique faculty included in the forecast after applying department, qualification, and approved-leave filters.",
+        "Faculty who submitted preferences and taught in the last 3 terms.",
       color: "text-emerald-700",
     },
     {
@@ -215,7 +222,7 @@ function SummaryCards({ data }: { data: AvailabilityHeatmap | null }) {
     },
     {
       label: "Slots with Low Faculty Support",
-      value: `${lowSupportCells} / ${totalCells}`,
+      value: `${lowSupportCells} out of ${totalCells}`,
       icon: <AlertTriangle className="h-5 w-5 text-rose-600" />,
       tooltip:
         "Number of time slots with little to no historical faculty support (0–1), indicating potential scheduling risk.",
@@ -288,13 +295,13 @@ export default function OM_RP_AvailabilityForecasting() {
     }
   }
 
-  const currentIndex = useMemo(() => {
+ /* const currentIndex = useMemo(() => {
     if (typeof data?.current_index === "number") return data.current_index;
     const tid = (data?.term?.term_id || data?.term_id || "").trim();
     if (!tid) return 0;
     const idx = terms.findIndex((t) => t.term_id === tid);
     return idx >= 0 ? idx : 0;
-  }, [data?.current_index, data?.term?.term_id, data?.term_id, terms]);
+  }, [data?.current_index, data?.term?.term_id, data?.term_id, terms]); */
 
   const planningTermId = useMemo(() => {
     // Planning term = next term after the DB's is_current anchor.
@@ -348,16 +355,6 @@ export default function OM_RP_AvailabilityForecasting() {
     if (data?.term_id) return String(data.term_id);
     return "—";
   }, [data?.term, data?.term_label, data?.term_id]);
-
-  const hasPrev = useMemo(() => {
-    if (typeof data?.has_prev === "boolean") return data.has_prev;
-    return terms.length > 0 ? currentIndex > 0 : false;
-  }, [data?.has_prev, terms.length, currentIndex]);
-
-  const hasNext = useMemo(() => {
-    if (typeof data?.has_next === "boolean") return data.has_next;
-    return terms.length > 0 ? currentIndex < terms.length - 1 : false;
-  }, [data?.has_next, terms.length, currentIndex]);
 
   const hasAnyPredictions = useMemo(() => {
     if (!data?.slots) return false;
@@ -450,8 +447,8 @@ export default function OM_RP_AvailabilityForecasting() {
   ) : null;
 
   return (
-    // CENTER + MAX WIDTH CONTAINER
-    <div className="w-full max-w-[1400px] mx-auto px-4 sm:px-6 lg:px-8 py-8">
+    // FULL-WIDTH, RESPONSIVE CONTAINER (supports split-screen)
+    <div className="w-full h-full min-h-0 px-4 sm:px-6 lg:px-8 py-8">
       <div className="flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
         <div>
         <h1 className="text-2xl font-bold mb-2">Time/Day Slot Availability Indicators</h1>
@@ -462,8 +459,7 @@ export default function OM_RP_AvailabilityForecasting() {
         {right}
       </div>
 
-      <div className="w-full px-4 sm:px-6 lg:px-8 py-6 space-y-6">
-      </div>
+  
 
       {/* Top Bar (match Deloading Utilization term navigation styling) */}
       <div className="rounded-xl border border-gray-200 bg-white shadow-sm mb-4">
@@ -478,29 +474,8 @@ export default function OM_RP_AvailabilityForecasting() {
             <span>Back</span>
           </Link>
 
-          <div className="flex flex-1 items-center justify-between">
-            <button
-              type="button"
-              className="inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm shadow-sm hover:bg-gray-50 disabled:opacity-40 disabled:hover:bg-white"
-              disabled={!hasPrev || loading}
-              onClick={() => loadHeatmap("prev")}
-              title="Previous term"
-            >
-              <ChevronLeft className="h-4 w-4" />
-              <span>Previous Term</span>
-            </button>
-
-            <button
-              type="button"
-              className="inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm shadow-sm hover:bg-gray-50 disabled:opacity-40 disabled:hover:bg-white"
-              disabled={!hasNext || loading}
-              onClick={() => loadHeatmap("next")}
-              title="Next term"
-            >
-              <span>Next Term</span>
-              <ChevronRight className="h-4 w-4" />
-            </button>
-          </div>
+          {/* Term navigation buttons removed per requirement */}
+          <div className="flex-1" />
 
           <div className="pointer-events-none absolute left-1/2 -translate-x-1/2 flex flex-col items-center gap-1">
             <div className="inline-flex items-center rounded-full border border-emerald-100 bg-emerald-50 px-4 py-2 text-sm font-semibold text-emerald-800 shadow-sm">
@@ -511,15 +486,6 @@ export default function OM_RP_AvailabilityForecasting() {
                 </span>
               )}
             </div>
-            {terms.length > 0 ? (
-              <div className="text-xs text-gray-500">
-                {currentIndex + 1} of {terms.length}
-              </div>
-            ) : (
-              <div className="text-xs text-gray-500">
-                Term scope: <span className="font-semibold text-emerald-700">Pre-survey</span>
-              </div>
-            )}
           </div>
         </div>
 
@@ -636,13 +602,40 @@ export default function OM_RP_AvailabilityForecasting() {
                 <div className="font-semibold text-emerald-700 mb-2">Predicted Faculty</div>
                 {modalData.cell.list.length === 0 && <div className="text-gray-500">None</div>}
                 {modalData.cell.list.slice(0, 100).map((p) => (
-                  <div key={p.faculty_id} className="flex flex-col py-1.5 border-b border-gray-50 last:border-b-0">
+                  <div
+                    key={p.faculty_id}
+                    className="group relative flex flex-col py-1.5 border-b border-gray-50 last:border-b-0"
+                  >
                     <div className="flex items-center justify-between">
-                      <span className="font-medium" title={p.email ? `${p.name} · ${p.email}` : p.name}>{p.name}</span>
-                      <span className="text-gray-700 font-semibold">{p.confidence_pct}%</span>
+                      <span className="font-medium" title={p.email ? `${p.name} · ${p.email}` : p.name}>
+                        {p.name}
+                      </span>
+
+                      {/* hover the % */}
+                      <span className="text-gray-700 font-semibold cursor-help">
+                        {p.confidence_pct}%
+                      </span>
+
+                      {p.score_breakdown && (
+                        <div className="pointer-events-none absolute right-0 top-0 z-10 opacity-0 group-hover:opacity-100">
+                          <div className="mt-7 w-72 rounded-md border border-gray-200 bg-white px-3 py-2 text-xs text-gray-700 shadow-sm whitespace-normal break-words leading-snug">
+                            <div className="font-semibold text-gray-900 mb-1">Score breakdown</div>
+                            <div>Base: <span className="font-medium">{p.score_breakdown.base}</span></div>
+                            <div>Preference boost: <span className="font-medium">{p.score_breakdown.pref_boost}</span></div>
+                            <div>History signal (raw): <span className="font-medium">{p.score_breakdown.history_signal}</span></div>
+                            <div>History boost: <span className="font-medium">{p.score_breakdown.history_boost}</span></div>
+                            <div className="mt-1 pt-1 border-t border-gray-100">
+                              Total: <span className="font-semibold">{p.score_breakdown.total}</span>{" "}
+                              → <span className="font-semibold">{p.confidence_pct}%</span>
+                            </div>
+                          </div>
+                        </div>
+                      )}
                     </div>
-                    {/* NEW: Display Reason */}
-                    <div className="text-xs text-gray-500 italic mt-0.5" title="Reason for this prediction">{p.reason}</div>
+
+                    <div className="text-xs text-gray-500 italic mt-0.5" title="Reason for this prediction">
+                      {p.reason}
+                    </div>
                   </div>
                 ))}
                 {modalData.cell.list.length > 100 && (

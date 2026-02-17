@@ -4,6 +4,12 @@ import { useNavigate } from "react-router-dom";
 import { UserCircle, LogOut, Inbox, Bell } from "lucide-react";
 import { useInboxBadge } from "@/realtime/inboxBadge";
 
+import {
+  listNotifications,
+  markNotificationsSeen,
+  type AppNotification,
+} from "@/api";
+
 
 interface TopBarProps {
   fullName: string;
@@ -12,11 +18,15 @@ interface TopBarProps {
   /** If provided, clicking the Inbox icon navigates here (OM-style). */
   inboxPath?: string;
   notifications?: {
-    id: number;
+    // legacy shape (some screens used numeric ids)
+    id?: number;
+    // backend shape
+    notif_id?: string;
     title: string;
     details: string;
     time: Date | string;
     seen?: boolean;
+    meta?: { route?: string; fs_id?: string; kind?: string };
   }[];
   inboxEvent?: string;
 }
@@ -40,25 +50,48 @@ export default function TopBar({
   const { unreadTotal } = useInboxBadge();
   const hasInboxUnread = unreadTotal > 0;
 
-    const pathname =
-    typeof window !== "undefined" && window.location?.pathname ? window.location.pathname : "";
-
-  const inferredInboxPath =
-    pathname.startsWith("/admin")
-      ? "/admin/inbox"
-      : pathname.startsWith("/chair")
-      ? "/chair/inbox"
-      : pathname.startsWith("/om")
-      ? "/om/inbox"
-      : pathname.startsWith("/apo")
-      ? "/apo/inbox"
-      : pathname.startsWith("/faculty")
-      ? "/faculty/inbox"
-      : "";
-
 
   const [menuOpen, setMenuOpen] = useState(false);
   const [notifOpen, setNotifOpen] = useState(false);
+
+  // Session user id (support multiple shapes across roles/versions)
+  // IMPORTANT: Do not memoize this once. In this app, the active user can change
+  // without a full page reload (e.g., role switching, re-login). Memoizing can
+  // freeze the user id at "" and prevent in-app notifications from loading.
+  const readSessionUserId = () => {
+    try {
+      const raw = localStorage.getItem("animo.user");
+      const u = raw ? JSON.parse(raw) : null;
+      return String(u?.userId || u?.user_id || u?.id || "").trim();
+    } catch {
+      return "";
+    }
+  };
+
+  const [sessionUserId, setSessionUserId] = useState<string>(() => readSessionUserId());
+
+  // Keep in sync across in-app role switching / login changes.
+  useEffect(() => {
+    const sync = () => setSessionUserId(readSessionUserId());
+    sync();
+
+    // Listen to storage changes from other tabs/windows.
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === "animo.user") sync();
+    };
+    window.addEventListener("storage", onStorage);
+
+    // Safety net for same-tab updates (no 'storage' event): poll lightly.
+    const t = window.setInterval(() => {
+      const next = readSessionUserId();
+      setSessionUserId((prev) => (prev === next ? prev : next));
+    }, 2000);
+
+    return () => {
+      window.removeEventListener("storage", onStorage);
+      window.clearInterval(t);
+    };
+  }, []);
   const toDateSafe = (v: any): Date | null => {
     const d = v instanceof Date ? v : new Date(v);
     return Number.isFinite(d.getTime()) ? d : null;
@@ -73,35 +106,74 @@ export default function TopBar({
     );
   };
 
-  const [notifications, setNotifications] = useState(
-    incomingNotifs.length
-      ? incomingNotifs.map((n) => ({
-          ...n,
-          time: pickNotifTime(n) || new Date(),
-        }))
-      : [
-          {
-            id: 1,
-            title: "System Notice",
-            details: "Welcome to AnimoAssign dashboard.",
-            time: new Date(),
-            seen: false,
-          },
-        ]
-  );
+  type NotifUI = {
+    id: string;
+    title: string;
+    details: string;
+    time: Date;
+    seen: boolean;
+    meta?: { route?: string; fs_id?: string; kind?: string };
+  };
+
+  const [notifications, setNotifications] = useState<NotifUI[]>(() => {
+    // If a screen passes notifications explicitly, keep that behavior.
+    if (incomingNotifs.length) {
+      return incomingNotifs.map((n: any) => ({
+        id: String(n?.notif_id || n?.id || Math.random()),
+        title: String(n?.title || ""),
+        details: String(n?.details || ""),
+        time: pickNotifTime(n) || new Date(),
+        seen: !!n?.seen,
+        meta: n?.meta,
+      }));
+    }
+
+    // Otherwise: default to empty; we'll load from the backend when logged in.
+    return [];
+  });
 
   // Keep state in sync when new notifications come in
   useEffect(() => {
     if (!incomingNotifs) return;
     setNotifications(
       incomingNotifs.length
-        ? incomingNotifs.map((n) => ({
-            ...n,
+        ? incomingNotifs.map((n: any) => ({
+            id: String(n?.notif_id || n?.id || Math.random()),
+            title: String(n?.title || ""),
+            details: String(n?.details || ""),
             time: pickNotifTime(n) || new Date(),
+            seen: !!n?.seen,
+            meta: n?.meta,
           }))
         : []
     );
   }, [incomingNotifs]);
+
+  const refreshNotifs = async () => {
+    // Only auto-fetch when the page didn't supply notifications.
+    if (incomingNotifs.length) return;
+    const uid = sessionUserId || readSessionUserId();
+    if (!uid) return;
+
+    const res = await listNotifications(uid, 25);
+    const rows = (res?.rows || []).map((n: AppNotification): NotifUI => ({
+      id: String(n.notif_id),
+      title: n.title,
+      details: n.details,
+      time: pickNotifTime(n) || new Date(),
+      seen: !!n.seen,
+      meta: n.meta,
+    }));
+    setNotifications(rows);
+  };
+
+  // Poll notifications so the bell reflects changes even if user stays on a page.
+  useEffect(() => {
+    refreshNotifs().catch(() => {});
+    const t = window.setInterval(() => refreshNotifs().catch(() => {}), 20000);
+    return () => window.clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const notifRef = useRef<HTMLDivElement | null>(null);
   const wrapperRef = useRef<HTMLDivElement | null>(null);
@@ -164,20 +236,30 @@ export default function TopBar({
     })
     .reverse();
 
-  const toggleNotif = () => {
-    setNotifOpen((v) => !v);
-    if (!notifOpen) {
+  const toggleNotif = async () => {
+    const nextOpen = !notifOpen;
+    setNotifOpen(nextOpen);
+
+    // Mark all as seen when opening.
+    if (nextOpen) {
+      // Refresh first so newly-created notifications appear immediately.
+      await refreshNotifs().catch(() => {});
+
+      // Only call backend when we're using the backend-driven notifications.
+      const uid = sessionUserId || readSessionUserId();
+      if (!incomingNotifs.length && uid) {
+        await markNotificationsSeen(uid, { all: true }).catch(() => {});
+      }
       setNotifications((n) => n.map((x) => ({ ...x, seen: true })));
     }
   };
 
   // Inbox click:
-  // - If inboxPath provided -> navigate
-  // - Else -> dispatch existing custom event (backward compatible)
-    const handleInboxClick = () => {
-    const target = inboxPath || inferredInboxPath;
-    if (target) {
-      navigate(target);
+  // - If inboxPath provided -> navigate (route-style inbox)
+  // - Else -> dispatch existing custom event (embedded inbox inside current page)
+  const handleInboxClick = () => {
+    if (inboxPath) {
+      navigate(inboxPath);
       return;
     }
     window.dispatchEvent(new Event(inboxEvent));

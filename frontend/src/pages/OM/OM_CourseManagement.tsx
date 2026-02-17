@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import SelectBox from "../../component/SelectBox";
-import { Search as SearchIcon, MoreVertical, FileText } from "lucide-react";
+import { Search as SearchIcon, MoreVertical, FileText, X as XIcon } from "lucide-react";
 import {
   getCMOptions,
   listCMCourses,
@@ -48,6 +48,8 @@ export default function OM_CourseManagement() {
 
   const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
+
+  const searchRef = useRef<HTMLInputElement | null>(null);
 
   const [rows, setRows] = useState<CMCourseRow[]>([]);
   const [err, setErr] = useState("");
@@ -106,11 +108,28 @@ export default function OM_CourseManagement() {
         <div className="relative flex-1 min-w-[240px]">
           <SearchIcon className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-500" />
           <input
+            ref={searchRef}
             value={searchInput}
             onChange={(e) => setSearchInput(e.target.value)}
-            placeholder="Search by course code, title, or coordinator…"
-            className="w-full rounded-lg border border-gray-300 px-9 py-2 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30"
+            placeholder="Search by course code, title, coordinator, or teaching composition…"
+            className="w-full rounded-lg border border-gray-300 pl-9 pr-9 py-2 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30"
           />
+
+          {searchInput.trim().length > 0 && (
+            <button
+              type="button"
+              aria-label="Clear search"
+              onClick={() => {
+                setSearchInput("");
+                setSearch("");
+                // Keep typing flow smooth
+                requestAnimationFrame(() => searchRef.current?.focus());
+              }}
+              className="absolute right-3 top-1/2 -translate-y-1/2 rounded-full p-1 text-neutral-500 hover:bg-gray-100 hover:text-neutral-700"
+            >
+              <XIcon className="h-4 w-4" />
+            </button>
+          )}
         </div>
         <SelectBox value={cluster} onChange={setCluster} options={clusters} />
       </div>

@@ -88,6 +88,17 @@ export async function fetchOmProfile(userId: string) {
   return r.json();
 }
 
+
+export async function fetchOmDeadlineWindow(userId: string) {
+  const url = join(
+    API_BASE,
+    `om/loadassignment?userId=${encodeURIComponent(userId)}&action=deadline_window`
+  );
+  const r = await fetch(url, { method: "POST" });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
 // Descriptive #1
 export async function fetchTeachingHistory(facultyId: string) {
   const base = (ANALYTICS_BASE || API_BASE).replace(/\/+$/, "");
@@ -124,6 +135,16 @@ export async function fetchDeloadingsByTerm(
   if (direction) params.set("direction", direction);
 
   const url = `${ANALYTICS_BASE.replace(/\/+$/, "")}/deloadings/by-term?${params.toString()}`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(await res.text().catch(() => res.statusText));
+  return res.json();
+}
+
+export async function fetchDeloadingHistoryAllTerms(q: string) {
+  const params = new URLSearchParams();
+  if (q && q.trim()) params.set("q", q.trim());
+
+  const url = `${ANALYTICS_BASE.replace(/\/+$/, "")}/deloadings/history?${params.toString()}`;
   const res = await fetch(url);
   if (!res.ok) throw new Error(await res.text().catch(() => res.statusText));
   return res.json();
@@ -519,11 +540,20 @@ export type SpecificElective = {
   course_title: string;
 };
 
+
+export type OmSubmissionWindow = {
+  openISO?: string;
+  deadlineISO?: string;
+term_id?: string;
+  campus_id?: string;
+};
+
 export type ApoOfferingsResponse = {
   rows: any[];
   course_options_by_group?: Record<string, any[]>;
   all_specific_electives?: SpecificElective[]; // backend may omit; we’ll default it
   [k: string]: any;
+  om_submit_window?: OmSubmissionWindow | null;
 };
 
 export type SlotPayload = {
@@ -964,6 +994,17 @@ export async function approveApoOfferingsPlan(
 ): Promise<{ ok: true; applied: number }> {
   const url = `${API_BASE}/apo/courseofferings${q({ userId, action: "approvePlan" })}`;
   return post(url);
+}
+
+
+export async function setApoOmSubmitWindow(
+  userId: string,
+  payload: { deadlineISO: string }
+): Promise<{ ok: boolean; om_submit_window?: OmSubmissionWindow }> {
+  const { data } = await api.post(`/apo/courseofferings`, payload, {
+    params: { userId, action: "setOmSubmitWindow" },
+  });
+  return data as any;
 }
 
 /* ---- Curriculum ops (used in offerings "Curriculum" view) ---- */
@@ -1830,6 +1871,18 @@ export async function getStudentSpecialClassProfile(
     `${API_BASE}/student/specialclass`,
     {},
     { params: { userId, action: "profile" } }
+  );
+  return data;
+}
+
+export async function getStudentSpecialClassCourseInfo(
+  userId: string,
+  courseCode: string
+): Promise<{ ok: boolean; course_code: string; course_title: string; units: number; department_name: string }> {
+  const { data } = await axios.post(
+    `${API_BASE}/student/specialclass`,
+    {},
+    { params: { userId, action: "courseInfo", courseCode } }
   );
   return data;
 }
@@ -2999,6 +3052,16 @@ export async function saveOmNewLine(user_id: string, payload: OmNewLineSavePaylo
   return r.json() as Promise<{ ok: boolean; section_id?: string }>;
 }
 
+
+
+export async function getOmSubmitDeadlineWindow(
+  userId: string
+): Promise<{ ok: boolean; window: OmSubmissionWindow | null }> {
+  const { data } = await api.post(`/om/loadassignment`, {}, {
+    params: { userId, action: "deadline_window" },
+  });
+  return data as any;
+}
 export async function submitOmLoadAssignment(
   userId: string,
   payload: { rows: OmLoadRow[] },

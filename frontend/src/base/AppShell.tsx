@@ -7,10 +7,16 @@ export default function AppShell({
   topbarProfileName,
   topbarProfileSubtitle,
   sidebarItems,
+  mainClassName,
 }: PropsWithChildren<{
   topbarProfileName?: TopbarProps["profileName"];
   topbarProfileSubtitle?: TopbarProps["profileSubtitle"];
   sidebarItems?: SidebarItem[];
+  /**
+   * Override the <main> container classes.
+   * Useful for pages that should be edge-to-edge (e.g., Inbox).
+   */
+  mainClassName?: string;
 }>) {
   const [open, setOpen] = useState(true);
 
@@ -34,7 +40,7 @@ export default function AppShell({
           profileName={topbarProfileName}
           profileSubtitle={topbarProfileSubtitle}
         />
-        <main className="flex-1 overflow-auto p-4">{children}</main>
+        <main className={mainClassName ?? "flex-1 overflow-auto p-4"}>{children}</main>
       </div>
     </div>
   );

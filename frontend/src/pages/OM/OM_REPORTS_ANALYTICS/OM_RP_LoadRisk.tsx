@@ -302,7 +302,7 @@ export default function OM_RP_LoadRisk() {
   const displayDept = data?.dept_name || data?.department_id || 'N/A';
 
   return (
-    <div className="w-full max-w-[1400px] mx-auto px-8 py-8">
+    <div className="w-full h-full min-h-0 px-4 sm:px-6 lg:px-8 py-8">
       {/* Header and subtitle retained (DO NOT MODIFY) */}
       <h1 className="text-2xl font-bold mb-2">Course Staffing Risk Indicators</h1>
       <p className="text-sm text-gray-600 mb-6">

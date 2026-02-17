@@ -1,8 +1,18 @@
-// frontend/src/pages/OM/OM_REPORTS_ANALYTICS/OM-RP_DeloadingUtilization.tsx 
+// frontend/src/pages/OM/OM_REPORTS_ANALYTICS/OM-RP_DeloadingUtilization.tsx
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { ChevronLeft, ChevronRight, BarChart2, AlertTriangle, BookOpen } from "lucide-react";
-import { fetchDeloadingsByTerm } from "../../../api";
+import {
+  ChevronLeft,
+  ChevronRight,
+  BarChart2,
+  AlertTriangle,
+  BookOpen,
+} from "lucide-react";
+// import { fetchDeloadingsByTerm } from "../../../api";
+import {
+  fetchDeloadingsByTerm,
+  fetchDeloadingHistoryAllTerms,
+} from "../../../api";
 
 // --- NEW TYPE DEFINITIONS ---
 type SummaryMetrics = {
@@ -20,6 +30,12 @@ type Row = {
   notes?: string;
   term_id?: string;
   updated_at?: string | Date;
+};
+
+type RowWithTerm = Row & {
+  term_label: string;
+  acad_year_start: number;
+  term_number: number;
 };
 
 type TermLite = {
@@ -49,7 +65,7 @@ type Payload = {
 
 // --- MOCK CHART COMPONENT (for demonstration of visualization) ---
 // In a real application, you would integrate a charting library like Recharts or Chart.js here.
-const MockBarChart = ({
+/*const MockBarChart = ({
   data,
   totalUnits,
 }: {
@@ -76,9 +92,7 @@ const MockBarChart = ({
               <span>{d.type}</span>
               <span>
                 {d.units} units (
-                {totalUnits > 0
-                  ? ((d.units / totalUnits) * 100).toFixed(1)
-                  : 0}
+                {totalUnits > 0 ? ((d.units / totalUnits) * 100).toFixed(1) : 0}
                 %)
               </span>
             </div>
@@ -92,7 +106,7 @@ const MockBarChart = ({
         ))}
     </div>
   );
-};
+}; */
 // --- END MOCK CHART COMPONENT ---
 
 export default function OM_RP_DeloadingUtilization() {
@@ -100,38 +114,54 @@ export default function OM_RP_DeloadingUtilization() {
   const [terms, setTerms] = useState<TermLite[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+
+  const [search, setSearch] = useState("");
+  const [historyRows, setHistoryRows] = useState<RowWithTerm[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState("");
+
   // NEW: State for collapsible table
   const [isTableOpen, setIsTableOpen] = useState(true);
+  const [isRiskOpen, setIsRiskOpen] = useState(true);
 
   function pillLabelOf(t: TermLite) {
     const ayEnd = t.acad_year_start + 1;
     return `AY ${t.acad_year_start}–${ayEnd} • Term ${t.term_number}`;
   }
-function formatFacultyName(name?: string) {
-  if (!name) return "";
-  const s = String(name).trim().replace(/\s+/g, " ");
-  if (!s) return "";
+  function formatFacultyName(name?: string) {
+    if (!name) return "";
+    const s = String(name).trim().replace(/\s+/g, " ");
+    if (!s) return "";
 
-  // If already "Last, First", just normalize spacing around comma.
-  if (s.includes(",")) return s.replace(/\s*,\s*/g, ", ").trim();
+    // If already "Last, First", just normalize spacing around comma.
+    if (s.includes(",")) return s.replace(/\s*,\s*/g, ", ").trim();
 
-  const parts = s.split(" ");
-  if (parts.length === 1) return parts[0];
+    const parts = s.split(" ");
+    if (parts.length === 1) return parts[0];
 
-  const suffixes = new Set(["Jr.", "Jr", "Sr.", "Sr", "II", "III", "IV", "V"]);
+    const suffixes = new Set([
+      "Jr.",
+      "Jr",
+      "Sr.",
+      "Sr",
+      "II",
+      "III",
+      "IV",
+      "V",
+    ]);
 
-  let last = parts[parts.length - 1];
-  let firstParts = parts.slice(0, -1);
+    let last = parts[parts.length - 1];
+    let firstParts = parts.slice(0, -1);
 
-  // Handle suffix: "Juan Dela Cruz Jr." -> "Cruz Jr., Juan Dela"
-  if (suffixes.has(last) && parts.length >= 2) {
-    last = parts[parts.length - 2] + " " + parts[parts.length - 1];
-    firstParts = parts.slice(0, -2);
+    // Handle suffix: "Juan Dela Cruz Jr." -> "Cruz Jr., Juan Dela"
+    if (suffixes.has(last) && parts.length >= 2) {
+      last = parts[parts.length - 2] + " " + parts[parts.length - 1];
+      firstParts = parts.slice(0, -2);
+    }
+
+    const first = firstParts.join(" ").trim();
+    return first ? `${last}, ${first}` : last;
   }
-
-  const first = firstParts.join(" ").trim();
-  return first ? `${last}, ${first}` : last;
-}
 
   async function load(
     direction: "current" | "next" | "prev" = "current",
@@ -209,6 +239,59 @@ function formatFacultyName(name?: string) {
     return viewed === planningTermId;
   }, [data?.term?.term_id, planningTermId]);
 
+  const filteredHistoryRows = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return [];
+
+    const tokens = q
+      .replace(",", " ")
+      .split(/\s+/g)
+      .map((t) => t.trim())
+      .filter(Boolean);
+
+    if (tokens.length === 0) return [];
+
+    return historyRows.filter((r) => {
+      const name = String(r.faculty_name || "").toLowerCase();
+      return tokens.every((tok) => name.includes(tok));
+    });
+  }, [search, historyRows]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function run() {
+      const q = search.trim();
+      if (!q) {
+        setHistoryRows([]);
+        setHistoryError("");
+        return;
+      }
+
+      try {
+        setHistoryLoading(true);
+        setHistoryError("");
+
+        const res = await fetchDeloadingHistoryAllTerms(q);
+
+        if (!cancelled) {
+          setHistoryRows(Array.isArray(res?.rows) ? res.rows : []);
+        }
+      } catch (e: any) {
+        if (!cancelled)
+          setHistoryError(e?.message || "Failed to search deloading history.");
+      } finally {
+        if (!cancelled) setHistoryLoading(false);
+      }
+    }
+
+    const t = setTimeout(run, 250); 
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
+  }, [search]);
+
   useEffect(() => {
     // Default view should be the *planning* term (next after current).
     // The backend paging logic supports direction="next" without an anchor,
@@ -283,6 +366,116 @@ function formatFacultyName(name?: string) {
           </div>
         </div>
 
+        {/* ✅ Search faculty deloading history across ALL terms */}
+        <div className="p-4 border-b border-gray-200 bg-white">
+          <div className="flex flex-col gap-2">
+            <label className="text-xs font-semibold text-gray-600">
+              Search faculty deloading history (across all terms)
+            </label>
+
+            <div className="flex items-center gap-2">
+              <input
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder='Type a name (e.g., "Cruz" or "Cruz, Juan")'
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-emerald-200"
+              />
+              {search.trim() && (
+                <button
+                  type="button"
+                  className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm shadow-sm hover:bg-gray-50"
+                  onClick={() => setSearch("")}
+                >
+                  Clear
+                </button>
+              )}
+            </div>
+
+            {historyLoading && (
+              <div className="text-xs text-gray-500">
+                Searching all-term history…
+              </div>
+            )}
+            {historyError && (
+              <div className="text-xs text-red-700">{historyError}</div>
+            )}
+
+            {!!search.trim() && (
+              <div className="text-xs text-gray-500">
+                Showing {filteredHistoryRows.length} matching record(s)
+              </div>
+            )}
+          </div>
+
+          {!!search.trim() && (
+            <div className="mt-3 overflow-x-auto rounded-xl border border-gray-200 bg-white">
+              <table className="min-w-full text-sm">
+                <thead className="bg-gray-50 border-b border-gray-200 text-gray-700">
+                  <tr>
+                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700">
+                      Term
+                    </th>
+                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700">
+                      Faculty
+                    </th>
+                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700">
+                      Deloading Type
+                    </th>
+                    <th className="px-4 py-3 text-center text-xs font-semibold text-gray-700">
+                      Units
+                    </th>
+                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700">
+                      Notes
+                    </th>
+                    <th className="px-4 py-3 text-center text-xs font-semibold text-gray-700">
+                      Last Updated
+                    </th>
+                  </tr>
+                </thead>
+
+                <tbody className="divide-y divide-gray-200 bg-white">
+                  {filteredHistoryRows.map((r, i) => (
+                    <tr
+                      key={`${r.term_id}-${r.faculty_name}-${r.deloading_type}-${i}`}
+                      className="hover:bg-gray-50"
+                    >
+                      <td className="px-4 py-3 text-left">
+                        {(r as any).term_label || "—"}
+                      </td>
+                      <td className="px-4 py-3 text-left">
+                        {formatFacultyName(r.faculty_name) || "—"}
+                      </td>
+                      <td className="px-4 py-3 text-left">
+                        {r.deloading_type || "—"}
+                      </td>
+                      <td className="px-4 py-3 text-center">
+                        {r.units_deloaded ?? "—"}
+                      </td>
+                      <td className="px-4 py-3 text-left">{r.notes || "—"}</td>
+                      <td className="px-4 py-3 text-center">
+                        {r.updated_at
+                          ? new Date(r.updated_at).toLocaleString()
+                          : "—"}
+                      </td>
+                    </tr>
+                  ))}
+
+                  {filteredHistoryRows.length === 0 && (
+                    <tr>
+                      <td
+                        colSpan={6}
+                        className="px-4 py-6 text-center text-sm text-gray-500"
+                      >
+                        No matches for "{search.trim()}".
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+
         {/* Status / error rows */}
         {error && (
           <div className="px-4 py-3 text-sm text-red-700 bg-red-50 border-b border-red-200">
@@ -306,106 +499,86 @@ function formatFacultyName(name?: string) {
         {/* Dashboard Content (visible when data is loaded) */}
         {!loading && !!data?.rows?.length && summary && (
           <div className="p-4 space-y-8">
-            {/* --- 1. GLOBAL SUMMARY CARDS --- */}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              {/* Total Units Deloaded */}
-              <div className="flex flex-col items-center justify-center p-6 bg-red-50 border border-red-300 rounded-lg shadow-md">
-                <p className="text-sm font-medium text-red-600 uppercase">
-                  Total Units Deloaded
-                </p>
-                <p className="text-4xl font-extrabold text-red-800 mt-1">
-                  {summary.total_units_deloaded}
-                </p>
-              </div>
-
-              {/* Total Faculty Deloaded */}
-              <div className="flex flex-col items-center justify-center p-6 bg-sky-50 border border-sky-300 rounded-lg shadow-md">
-                <p className="text-sm font-medium text-sky-600 uppercase">
-                  Total Faculty Deloaded
-                </p>
-                <p className="text-4xl font-extrabold text-sky-800 mt-1">
-                  {summary.total_faculty_deloaded}
-                </p>
-              </div>
-
-              {/* Average Deloading Per Faculty */}
-              <div className="flex flex-col items-center justify-center p-6 bg-emerald-50 border border-emerald-300 rounded-lg shadow-md">
-                <p className="text-sm font-medium text-emerald-600 uppercase">
-                  Avg. Deloading Per Faculty
-                </p>
-                <p className="text-4xl font-extrabold text-emerald-800 mt-1">
-                  {summary.average_deloading_per_faculty}
-                </p>
-              </div>
-            </div>
-
             {/* --- 2. ADMINISTRATIVE RISK ALERT (Moved to top) --- */}
             {adminWarnings && adminWarnings.length > 0 && (
-              <div className="p-4 bg-orange-100 border border-orange-400 rounded-lg shadow-sm">
-                <div className="flex items-center mb-3">
-                  <AlertTriangle className="h-5 w-5 text-orange-700 mr-2 flex-shrink-0" />
-                  <h2 className="text-lg font-semibold text-orange-800">
-                    Administrative Continuity Risk Warning
-                  </h2>
-                </div>
-                <p className="text-sm text-orange-700 mb-3">
-                  The following faculty received 'Admin'-related deloading in the{' '}
-                  <span className="font-semibold text-orange-800">previous</span>{' '}
-                  term. Review their load for the current/next term to ensure
-                  administrative continuity and resource allocation.
-                </p>
+              <div className="p-4 bg-red-100 border border-red-400 rounded-lg shadow-sm">
+                <button
+                  type="button"
+                  className="w-full flex items-center justify-between mb-3 text-left"
+                  onClick={() => setIsRiskOpen(!isRiskOpen)}
+                  aria-expanded={isRiskOpen}
+                  aria-controls="admin-risk-warning-body"
+                >
+                  <div className="flex items-center">
+                    <AlertTriangle className="h-5 w-5 text-red-700 mr-2 flex-shrink-0" />
+                    <h2 className="text-lg font-semibold text-red-800">
+                      Administrative Continuity Risk Warning
+                    </h2>
+                  </div>
 
-                <div className="border border-orange-200 bg-orange-50/70 shadow-sm overflow-hidden rounded-xl">
-                  <div className="overflow-x-auto rounded-xl">
-                    <table className="min-w-full text-sm">
-                      <thead className="bg-orange-100 border-b border-orange-200 text-orange-900">
-                        <tr>
-                          <th className="px-4 py-3 text-left text-xs font-semibold text-orange-900">Faculty</th>
-                          <th className="px-4 py-3 text-left text-xs font-semibold text-orange-900">Deloading Type</th>
-                          <th className="px-4 py-3 text-center text-xs font-semibold text-orange-900">Units</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-orange-200 bg-transparent">
-                        {adminWarnings.map((r, i) => (
-                          <tr
-                            key={`${r.faculty_id}-${i}`}
-                            className="hover:bg-orange-50"
-                          >
-                            <td className="px-4 py-3 text-left">
-                              {formatFacultyName(r.faculty_name) || "—"}
-                            </td>
-                            <td className="px-4 py-3 text-left">
-                              {r.deloading_type || "—"}
-                            </td>
-                            <td className="px-4 py-3 text-center">
-                              {r.units ?? "—"}
-                            </td>
+                  <ChevronLeft
+                    className={`h-5 w-5 text-red-700 transition-transform ${
+                      isRiskOpen ? "-rotate-90" : "rotate-0"
+                    }`}
+                  />
+                </button>
+
+                <div
+                  id="admin-risk-warning-body"
+                  className={`transition-all duration-300 ease-in-out overflow-hidden ${
+                    isRiskOpen
+                      ? "max-h-[1000px] opacity-100"
+                      : "max-h-0 opacity-0"
+                  }`}
+                >
+                  <p className="text-sm text-red-700 mb-3">
+                    The following faculty received 'Admin'-related deloading in
+                    the{" "}
+                    <span className="font-semibold text-red-800">previous</span>{" "}
+                    term. Review their load for the current/next term to ensure
+                    administrative continuity and resource allocation.
+                  </p>
+
+                  <div className="border border-red-200 bg-red-50/70 shadow-sm overflow-hidden rounded-xl">
+                    <div className="overflow-x-auto rounded-xl">
+                      <table className="min-w-full text-sm">
+                        <thead className="bg-red-100 border-b border-red-200 text-red-900">
+                          <tr>
+                            <th className="px-4 py-3 text-left text-xs font-semibold text-red-900">
+                              Faculty
+                            </th>
+                            <th className="px-4 py-3 text-left text-xs font-semibold text-red-900">
+                              Deloading Type
+                            </th>
+                            <th className="px-4 py-3 text-center text-xs font-semibold text-red-900">
+                              Units
+                            </th>
                           </tr>
-                        ))}
-                      </tbody>
-                    </table>
+                        </thead>
+                        <tbody className="divide-y divide-red-200 bg-transparent">
+                          {adminWarnings.map((r, i) => (
+                            <tr
+                              key={`${r.faculty_id}-${i}`}
+                              className="hover:bg-red-50"
+                            >
+                              <td className="px-4 py-3 text-left">
+                                {formatFacultyName(r.faculty_name) || "—"}
+                              </td>
+                              <td className="px-4 py-3 text-left">
+                                {r.deloading_type || "—"}
+                              </td>
+                              <td className="px-4 py-3 text-center">
+                                {r.units ?? "—"}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
                   </div>
                 </div>
               </div>
             )}
-
-            {/* --- 3. UTILIZATION BREAKDOWN VISUAL --- */}
-            <div className="p-6 border border-gray-200 rounded-lg shadow-sm">
-              <div className="flex items-center mb-4">
-                <BarChart2 className="h-5 w-5 text-emerald-700 mr-2" />
-                <h2 className="text-lg font-semibold text-gray-800">
-                  Utilization Breakdown by Deloading Type
-                </h2>
-              </div>
-              <p className="text-sm text-gray-600 mb-4">
-                Units allocated by deloading type, showing where institutional
-                resources are primarily used.
-              </p>
-              <MockBarChart
-                data={summary.deloading_type_breakdown}
-                totalUnits={summary.total_units_deloaded}
-              />
-            </div>
 
             {/* --- 4. RAW DATA TABLE (Collapsible) --- */}
             <div className="border border-gray-200 bg-white shadow-sm overflow-hidden rounded-xl">
@@ -431,7 +604,9 @@ function formatFacultyName(name?: string) {
               <div
                 id="deloading-records-table"
                 className={`transition-all duration-300 ease-in-out overflow-hidden ${
-                  isTableOpen ? "max-h-[1000px] opacity-100" : "max-h-0 opacity-0"
+                  isTableOpen
+                    ? "max-h-[1000px] opacity-100"
+                    : "max-h-0 opacity-0"
                 }`}
               >
                 <div className="p-4">
@@ -439,11 +614,21 @@ function formatFacultyName(name?: string) {
                     <table className="min-w-full text-sm">
                       <thead className="bg-gray-50 border-b border-gray-200 text-gray-700">
                         <tr>
-                          <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700">Faculty</th>
-                          <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700">Deloading Type</th>
-                          <th className="px-4 py-3 text-center text-xs font-semibold text-gray-700">Units</th>
-                          <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700">Notes</th>
-                          <th className="px-4 py-3 text-center text-xs font-semibold text-gray-700">Last Updated</th>
+                          <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700">
+                            Faculty
+                          </th>
+                          <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700">
+                            Deloading Type
+                          </th>
+                          <th className="px-4 py-3 text-center text-xs font-semibold text-gray-700">
+                            Units
+                          </th>
+                          <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700">
+                            Notes
+                          </th>
+                          <th className="px-4 py-3 text-center text-xs font-semibold text-gray-700">
+                            Last Updated
+                          </th>
                         </tr>
                       </thead>
 
@@ -478,6 +663,24 @@ function formatFacultyName(name?: string) {
                 </div>
               </div>
             </div>
+
+            {/* --- 3. UTILIZATION BREAKDOWN VISUAL ---
+            <div className="p-6 border border-gray-200 rounded-lg shadow-sm">
+              <div className="flex items-center mb-4">
+                <BarChart2 className="h-5 w-5 text-emerald-700 mr-2" />
+                <h2 className="text-lg font-semibold text-gray-800">
+                  Utilization Breakdown by Deloading Type
+                </h2>
+              </div>
+              <p className="text-sm text-gray-600 mb-4">
+                Units allocated by deloading type, showing where institutional
+                resources are primarily used.
+              </p>
+              <MockBarChart
+                data={summary.deloading_type_breakdown}
+                totalUnits={summary.total_units_deloaded}
+              />
+            </div> */}
           </div>
         )}
       </div>

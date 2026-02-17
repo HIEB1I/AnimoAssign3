@@ -1189,16 +1189,17 @@ const refresh = async (): Promise<RoomAllocationResponse | null> => {
             </div>
 
             {/* Controls */}
-            <div className="mt-4 mb-4 grid gap-3 md:grid-cols-[220px_220px_1fr]">
+            <div className="mt-4 mb-4 grid gap-3 md:grid-cols-[minmax(280px,360px)_220px_1fr]">
+              {/* NOTE: Do NOT edit SelectBox component. Fix icon alignment here by preventing wrap via wider first column. */}
               <SelectBox value={building} onChange={setBuilding} options={buildings} />
               <SelectBox value={typeFilter} onChange={setTypeFilter} options={types} />
               <div className="relative">
-                <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-400" />
+                <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-400" />
                 <input
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
                   placeholder="Search room or building…"
-                  className="w-full rounded-lg border border-gray-300 pl-9 pr-3 py-2 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30"
+                  className="w-full h-10 rounded-lg border border-gray-300 bg-white pl-9 pr-3 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30"
                 />
               </div>
             </div>

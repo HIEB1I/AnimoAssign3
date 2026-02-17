@@ -5,14 +5,37 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Search } from "lucide-react";
 
-// Standardized column headers (reused across all term tables)
+// Standardized column headers (match FACULTY_Overview List view; minus Syllabus)
+// NOTE: History payload only provides a single `time` string; we map it to Begin/End for Day 1 and (if present) Day 2.
 const HEADERS = [
-  "Course Code","Course Title","Section",
-  "Mode","Day 1","Room 1","Day 2","Room 2","Time",
+  "Course Code & Title",
+  "Section",
+  "Day 1",
+  "Begin 1",
+  "End 1",
+  "Room 1",
+  "Day 2",
+  "Begin 2",
+  "End 2",
+  "Room 2",
 ] as const;
 
 // ---------- tiny utils ----------
 const cls = (...s: (string | false | undefined)[]) => s.filter(Boolean).join(" ");
+
+function splitBeginEnd(time?: string): { begin: string; end: string } {
+  const raw = (time || "").trim();
+  if (!raw || raw.toUpperCase() === "TBA") return { begin: "—", end: "—" };
+
+  // Accept a few common separators: en dash, em dash, hyphen
+  const parts = raw
+    .split(/\s*(?:–|—|-)\s*/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  if (parts.length >= 2) return { begin: parts[0], end: parts[1] };
+  return { begin: parts[0] || "—", end: "—" };
+}
 
 // Normalize "AY" strings for robust comparisons & query params
 const normAy = (s?: string | null) =>
@@ -419,56 +442,84 @@ function HistoryMain() {
 
               {/* Table */}
               <div className="overflow-x-auto">
-                <table className="min-w-full table-fixed border-t border-gray-200">
-                  <colgroup>
-                  <col className="w-[12ch]" /> {/* Course Code */}
-                  <col className="w-[32ch]" /> {/* Course Title */}
-                  <col className="w-[8ch]"  /> {/* Section */}
-                  <col className="w-[8ch]"  /> {/* Mode */}
-                  <col className="w-[6ch]"  /> {/* Day 1 */}
-                  <col className="w-[12ch]" /> {/* Room 1 */}
-                  <col className="w-[6ch]"  /> {/* Day 2 */}
-                  <col className="w-[12ch]" /> {/* Room 2 */}
-                  <col className="w-[14ch]" /> {/* Time */}
-                </colgroup>
+                <div className="overflow-hidden rounded-xl bg-white">
+                  <table className="min-w-full table-fixed border-t border-gray-200 text-[13px]">
+                    <colgroup>
+                      {/* Match FACULTY_Overview list view sizing (minus Mode/Syllabus) */}
+                      <col className="w-[240px]" />
+                      <col className="w-[92px]" />
+                      <col className="w-[82px]" />
+                      <col className="w-[92px]" />
+                      <col className="w-[92px]" />
+                      <col className="w-[110px]" />
+                      <col className="w-[82px]" />
+                      <col className="w-[92px]" />
+                      <col className="w-[92px]" />
+                      <col className="w-[110px]" />
+                    </colgroup>
 
-
-                  <thead>
-                    <tr className="text-xs text-gray-500">
-                      {HEADERS.map((h) => (
-                        <th key={h} className="px-4 py-2 font-medium text-center whitespace-normal wrap-break-word align-middle">{h}</th>
-                      ))}
-                    </tr>
-                  </thead>
-
-                  <tbody>
-                    {(groups[t] ?? []).length === 0 ? (
-                      <tr>
-                        <td colSpan={9} className="px-4 py-6 text-center text-sm text-gray-500">
-                          No records.
-                        </td>
-
+                    <thead className="bg-gray-50 text-gray-700">
+                      <tr className="[&>th]:border-b [&>th]:border-gray-200">
+                        {HEADERS.map((h, idx) => (
+                          <th
+                            key={h}
+                            className={cls(
+                              "px-4 py-3 font-semibold",
+                              idx === 0 ? "text-left" : "text-center"
+                            )}
+                          >
+                            {h}
+                          </th>
+                        ))}
                       </tr>
-                    ) : (
-                      groups[t].map((r, i) => (
-                        <tr
-                          key={`${t}-${i}`}
-                          className={cls("text-sm text-gray-700", i % 2 === 0 ? "bg-white" : "bg-gray-50")}
-                        >
-                          <td className="px-4 py-2 text-center">{r.code}</td>
-                          <td className="px-4 py-2 text-center whitespace-normal wrap-break-word align-middle">{r.title}</td>
-                          <td className="px-4 py-2 text-center">{r.section}</td>
-                          <td className="px-4 py-2 text-center">{r.mode ?? ""}</td>
-                          <td className="px-4 py-2 text-center">{r.day1 ?? ""}</td>
-                          <td className="px-4 py-2 text-center">{r.room1 ?? ""}</td>
-                          <td className="px-4 py-2 text-center">{r.day2 ?? ""}</td>
-                          <td className="px-4 py-2 text-center">{r.room2 ?? ""}</td>
-                          <td className="px-4 py-2 text-center">{r.time}</td>
+                    </thead>
+
+                    <tbody className="text-gray-900">
+                      {(groups[t] ?? []).length === 0 ? (
+                        <tr>
+                          <td colSpan={HEADERS.length} className="px-4 py-6 text-center text-sm text-gray-500">
+                            No records.
+                          </td>
                         </tr>
-                      ))
-                    )}
-                  </tbody>
-                </table>
+                      ) : (
+                        groups[t].map((r, i) => {
+                          const d1 = r.day1 && r.day1 !== "TBA" ? r.day1 : "—";
+                          const d2 = r.day2 && r.day2 !== "TBA" ? r.day2 : "—";
+
+                          // History provides one `time` string; use it for Day 1, and only mirror to Day 2 when it exists.
+                          const t1 = splitBeginEnd(r.time);
+                          const t2 = d2 !== "—" ? t1 : { begin: "—", end: "—" };
+
+                          return (
+                            <tr
+                              key={`${t}-${i}`}
+                              className={cls(
+                                i % 2 === 0 ? "bg-white" : "bg-gray-50",
+                                "[&>td]:border-t [&>td]:border-gray-100"
+                              )}
+                            >
+                              <td className="px-4 py-3 align-middle">
+                                <div className="leading-tight">
+                                  <div className="font-semibold text-gray-900">{r.code || "—"}</div>
+                                  <div className="mt-0.5 text-[12px] text-gray-600">{r.title || "—"}</div>
+                                </div>
+                              </td>
+                              <td className="px-4 py-3 align-middle text-center">{r.section || "—"}</td>
+                              <td className="px-4 py-3 align-middle text-center">{d1}</td>
+                              <td className="px-4 py-3 align-middle text-center">{t1.begin}</td>
+                              <td className="px-4 py-3 align-middle text-center">{t1.end}</td>
+                              <td className="px-4 py-3 align-middle text-center">{r.room1 || "—"}</td>
+                              <td className="px-4 py-3 align-middle text-center">{d2}</td>
+                              <td className="px-4 py-3 align-middle text-center">{t2.begin}</td>
+                              <td className="px-4 py-3 align-middle text-center">{t2.end}</td>
+                              <td className="px-4 py-3 align-middle text-center">{r.room2 || "—"}</td>
+                            </tr>
+                          );
+                        })
+                      )}
+                    </tbody>
+                  </table>
+                </div>
               </div>
             </div>
           ))}
