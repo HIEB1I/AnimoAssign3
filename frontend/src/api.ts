@@ -1010,7 +1010,7 @@ export async function planAllowExtra(
 
 export async function planRejectOmNewLine(
   userId: string,
-  payload: { course_id: string }
+  payload: { course_id: string; section_id?: string }
 ): Promise<{ ok: true; deleted: number }> {
   const url = `${API_BASE}/apo/courseofferings${q({ userId, action: "planRejectOmNewLine" })}`;
   // See note in planAllowExtra(): absolute URL => use `post()` helper.
