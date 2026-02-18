@@ -453,7 +453,7 @@ export default function OM_RP_AvailabilityForecasting() {
         <div>
         <h1 className="text-2xl font-bold mb-2">Time/Day Slot Availability Indicators</h1>
         <p className="text-sm text-gray-600 mb-6">
-          Assess forecast reliability via quality metrics and identify peak availability.
+        Highlights time/day pressure points (slots that are hard to fill) based on submitted faculty availability/preferences for the target term, so you can anticipate scheduling conflicts early.
         </p>
         </div>
         {right}

@@ -309,7 +309,7 @@ export default function OM_RP_DeloadingUtilization() {
       {/* Header */}
       <h1 className="text-2xl font-bold mb-2">Deloading Utilization</h1>
       <p className="text-sm text-gray-600 mb-6">
-        Aggregate resource allocation and administrative risk assessment.
+      Shows which faculty have deloading, how many units it removes, and how it affects assignable capacity.
       </p>
 
       {/* Card wrapper */}

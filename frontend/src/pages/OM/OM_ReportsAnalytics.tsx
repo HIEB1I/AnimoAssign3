@@ -72,7 +72,7 @@ const FORECAST_CARDS: CardItem[] = [
     },
   },
   {
-    title: "Course Staffing Risk Indicators",
+    title: "Course Coverage Risk Indicators",
     to: "load-risk",
     Icon: AlertTriangle,
     accent: {

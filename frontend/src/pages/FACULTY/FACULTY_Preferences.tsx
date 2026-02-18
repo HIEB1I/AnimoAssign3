@@ -53,6 +53,7 @@ function MultiSelectDropdown({
   className = "w/full",
   placeholder = "— Select options —",
   maxPreview = 2,
+  error = false,
 }: {
   values: string[];
   onChange: (v: string[]) => void;
@@ -60,6 +61,7 @@ function MultiSelectDropdown({
   className?: string;
   placeholder?: string;
   maxPreview?: number;
+  error?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [hover, setHover] = useState(0);
@@ -115,7 +117,7 @@ function MultiSelectDropdown({
         onClick={() => setOpen((v) => !v)}
         aria-haspopup="listbox"
         aria-expanded={open}
-        className={DD_BASE}
+        className={cls(DD_BASE, error ? "border-red-500 focus:ring-red-500/20" : "")}
       >
         {label}
         <span className="pointer-events-none absolute right-4 top-1/2 -translate-y-1/2">▾</span>
@@ -162,12 +164,14 @@ function Dropdown({
   options,
   className = "w-full",
   placeholder = "— Select —",
+  error = false,
 }: {
   value: string;
   onChange: (v: string) => void;
   options: readonly string[];
   className?: string;
   placeholder?: string;
+  error?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [hover, setHover] = useState(() => Math.max(0, options.findIndex((o) => o === value)));
@@ -217,7 +221,7 @@ function Dropdown({
         onClick={() => setOpen((v) => !v)}
         aria-haspopup="listbox"
         aria-expanded={open}
-        className={DD_BASE}
+        className={cls(DD_BASE, error ? "border-red-500 focus:ring-red-500/20" : "")}
       >
         {value || <span className="text-gray-400">{placeholder}</span>}
         <span className="pointer-events-none absolute right-4 top-1/2 -translate-y-1/2">▾</span>
@@ -567,8 +571,10 @@ type SavedPrefs = {
   remarks: string;
   onBreak: boolean;
   breakReason: string;
-  breakReturnTermId: string; // UPDATED: Stores ID of the return term
-  breakReturnDate: string; // Legacy: Keep for display if needed, or for fallback
+  // Legacy: kept for backward compatibility with older stored prefs/backends
+  breakReturnTermId: string;
+  // Expected date of return (YYYY-MM-DD)
+  breakReturnDate: string;
 };
 
 const initialSaved: SavedPrefs = {
@@ -600,7 +606,7 @@ function EditForm({
   daysMaster,
   timeSlotsMaster,
   kacDisplayOptions,
-  futureTerms, // UPDATED: prop
+  futureTerms: _futureTerms, // kept for API compatibility; leave return is now a date input
 }: {
   initial: SavedPrefs;
   onClose: () => void;
@@ -620,19 +626,28 @@ function EditForm({
 	// Field-level validation (only for Preferred Time Slots minimum selection rule)
 	const [timeSlotsError, setTimeSlotsError] = useState<string>("");
 
+	// Field-level validation for required inputs (show warnings instead of silently blocking save)
+	const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+	const clearFieldError = (key: string) =>
+		setFieldErrors((prev) => {
+			if (!prev[key]) return prev;
+			const next = { ...prev };
+			delete next[key];
+			return next;
+		});
+
   const ZERO_LOAD_LABEL = "0.0 units - no teaching load (for full-time only)";
   const isZeroTeachingLoad = form.prefUnits === ZERO_LOAD_LABEL;
 
+  const isTeachingBreak = form.prefUnits === TEACHING_BREAK;
+
+  // Teaching break OR 0.0-unit (no teaching load) + No Deloading is considered a leave
+  // (requires reason + expected return date)
+  const isLeave = (isTeachingBreak || isZeroTeachingLoad) && form.noDeloading;
+
   const { past: deadlinePassed } = useCountdown(deadlineISO);
 
-  // Helper to map Term ID <-> Term Label for the Dropdown
-  const termLabelOptions = useMemo(() => futureTerms.map(t => t.label), [futureTerms]);
-  
-  // Get currently selected label based on ID
-  const currentTermLabel = useMemo(() => {
-    const found = futureTerms.find(t => t.term_id === form.breakReturnTermId);
-    return found ? found.label : "";
-  }, [form.breakReturnTermId, futureTerms]);
+  // futureTerms kept for other parts of the page/backend, but leave return is now a date input
 
   // FT/PT: unit options
   const prefUnitOptions = useMemo(() => {
@@ -660,15 +675,30 @@ function EditForm({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [employmentType, prefUnitOptions]);
 
-  const isTeachingBreak = form.prefUnits === TEACHING_BREAK;
   useEffect(() => {
+    // Keep schema intact: onBreak should reflect a real break/leave.
+    // - Teaching Break => always onBreak
+    // - 0.0 units + No Deloading => assumed leave => onBreak
+    const shouldMarkOnBreak = isTeachingBreak || (isZeroTeachingLoad && form.noDeloading);
     setForm((f) => ({
       ...f,
-      onBreak: isTeachingBreak,
-      ...(isTeachingBreak ? {} : { breakReason: "", breakReturnTermId: "" }),
+      onBreak: shouldMarkOnBreak,
+      ...((isTeachingBreak || isZeroTeachingLoad)
+        ? {}
+        : { breakReason: "", breakReturnTermId: "", breakReturnDate: "" }),
     }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [form.prefUnits]);
+  }, [form.prefUnits, form.noDeloading]);
+
+  // If user selected Teaching Break / 0.0-unit but is NOT considered a leave,
+  // hide/clear leave fields.
+  useEffect(() => {
+    if (!(isTeachingBreak || isZeroTeachingLoad)) return;
+    if (!isLeave) {
+      setForm((f) => ({ ...f, breakReason: "", breakReturnTermId: "", breakReturnDate: "" }));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isTeachingBreak, isZeroTeachingLoad, isLeave]);
 
 	// Clear Preferred Time Slots field error as soon as the user satisfies the rule
 	useEffect(() => {
@@ -682,6 +712,22 @@ function EditForm({
 			setTimeSlotsError("");
 		}
 	}, [form.prefUnits, form.timeSlots, isTeachingBreak, timeSlotsError]);
+
+	// Leave return-date field error (Expected date of Return)
+	const [breakReturnDateError, setBreakReturnDateError] = useState<string>("");
+	useEffect(() => {
+		// If not a leave, hide/clear any date error
+		if (!isLeave && breakReturnDateError) setBreakReturnDateError("");
+	}, [isLeave, breakReturnDateError]);
+
+	function isBeforeToday(isoYYYYMMDD: string): boolean {
+		if (!/^\d{4}-\d{2}-\d{2}$/.test(isoYYYYMMDD)) return false;
+		const d = new Date(`${isoYYYYMMDD}T00:00:00`);
+		if (Number.isNaN(d.getTime())) return false;
+		const today = new Date();
+		today.setHours(0, 0, 0, 0);
+		return d.getTime() < today.getTime();
+	}
 
   // deloading rows
   const [deloadRows, setDeloadRows] = useState<DeloadRow[]>(() =>
@@ -702,12 +748,19 @@ function EditForm({
 
   // validation
   function validate(): { ok: true } | { ok: false; msg: string } {
-    if (isTeachingBreak) {
-      if (!form.breakReason.trim())
-        return { ok: false, msg: "Reason for taking a break/leave is required." };
-      // UPDATED: Check for Term ID
-      if (!form.breakReturnTermId)
-        return { ok: false, msg: "Academic Year and Term of return is required." };
+    // Teaching break with deloading is still a "break" (no teaching-load fields required)
+    if (isTeachingBreak && !isLeave) return { ok: true };
+
+    if (isLeave) {
+      if (!form.breakReason.trim()) return { ok: false, msg: "Reason for taking a break/leave is required." };
+      if (!form.breakReturnDate) return { ok: false, msg: "Expected date of Return is required." };
+      // basic date validity check (YYYY-MM-DD)
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(form.breakReturnDate) || Number.isNaN(Date.parse(form.breakReturnDate))) {
+        return { ok: false, msg: "Expected date of Return must be a valid date." };
+      }
+		if (isBeforeToday(form.breakReturnDate)) {
+			return { ok: false, msg: "Expected date of Return cannot be before the current date." };
+		}
       return { ok: true };
     }
 
@@ -761,6 +814,55 @@ function EditForm({
     return { ok: true };
   }
 
+	function validateAndSetWarnings(): boolean {
+		const errs: Record<string, string> = {};
+		const ZERO_LOAD_LABEL_LOCAL = "0.0 units - no teaching load (for full-time only)";
+		const hasZeroLoad = form.prefUnits === ZERO_LOAD_LABEL_LOCAL;
+
+		// Required: Preferred Teaching Units (always required)
+		if (!form.prefUnits || !prefUnitOptions.includes(form.prefUnits as any)) {
+			errs.prefUnits = "Preferred Teaching Units is required.";
+		}
+
+		// Leave requirements
+		if (isLeave) {
+			if (!form.breakReason.trim()) errs.breakReason = "Reason for taking a break/leave is required.";
+			if (!form.breakReturnDate) {
+				errs.breakReturnDate = "Expected date of Return is required.";
+			} else {
+				// validate date
+				if (!/^\d{4}-\d{2}-\d{2}$/.test(form.breakReturnDate) || Number.isNaN(Date.parse(form.breakReturnDate))) {
+					errs.breakReturnDate = "Expected date of Return must be a valid date.";
+				} else if (isBeforeToday(form.breakReturnDate)) {
+					errs.breakReturnDate = "Expected date of Return cannot be before the current date.";
+				}
+			}
+		}
+
+		// Teaching-load requirements (only when not break and not zero-load)
+		if (!isTeachingBreak && !hasZeroLoad) {
+			if (!form.delivery.trim()) errs.delivery = "Preferred Delivery Mode is required.";
+			if (!form.days || form.days.length === 0) errs.days = "Preferred Teaching Days are required.";
+			if (!form.timeSlots || form.timeSlots.length < 3) {
+				errs.timeSlots = "Please select at least 3 Preferred Time Slots.";
+			}
+			if (!form.kac || form.kac.length === 0) errs.kac = "Knowledge Area Cluster (KAC) is required.";
+		}
+
+		setFieldErrors(errs);
+		setTimeSlotsError(errs.timeSlots || "");
+		setBreakReturnDateError(errs.breakReturnDate || "");
+
+		if (Object.keys(errs).length > 0) return false;
+		const v = validate();
+		if (!v.ok) {
+			// Non-required validation issues (e.g., deloading details/range)
+			alert(v.msg);
+			return false;
+		}
+		return true;
+	}
+
   // toggles
   const DAY_PAIR: Record<string, string> = {
     Monday: "Thursday",
@@ -798,11 +900,19 @@ function EditForm({
           return i < 0 ? 999 : i;
         };
         next.sort((a, b) => order(a) - order(b));
+			// Clear required-field warning once at least one day is selected
+			if (next.length > 0) clearFieldError("days");
         return { ...f, days: next };
       }
 
       const has = arr.includes(value);
-      return { ...f, [key]: has ? arr.filter((v) => v !== value) : [...arr, value] };
+	  const next = has ? arr.filter((v) => v !== value) : [...arr, value];
+	  // Clear required-field warning once minimum time slots rule is satisfied
+	  if (key === "timeSlots" && next.length >= 3) {
+		  clearFieldError("timeSlots");
+		  if (timeSlotsError) setTimeSlotsError("");
+	  }
+	  return { ...f, [key]: next };
     });
 
   // Corrected showAE logic: Hide if on teaching break
@@ -848,10 +958,17 @@ function EditForm({
                 value={form.prefUnits}
                 onChange={(v) => {
                   setForm({ ...form, prefUnits: v });
+                  clearFieldError("prefUnits");
                   if (step === 1 && v && v.trim().length > 0) setStep(2);
                 }}
                 options={prefUnitOptions}
               />
+				{fieldErrors.prefUnits && (
+					<div className="mt-2 flex items-start gap-2 rounded-md border border-red-200 bg-red-50 p-2 text-[13px] text-red-800">
+						<AlertTriangle className="mt-0.5 h-4 w-4" />
+						<span>{fieldErrors.prefUnits}</span>
+					</div>
+				)}
               {/* Preferred units guidance */}
               {form.prefUnits !== TEACHING_BREAK && form.prefUnits !== ZERO_LOAD_LABEL && (
                 <div className="mt-2 flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 p-2 text-[12px] text-amber-900">
@@ -1038,39 +1155,68 @@ function EditForm({
                       )}
                     </div>
 
-                    <div className="space-y-4">
-                      <div>
-                        <FieldLabel required>Reason for taking a break/leave</FieldLabel>
-                        <input
-                          type="text"
-                          className="w-full rounded-2xl border border-neutral-300 px-4 py-3 text-[15px] shadow-sm outline-none"
-                          placeholder="Reason..."
-                          value={form.breakReason}
-                          onChange={(e) =>
-                            setForm({ ...form, breakReason: e.target.value })
-                          }
-                        />
-                      </div>
+                    {isLeave && (
+                      <div className="space-y-4">
+                        <div>
+                          <FieldLabel required>Reason for taking a break/leave</FieldLabel>
+                          <input
+                            type="text"
+                            className={cls(
+							"w-full rounded-2xl border px-4 py-3 text-[15px] shadow-sm outline-none",
+							fieldErrors.breakReason ? "border-red-500 focus:ring-2 focus:ring-red-500/20" : "border-neutral-300"
+						)}
+                            placeholder="Reason..."
+                            value={form.breakReason}
+                            onChange={(e) => {
+							  setForm({ ...form, breakReason: e.target.value });
+							  if (e.target.value.trim()) clearFieldError("breakReason");
+							}}
+                          />
+						{fieldErrors.breakReason && (
+							<div className="mt-2 flex items-start gap-2 rounded-md border border-red-200 bg-red-50 p-2 text-[13px] text-red-800">
+								<AlertTriangle className="mt-0.5 h-4 w-4" />
+								<span>{fieldErrors.breakReason}</span>
+							</div>
+						)}
+                        </div>
 
-                      {/* UPDATED: Term Dropdown Selection */}
-                      <div>
-                        <FieldLabel required>Academic Year and Term of Return</FieldLabel>
-                        <Dropdown
-                          value={currentTermLabel}
-                          onChange={(label) => {
-                            const found = futureTerms.find(t => t.label === label);
-                            if (found) {
-                                setForm({ ...form, breakReturnTermId: found.term_id });
-                            }
-                          }}
-                          options={termLabelOptions}
-                          placeholder="— Select Academic Year and Term —"
-                        />
-                        <div className="mt-1 text-[12px] text-neutral-500">
-                          Select the term you plan to return to teaching.
+                        <div>
+                          <FieldLabel required>Expected date of Return</FieldLabel>
+                          <div className="relative">
+                            <input
+                              type="date"
+                              value={form.breakReturnDate}
+										  onChange={(e) => {
+											  const v = e.target.value;
+											  setForm({ ...form, breakReturnDate: v });
+							  if (v) clearFieldError("breakReturnDate");
+											  if (!v) {
+												  setBreakReturnDateError("");
+												  return;
+											  }
+								  if (isBeforeToday(v)) {
+									  setBreakReturnDateError("Expected date of Return cannot be before the current date.");
+											  } else {
+												  setBreakReturnDateError("");
+											  }
+										  }}
+										  className={cls(
+											  DD_BASE,
+											  "pr-12",
+											  breakReturnDateError ? "border-red-500 focus:ring-red-500/20" : ""
+										  )}
+                            />
+                            <CalendarDays className="pointer-events-none absolute right-4 top-1/2 h-5 w-5 -translate-y-1/2 text-neutral-500" />
+                          </div>
+                          {breakReturnDateError && (
+                            <div className="mt-1 text-[12px] text-red-600">{breakReturnDateError}</div>
+                          )}
+                          <div className="mt-1 text-[12px] text-neutral-500">
+                            Select the date you expect to return to teaching.
+                          </div>
                         </div>
                       </div>
-                    </div>
+                    )}
                   </div>
 
                   {/* actions */}
@@ -1084,19 +1230,13 @@ function EditForm({
                     <button
                       disabled={deadlinePassed}
 	                      onClick={() => {
-	                        const v = validate();
-	                        if (!v.ok) {
-	                          // Only show field-level validation for Preferred Time Slots minimum selection
-	                          setTimeSlotsError(
-	                            v.msg === "Please select at least 3 Preferred Time Slots." ? v.msg : ""
-	                          );
-	                          return;
-	                        }
-	                        setTimeSlotsError("");
-	                        onSave({
-	                          ...form,
-	                          deloadings: form.noDeloading ? [] : deloadRows,
-	                        });
+							if (!validateAndSetWarnings()) return;
+							setTimeSlotsError("");
+							setBreakReturnDateError("");
+							onSave({
+							  ...form,
+							  deloadings: form.noDeloading ? [] : deloadRows,
+							});
 	                      }}
                       className={cls(
                         "inline-flex h-9 items-center justify-center rounded-2xl px-4 text-sm font-medium text-white shadow active:translate-y-[0.5px]",
@@ -1117,7 +1257,9 @@ function EditForm({
               ) : isZeroTeachingLoad ? (
                 <>
                   {/* 0.0 units - only ask for Deloading */}
-                  <div className="space-y-3">
+                  <div className="grid grid-cols-1 gap-6 sm:grid-cols-2">
+                    {/* LEFT: Deloading */}
+                    <div className="space-y-3">
                     <div>
                       <FieldLabel>Deloading</FieldLabel>
                       <p className="mb-2 text-[12px] text-neutral-600">
@@ -1282,6 +1424,81 @@ function EditForm({
                         </button>
                       </div>
                     )}
+
+                    </div>
+
+                    {/* RIGHT: Leave (assumed) — shown on the right side just like Teaching Break */}
+                    <div>
+                      {/* If 0.0 units + No Deloading, assume leave and require reason + expected return date */}
+                      {isLeave && (
+                        <div className="space-y-4">
+                          <div>
+                            <FieldLabel required>Reason for taking a break/leave</FieldLabel>
+                            <input
+                              type="text"
+                              className={cls(
+                                "w-full rounded-2xl border px-4 py-3 text-[15px] shadow-sm outline-none",
+                                fieldErrors.breakReason
+                                  ? "border-red-500 focus:ring-2 focus:ring-red-500/20"
+                                  : "border-neutral-300"
+                              )}
+                              placeholder="Reason..."
+                              value={form.breakReason}
+                              onChange={(e) => {
+                                setForm({ ...form, breakReason: e.target.value });
+                                if (e.target.value.trim()) clearFieldError("breakReason");
+                              }}
+                            />
+                            {fieldErrors.breakReason && (
+                              <div className="mt-2 flex items-start gap-2 rounded-md border border-red-200 bg-red-50 p-2 text-[13px] text-red-800">
+                                <AlertTriangle className="mt-0.5 h-4 w-4" />
+                                <span>{fieldErrors.breakReason}</span>
+                              </div>
+                            )}
+                          </div>
+
+                          <div>
+                            <FieldLabel required>Expected date of Return</FieldLabel>
+                            <div className="relative">
+                              <input
+                                type="date"
+                                value={form.breakReturnDate}
+                                onChange={(e) => {
+                                  const v = e.target.value;
+                                  setForm({ ...form, breakReturnDate: v });
+                                  if (v) clearFieldError("breakReturnDate");
+                                  if (!v) {
+                                    setBreakReturnDateError("");
+                                    return;
+                                  }
+                                  if (isBeforeToday(v)) {
+                                    setBreakReturnDateError(
+                                      "Expected date of Return cannot be before the current date."
+                                    );
+                                  } else {
+                                    setBreakReturnDateError("");
+                                  }
+                                }}
+                                className={cls(
+                                  DD_BASE,
+                                  "pr-12",
+                                  breakReturnDateError
+                                    ? "border-red-500 focus:ring-red-500/20"
+                                    : ""
+                                )}
+                              />
+                              <CalendarDays className="pointer-events-none absolute right-4 top-1/2 h-5 w-5 -translate-y-1/2 text-neutral-500" />
+                            </div>
+                            {breakReturnDateError && (
+                              <div className="mt-1 text-[12px] text-red-600">{breakReturnDateError}</div>
+                            )}
+                            <div className="mt-1 text-[12px] text-neutral-500">
+                              Select the date you expect to return to teaching.
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                    </div>
                   </div>
 
                   {/* actions for 0.0 units */}
@@ -1295,19 +1512,12 @@ function EditForm({
                     <button
                       disabled={deadlinePassed}
 	                    	  onClick={() => {
-	                    	    const v = validate();
-	                    	    if (!v.ok) {
-	                    	      // Only show field-level validation for Preferred Time Slots minimum selection
-	                    	      setTimeSlotsError(
-	                    	        v.msg === "Please select at least 3 Preferred Time Slots." ? v.msg : ""
-	                    	      );
-	                    	      return;
-	                    	    }
-	                    	    setTimeSlotsError("");
-	                    	    onSave({
-	                    	      ...form,
-	                    	      deloadings: form.noDeloading ? [] : deloadRows,
-	                    	    });
+							if (!validateAndSetWarnings()) return;
+							setTimeSlotsError("");
+							onSave({
+							  ...form,
+							  deloadings: form.noDeloading ? [] : deloadRows,
+							});
 	                    	  }}
                       className={cls(
                         "inline-flex h-9 items-center justify-center rounded-2xl px-4 text-sm font-medium text-white shadow active:translate-y-[0.5px]",
@@ -1336,10 +1546,18 @@ function EditForm({
                         onChange={(v) => {
                           const nextCampus = autoCampusFor(v);
                           setForm({ ...form, delivery: v, campus: nextCampus });
+						  clearFieldError("delivery");
                         }}
                         options={OPT.delivery}
                         placeholder="— Select Delivery Mode —"
+						error={!!fieldErrors.delivery}
                       />
+					  {fieldErrors.delivery && (
+						<div className="mt-2 flex items-start gap-2 rounded-md border border-red-200 bg-red-50 p-2 text-[13px] text-red-800">
+							<AlertTriangle className="mt-0.5 h-4 w-4" />
+							<span>{fieldErrors.delivery}</span>
+						</div>
+					  )}
                     </div>
                     {form.delivery && (
                       <div>
@@ -1390,6 +1608,12 @@ function EditForm({
         ))}
       </div>
     </div>
+	{fieldErrors.days && (
+		<div className="mt-2 flex items-start gap-2 rounded-md border border-red-200 bg-red-50 p-2 text-[13px] text-red-800">
+			<AlertTriangle className="mt-0.5 h-4 w-4" />
+			<span>{fieldErrors.days}</span>
+		</div>
+	)}
   </div>
 
   {/* RIGHT: Preferred Time Slots */}
@@ -1420,13 +1644,59 @@ function EditForm({
 
                   {/* KAC */}
                   <div>
+                    {/* KAC format notice + links */}
+                    <div className="mb-3 rounded-2xl border border-emerald-200 bg-emerald-50/60 p-4">
+                      <div className="flex items-start gap-2">
+                        <Info className="mt-0.5 h-4 w-4 text-emerald-700" />
+                        <div className="space-y-2">
+                          <p className="text-[14px] text-emerald-900">
+                            We will now be observing the Knowledge Area Clusters (KAC) format moving forward. Thus, we
+                            can assign you to any of the courses that belong to a certain KAC. For the latest mapping,
+                            please check the following:
+                          </p>
+                          <ul className="list-disc space-y-1 pl-5 text-[14px]">
+                            <li>
+                              <a
+                                href="https://docs.google.com/spreadsheets/d/1g5IwjyfNWyWzlOM7d34-BUw3NpeMz71o/edit?usp=sharing&ouid=111791041834976052314&rtpof=true&sd=true"
+                                target="_blank"
+                                rel="noreferrer"
+                                className="font-medium text-emerald-800 underline decoration-emerald-400 underline-offset-2 hover:decoration-emerald-700"
+                              >
+                                Computer Science and Data Science KACs
+                              </a>
+                            </li>
+                            <li>
+                              <a
+                                href="https://docs.google.com/spreadsheets/d/1wtXpLMb9Gw9qQLB_P9xE9_BeqG_t4OCA/edit?usp=sharing&ouid=111791041834976052314&rtpof=true&sd=true"
+                                target="_blank"
+                                rel="noreferrer"
+                                className="font-medium text-emerald-800 underline decoration-emerald-400 underline-offset-2 hover:decoration-emerald-700"
+                              >
+                                Interactive Entertainment KACs
+                              </a>
+                            </li>
+                          </ul>
+                        </div>
+                      </div>
+                    </div>
+
                     <FieldLabel required>Knowledge Area Cluster (KAC)</FieldLabel>
                     <MultiSelectDropdown
                       values={form.kac as string[]}
-                      onChange={(v) => setForm({ ...form, kac: v })}
+                      onChange={(v) => {
+						  setForm({ ...form, kac: v });
+						  if (v && v.length > 0) clearFieldError("kac");
+						}}
                       options={kacDisplayOptions}
                       placeholder="— Select KAC —"
+						error={!!fieldErrors.kac}
                     />
+					{fieldErrors.kac && (
+						<div className="mt-2 flex items-start gap-2 rounded-md border border-red-200 bg-red-50 p-2 text-[13px] text-red-800">
+							<AlertTriangle className="mt-0.5 h-4 w-4" />
+							<span>{fieldErrors.kac}</span>
+						</div>
+					)}
                   </div>
 
                   {/* Deloading */}
@@ -1609,19 +1879,12 @@ function EditForm({
                     <button
                       disabled={deadlinePassed}
 	                      onClick={() => {
-	                        const v = validate();
-	                        if (!v.ok) {
-	                          // Only show field-level validation for Preferred Time Slots minimum selection
-	                          setTimeSlotsError(
-	                            v.msg === "Please select at least 3 Preferred Time Slots." ? v.msg : ""
-	                          );
-	                          return;
-	                        }
-	                        setTimeSlotsError("");
-	                        onSave({
-	                          ...form,
-	                          deloadings: form.noDeloading ? [] : deloadRows,
-	                        });
+							if (!validateAndSetWarnings()) return;
+							setTimeSlotsError("");
+							onSave({
+							  ...form,
+							  deloadings: form.noDeloading ? [] : deloadRows,
+							});
 	                      }}
                       className={cls(
                         "inline-flex h-9 items-center justify-center rounded-2xl px-4 text-sm font-medium text-white shadow active:translate-y-[0.5px]",
@@ -1834,17 +2097,12 @@ useEffect(() => {
     return hit?.kac_id || name;
   };
 
-  // convert YYYY-MM-DD -> MM/DD/YYYY for backend storage
-  const dateISOToMDY = (iso: string) => {
-    if (!iso) return "";
-    const [yy, mm, dd] = iso.split("-");
-    return `${mm}/${dd}/${yy}`;
-  };
-
   const toServerPayload = (v: SavedPrefs, finished: boolean) => {
     const ZERO_LOAD_LABEL = "0.0 units - no teaching load (for full-time only)";
     const onBreak = v.prefUnits === TEACHING_BREAK;
     const isZeroTeachingLoad = v.prefUnits === ZERO_LOAD_LABEL;
+
+    const isLeaveLocal = onBreak && v.noDeloading;
 
     const preferredUnits =
       onBreak || isZeroTeachingLoad ? 0 : parseUnits(v.prefUnits) ?? 0;
@@ -1883,9 +2141,9 @@ useEffect(() => {
       is_finished: finished,
 
       on_break: onBreak,
-      break_reason: onBreak ? v.breakReason : "",
-      break_return_term_id: onBreak ? v.breakReturnTermId : "", // UPDATED: Send Term ID
-      break_return_date: onBreak ? dateISOToMDY(v.breakReturnDate) : "", // Legacy support, can be empty or calculated
+      break_reason: isLeaveLocal ? v.breakReason : "",
+      // return date is now an expected date selected by the faculty (YYYY-MM-DD)
+      break_return_date: isLeaveLocal ? v.breakReturnDate : "",
       employment_type: employmentType,
     } as const;
   };
@@ -1941,12 +2199,7 @@ useEffect(() => {
 
   /* -------------------- SAVED VIEW -------------------- */
   
-  // Helper to display return label in saved view
-  const savedReturnTermLabel = (() => {
-    if (!saved.breakReturnTermId) return "";
-    const found = futureTerms.find(t => t.term_id === saved.breakReturnTermId);
-    return found ? found.label : "";
-  })();
+  const savedReturnDateLabel = saved.breakReturnDate || "";
 
   return (
     <section className="mx-auto w-full max-w-screen-2xl px-4">
@@ -1989,16 +2242,16 @@ useEffect(() => {
               value={<Tag tone="gray">{saved.prefUnits || "—"}</Tag>}
             />
             
-            {/* UPDATED: Display break details */}
-            {saved.onBreak && (
+            {/* Display leave details only when teaching break is treated as leave (no deloading) */}
+            {saved.onBreak && saved.noDeloading && (
               <>
                 <Row
                   label="Break Reason"
                   value={<span className="text-neutral-900">{saved.breakReason}</span>}
                 />
                 <Row
-                  label="Return Term"
-                  value={<span className="text-neutral-900">{savedReturnTermLabel || saved.breakReturnTermId || "—"}</span>}
+                  label="Expected date of Return"
+                  value={<span className="text-neutral-900">{savedReturnDateLabel || "—"}</span>}
                 />
               </>
             )}
