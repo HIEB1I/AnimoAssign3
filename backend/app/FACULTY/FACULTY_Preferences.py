@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, date
 import re
 
 from fastapi import APIRouter, Body, HTTPException, Query, Request
@@ -57,10 +57,11 @@ class SubmitPayload(BaseModel):
     # harmless extras supported by UI
     on_break: Optional[bool] = None
     break_reason: Optional[str] = None
-    
-    # UPDATED: Expecting a term ID now instead of just a date string
+
+    # Legacy support: older clients may still send a return term id.
+    # Current UI uses break_return_date as "Expected date of Return".
     break_return_term_id: Optional[str] = None
-    # Legacy field support (optional - ignored in logic below favor of term_id)
+    # Expected date of return (YYYY-MM-DD). Legacy clients may send MM/DD/YYYY.
     break_return_date: Optional[str] = None
 
     employment_type: Optional[str] = None 
@@ -753,52 +754,75 @@ async def preferences_root(
       on_break_flag = bool(payload.get("on_break", False))
       
       # --- UPDATED LEAVES LOGIC ---
-      if on_break_flag:
+      is_leave = bool(on_break_flag and len(deload_items) == 0)
+      if is_leave:
           break_reason = str(payload.get("break_reason") or "").strip()
-          break_return_term_id = str(payload.get("break_return_term_id") or "").strip()
-          
+          raw_return_date = str(payload.get("break_return_date") or "").strip()
+          legacy_end_term_id = str(payload.get("break_return_term_id") or "").strip()
+
           if not break_reason:
               raise HTTPException(status_code=400, detail="Break reason is required.")
-          if not break_return_term_id:
-              raise HTTPException(status_code=400, detail="Academic Year and Term of return is required.")
+          if not raw_return_date:
+              raise HTTPException(status_code=400, detail="Expected date of Return is required.")
 
-          # Fetch the return term doc to get its start date for legacy support
-          return_term_doc = await db[COL_TERMS].find_one({"term_id": break_return_term_id})
-          # Fallback date string if term not found
-          return_date_str = ""
-          if return_term_doc:
-              # Format date as needed, e.g., stringify ISO or MM/DD/YYYY depending on legacy needs
-              # Assuming standard ISO string or datetime for now
-              if return_term_doc.get("start_date"):
-                  return_date_str = str(return_term_doc["start_date"]).split(" ")[0]
+          # Validate and normalize to ISO (YYYY-MM-DD)
+          return_date_iso = ""
+          try:
+              # ISO (from <input type="date">)
+              if re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw_return_date):
+                  dt = datetime.strptime(raw_return_date, "%Y-%m-%d")
+                  return_date_iso = dt.strftime("%Y-%m-%d")
+              # legacy MM/DD/YYYY
+              elif re.fullmatch(r"\d{2}/\d{2}/\d{4}", raw_return_date):
+                  dt = datetime.strptime(raw_return_date, "%m/%d/%Y")
+                  return_date_iso = dt.strftime("%Y-%m-%d")
+              else:
+                  raise ValueError("invalid format")
+          except Exception:
+              raise HTTPException(status_code=400, detail="Expected date of Return must be a valid date.")
+
+
+          # Return date must not be before the current date (UI requirement)
+          try:
+              if dt.date() < date.today():
+                  raise HTTPException(
+                      status_code=400,
+                      detail="Expected date of Return cannot be before the current date.",
+                  )
+          except HTTPException:
+              raise
+          except Exception:
+              raise HTTPException(status_code=400, detail="Expected date of Return must be a valid date.")
 
           # Upsert into leaves
           existing_leave = await db[COL_LEAVES].find_one(
               {"faculty_id": faculty_id, "start_term_id": term_id}
           )
           leave_id = (existing_leave or {}).get("leave_id") or await _next_leave_id()
-          
+
           leave_doc = {
               "leave_id": leave_id,
               "faculty_id": faculty_id,
-              "approval_status": "APPROVED", 
-              "is_active": True, 
+              "approval_status": "APPROVED",
+              "is_active": True,
               "start_term_id": term_id,
-              "end_term_id": break_return_term_id, # UPDATED: Save term ID
+              # kept for backward compatibility with reports (may be empty when return is date-based)
+              "end_term_id": legacy_end_term_id,
               "reason": break_reason,
-              "return_date": return_date_str, # Auto-filled based on term start date
+              # NEW: save the expected date of return
+              "return_date": return_date_iso,
               "created_at": _utcnow(),
-              "updated_at": _utcnow()
+              "updated_at": _utcnow(),
           }
-          
+
           await db[COL_LEAVES].update_one(
               {"faculty_id": faculty_id, "start_term_id": term_id},
               {"$set": leave_doc},
-              upsert=True
+              upsert=True,
           )
-          
+
           # Clear break details from the payload destined for faculty_preferences
-          payload_break_reason = "" 
+          payload_break_reason = ""
           payload_break_return_date = ""
       else:
           payload_break_reason = ""

@@ -339,7 +339,7 @@ async def course_management(
             "let": {"uids": {"$map": {"input": "$_qual_fps", "as": "fp", "in": "$$fp.user_id"}}},
             "pipeline": [
                 {"$match": {"$expr": {"$in": ["$user_id", "$$uids"]}}},
-                {"$project": {"_id": 0, "first_name": 1, "last_name": 1}},
+                {"$project": {"_id": 0, "first_name": 1, "last_name": 1, "email": 1}},
                 {"$sort": {"last_name": 1, "first_name": 1}}
             ],
             "as": "_qual_users"
@@ -351,10 +351,13 @@ async def course_management(
                 "$map": {
                     "input": "$_qual_users",
                     "as": "u",
-                    "in": {"$trim": {"input": {"$concat": [
-                        {"$ifNull": ["$$u.first_name", ""]}, " ",
-                        {"$ifNull": ["$$u.last_name",  ""]}
-                    ]}}}
+                    "in": {
+                        "name": {"$trim": {"input": {"$concat": [
+                            {"$ifNull": ["$$u.first_name", ""]}, " ",
+                            {"$ifNull": ["$$u.last_name",  ""]}
+                        ]}}},
+                        "email": {"$ifNull": ["$$u.email", ""]}
+                    }
                 }
             }
         }},
@@ -403,8 +406,8 @@ async def course_management(
             {"course_title": {"$regex": s, "$options": "i"}},
             {"coordinator_name": {"$regex": s, "$options": "i"}},
             {"kac_label": {"$regex": s, "$options": "i"}},
-            # Teaching Composition (array of faculty names)
-            {"composition": {"$elemMatch": {"$regex": s, "$options": "i"}}},
+            # Teaching Composition (array of objects: {name, email})
+            {"composition": {"$elemMatch": {"name": {"$regex": s, "$options": "i"}}}},
         ]}})
 
     pipeline.extend([
