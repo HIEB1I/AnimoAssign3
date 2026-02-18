@@ -375,6 +375,17 @@ async def _get_type_id(db, type_label: str) -> str | None:
   return (doc or {}).get("deloadingtype_id")
 
 
+async def _get_type_label(db, type_id: str) -> str:
+  """Resolve a deloading type label from its deloadingtype_id."""
+  if not type_id:
+      return ""
+  doc = await db.deloading_types.find_one(
+      {"deloadingtype_id": type_id},
+      {"_id": 0, "type": 1},
+  ) or {}
+  return str(doc.get("type") or "")
+
+
 async def _sync_deloadings(db, faculty_id: str, term_id: str, items: list[dict]) -> list[dict]:
   now = datetime.now(timezone.utc)
   normalized = []
@@ -473,6 +484,54 @@ async def _enrich_pref(doc: Dict[str, Any]) -> Dict[str, Any]:
   if not doc:
       return doc
   out = {**doc}
+
+  # ------------------------------
+  # Deloadings
+  #
+  # IMPORTANT: deloadings are stored in the dedicated `deloadings` table.
+  # Preferences must NOT be the source of truth for deloading data.
+  # We hydrate `deloading_data` at read-time for UI compatibility.
+  # ------------------------------
+  try:
+      faculty_id = out.get("faculty_id")
+      term_id = out.get("term_id")
+      if faculty_id and term_id:
+          drows = await db.deloadings.find(
+              {"faculty_id": faculty_id, "term_id": term_id},
+              {"_id": 0, "type_id": 1, "units_deloaded": 1, "notes": 1},
+          ).to_list(length=9999)
+
+          # Resolve distinct type labels in one pass
+          type_ids = list({(r.get("type_id") or "").strip() for r in (drows or []) if (r.get("type_id") or "").strip()})
+          type_map: Dict[str, str] = {}
+          if type_ids:
+              tdocs = await db.deloading_types.find(
+                  {"deloadingtype_id": {"$in": type_ids}},
+                  {"_id": 0, "deloadingtype_id": 1, "type": 1},
+              ).to_list(length=9999)
+              for t in tdocs or []:
+                  tid = (t.get("deloadingtype_id") or "").strip()
+                  if tid:
+                      type_map[tid] = str(t.get("type") or "")
+
+          hydrated: List[Dict[str, Any]] = []
+          for r in drows or []:
+              tid = (r.get("type_id") or "").strip()
+              label = type_map.get(tid) or (await _get_type_label(db, tid))
+              if not label:
+                  # If type is missing, skip to avoid confusing UI.
+                  continue
+              hydrated.append({
+                  "deloading_type": label,
+                  "units": float(r.get("units_deloaded") or 0),
+                  "detail": str(r.get("notes") or ""),
+              })
+          out["deloading_data"] = hydrated
+      else:
+          out["deloading_data"] = []
+  except Exception:
+      # best-effort hydration only; never block preferences fetch
+      out["deloading_data"] = out.get("deloading_data") or []
   
   # If on_break is True, we need to fetch details from 'leaves' table
   if out.get("on_break"):
@@ -852,7 +911,6 @@ async def preferences_root(
           "availability_days": availability_days,
           "preferred_times": preferred_times,
           "preferred_kacs": preferred_kacs,
-          "deloading_data": summary_deloading_data,
           "mode": mode,
           "notes": str(payload.get("notes") or ""),
           "has_new_prep": bool(payload.get("has_new_prep", False)),
@@ -873,6 +931,9 @@ async def preferences_root(
               {"faculty_id": faculty_id, "term_id": term_id},
               {
                   "$set": doc_set,
+                  # Ensure we do NOT persist deloadings in preferences.
+                  # Deloadings are stored in the dedicated `deloadings` table.
+                  "$unset": {"deloading_data": ""},
                   "$setOnInsert": {
                       "created_at": _utcnow(),
                       "pref_id": pref_id,
@@ -890,6 +951,10 @@ async def preferences_root(
 
           saved = await _enrich_pref(saved)
           saved = await _expand_kac_names(saved)
+
+          # Ensure the response includes the deloadings summary (for UI).
+          # This keeps the UI behavior intact while enforcing correct storage.
+          saved["deloading_data"] = summary_deloading_data
 
           # ------------------------------
           # Notify OM: Faculty Preference Submitted (best-effort; do not block submit)

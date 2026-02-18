@@ -59,6 +59,7 @@ import APO_Inbox from "./pages/APO/APO_Inbox";
 
 // ---------------- CHAIR ----------------
 import CHAIR_Plantilla from "./pages/CHAIR/CHAIR_Plantilla";
+import CHAIR_LoadAssignment from "./pages/CHAIR/CHAIR_LoadAssignment";
 import CHAIR_FacultyManagement from "./pages/CHAIR/CHAIR_FacultyManagement";
 import CHAIR_CourseManagement from "./pages/CHAIR/CHAIR_CourseManagement";
 import CHAIR_FacultyService from "./pages/CHAIR/CHAIR_FacultyService";
@@ -208,6 +209,9 @@ export default function App() {
             {/* Parent landing */}
             <Route index element={<div />} />
             <Route path="plantilla" element={<div />} />
+
+            {/* CHAIR Load Assignment should render inside the CHAIR AppShell (sidebar/topbar) */}
+            <Route path="load-assignment" element={<CHAIR_LoadAssignment />} />
 
             {/* Children per mapping */}
             <Route path="inbox" element={<CHAIR_Inbox />} /> 

@@ -273,6 +273,7 @@ async def chair_plantilla_get(
     if action == "options":
         return {"ok": True, "buttons": [
             {"label": "Plantilla", "to": "/chair/plantilla"},
+            {"label": "Load Assignment", "to": "/chair/load-assignment"},
             {"label": "Faculty Directory", "to": "/chair/faculty-management"},
             {"label": "Course Management", "to": "/chair/course-management"},
             {"label": "Faculty Service", "to": "/chair/faculty-service"},
