@@ -15,6 +15,22 @@ import base64
 from email.message import EmailMessage
 import httpx
 
+from datetime import timedelta
+try:
+    from zoneinfo import ZoneInfo
+except Exception:
+    ZoneInfo = None  # fallback to UTC if zoneinfo isn't available
+
+_GCAL_EVENTS_INSERT_URL = "https://calendar.googleapis.com/calendar/v3/calendars/primary/events"
+_DEFAULT_TZ = (os.getenv("ANIMOASSIGN_TZ") or "Asia/Manila").strip()
+_TERM_WEEK_COUNT = int(os.getenv("TERM_WEEK_COUNT") or "12")
+
+_WEEKDAY_IDX = {
+    "Monday": 0, "Tuesday": 1, "Wednesday": 2, "Thursday": 3,
+    "Friday": 4, "Saturday": 5, "Sunday": 6,
+}
+
+
 _GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 _GMAIL_SEND_URL = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send"
 # RFC email recipient fallback.
@@ -301,6 +317,192 @@ async def _send_email_via_user_gmail(
         return True, None
     return False, r2.text
 
+
+def _pick_tzinfo():
+    if ZoneInfo:
+        try:
+            return ZoneInfo(_DEFAULT_TZ)
+        except Exception:
+            return timezone.utc
+    return timezone.utc
+
+def _parse_time_band_to_hm(band: str):
+    """
+    Accepts: "07:30 – 09:00", "07:30-09:00", etc.
+    Returns: ((h1,m1),(h2,m2)) or None
+    """
+    if not band:
+        return None
+    s = band.strip()
+    if not s or "TBA" in s.upper():
+        return None
+
+    s = s.replace("–", "-").replace("—", "-")
+    parts = [p.strip() for p in s.split("-") if p.strip()]
+    if len(parts) != 2:
+        return None
+
+    def _one(t: str):
+        m = re.search(r"(\d{1,2}):(\d{2})", t)
+        if m:
+            return int(m.group(1)), int(m.group(2))
+        digits = re.sub(r"\D", "", t)
+        if len(digits) == 3:
+            return int(digits[0]), int(digits[1:])
+        if len(digits) == 4:
+            return int(digits[:2]), int(digits[2:])
+        return None
+
+    a = _one(parts[0])
+    b = _one(parts[1])
+    if not a or not b:
+        return None
+    return a, b
+
+def _first_date_on_or_after(start_date, target_weekday: int):
+    # start_date is a date() in local tz
+    delta = (target_weekday - start_date.weekday()) % 7
+    return start_date + timedelta(days=delta)
+
+async def _insert_gcal_event(token: str, event_body: Dict[str, Any]) -> httpx.Response:
+    headers = {"Authorization": f"Bearer {token}"}
+    async with httpx.AsyncClient(timeout=25) as client:
+        return await client.post(_GCAL_EVENTS_INSERT_URL, headers=headers, json=event_body)
+
+async def _create_term_calendar_for_user(
+    *,
+    user_id: str,
+    term_start_at: datetime,
+    rows: List[Dict[str, Any]],
+    week_count: int = _TERM_WEEK_COUNT,
+) -> Tuple[bool, int, Optional[str]]:
+    """
+    Creates weekly recurring events (COUNT=week_count) starting from the week of term_start_at.
+    Returns (ok, events_created, error)
+    """
+    user = await db["users"].find_one({"user_id": user_id}, {"_id": 0, "google_token": 1})
+    if not user:
+        return False, 0, "User not found."
+
+    gt = user.get("google_token") or {}
+    access_token = (gt.get("access_token") or "").strip()
+    refresh_token = (gt.get("refresh_token") or "").strip()
+
+    if not access_token and not refresh_token:
+        return False, 0, "No Google token. User must login with Google (calendar.events scope)."
+
+    tzinfo = _pick_tzinfo()
+    term_start_local_date = _coerce_dt(term_start_at).astimezone(tzinfo).date()
+
+    created = 0
+
+    async def _ensure_token_and_retry(event_body: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
+        nonlocal access_token
+
+        # try current access token first
+        if access_token:
+            r = await _insert_gcal_event(access_token, event_body)
+            if r.status_code < 400:
+                return True, None
+            if r.status_code != 401:
+                return False, r.text
+
+        # refresh if possible
+        if not refresh_token:
+            return False, "Access token expired and no refresh_token available. Reconnect Google."
+
+        tokens = await _refresh_access_token(refresh_token)
+        new_access = (tokens.get("access_token") or "").strip()
+        if not new_access:
+            return False, "Failed to refresh Google access token."
+
+        access_token = new_access
+        await db["users"].update_one(
+            {"user_id": user_id},
+            {"$set": {
+                "google_token.access_token": new_access,
+                "google_token.updated_at": _now_utc(),
+                "google_token.expires_in": tokens.get("expires_in"),
+                "google_token.scope": tokens.get("scope"),
+            }},
+        )
+
+        r2 = await _insert_gcal_event(new_access, event_body)
+        if r2.status_code < 400:
+            return True, None
+        return False, r2.text
+
+    def _make_event(*, course_code: str, section: str, day_full: str, time_band: str, room: str, mode: str):
+        hm = _parse_time_band_to_hm(time_band)
+        if not hm:
+            return None
+
+        (sh, sm), (eh, em) = hm
+        day_full = _to_full_day(day_full)
+        wd = _WEEKDAY_IDX.get(day_full)
+        if wd is None:
+            return None
+
+        first_date = _first_date_on_or_after(term_start_local_date, wd)
+
+        start_dt = datetime(first_date.year, first_date.month, first_date.day, sh, sm, tzinfo=tzinfo)
+        end_dt = datetime(first_date.year, first_date.month, first_date.day, eh, em, tzinfo=tzinfo)
+
+        title = f"{(course_code or '').strip()} {(section or '').strip()}".strip() or "Class"
+        location = (room or "").strip() or "Online"
+        desc = (
+            f"Mode: {(mode or '').strip()}\n"
+            f"Created by AnimoAssign upon schedule acceptance.\n"
+            f"Login: {_aa_login_link()}"
+        )
+
+        return {
+            "summary": title,
+            "location": location,
+            "description": desc,
+            "start": {"dateTime": start_dt.isoformat(), "timeZone": _DEFAULT_TZ},
+            "end": {"dateTime": end_dt.isoformat(), "timeZone": _DEFAULT_TZ},
+            "recurrence": [f"RRULE:FREQ=WEEKLY;COUNT={int(week_count)}"],
+        }
+
+    for rr in rows or []:
+        course_code = rr.get("course_code") or rr.get("course") or ""
+        section = rr.get("section") or ""
+        mode = rr.get("mode") or ""
+        # Meeting 1
+        ev1 = _make_event(
+            course_code=course_code,
+            section=section,
+            day_full=rr.get("day1") or "",
+            time_band=rr.get("time1") or "",
+            room=rr.get("room1") or "Online",
+            mode=mode,
+        )
+        if ev1:
+            ok1, err1 = await _ensure_token_and_retry(ev1)
+            if ok1:
+                created += 1
+            else:
+                # don't stop everything; just return the first hard error
+                return False, created, err1
+
+        # Meeting 2 (optional)
+        ev2 = _make_event(
+            course_code=course_code,
+            section=section,
+            day_full=rr.get("day2") or "",
+            time_band=rr.get("time2") or "",
+            room=rr.get("room2") or rr.get("room1") or "Online",
+            mode=mode,
+        )
+        if ev2:
+            ok2, err2 = await _ensure_token_and_retry(ev2)
+            if ok2:
+                created += 1
+            else:
+                return False, created, err2
+
+    return True, created, None
 
 
 RFC_TERMINAL = {"ACCEPTED", "APPROVED", "REJECTED"}
@@ -2234,4 +2436,41 @@ async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[s
         )
 
     # Keep old shape + add email fields (won't break existing callers)
-    return {"ok": True, "status": "ACCEPTED", "email_sent": email_sent, "email_error": email_error}
+  # --- NEW: create Google Calendar events (best-effort, non-blocking) ---
+    calendar_ok = False
+    calendar_error: Optional[str] = None
+    calendar_events_created = 0
+
+    # Fetch start_at for THIS term_id
+    term_doc_full = await db[COL_TERMS].find_one(
+        {"term_id": term_id},
+        {"_id": 0, "start_at": 1, "acad_year_start": 1, "term_number": 1},
+    ) or {}
+
+    term_start_at = _coerce_dt(term_doc_full.get("start_at"))
+    if term_start_at:
+        try:
+            calendar_ok, calendar_events_created, calendar_error = await _create_term_calendar_for_user(
+                user_id=userId,
+                term_start_at=term_start_at,
+                rows=proposal_rows,
+                week_count=_TERM_WEEK_COUNT,
+            )
+        except Exception as e:
+            calendar_ok = False
+            calendar_error = str(e)
+    else:
+        calendar_ok = False
+        calendar_error = "Term has no start_at; cannot create calendar events."
+
+    return {
+        "ok": True,
+        "status": "ACCEPTED",
+        "email_sent": email_sent,
+        "email_error": email_error,
+        "calendar_ok": calendar_ok,
+        "calendar_events_created": calendar_events_created,
+        "calendar_error": calendar_error,
+        "term_start_at": (term_start_at.isoformat() if term_start_at else None),
+        "week_count": _TERM_WEEK_COUNT,
+    }
