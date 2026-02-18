@@ -648,7 +648,7 @@ export default function CHAIR_FacultyManagement() {
           <thead className="bg-gray-50 border-b text-gray-700">
             <tr>
               <th className="text-left px-4 py-2">Faculty</th>
-              <th className="text-left px-4 py-2">Department</th>
+              <th className="text-center px-4 py-2">Department</th>
               <th className="text-left px-4 py-2">Position</th>
               <th className="text-center px-4 py-2">Teaching Units</th>
               <th className="text-center px-4 py-2">Faculty Type</th>
@@ -668,7 +668,7 @@ export default function CHAIR_FacultyManagement() {
                     {r.name}
                     <div className="text-xs text-gray-500">{r.email}</div>
                   </td>
-                  <td className="px-4 py-3">{r.department}</td>
+                  <td className="text-center">{r.department}</td>
                   <td className="px-4 py-3">{r.position || "—"}</td>
                   <td className="text-center">{r.teaching_units}</td>
                   <td className="text-center">{r.faculty_type}</td>
