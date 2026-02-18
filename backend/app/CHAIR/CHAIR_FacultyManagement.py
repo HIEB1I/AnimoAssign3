@@ -22,6 +22,10 @@ COL_COURSES = "courses"
 COL_PREEN_COUNT = "preenlistment_count"
 COL_CAMPUSES = "campuses"
 
+# Deloading collections (shared with OM Load Assignment)
+COL_DELOADINGS = "deloadings"
+COL_DELOADING_TYPES = "deloading_types"
+
 WEEKDAY_ORDER = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
 
 # ---------- Day / time helpers ----------
@@ -199,23 +203,6 @@ def _coerce_int(val: Any) -> Optional[int]:
         return int(val)
     except (TypeError, ValueError):
         return None
-
-def _validate_dlsu_email(email: str) -> bool:
-    if not email:
-        return False
-    s = email.strip()
-    at_index = s.rfind("@")
-    if at_index <= 0:
-        return False
-    local = s[:at_index]
-    domain = s[at_index + 1 :]
-    if domain.lower() != "dlsu.edu.ph":
-        return False
-    if "." not in local or " " in local:
-        return False
-    if not re.match(r"^[^@\s]+@dlsu\.edu\.ph$", s, flags=re.IGNORECASE):
-        return False
-    return True
 
 # ---------- Expression helpers ----------
 def _dept_name_expr():
@@ -440,6 +427,127 @@ async def facultymanagement_handler(
             "academicYears": ay_list, # Now reflects all years from assignments
             "activeTerm": active_term_obj,
         }
+
+    # ----- DELOADING (VIEW + UPDATE) -----
+    # Used by the Edit Faculty Details modal to show the faculty's deloading for the active term.
+    if action == "deloading_get":
+        if not facultyId:
+            raise HTTPException(status_code=400, detail="facultyId is required.")
+
+        active = await _active_term()
+        term_id = (termId or "").strip() or (active or {}).get("term_id")
+        if not term_id:
+            return {"ok": True, "term_id": None, "faculty_id": facultyId, "current": None, "types": []}
+
+        # Types (normalize id field)
+        types_docs = [
+            t async for t in db[COL_DELOADING_TYPES].find(
+                {}, {"_id": 0, "type_id": 1, "deloadingtype_id": 1, "type": 1}
+            ).sort([("type", 1)])
+        ]
+        types = [
+            {
+                "type_id": (t.get("type_id") or t.get("deloadingtype_id") or "").strip(),
+                "type": (t.get("type") or "").strip(),
+            }
+            for t in (types_docs or [])
+            if (t.get("type_id") or t.get("deloadingtype_id")) and (t.get("type") or "").strip()
+        ]
+
+        # Current deloading: use most recently updated record for the term.
+        dl_list = await db[COL_DELOADINGS].find(
+            {"term_id": term_id, "faculty_id": facultyId},
+            {"_id": 0, "type_id": 1, "units_deloaded": 1, "notes": 1, "deloading_notes": 1, "updated_at": 1},
+        ).sort([("updated_at", -1), ("_id", -1)]).to_list(1)
+        d = (dl_list or [None])[0]
+        current = None
+        if d:
+            type_id_val = (d.get("type_id") or "").strip() if d.get("type_id") else None
+            dt = None
+            if type_id_val:
+                dt = await db[COL_DELOADING_TYPES].find_one(
+                    {"$or": [{"type_id": type_id_val}, {"deloadingtype_id": type_id_val}]},
+                    {"_id": 0, "type": 1},
+                )
+            current = {
+                "type_id": type_id_val,
+                "deloading_type": (dt or {}).get("type"),
+                "units_deloaded": d.get("units_deloaded"),
+                "notes": (d.get("notes") or d.get("deloading_notes") or "").strip() or None,
+                "term_id": term_id,
+                "updated_at": d.get("updated_at"),
+            }
+
+        return {"ok": True, "term_id": term_id, "faculty_id": facultyId, "current": current, "types": types}
+
+    if action == "deloading_update":
+        if not facultyId:
+            raise HTTPException(status_code=400, detail="facultyId is required.")
+
+        active = await _active_term()
+        term_id = (termId or "").strip() or (active or {}).get("term_id")
+        if not term_id:
+            return {"ok": True, "term_id": None, "faculty_id": facultyId}
+
+        type_id = payload.get("type_id")
+        if type_id is not None:
+            type_id = str(type_id).strip()
+            if not type_id:
+                type_id = None
+
+        units_val = payload.get("units_deloaded")
+        units_deloaded: Optional[float] = None
+        if units_val is not None:
+            try:
+                # allow clearing by sending null/""
+                if str(units_val).strip() == "":
+                    units_deloaded = None
+                else:
+                    units_deloaded = float(units_val)
+                    if units_deloaded < 0:
+                        raise ValueError("units_deloaded must be >= 0")
+            except Exception:
+                raise HTTPException(status_code=422, detail="Invalid units_deloaded.")
+
+        # Find most recent record for the term.
+        existing_list = await db[COL_DELOADINGS].find(
+            {"term_id": term_id, "faculty_id": facultyId},
+            {"_id": 1},
+        ).sort([("updated_at", -1), ("_id", -1)]).to_list(1)
+        existing = (existing_list or [None])[0]
+
+        now = datetime.now(timezone.utc)
+        set_fields: Dict[str, Any] = {"updated_at": now}
+        unset_fields: Dict[str, Any] = {}
+
+        if type_id is not None:
+            set_fields["type_id"] = type_id
+        elif payload.get("type_id") is not None:
+            # explicit clear
+            unset_fields["type_id"] = ""
+
+        if units_val is not None:
+            if units_deloaded is None:
+                unset_fields["units_deloaded"] = ""
+            else:
+                set_fields["units_deloaded"] = units_deloaded
+
+        if existing:
+            update_doc: Dict[str, Any] = {"$set": set_fields}
+            if unset_fields:
+                update_doc["$unset"] = unset_fields
+            await db[COL_DELOADINGS].update_one({"_id": existing["_id"]}, update_doc)
+        else:
+            # If nothing is being set other than updated_at, don't create a new record.
+            doc: Dict[str, Any] = {"term_id": term_id, "faculty_id": facultyId, "updated_at": now}
+            if type_id is not None:
+                doc["type_id"] = type_id
+            if units_val is not None and units_deloaded is not None:
+                doc["units_deloaded"] = units_deloaded
+            if len(doc.keys()) > 3:
+                await db[COL_DELOADINGS].insert_one(doc)
+
+        return {"ok": True, "term_id": term_id, "faculty_id": facultyId}
 
     # ----- LIST -----
     if action == "list":
@@ -828,8 +936,6 @@ async def facultymanagement_handler(
             raise HTTPException(status_code=400, detail="Required fields missing.")
         if employment_type not in {"FT", "PT"}:
             raise HTTPException(status_code=400, detail="Invalid employment type.")
-        if not _validate_dlsu_email(email):
-            raise HTTPException(status_code=422, detail="Email is not a valid DLSU account")
 
         existing = await db[COL_USERS].find_one({"email": email}, {"_id": 1})
         if existing:
@@ -904,8 +1010,6 @@ async def facultymanagement_handler(
         if "email" in payload:
             email = str(payload["email"]).strip().lower()
             if email:
-                if not _validate_dlsu_email(email):
-                    raise HTTPException(status_code=422, detail="Invalid email.")
                 exist = await db[COL_USERS].find_one({"email": email, "user_id": {"$ne": user_id}})
                 if exist: raise HTTPException(status_code=409, detail="Email already exists.")
                 user_update["email"] = email

@@ -327,18 +327,61 @@ async def _find_course_by_code(course_code: str, db) -> dict:
 
 
 async def _om_department_ids(user_id: str, db) -> List[str]:
-    """Departments this OM should see (from role_assignments.scope)."""
-    ra = await db.get_collection("role_assignments").find_one(
-        {"user_id": user_id, "role_id": "ROLE0006"},
-        {"_id": 0, "scope": 1},
-    ) or {}
+    """Departments this Load Assignment view should see.
+
+    OM Load Assignment endpoints were originally scoped to the OM role
+    (ROLE0006) via role_assignments.scope.
+
+    The CHAIR UI mirrors OM_LoadAssignment and reuses these endpoints; therefore
+    CHAIR users must also resolve to department scopes.
+
+    Supported role_ids:
+      - ROLE0006 (OM)
+      - ROLE0002 (CHAIR)
+
+    Fallback (best-effort): users.department_id / users.department_ids.
+    """
 
     dept_ids: List[str] = []
-    for sc in (ra.get("scope") or []):
-        if isinstance(sc, dict) and sc.get("type") == "department":
-            did = str(sc.get("id") or "").strip()
+
+    # Primary: role_assignments.scope
+    try:
+        ra_cur = db.get_collection("role_assignments").find(
+            {"user_id": user_id, "role_id": {"$in": ["ROLE0006", "ROLE0002"]}},
+            {"_id": 0, "scope": 1},
+        )
+        async for ra in ra_cur:
+            for sc in (ra.get("scope") or []):
+                if isinstance(sc, dict) and sc.get("type") == "department":
+                    did = str(sc.get("id") or "").strip()
+                    if did:
+                        dept_ids.append(did)
+    except Exception:
+        pass
+
+    # De-dup while preserving order
+    seen = set()
+    dept_ids = [d for d in dept_ids if not (d in seen or seen.add(d))]
+
+    # Fallback: users table (some deployments store department directly on user).
+    if not dept_ids:
+        try:
+            u = await db.get_collection(COL_USERS).find_one(
+                {"user_id": user_id},
+                {"_id": 0, "department_id": 1, "department_ids": 1},
+            ) or {}
+            did = str(u.get("department_id") or "").strip()
             if did:
                 dept_ids.append(did)
+            else:
+                dids = u.get("department_ids")
+                if isinstance(dids, list):
+                    for x in dids:
+                        sx = str(x or "").strip()
+                        if sx:
+                            dept_ids.append(sx)
+        except Exception:
+            pass
 
     return dept_ids
 

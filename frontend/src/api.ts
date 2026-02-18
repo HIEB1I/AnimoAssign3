@@ -3769,3 +3769,64 @@ export async function updateChairFacultyEntry(
   );
   return data as { ok: boolean };
 }
+
+// === CHAIR: FACULTY DELOADING (for Edit Faculty Details modal) ===
+
+export type ChairDeloadingType = { type_id: string; type: string };
+
+export type ChairFacultyDeloading = {
+  type_id?: string | null;
+  deloading_type?: string | null;
+  units_deloaded?: number | null;
+  notes?: string | null;
+  term_id?: string | null;
+  updated_at?: string | Date | null;
+};
+
+export async function getChairFacultyDeloading(params: {
+  facultyId: string;
+  termId?: string;
+}): Promise<{
+  ok: boolean;
+  term_id: string | null;
+  faculty_id: string;
+  current: ChairFacultyDeloading | null;
+  types: ChairDeloadingType[];
+}> {
+  const { facultyId, termId } = params;
+  const { data } = await axios.post(
+    `${API_BASE}/chair/facultymanagement`,
+    {},
+    { params: { action: "deloading_get", facultyId, termId } }
+  );
+  return {
+    ok: !!data?.ok,
+    term_id: data?.term_id ?? null,
+    faculty_id: String(data?.faculty_id ?? facultyId),
+    current: data?.current ?? null,
+    types: Array.isArray(data?.types) ? data.types : [],
+  };
+}
+
+export async function updateChairFacultyDeloading(params: {
+  facultyId: string;
+  termId?: string;
+  type_id?: string | null;
+  units_deloaded?: number | null;
+}): Promise<{ ok: boolean; term_id: string | null; faculty_id: string }> {
+  const { facultyId, termId, type_id, units_deloaded } = params;
+  const payload: Record<string, any> = {};
+  if (type_id !== undefined) payload.type_id = type_id;
+  if (units_deloaded !== undefined) payload.units_deloaded = units_deloaded;
+
+  const { data } = await axios.post(
+    `${API_BASE}/chair/facultymanagement`,
+    payload,
+    { params: { action: "deloading_update", facultyId, termId } }
+  );
+  return {
+    ok: !!data?.ok,
+    term_id: data?.term_id ?? null,
+    faculty_id: String(data?.faculty_id ?? facultyId),
+  };
+}

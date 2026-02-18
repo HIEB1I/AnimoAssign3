@@ -2364,8 +2364,17 @@ function useToast() {
   return { toast, show, clear };
 }
 /* ---------------- Main ---------------- */
-export default function OM_LoadAssignment() {
+export type OMLoadAssignmentProps = {
+  /** Render without AppShell wrapper (for embedding inside another shell, e.g., CHAIR). */
+  embedded?: boolean;
+  /** Hide the "Forward to Chair" workflow (used by CHAIR mirror). */
+  hideForwardToChair?: boolean;
+};
+
+export default function OM_LoadAssignment(props: OMLoadAssignmentProps = {}) {
   const [copiedRowId, setCopiedRowId] = useState<string | null>(null);
+
+  const { embedded = false, hideForwardToChair = false } = props;
 
   const formatRowForClipboard = (row: Row) =>
     [
@@ -3296,9 +3305,13 @@ const [omDeadlinePassed, setOmDeadlinePassed] = useState<boolean>(false);
     })();
   }, []);
 
-  // Show the main Load Assignment content only on /om or /om/load-assignment
+  // Show the main Load Assignment content on OM routes, and also when embedded
+  // (e.g., CHAIR mirror at /chair/load-assignment).
   const loc = useLocation();
-  const isIndex = /^\/om(\/(load-assignment|home)(\/load-assignment)?)?$/.test(loc.pathname);
+  const isIndex =
+    embedded ||
+    /^\/om(\/(load-assignment|home)(\/load-assignment)?)?$/.test(loc.pathname) ||
+    /^\/chair\/load-assignment$/.test(loc.pathname);
 
   // === Inbox-as-tab behavior (mirrors Faculty) ===
   const [showInbox, setShowInbox] = useState(false);
@@ -5131,14 +5144,9 @@ const courseCodeToInfo = useMemo(() => {
 // (deadlineWindow + deadlineNow are used by the render-time countdown banner)
 
 
-  return (
-    <AppShell
-      // make TopBar’s Inbox icon open our OM Inbox-as-tab
-      topbarProfileName={profileName || " "}
-      topbarProfileSubtitle={profileSubtitle || " "}
-      // @ts-ignore
-      topbarInboxEvent="om:openInbox"
-    >
+    const content = (
+    <>
+
       {/* If Inbox is opened from the TopBar, show it like a tab */}
       {showInbox ? (
         <OMInboxContent />
@@ -5341,7 +5349,8 @@ const courseCodeToInfo = useMemo(() => {
                     <Send className="h-4 w-4" />
                     To Faculty
                   </button>
-                  <button
+                                    {!hideForwardToChair && (
+<button
                     // NOTE: `loading` is scoped to RequestChangeModal; use `isAssigning` + row states here.
                     disabled={!hasReco || isArchiveView || omDeadlinePassed || isAssigning}
                     className={cls(
@@ -5464,6 +5473,8 @@ const courseCodeToInfo = useMemo(() => {
                     <CheckCheck className="h-4 w-4" />
                     {approved ? "Forward to Chair" : "Forward to Chair"}
                   </button>
+                  )}
+
                 </div>
               </div>
               <div className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
@@ -6260,7 +6271,7 @@ const courseCodeToInfo = useMemo(() => {
                       title="Add new line"
                     >
                       <Plus className="h-4 w-4" />
-                      Add new line
+                      Add section
                     </button>
                   </div>
                   {/* Right: Auto-assign (Run algorithm) - REMOVED from bottom */}
@@ -7257,6 +7268,8 @@ const courseCodeToInfo = useMemo(() => {
         </div>
       )}
 
+      {!hideForwardToChair && (
+      <>
       {/* Re-forward review modal (APO-style change list) */}
       <ForwardReviewModal
         open={showForwardReview}
@@ -7276,14 +7289,29 @@ const courseCodeToInfo = useMemo(() => {
           await handleForwardToChair();
         }}
       />
-
-      {/* Global toast */}
+      </>
+      )}
+{/* Global toast */}
       <Toast
         open={!!toast}
         kind={toast?.kind}
         message={toast?.message || ""}
         onClose={clearToast}
       />
+        </>
+  );
+
+  if (embedded) return content;
+
+  return (
+    <AppShell
+      // make TopBar’s Inbox icon open our OM Inbox-as-tab
+      topbarProfileName={profileName || " "}
+      topbarProfileSubtitle={profileSubtitle || " "}
+      // @ts-ignore
+      topbarInboxEvent="om:openInbox"
+    >
+      {content}
     </AppShell>
   );
 }
