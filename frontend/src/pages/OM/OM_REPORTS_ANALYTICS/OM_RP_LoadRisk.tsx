@@ -1,225 +1,148 @@
 // frontend/src/pages/OM/OM_REPORTS_ANALYTICS/OM-RP_LoadRisk.tsx
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { ChevronLeft, TrendingUp, AlertTriangle, Users, BarChart, CheckCircle } from "lucide-react"; 
-import { fetchPTRisk } from "../../../api";
+import { ChevronLeft, Search as SearchIcon, X } from "lucide-react";
 import SelectBox from "../../../component/SelectBox";
 
-/** ---------------- Types (from OM_pred2) ---------------- */
-type PTRow = {
+type DepartmentItem = { department_id: string; department_name: string };
+
+type Candidate = {
+  faculty_id: string;
+  name: string;
+  standard_units?: number;
+  deload_units?: number;
+  effective_units?: number;
+  sections_can_cover?: number | null;
+};
+
+type Row = {
   course_id: string;
-  course_code: string;
-  demand_sections: number;
-  ft_filled_sections: number;
-  pt_needed_sections: number;
-  risk: string;
-  confidence: string; // e.g., "80%"
-  ft_assignees?: string[];
+  course: string;
+  course_title?: string;
+  baseline_demand_sections: number;
+  ft_can_cover_sections_est: number;
+  risk: "RISK" | "WARNING" | "SAFE";
+  uncovered_sections: number;
+  flags: string[];
+  reasons: string[];
+  ft_candidates: Candidate[];
+  pt_suggestions: Candidate[];
+  history: {
+    baseline_term_id: string;
+    baseline_relay_on_pt: boolean;
+    baseline_needed_overload: boolean;
+  };
+  confidence: number;
+  ft_breakdown?: SectionBreakdown[];
+  suggested_action?: SuggestedAction | null;
 };
 
-// Updated Summary Type for Aggregated Metrics
-type PTSummary = {
-  total_pt_sections: number;
-  estimated_pt_hires: number;
-  high_risk_course_count: number; 
-  medium_risk_course_count: number; 
-  avg_confidence_score: number; // (e.g., 85)
-};
-
-type PTResponse = {
+type CoverageResponse = {
   department_id: string;
-  dept_name: string; // NEW: Human-readable department name
-  term_id: string;
-  acad_year_start: number | string; // NEW: Academic year start
-  end_at: number | string; // NEW: Academic year end
-  term_number: number | string; // NEW: Term number
-  rows: PTRow[];
-  summary: PTSummary; // Using updated type
+  dept_name: string;
+  target: { term_id: string; acad_year_start: number; term_number: number };
+  baseline: { term_id: string; acad_year_start: number; term_number: number };
+  summary: {
+    risk: number;
+    warning: number;
+    safe: number;
+    avg_confidence: number;
+  };
+  rows: Row[];
   generated_at: string;
-  params: any;
 };
 
-type DepartmentItem = {
-  department_id: string;
-  department_name: string;
+type SectionBreakdown = {
+  section_id: string;
+  section_code: string;
+
+  faculty_id?: string | null;
+  faculty_name?: string | null;
+  baseline_employment_type?: "FT" | "PT" | null;
+
+  status: "AVAILABLE" | "UNAVAILABLE";
+  reasons: string[];
+
+  on_leave?: boolean;
+  is_active?: boolean;
+  active_check_terms?: string[];
+  active_hit_term_id?: string | null;
+
+  capacity_units?: number | null;
+  deload_units?: number | null;
+  effective_units?: number | null;
+  now_sections_capacity?: number | null;
+
+  sections_can_cover?: number | null; // 0/1 per section
 };
 
-/** ---------------- Tiny util ---------------- */
-const cls = (...s: Array<string | false | undefined>) => s.filter(Boolean).join(" ");
+type SuggestedAction = {
+  pt_needed: number;
+  pt_taught_last_year: { faculty_id: string; name: string; sections: number }[];
+  overload_candidates: {
+    faculty_id: string;
+    name: string;
+    baseline_sections: number;
+    now_sections_capacity: number;
+  }[];
+};
 
-function badgeClasses(kind: "risk" | "confidence", value?: string) {
-  const v = (value || "").toLowerCase();
-  if (kind === "risk") {
-    if (v.includes("high")) return "bg-rose-100 text-rose-800 border border-rose-200";
-    if (v.includes("medium")) return "bg-amber-100 text-amber-800 border border-amber-200";
-    if (v.includes("low")) return "bg-emerald-100 text-emerald-800 border border-emerald-200";
-    return "bg-gray-100 text-gray-700 border border-gray-200";
-  }
-  // confidence - now handles numerical confidence score (e.g. "80")
-  const n = parseInt(v.replace('%', ''), 10);
-  if (!isNaN(n)) {
-    if (n >= 80) return "bg-emerald-100 text-emerald-800 border border-emerald-200";
-    if (n >= 50) return "bg-amber-100 text-amber-800 border border-amber-200";
-    return "bg-gray-100 text-gray-700 border border-gray-200";
-  }
-  return "bg-gray-100 text-gray-700 border border-gray-200";
-}
+const cls = (...s: Array<string | false | undefined>) =>
+  s.filter(Boolean).join(" ");
 
-// --- NEW Component: Summary Card ---
-interface SummaryCardProps {
-  title: string;
-  value: string | number;
-  icon: React.ReactNode;
-  color: string;
-  iconBgColor: string; // New prop for icon background contrast
-}
-
-const SummaryCard = ({ title, value, icon, color, iconBgColor }: SummaryCardProps) => (
-  <div className={`p-6 rounded-xl border-t-4 shadow-md ${color} border-t-2`}>
-    <div className="flex items-start justify-between">
-      <div>
-        <p className="text-sm font-medium text-gray-700">{title}</p>
-        <p className="mt-1 text-3xl font-bold text-gray-900 tabular-nums">{value}</p>
-      </div>
-      <div className={`p-3 rounded-full ${iconBgColor} text-white shadow-inner`}>
-        {icon}
-      </div>
-    </div>
-  </div>
-);
-
-// --- NEW Component: Risk Distribution Visual (Placeholder) ---
-const RiskDistributionVisual = ({ data }: { data: PTResponse }) => {
-  const riskCounts = data.rows.reduce((acc, row) => {
-    acc[row.risk] = (acc[row.risk] || 0) + 1;
-    return acc;
-  }, {} as Record<string, number>);
-
-  const high = riskCounts["High"] || 0;
-  const medium = riskCounts["Medium"] || 0;
-  const low = riskCounts["Low"] || 0;
-  const total = high + medium + low;
-
-  const getPercentage = (count: number) => (total > 0 ? ((count / total) * 100).toFixed(0) : 0);
-
-  const distribution = [
-    { label: 'High Risk', count: high, color: 'bg-rose-500', percentage: getPercentage(high) },
-    { label: 'Medium Risk', count: medium, color: 'bg-amber-500', percentage: getPercentage(medium) },
-    { label: 'Low Risk', count: low, color: 'bg-emerald-500', percentage: getPercentage(low) },
-  ];
-
+function StatusBadge({ v }: { v: Row["risk"] }) {
+  const base =
+    "inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-semibold";
+  if (v === "RISK")
+    return (
+      <span className={cls(base, "border-rose-200 bg-rose-50 text-rose-800")}>
+        RISK
+      </span>
+    );
+  if (v === "WARNING")
+    return (
+      <span
+        className={cls(base, "border-amber-200 bg-amber-50 text-amber-800")}
+      >
+        WARNING
+      </span>
+    );
   return (
-    <div className="p-6">
-      <h3 className="text-lg font-semibold text-gray-800 mb-4 flex items-center gap-2">
-        <BarChart className="h-5 w-5 text-gray-600" />
-        Course Risk Distribution ({total} Total Courses)
-      </h3>
-      <div className="flex flex-col gap-3">
-        {distribution.map((item) => (
-          <div key={item.label}>
-            <div className="flex justify-between text-sm font-medium text-gray-700 mb-1">
-              <span>{item.label} ({item.count})</span>
-              <span>{item.percentage}%</span>
-            </div>
-            <div className="w-full bg-gray-200 rounded-full h-2.5">
-              <div
-                className={`h-2.5 rounded-full ${item.color}`}
-                style={{ width: `${item.percentage}%` }}
-              />
-            </div>
-          </div>
-        ))}
-      </div>
-    </div>
+    <span
+      className={cls(base, "border-emerald-200 bg-emerald-50 text-emerald-800")}
+    >
+      SAFE
+    </span>
   );
-};
+}
 
+type Tab = "RISK" | "WARNING" | "SAFE";
 
-/** ---------------- Page ---------------- */
 export default function OM_RP_LoadRisk() {
-  // knobs (ported from OM_pred2)
+  const PAGE_SIZE = 15;
+  const [page, setPage] = useState(1);
+
   const [departmentId, setDepartmentId] = useState("DEPT0001");
   const [departments, setDepartments] = useState<DepartmentItem[]>([]);
-  const [overload, setOverload] = useState(0);
-  const [histK, setHistK] = useState(3);
-  const [onlyWithPrefs] = useState(false);
-  const [allowFallback] = useState(false); 
+  const [tab, setTab] = useState<Tab>("RISK");
+  const [q, setQ] = useState("");
 
-  type RiskFilter = "HIGH_ONLY" | "HIGH_MED" | "ALL";
-  const [riskFilter, setRiskFilter] = useState<RiskFilter>("HIGH_MED");
-  const [showLowRisk, setShowLowRisk] = useState(false);
-
-  type RiskTableSortKey = "course" | "demand" | "pt_needed" | "risk";
-  const [riskSortKey, setRiskSortKey] = useState<RiskTableSortKey>("risk");
-  const [riskSortDir, setRiskSortDir] = useState<"asc" | "desc">("desc");
-
-  const toggleRiskSort = (key: RiskTableSortKey) => {
-    if (riskSortKey === key) {
-      setRiskSortDir((d) => (d === "asc" ? "desc" : "asc"));
-    } else {
-      setRiskSortKey(key);
-      setRiskSortDir("asc");
-    }
-  };
-
-  const sortArrow = (key: RiskTableSortKey) =>
-    riskSortKey === key ? (riskSortDir === "asc" ? "▲" : "▼") : "";
-
-
-  // defaults (for Reset)
-  const DEFAULT_DEPT = "DEPT0001";
-  const DEFAULT_OVERLOAD = 0;
-  const DEFAULT_HISTK = 3;
-
-  const resetInputs = () => {
-    setDepartmentId(DEFAULT_DEPT);
-    setOverload(DEFAULT_OVERLOAD);
-    setHistK(DEFAULT_HISTK);
-    setError(null);
-  };
-
-  const canRun = Boolean(departmentId?.trim()) && histK >= 1 && histK <= 6;
-
-  // Dropdown options (match Course Management SelectBox style)
-  const deptOptions = useMemo(() => {
-    if (!departments || departments.length === 0) return [departmentId];
-    // Display department names only (no IDs in the dropdown)
-    return departments.map((d) => d.department_name);
-  }, [departments, departmentId]);
-
-  const deptValue = useMemo(() => {
-    if (!departments || departments.length === 0) return departmentId;
-    const match = departments.find((d) => d.department_id === departmentId);
-    return match?.department_name || deptOptions[0] || departmentId;
-  }, [departments, deptOptions, departmentId]);
-
-  const overloadOptions = useMemo(() => ["0", "3"], []);
-
-
-  // data state
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [data, setData] = useState<PTResponse | null>(null);
+  const [data, setData] = useState<CoverageResponse | null>(null);
+  const [selectedCourseId, setSelectedCourseId] = useState<string | null>(null);
+  const [panelMode, setPanelMode] = useState<"DETAILS" | "HISTORY" | "ACTIONS">(
+    "DETAILS"
+  );
 
-  const load = async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const resp = await fetchPTRisk({
-        department_id: departmentId,
-        overload_allowance_units: overload,
-        history_terms_for_experience: histK,
-        include_only_with_preferences: onlyWithPrefs,
-        allow_fallback_without_sections: allowFallback,
-      });
-      setData(resp);
-    } catch (e: any) {
-      setError(e?.message || "Failed to load");
-      setData(null);
-    } finally {
-      setLoading(false);
-    }
-  };
+  const deptOptions = useMemo(
+    () => departments.map((d) => d.department_name),
+    [departments]
+  );
+  const deptValue = useMemo(() => {
+    const m = departments.find((d) => d.department_id === departmentId);
+    return m?.department_name || departmentId;
+  }, [departments, departmentId]);
 
   const loadDepartments = async () => {
     try {
@@ -228,538 +151,798 @@ export default function OM_RP_LoadRisk() {
       const json = await res.json();
       setDepartments(json?.departments || []);
     } catch {
-      // fail silently; fallback to manual input still works
+      // ignore
+    }
+  };
+
+  type SortKey = "course" | "baseline";
+  type SortDir = "asc" | "desc";
+
+  const [sortKey, setSortKey] = useState<SortKey>("course");
+  const [sortDir, setSortDir] = useState<SortDir>("asc");
+
+  const toggleSort = (k: SortKey) => {
+    setPage(1);
+
+    const defaultDir: SortDir = k === "baseline" ? "desc" : "asc";
+    if (sortKey !== k) {
+      setSortKey(k);
+      setSortDir(defaultDir);
+      return;
+    }
+
+    setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+  };
+
+  const run = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const url = `/analytics/ft-coverage-review?department_id=${encodeURIComponent(
+        departmentId
+      )}&suggest_top_n=3`;
+      const res = await fetch(url);
+      if (!res.ok) {
+        const t = await res.text();
+        throw new Error(t || "Failed to load");
+      }
+      const json = (await res.json()) as CoverageResponse;
+      setData(json);
+
+      // auto-select first row of current tab
+      const firstInTab = (json.rows || []).find((r) => r.risk === tab) || null;
+      setSelectedCourseId(firstInTab?.course_id || null);
+      setPanelMode("DETAILS");
+    } catch (e: any) {
+      setError(e?.message || "Failed to load");
+      setData(null);
+      setSelectedCourseId(null);
+    } finally {
+      setLoading(false);
     }
   };
 
   useEffect(() => {
-    // auto-load on mount
-    // eslint-disable-next-line @typescript-eslint/no-floating-promises
     loadDepartments();
-    load();
+    run();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // New Memoized Value for Sorted Rows and Totals
-  const { sortedRows, totals, lowRiskCount } = useMemo(() => {
-    if (!data) return { sortedRows: [], totals: { demand: 0, ft: 0, pt: 0 }, lowRiskCount: 0 };
-    
-    const demand = data.rows.reduce((a, r) => a + r.demand_sections, 0);
-    const ft = data.rows.reduce((a, r) => a + r.ft_filled_sections, 0);
-    const pt = data.rows.reduce((a, r) => a + r.pt_needed_sections, 0);
-    
-    const allCourses = data.rows.length;
-    const lowRiskCount = allCourses - (data.summary.high_risk_course_count || 0) - (data.summary.medium_risk_course_count || 0);
+  const termLine = useMemo(() => {
+    if (!data) return "";
+    return `Target: AY ${data.target.acad_year_start}-${
+      data.target.acad_year_start + 1
+    } Term ${data.target.term_number}  |  Baseline: AY ${
+      data.baseline.acad_year_start
+    }-${data.baseline.acad_year_start + 1} Term ${data.baseline.term_number}`;
+  }, [data]);
 
-    const riskRank = (v?: string) => {
-      const s = (v || "").toLowerCase();
-      if (s.includes("high")) return 3;
-      if (s.includes("medium")) return 2;
-      if (s.includes("low")) return 1;
-      return 0;
+  const filtered = useMemo(() => {
+    if (!data) return [];
+    const rows = data.rows.filter((r) => r.risk === tab);
+    const s = q.trim().toLowerCase();
+    if (!s) return rows;
+    return rows.filter((r) => (r.course || "").toLowerCase().includes(s));
+  }, [data, tab, q]);
+
+  const sorted = useMemo(() => {
+    const arr = [...filtered];
+
+    const dir = sortDir === "asc" ? 1 : -1;
+
+    arr.sort((a, b) => {
+      if (sortKey === "course") {
+        return dir * (a.course || "").localeCompare(b.course || "");
+      }
+      // sortKey === "baseline"
+      return (
+        dir *
+        (Number(a.baseline_demand_sections) -
+          Number(b.baseline_demand_sections))
+      );
+    });
+
+    return arr;
+  }, [filtered, sortKey, sortDir]);
+
+  const totalRows = sorted.length;
+  const totalPages = Math.max(1, Math.ceil(totalRows / PAGE_SIZE));
+
+  const pageStart = (page - 1) * PAGE_SIZE;
+  const pageEnd = Math.min(totalRows, pageStart + PAGE_SIZE);
+
+  const pagedRows = useMemo(() => {
+    return sorted.slice(pageStart, pageStart + PAGE_SIZE);
+  }, [sorted, pageStart]);
+
+  const selected = useMemo(() => {
+    if (!data || !selectedCourseId) return null;
+    return data.rows.find((r) => r.course_id === selectedCourseId) || null;
+  }, [data, selectedCourseId]);
+
+  const counts = useMemo(() => {
+    return {
+      risk: data?.summary?.risk ?? 0,
+      warning: data?.summary?.warning ?? 0,
+      safe: data?.summary?.safe ?? 0,
     };
-    
-    const dir = riskSortDir === "asc" ? 1 : -1;
-    
-    const sortedRows = [...data.rows].sort((a, b) => {
-      const aCourse = String(a.course_code ?? "");
-      const bCourse = String(b.course_code ?? "");
-    
-      const aDemand = Number(a.demand_sections ?? 0);
-      const bDemand = Number(b.demand_sections ?? 0);
-    
-      const aPT = Number(a.pt_needed_sections ?? 0);
-      const bPT = Number(b.pt_needed_sections ?? 0);
-    
-      const aRisk = riskRank(a.risk);
-      const bRisk = riskRank(b.risk);
-    
-      if (riskSortKey === "course") return dir * aCourse.localeCompare(bCourse);
-      if (riskSortKey === "demand") return dir * (aDemand - bDemand);
-      if (riskSortKey === "pt_needed") return dir * (aPT - bPT);
-    
-      // risk
-      if (aRisk !== bRisk) return dir * (aRisk - bRisk);
-    
-      // tie-breaker
-      return aCourse.localeCompare(bCourse);
-    });    
+  }, [data]);
 
-    return { sortedRows, totals: { demand, ft, pt }, lowRiskCount };
-  }, [data, riskSortKey, riskSortDir]);
+  const suggestedAction = useMemo(() => {
+    return selected?.suggested_action ?? null;
+  }, [selected]);  
 
-  const displayedRows = useMemo(() => {
-    const highs = sortedRows.filter((r) => r.risk === "High");
-    const meds = sortedRows.filter((r) => r.risk === "Medium");
-    const lows = sortedRows.filter((r) => r.risk === "Low");
-
-    if (riskFilter === "HIGH_ONLY") return { main: highs, low: lows };
-    if (riskFilter === "HIGH_MED") return { main: [...highs, ...meds], low: lows };
-    return { main: sortedRows, low: lows };
-  }, [sortedRows, riskFilter]);
-
-  const displayTerm = data ? `AY ${data.acad_year_start} - ${data.end_at} | Term ${data.term_number}` : 'N/A';
-  const displayDept = data?.dept_name || data?.department_id || 'N/A';
+  const onTab = (t: Tab) => {
+    setTab(t);
+    setQ("");
+    setPage(1);
+    setPanelMode("DETAILS");
+    const first = (data?.rows || []).find((r) => r.risk === t) || null;
+    setSelectedCourseId(first?.course_id || null);
+  };
 
   return (
     <div className="w-full h-full min-h-0 px-4 sm:px-6 lg:px-8 py-8">
-      {/* Header and subtitle retained (DO NOT MODIFY) */}
-      <h1 className="text-2xl font-bold mb-2">Course Staffing Risk Indicators</h1>
-      <p className="text-sm text-gray-600 mb-6">
-        Predictive analytics dashboard for staffing needs and departmental load stability.
-      </p>
+      <div className="mb-6">
+        <h1 className="text-2xl font-bold">Course Coverage Risk Indicators</h1>
+        <p className="text-sm text-gray-600">
+        Flags courses that may be hard to staff with FT by comparing last year’s same-term demand vs current FT availability/capacity (including deloading/leave/activity checks), and shows a breakdown per baseline section + suggested actions.
+        </p>
+      </div>
 
-      {/* -- Main content (in OM_RP aesthetic) -- */}
       <div className="rounded-xl border border-gray-200 bg-white shadow-sm">
-        {/* Top Bar: Back + Filters (aligned & evenly spaced) */}
+        {/* Top controls */}
         <div className="p-4 border-b border-gray-200">
           <div className="flex flex-col gap-3">
             <div className="flex items-center gap-3">
               <Link
                 to="/om/home/reports-analytics"
                 className="inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm shadow-sm hover:bg-gray-50 active:bg-gray-100"
-                aria-label="Back"
-                title="Back"
               >
                 <ChevronLeft className="h-4 w-4" />
                 <span>Back</span>
               </Link>
-            </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4 items-end">
-              <div>
-              <label className="block text-xs text-gray-600 mb-1">Department</label>
-              <SelectBox
-                value={deptValue}
-                onChange={(v) => {
-                  const nextName = (v || "").trim();
-                  const next = departments.find((d) => d.department_name === nextName);
-                  setDepartmentId(next?.department_id || departmentId);
-                }}
-                options={deptOptions}
-              />
-              </div>
-              <div>
-                <label className="block text-xs text-gray-600 mb-1">Overload allowance (units)</label>
-                <SelectBox
-                  value={String(overload)}
-                  onChange={(v) => setOverload(Number(v))}
-                  options={overloadOptions}
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs text-gray-600 mb-1">History window (terms)</label>
-                <input
-                  type="number"
-                  min={1}
-                  max={6}
-                  value={histK}
-                  onChange={(e) => setHistK(Number(e.target.value))}
-                  className="w-full rounded-lg border border-gray-300 px-3.5 py-2 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30"
-                />
-              </div>
-
-              <div className="flex gap-2 sm:justify-end">
+              <div className="ml-auto flex items-center gap-2">
                 <button
-                  type="button"
+                  onClick={run}
                   disabled={loading}
-                  onClick={resetInputs}
                   className={cls(
-                    "w-full sm:w-auto rounded-lg border px-4 py-2 text-sm font-semibold",
+                    "rounded-lg border px-4 py-2 text-sm font-semibold",
                     loading
                       ? "cursor-not-allowed border-gray-200 bg-gray-100 text-gray-400"
-                      : "border-gray-300 bg-white text-gray-700 hover:bg-gray-50"
+                      : "border-emerald-500 bg-emerald-400 text-emerald-950 hover:bg-emerald-300"
                   )}
-                  title="Reset inputs"
-                >
-                  Reset
-                </button>
-
-                <button
-                  disabled={loading || !canRun}
-                  onClick={load}
-                  className={cls(
-                    "w-full sm:w-auto rounded-lg border px-4 py-2 text-sm font-semibold",
-                    loading || !canRun
-                      ? "cursor-not-allowed border-gray-200 bg-gray-100 text-gray-400"
-                      : "cursor-pointer border-emerald-500 bg-emerald-400 text-emerald-950 hover:bg-emerald-300"
-                  )}
-                  title={!canRun ? "Select a Department and a valid History window first." : "Run forecast"}
                 >
                   {loading ? "Loading…" : "Run"}
                 </button>
               </div>
             </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 items-end">
+              <div className="sm:col-span-2">
+                <label className="block text-s text-gray-600 mb-1">
+                  Department
+                </label>
+
+                {/* NEW: constrain width */}
+                <div className="w-full max-w-sm">
+                  <SelectBox
+                    value={deptValue}
+                    onChange={(v) => {
+                      const nextName = (v || "").trim();
+                      const next = departments.find(
+                        (d) => d.department_name === nextName
+                      );
+                      setDepartmentId(next?.department_id || departmentId);
+                    }}
+                    options={deptOptions.length ? deptOptions : [departmentId]}
+                  />
+                </div>
+              </div>
+
+              <div className="sm:col-span-1 flex justify-end">
+                <div className="text-s text-gray-500 mt-1 text-right">
+                  {data ? termLine : ""}
+                </div>
+              </div>
+            </div>
           </div>
         </div>
 
-        {/* Status / error rows */}
         {error && (
-          <div className="px-4 py-3 text-sm text-red-700 bg-red-50 border-b border-red-200">{error}</div>
-        )}
-        {loading && <div className="px-4 py-4 text-sm text-gray-500">Loading…</div>}
-
-        {/* --- Primary Dashboard Content --- */}
-        {data && !loading && (
-          <div className="p-4 space-y-6">
-            <div className="flex flex-wrap gap-4 items-center text-sm">
-                <div>
-                  <span className="text-gray-600">Forecast Term:</span>{" "}
-                  <span className="font-semibold text-gray-900">{displayTerm}</span>
-                </div>
-                <div>
-                  <span className="text-gray-600">Department:</span>{" "}
-                  <span className="font-semibold text-gray-900">{displayDept}</span>
-                </div>
-                <div className="ml-auto">
-                  <span className="text-gray-600">Generated:</span>{" "}
-                  <span className="font-semibold text-gray-900">
-                    {new Date(data.generated_at).toLocaleString()}
-                  </span>
-                </div>
-            </div>
-
-            {/* Prominent Summary Cards - Pastel Colors */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
-              <SummaryCard
-                title="Total PT Sections Needed"
-                value={data.summary.total_pt_sections}
-                icon={<BarChart className="h-6 w-6" />}
-                color="bg-indigo-50 border-indigo-400"
-                iconBgColor="bg-indigo-500/80"
-              />
-              <SummaryCard
-                title="Estimated PT Hires"
-                value={data.summary.estimated_pt_hires}
-                icon={<Users className="h-6 w-6" />}
-                color="bg-cyan-50 border-cyan-400"
-                iconBgColor="bg-cyan-500/80"
-              />
-              <SummaryCard
-                title="High Risk Courses"
-                value={data.summary.high_risk_course_count}
-                icon={<TrendingUp className="h-6 w-6" />}
-                color="bg-rose-50 border-rose-400"
-                iconBgColor="bg-rose-500/80"
-              />
-              <SummaryCard
-                title="Medium Risk Courses"
-                value={data.summary.medium_risk_course_count}
-                icon={<AlertTriangle className="h-6 w-6" />}
-                color="bg-amber-50 border-amber-400"
-                iconBgColor="bg-amber-500/80"
-              />
-              <SummaryCard
-                title="Low Risk Courses"
-                value={lowRiskCount}
-                icon={<CheckCircle className="h-6 w-6" />}
-                color="bg-emerald-50 border-emerald-400"
-                iconBgColor="bg-emerald-500/80"
-              />
-            </div>
-
-            {/* Risk Distribution Visual & Confidence Score */}
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-                <div className="lg:col-span-2 rounded-xl border border-gray-200 bg-white shadow-sm">
-                    <RiskDistributionVisual data={data} />
-                </div>
-                <div className="lg:col-span-1 p-6 rounded-xl border border-gray-200 bg-white shadow-sm flex flex-col justify-center items-center">
-                    <div className="text-center">
-                        <p className="text-sm font-medium text-gray-600 mb-2" title="Confidence reflects data completeness and coverage (e.g., preferences/history), not certainty.">Model Average Confidence</p>
-                        <span className={cls(
-                            "inline-block text-5xl font-extrabold tabular-nums",
-                            data.summary.avg_confidence_score >= 80 ? "text-emerald-600" :
-                            data.summary.avg_confidence_score >= 50 ? "text-amber-600" : "text-gray-600"
-                        )}>
-                            {data.summary.avg_confidence_score}%
-                        </span>
-                        <p className="text-xs text-gray-500 mt-2">
-                          This score helps gauge the reliability of the forecast for this run.
-                        </p>
-                    </div>
-                </div>
-            </div>
-            
-            <p className="text-xs text-gray-500 mb-2">
-              Note: Values shown are <span className="font-semibold">model estimates</span> for planning purposes only, not final assignments.
-            </p>
-
-            {/* Raw Data Table (Secondary Section) */}
-            <h2 className="text-xl font-bold text-gray-800 pt-4 border-t border-gray-200">
-                Detailed Course-by-Course Analysis (Sorted by Risk)
-            </h2>
-
-            <div className="flex flex-wrap items-center gap-2 mt-3 mb-2">
-              <span className="text-xs text-gray-600">Show:</span>
-
-              <button
-                type="button"
-                disabled={loading}
-                className={cls(
-                  "text-xs px-3 py-1 rounded-full border",
-                  riskFilter === "HIGH_ONLY"
-                    ? "bg-rose-50 border-rose-200 text-rose-800"
-                    : "bg-white border-gray-200 text-gray-700 hover:bg-gray-50"
-                )}
-                onClick={() => setRiskFilter("HIGH_ONLY")}
-              >
-                High only
-              </button>
-
-              <button
-                type="button"
-                disabled={loading}
-                className={cls(
-                  "text-xs px-3 py-1 rounded-full border",
-                  riskFilter === "HIGH_MED"
-                    ? "bg-amber-50 border-amber-200 text-amber-800"
-                    : "bg-white border-gray-200 text-gray-700 hover:bg-gray-50"
-                )}
-                onClick={() => setRiskFilter("HIGH_MED")}
-              >
-                High + Medium
-              </button>
-
-              <button
-                type="button"
-                disabled={loading}
-                className={cls(
-                  "text-xs px-3 py-1 rounded-full border",
-                  riskFilter === "ALL"
-                    ? "bg-gray-100 border-gray-200 text-gray-800"
-                    : "bg-white border-gray-200 text-gray-700 hover:bg-gray-50"
-                )}
-                onClick={() => setRiskFilter("ALL")}
-              >
-                All
-              </button>
-
-              {riskFilter !== "ALL" && (
-                <button
-                  type="button"
-                  className={cls(
-                    "ml-auto text-xs px-3 py-1 rounded-lg border",
-                    showLowRisk
-                      ? "bg-emerald-50 border-emerald-200 text-emerald-800"
-                      : "bg-white border-gray-200 text-gray-700 hover:bg-gray-50"
-                  )}
-                  onClick={() => setShowLowRisk((v) => !v)}
-                >
-                  {showLowRisk ? "Hide" : "Show"} Low Risk ({displayedRows.low.length})
-                </button>
-              )}
-            </div>
-
-            <div className="overflow-x-auto rounded-xl border border-gray-200">
-                <table className="min-w-full table-fixed text-sm border-collapse">
-                  <colgroup>
-                    <col style={{ width: "22%" }} />
-                    <col style={{ width: "14%" }} />
-                    <col style={{ width: "14%" }} />
-                    <col style={{ width: "28%" }} />
-                    <col style={{ width: "10%" }} />
-                    <col style={{ width: "6%" }} />
-                    <col style={{ width: "6%" }} />
-                  </colgroup>
-
-                  <thead className="bg-gray-50 text-gray-700 text-xs uppercase tracking-wide sticky top-0 z-[1]">
-                    <tr>
-                      <th className="px-4 py-2.5 text-center font-semibold whitespace-nowrap border-b">
-                        <button
-                          type="button"
-                          onClick={() => toggleRiskSort("course")}
-                          className="inline-flex items-center gap-1 hover:underline"
-                        >
-                          Course {sortArrow("course")}
-                        </button>
-                      </th>
-
-                      <th className="px-4 py-2.5 text-center font-semibold whitespace-nowrap border-b">
-                        <button
-                          type="button"
-                          onClick={() => toggleRiskSort("demand")}
-                          className="inline-flex items-center gap-1 hover:underline"
-                        >
-                          Demand (sections) {sortArrow("demand")}
-                        </button>
-                      </th>
-
-                      <th className="px-4 py-2.5 text-center font-semibold whitespace-nowrap border-b">
-                        FT Capacity Used (estimated)
-                      </th>
-
-                      <th className="px-4 py-2.5 text-center font-semibold whitespace-nowrap border-b">
-                        Suggested FT Candidates (model)
-                      </th>
-
-                      <th className="px-4 py-2.5 text-center font-semibold whitespace-nowrap border-b">
-                        <button
-                          type="button"
-                          onClick={() => toggleRiskSort("pt_needed")}
-                          className="inline-flex items-center gap-1 hover:underline"
-                        >
-                          PT Needed {sortArrow("pt_needed")}
-                        </button>
-                      </th>
-
-                      <th className="px-4 py-2.5 text-center font-semibold whitespace-nowrap border-b">
-                        <button
-                          type="button"
-                          onClick={() => toggleRiskSort("risk")}
-                          className="inline-flex items-center gap-1 hover:underline"
-                        >
-                          Risk {sortArrow("risk")}
-                        </button>
-                      </th>
-
-                      <th className="px-4 py-2.5 text-center font-semibold whitespace-nowrap border-b">
-                        Confidence Level
-                      </th>
-                    </tr>
-                  </thead>
-
-                  <tbody>
-                    {displayedRows.main.map((r, i) => ( // filtered rows
-                      <tr
-                        key={r.course_id}
-                        className={cls(
-                          i % 2 === 0 ? "bg-white" : "bg-gray-50",
-                          "text-gray-800 hover:bg-gray-100 transition"
-                        )}
-                      >
-                        <td className="px-4 py-2.5 text-left font-medium text-gray-900">{r.course_code}</td>
-                        <td className="px-4 py-2.5 text-center tabular-nums">{r.demand_sections}</td>
-                        <td className="px-4 py-2.5 text-center tabular-nums">{r.ft_filled_sections}</td>
-                        <td className="px-4 py-2.5">
-                          {r.ft_assignees && r.ft_assignees.length ? (
-                            <div className="flex flex-wrap gap-1 justify-center">
-                              {r.ft_assignees.map((n, idx) => (
-                                <span
-                                  key={idx}
-                                  className="inline-flex items-center rounded-full border border-gray-200 px-2.5 py-0.5 text-xs bg-white text-gray-700"
-                                  title={n}
-                                >
-                                  {n}
-                                </span>
-                              ))}
-                            </div>
-                          ) : (
-                            <div className="text-center text-gray-500">—</div>
-                          )}
-                        </td>
-                        <td className="px-4 py-2.5 text-center font-semibold tabular-nums">
-                          {r.pt_needed_sections}
-                        </td>
-                        <td className="px-4 py-2.5">
-                          <span className={cls("px-2 py-0.5 rounded-full text-xs inline-block text-center", badgeClasses("risk", r.risk))}>
-                            {r.risk || "—"}
-                          </span>
-                        </td>
-                        <td className="px-4 py-2.5">
-                          <span className={cls("px-2 py-0.5 rounded-full text-xs inline-block text-center", badgeClasses("confidence", r.confidence))}>
-                            {r.confidence || "—"}
-                          </span>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-
-                  <tfoot>
-                    <tr>
-                      <td className="px-4 py-2.5 border-t-2 border-gray-300 font-bold text-left">TOTAL</td>
-                      <td className="px-4 py-2.5 border-t-2 border-gray-300 font-bold text-center tabular-nums">
-                        {totals.demand}
-                      </td>
-                      <td className="px-4 py-2.5 border-t-2 border-gray-300 font-bold text-center tabular-nums">
-                        {totals.ft}
-                      </td>
-                      <td className="px-4 py-2.5 border-t-2 border-gray-300" />
-                      <td className="px-4 py-2.5 border-t-2 border-gray-300 font-bold text-center tabular-nums">
-                        {totals.pt}
-                      </td>
-                      <td className="px-4 py-2.5 border-t-2 border-gray-300" />
-                      <td className="px-4 py-2.5 border-t-2 border-gray-300" />
-                    </tr>
-                  </tfoot>
-                </table>
-              </div>
-
-              <div className="text-xs text-gray-500 mt-3">
-                Tip: The table is automatically sorted by **Risk (High to Low)** to prioritize critical staffing needs.
-              </div>
-
-              {riskFilter !== "ALL" && showLowRisk && displayedRows.low.length > 0 && (
-                <div className="mt-5">
-                  <h3 className="text-sm font-semibold text-gray-800 mb-2">
-                    Low Risk Courses ({displayedRows.low.length})
-                  </h3>
-                  <div className="overflow-x-auto rounded-xl border border-gray-200">
-                    <table className="min-w-full table-fixed text-sm border-collapse">
-                      <colgroup>
-                        <col style={{ width: "34%" }} />
-                        <col style={{ width: "14%" }} />
-                        <col style={{ width: "14%" }} />
-                        <col style={{ width: "14%" }} />
-                        <col style={{ width: "12%" }} />
-                        <col style={{ width: "12%" }} />
-                      </colgroup>
-
-                      <thead className="bg-gray-50 text-gray-700 text-xs uppercase tracking-wide">
-                        <tr>
-                          {["Course", "Demand", "FT Cap Used", "PT Needed", "Risk", "Confidence"].map((h) => (
-                            <th
-                              key={h}
-                              className="px-4 py-2.5 text-center font-semibold whitespace-nowrap border-b"
-                            >
-                              {h}
-                            </th>
-                          ))}
-                        </tr>
-                      </thead>
-
-                      <tbody>
-                        {displayedRows.low.map((r, idx) => (
-                          <tr
-                            key={r.course_id}
-                            className={cls(
-                              idx % 2 === 0 ? "bg-white" : "bg-gray-50",
-                              "text-gray-800 hover:bg-gray-100 transition"
-                            )}
-                          >
-                            <td className="px-4 py-2.5 text-left font-medium text-gray-900">
-                              {r.course_code}
-                            </td>
-                            <td className="px-4 py-2.5 text-center tabular-nums">{r.demand_sections}</td>
-                            <td className="px-4 py-2.5 text-center tabular-nums">{r.ft_filled_sections}</td>
-                            <td className="px-4 py-2.5 text-center font-semibold tabular-nums">
-                              {r.pt_needed_sections}
-                            </td>
-                            <td className="px-4 py-2.5 text-center">
-                              <span className={cls("px-2 py-0.5 rounded-full text-xs inline-block", badgeClasses("risk", r.risk))}>
-                                {r.risk}
-                              </span>
-                            </td>
-                            <td className="px-4 py-2.5 text-center">
-                              <span className={cls("px-2 py-0.5 rounded-full text-xs inline-block", badgeClasses("confidence", r.confidence))}>
-                                {r.confidence}
-                              </span>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              )}
-
+          <div className="px-4 py-3 text-sm text-red-700 bg-red-50 border-b border-red-200">
+            {error}
           </div>
         )}
 
-        {/* Empty state */}
-        {!loading && !error && (!data || data.rows.length === 0) && (
-          <div className="px-4 py-6 text-center text-sm text-gray-500">No results.</div>
-        )}
+        {/* Tabs (OUTSIDE but CONNECTED to main container) */}
+        <div className="px-4 pt-4">
+          <div className="inline-flex overflow-hidden border border-gray-200 bg-gray-50">
+            <button
+              onClick={() => onTab("RISK")}
+              className={cls(
+                "px-5 py-3 text-left",
+                tab === "RISK"
+                  ? "bg-white border-b-2 border-rose-500"
+                  : "hover:bg-gray-100"
+              )}
+            >
+              <div className="flex items-center gap-3">
+                <span
+                  className={cls(
+                    "inline-flex h-7 min-w-7 items-center justify-center px-2 text-xs font-bold",
+                    tab === "RISK"
+                      ? "bg-rose-100 text-rose-700"
+                      : "bg-rose-50 text-rose-600"
+                  )}
+                >
+                  1
+                </span>
+                <span className="text-base font-semibold text-gray-900">
+                  Risk
+                </span>
+                <span
+                  className={cls(
+                    "ml-1 inline-flex items-center justify-center px-2.5 py-0.5 text-xs font-bold",
+                    tab === "RISK"
+                      ? "bg-rose-100 text-rose-700"
+                      : "bg-gray-200 text-gray-700"
+                  )}
+                >
+                  {counts.risk}
+                </span>
+              </div>
+            </button>
+
+            <button
+              onClick={() => onTab("WARNING")}
+              className={cls(
+                "px-5 py-3 text-left border-l border-gray-200",
+                tab === "WARNING"
+                  ? "bg-white shadow-[inset_0_-2px_0_0_rgb(245,158,11)]"
+                  : "hover:bg-gray-100"
+              )}
+            >
+              <div className="flex items-center gap-3">
+                <span
+                  className={cls(
+                    "inline-flex h-7 min-w-7 items-center justify-center px-2 text-xs font-bold",
+                    tab === "WARNING"
+                      ? "bg-amber-100 text-amber-800"
+                      : "bg-amber-50 text-amber-700"
+                  )}
+                >
+                  1
+                </span>
+                <span className="text-base font-semibold text-gray-900">
+                  Warning
+                </span>
+                <span
+                  className={cls(
+                    "ml-1 inline-flex items-center justify-center px-2.5 py-0.5 text-xs font-bold",
+                    tab === "WARNING"
+                      ? "bg-amber-100 text-amber-800"
+                      : "bg-gray-200 text-gray-700"
+                  )}
+                >
+                  {counts.warning}
+                </span>
+              </div>
+            </button>
+
+            <button
+              onClick={() => onTab("SAFE")}
+              className={cls(
+                "px-5 py-3 text-left border-l border-gray-200",
+                tab === "SAFE"
+                  ? "bg-white shadow-[inset_0_-2px_0_0_rgb(16,185,129)]"
+                  : "hover:bg-gray-100"
+              )}
+            >
+              <div className="flex items-center gap-3">
+                <span
+                  className={cls(
+                    "inline-flex h-7 min-w-7 items-center justify-center px-2 text-xs font-bold",
+                    tab === "SAFE"
+                      ? "bg-emerald-100 text-emerald-800"
+                      : "bg-emerald-50 text-emerald-700"
+                  )}
+                >
+                  2
+                </span>
+                <span className="text-base font-semibold text-gray-900">
+                  Safe
+                </span>
+                <span
+                  className={cls(
+                    "ml-1 inline-flex items-center justify-center px-2.5 py-0.5 text-xs font-bold",
+                    tab === "SAFE"
+                      ? "bg-emerald-100 text-emerald-800"
+                      : "bg-gray-200 text-gray-700"
+                  )}
+                >
+                  {counts.safe}
+                </span>
+              </div>
+            </button>
+          </div>
+          <div className="border-t border-gray-200 w-full" />
+        </div>
+
+        {/* Main container (CONNECTED: no top border, no rounding) */}
+        <div className="px-4 pb-4">
+          <div className="border border-gray-200 border-t-0 bg-white overflow-hidden">
+            {/* Search row */}
+            <div className="p-3">
+              <div className="relative w-full max-w-xl">
+                <SearchIcon className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
+                <input
+                  value={q}
+                  onChange={(e) => {
+                    setQ(e.target.value);
+                    setPage(1);
+                  }}
+                  placeholder="Search courses..."
+                  className="w-full border border-gray-300 pl-9 pr-9 py-2 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30"
+                />
+                {q.trim() && (
+                  <button
+                    className="absolute right-2 top-1/2 -translate-y-1/2 p-1 hover:bg-gray-100"
+                    onClick={() => setQ("")}
+                    aria-label="Clear"
+                  >
+                    <X className="h-4 w-4 text-gray-500" />
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* Content row: left table + right panel */}
+            <div className="p-4 grid grid-cols-1 lg:grid-cols-3 gap-4">
+              {/* Left table (no extra outer border; container already has it) */}
+              <div className="lg:col-span-2 rounded-xl border border-gray-200 overflow-hidden">
+                <table className="min-w-full text-sm">
+                  <thead className="bg-gray-50 text-gray-700 text-xs uppercase tracking-wide">
+                    <tr>
+                      <th className="px-4 py-2.5 text-left font-semibold border-b">
+                        <button
+                          type="button"
+                          onClick={() => toggleSort("course")}
+                          className="inline-flex items-center gap-1 hover:underline"
+                        >
+                          Course
+                          <span
+                            className={cls(
+                              "text-[10px]",
+                              sortKey === "course"
+                                ? "text-gray-700"
+                                : "text-gray-300"
+                            )}
+                          >
+                            {sortKey === "course"
+                              ? sortDir === "asc"
+                                ? "▲"
+                                : "▼"
+                              : "▲"}
+                          </span>
+                        </button>
+                      </th>
+
+                      <th className="px-4 py-2.5 text-center font-semibold border-b">
+                        <button
+                          type="button"
+                          onClick={() => toggleSort("baseline")}
+                          className="inline-flex items-center gap-1 hover:underline"
+                        >
+                          Last A.Y. Sections
+                          <span
+                            className={cls(
+                              "text-[10px]",
+                              sortKey === "baseline"
+                                ? "text-gray-700"
+                                : "text-gray-300"
+                            )}
+                          >
+                            {sortKey === "baseline"
+                              ? sortDir === "asc"
+                                ? "▲"
+                                : "▼"
+                              : "▼"}
+                          </span>
+                        </button>
+                      </th>
+                      <th className="px-4 py-2.5 text-center font-semibold border-b">
+                        FT Can Cover
+                      </th>
+                      <th className="px-4 py-2.5 text-center font-semibold border-b">
+                        Status
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {pagedRows.map((r, idx: number) => {
+                      const selectedRow = r.course_id === selectedCourseId;
+                      return (
+                        <tr
+                          key={r.course_id}
+                          onClick={() => {
+                            setSelectedCourseId(r.course_id);
+                            setPanelMode("DETAILS");
+                          }}
+                          className={cls(
+                            "cursor-pointer border-b border-gray-100",
+                            idx % 2 === 0 ? "bg-white" : "bg-gray-50",
+                            selectedRow
+                              ? "bg-emerald-50 shadow-[inset_4px_0_0_0_rgb(16,185,129)]"
+                              : "hover:bg-gray-100"
+                          )}
+                        >
+                          <td className="px-4 py-2.5 text-left font-medium text-gray-900">
+                            {r.course}
+                          </td>
+                          <td className="px-4 py-2.5 text-center tabular-nums">
+                            {r.baseline_demand_sections}
+                          </td>
+                          <td className="px-4 py-2.5 text-center tabular-nums">
+                            {r.ft_can_cover_sections_est}
+                          </td>
+                          <td className="px-4 py-2.5 text-center">
+                            <StatusBadge v={r.risk} />
+                          </td>
+                        </tr>
+                      );
+                    })}
+
+                    {!loading && data && filtered.length === 0 && (
+                      <tr>
+                        <td
+                          colSpan={4}
+                          className="px-4 py-8 text-center text-gray-500"
+                        >
+                          No courses found.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+
+                <div className="flex items-center justify-between px-4 py-3 border-t border-gray-200 text-sm">
+                  <button
+                    onClick={() => setPage((p) => Math.max(1, p - 1))}
+                    disabled={page <= 1}
+                    className={cls(
+                      "px-3 py-2 border border-gray-300 bg-white",
+                      page <= 1
+                        ? "opacity-50 cursor-not-allowed"
+                        : "hover:bg-gray-50"
+                    )}
+                  >
+                    Prev
+                  </button>
+
+                  <div className="text-gray-600 tabular-nums">
+                    {totalRows === 0 ? "0" : `${pageStart + 1}-${pageEnd}`} of{" "}
+                    {totalRows}
+                  </div>
+
+                  <button
+                    onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                    disabled={page >= totalPages}
+                    className={cls(
+                      "px-3 py-2 border border-gray-300 bg-white",
+                      page >= totalPages
+                        ? "opacity-50 cursor-not-allowed"
+                        : "hover:bg-gray-50"
+                    )}
+                  >
+                    Next
+                  </button>
+                </div>
+              </div>
+
+              {/* Right side panel */}
+              <div className="lg:col-span-1 rounded-xl border border-gray-200 bg-white overflow-hidden">
+                <div className="p-4 border-b border-gray-200 flex items-center justify-between">
+                  <div>
+                    <div className="text-sm font-semibold text-gray-900">
+                      {selected ? `${selected.course} Overview` : "Overview"}
+                    </div>
+                    {selected && (
+                      <div className="text-xs text-gray-500 mt-0.5">
+                        {selected.course_title || ""}
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="px-4 pt-3">
+                  <div className="flex gap-3 text-sm font-semibold">
+                    <button
+                      className={cls(
+                        "pb-2",
+                        panelMode === "DETAILS"
+                          ? "text-gray-900 border-b-2 border-emerald-400"
+                          : "text-gray-500"
+                      )}
+                      onClick={() => setPanelMode("DETAILS")}
+                    >
+                      Details
+                    </button>
+
+                    {/* <button
+                      className={cls(
+                        "pb-2",
+                        panelMode === "HISTORY"
+                          ? "text-gray-900 border-b-2 border-emerald-400"
+                          : "text-gray-500"
+                      )}
+                      onClick={() => setPanelMode("HISTORY")}
+                    >
+                      History
+                    </button> */}
+
+                    <button
+                      className={cls(
+                        "pb-2",
+                        panelMode === "ACTIONS"
+                          ? "text-gray-900 border-b-2 border-emerald-400"
+                          : "text-gray-500"
+                      )}
+                      onClick={() => setPanelMode("ACTIONS")}
+                    >
+                      Suggested Action
+                    </button>
+                  </div>
+                </div>
+
+                <div className="p-4 space-y-4">
+                  {!selected ? (
+                    <div className="text-sm text-gray-500">
+                      Select a course to see details.
+                    </div>
+                  ) : panelMode === "DETAILS" ? (
+                    <>
+                      {/* DETAILS */}
+                      <div className="flex items-center justify-between">
+                        <StatusBadge v={selected.risk} />
+                        {/* <div className="text-xs text-gray-500">
+                          Confidence: {selected.confidence}%
+                        </div> */}
+                      </div>
+
+                      <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 text-sm">
+                        <div className="flex justify-between">
+                          <span className="text-gray-600">
+                            Demand (Last AY)
+                          </span>
+                          <span className="font-semibold tabular-nums">
+                            {selected.baseline_demand_sections}
+                          </span>
+                        </div>
+                        <div className="flex justify-between mt-1">
+                          <span className="text-gray-600">
+                            FT can cover (est.)
+                          </span>
+                          <span className="font-semibold tabular-nums">
+                            {selected.ft_can_cover_sections_est}
+                          </span>
+                        </div>
+                        {selected.risk === "RISK" && (
+                          <div className="flex justify-between mt-1">
+                            <span className="text-gray-600">Uncovered</span>
+                            <span className="font-semibold tabular-nums">
+                              {selected.uncovered_sections}
+                            </span>
+                          </div>
+                        )}
+                      </div>
+
+                      {selected?.ft_breakdown?.length ? (
+                        <div className="mt-4 rounded-lg border border-gray-200 bg-white p-3">
+                          <div className="text-sm font-semibold text-gray-900">
+                            FT Availability Breakdown
+                          </div>
+                          <div className="mt-2 space-y-2 max-h-110 overflow-y-auto pr-2">
+                            {[...selected.ft_breakdown]
+                              .sort((a, b) => {
+                                const aRank = a.status === "UNAVAILABLE" ? 0 : 1;
+                                const bRank = b.status === "UNAVAILABLE" ? 0 : 1;
+                                if (aRank !== bRank) return aRank - bRank;
+
+                                // tie-breaker: by section code
+                                return (a.section_code || "").localeCompare(b.section_code || "");
+                              })
+                              .map((b) => {
+                              const reasons = (b.reasons || []).filter(Boolean);
+
+                              const displayFaculty =
+                                (b.faculty_name && b.faculty_name.trim()) ||
+                                (b.faculty_id ? b.faculty_id : "—");
+
+                              return (
+                                <div
+                                  key={b.section_id}
+                                  className="rounded-md border border-gray-100 p-2"
+                                >
+                                  <div className="flex items-center justify-between gap-2">
+                                    <div className="font-medium text-gray-900">
+                                      {b.section_code || b.section_id}{" "}
+                                      <span className="text-xs text-gray-500">
+                                        {b.baseline_employment_type
+                                          ? `(${b.baseline_employment_type})`
+                                          : ""}
+                                      </span>
+                                    </div>
+
+                                    <span
+                                      className={
+                                        "rounded-full px-2 py-0.5 text-xs " +
+                                        (b.status === "AVAILABLE"
+                                          ? "bg-green-50 text-green-700"
+                                          : "bg-red-50 text-red-700")
+                                      }
+                                    >
+                                      {b.status}
+                                    </span>
+                                  </div>
+
+                                  <div className="mt-1 text-xs text-gray-600">
+                                    Faculty:{" "}
+                                    <span className="font-medium text-gray-800">
+                                      {displayFaculty}
+                                    </span>
+                                    {b.faculty_id ? (
+                                      <span className="text-gray-400">
+                                        {" "}
+                                        • {b.faculty_id}
+                                      </span>
+                                    ) : null}
+                                  </div>
+
+                                  <div className="mt-1 text-xs text-gray-600">
+                                    {reasons.length ? (
+                                      <>Reasons: {reasons.join(", ")}</>
+                                    ) : (
+                                      <>Reasons: —</>
+                                    )}
+                                  </div>
+
+                                  <div className="mt-1 text-xs text-gray-600">
+                                    Unit Capacity: {b.capacity_units ?? "—"} |
+                                    {/* Deload: {b.deload_units ?? "—"} | Effective:{" "}
+                                    {b.effective_units ?? "—"} | */}
+                                    No. of units can cover: {b.sections_can_cover ?? "—"}
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      ) : null}
+                    </>
+                  ) : panelMode === "ACTIONS" ? (
+                    <div className="space-y-4">
+                      <div className="rounded-lg border border-gray-200 bg-white p-3">
+                        <div className="text-sm font-semibold text-gray-900">
+                          Suggested Action
+                        </div>
+                        <div className="mt-1 text-xs text-gray-500">
+                          Based on last A.Y. sections and current
+                          availability signals.
+                        </div>
+                      </div>
+
+                      {/* 1) Hire PT */}
+                      <div className="rounded-lg border border-gray-200 bg-white p-3">
+                        <div className="flex items-center justify-between">
+                          <div className="text-sm font-semibold text-gray-900">
+                            1) Hire Part-Time Instructors
+                          </div>
+                          <div className="text-xs text-gray-600">
+                            Need:{" "}
+                            <span className="font-semibold tabular-nums">
+                              {suggestedAction?.pt_needed ?? 0}
+                            </span>
+                          </div>
+                        </div>
+
+                        <div className="mt-2 text-xs text-gray-600">
+                          Suggested list (taught this course last year):
+                        </div>
+
+                        <div className="mt-2 space-y-2">
+                          {(suggestedAction?.pt_taught_last_year || []).length ? (
+                            (suggestedAction?.pt_taught_last_year || [])
+                              .slice(0, 10)
+                              .map((p) => (
+                                <div
+                                  key={p.faculty_id}
+                                  className="rounded-md border border-gray-100 p-2"
+                                >
+                                  <div className="text-sm font-medium text-gray-900">
+                                    {p.name}
+                                  </div>
+                                  <div className="text-xs text-gray-600">
+                                    {p.faculty_id} • sections taught last A.Y. :{" "}
+                                    <span className="tabular-nums">
+                                      {p.sections}
+                                    </span>
+                                  </div>
+                                </div>
+                              ))
+                          ) : (
+                            <div className="text-sm text-gray-500">
+                              No PT instructors found for this course based on last A.Y. data.
+                            </div>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* 2) Ask to overload */}
+                      <div className="rounded-lg border border-gray-200 bg-white p-3">
+                        <div className="text-sm font-semibold text-gray-900">
+                          2) Ask Professors to Overload
+                        </div>
+                        <div className="mt-2 text-xs text-gray-600">
+                          Top candidates (most teaching history for this course;
+                          active & not on leave):
+                        </div>
+
+                        <div className="mt-2 space-y-2">
+                          {(suggestedAction?.overload_candidates || [])
+                            .length ? (
+                            (suggestedAction?.overload_candidates || []).map(
+                              (c) => (
+                                <div
+                                  key={c.faculty_id}
+                                  className="rounded-md border border-gray-100 p-2"
+                                >
+                                  <div className="text-sm font-medium text-gray-900">
+                                    {c.name}
+                                  </div>
+                                  <div className="text-xs text-gray-600">
+                                    {c.faculty_id} • sections taught last A.Y.:{" "}
+                                    <span className="tabular-nums">
+                                      {c.baseline_sections}
+                                    </span>
+                                    {" • "}
+                                    current section capacity :{" "}
+                                    <span className="tabular-nums">
+                                      {c.now_sections_capacity}
+                                    </span>
+                                  </div>
+                                </div>
+                              )
+                            )
+                          ) : (
+                            <div className="text-sm text-gray-500">
+                              No eligible overload candidates found.
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    /* HISTORY (your existing HISTORY UI) */
+                    <div className="text-sm text-gray-700">
+                      <div className="font-semibold mb-2">Baseline Term</div>
+                      <div className="text-xs text-gray-500">
+                        Term ID: {selected.history.baseline_term_id}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Footer inside same main container */}
+            <div className="border-t-0 px-4 py-2 text-xs text-gray-500">
+              Generated:{" "}
+              {data ? new Date(data.generated_at).toLocaleString() : "—"}
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   );

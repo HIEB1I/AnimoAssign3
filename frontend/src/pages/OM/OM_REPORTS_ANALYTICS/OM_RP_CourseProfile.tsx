@@ -550,8 +550,7 @@ export default function OM_RP_CourseProfile() {
       {/* Header */}
       <h1 className="text-2xl font-bold mb-2">Course Profile</h1>
       <p className="text-sm text-gray-600 mb-6">
-        View analytical metrics on course history, demand, and faculty
-        assignment stability.
+      Summarizes a course’s usual teaching pattern (who teaches it, how often it runs, typical sections) to guide assignments and planning.
       </p>
 
       <div className="rounded-xl border border-gray-200 bg-white shadow-sm">
