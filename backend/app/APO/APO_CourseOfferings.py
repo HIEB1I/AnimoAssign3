@@ -6277,6 +6277,18 @@ async def post_course_offerings(
         # Delete schedules + the section rows (planning term)
         await db[COL_SCHEDS].delete_many({"term_id": term_id, "section_id": {"$in": deletable}})
 
+        # Capture section_code(s) before deleting canonical sections so notifications can be human readable.
+        section_code_map: dict[str, str] = {}
+        try:
+            cur = db[COL_SECTIONS].find({"section_id": {"$in": deletable}}, {"_id": 0, "section_id": 1, "section_code": 1})
+            for doc in await cur.to_list(length=5000):
+                sid = (doc or {}).get("section_id")
+                sc = (doc or {}).get("section_code")
+                if sid and sc:
+                    section_code_map[str(sid)] = str(sc)
+        except Exception:
+            section_code_map = {}
+
         # Delete OM snapshot rows that keep "Approval required" alive.
         # We do a strict delete first, then a defensive fallback (sometimes term_id/campus_id can be missing in old data).
         await db[COL_SECTIONS_SUBMITTED].delete_many({"term_id": term_id, "section_id": {"$in": deletable}})
@@ -6293,21 +6305,28 @@ async def post_course_offerings(
             course_code = course_meta.get("course_code") or ""
             if isinstance(course_code, list):
                 course_code = course_code[0] if course_code else ""
-            recipients = _om_and_gs_user_ids_for_department_id(
+            recipients = await _om_and_gs_user_ids_for_department_id(
                 (course_meta.get("department_id") or "").strip(),
                 campus_id,
                 db,
             )
+            deleted_codes = [section_code_map.get(sid, sid) for sid in deletable]
             details = (
                 f"APO rejected OM-added section(s) for {course_code or cid}."
-                f"\nDeleted section_id(s): {', '.join(deletable)}"
+                f"\nDeleted section(s): {', '.join(deleted_codes)}"
             )
             for rid in recipients:
                 await create_notification(
                     user_id=str(rid),
                     title="OM section suggestion rejected",
                     details=details,
-                    meta={"term_id": term_id, "campus_id": campus_id, "course_id": cid, "deleted_section_ids": deletable},
+                    meta={
+                        "term_id": term_id,
+                        "campus_id": campus_id,
+                        "course_id": cid,
+                        "deleted_section_ids": deletable,
+                        "deleted_section_codes": deleted_codes,
+                    },
                     send_email=True,
                     email_from_user_id=userId,
                 )
@@ -6967,7 +6986,7 @@ async def post_course_offerings(
 
                 # Notify OM + GS Coordinator for the department (best-effort)
                 if dept_id:
-                    recipients = _om_and_gs_user_ids_for_department_id(dept_id, campus_id, db)
+                    recipients = await _om_and_gs_user_ids_for_department_id(dept_id, campus_id, db)
                 else:
                     recipients = await _om_and_gs_user_ids_for_campus(campus_id, db)
 
@@ -7267,7 +7286,7 @@ async def apo_forward_courseofferings_to_scheduling(
     notified: List[str] = []
 
     for dept_id in dept_ids:
-        recipients = _om_and_gs_user_ids_for_department_id(dept_id, campus_id, db)
+        recipients = await _om_and_gs_user_ids_for_department_id(dept_id, campus_id, db)
         dept_name = await _dept_name_by_id(dept_id, db)
 
         # kind inference: forwarded vs updated (same idea as your notify-chair)
