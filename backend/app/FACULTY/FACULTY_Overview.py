@@ -1134,6 +1134,160 @@ def _build_load_accept_email_html(*, faculty_name: str, term_label: str, rows: L
   </body>
 </html>"""
 
+# ====== OM NOTIFY EMAIL (drop-in) ======
+OM_NOTIFY_EMAIL = (os.getenv("ANIMOASSIGN_OM_NOTIFY_EMAIL") or "jdom.animoassign@gmail.com").strip()
+OM_LOAD_ASSIGNMENT_URL = (
+    os.getenv("ANIMOASSIGN_OM_LOAD_ASSIGNMENT_URL")
+    or "http://ccscloud.dlsu.edu.ph:11160/om/load-assignment"
+).strip()
+
+def _build_om_finalized_email(
+    *,
+    term_label: str,
+    faculty_name: str,
+    rows: List[Dict[str, Any]],
+    om_link: str,
+) -> Tuple[str, str, str]:
+    safe_name = _html_escape((faculty_name or "Faculty").strip() or "Faculty")
+    safe_term = _html_escape((term_label or "Term").strip() or "Term")
+    safe_link = _html_escape((om_link or "").strip())
+    preheader = _html_escape(f"{faculty_name} finalized teaching load for {term_label}"[:120])
+
+    subject = f"[AnimoAssign] Faculty load finalized • {faculty_name} • {term_label}"
+
+    # Plain text
+    lines = [
+        "Hi OM,",
+        "",
+        f"{faculty_name} has ACCEPTED and FINALIZED the faculty load assignment.",
+        f"Term: {term_label}",
+        "",
+        "Schedule:",
+    ]
+    for r in rows:
+        lines.append(
+            f"- {r.get('course_code','')} {r.get('section','')} | {r.get('units','')}u | "
+            f"{r.get('day1','')} {r.get('time1','')} {r.get('room1','')} | "
+            f"{(r.get('day2') or '')} {(r.get('time2') or '')} {(r.get('room2') or '')}"
+        )
+    lines += ["", f"Open OM page: {om_link}", "", "— AnimoAssign"]
+    body_text = "\n".join(lines)
+
+    # Build HTML rows (same columns as your accepted-email table)
+    tr = []
+    for r in rows:
+        course = _html_escape(str(r.get("course_code") or ""))
+        sec = _html_escape(str(r.get("section") or ""))
+        units = _html_escape(str(r.get("units") or ""))
+        mode = _html_escape(str(r.get("mode") or ""))
+        day1 = _html_escape(str(r.get("day1") or ""))
+        time1 = _html_escape(str(r.get("time1") or ""))
+        room1 = _html_escape(str(r.get("room1") or ""))
+        day2 = _html_escape(str(r.get("day2") or ""))
+        time2 = _html_escape(str(r.get("time2") or ""))
+        room2 = _html_escape(str(r.get("room2") or ""))
+
+        tr.append(f"""
+          <tr>
+            <td style="padding:10px 10px;border-top:1px solid #e5e7eb;">{course}</td>
+            <td style="padding:10px 10px;border-top:1px solid #e5e7eb;text-align:center;">{sec}</td>
+            <td style="padding:10px 10px;border-top:1px solid #e5e7eb;text-align:center;">{units}</td>
+            <td style="padding:10px 10px;border-top:1px solid #e5e7eb;text-align:center;">{mode}</td>
+            <td style="padding:10px 10px;border-top:1px solid #e5e7eb;text-align:center;">{day1}</td>
+            <td style="padding:10px 10px;border-top:1px solid #e5e7eb;text-align:center;">{time1}</td>
+            <td style="padding:10px 10px;border-top:1px solid #e5e7eb;">{room1}</td>
+            <td style="padding:10px 10px;border-top:1px solid #e5e7eb;text-align:center;">{day2}</td>
+            <td style="padding:10px 10px;border-top:1px solid #e5e7eb;text-align:center;">{time2}</td>
+            <td style="padding:10px 10px;border-top:1px solid #e5e7eb;">{room2}</td>
+          </tr>
+        """)
+
+    rows_html = "\n".join(tr) if tr else """
+      <tr><td colspan="10" style="padding:12px;border-top:1px solid #e5e7eb;color:#6b7280;text-align:center;">
+        No schedule rows found.
+      </td></tr>
+    """
+
+    # Inbox-style card layout (same visual pattern as inbox_email + your accepted email)
+    body_html = f"""<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Faculty Load Finalized</title>
+  </head>
+  <body style="margin:0;padding:0;background:#f6f7fb;">
+    <div style="display:none;max-height:0;overflow:hidden;opacity:0;color:transparent;">{preheader}</div>
+
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f6f7fb;padding:24px 0;">
+      <tr>
+        <td align="center">
+          <table role="presentation" width="600" cellpadding="0" cellspacing="0"
+                 style="width:600px;max-width:92vw;background:#ffffff;border-radius:14px;overflow:hidden;box-shadow:0 6px 18px rgba(17,24,39,0.08);">
+            <tr>
+              <td style="padding:20px 24px;background:#0B6B3A;color:#ffffff;font-family:Arial,Helvetica,sans-serif;">
+                <div style="font-size:12px;letter-spacing:.08em;text-transform:uppercase;opacity:.9;">AnimoAssign</div>
+                <div style="font-size:20px;font-weight:700;margin-top:6px;line-height:1.25;">Faculty Load Finalized</div>
+              </td>
+            </tr>
+
+            <tr>
+              <td style="padding:22px 24px;font-family:Arial,Helvetica,sans-serif;color:#111827;font-size:14px;line-height:1.55;">
+                <p style="margin:0 0 10px 0;">Hi OM,</p>
+                <p style="margin:0 0 16px 0;color:#374151;">
+                  Faculty <b>{safe_name}</b> has <b>ACCEPTED</b> and <b>FINALIZED</b> the load assignment for <b>{safe_term}</b>.
+                </p>
+
+                <div style="border:1px solid #e5e7eb;border-radius:12px;overflow:hidden;">
+                  <table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse;font-size:12px;">
+                    <thead style="background:#f3f4f6;color:#111827;">
+                      <tr>
+                        <th style="padding:10px 10px;text-align:left;">Course</th>
+                        <th style="padding:10px 10px;text-align:center;">Section</th>
+                        <th style="padding:10px 10px;text-align:center;">Units</th>
+                        <th style="padding:10px 10px;text-align:center;">Mode</th>
+                        <th style="padding:10px 10px;text-align:center;">Day 1</th>
+                        <th style="padding:10px 10px;text-align:center;">Time 1</th>
+                        <th style="padding:10px 10px;text-align:left;">Room 1</th>
+                        <th style="padding:10px 10px;text-align:center;">Day 2</th>
+                        <th style="padding:10px 10px;text-align:center;">Time 2</th>
+                        <th style="padding:10px 10px;text-align:left;">Room 2</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {rows_html}
+                    </tbody>
+                  </table>
+                </div>
+
+                <div style="text-align:center;margin:18px 0 10px 0;">
+                  <a href="{safe_link}" style="display:inline-block;background:#16a34a;color:#ffffff;text-decoration:none;
+                                             padding:10px 14px;border-radius:10px;font-weight:700;font-size:14px;">
+                    Open OM Load Assignment
+                  </a>
+                </div>
+
+                <p style="margin:14px 0 0 0;color:#6b7280;font-size:12px;">
+                  If the button doesn’t work, copy and paste this link:<br/>
+                  <a href="{safe_link}" style="color:#0B6B3A;text-decoration:underline;">{safe_link}</a>
+                </p>
+
+                <hr style="border:none;border-top:1px solid #e5e7eb;margin:18px 0;" />
+                <p style="margin:0;color:#6b7280;font-size:12px;">
+                  This email was sent by AnimoAssign using the faculty’s connected Gmail account.
+                </p>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>
+"""
+    return subject, body_text, body_html
+# ====== end drop-in ======
+
 def _build_load_accept_email(*, faculty_name: str, term_label: str, rows: List[Dict[str, Any]]) -> Tuple[str, str, str]:
     login_link = _aa_login_link()
     subject = f"[AnimoAssign] Teaching Load Accepted - {term_label}"
@@ -2450,6 +2604,29 @@ async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[s
     else:
         email_sent = False
         email_error = "No recipient email found for this user."
+    
+    # --- NEW: notify OM mailbox using the faculty's connected Gmail (best-effort, non-blocking) ---
+    om_mailbox_sent = False
+    om_mailbox_error: Optional[str] = None
+
+    if OM_NOTIFY_EMAIL:
+        om_subject, om_body_text, om_body_html = _build_om_finalized_email(
+            term_label=term_label,
+            faculty_name=faculty_name,
+            rows=proposal_rows,
+            om_link=OM_LOAD_ASSIGNMENT_URL,
+        )
+        try:
+            om_mailbox_sent, om_mailbox_error = await _send_email_via_user_gmail(
+                user_id=userId,  # IMPORTANT: send using the logged-in user's Gmail
+                to_email=OM_NOTIFY_EMAIL,
+                subject=om_subject,
+                body=om_body_text,
+                html_body=om_body_html,
+            )
+        except Exception as e:
+            om_mailbox_sent = False
+            om_mailbox_error = str(e)
 
     # optional rfc_id for notif (latest one)
     rfc_id = None
@@ -2513,16 +2690,19 @@ async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[s
             calendar_error = str(e)
 
         return {
-            "ok": True,
+             "ok": True,
             "status": "ACCEPTED",
+
             "email_sent": email_sent,
             "email_error": email_error,
+
+            "om_mailbox_email": OM_NOTIFY_EMAIL,
+            "om_mailbox_sent": om_mailbox_sent,
+            "om_mailbox_error": om_mailbox_error,
 
             "calendar_ok": calendar_ok,
             "calendar_events_created": calendar_events_created,
             "calendar_error": calendar_error,
-
-            # helpful debug
             "calendar_term_id": calendar_term_id,
             "term_start_at": (term_start_at.isoformat() if term_start_at else None),
             "week_count": week_count,
