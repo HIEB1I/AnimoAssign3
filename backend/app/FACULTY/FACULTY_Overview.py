@@ -15,6 +15,8 @@ import base64
 from email.message import EmailMessage
 import httpx
 
+from urllib.parse import quote
+
 from datetime import timedelta
 try:
     from zoneinfo import ZoneInfo
@@ -60,6 +62,8 @@ COL_LOAD_RFC = "faculty_rfc"
 
 import uuid
 
+def _gcal_events_insert_url(calendar_id: str = "primary") -> str:
+    return f"https://www.googleapis.com/calendar/v3/calendars/{quote(calendar_id, safe='')}/events"
 
 def _to_hhmm(v: Any) -> str:
     """Normalize various DB time formats to 4-digit HHMM used by _hhmm_to_hm.
@@ -366,8 +370,10 @@ def _first_date_on_or_after(start_date, target_weekday: int):
 
 async def _insert_gcal_event(token: str, event_body: Dict[str, Any]) -> httpx.Response:
     headers = {"Authorization": f"Bearer {token}"}
+    url = _gcal_events_insert_url("primary")
     async with httpx.AsyncClient(timeout=25) as client:
-        return await client.post(_GCAL_EVENTS_INSERT_URL, headers=headers, json=event_body)
+        r = await client.post(url, headers=headers, json=event_body)
+    return r
 
 async def _create_term_calendar_for_user(
     *,
@@ -402,6 +408,11 @@ async def _create_term_calendar_for_user(
         # try current access token first
         if access_token:
             r = await _insert_gcal_event(access_token, event_body)
+            if r is None:
+                return False, "Calendar insert returned no response (check _insert_gcal_event return)."
+            if r.status_code < 400:
+                return True, None
+
             if r.status_code < 400:
                 return True, None
             if r.status_code != 401:
@@ -892,6 +903,35 @@ def _now_utc():
 
 
 # --- Helpers tied to your actual terms schema (augmented JSON) ---
+
+async def _next_term_from_current() -> Dict[str, Any] | None:
+    cur = await db["terms"].find_one({"is_current": True}, {"_id": 0})
+    if not cur:
+        return None
+
+    ay = cur.get("acad_year_start")
+    tn = cur.get("term_number")
+    if ay is None or tn is None:
+        return None
+
+    nxt = await db["terms"].find_one(
+        {"acad_year_start": ay, "term_number": int(tn) + 1},
+        {"_id": 0},
+    )
+    if nxt:
+        return nxt
+
+    # fallback: earliest term whose start_at is after current.start_at
+    cur_start = cur.get("start_at")
+    if cur_start:
+        nxt = await db["terms"].find_one(
+            {"start_at": {"$gt": cur_start}},
+            {"_id": 0},
+            sort=[("start_at", 1)],
+        )
+        return nxt
+
+    return None
 
 async def _active_term() -> Dict[str, Any]:
     # 1) find the current anchor (must be is_current=True)
@@ -2220,7 +2260,7 @@ def _build_acceptance_email(term_label: str, rows: list[dict], recipient_email: 
       </table>
 
       <p style="margin-top:16px;">Thank you.<br/>AnimoAssign</p>
-      <p>Log in here: <a href=" http://ccscloud.dlsu.edu.ph:11160/login">http://ccscloud.dlsu.edu.ph:11160/login</a></p>
+      <p>Log in here: <a href="http://ccscloud.dlsu.edu.ph:11160/login">http://ccscloud.dlsu.edu.ph:11160/login</a></p>
     </div>
     """
     return subject, body_text, body_html
@@ -2230,7 +2270,7 @@ def _build_faculty_accept_email(
     term_label: str,
     faculty_name: str,
     rows: List[Dict[str, Any]],
-    login_url: str = " http://ccscloud.dlsu.edu.ph:11160/login",
+    login_url: str = "http://ccscloud.dlsu.edu.ph:11160/login",
 ) -> Tuple[str, str, str]:
     subject = f"[AnimoAssign] Accepted schedule • {term_label}"
 
@@ -2435,42 +2475,56 @@ async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[s
             },
         )
 
-    # Keep old shape + add email fields (won't break existing callers)
-  # --- NEW: create Google Calendar events (best-effort, non-blocking) ---
-    calendar_ok = False
-    calendar_error: Optional[str] = None
-    calendar_events_created = 0
+      # --- NEW: create Google Calendar events (best-effort, non-blocking) ---
+        calendar_ok = False
+        calendar_error: Optional[str] = None
+        calendar_events_created = 0
 
-    # Fetch start_at for THIS term_id
-    term_doc_full = await db[COL_TERMS].find_one(
-        {"term_id": term_id},
-        {"_id": 0, "start_at": 1, "acad_year_start": 1, "term_number": 1},
-    ) or {}
+        calendar_term_id: Optional[str] = None
+        term_start_at = None
+        week_count = _TERM_WEEK_COUNT  # keep your existing constant (e.g., 12)
 
-    term_start_at = _coerce_dt(term_doc_full.get("start_at"))
-    if term_start_at:
         try:
-            calendar_ok, calendar_events_created, calendar_error = await _create_term_calendar_for_user(
-                user_id=userId,
-                term_start_at=term_start_at,
-                rows=proposal_rows,
-                week_count=_TERM_WEEK_COUNT,
-            )
+            # IMPORTANT: calendar must follow the NEXT term after is_current:true
+            nxt_term = await _next_term_from_current()  # should return full term doc (term_id, start_at, end_at, ...)
+            if not nxt_term:
+                calendar_error = "No next term found after current term."
+            else:
+                calendar_term_id = (nxt_term.get("term_id") or "").strip()
+                term_start_at = _coerce_dt(nxt_term.get("start_at"))
+                term_end_at = _coerce_dt(nxt_term.get("end_at"))
+
+                if not term_start_at:
+                    calendar_error = f"Next term {calendar_term_id or ''} has no start_at; cannot create calendar events."
+                else:
+                    # Optional: if you want to cap by term range, compute weeks from start_at/end_at.
+                    if term_end_at:
+                        span_weeks = max(1, ((term_end_at.date() - term_start_at.date()).days // 7) + 1)
+                        week_count = min(_TERM_WEEK_COUNT, span_weeks)
+
+                    calendar_ok, calendar_events_created, calendar_error = await _create_term_calendar_for_user(
+                        user_id=userId,
+                        term_start_at=term_start_at,
+                        rows=proposal_rows,
+                        week_count=week_count,
+                    )
         except Exception as e:
             calendar_ok = False
             calendar_error = str(e)
-    else:
-        calendar_ok = False
-        calendar_error = "Term has no start_at; cannot create calendar events."
 
-    return {
-        "ok": True,
-        "status": "ACCEPTED",
-        "email_sent": email_sent,
-        "email_error": email_error,
-        "calendar_ok": calendar_ok,
-        "calendar_events_created": calendar_events_created,
-        "calendar_error": calendar_error,
-        "term_start_at": (term_start_at.isoformat() if term_start_at else None),
-        "week_count": _TERM_WEEK_COUNT,
-    }
+        return {
+            "ok": True,
+            "status": "ACCEPTED",
+            "email_sent": email_sent,
+            "email_error": email_error,
+
+            "calendar_ok": calendar_ok,
+            "calendar_events_created": calendar_events_created,
+            "calendar_error": calendar_error,
+
+            # helpful debug
+            "calendar_term_id": calendar_term_id,
+            "term_start_at": (term_start_at.isoformat() if term_start_at else None),
+            "week_count": week_count,
+            "calendar_url_used": _GCAL_EVENTS_INSERT_URL,
+        }
