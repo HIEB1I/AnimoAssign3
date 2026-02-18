@@ -6050,16 +6050,18 @@ ${msg}`,
               },
             });
           }}
-          onRejectOmNewLine={async (courseId: string, courseCode: string) => {
+          onRejectOmNewLine={async (courseId: string, courseCode: string, sectionId?: string, sectionCode?: string) => {
             if (!user?.userId) return;
             openConfirm({
               title: "Reject OM-added section(s)?",
-              description: `This will reject OM’s suggested section(s) for ${courseCode} and remove them from your offerings.`,
+              description: sectionCode
+                ? `This will reject OM’s suggested section ${sectionCode} for ${courseCode} and remove it from your offerings.`
+                : `This will reject OM’s suggested section(s) for ${courseCode} and remove them from your offerings.`,
               confirmText: "Reject",
               cancelText: "Cancel",
               variant: "danger",
               onConfirm: async () => {
-                await planRejectOmNewLine(user.userId, { course_id: courseId });
+                await planRejectOmNewLine(user.userId, { course_id: courseId, section_id: sectionId });
                 await loadOfferings();
                 setShowPlanModal(true);
               },
@@ -6754,7 +6756,7 @@ const PlanReviewModal: React.FC<{
   // courseIndex is used only for display (course code/title lookups). Keep it permissive.
   courseIndex?: Record<string, { code: string; title?: string } | any>;
   onKeepOmExtra?: (courseId: string, courseCode: string, bySections: number) => void | Promise<void>;
-  onRejectOmNewLine?: (courseId: string, courseCode: string) => void | Promise<void>;
+  onRejectOmNewLine?: (courseId: string, courseCode: string, sectionId?: string, sectionCode?: string) => void | Promise<void>;
 }> = ({ changes, onClose, onApprove, courseIndex = {}, onKeepOmExtra, onRejectOmNewLine }) => {
   const [busy, setBusy] = useState(false);
   const summary = useMemo(() => {
@@ -6951,12 +6953,23 @@ const PlanReviewModal: React.FC<{
                               type="button"
                               className="rounded-lg border border-rose-300 bg-white px-3 py-1.5 text-xs font-semibold text-rose-700 hover:bg-rose-50 disabled:opacity-50"
                               disabled={busy}
-                              onClick={() =>
+                              onClick={() => {
+                                const ids = Array.isArray((ch as any).om_rejectable_section_ids)
+                                  ? (ch as any).om_rejectable_section_ids
+                                  : [];
+                                const codes = Array.isArray((ch as any).om_added_section_codes)
+                                  ? (ch as any).om_added_section_codes
+                                  : [];
+                                // Reject the first rejectable OM section by default.
+                                const sid = String(ids?.[0] || "").trim();
+                                const sc = String(codes?.[0] || "").trim();
                                 onRejectOmNewLine?.(
                                   String((ch as any).course_id || ""),
-                                  String(codeForChange(ch) || "")
-                                )
-                              }
+                                  String(codeForChange(ch) || ""),
+                                  sid || undefined,
+                                  sc || undefined
+                                );
+                              }}
                             >
                               Reject
                             </button>

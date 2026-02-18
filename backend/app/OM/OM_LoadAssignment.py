@@ -251,7 +251,7 @@ async def _apo_user_ids_for_campus(campus_id: str, db) -> list[str]:
     ROLE_APO = ""
     try:
         role_doc = await db.get_collection("user_roles").find_one(
-            {"role_type": {"$regex": "^APO$", "$options": "i"}},
+            {"role_type": {"$regex": "APO", "$options": "i"}},
             {"_id": 0, "role_id": 1},
         )
         ROLE_APO = str((role_doc or {}).get("role_id") or "").strip()
@@ -298,7 +298,7 @@ async def _apo_user_ids_for_campus(campus_id: str, db) -> list[str]:
     # (no explicit campus scope in role_assignments).
     try:
         cur = db.get_collection(COL_USERS).find(
-            {"role": {"$regex": "^APO$", "$options": "i"}, "campus_id": campus_id},
+            {"role": {"$regex": "APO", "$options": "i"}, "campus_id": campus_id},
             {"_id": 0, "user_id": 1},
         )
         async for u in cur:
