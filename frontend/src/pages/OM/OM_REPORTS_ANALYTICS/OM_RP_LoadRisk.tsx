@@ -714,7 +714,7 @@ export default function OM_RP_LoadRisk() {
                       <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 text-sm">
                         <div className="flex justify-between">
                           <span className="text-gray-600">
-                            Demand (Last AY)
+                            Demand No. of Sections (Last AY)
                           </span>
                           <span className="font-semibold tabular-nums">
                             {selected.baseline_demand_sections}
@@ -722,7 +722,7 @@ export default function OM_RP_LoadRisk() {
                         </div>
                         <div className="flex justify-between mt-1">
                           <span className="text-gray-600">
-                            FT can cover (est.)
+                            FT professors that can cover
                           </span>
                           <span className="font-semibold tabular-nums">
                             {selected.ft_can_cover_sections_est}
