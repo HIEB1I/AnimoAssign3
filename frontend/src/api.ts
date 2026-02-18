@@ -3099,6 +3099,19 @@ export async function submitOmLoadAssignment(
   };
 }
 
+
+/** Apply OM post-deadline draft overrides to canonical rows so APO can see them (campus-scoped). */
+export async function applyOmPendingOverrides(
+  userId: string,
+  payload: { campus_id: string }
+) {
+  const { data } = await axios.post(`${API_BASE}/om/loadassignment`, payload, {
+    params: { userId, action: "apply_pending_overrides" },
+  });
+  return data as { ok: boolean; applied?: number; campus_id?: string; term?: string };
+}
+
+
 /** Save OM remarks for a section (section is resolved via section_schedules.schedule_id). */
 export async function saveOmSectionRemarks(
   userId: string,
