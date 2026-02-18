@@ -2809,6 +2809,34 @@ async def om_load_assignment_terms(db=Depends(get_db)):
     return {"ok": True, "active_term_id": active_term_id, "terms": terms}
 
 
+
+@router.get("/load-assignment/planning-term")
+async def om_load_assignment_planning_term(db=Depends(get_db)):
+    """Return the current (is_current=True) term id and the planning term id.
+
+    In OM terminology:
+      - current_term_id: the term where terms.is_current == True
+      - planning_term_id: the term immediately after the current term (chronological next)
+
+    The Load Assignment screen typically uses the planning term by default, but some UI widgets
+    (like Faculty Deloading) may need to explicitly target the planning term.
+    """
+    cur = await db[COL_TERMS].find_one(
+        {"is_current": True},
+        {"_id": 0, "term_id": 1, "acad_year_start": 1, "term_number": 1},
+    )
+    current_term_id = (cur or {}).get("term_id")
+
+    planning = await _active_term()
+    planning_term_id = (planning or {}).get("term_id")
+
+    return {
+        "ok": True,
+        "current_term_id": current_term_id,
+        "planning_term_id": planning_term_id,
+    }
+
+
 @router.get("/load-assignment/list")
 async def get_om_load_assignment_list(user_id: str, term_id: Optional[str] = None, db=Depends(get_db)):
     # Default behavior remains: if no term_id is provided, use the OM active term.
