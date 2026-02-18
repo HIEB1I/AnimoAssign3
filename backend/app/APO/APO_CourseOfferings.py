@@ -3041,7 +3041,10 @@ async def _pending_changes(
         if str(k).strip()
     }
 
-    # OM-created inline rows are stored in sections_submitted without program_id/batch_id.
+    # OM-created inline rows are explicitly stamped with created_source/created_by_office.
+    # IMPORTANT: do NOT infer OM-added rows via missing program_id/batch_id.
+    # Some APO-created rows can legitimately have empty program/batch and would be falsely
+    # treated as "OM-added" (this is what caused rejecting S14 to delete the original S11).
     om_q: Dict[str, Any] = {
         "term_id": term_id,
         "campus_id": campus_id,
@@ -3050,17 +3053,17 @@ async def _pending_changes(
         "$or": [
             {"created_source": "OM_NEW_LINE"},
             {"created_by_office": "OM"},
-            {"program_id": {"$in": [None, ""]}},
         ],
         # exclude special class records from OM-suggestion actions
         "remarks": {"$not": {"$regex": r"SPECIAL\\s*CLASS", "$options": "i"}},
     }
-    om_rows = [
-        r async for r in db[COL_SECTIONS_SUBMITTED].find(
-            om_q,
-            {"_id": 0, "course_id": 1, "section_id": 1, "section_code": 1},
-        )
-    ]
+
+    # Prefer newest OM-added suggestions first when deciding what to reject.
+    cur = db[COL_SECTIONS_SUBMITTED].find(
+        om_q,
+        {"_id": 0, "course_id": 1, "section_id": 1, "section_code": 1, "created_at": 1},
+    ).sort("created_at", -1)
+    om_rows = [r async for r in cur]
     om_newline_by_course: Dict[str, List[Dict[str, str]]] = {}
     for r in om_rows:
         cid0 = str(r.get("course_id") or "").strip()
