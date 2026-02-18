@@ -1644,6 +1644,42 @@ function EditForm({
 
                   {/* KAC */}
                   <div>
+                    {/* KAC format notice + links */}
+                    <div className="mb-3 rounded-2xl border border-emerald-200 bg-emerald-50/60 p-4">
+                      <div className="flex items-start gap-2">
+                        <Info className="mt-0.5 h-4 w-4 text-emerald-700" />
+                        <div className="space-y-2">
+                          <p className="text-[14px] text-emerald-900">
+                            We will now be observing the Knowledge Area Clusters (KAC) format moving forward. Thus, we
+                            can assign you to any of the courses that belong to a certain KAC. For the latest mapping,
+                            please check the following:
+                          </p>
+                          <ul className="list-disc space-y-1 pl-5 text-[14px]">
+                            <li>
+                              <a
+                                href="https://docs.google.com/spreadsheets/d/1g5IwjyfNWyWzlOM7d34-BUw3NpeMz71o/edit?usp=sharing&ouid=111791041834976052314&rtpof=true&sd=true"
+                                target="_blank"
+                                rel="noreferrer"
+                                className="font-medium text-emerald-800 underline decoration-emerald-400 underline-offset-2 hover:decoration-emerald-700"
+                              >
+                                Computer Science and Data Science KACs
+                              </a>
+                            </li>
+                            <li>
+                              <a
+                                href="https://docs.google.com/spreadsheets/d/1wtXpLMb9Gw9qQLB_P9xE9_BeqG_t4OCA/edit?usp=sharing&ouid=111791041834976052314&rtpof=true&sd=true"
+                                target="_blank"
+                                rel="noreferrer"
+                                className="font-medium text-emerald-800 underline decoration-emerald-400 underline-offset-2 hover:decoration-emerald-700"
+                              >
+                                Interactive Entertainment KACs
+                              </a>
+                            </li>
+                          </ul>
+                        </div>
+                      </div>
+                    </div>
+
                     <FieldLabel required>Knowledge Area Cluster (KAC)</FieldLabel>
                     <MultiSelectDropdown
                       values={form.kac as string[]}
