@@ -1004,37 +1004,38 @@ async def post_room_allocation(
             {"schedule_id": sched["schedule_id"]}, {"$set": {"room_id": room_id, "updated_at": now()}}
         )
 
-
-    # Notify OM when rooms were assigned (for OM-created pending rows).
-    try:
-        snap = await db["sections_submitted"].find_one(
-            {"section_id": section_id, "term_id": term_id},
-            {"_id": 0, "om_created_by": 1},
-        ) or {}
-        om_uid = (snap.get("om_created_by") or "").strip()
-        if om_uid:
-            room_doc = await db[COL_ROOMS].find_one(
-                {"room_id": room_id},
-                {"_id": 0, "room_number": 1, "building": 1},
+        # Notify OM when rooms were assigned (for OM-created pending rows).
+        # Must stay inside the "assign" action; otherwise other actions (e.g. unassign)
+        # can crash because section_id/sched aren't defined in those branches.
+        try:
+            snap = await db["sections_submitted"].find_one(
+                {"section_id": section_id, "term_id": term_id},
+                {"_id": 0, "om_created_by": 1},
             ) or {}
-            rn = (room_doc.get("room_number") or "").strip() or room_id
-            bld = (room_doc.get("building") or "").strip()
-            where = f"{bld} {rn}".strip() if bld else rn
-            await create_notification(
-                user_id=om_uid,
-                title="Rooms Assigned",
-                details=f"APO assigned room {where} for {sec_code} ({day_full} {time_band}).",
-                meta={
-                    "route": "/om/load-assignment",
-                    "kind": "apo_room_assigned",
-                    "section_id": section_id,
-                    "term_id": term_id,
-                    "room_id": room_id,
-                },
-                send_email=False,
-            )
-    except Exception:
-        pass
+            om_uid = (snap.get("om_created_by") or "").strip()
+            if om_uid:
+                room_doc = await db[COL_ROOMS].find_one(
+                    {"room_id": room_id},
+                    {"_id": 0, "room_number": 1, "building": 1},
+                ) or {}
+                rn = (room_doc.get("room_number") or "").strip() or room_id
+                bld = (room_doc.get("building") or "").strip()
+                where = f"{bld} {rn}".strip() if bld else rn
+                await create_notification(
+                    user_id=om_uid,
+                    title="Rooms Assigned",
+                    details=f"APO assigned room {where} for {sec_code} ({day_full} {time_band}).",
+                    meta={
+                        "route": "/om/load-assignment",
+                        "kind": "apo_room_assigned",
+                        "section_id": section_id,
+                        "term_id": term_id,
+                        "room_id": room_id,
+                    },
+                    send_email=False,
+                )
+        except Exception:
+            pass
 
         return {"ok": True, "schedule_id": sched["schedule_id"]}
 

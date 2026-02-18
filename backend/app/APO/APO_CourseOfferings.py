@@ -2919,6 +2919,7 @@ async def _section_count(term_id: str, campus_prefix_pattern: str, course_id: st
     q["$or"] = [{"course_id": course_id}, {"fulfilled_placeholder_course_id": course_id}]
     if campus_prefix_pattern:
         q["section_code"] = {"$regex": f"^{campus_prefix_pattern}", "$options": "i"}
+    q["remarks"] = {"$not": {"$regex": r"SPECIAL\s*CLASS", "$options": "i"}}
     return await db[COL_SECTIONS].count_documents(q)
 
 async def _pending_changes(
@@ -3032,6 +3033,46 @@ async def _pending_changes(
         demand_by_course[cid] = est["plan"]
     cap_by_course = await _planned_capacity_by_course_multi(term_id, prefix_map, view_course_ids)
 
+    # --- OM "Add new line" detection (for Keep/Reject) ---
+    plan_state = await db[COL_PLANSTATE].find_one({"term_id": term_id, "campus_id": campus_id}) or {}
+    extra_allowance: Dict[str, int] = {
+        str(k): int(v or 0)
+        for k, v in (plan_state.get("extra_sections_allowance") or {}).items()
+        if str(k).strip()
+    }
+
+    # OM-created inline rows are stored in sections_submitted without program_id/batch_id.
+    om_q: Dict[str, Any] = {
+        "term_id": term_id,
+        "campus_id": campus_id,
+        "submitted_for_scheduling": True,
+        "course_id": {"$in": view_course_ids},
+        "$or": [
+            {"created_source": "OM_NEW_LINE"},
+            {"created_by_office": "OM"},
+            {"program_id": {"$in": [None, ""]}},
+        ],
+        # exclude special class records from OM-suggestion actions
+        "remarks": {"$not": {"$regex": r"SPECIAL\\s*CLASS", "$options": "i"}},
+    }
+    om_rows = [
+        r async for r in db[COL_SECTIONS_SUBMITTED].find(
+            om_q,
+            {"_id": 0, "course_id": 1, "section_id": 1, "section_code": 1},
+        )
+    ]
+    om_newline_by_course: Dict[str, List[Dict[str, str]]] = {}
+    for r in om_rows:
+        cid0 = str(r.get("course_id") or "").strip()
+        if not cid0:
+            continue
+        om_newline_by_course.setdefault(cid0, []).append(
+            {
+                "section_id": str(r.get("section_id") or "").strip(),
+                "section_code": str(r.get("section_code") or "").strip(),
+            }
+        )
+
     course_to_programs: Dict[str, set] = {}
     for c in currs:
         pid = c.get("program_id")
@@ -3048,11 +3089,36 @@ async def _pending_changes(
         need_demand = max(1, ceil((plan or 0) / eff_cap))
         target = max(base, need_demand)
 
-        if existing < target:
-            add_by = target - existing
+        # Allow APO to permanently keep OM-suggested extra sections for this course (bypasses pre-enlistment target)
+        allow = int(extra_allowance.get(cid, 0) or 0)
+        effective_target = target + max(0, allow)
+
+        if existing < effective_target:
+            add_by = effective_target - existing
             changes.append({"type": "sections_increase", "course_id": cid, "by_sections": add_by})
-        elif existing > target:
-            changes.append({"type": "sections_decrease", "course_id": cid, "by_sections": existing - target})
+        elif existing > effective_target:
+            over = existing - effective_target
+
+            # Only show "Reduce" items that were caused by OM inline suggestions (do not nag APO for other overages here).
+            om_secs = om_newline_by_course.get(cid) or []
+            if not om_secs:
+                continue
+
+            delete_count = min(int(over), len(om_secs))
+            if delete_count <= 0:
+                continue
+
+            om_codes = [s.get("section_code") for s in om_secs if s.get("section_code")]
+            om_ids = [s.get("section_id") for s in om_secs if s.get("section_id")]
+
+            changes.append({
+                "type": "sections_decrease",
+                "course_id": cid,
+                "by_sections": delete_count,
+                "om_added_section_codes": om_codes,
+                "om_rejectable_section_ids": om_ids[:delete_count],
+                "om_delete_count": delete_count,
+            })
 
 
     # Enrich pending changes with course_code/title so the UI can display codes
@@ -4839,6 +4905,7 @@ async def post_course_offerings(
         "addRow", "editRow", "deleteRow", "restoreRow", "forward",
         "curriculumAddCourse", "curriculumEditCourse", "curriculumRemoveCourse",
         "approvePlan",
+        "planAllowExtra", "planRejectOmNewLine",
         "specialclassUpdate", 
         "courseCatalog", "search_catalog",
         "catalog.create", 
@@ -6052,6 +6119,77 @@ async def post_course_offerings(
             upsert=True
         )
         return {"ok": True, "applied": len(pending)}
+
+
+    # ----- KEEP / REJECT OM-ADDED NEW LINES -----
+    if action == "planAllowExtra":
+        if not payload or not str(payload.get("course_id") or "").strip():
+            raise HTTPException(status_code=400, detail="course_id is required.")
+        cid = str(payload["course_id"]).strip()
+        keep_n = int(payload.get("keep_sections") or payload.get("by_sections") or 1)
+
+        plan_state = await db[COL_PLANSTATE].find_one({"term_id": term_id, "campus_id": campus_id}) or {}
+        extra = plan_state.get("extra_sections_allowance") or {}
+        extra = {str(k): int(v or 0) for k, v in extra.items() if str(k).strip()}
+        extra[cid] = max(int(extra.get(cid, 0) or 0), max(0, keep_n))
+
+        await db[COL_PLANSTATE].update_one(
+            {"term_id": term_id, "campus_id": campus_id},
+            {"$set": {"extra_sections_allowance": extra, "updated_at": now()}},
+            upsert=True,
+        )
+        return {"ok": True, "kept": keep_n}
+
+    if action == "planRejectOmNewLine":
+        if not payload or not str(payload.get("course_id") or "").strip():
+            raise HTTPException(status_code=400, detail="course_id is required.")
+        cid = str(payload["course_id"]).strip()
+
+        # Determine how many OM new-line sections are currently causing an overage (respect allowance)
+        meta = await campus_meta(campus_id)
+        _, pending, _, _ = await _pending_changes(term_id=term_id, campus_id=campus_id, campus_name=meta.get("campus_name",""))
+        ch = next((x for x in pending if x.get("type") == "sections_decrease" and x.get("course_id") == cid), None)
+        ids = (ch or {}).get("om_rejectable_section_ids") or []
+        ids = [str(x).strip() for x in ids if str(x).strip()]
+        if not ids:
+            return {"ok": True, "deleted": 0}
+
+        # Soft rule: never delete special class records (remarks contains SPECIAL CLASS)
+        sec_docs = [s async for s in db[COL_SECTIONS].find({"section_id": {"$in": ids}, "term_id": term_id}, {"_id": 0, "section_id": 1, "remarks": 1})]
+        deletable = []
+        for s in sec_docs:
+            sid = str(s.get("section_id") or "").strip()
+            rem = str(s.get("remarks") or "")
+            if re.search(r"SPECIAL\s*CLASS", rem, flags=re.I):
+                continue
+            deletable.append(sid)
+
+        if deletable:
+            # NOTE: section schedules are stored in COL_SCHEDS ("section_schedules")
+            await db[COL_SCHEDS].delete_many({"term_id": term_id, "section_id": {"$in": deletable}})
+            await db[COL_SECTIONS_SUBMITTED].delete_many({"term_id": term_id, "section_id": {"$in": deletable}})
+            await db[COL_SECTIONS].delete_many({"term_id": term_id, "section_id": {"$in": deletable}})
+
+        # Notify OM/GS (in-app + email) using existing notification helper.
+        try:
+            course_meta = (await map_courses([cid])).get(cid) or {}
+            course_code = (course_meta.get("course_code") or "")
+            if isinstance(course_code, list):
+                course_code = course_code[0] if course_code else ""
+            msg = f"APO rejected OM-added section(s) for {course_code or cid}."
+            await create_notification(
+                userId=userId,
+                recipients=_om_and_gs_user_ids_for_department_id(course_meta.get("department_id") or ""),
+                title="OM section suggestion rejected",
+                message=msg,
+                kind="courseofferings",
+                send_email=True,
+                meta={"term_id": term_id, "campus_id": campus_id, "course_id": cid, "deleted_section_ids": deletable},
+            )
+        except Exception:
+            pass
+
+        return {"ok": True, "deleted": len(deletable)}
 
     # ----- GE/SHS EXEMPTION -----
     plan_warning = False

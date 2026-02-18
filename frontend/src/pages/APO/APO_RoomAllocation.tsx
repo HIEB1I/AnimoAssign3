@@ -635,6 +635,7 @@ function RoomSchedule({
   room,
   onBack,
   onUpdated,
+  onAfterMutation,
   timeBands,
   sections,
   sectionSchedules,
@@ -646,6 +647,7 @@ function RoomSchedule({
   room: RoomItem;
   onBack: () => void;
   onUpdated: (next: RoomItem) => void;
+  onAfterMutation?: () => Promise<void>;
   timeBands: string[];
   sections: SectionDoc[];
   sectionSchedules: SectionSched[];
@@ -684,6 +686,12 @@ function RoomSchedule({
         c.day === selectedSlot.day && c.time_band === selectedSlot.time_band ? { ...c, section_id } : c
       );
       onUpdated({ ...room, schedule: updatedCells });
+
+      // IMPORTANT:
+      // The backend computes per-cell eligible_section_ids based on *currently unassigned*
+      // section schedules. After an assign/unassign, we must refresh so the dropdown
+      // shows the correct eligible sections (otherwise it can stay empty/stale).
+      if (onAfterMutation) await onAfterMutation();
       setSelectedSlot(null);
     } catch (e: any) {
       setAllocError(e?.message || "Failed to assign room.");
@@ -694,11 +702,20 @@ function RoomSchedule({
 
   const handleRemove = async (day: Day, time_band: string, section_id?: string | null) => {
     if (!user?.userId || !section_id) return;
-    await unassignRoom(user.userId, { room_id: room.room_id, day, time_band, section_id });
-    const updatedCells = room.schedule.map((c) =>
-      c.day === day && c.time_band === time_band ? { ...c, section_id: null } : c
-    );
-    onUpdated({ ...room, schedule: updatedCells });
+    try {
+      setAllocError(null);
+      await unassignRoom(user.userId, { room_id: room.room_id, day, time_band, section_id });
+      const updatedCells = room.schedule.map((c) =>
+        c.day === day && c.time_band === time_band ? { ...c, section_id: null } : c
+      );
+      onUpdated({ ...room, schedule: updatedCells });
+
+      // Refresh to recompute eligible_section_ids so the removed section
+      // becomes selectable again in the Allocate modal without requiring a full page reload.
+      if (onAfterMutation) await onAfterMutation();
+    } catch (e: any) {
+      setAllocError(e?.message || "Failed to remove room assignment.");
+    }
   };
 
   return (
@@ -1219,6 +1236,15 @@ const refresh = async (): Promise<RoomAllocationResponse | null> => {
             onUpdated={(next) => {
               setRooms((prev) => prev.map((r) => (r.room_id === next.room_id ? next : r)));
               setViewing(next);
+            }}
+            onAfterMutation={async () => {
+              // Re-fetch room allocation so eligible_section_ids stays accurate
+              // after assign/unassign. Also keeps the currently viewed room in sync.
+              const data = await refresh();
+              if (data && viewing) {
+                const updated = data.rooms.find((r) => r.room_id === viewing.room_id);
+                if (updated) setViewing(updated);
+              }
             }}
             timeBands={timeBands}
             sections={sections}

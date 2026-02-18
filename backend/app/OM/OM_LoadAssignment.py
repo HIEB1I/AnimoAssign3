@@ -3517,6 +3517,9 @@ async def om_save_new_line(
             "enrollment_cap": cap,
             "mode": mode,
             "remarks": remarks,
+            "created_source": "OM_NEW_LINE",
+            "created_by_user_id": user_id,
+            "created_by_office": "OM",
             "created_at": now,
             "updated_at": now,
         }
@@ -3533,6 +3536,9 @@ async def om_save_new_line(
             "enrollment_cap": cap,
             "campus_id": campus_id,
             "remarks": remarks,
+            "created_source": "OM_NEW_LINE",
+            "created_by_user_id": user_id,
+            "created_by_office": "OM",
             "created_at": now,
             "updated_at": now,
         }

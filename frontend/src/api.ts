@@ -997,6 +997,27 @@ export async function approveApoOfferingsPlan(
 }
 
 
+export async function planAllowExtra(
+  userId: string,
+  payload: { course_id: string; keep_sections?: number }
+): Promise<{ ok: true; kept: number }> {
+  const url = `${API_BASE}/apo/courseofferings${q({ userId, action: "planAllowExtra" })}`;
+  // IMPORTANT: `api` axios instance already has baseURL=API_BASE.
+  // This function builds an absolute URL, so we must use the low-level `post()` helper
+  // (which uses global axios) to avoid generating API_BASE + API_BASE/... (404 Not Found).
+  return post(url, payload);
+}
+
+export async function planRejectOmNewLine(
+  userId: string,
+  payload: { course_id: string }
+): Promise<{ ok: true; deleted: number }> {
+  const url = `${API_BASE}/apo/courseofferings${q({ userId, action: "planRejectOmNewLine" })}`;
+  // See note in planAllowExtra(): absolute URL => use `post()` helper.
+  return post(url, payload);
+}
+
+
 export async function setApoOmSubmitWindow(
   userId: string,
   payload: { deadlineISO: string }

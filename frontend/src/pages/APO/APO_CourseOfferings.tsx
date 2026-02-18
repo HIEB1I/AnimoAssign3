@@ -48,6 +48,8 @@ import {
   type CreateCoursePayload,  
   type CourseCatalogItem,
   type OmSubmissionWindow,
+  planAllowExtra,
+  planRejectOmNewLine,
 } from "../../api";
 
 /* --------------------------------- helpers --------------------------------- */
@@ -5982,7 +5984,18 @@ ${msg}`,
           onConfirm={async () => {
             // Action lives in a ref so we don't store functions in state.
             if (!confirmActionRef.current) return;
-            await confirmActionRef.current();
+            // Show a real busy state and close on success.
+            setConfirmDlg((prev) => ({ ...prev, busy: true }));
+            try {
+              await confirmActionRef.current();
+              closeConfirm();
+              // Bring the planning review to the front so the user sees the item disappear.
+              setShowPlanModal(true);
+            } catch (e: any) {
+              const msg = describeApiError(e, "Action failed.");
+              setConfirmDlg((prev) => ({ ...prev, busy: false }));
+              openNotice("Action failed", msg);
+            }
           }}
         />
       )}
@@ -6022,6 +6035,36 @@ ${msg}`,
         <PlanReviewModal
           changes={data.planning.pending_changes || []}
           courseIndex={{ ...planCourseIndex, ...extraCourseIndex }}  // ⟵ merged
+          onKeepOmExtra={async (courseId: string, courseCode: string, bySections: number) => {
+            if (!user?.userId) return;
+            openConfirm({
+              title: "Keep extra section(s)?",
+              description: `This will keep OM’s suggested section(s) for ${courseCode} and stop showing this item in Approval required.`,
+              confirmText: "Keep",
+              cancelText: "Cancel",
+              variant: "default",
+              onConfirm: async () => {
+                await planAllowExtra(user.userId, { course_id: courseId, keep_sections: bySections });
+                await loadOfferings();
+                setShowPlanModal(true);
+              },
+            });
+          }}
+          onRejectOmNewLine={async (courseId: string, courseCode: string) => {
+            if (!user?.userId) return;
+            openConfirm({
+              title: "Reject OM-added section(s)?",
+              description: `This will reject OM’s suggested section(s) for ${courseCode} and remove them from your offerings.`,
+              confirmText: "Reject",
+              cancelText: "Cancel",
+              variant: "danger",
+              onConfirm: async () => {
+                await planRejectOmNewLine(user.userId, { course_id: courseId });
+                await loadOfferings();
+                setShowPlanModal(true);
+              },
+            });
+          }}
           onClose={() => setShowPlanModal(false)}
           onApprove={async () => {
             if (!user?.userId) return;
@@ -6708,8 +6751,11 @@ const PlanReviewModal: React.FC<{
   changes: PlanningChange[];
   onClose: () => void;
   onApprove: () => void | Promise<void>;
-  courseIndex?: Record<string, { code: string; title: string }>;
-}> = ({ changes, onClose, onApprove, courseIndex = {} }) => {
+  // courseIndex is used only for display (course code/title lookups). Keep it permissive.
+  courseIndex?: Record<string, { code: string; title?: string } | any>;
+  onKeepOmExtra?: (courseId: string, courseCode: string, bySections: number) => void | Promise<void>;
+  onRejectOmNewLine?: (courseId: string, courseCode: string) => void | Promise<void>;
+}> = ({ changes, onClose, onApprove, courseIndex = {}, onKeepOmExtra, onRejectOmNewLine }) => {
   const [busy, setBusy] = useState(false);
   const summary = useMemo(() => {
     const s = { total: changes.length, add: 0, increase: 0, reduce: 0 };
@@ -6721,7 +6767,8 @@ const PlanReviewModal: React.FC<{
     return s;
   }, [changes]);
   return (
-    <div className="fixed inset-0 z-[9999] flex items-start justify-center bg-black/50 p-3 sm:p-6">
+    // Keep this below ConfirmModal (z-[120]) so prompts always stay clickable.
+    <div className="fixed inset-0 z-[110] flex items-start justify-center bg-black/50 p-3 sm:p-6">
       <div className="w-[95vw] max-w-[980px] max-h-[90vh] mt-4 sm:mt-8 rounded-2xl bg-white shadow-2xl border border-gray-200 flex flex-col overflow-hidden">
         {/* Header (high-visibility) */}
         <div className="bg-amber-600 text-white px-5 py-4">
@@ -6861,6 +6908,61 @@ const PlanReviewModal: React.FC<{
                         </div>
                       ))}
                     </div>
+
+                    {ch.type === "sections_decrease" &&
+                      Array.isArray((ch as any).om_added_section_codes) &&
+                      ((ch as any).om_added_section_codes?.length || 0) > 0 && (
+                        <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
+                          <div className="flex flex-wrap items-center gap-1">
+                            <span className="inline-flex items-center rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-semibold text-amber-800">
+                              OM
+                            </span>
+                            {(ch as any).om_added_section_codes.slice(0, 4).map((sc: string) => (
+                              <span
+                                key={sc}
+                                className="inline-flex items-center rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-900"
+                              >
+                                {sc}
+                              </span>
+                            ))}
+                            {((ch as any).om_added_section_codes.length || 0) > 4 && (
+                              <span className="text-[11px] font-medium text-amber-800">
+                                +{(ch as any).om_added_section_codes.length - 4}
+                              </span>
+                            )}
+                          </div>
+
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              className="rounded-lg border border-amber-300 bg-white px-3 py-1.5 text-xs font-semibold text-amber-800 hover:bg-amber-50 disabled:opacity-50"
+                              disabled={busy}
+                              onClick={() =>
+                                onKeepOmExtra?.(
+                                  String((ch as any).course_id || ""),
+                                  String(codeForChange(ch) || ""),
+                                  Number((ch as any).by_sections || 1)
+                                )
+                              }
+                            >
+                              Keep
+                            </button>
+                            <button
+                              type="button"
+                              className="rounded-lg border border-rose-300 bg-white px-3 py-1.5 text-xs font-semibold text-rose-700 hover:bg-rose-50 disabled:opacity-50"
+                              disabled={busy}
+                              onClick={() =>
+                                onRejectOmNewLine?.(
+                                  String((ch as any).course_id || ""),
+                                  String(codeForChange(ch) || "")
+                                )
+                              }
+                            >
+                              Reject
+                            </button>
+                          </div>
+                        </div>
+                      )}
                   </li>
                 );
               })}
