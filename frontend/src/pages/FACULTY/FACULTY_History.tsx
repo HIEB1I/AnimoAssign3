@@ -7,35 +7,11 @@ import { Search } from "lucide-react";
 
 // Standardized column headers (match FACULTY_Overview List view; minus Syllabus)
 // NOTE: History payload only provides a single `time` string; we map it to Begin/End for Day 1 and (if present) Day 2.
-const HEADERS = [
-  "Course Code & Title",
-  "Section",
-  "Day 1",
-  "Begin 1",
-  "End 1",
-  "Room 1",
-  "Day 2",
-  "Begin 2",
-  "End 2",
-  "Room 2",
-] as const;
+const HEADERS = ["Course Code & Title"] as const;
 
 // ---------- tiny utils ----------
 const cls = (...s: (string | false | undefined)[]) => s.filter(Boolean).join(" ");
 
-function splitBeginEnd(time?: string): { begin: string; end: string } {
-  const raw = (time || "").trim();
-  if (!raw || raw.toUpperCase() === "TBA") return { begin: "—", end: "—" };
-
-  // Accept a few common separators: en dash, em dash, hyphen
-  const parts = raw
-    .split(/\s*(?:–|—|-)\s*/)
-    .map((s) => s.trim())
-    .filter(Boolean);
-
-  if (parts.length >= 2) return { begin: parts[0], end: parts[1] };
-  return { begin: parts[0] || "—", end: "—" };
-}
 
 // Normalize "AY" strings for robust comparisons & query params
 const normAy = (s?: string | null) =>
@@ -173,7 +149,7 @@ function Dropdown({
 }
 
 // ---------- component ----------
-function HistoryMain() {
+function HistoryMain({ embedded = false }: { embedded?: boolean } = {}) {
   const [rows, setRows] = useState<Row[]>([]);
   const [loading, setLoading] = useState(false);
   const [query, setQuery] = useState("");
@@ -342,18 +318,58 @@ function HistoryMain() {
   }, [rows, ay, query]); // This logic is correct and unchanged
 
   // This logic is also correct and unchanged
-  const groups = useMemo(() => {
-    const byTerm: Record<string, Row[]> = { "Term 1": [], "Term 2": [], "Term 3": [] };
-    filtered.forEach((r) => {
-      const key = (r.term as string) || "Term 1";
-      if (!byTerm[key]) byTerm[key] = [];
-      byTerm[key].push(r);
+  const allTimeCounts = useMemo(() => {
+    const map: Record<string, { code: string; title: string; totalCount: number }> = {};
+    rows.forEach((r) => {
+      const code = (r.code || "").trim();
+      const title = (r.title || "").trim();
+      const key = `${code}||${title}`.toUpperCase();
+      if (!map[key]) map[key] = { code, title, totalCount: 0 };
+      map[key].totalCount += 1;
     });
+    return map;
+  }, [rows]);
+
+  // Aggregate to "what you've taught" (per term) + analytics (counts)
+  const termCourses = useMemo(() => {
+    const byTerm: Record<
+      string,
+      { key: string; code: string; title: string; termCount: number; totalCount: number }[]
+    > = { "Term 1": [], "Term 2": [], "Term 3": [] };
+
+    const acc: Record<
+      string,
+      Record<string, { key: string; code: string; title: string; termCount: number; totalCount: number }>
+    > = { "Term 1": {}, "Term 2": {}, "Term 3": {} };
+
+    filtered.forEach((r) => {
+      const termKey = (r.term as string) || "Term 1";
+      const code = (r.code || "").trim();
+      const title = (r.title || "").trim();
+      const key = `${code}||${title}`.toUpperCase();
+      const totalCount = allTimeCounts[key]?.totalCount ?? 0;
+
+      if (!acc[termKey]) acc[termKey] = {};
+      if (!acc[termKey][key]) {
+        acc[termKey][key] = { key, code, title, termCount: 0, totalCount };
+      }
+      acc[termKey][key].termCount += 1;
+    });
+
+    (Object.keys(acc) as (keyof typeof acc)[]).forEach((t) => {
+      byTerm[t] = Object.values(acc[t]).sort((a, b) => {
+        // higher-termCount first, then code
+        if (b.termCount !== a.termCount) return b.termCount - a.termCount;
+        return (a.code || "").localeCompare(b.code || "");
+      });
+    });
+
     return byTerm;
-  }, [filtered]);
+  }, [filtered, allTimeCounts]);
+
 
   return (
-    <section className="mx-auto w-full max-w-screen-2xl px-4">
+    <section className={cls("mx-auto w-full", embedded ? "" : "max-w-screen-2xl px-4")}>
       <div className="rounded-xl border border-gray-200 bg-white p-5">
         {/* Header */}
         <div className="mb-4">
@@ -445,29 +461,13 @@ function HistoryMain() {
                 <div className="overflow-hidden rounded-xl bg-white">
                   <table className="min-w-full table-fixed border-t border-gray-200 text-[13px]">
                     <colgroup>
-                      {/* Match FACULTY_Overview list view sizing (minus Mode/Syllabus) */}
-                      <col className="w-[240px]" />
-                      <col className="w-[92px]" />
-                      <col className="w-[82px]" />
-                      <col className="w-[92px]" />
-                      <col className="w-[92px]" />
-                      <col className="w-[110px]" />
-                      <col className="w-[82px]" />
-                      <col className="w-[92px]" />
-                      <col className="w-[92px]" />
-                      <col className="w-[110px]" />
+                      <col className="w-full" />
                     </colgroup>
 
                     <thead className="bg-gray-50 text-gray-700">
                       <tr className="[&>th]:border-b [&>th]:border-gray-200">
-                        {HEADERS.map((h, idx) => (
-                          <th
-                            key={h}
-                            className={cls(
-                              "px-4 py-3 font-semibold",
-                              idx === 0 ? "text-left" : "text-center"
-                            )}
-                          >
+                        {HEADERS.map((h) => (
+                          <th key={h} className="px-4 py-3 text-left font-semibold">
                             {h}
                           </th>
                         ))}
@@ -475,47 +475,36 @@ function HistoryMain() {
                     </thead>
 
                     <tbody className="text-gray-900">
-                      {(groups[t] ?? []).length === 0 ? (
+                      {(termCourses[t] ?? []).length === 0 ? (
                         <tr>
-                          <td colSpan={HEADERS.length} className="px-4 py-6 text-center text-sm text-gray-500">
-                            No records.
-                          </td>
+                          <td className="px-4 py-6 text-center text-sm text-gray-500">No records.</td>
                         </tr>
                       ) : (
-                        groups[t].map((r, i) => {
-                          const d1 = r.day1 && r.day1 !== "TBA" ? r.day1 : "—";
-                          const d2 = r.day2 && r.day2 !== "TBA" ? r.day2 : "—";
-
-                          // History provides one `time` string; use it for Day 1, and only mirror to Day 2 when it exists.
-                          const t1 = splitBeginEnd(r.time);
-                          const t2 = d2 !== "—" ? t1 : { begin: "—", end: "—" };
-
-                          return (
-                            <tr
-                              key={`${t}-${i}`}
-                              className={cls(
-                                i % 2 === 0 ? "bg-white" : "bg-gray-50",
-                                "[&>td]:border-t [&>td]:border-gray-100"
-                              )}
-                            >
-                              <td className="px-4 py-3 align-middle">
-                                <div className="leading-tight">
-                                  <div className="font-semibold text-gray-900">{r.code || "—"}</div>
-                                  <div className="mt-0.5 text-[12px] text-gray-600">{r.title || "—"}</div>
+                        termCourses[t].map((c, i) => (
+                          <tr
+                            key={`${t}-${c.key}`}
+                            className={cls(
+                              i % 2 === 0 ? "bg-white" : "bg-gray-50",
+                              "[&>td]:border-t [&>td]:border-gray-100"
+                            )}
+                          >
+                            <td className="px-4 py-3 align-middle">
+                              <div className="flex items-start justify-between gap-3">
+                                <div className="min-w-0">
+                                  <div className="font-semibold text-gray-900">{c.code || "—"}</div>
+                                  <div className="mt-0.5 line-clamp-2 text-[12px] text-gray-600">{c.title || "—"}</div>
                                 </div>
-                              </td>
-                              <td className="px-4 py-3 align-middle text-center">{r.section || "—"}</td>
-                              <td className="px-4 py-3 align-middle text-center">{d1}</td>
-                              <td className="px-4 py-3 align-middle text-center">{t1.begin}</td>
-                              <td className="px-4 py-3 align-middle text-center">{t1.end}</td>
-                              <td className="px-4 py-3 align-middle text-center">{r.room1 || "—"}</td>
-                              <td className="px-4 py-3 align-middle text-center">{d2}</td>
-                              <td className="px-4 py-3 align-middle text-center">{t2.begin}</td>
-                              <td className="px-4 py-3 align-middle text-center">{t2.end}</td>
-                              <td className="px-4 py-3 align-middle text-center">{r.room2 || "—"}</td>
-                            </tr>
-                          );
-                        })
+
+                                <div className="shrink-0 text-right">
+                                  <div className="inline-flex items-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-800">
+                                    This term: {c.termCount}
+                                  </div>
+                                  <div className="mt-1 text-[11px] text-gray-500">All-time: {c.totalCount}</div>
+                                </div>
+                              </div>
+                            </td>
+                          </tr>
+                        ))
                       )}
                     </tbody>
                   </table>

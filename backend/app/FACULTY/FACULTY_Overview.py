@@ -993,16 +993,90 @@ async def overview_handler(
             {"user_id": userId}, {"_id": 0}
         ).to_list(None)
 
+        # Expand faculty profile details (from faculty_profiles) for the Profile tab
+        employment_type = faculty.get("employment_type")
+        min_units = faculty.get("min_units")
+        max_preps = faculty.get("max_preps")
+        teaching_years = faculty.get("teaching_years")
+        certifications = faculty.get("certifications") or []
+
+        # Qualified KACs (include course list with code + title)
+        kac_ids = faculty.get("qualified_kacs") or []
+        if not isinstance(kac_ids, list):
+            kac_ids = []
+        kac_docs: List[Dict[str, Any]] = []
+        if kac_ids:
+            kac_docs = await db.kacs.find(
+                {"kac_id": {"$in": kac_ids}},
+                {"_id": 0, "kac_id": 1, "kac_name": 1, "kac_code": 1, "program_area": 1, "course_list": 1},
+            ).to_list(None)
+
+        kac_by_id = {str(k.get("kac_id")): k for k in (kac_docs or []) if k}
+        course_ids: List[str] = []
+        for kd in (kac_docs or []):
+            for cid in (kd.get("course_list") or []):
+                if isinstance(cid, str) and cid.strip():
+                    course_ids.append(cid.strip())
+        course_ids = sorted(set(course_ids))
+
+        courses_map: Dict[str, Dict[str, Any]] = {}
+        if course_ids:
+            course_docs = await db[COL_COURSES].find(
+                {"course_id": {"$in": course_ids}},
+                {"_id": 0, "course_id": 1, "course_code": 1, "course_title": 1},
+            ).to_list(None)
+            for cd in course_docs:
+                cid = str(cd.get("course_id") or "").strip()
+                if not cid:
+                    continue
+                courses_map[cid] = {
+                    "course_id": cid,
+                    "course_code": _as_code_str(cd.get("course_code")),
+                    "course_title": cd.get("course_title") or "",
+                }
+
+        qualified_kacs_details: List[Dict[str, Any]] = []
+        for kac_id in kac_ids:
+            kid = str(kac_id or "").strip()
+            if not kid:
+                continue
+            kd = kac_by_id.get(kid)
+            if not kd:
+                continue
+            clist = []
+            for cid in (kd.get("course_list") or []):
+                scid = str(cid or "").strip()
+                if not scid:
+                    continue
+                clist.append(courses_map.get(scid, {"course_id": scid, "course_code": "", "course_title": ""}))
+
+            qualified_kacs_details.append({
+                "kac_id": kid,
+                "kac_name": kd.get("kac_name") or "",
+                "kac_code": kd.get("kac_code") or "",
+                "program_area": kd.get("program_area") or "",
+                "courses": clist,
+            })
+
         return {
             "ok": True,
             "faculty": {
                 "full_name": full_name,
-                "fullName": full_name,   
+                "fullName": full_name,
                 "role": "Faculty",
                 "department": (dept or {}).get("dept_name", "—"),
+
+                # faculty_profiles fields
+                "employment_type": employment_type,
+                "min_units": min_units,
+                "max_preps": max_preps,
+                "teaching_years": teaching_years,
+                "certifications": certifications,
+                "qualified_kacs": qualified_kacs_details,
             },
             "notifications": notifications,
         }
+
 
     # ---------- fetch (list) ----------
     if action == "fetch":

@@ -88,7 +88,7 @@ function ToastViewport({
    0) Page
    ========================================= */
 export default function FAC_Overview() {
-  const [tab, setTab] = useState<"Overview" | "History" | "Preferences" | "Deloadings">("Overview");
+  const [tab, setTab] = useState<"Overview" | "Preferences" | "Profile">("Overview");
   const [showInbox, setShowInbox] = useState(false); // NEW
   const [data, setData] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
@@ -318,7 +318,7 @@ useEffect(() => {
           mode="state"
           activeTab={tab}
           onTabChange={(newTab) => setTab(newTab as typeof tab)}
-          items={[{ label: "Overview" }, { label: "History" }, { label: "Preferences" }, { label: "Deloadings" }]}
+          items={[{ label: "Overview" }, { label: "Preferences" }, { label: "Profile" }]}
         />
       )}
 
@@ -341,15 +341,189 @@ useEffect(() => {
                 />
               </>
             )}
-            {tab === "History" && <HistoryMain />}
             {tab === "Preferences" && <PreferencesContent />}
-            {tab === "Deloadings" && <DeloadingsContent />}
+            {tab === "Profile" && (
+              <FacultyProfileTab faculty={data?.faculty} />
+            )}
           </>
         )}
       </main>
     </div>
   );
 }
+
+/* =========================================
+   Faculty Profile Tab (REDESIGNED)
+   - Not an information dump: show actionable "guardrails" + qualifications
+   ========================================= */
+function FacultyProfileTab({ faculty }: { faculty: any }) {
+  const employmentLabel = (v: any) => {
+    const s = String(v ?? "").trim().toUpperCase();
+    if (s === "FT" || s === "FULLTIME" || s === "FULL-TIME") return "Full-time";
+    if (s === "PT" || s === "PARTTIME" || s === "PART-TIME") return "Part-time";
+    return s || "—";
+  };
+
+  const pills: { label: string; value: string }[] = [
+    { label: "Employment", value: employmentLabel(faculty?.employment_type) },
+    { label: "Teaching experience", value: faculty?.teaching_years != null ? `${faculty.teaching_years} yrs` : "—" },
+  ];
+
+  const guardrails = [
+    { label: "Minimum units (preference baseline)", value: faculty?.min_units ?? "—" },
+    { label: "Max course preps (per term)", value: faculty?.max_preps ?? "—" },
+  ];
+
+  const certifications: any[] = Array.isArray(faculty?.certifications) ? faculty.certifications : [];
+  const kacs: any[] = Array.isArray(faculty?.qualified_kacs) ? faculty.qualified_kacs : [];
+
+  return (
+    <div className="mx-auto w-full max-w-screen-2xl px-4">
+      {/* Header */}
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+        <div>
+          <div className="mt-1 font-bold text-gray-900">
+            {faculty?.full_name || faculty?.fullName || "—"}
+            <span className="mx-2 text-gray-300">•</span>
+            <span>{faculty?.department || "—"}</span>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          {pills.map((p) => (
+            <span
+              key={p.label}
+              className="inline-flex items-center gap-2 rounded-full border border-gray-200 bg-white px-3 py-1 text-xs text-gray-700 shadow-sm"
+              title={p.label}
+            >
+              <span className="text-gray-500">{p.label}:</span>
+              <span className="font-medium">{p.value}</span>
+            </span>
+          ))}
+        </div>
+      </div>
+
+      {/* Actionable overview */}
+      <div className="mt-5 grid grid-cols-1 gap-4 lg:grid-cols-3">
+        {/* Guardrails */}
+        <div className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm">
+          <div className="text-sm font-semibold text-gray-900">Your teaching guardrails</div>
+          <div className="mt-1 text-xs text-gray-500">
+            These help you plan preferences and spot overload risk early.
+          </div>
+
+          <div className="mt-3 space-y-2">
+            {guardrails.map((g) => (
+              <div key={g.label} className="flex items-center justify-between gap-4 rounded-xl bg-gray-50 px-3 py-2">
+                <div className="text-xs text-gray-600">{g.label}</div>
+                <div className="text-sm font-semibold text-gray-900">{g.value}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Certifications */}
+        <div className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm">
+          <div className="text-sm font-semibold text-gray-900">Certifications</div>
+          <div className="mt-1 text-xs text-gray-500">Shown to help chairs match you to specialized courses.</div>
+
+          {certifications.length === 0 ? (
+            <div className="mt-3 rounded-xl border border-dashed border-gray-200 bg-gray-50 px-3 py-3 text-sm text-gray-600">
+              No certifications on file.
+            </div>
+          ) : (
+            <div className="mt-3 flex flex-wrap gap-2">
+              {certifications.map((c, idx) => (
+                <span
+                  key={`${idx}-${String(c)}`}
+                  className="inline-flex items-center rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-900"
+                >
+                  {typeof c === "string" ? c : c?.name || c?.title || JSON.stringify(c)}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Qualified KACs */}
+        <div className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm">
+          <div className="text-sm font-semibold text-gray-900">Qualified KACs</div>
+          <div className="mt-1 text-xs text-gray-500">
+            This is your “coverage map” — areas and courses you can be assigned to.
+          </div>
+
+          {kacs.length === 0 ? (
+            <div className="mt-3 rounded-xl border border-dashed border-gray-200 bg-gray-50 px-3 py-3 text-sm text-gray-600">
+              No KAC qualifications on file.
+            </div>
+          ) : (
+            <div className="mt-3 space-y-2">
+              {kacs.map((k) => (
+                <details key={k.kac_id || k.kac_code || k.kac_name} className="group rounded-xl border border-gray-200 bg-white">
+                  <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-2">
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-sm font-semibold text-gray-900">{k.kac_name || "—"}</span>
+                        <span className="rounded-full border border-gray-200 bg-gray-50 px-2 py-0.5 text-[11px] text-gray-700">
+                          {k.kac_code || k.kac_id || "KAC"}
+                        </span>
+                      </div>
+                      <div className="mt-0.5 text-[12px] text-gray-500">{k.program_area || "—"}</div>
+                    </div>
+                    <span className="text-xs text-gray-500 transition group-open:rotate-180">▾</span>
+                  </summary>
+
+                  <div className="border-t border-gray-200 px-3 py-3">
+                    <div className="text-xs font-medium text-gray-700">Courses under this KAC</div>
+                    {(k.courses || []).length === 0 ? (
+                      <div className="mt-2 text-sm text-gray-600">No course list.</div>
+                    ) : (
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        {(k.courses || []).map((c: any) => (
+                          <span
+                            key={c.course_id || `${c.course_code}-${c.course_title}`}
+                            className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs text-slate-900"
+                            title={c.course_title || ""}
+                          >
+                            <span className="font-semibold">{c.course_code || "—"}</span>
+                            <span className="text-slate-500">•</span>
+                            <span className="max-w-[280px] truncate text-slate-700">{c.course_title || "—"}</span>
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </details>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Records */}
+      <div className="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-2">
+        <div className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm">
+          <div className="text-sm font-semibold text-gray-900">Teaching history</div>
+          <div className="mt-1 text-xs text-gray-500">
+            Focuses on what you taught and how often (per term + all-time).
+          </div>
+          <div className="mt-4">
+            <HistoryMain embedded />
+          </div>
+        </div>
+
+        <div className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm">
+          <div className="text-sm font-semibold text-gray-900">Deloadings</div>
+          <div className="mt-1 text-xs text-gray-500">Your recorded deloading arrangements.</div>
+          <div className="mt-4">
+            <DeloadingsContent embedded />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* =========================================
    1) Stat Cards (MODIFIED)
    ========================================= */
