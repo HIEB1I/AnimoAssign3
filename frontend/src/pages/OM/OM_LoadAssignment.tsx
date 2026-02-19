@@ -49,6 +49,18 @@ async function runOmSubmitDeadlineReminders(): Promise<any> {
   }
 }
 
+
+// Fetch the planning term (term after the current anchor) without hardcoding.
+// current_term_id = terms.is_current === true
+// planning_term_id = term immediately after current_term_id
+async function getOmPlanningTermIds(): Promise<{ current_term_id?: string; planning_term_id?: string }> {
+  const resp = await fetch("/api/om/load-assignment/planning-term");
+  if (!resp.ok) {
+    throw new Error(`Failed to fetch planning term ids (${resp.status})`);
+  }
+  return await resp.json();
+}
+
 import { cls } from "../../utilities/cls";
 import {
   ChevronDown,
@@ -2817,6 +2829,8 @@ useEffect(() => {
   // Term label from backend (no hardcoding)
   const [term, setTerm] = useState<string>("");
   const [termId, setTermId] = useState<string>("");
+  const [planningTermId, setPlanningTermId] = useState<string>("");
+
   /** Track the default (active) term id so we can detect archive viewing */
   const [activeTermId, setActiveTermId] = useState<string>("");
 
@@ -2832,6 +2846,31 @@ useEffect(() => {
   >([]);
   const [archiveTermId, setArchiveTermId] = useState<string>("");
   const isArchiveView = !!activeTermId && !!termId && termId !== activeTermId;
+
+
+  // Determine the planning term id (term after the current anchor) for widgets that must
+  // explicitly target the planning term (e.g., Faculty Deloading table).
+  useEffect(() => {
+    if (!userId) return;
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const res: any = await getOmPlanningTermIds();
+        if (cancelled) return;
+        const pid = typeof res?.planning_term_id === "string" ? res.planning_term_id : "";
+        setPlanningTermId(pid);
+      } catch (e) {
+        // Best-effort only: if this fails, we fall back to termId.
+        console.warn("Failed to fetch planning term ids", e);
+        if (!cancelled) setPlanningTermId("");
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [userId]);
 
   useEffect(() => {
     if (!archiveOpen || !userId) return;
@@ -4473,7 +4512,8 @@ async function handleSaveNewLineRow(r: Row) {
   }, [deloadAllRows]);
 
   useEffect(() => {
-    if (!termId) return;
+    const deloadTermId = planningTermId || termId;
+    if (!deloadTermId) return;
 
     let cancelled = false;
     (async () => {
@@ -4481,7 +4521,7 @@ async function handleSaveNewLineRow(r: Row) {
       setDeloadAllError("");
       try {
         // 1) Get the list of faculty who have deloadings for the term.
-        const r = await getOmFacultyWithDeloadings(termId);
+        const r = await getOmFacultyWithDeloadings(deloadTermId);
         const fac = Array.isArray(r?.faculty) ? r.faculty : [];
         if (cancelled) return;
         setFacultyWithDeloadings(fac);
@@ -4492,7 +4532,7 @@ async function handleSaveNewLineRow(r: Row) {
             try {
               const res = await getOmFacultyDeloadings({
                 faculty_id: f.faculty_id,
-                term_id: termId || undefined,
+                term_id: deloadTermId || undefined,
               });
               const rows = Array.isArray(res?.rows) ? res.rows : [];
               return rows.map((row) => ({
@@ -4532,7 +4572,7 @@ async function handleSaveNewLineRow(r: Row) {
     return () => {
       cancelled = true;
     };
-  }, [termId]);
+  }, [planningTermId, termId]);
 
   type FacultySummaryRow = {
     facultyId: string;

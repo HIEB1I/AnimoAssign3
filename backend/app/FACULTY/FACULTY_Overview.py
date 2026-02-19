@@ -1899,6 +1899,12 @@ async def faculty_send_load_rfc_message(userId: str = Query(...), payload: Dict[
         "created_at": now.isoformat(),
     })
 
+    # Optional structured schedule request (sent by the Faculty UI)
+    requested = payload.get("requested")
+    if not isinstance(requested, dict):
+        requested = {}
+
+
     await db[COL_LOAD_RFC].update_one(
         qkey,
         {"$set": {
@@ -1911,6 +1917,7 @@ async def faculty_send_load_rfc_message(userId: str = Query(...), payload: Dict[
             "status": "NEEDS_OM",
             "locked": False,
             "messages": msgs,
+            "requested": requested,
             "history": list(existing.get("history") or []),
             "updated_at": now,
         }, "$setOnInsert": {"created_at": now}},
