@@ -5726,11 +5726,11 @@ const courseCodeToInfo = useMemo(() => {
                         {/* 1) Select */}
                         <col className="w-[46px]" />
                         {/* 2) Course Code & Title */}
-                        <col className="w-[260px]" />
+                        <col className="w-[230px]" />
                         {/* 3) Units */}
                         <col className="w-[70px]" />
                         {/* 4) Section (WIDENED) */}
-                        <col className="w-[260px]" />
+                        <col className="w-[100px]" />
                         {/* 5) Faculty */}
                         <col className="w-[280px]" />
                         {/* 6) Day 1 */}

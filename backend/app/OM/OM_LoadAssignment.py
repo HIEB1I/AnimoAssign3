@@ -311,6 +311,45 @@ async def _apo_user_ids_for_campus(campus_id: str, db) -> list[str]:
     return sorted(list(out))
 
 
+async def _all_apo_user_ids(db) -> list[str]:
+    """Return all APO user_ids (best-effort).
+
+    Used as a last-resort fallback when campus-scoped routing is not configured.
+    Sources:
+    1) role_assignments via APO role_id from user_roles (role_type == "APO")
+    2) legacy users.role == "APO"
+    """
+    uids: set[str] = set()
+
+    # 1) role_assignments for APO role
+    try:
+        apo_role = await db["user_roles"].find_one({"role_type": "APO"}, {"_id": 0, "role_id": 1})
+        apo_role_id = (apo_role or {}).get("role_id")
+        if apo_role_id:
+            cur = db["role_assignments"].find({"role_id": apo_role_id}, {"_id": 0, "user_id": 1})
+            async for r in cur:
+                uid = (r or {}).get("user_id")
+                if uid:
+                    uids.add(str(uid))
+    except Exception:
+        pass
+
+    # 2) legacy users.role field
+    try:
+        cur2 = db["users"].find({"role": {"$regex": r"\bAPO\b", "$options": "i"}}, {"_id": 0, "user_id": 1})
+        async for r in cur2:
+            uid = (r or {}).get("user_id")
+            if uid:
+                uids.add(str(uid))
+    except Exception:
+        pass
+
+    return sorted(uids)
+
+
+
+
+
 async def _find_course_by_code(course_code: str, db) -> dict:
     """Find a course by course_code (supports string or array storage)."""
     import re as _re
@@ -3626,6 +3665,19 @@ async def om_save_new_line(
                 meta["campus_id"] = inferred_campus
         except Exception:
             apo_uids = []
+
+    # Final fallback: if campus routing is not configured, notify all APO users.
+    if not apo_uids:
+        try:
+            apo_uids = await _all_apo_user_ids(db)
+        except Exception:
+            apo_uids = []
+
+    # De-duplicate and never notify the actor.
+    try:
+        apo_uids = sorted({uid for uid in (apo_uids or []) if uid and uid != user_id})
+    except Exception:
+        pass
 
     # Create one notification per APO user.
     # IMPORTANT: in-app notifications must still be created even if Gmail address
