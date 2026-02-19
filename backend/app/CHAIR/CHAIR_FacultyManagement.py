@@ -667,6 +667,26 @@ async def facultymanagement_handler(
                 "teaching_units": "$teaching_units_display",
                 "faculty_type": "$faculty_type_display",
                 "status": "$status_display",
+                # Include profile fields used in the Edit Faculty Details modal
+                "certifications": {
+                    "$let": {
+                        "vars": {"c": {"$ifNull": ["$certifications", []]}},
+                        "in": {
+                            "$cond": [
+                                {"$isArray": "$$c"},
+                                "$$c",
+                                {
+                                    "$filter": {
+                                        "input": {"$map": {"input": {"$split": ["$$c", ","]}, "as": "p", "in": {"$trim": {"input": "$$p"}}}},
+                                        "as": "x",
+                                        "cond": {"$ne": ["$$x", ""]},
+                                    }
+                                },
+                            ]
+                        },
+                    }
+                },
+                "teaching_years": {"$ifNull": ["$teaching_years", None]},
             }},
             {"$sort": {"name": 1}},
         ])

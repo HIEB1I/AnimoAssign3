@@ -2014,6 +2014,9 @@ export type FacultyRow = {
   teaching_units: string | number;
   faculty_type: string; // Full-Time | Part-Time
   status: string; // Active | On Leave
+  // Optional fields used by Edit Faculty Details
+  certifications?: string[];
+  teaching_years?: number | null;
 };
 
 export type FMOptions = {
@@ -2761,6 +2764,24 @@ export async function getFacultyOverviewProfile(userId: string) {
     params: { userId, action: "profile" },
   });
   return data;
+}
+
+// Updates the Faculty "My Profile" fields (name, employment, certifications, qualified_kacs)
+// Backend: POST /faculty/overview?action=profile_update
+export async function updateFacultyOverviewProfile(
+  userId: string,
+  payload: {
+    first_name?: string;
+    last_name?: string;
+    employment_type?: string;
+    certifications?: string[];
+    qualified_kacs?: string[];
+  }
+) {
+  const { data } = await axios.post(`${API_BASE}/faculty/overview`, payload, {
+    params: { userId, action: "profile_update" },
+  });
+  return data as { ok: boolean; matched?: number; modified?: number; detail?: string };
 }
 
 export async function getFacultyOverviewOptions(userId: string) {
