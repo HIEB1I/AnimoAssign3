@@ -3999,6 +3999,166 @@ async def respond_load_assignment_rfc(
 
         # RFC APPROVED → notify faculty only.
         # IMPORTANT: Do NOT change proposal/schedule status here; it becomes "Approved" only when faculty accepts.
+
+        # --- AUTO-APPLY APPROVED RFC (day/time changes) ---
+        # When OM approves an RFC that includes requested schedule details,
+        # immediately reflect it in:
+        #   1) section_schedules (so OM list refresh shows the change)
+        #   2) faculty_load_proposals rows (so faculty calendar/list updates)
+        # Backwards compatible: if structured `requested` is missing, attempt
+        # to parse it from the latest faculty RFC message.
+        def _norm_day_code(v: str) -> str:
+            s = str(v or '').strip()
+            if not s:
+                return ''
+            u = s.upper()
+            # already short code
+            if u in ('M','T','W','H','F','S','U','TH'):
+                return 'H' if u in ('H','TH') else u
+            low = s.lower()
+            if low.startswith('mon'): return 'M'
+            if low.startswith('tue'): return 'T'
+            if low.startswith('wed'): return 'W'
+            if low.startswith('thu'): return 'H'
+            if low.startswith('fri'): return 'F'
+            if low.startswith('sat'): return 'S'
+            if low.startswith('sun'): return 'U'
+            # fallback: first char
+            ch = u[:1]
+            return 'H' if ch == 'T' and u.startswith('TH') else ch
+
+        def _split_time_range(v: str) -> tuple[str, str]:
+            s = str(v or '').strip()
+            if not s:
+                return ('','')
+            # normalize various dashes
+            s = s.replace('—', '–').replace('-', '–')
+            parts = [p.strip() for p in s.split('–') if p.strip()]
+            if len(parts) >= 2:
+                b, e = parts[0], parts[1]
+            else:
+                # fallback: '07:30 to 09:00'
+                parts2 = re.split(r"\s+to\s+", s, flags=re.I)
+                b, e = (parts2[0].strip(), parts2[1].strip()) if len(parts2) >= 2 else ('','')
+            b2 = _norm_hhmm(b) or ''
+            e2 = _norm_hhmm(e) or ''
+            return (b2, e2)
+
+        def _extract_requested_from_messages(msgs: list[dict]) -> dict:
+            # Find the latest faculty message containing REQUESTED SCHEDULE
+            for mm in reversed(msgs or []):
+                if not isinstance(mm, dict):
+                    continue
+                if str(mm.get('sender_role') or '').lower() != 'faculty':
+                    continue
+                text = str(mm.get('message') or '')
+                if 'REQUESTED SCHEDULE' not in text.upper():
+                    continue
+                req = {}
+                lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+                # locate index
+                try:
+                    idx = next(i for i,ln in enumerate(lines) if ln.upper().startswith('REQUESTED SCHEDULE'))
+                except StopIteration:
+                    idx = -1
+                if idx >= 0:
+                    for ln in lines[idx+1:]:
+                        m1 = re.search(r"Meeting\s*1:\s*Day\s*(.*?)\s*\|\s*Time\s*(.*)", ln, flags=re.I)
+                        if m1:
+                            req['day1'] = m1.group(1).strip()
+                            req['time1'] = m1.group(2).strip()
+                            continue
+                        m2 = re.search(r"Meeting\s*2:\s*Day\s*(.*?)\s*\|\s*Time\s*(.*)", ln, flags=re.I)
+                        if m2:
+                            req['day2'] = m2.group(1).strip()
+                            req['time2'] = m2.group(2).strip()
+                            continue
+                        # stop if another section
+                        if ln.upper().startswith('REMARKS'):
+                            break
+                return req
+            return {}
+
+        applied = False
+        try:
+            requested = rfc.get('requested') if isinstance(rfc, dict) else None
+            if not isinstance(requested, dict):
+                requested = {}
+            if not requested:
+                requested = _extract_requested_from_messages(msgs)
+
+            if section_id and (requested.get('day1') or requested.get('time1') or requested.get('day2') or requested.get('time2')):
+                d1 = _norm_day_code(requested.get('day1') or '')
+                d2 = _norm_day_code(requested.get('day2') or '')
+                b1, e1 = _split_time_range(requested.get('time1') or '')
+                b2, e2 = _split_time_range(requested.get('time2') or '')
+
+                # Only apply when we have at least meeting 1 day+time
+                if d1 and b1 and e1:
+                    now2 = datetime.now(timezone.utc)
+
+                    def _compact(hhmm: str) -> str:
+                        return _to_compact_hhmm(hhmm) if hhmm else ''
+
+                    # Update section_schedules (preserve room_id/room_type)
+                    await db[COL_SCHED].update_one(
+                        {'schedule_id': _sched_id(section_id, 1)},
+                        {'$set': {'term_id': term_id, 'section_id': section_id, 'day': d1, 'start_time': _compact(b1), 'end_time': _compact(e1), 'updated_at': now2}},
+                        upsert=True,
+                    )
+                    if d2 and b2 and e2:
+                        await db[COL_SCHED].update_one(
+                            {'schedule_id': _sched_id(section_id, 2)},
+                            {'$set': {'term_id': term_id, 'section_id': section_id, 'day': d2, 'start_time': _compact(b2), 'end_time': _compact(e2), 'updated_at': now2}},
+                            upsert=True,
+                        )
+                    else:
+                        # Clear meeting 2 if explicitly requested as blank/TBA
+                        await db[COL_SCHED].update_one(
+                            {'schedule_id': _sched_id(section_id, 2)},
+                            {'$set': {'term_id': term_id, 'section_id': section_id, 'day': d2 or '', 'start_time': _compact(b2), 'end_time': _compact(e2), 'updated_at': now2}},
+                            upsert=True,
+                        )
+
+                    # Update proposal row for faculty (best-effort)
+                    # Keep both faculty schema (start/end/time1) and OM schema (begin1/end1)
+                    time1_disp = requested.get('time1') or (f"{b1} – {e1}" if (b1 and e1) else '')
+                    time2_disp = requested.get('time2') or (f"{b2} – {e2}" if (b2 and e2) else '')
+
+                    await db[COL_LOAD_PROPOSALS].update_one(
+                        {'faculty_id': faculty_id, 'term_id': term_id},
+                        {
+                            '$set': {
+                                'rows.$[row].day1': d1,
+                                'rows.$[row].day2': d2 or '',
+                                'rows.$[row].start': b1,
+                                'rows.$[row].end': e1,
+                                'rows.$[row].start2': b2,
+                                'rows.$[row].end2': e2,
+                                'rows.$[row].time1': time1_disp,
+                                'rows.$[row].time2': time2_disp,
+                                'rows.$[row].begin1': _compact(b1),
+                                'rows.$[row].end1': _compact(e1),
+                                'rows.$[row].begin2': _compact(b2),
+                                'rows.$[row].end2': _compact(e2),
+                                'updated_at': now2,
+                            }
+                        },
+                        array_filters=[{'row.section_id': section_id}],
+                    )
+
+                    # Persist requested block on RFC doc too (normalized)
+                    await db[COL_LOAD_RFC].update_one(
+                        qkey,
+                        {'$set': {'requested': {'day1': d1, 'time1': requested.get('time1') or time1_disp, 'day2': d2, 'time2': requested.get('time2') or time2_disp}, 'updated_at': now2}},
+                        upsert=True,
+                    )
+
+                    applied = True
+        except Exception:
+            # Best-effort only; RFC approval should still succeed even if apply fails.
+            applied = False
+
     else:
         new_status = "REJECTED"
         # Keep the RFC closed, but do not hard-lock the workflow.
@@ -4073,7 +4233,16 @@ async def respond_load_assignment_rfc(
             kind = "load_rfc_reply"
         elif action == "approve":
             title = "Load Assignment: OM approved your request"
-            details = message or "Your Request for Change was approved."
+            if message:
+                details = message
+            else:
+                details = "Your Request for Change was approved."
+                # If the RFC contained schedule details, we auto-applied them on approval.
+                try:
+                    if 'applied' in locals() and applied:
+                        details = "Your Request for Change was approved and the requested schedule was applied."
+                except Exception:
+                    pass
             kind = "load_rfc_approved"
         else:
             title = "Load Assignment: OM rejected your request"

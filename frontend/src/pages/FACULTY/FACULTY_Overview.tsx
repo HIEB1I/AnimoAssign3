@@ -663,23 +663,40 @@ function groupPlacedByCell(placed: Placed[]): CellGroup[] {
 
 const cls = (...s: (string | false | undefined)[]) => s.filter(Boolean).join(" ");
 
-const ClassBlock = ({ onClick, it }: { onClick?: () => void; it: TLItemForCalendar }) => (
-  <button
-    onClick={onClick}
-    className={cls(
-      "flex w-full flex-col items-center justify-center rounded-xl border shadow-sm",
-      it.is_special_class
-        ? "border-purple-200 bg-purple-100/80 hover:bg-purple-100"
-        : "border-emerald-200 bg-emerald-50/90 hover:bg-emerald-50",
-      it.is_special_class && "cursor-default"
-    )}
-    title={`${it.code} • ${it.sec} | ${it.room} • ${it.mode}`}
-  >
-    <div className="text-[13px] font-extrabold tracking-wide">{it.code}</div>
-    <div className="text-[12px]">{it.sec} | {it.room}</div>
-    {/* Removed mode display here as requested */}
-  </button>
-);
+const getCampusColorForSection = (sec?: string): string | undefined => {
+  const s = String(sec || "").trim().toUpperCase();
+  if (!s) return undefined;
+  // Laguna sections start with XX or XC
+  if (s.startsWith("XX") || s.startsWith("XC")) return "#859EAC";
+  // Manila sections start with S or G
+  if (s.startsWith("S") || s.startsWith("G")) return "#97AC9F";
+  return undefined;
+};
+
+const ClassBlock = ({ onClick, it }: { onClick?: () => void; it: TLItemForCalendar }) => {
+  const campusColor = !it.is_special_class ? getCampusColorForSection(it.sec) : undefined;
+
+  return (
+    <button
+      onClick={onClick}
+      className={cls(
+        "flex w-full flex-col items-center justify-center rounded-xl border shadow-sm",
+        it.is_special_class
+          ? "border-purple-200 bg-purple-100/80 hover:bg-purple-100"
+          : campusColor
+          ? "border-neutral-200 text-white hover:brightness-[1.02]"
+          : "border-emerald-200 bg-emerald-50/90 hover:bg-emerald-50",
+        it.is_special_class && "cursor-default"
+      )}
+      style={campusColor ? { backgroundColor: campusColor } : undefined}
+      title={`${it.code} • ${it.sec} | ${it.room} • ${it.mode}`}
+    >
+      <div className="text-[13px] font-extrabold tracking-wide">{it.code}</div>
+      <div className="text-[12px]">{it.sec} | {it.room}</div>
+      {/* Removed mode display here as requested */}
+    </button>
+  );
+};
 
 type TeachingLoadEnhancedProps = {
   teachingLoad: TLItem[];
@@ -769,12 +786,29 @@ const scheduleFinalLabel = (() => {
 
   return (
     <section className="mx-auto w-full max-w-screen-2xl px-4">
-      <div className="rounded-xl border border-neutral-200 bg-white p-5">
-        <div className="mb-4 flex items-center justify-between">
+	      <div className="rounded-xl border border-neutral-200 bg-white p-5">
+	        <div className="relative mb-4 flex items-center justify-between">
           <div>
             <h3 className="text-lg font-bold text-neutral-900">Teaching Load Summary</h3>
             <p className="text-sm text-neutral-500">{term?.term_label || ""}</p>
           </div>
+
+	          {/* Legend (centered above the calendar/list controls) */}
+	          <div className="absolute left-1/2 hidden -translate-x-1/2 items-center gap-3 rounded-full border border-neutral-200 bg-white px-3 py-1 text-xs text-neutral-700 shadow-sm md:flex">
+	            <span className="font-semibold text-neutral-800">Legend:</span>
+	            <span className="inline-flex items-center gap-2">
+	              <span className="h-3 w-3 rounded-sm" style={{ backgroundColor: "#97AC9F" }} />
+	              <span>Manila</span>
+	            </span>
+	            <span className="inline-flex items-center gap-2">
+	              <span className="h-3 w-3 rounded-sm" style={{ backgroundColor: "#859EAC" }} />
+	              <span>Laguna</span>
+	            </span>
+	            <span className="inline-flex items-center gap-2">
+	              <span className="h-3 w-3 rounded-sm border border-purple-200 bg-purple-100" />
+	              <span>Special Class</span>
+	            </span>
+	          </div>
           <div className="flex gap-2">
           {["Calendar", "List"].map((v) => (
             <button
@@ -879,6 +913,25 @@ const scheduleFinalLabel = (() => {
           </button>
         </div>
       </div>
+
+	      {/* Legend (mobile): centered above the calendar/list table */}
+	      <div className="mb-3 flex justify-center md:hidden">
+	        <div className="flex flex-wrap items-center justify-center gap-3 rounded-xl border border-neutral-200 bg-white px-3 py-2 text-xs text-neutral-700 shadow-sm">
+	          <span className="font-semibold text-neutral-800">Legend:</span>
+	          <span className="inline-flex items-center gap-2">
+	            <span className="h-3 w-3 rounded-sm" style={{ backgroundColor: "#97AC9F" }} />
+	            <span>Manila</span>
+	          </span>
+	          <span className="inline-flex items-center gap-2">
+	            <span className="h-3 w-3 rounded-sm" style={{ backgroundColor: "#859EAC" }} />
+	            <span>Laguna</span>
+	          </span>
+	          <span className="inline-flex items-center gap-2">
+	            <span className="h-3 w-3 rounded-sm border border-purple-200 bg-purple-100" />
+	            <span>Special Class</span>
+	          </span>
+	        </div>
+	      </div>
 
       {scheduleFinal && (
         <div className="mt-3 rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900">
@@ -1642,6 +1695,13 @@ function ChangeRequestModal({
                 term_id: (term as any)?.term_id || (term as any)?._id || (term as any)?.id,
                 section_id: sectionId,
                 message: msg,
+                // Structured schedule request so OM approval can auto-apply
+                requested: {
+                  day1: requestedDay1,
+                  time1: requestedTime1,
+                  day2: requestedDay2,
+                  time2: requestedTime2,
+                },
               });
 
               // Optional: show a useful message if Gmail isn't connected
