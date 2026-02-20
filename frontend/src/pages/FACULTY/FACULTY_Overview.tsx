@@ -8,7 +8,6 @@ import HistoryMain from "./FACULTY_History";
 import PreferencesContent from "./FACULTY_Preferences";
 import DeloadingsContent from "./FACULTY_Deloadings";
 import { InboxContent } from "./FACULTY_Inbox";
-import { acceptTeachingLoadToGcal } from "../../api"; 
 import SelectBox from "../../component/SelectBox";
 
 
