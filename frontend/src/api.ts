@@ -1010,8 +1010,9 @@ export async function planAllowExtra(
 
 export async function planRejectOmNewLine(
   userId: string,
-  payload: { course_id: string }
-): Promise<{ ok: true; deleted: number }> {
+  payload: { course_id: string; section_id?: string }
+):
+  Promise<{ ok: true; deleted: number }> {
   const url = `${API_BASE}/apo/courseofferings${q({ userId, action: "planRejectOmNewLine" })}`;
   // See note in planAllowExtra(): absolute URL => use `post()` helper.
   return post(url, payload);
@@ -2792,14 +2793,7 @@ export async function getFacultyLoadAssignmentRfc(
 
 export async function sendFacultyLoadAssignmentRfcMessage(
   userId: string,
-  payload: {
-    term_id?: string;
-    section_id: string;
-    course_code?: string;
-    message: string;
-    // Optional structured request details (used for auto-apply on OM approval)
-    requested?: { day1?: string; time1?: string; day2?: string; time2?: string };
-  }
+  payload: { term_id?: string; section_id: string; course_code?: string; message: string }
 ) {
   const base = (typeof API_BASE !== "undefined" ? API_BASE : "").replace(/\/+$/, "");
   const url = `${base}/faculty/load-assignment/rfc/message?userId=${encodeURIComponent(userId)}`;
