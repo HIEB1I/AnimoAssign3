@@ -7,35 +7,10 @@ import { Search } from "lucide-react";
 
 // Standardized column headers (match FACULTY_Overview List view; minus Syllabus)
 // NOTE: History payload only provides a single `time` string; we map it to Begin/End for Day 1 and (if present) Day 2.
-const HEADERS = [
-  "Course Code & Title",
-  "Section",
-  "Day 1",
-  "Begin 1",
-  "End 1",
-  "Room 1",
-  "Day 2",
-  "Begin 2",
-  "End 2",
-  "Room 2",
-] as const;
+const HEADERS = ["Course Code & Title"] as const;
 
 // ---------- tiny utils ----------
 const cls = (...s: (string | false | undefined)[]) => s.filter(Boolean).join(" ");
-
-function splitBeginEnd(time?: string): { begin: string; end: string } {
-  const raw = (time || "").trim();
-  if (!raw || raw.toUpperCase() === "TBA") return { begin: "—", end: "—" };
-
-  // Accept a few common separators: en dash, em dash, hyphen
-  const parts = raw
-    .split(/\s*(?:–|—|-)\s*/)
-    .map((s) => s.trim())
-    .filter(Boolean);
-
-  if (parts.length >= 2) return { begin: parts[0], end: parts[1] };
-  return { begin: parts[0] || "—", end: "—" };
-}
 
 // Normalize "AY" strings for robust comparisons & query params
 const normAy = (s?: string | null) =>
@@ -46,7 +21,7 @@ const normAy = (s?: string | null) =>
 
 // ---------- types (match backend payload) ----------
 type Row = {
-  ay: string;                 // "AY 2024-2025"
+  ay: string; // "AY 2024-2025"
   term: "Term 1" | "Term 2" | "Term 3" | string | null;
   code: string;
   title: string;
@@ -60,6 +35,9 @@ type Row = {
   room2: string | null;
   time: string;
 };
+
+const courseKey = (code?: string | null, title?: string | null) =>
+  `${(code || "").trim()}||${(title || "").trim()}`.toUpperCase();
 
 // ---------- shared Dropdown (unchanged) ----------
 function Dropdown({
@@ -138,7 +116,9 @@ function Dropdown({
         )}
       >
         {value || <span className="text-gray-400">{placeholder}</span>}
-        <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2">▾</span>
+        <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2">
+          ▾
+        </span>
       </button>
 
       {open && (
@@ -173,7 +153,7 @@ function Dropdown({
 }
 
 // ---------- component ----------
-function HistoryMain() {
+function HistoryMain({ embedded = false }: { embedded?: boolean } = {}) {
   const [rows, setRows] = useState<Row[]>([]);
   const [loading, setLoading] = useState(false);
   const [query, setQuery] = useState("");
@@ -189,11 +169,8 @@ function HistoryMain() {
   }, [allAys, rows]);
 
   // Current AY index + edge checks (for Prev/Next buttons)
-  const ayIndex = useMemo(
-    () => AY_OPTIONS.findIndex((o) => o === ay),
-    [AY_OPTIONS, ay]
-  );
-  const atFirst = ayIndex <= 0 || AY_OPTIONS.length === 0;               // first = most recent
+  const ayIndex = useMemo(() => AY_OPTIONS.findIndex((o) => o === ay), [AY_OPTIONS, ay]);
+  const atFirst = ayIndex <= 0 || AY_OPTIONS.length === 0; // first = most recent
   const atLast = ayIndex === AY_OPTIONS.length - 1 || AY_OPTIONS.length === 0;
 
   // Jump helpers
@@ -220,7 +197,9 @@ function HistoryMain() {
     try {
       const u = JSON.parse(localStorage.getItem("animo.user") || "null");
       return u?.userId || u?.user_id || null;
-    } catch { return null; }
+    } catch {
+      return null;
+    }
   }, []);
 
   // Parallel initial loads: options (AY list) + first page (most recent AY)
@@ -230,12 +209,15 @@ function HistoryMain() {
     (async () => {
       try {
         // 1) options (fetch AYs)
-        const optRes = await fetch(`/api/faculty/history?action=options&userId=${encodeURIComponent(userId)}`, {
-          method: "POST",
-          signal: ctrl.signal,
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({}),
-        });
+        const optRes = await fetch(
+          `/api/faculty/history?action=options&userId=${encodeURIComponent(userId)}`,
+          {
+            method: "POST",
+            signal: ctrl.signal,
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({}),
+          }
+        );
         if (!optRes.ok) throw new Error(`HTTP ${optRes.status}`);
         const optJson = await optRes.json();
         const ays = (optJson?.ays || []) as string[];
@@ -262,14 +244,11 @@ function HistoryMain() {
 
       try {
         const params = new URLSearchParams();
-        
+
         // MODIFICATION:
         // We no longer send 'ay' or 'q' to the backend here.
         // We fetch ALL rows, and let the 'filtered' memo handle
         // client-side filtering for 'ay' and 'q'.
-        
-        // if (ay) params.set("ay", normAy(ay)); // <- REMOVED
-        // if (query.trim()) params.set("q", query.trim()); // <- REMOVED
 
         params.set("action", "fetch");
         params.set("userId", String(userId || ""));
@@ -290,7 +269,12 @@ function HistoryMain() {
           code: r.code ?? "",
           title: r.title ?? "",
           section: r.section ?? "",
-          units: typeof r.units === "number" ? r.units : (r.units ? Number(r.units) : null),
+          units:
+            typeof r.units === "number"
+              ? r.units
+              : r.units
+                ? Number(r.units)
+                : null,
           campus: r.campus ?? null,
           mode: r.mode ?? null,
           day1: r.day1 ?? null,
@@ -318,7 +302,7 @@ function HistoryMain() {
   // the currently selected 'ay' and 'query' state.
   const filtered = useMemo(() => {
     let r = rows;
-    
+
     // 1. Filter by Academic Year
     if (ay) {
       const wanted = normAy(ay);
@@ -328,41 +312,113 @@ function HistoryMain() {
     // 2. Filter by Search Query
     const q = query.trim().toLowerCase();
     if (!q) return r; // Return AY-filtered list if no query
-    
+
     // Return AY-filtered list that also matches query
     return r.filter((x) =>
       [
-        x.code, x.title, x.section,
-        x.campus ?? "", x.mode ?? "",
-        x.day1 ?? "", x.room1 ?? "",
-        x.day2 ?? "", x.room2 ?? "",
-        x.time, x.term ?? "", x.ay
-      ].join(" ").toLowerCase().includes(q)
+        x.code,
+        x.title,
+        x.section,
+        x.campus ?? "",
+        x.mode ?? "",
+        x.day1 ?? "",
+        x.room1 ?? "",
+        x.day2 ?? "",
+        x.room2 ?? "",
+        x.time,
+        x.term ?? "",
+        x.ay,
+      ]
+        .join(" ")
+        .toLowerCase()
+        .includes(q)
     );
   }, [rows, ay, query]); // This logic is correct and unchanged
 
   // This logic is also correct and unchanged
-  const groups = useMemo(() => {
-    const byTerm: Record<string, Row[]> = { "Term 1": [], "Term 2": [], "Term 3": [] };
-    filtered.forEach((r) => {
-      const key = (r.term as string) || "Term 1";
-      if (!byTerm[key]) byTerm[key] = [];
-      byTerm[key].push(r);
+  const allTimeCounts = useMemo(() => {
+    const map: Record<string, { code: string; title: string; totalCount: number }> =
+      {};
+    rows.forEach((r) => {
+      const code = (r.code || "").trim();
+      const title = (r.title || "").trim();
+      const key = courseKey(code, title);
+      if (!map[key]) map[key] = { code, title, totalCount: 0 };
+      map[key].totalCount += 1;
     });
+    return map;
+  }, [rows]);
+
+  const mostTaught = useMemo(() => {
+    return Object.values(allTimeCounts)
+      .filter((x) => (x.code || "").trim() || (x.title || "").trim())
+      .sort((a, b) => {
+        if (b.totalCount !== a.totalCount) return b.totalCount - a.totalCount;
+        return (a.code || "").localeCompare(b.code || "");
+      })
+      .slice(0, 5);
+  }, [allTimeCounts]);
+
+  // Aggregate to "what you've taught" (per term) + analytics (counts)
+  const termCourses = useMemo(() => {
+    const byTerm: Record<
+      string,
+      { key: string; code: string; title: string; termCount: number; totalCount: number }[]
+    > = { "Term 1": [], "Term 2": [], "Term 3": [] };
+
+    const acc: Record<
+      string,
+      Record<
+        string,
+        { key: string; code: string; title: string; termCount: number; totalCount: number }
+      >
+    > = { "Term 1": {}, "Term 2": {}, "Term 3": {} };
+
+    filtered.forEach((r) => {
+      const termKey = (r.term as string) || "Term 1";
+      const code = (r.code || "").trim();
+      const title = (r.title || "").trim();
+      const key = courseKey(code, title);
+      const totalCount = allTimeCounts[key]?.totalCount ?? 0;
+
+      if (!acc[termKey]) acc[termKey] = {};
+      if (!acc[termKey][key]) {
+        acc[termKey][key] = { key, code, title, termCount: 0, totalCount };
+      }
+      acc[termKey][key].termCount += 1;
+    });
+
+    (Object.keys(acc) as (keyof typeof acc)[]).forEach((t) => {
+      byTerm[t] = Object.values(acc[t]).sort((a, b) => {
+        // higher-termCount first, then code
+        if (b.termCount !== a.termCount) return b.termCount - a.termCount;
+        return (a.code || "").localeCompare(b.code || "");
+      });
+    });
+
     return byTerm;
-  }, [filtered]);
+  }, [filtered, allTimeCounts]);
 
   return (
-    <section className="mx-auto w-full max-w-screen-2xl px-4">
-      <div className="rounded-xl border border-gray-200 bg-white p-5">
-        {/* Header */}
-        <div className="mb-4">
-          <h3 className="text-lg font-bold text-gray-900">Teaching History</h3>
-          <p className="text-sm text-gray-500">Complete record of your teaching assignments</p>
-        </div>
+    <section className={cls("mx-auto w-full", embedded ? "" : "max-w-screen-2xl px-4")}>
+      <div
+        className={cls(
+          embedded ? "" : "rounded-xl border border-gray-200 bg-white p-5",
+          embedded ? "" : ""
+        )}
+      >
+        {/* Header (hide in embedded mode; parent card already provides context) */}
+        {!embedded && (
+          <div className="mb-4">
+            <h3 className="text-lg font-bold text-gray-900">Teaching History</h3>
+            <p className="text-sm text-gray-500">
+              Complete record of your teaching assignments
+            </p>
+          </div>
+        )}
 
         {/* Filters */}
-        <div className="mb-2 grid grid-cols-1 gap-3 sm:grid-cols-3">
+        <div className={cls("grid grid-cols-1 gap-3 sm:grid-cols-3", embedded ? "" : "mb-2")}>
           <div className="col-span-2">
             <div className="relative flex items-center gap-2 rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm shadow-sm">
               <Search className="h-4 w-4 text-gray-500" />
@@ -427,47 +483,72 @@ function HistoryMain() {
           </div>
         </div>
 
-        {/* AY label (first row's AY or default) */}
-        <div className="mb-3 flex items-center gap-2 text-sm font-medium text-gray-700">
-            <span>{ay || "AY —"}</span>
-            {loading && <span className="ml-2 text-gray-400">(loading…)</span>}
-        </div>
+        {/* Loading state */}
+        {loading && (
+          <div className={cls("mt-2 text-xs text-gray-500", embedded ? "" : "mb-4")}>
+            Loading teaching history…
+          </div>
+        )}
+
+        {/* Insights (kept intentionally minimal + high-signal) */}
+        {rows.length > 0 && (
+          <div className={cls("grid grid-cols-1 gap-4", embedded ? "mt-4" : "mb-6")}>
+            <div
+              className={cls(
+                "rounded-xl border border-gray-200 p-4",
+                embedded ? "bg-slate-50" : "bg-white"
+              )}
+            >
+              <div className="text-xs font-semibold uppercase tracking-wide text-gray-500">
+                Most taught (all-time)
+              </div>
+              <div className="mt-3 space-y-2">
+                {mostTaught.length === 0 ? (
+                  <div className="text-sm text-gray-500">No records.</div>
+                ) : (
+                  mostTaught.map((c) => (
+                    <div
+                      key={courseKey(c.code, c.title)}
+                      className="flex items-start justify-between gap-3"
+                    >
+                      <div className="min-w-0">
+                        <div className="font-semibold text-gray-900">{c.code || "—"}</div>
+                        <div className="mt-0.5 line-clamp-1 text-[12px] text-gray-600">
+                          {c.title || "—"}
+                        </div>
+                      </div>
+                      <div className="shrink-0">
+                        <div className="inline-flex items-center rounded-full border border-gray-200 bg-gray-50 px-2 py-0.5 text-[11px] font-semibold text-gray-700">
+                          {c.totalCount} sections
+                        </div>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Term sections */}
-        <div className="space-y-8">
+        <div className={cls("space-y-6", embedded ? "mt-4" : "")}>
           {(["Term 1", "Term 2", "Term 3"] as const).map((t) => (
             <div key={t} className="rounded-xl border border-gray-200">
               {/* Term title */}
-              <div className="px-4 py-3 text-sm font-semibold text-emerald-700">{t}</div>
+              <div className="px-4 py-3 text-sm font-semibold text-slate-700">{t}</div>
 
               {/* Table */}
               <div className="overflow-x-auto">
                 <div className="overflow-hidden rounded-xl bg-white">
                   <table className="min-w-full table-fixed border-t border-gray-200 text-[13px]">
                     <colgroup>
-                      {/* Match FACULTY_Overview list view sizing (minus Mode/Syllabus) */}
-                      <col className="w-[240px]" />
-                      <col className="w-[92px]" />
-                      <col className="w-[82px]" />
-                      <col className="w-[92px]" />
-                      <col className="w-[92px]" />
-                      <col className="w-[110px]" />
-                      <col className="w-[82px]" />
-                      <col className="w-[92px]" />
-                      <col className="w-[92px]" />
-                      <col className="w-[110px]" />
+                      <col className="w-full" />
                     </colgroup>
 
                     <thead className="bg-gray-50 text-gray-700">
                       <tr className="[&>th]:border-b [&>th]:border-gray-200">
-                        {HEADERS.map((h, idx) => (
-                          <th
-                            key={h}
-                            className={cls(
-                              "px-4 py-3 font-semibold",
-                              idx === 0 ? "text-left" : "text-center"
-                            )}
-                          >
+                        {HEADERS.map((h) => (
+                          <th key={h} className="px-4 py-3 text-left font-semibold">
                             {h}
                           </th>
                         ))}
@@ -475,47 +556,42 @@ function HistoryMain() {
                     </thead>
 
                     <tbody className="text-gray-900">
-                      {(groups[t] ?? []).length === 0 ? (
+                      {(termCourses[t] ?? []).length === 0 ? (
                         <tr>
-                          <td colSpan={HEADERS.length} className="px-4 py-6 text-center text-sm text-gray-500">
-                            No records.
+                          <td className="px-4 py-6 text-center text-sm text-gray-500">
+                            {loading ? "Loading…" : "No records."}
                           </td>
                         </tr>
                       ) : (
-                        groups[t].map((r, i) => {
-                          const d1 = r.day1 && r.day1 !== "TBA" ? r.day1 : "—";
-                          const d2 = r.day2 && r.day2 !== "TBA" ? r.day2 : "—";
-
-                          // History provides one `time` string; use it for Day 1, and only mirror to Day 2 when it exists.
-                          const t1 = splitBeginEnd(r.time);
-                          const t2 = d2 !== "—" ? t1 : { begin: "—", end: "—" };
-
-                          return (
-                            <tr
-                              key={`${t}-${i}`}
-                              className={cls(
-                                i % 2 === 0 ? "bg-white" : "bg-gray-50",
-                                "[&>td]:border-t [&>td]:border-gray-100"
-                              )}
-                            >
-                              <td className="px-4 py-3 align-middle">
-                                <div className="leading-tight">
-                                  <div className="font-semibold text-gray-900">{r.code || "—"}</div>
-                                  <div className="mt-0.5 text-[12px] text-gray-600">{r.title || "—"}</div>
+                        termCourses[t].map((c, i) => (
+                          <tr
+                            key={`${t}-${c.key}`}
+                            className={cls(
+                              i % 2 === 0 ? "bg-white" : "bg-gray-50",
+                              "[&>td]:border-t [&>td]:border-gray-100"
+                            )}
+                          >
+                            <td className="px-4 py-3 align-middle">
+                              <div className="flex items-start justify-between gap-3">
+                                <div className="min-w-0">
+                                  <div className="font-semibold text-gray-900">{c.code || "—"}</div>
+                                  <div className="mt-0.5 line-clamp-2 text-[12px] text-gray-600">
+                                    {c.title || "—"}
+                                  </div>
                                 </div>
-                              </td>
-                              <td className="px-4 py-3 align-middle text-center">{r.section || "—"}</td>
-                              <td className="px-4 py-3 align-middle text-center">{d1}</td>
-                              <td className="px-4 py-3 align-middle text-center">{t1.begin}</td>
-                              <td className="px-4 py-3 align-middle text-center">{t1.end}</td>
-                              <td className="px-4 py-3 align-middle text-center">{r.room1 || "—"}</td>
-                              <td className="px-4 py-3 align-middle text-center">{d2}</td>
-                              <td className="px-4 py-3 align-middle text-center">{t2.begin}</td>
-                              <td className="px-4 py-3 align-middle text-center">{t2.end}</td>
-                              <td className="px-4 py-3 align-middle text-center">{r.room2 || "—"}</td>
-                            </tr>
-                          );
-                        })
+
+                                <div className="shrink-0 text-right">
+                                  <div className="inline-flex items-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-800">
+                                    This term: {c.termCount}
+                                  </div>
+                                  <div className="mt-1 text-[11px] text-gray-500">
+                                    All-time: {c.totalCount}
+                                  </div>
+                                </div>
+                              </div>
+                            </td>
+                          </tr>
+                        ))
                       )}
                     </tbody>
                   </table>

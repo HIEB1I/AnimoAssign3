@@ -22,6 +22,10 @@ import {
   type FMOptions,
   type FacultyUpsertPayload,
   updateChairFacultyEntry,
+  getChairFacultyDeloading,
+  updateChairFacultyDeloading,
+  type ChairDeloadingType,
+  type ChairFacultyDeloading,
 } from "../../api";
 
 /* ---- Small shared bits (from ADMIN pattern) ---- */
@@ -320,6 +324,7 @@ export default function CHAIR_FacultyManagement() {
 
   // profile header info
   const [termLabel, setTermLabel] = useState<string>("");
+  const [activeTermId, setActiveTermId] = useState<string>("");
   
   // ---------------------------------------
 
@@ -357,37 +362,26 @@ export default function CHAIR_FacultyManagement() {
   };
   const [addOpen, setAddOpen] = useState(false);
   const [addForm, setAddForm] = useState<AddFacultyForm>(emptyAddForm);
-  const [addEmailError, setAddEmailError] = useState("");
   const [addError, setAddError] = useState("");
   const [addSaving, setAddSaving] = useState(false);
 
   const [editOpen, setEditOpen] = useState<FacultyRow | null>(null);
   const [editForm, setEditForm] = useState<EditFacultyForm | null>(null);
-  const [editEmailError, setEditEmailError] = useState("");
   const [editError, setEditError] = useState("");
   const [editSaving, setEditSaving] = useState(false);
+
+  // Deloading (Edit Faculty Details)
+  const [deloadingTypes, setDeloadingTypes] = useState<ChairDeloadingType[]>([]);
+  const [editDeloading, setEditDeloading] = useState<ChairFacultyDeloading | null>(null);
+  const [deloadingLoading, setDeloadingLoading] = useState(false);
 
   const deptChoices = useMemo(
     () => deptOptions.filter((d) => d && d !== "All Departments"),
     [deptOptions]
   );
 
-  const isValidDlsuEmail = (email: string) => {
-    const trimmed = (email || "").trim();
-    if (!trimmed) return true;
-    const atIndex = trimmed.lastIndexOf("@");
-    if (atIndex <= 0) return false;
-    const local = trimmed.slice(0, atIndex);
-    const domain = trimmed.slice(atIndex + 1);
-    if (domain.toLowerCase() !== "dlsu.edu.ph") return false;
-    if (!local.includes(".")) return false;
-    if (/\s/.test(local)) return false;
-    return true;
-  };
-
   const openAddFaculty = () => {
     setAddForm(emptyAddForm);
-    setAddEmailError("");
     setAddError("");
     setAddOpen(true);
   };
@@ -397,12 +391,6 @@ export default function CHAIR_FacultyManagement() {
       addForm;
 
     const trimmedEmail = email.trim();
-    const emailOk = isValidDlsuEmail(trimmedEmail);
-    if (!emailOk) {
-      setAddEmailError("Email is not a valid DLSU account");
-      return;
-    }
-
     if (!first_name.trim() || !last_name.trim() || !trimmedEmail || !department || !employment_type) {
       setAddError("Please fill out all required fields.");
       return;
@@ -431,7 +419,6 @@ export default function CHAIR_FacultyManagement() {
       if (!res || !res.ok) throw new Error("Failed to add faculty.");
 
       setAddForm(emptyAddForm);
-      setAddEmailError("");
       setAddError("");
       setAddOpen(false);
       setReloadToken((t) => t + 1);
@@ -468,11 +455,33 @@ export default function CHAIR_FacultyManagement() {
       email: row.email || "",
       department: row.department || "",
       employment_type,
-      certifications: "",
-      teaching_years: "",
+      certifications: Array.isArray((row as any).certifications)
+        ? ((row as any).certifications as string[]).join(", ")
+        : "",
+      teaching_years:
+        (row as any).teaching_years != null && (row as any).teaching_years !== ""
+          ? String((row as any).teaching_years)
+          : "",
     });
-    setEditEmailError("");
     setEditError("");
+
+    // Fetch deloading info for active term (best-effort; errors should not block editing).
+    (async () => {
+      try {
+        setDeloadingLoading(true);
+        const resp = await getChairFacultyDeloading({
+          facultyId: row.faculty_id,
+          termId: activeTermId || undefined,
+        });
+        setDeloadingTypes(Array.isArray(resp?.types) ? resp.types : []);
+        setEditDeloading(resp?.current ?? null);
+      } catch {
+        setDeloadingTypes([]);
+        setEditDeloading(null);
+      } finally {
+        setDeloadingLoading(false);
+      }
+    })();
   };
 
   const submitEditFaculty = async () => {
@@ -480,11 +489,6 @@ export default function CHAIR_FacultyManagement() {
     const { first_name, last_name, email, department, employment_type, certifications, teaching_years } = editForm;
 
     const trimmedEmail = email.trim();
-    const emailOk = isValidDlsuEmail(trimmedEmail);
-    if (!emailOk) {
-      setEditEmailError("Email is not a valid DLSU account");
-      return;
-    }
     if (!first_name.trim() || !last_name.trim() || !trimmedEmail || !department || !employment_type) {
       setEditError("Please fill out all required fields.");
       return;
@@ -512,10 +516,33 @@ export default function CHAIR_FacultyManagement() {
       const res = await updateChairFacultyEntry(editOpen.faculty_id, payload);
       if (!res || !res.ok) throw new Error("Failed to update faculty.");
 
+      // Save deloading edits (type + units). Notes are informational only.
+      // Best-effort: if it fails, keep the faculty update and surface a message.
+      const dlTypeId = (editDeloading as any)?.type_id;
+      const dlUnitsRaw = (editDeloading as any)?.units_deloaded;
+      const dlUnits =
+        dlUnitsRaw == null || dlUnitsRaw === ""
+          ? null
+          : typeof dlUnitsRaw === "number"
+            ? dlUnitsRaw
+            : Number(dlUnitsRaw);
+
+      // Only call update if the edit modal had deloading loaded or user changed fields.
+      // If there is no active term id, backend will default to active term.
+      if (editDeloading || deloadingTypes.length > 0) {
+        await updateChairFacultyDeloading({
+          facultyId: editOpen.faculty_id,
+          termId: activeTermId || undefined,
+          type_id: dlTypeId ?? null,
+          units_deloaded: Number.isFinite(dlUnits as number) ? (dlUnits as number) : null,
+        });
+      }
+
       setEditOpen(null);
       setEditForm(null);
-      setEditEmailError("");
       setEditError("");
+      setEditDeloading(null);
+      setDeloadingTypes([]);
       setReloadToken((t) => t + 1);
     } catch (e: any) {
       setEditError(e?.response?.data?.detail || e?.message || "Error updating faculty.");
@@ -539,6 +566,7 @@ export default function CHAIR_FacultyManagement() {
         const tn = opt.activeTerm?.term_number;
         const label = ay != null ? `Term ${tn ?? "—"} · AY ${ay}-${ay + 1}` : "";
         setTermLabel(label);
+        setActiveTermId(String(opt.activeTerm?.term_id || ""));
       } catch (e: any) {
         setErr(e?.response?.data?.detail || e?.message || "Failed to load options.");
       }
@@ -777,11 +805,9 @@ export default function CHAIR_FacultyManagement() {
             </div>
             <div>
               <Label>Email</Label>
-              <TextInput placeholder="first.last@dlsu.edu.ph" value={addForm.email} onChange={(e) => {
+              <TextInput placeholder="name@domain.com" value={addForm.email} onChange={(e) => {
                 const v = e.target.value; setAddForm(f => ({...f, email: v}));
-                setAddEmailError(isValidDlsuEmail(v) ? "" : "Email is not a valid DLSU account");
               }} />
-              {addEmailError && addForm.email.trim() && <p className="mt-1 text-xs text-red-600">{addEmailError}</p>}
             </div>
             <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
               <div><Label>Department</Label><SelectBox value={addForm.department} onChange={(v) => setAddForm(f => ({...f, department: v || ""}))} options={deptChoices} placeholder="Select Dept" /></div>
@@ -792,7 +818,7 @@ export default function CHAIR_FacultyManagement() {
               <div><Label>Teaching Years</Label><TextInput type="number" min={0} value={addForm.teaching_years} onChange={(e) => setAddForm(f => ({...f, teaching_years: e.target.value}))} /></div>
             </div>
             <div className="mt-4 flex justify-end">
-              <button onClick={submitAddFaculty} disabled={addSaving || !!addEmailError} className="rounded-lg bg-emerald-700 px-6 py-2 text-sm font-medium text-white hover:bg-emerald-800 disabled:bg-emerald-300">
+              <button onClick={submitAddFaculty} disabled={addSaving} className="rounded-lg bg-emerald-700 px-6 py-2 text-sm font-medium text-white hover:bg-emerald-800 disabled:bg-emerald-300">
                 {addSaving ? "Adding…" : "Add Faculty"}
               </button>
             </div>
@@ -800,7 +826,7 @@ export default function CHAIR_FacultyManagement() {
         </div>
       </Modal>
 
-      <Modal open={!!editOpen} onClose={() => { setEditOpen(null); setEditForm(null); }}>
+      <Modal open={!!editOpen} onClose={() => { setEditOpen(null); setEditForm(null); setEditDeloading(null); setDeloadingTypes([]); }}>
         {editOpen && editForm && (
           <div className="p-6 sm:p-8">
             <div className="mb-6 flex items-start justify-between">
@@ -808,7 +834,7 @@ export default function CHAIR_FacultyManagement() {
                 <h3 className="text-xl font-semibold text-emerald-700">Edit Faculty Details</h3>
                 <div className="mt-1 text-sm text-gray-700">Faculty: <span className="font-medium">{editOpen.name}</span></div>
               </div>
-              <button onClick={() => { setEditOpen(null); setEditForm(null); }} className="rounded-full p-1 hover:bg-gray-100"><X className="h-5 w-5" /></button>
+              <button onClick={() => { setEditOpen(null); setEditForm(null); setEditDeloading(null); setDeloadingTypes([]); }} className="rounded-full p-1 hover:bg-gray-100"><X className="h-5 w-5" /></button>
             </div>
             {editError && <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{editError}</div>}
             <div className="grid grid-cols-1 gap-5">
@@ -820,9 +846,7 @@ export default function CHAIR_FacultyManagement() {
                 <Label>Email</Label>
                 <TextInput value={editForm.email} onChange={(e) => {
                   const v = e.target.value; setEditForm(f => f ? {...f, email: v} : f);
-                  setEditEmailError(isValidDlsuEmail(v) ? "" : "Email is not a valid DLSU account");
                 }} />
-                {editEmailError && editForm.email.trim() && <p className="mt-1 text-xs text-red-600">{editEmailError}</p>}
               </div>
               <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
                 <div><Label>Department</Label><SelectBox value={editForm.department} onChange={(v) => setEditForm(f => f ? {...f, department: v || ""} : f)} options={deptChoices} /></div>
@@ -832,8 +856,73 @@ export default function CHAIR_FacultyManagement() {
               <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
                 <div><Label>Teaching Years</Label><TextInput type="number" min={0} value={editForm.teaching_years} onChange={(e) => setEditForm(f => f ? {...f, teaching_years: e.target.value} : f)} /></div>
               </div>
+
+              {/* Faculty Deloading (Active Term) */}
+              <div className="mt-2 rounded-xl border border-gray-200 bg-gray-50 p-4">
+                <div className="mb-3 flex items-center justify-between">
+                  <div>
+                    <div className="text-sm font-semibold text-gray-900">Faculty Deloading (Active Term)</div>
+                    <div className="text-xs text-gray-600">Type and units are editable. Notes are read-only.</div>
+                  </div>
+                  {deloadingLoading && <div className="text-xs text-gray-600">Loading…</div>}
+                </div>
+
+                <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+                  <div className="md:col-span-1">
+                    <Label>Deloading Type</Label>
+                    <div className={cls("w-full", deloadingLoading ? "pointer-events-none opacity-60" : "")}>
+                      <SelectBox
+                        value={(() => {
+                          const id = (editDeloading as any)?.type_id;
+                          const found = deloadingTypes.find((t) => t.type_id === id);
+                          return found ? found.type : "— None —";
+                        })()}
+                        onChange={(v) => {
+                          const selected = (v || "").toString();
+                          if (!selected || selected === "— None —") {
+                            setEditDeloading((cur) => ({ ...(cur || {}), type_id: null }));
+                            return;
+                          }
+                          const found = deloadingTypes.find((t) => t.type === selected);
+                          setEditDeloading((cur) => ({ ...(cur || {}), type_id: found?.type_id || null }));
+                        }}
+                        options={["— None —", ...deloadingTypes.map((t) => t.type)]}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="md:col-span-1">
+                    <Label>Units Deloaded</Label>
+                    <TextInput
+                      type="number"
+                      min={0}
+                      step="0.5"
+                      value={
+                        (editDeloading as any)?.units_deloaded == null
+                          ? ""
+                          : String((editDeloading as any)?.units_deloaded)
+                      }
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        setEditDeloading((cur) => ({
+                          ...(cur || {}),
+                          units_deloaded: v === "" ? null : Number(v),
+                        }));
+                      }}
+                      disabled={deloadingLoading}
+                    />
+                  </div>
+
+                  <div className="md:col-span-3">
+                    <Label>Deloading Notes (read-only)</Label>
+                    <div className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-700 whitespace-pre-wrap">
+                      {((editDeloading as any)?.notes || "").trim() || "—"}
+                    </div>
+                  </div>
+                </div>
+              </div>
               <div className="mt-4 flex justify-end">
-                <button onClick={submitEditFaculty} disabled={editSaving || !!editEmailError} className="rounded-lg bg-emerald-700 px-6 py-2 text-sm font-medium text-white hover:bg-emerald-800 disabled:bg-emerald-300">
+                <button onClick={submitEditFaculty} disabled={editSaving} className="rounded-lg bg-emerald-700 px-6 py-2 text-sm font-medium text-white hover:bg-emerald-800 disabled:bg-emerald-300">
                   {editSaving ? "Saving…" : "Save Changes"}
                 </button>
               </div>

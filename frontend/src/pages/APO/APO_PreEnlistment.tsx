@@ -1529,7 +1529,7 @@ const [archiveCountTotal, setArchiveCountTotal] = useState(0);
                     {enrollmentStats.length === 0 && (
                       <tr>
                         <td colSpan={6} className="py-8 text-center text-gray-500">
-                          No data.
+                          No rows yet — import a CSV.
                         </td>
                       </tr>
                     )}

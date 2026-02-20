@@ -997,6 +997,27 @@ export async function approveApoOfferingsPlan(
 }
 
 
+export async function planAllowExtra(
+  userId: string,
+  payload: { course_id: string; keep_sections?: number }
+): Promise<{ ok: true; kept: number }> {
+  const url = `${API_BASE}/apo/courseofferings${q({ userId, action: "planAllowExtra" })}`;
+  // IMPORTANT: `api` axios instance already has baseURL=API_BASE.
+  // This function builds an absolute URL, so we must use the low-level `post()` helper
+  // (which uses global axios) to avoid generating API_BASE + API_BASE/... (404 Not Found).
+  return post(url, payload);
+}
+
+export async function planRejectOmNewLine(
+  userId: string,
+  payload: { course_id: string }
+): Promise<{ ok: true; deleted: number }> {
+  const url = `${API_BASE}/apo/courseofferings${q({ userId, action: "planRejectOmNewLine" })}`;
+  // See note in planAllowExtra(): absolute URL => use `post()` helper.
+  return post(url, payload);
+}
+
+
 export async function setApoOmSubmitWindow(
   userId: string,
   payload: { deadlineISO: string }
@@ -1993,6 +2014,9 @@ export type FacultyRow = {
   teaching_units: string | number;
   faculty_type: string; // Full-Time | Part-Time
   status: string; // Active | On Leave
+  // Optional fields used by Edit Faculty Details
+  certifications?: string[];
+  teaching_years?: number | null;
 };
 
 export type FMOptions = {
@@ -2742,6 +2766,24 @@ export async function getFacultyOverviewProfile(userId: string) {
   return data;
 }
 
+// Updates the Faculty "My Profile" fields (name, employment, certifications, qualified_kacs)
+// Backend: POST /faculty/overview?action=profile_update
+export async function updateFacultyOverviewProfile(
+  userId: string,
+  payload: {
+    first_name?: string;
+    last_name?: string;
+    employment_type?: string;
+    certifications?: string[];
+    qualified_kacs?: string[];
+  }
+) {
+  const { data } = await axios.post(`${API_BASE}/faculty/overview`, payload, {
+    params: { userId, action: "profile_update" },
+  });
+  return data as { ok: boolean; matched?: number; modified?: number; detail?: string };
+}
+
 export async function getFacultyOverviewOptions(userId: string) {
   const { data } = await axios.post(`${API_BASE}/faculty/overview`, {}, {
     params: { userId, action: "options" },
@@ -2771,7 +2813,14 @@ export async function getFacultyLoadAssignmentRfc(
 
 export async function sendFacultyLoadAssignmentRfcMessage(
   userId: string,
-  payload: { term_id?: string; section_id: string; course_code?: string; message: string }
+  payload: {
+    term_id?: string;
+    section_id: string;
+    course_code?: string;
+    message: string;
+    // Optional structured request details (used for auto-apply on OM approval)
+    requested?: { day1?: string; time1?: string; day2?: string; time2?: string };
+  }
 ) {
   const base = (typeof API_BASE !== "undefined" ? API_BASE : "").replace(/\/+$/, "");
   const url = `${base}/faculty/load-assignment/rfc/message?userId=${encodeURIComponent(userId)}`;
@@ -2790,16 +2839,27 @@ export async function sendFacultyLoadAssignmentRfcMessage(
   }>;
 }
 
-export async function acceptFacultyLoadAssignment(userId: string, payload: { term_id?: string }) {
+export async function acceptFacultyLoadAssignment(
+  userId: string,
+  payload: { term_id?: string }
+) {
   const base = (typeof API_BASE !== "undefined" ? API_BASE : "").replace(/\/+$/, "");
   const url = `${base}/faculty/load-assignment/accept?userId=${encodeURIComponent(userId)}`;
+
   const r = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+    body: JSON.stringify(payload || {}),
   });
-  if (!r.ok) throw new Error(await r.text());
-  return r.json() as Promise<{ ok: boolean; status?: string }>;
+
+  const text = await r.text();
+  if (!r.ok) throw new Error(text);
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    return { ok: true, raw: text };
+  }
 }
 
 export async function acceptTeachingLoadToGcal(
@@ -3077,6 +3137,19 @@ export async function submitOmLoadAssignment(
     term?: string;
   };
 }
+
+
+/** Apply OM post-deadline draft overrides to canonical rows so APO can see them (campus-scoped). */
+export async function applyOmPendingOverrides(
+  userId: string,
+  payload: { campus_id: string }
+) {
+  const { data } = await axios.post(`${API_BASE}/om/loadassignment`, payload, {
+    params: { userId, action: "apply_pending_overrides" },
+  });
+  return data as { ok: boolean; applied?: number; campus_id?: string; term?: string };
+}
+
 
 /** Save OM remarks for a section (section is resolved via section_schedules.schedule_id). */
 export async function saveOmSectionRemarks(
@@ -3747,4 +3820,65 @@ export async function updateChairFacultyEntry(
     }
   );
   return data as { ok: boolean };
+}
+
+// === CHAIR: FACULTY DELOADING (for Edit Faculty Details modal) ===
+
+export type ChairDeloadingType = { type_id: string; type: string };
+
+export type ChairFacultyDeloading = {
+  type_id?: string | null;
+  deloading_type?: string | null;
+  units_deloaded?: number | null;
+  notes?: string | null;
+  term_id?: string | null;
+  updated_at?: string | Date | null;
+};
+
+export async function getChairFacultyDeloading(params: {
+  facultyId: string;
+  termId?: string;
+}): Promise<{
+  ok: boolean;
+  term_id: string | null;
+  faculty_id: string;
+  current: ChairFacultyDeloading | null;
+  types: ChairDeloadingType[];
+}> {
+  const { facultyId, termId } = params;
+  const { data } = await axios.post(
+    `${API_BASE}/chair/facultymanagement`,
+    {},
+    { params: { action: "deloading_get", facultyId, termId } }
+  );
+  return {
+    ok: !!data?.ok,
+    term_id: data?.term_id ?? null,
+    faculty_id: String(data?.faculty_id ?? facultyId),
+    current: data?.current ?? null,
+    types: Array.isArray(data?.types) ? data.types : [],
+  };
+}
+
+export async function updateChairFacultyDeloading(params: {
+  facultyId: string;
+  termId?: string;
+  type_id?: string | null;
+  units_deloaded?: number | null;
+}): Promise<{ ok: boolean; term_id: string | null; faculty_id: string }> {
+  const { facultyId, termId, type_id, units_deloaded } = params;
+  const payload: Record<string, any> = {};
+  if (type_id !== undefined) payload.type_id = type_id;
+  if (units_deloaded !== undefined) payload.units_deloaded = units_deloaded;
+
+  const { data } = await axios.post(
+    `${API_BASE}/chair/facultymanagement`,
+    payload,
+    { params: { action: "deloading_update", facultyId, termId } }
+  );
+  return {
+    ok: !!data?.ok,
+    term_id: data?.term_id ?? null,
+    faculty_id: String(data?.faculty_id ?? facultyId),
+  };
 }

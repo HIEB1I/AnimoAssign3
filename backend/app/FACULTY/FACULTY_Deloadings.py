@@ -1,5 +1,8 @@
 from typing import Optional, Literal, Dict, Any, List
-from fastapi import APIRouter, Query
+from datetime import datetime
+from uuid import uuid4
+
+from fastapi import APIRouter, Query, Body
 from ..main import db  # shared Motor client/database
 
 Direction = Literal["current", "next", "prev"]
@@ -113,6 +116,8 @@ async def by_term(
             ]
         })
         rows.append({
+            "deloading_id": d.get("deloading_id") or d.get("_id"),
+            "type_id": d.get("type_id") or d.get("deloadingtype_id"),
             "deloading_type": (dt or {}).get("type"),
             "units_deloaded": d.get("units_deloaded"),
             "notes": (d.get("notes") or d.get("deloading_notes") or "").strip() or None,
@@ -131,3 +136,86 @@ async def by_term(
         "terms": [_term_lite(t) for t in terms],
         "current_index": idx,
     }
+
+
+@router.post("")
+async def post_actions(
+    body: Dict[str, Any] = Body(default_factory=dict),
+    userId: str = Query(..., description="Logged-in user ID"),
+    action: str = Query(..., description="Action: types | upsert"),
+):
+    """POST actions used by the Faculty Deloadings UI.
+
+    - action=types: returns available deloading types
+    - action=upsert: insert/update a deloading record for the logged-in faculty and selected term
+    """
+
+    faculty = await db["faculty_profiles"].find_one({"user_id": userId})
+    if not faculty:
+        user = await db["users"].find_one({"user_id": userId})
+        if user:
+            faculty = await db["faculty_profiles"].find_one({"email": user.get("email")})
+    faculty_id = (faculty or {}).get("faculty_id")
+    if not faculty_id:
+        return {"ok": False, "detail": "Faculty profile not found."}
+
+    if action == "types":
+        types = await db["deloading_types"].find({}, {"_id": 0}).sort([("type", 1)]).to_list(None)
+        cleaned = []
+        for t in types or []:
+            tid = t.get("type_id") or t.get("deloadingtype_id")
+            name = t.get("type") or t.get("name")
+            if tid and name:
+                cleaned.append({"type_id": str(tid), "type": str(name)})
+        return {"ok": True, "types": cleaned}
+
+    if action == "upsert":
+        term_id = body.get("term_id")
+        type_id = body.get("type_id")
+        if not term_id:
+            return {"ok": False, "detail": "term_id is required."}
+        if not type_id:
+            return {"ok": False, "detail": "type_id is required."}
+
+        units_deloaded = body.get("units_deloaded")
+        notes = (body.get("notes") or "").strip()
+
+        if units_deloaded in ("", None):
+            units_deloaded = None
+        else:
+            try:
+                units_deloaded = float(units_deloaded)
+            except Exception:
+                return {"ok": False, "detail": "units_deloaded must be a number."}
+
+        provided_id = body.get("deloading_id")
+        if provided_id:
+            query: Dict[str, Any] = {"deloading_id": provided_id, "faculty_id": faculty_id}
+        else:
+            query = {"faculty_id": faculty_id, "term_id": term_id}
+
+        now = datetime.utcnow()
+        update_doc = {
+            "$set": {
+                "faculty_id": faculty_id,
+                "term_id": term_id,
+                "type_id": str(type_id),
+                "units_deloaded": units_deloaded,
+                "notes": notes,
+                "deloading_notes": notes,
+                "updated_at": now,
+            },
+            "$setOnInsert": {
+                "deloading_id": provided_id or str(uuid4()),
+                "created_at": now,
+            },
+        }
+
+        res = await db["deloadings"].update_one(query, update_doc, upsert=True)
+        return {
+            "ok": True,
+            "matched": int(res.matched_count or 0),
+            "modified": int(res.modified_count or 0),
+        }
+
+    return {"ok": False, "detail": "Unknown action."}
