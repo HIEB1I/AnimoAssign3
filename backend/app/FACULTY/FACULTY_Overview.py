@@ -15,6 +15,24 @@ import base64
 from email.message import EmailMessage
 import httpx
 
+from urllib.parse import quote
+
+from datetime import timedelta
+try:
+    from zoneinfo import ZoneInfo
+except Exception:
+    ZoneInfo = None  # fallback to UTC if zoneinfo isn't available
+
+_GCAL_EVENTS_INSERT_URL = "https://calendar.googleapis.com/calendar/v3/calendars/primary/events"
+_DEFAULT_TZ = (os.getenv("ANIMOASSIGN_TZ") or "Asia/Manila").strip()
+_TERM_WEEK_COUNT = int(os.getenv("TERM_WEEK_COUNT") or "12")
+
+_WEEKDAY_IDX = {
+    "Monday": 0, "Tuesday": 1, "Wednesday": 2, "Thursday": 3,
+    "Friday": 4, "Saturday": 5, "Sunday": 6,
+}
+
+
 _GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 _GMAIL_SEND_URL = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send"
 # RFC email recipient fallback.
@@ -44,6 +62,8 @@ COL_LOAD_RFC = "faculty_rfc"
 
 import uuid
 
+def _gcal_events_insert_url(calendar_id: str = "primary") -> str:
+    return f"https://www.googleapis.com/calendar/v3/calendars/{quote(calendar_id, safe='')}/events"
 
 def _to_hhmm(v: Any) -> str:
     """Normalize various DB time formats to 4-digit HHMM used by _hhmm_to_hm.
@@ -301,6 +321,199 @@ async def _send_email_via_user_gmail(
         return True, None
     return False, r2.text
 
+
+def _pick_tzinfo():
+    if ZoneInfo:
+        try:
+            return ZoneInfo(_DEFAULT_TZ)
+        except Exception:
+            return timezone.utc
+    return timezone.utc
+
+def _parse_time_band_to_hm(band: str):
+    """
+    Accepts: "07:30 – 09:00", "07:30-09:00", etc.
+    Returns: ((h1,m1),(h2,m2)) or None
+    """
+    if not band:
+        return None
+    s = band.strip()
+    if not s or "TBA" in s.upper():
+        return None
+
+    s = s.replace("–", "-").replace("—", "-")
+    parts = [p.strip() for p in s.split("-") if p.strip()]
+    if len(parts) != 2:
+        return None
+
+    def _one(t: str):
+        m = re.search(r"(\d{1,2}):(\d{2})", t)
+        if m:
+            return int(m.group(1)), int(m.group(2))
+        digits = re.sub(r"\D", "", t)
+        if len(digits) == 3:
+            return int(digits[0]), int(digits[1:])
+        if len(digits) == 4:
+            return int(digits[:2]), int(digits[2:])
+        return None
+
+    a = _one(parts[0])
+    b = _one(parts[1])
+    if not a or not b:
+        return None
+    return a, b
+
+def _first_date_on_or_after(start_date, target_weekday: int):
+    # start_date is a date() in local tz
+    delta = (target_weekday - start_date.weekday()) % 7
+    return start_date + timedelta(days=delta)
+
+async def _insert_gcal_event(token: str, event_body: Dict[str, Any]) -> httpx.Response:
+    headers = {"Authorization": f"Bearer {token}"}
+    url = _gcal_events_insert_url("primary")
+    async with httpx.AsyncClient(timeout=25) as client:
+        r = await client.post(url, headers=headers, json=event_body)
+    return r
+
+async def _create_term_calendar_for_user(
+    *,
+    user_id: str,
+    term_start_at: datetime,
+    rows: List[Dict[str, Any]],
+    week_count: int = _TERM_WEEK_COUNT,
+) -> Tuple[bool, int, Optional[str]]:
+    """
+    Creates weekly recurring events (COUNT=week_count) starting from the week of term_start_at.
+    Returns (ok, events_created, error)
+    """
+    user = await db["users"].find_one({"user_id": user_id}, {"_id": 0, "google_token": 1})
+    if not user:
+        return False, 0, "User not found."
+
+    gt = user.get("google_token") or {}
+    access_token = (gt.get("access_token") or "").strip()
+    refresh_token = (gt.get("refresh_token") or "").strip()
+
+    if not access_token and not refresh_token:
+        return False, 0, "No Google token. User must login with Google (calendar.events scope)."
+
+    tzinfo = _pick_tzinfo()
+    term_start_local_date = _coerce_dt(term_start_at).astimezone(tzinfo).date()
+
+    created = 0
+
+    async def _ensure_token_and_retry(event_body: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
+        nonlocal access_token
+
+        # try current access token first
+        if access_token:
+            r = await _insert_gcal_event(access_token, event_body)
+            if r is None:
+                return False, "Calendar insert returned no response (check _insert_gcal_event return)."
+            if r.status_code < 400:
+                return True, None
+
+            if r.status_code < 400:
+                return True, None
+            if r.status_code != 401:
+                return False, r.text
+
+        # refresh if possible
+        if not refresh_token:
+            return False, "Access token expired and no refresh_token available. Reconnect Google."
+
+        tokens = await _refresh_access_token(refresh_token)
+        new_access = (tokens.get("access_token") or "").strip()
+        if not new_access:
+            return False, "Failed to refresh Google access token."
+
+        access_token = new_access
+        await db["users"].update_one(
+            {"user_id": user_id},
+            {"$set": {
+                "google_token.access_token": new_access,
+                "google_token.updated_at": _now_utc(),
+                "google_token.expires_in": tokens.get("expires_in"),
+                "google_token.scope": tokens.get("scope"),
+            }},
+        )
+
+        r2 = await _insert_gcal_event(new_access, event_body)
+        if r2.status_code < 400:
+            return True, None
+        return False, r2.text
+
+    def _make_event(*, course_code: str, section: str, day_full: str, time_band: str, room: str, mode: str):
+        hm = _parse_time_band_to_hm(time_band)
+        if not hm:
+            return None
+
+        (sh, sm), (eh, em) = hm
+        day_full = _to_full_day(day_full)
+        wd = _WEEKDAY_IDX.get(day_full)
+        if wd is None:
+            return None
+
+        first_date = _first_date_on_or_after(term_start_local_date, wd)
+
+        start_dt = datetime(first_date.year, first_date.month, first_date.day, sh, sm, tzinfo=tzinfo)
+        end_dt = datetime(first_date.year, first_date.month, first_date.day, eh, em, tzinfo=tzinfo)
+
+        title = f"{(course_code or '').strip()} {(section or '').strip()}".strip() or "Class"
+        location = (room or "").strip() or "Online"
+        desc = (
+            f"Mode: {(mode or '').strip()}\n"
+            f"Created by AnimoAssign upon schedule acceptance.\n"
+            f"Login: {_aa_login_link()}"
+        )
+
+        return {
+            "summary": title,
+            "location": location,
+            "description": desc,
+            "start": {"dateTime": start_dt.isoformat(), "timeZone": _DEFAULT_TZ},
+            "end": {"dateTime": end_dt.isoformat(), "timeZone": _DEFAULT_TZ},
+            "recurrence": [f"RRULE:FREQ=WEEKLY;COUNT={int(week_count)}"],
+        }
+
+    for rr in rows or []:
+        course_code = rr.get("course_code") or rr.get("course") or ""
+        section = rr.get("section") or ""
+        mode = rr.get("mode") or ""
+        # Meeting 1
+        ev1 = _make_event(
+            course_code=course_code,
+            section=section,
+            day_full=rr.get("day1") or "",
+            time_band=rr.get("time1") or "",
+            room=rr.get("room1") or "Online",
+            mode=mode,
+        )
+        if ev1:
+            ok1, err1 = await _ensure_token_and_retry(ev1)
+            if ok1:
+                created += 1
+            else:
+                # don't stop everything; just return the first hard error
+                return False, created, err1
+
+        # Meeting 2 (optional)
+        ev2 = _make_event(
+            course_code=course_code,
+            section=section,
+            day_full=rr.get("day2") or "",
+            time_band=rr.get("time2") or "",
+            room=rr.get("room2") or rr.get("room1") or "Online",
+            mode=mode,
+        )
+        if ev2:
+            ok2, err2 = await _ensure_token_and_retry(ev2)
+            if ok2:
+                created += 1
+            else:
+                return False, created, err2
+
+    return True, created, None
 
 
 RFC_TERMINAL = {"ACCEPTED", "APPROVED", "REJECTED"}
@@ -691,6 +904,35 @@ def _now_utc():
 
 # --- Helpers tied to your actual terms schema (augmented JSON) ---
 
+async def _next_term_from_current() -> Dict[str, Any] | None:
+    cur = await db["terms"].find_one({"is_current": True}, {"_id": 0})
+    if not cur:
+        return None
+
+    ay = cur.get("acad_year_start")
+    tn = cur.get("term_number")
+    if ay is None or tn is None:
+        return None
+
+    nxt = await db["terms"].find_one(
+        {"acad_year_start": ay, "term_number": int(tn) + 1},
+        {"_id": 0},
+    )
+    if nxt:
+        return nxt
+
+    # fallback: earliest term whose start_at is after current.start_at
+    cur_start = cur.get("start_at")
+    if cur_start:
+        nxt = await db["terms"].find_one(
+            {"start_at": {"$gt": cur_start}},
+            {"_id": 0},
+            sort=[("start_at", 1)],
+        )
+        return nxt
+
+    return None
+
 async def _active_term() -> Dict[str, Any]:
     # 1) find the current anchor (must be is_current=True)
     cur = await db.terms.find_one(
@@ -892,6 +1134,160 @@ def _build_load_accept_email_html(*, faculty_name: str, term_label: str, rows: L
   </body>
 </html>"""
 
+# ====== OM NOTIFY EMAIL (drop-in) ======
+OM_NOTIFY_EMAIL = (os.getenv("ANIMOASSIGN_OM_NOTIFY_EMAIL") or "jdom.animoassign@gmail.com").strip()
+OM_LOAD_ASSIGNMENT_URL = (
+    os.getenv("ANIMOASSIGN_OM_LOAD_ASSIGNMENT_URL")
+    or "http://ccscloud.dlsu.edu.ph:11160/om/load-assignment"
+).strip()
+
+def _build_om_finalized_email(
+    *,
+    term_label: str,
+    faculty_name: str,
+    rows: List[Dict[str, Any]],
+    om_link: str,
+) -> Tuple[str, str, str]:
+    safe_name = _html_escape((faculty_name or "Faculty").strip() or "Faculty")
+    safe_term = _html_escape((term_label or "Term").strip() or "Term")
+    safe_link = _html_escape((om_link or "").strip())
+    preheader = _html_escape(f"{faculty_name} finalized teaching load for {term_label}"[:120])
+
+    subject = f"[AnimoAssign] Faculty load finalized • {faculty_name} • {term_label}"
+
+    # Plain text
+    lines = [
+        "Hi OM,",
+        "",
+        f"{faculty_name} has ACCEPTED and FINALIZED the faculty load assignment.",
+        f"Term: {term_label}",
+        "",
+        "Schedule:",
+    ]
+    for r in rows:
+        lines.append(
+            f"- {r.get('course_code','')} {r.get('section','')} | {r.get('units','')}u | "
+            f"{r.get('day1','')} {r.get('time1','')} {r.get('room1','')} | "
+            f"{(r.get('day2') or '')} {(r.get('time2') or '')} {(r.get('room2') or '')}"
+        )
+    lines += ["", f"Open OM page: {om_link}", "", "— AnimoAssign"]
+    body_text = "\n".join(lines)
+
+    # Build HTML rows (same columns as your accepted-email table)
+    tr = []
+    for r in rows:
+        course = _html_escape(str(r.get("course_code") or ""))
+        sec = _html_escape(str(r.get("section") or ""))
+        units = _html_escape(str(r.get("units") or ""))
+        mode = _html_escape(str(r.get("mode") or ""))
+        day1 = _html_escape(str(r.get("day1") or ""))
+        time1 = _html_escape(str(r.get("time1") or ""))
+        room1 = _html_escape(str(r.get("room1") or ""))
+        day2 = _html_escape(str(r.get("day2") or ""))
+        time2 = _html_escape(str(r.get("time2") or ""))
+        room2 = _html_escape(str(r.get("room2") or ""))
+
+        tr.append(f"""
+          <tr>
+            <td style="padding:10px 10px;border-top:1px solid #e5e7eb;">{course}</td>
+            <td style="padding:10px 10px;border-top:1px solid #e5e7eb;text-align:center;">{sec}</td>
+            <td style="padding:10px 10px;border-top:1px solid #e5e7eb;text-align:center;">{units}</td>
+            <td style="padding:10px 10px;border-top:1px solid #e5e7eb;text-align:center;">{mode}</td>
+            <td style="padding:10px 10px;border-top:1px solid #e5e7eb;text-align:center;">{day1}</td>
+            <td style="padding:10px 10px;border-top:1px solid #e5e7eb;text-align:center;">{time1}</td>
+            <td style="padding:10px 10px;border-top:1px solid #e5e7eb;">{room1}</td>
+            <td style="padding:10px 10px;border-top:1px solid #e5e7eb;text-align:center;">{day2}</td>
+            <td style="padding:10px 10px;border-top:1px solid #e5e7eb;text-align:center;">{time2}</td>
+            <td style="padding:10px 10px;border-top:1px solid #e5e7eb;">{room2}</td>
+          </tr>
+        """)
+
+    rows_html = "\n".join(tr) if tr else """
+      <tr><td colspan="10" style="padding:12px;border-top:1px solid #e5e7eb;color:#6b7280;text-align:center;">
+        No schedule rows found.
+      </td></tr>
+    """
+
+    # Inbox-style card layout (same visual pattern as inbox_email + your accepted email)
+    body_html = f"""<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Faculty Load Finalized</title>
+  </head>
+  <body style="margin:0;padding:0;background:#f6f7fb;">
+    <div style="display:none;max-height:0;overflow:hidden;opacity:0;color:transparent;">{preheader}</div>
+
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f6f7fb;padding:24px 0;">
+      <tr>
+        <td align="center">
+          <table role="presentation" width="600" cellpadding="0" cellspacing="0"
+                 style="width:600px;max-width:92vw;background:#ffffff;border-radius:14px;overflow:hidden;box-shadow:0 6px 18px rgba(17,24,39,0.08);">
+            <tr>
+              <td style="padding:20px 24px;background:#0B6B3A;color:#ffffff;font-family:Arial,Helvetica,sans-serif;">
+                <div style="font-size:12px;letter-spacing:.08em;text-transform:uppercase;opacity:.9;">AnimoAssign</div>
+                <div style="font-size:20px;font-weight:700;margin-top:6px;line-height:1.25;">Faculty Load Finalized</div>
+              </td>
+            </tr>
+
+            <tr>
+              <td style="padding:22px 24px;font-family:Arial,Helvetica,sans-serif;color:#111827;font-size:14px;line-height:1.55;">
+                <p style="margin:0 0 10px 0;">Hi OM,</p>
+                <p style="margin:0 0 16px 0;color:#374151;">
+                  Faculty <b>{safe_name}</b> has <b>ACCEPTED</b> and <b>FINALIZED</b> the load assignment for <b>{safe_term}</b>.
+                </p>
+
+                <div style="border:1px solid #e5e7eb;border-radius:12px;overflow:hidden;">
+                  <table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse;font-size:12px;">
+                    <thead style="background:#f3f4f6;color:#111827;">
+                      <tr>
+                        <th style="padding:10px 10px;text-align:left;">Course</th>
+                        <th style="padding:10px 10px;text-align:center;">Section</th>
+                        <th style="padding:10px 10px;text-align:center;">Units</th>
+                        <th style="padding:10px 10px;text-align:center;">Mode</th>
+                        <th style="padding:10px 10px;text-align:center;">Day 1</th>
+                        <th style="padding:10px 10px;text-align:center;">Time 1</th>
+                        <th style="padding:10px 10px;text-align:left;">Room 1</th>
+                        <th style="padding:10px 10px;text-align:center;">Day 2</th>
+                        <th style="padding:10px 10px;text-align:center;">Time 2</th>
+                        <th style="padding:10px 10px;text-align:left;">Room 2</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {rows_html}
+                    </tbody>
+                  </table>
+                </div>
+
+                <div style="text-align:center;margin:18px 0 10px 0;">
+                  <a href="{safe_link}" style="display:inline-block;background:#16a34a;color:#ffffff;text-decoration:none;
+                                             padding:10px 14px;border-radius:10px;font-weight:700;font-size:14px;">
+                    Open OM Load Assignment
+                  </a>
+                </div>
+
+                <p style="margin:14px 0 0 0;color:#6b7280;font-size:12px;">
+                  If the button doesn’t work, copy and paste this link:<br/>
+                  <a href="{safe_link}" style="color:#0B6B3A;text-decoration:underline;">{safe_link}</a>
+                </p>
+
+                <hr style="border:none;border-top:1px solid #e5e7eb;margin:18px 0;" />
+                <p style="margin:0;color:#6b7280;font-size:12px;">
+                  This email was sent by AnimoAssign using the faculty’s connected Gmail account.
+                </p>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>
+"""
+    return subject, body_text, body_html
+# ====== end drop-in ======
+
 def _build_load_accept_email(*, faculty_name: str, term_label: str, rows: List[Dict[str, Any]]) -> Tuple[str, str, str]:
     login_link = _aa_login_link()
     subject = f"[AnimoAssign] Teaching Load Accepted - {term_label}"
@@ -993,16 +1389,243 @@ async def overview_handler(
             {"user_id": userId}, {"_id": 0}
         ).to_list(None)
 
+        # Expand faculty profile details (from faculty_profiles) for the Profile tab
+        employment_type = faculty.get("employment_type")
+        min_units = faculty.get("min_units")
+        max_preps = faculty.get("max_preps")
+        teaching_years = faculty.get("teaching_years")
+        certifications = faculty.get("certifications") or []
+
+        # Qualified KACs (include course list with code + title)
+        kac_ids = faculty.get("qualified_kacs") or []
+        if not isinstance(kac_ids, list):
+            kac_ids = []
+        kac_docs: List[Dict[str, Any]] = []
+        if kac_ids:
+            kac_docs = await db.kacs.find(
+                {"kac_id": {"$in": kac_ids}},
+                {"_id": 0, "kac_id": 1, "kac_name": 1, "kac_code": 1, "program_area": 1, "course_list": 1},
+            ).to_list(None)
+
+        kac_by_id = {str(k.get("kac_id")): k for k in (kac_docs or []) if k}
+        course_ids: List[str] = []
+        for kd in (kac_docs or []):
+            for cid in (kd.get("course_list") or []):
+                if isinstance(cid, str) and cid.strip():
+                    course_ids.append(cid.strip())
+        course_ids = sorted(set(course_ids))
+
+        courses_map: Dict[str, Dict[str, Any]] = {}
+        if course_ids:
+            course_docs = await db[COL_COURSES].find(
+                {"course_id": {"$in": course_ids}},
+                {"_id": 0, "course_id": 1, "course_code": 1, "course_title": 1},
+            ).to_list(None)
+            for cd in course_docs:
+                cid = str(cd.get("course_id") or "").strip()
+                if not cid:
+                    continue
+                courses_map[cid] = {
+                    "course_id": cid,
+                    "course_code": _as_code_str(cd.get("course_code")),
+                    "course_title": cd.get("course_title") or "",
+                }
+
+        qualified_kacs_details: List[Dict[str, Any]] = []
+        for kac_id in kac_ids:
+            kid = str(kac_id or "").strip()
+            if not kid:
+                continue
+            kd = kac_by_id.get(kid)
+            if not kd:
+                continue
+            clist = []
+            for cid in (kd.get("course_list") or []):
+                scid = str(cid or "").strip()
+                if not scid:
+                    continue
+                clist.append(courses_map.get(scid, {"course_id": scid, "course_code": "", "course_title": ""}))
+
+            qualified_kacs_details.append({
+                "kac_id": kid,
+                "kac_name": kd.get("kac_name") or "",
+                "kac_code": kd.get("kac_code") or "",
+                "program_area": kd.get("program_area") or "",
+                "courses": clist,
+            })
+
         return {
             "ok": True,
             "faculty": {
                 "full_name": full_name,
-                "fullName": full_name,   
+                "fullName": full_name,
                 "role": "Faculty",
                 "department": (dept or {}).get("dept_name", "—"),
+
+                # faculty_profiles fields
+                "employment_type": employment_type,
+                "min_units": min_units,
+                "max_preps": max_preps,
+                "teaching_years": teaching_years,
+                "certifications": certifications,
+                "qualified_kacs": qualified_kacs_details,
             },
             "notifications": notifications,
         }
+
+
+    # ---------- profile_update (My Profile edits) ----------
+    if action == "profile_update":
+        data = payload or {}
+
+        # Accept updates for: name, employment, certifications, qualified kacs.
+        first_name = (data.get("first_name") or "").strip()
+        last_name = (data.get("last_name") or "").strip()
+        employment_type = (data.get("employment_type") or "").strip()
+        certifications = data.get("certifications")
+        qualified_kacs = data.get("qualified_kacs")
+
+        updates_faculty: Dict[str, Any] = {}
+        updates_user: Dict[str, Any] = {}
+
+        if first_name or last_name:
+            if not first_name or not last_name:
+                raise HTTPException(status_code=400, detail="Both first_name and last_name are required.")
+            # Keep both collections in sync (some screens read from users, others from faculty_profiles)
+            updates_user["first_name"] = first_name
+            updates_user["last_name"] = last_name
+            updates_faculty["first_name"] = first_name
+            updates_faculty["last_name"] = last_name
+            updates_faculty["full_name"] = f"{first_name} {last_name}".strip()
+
+        if employment_type:
+            et = employment_type.upper().replace(" ", "")
+            if et in ("FULLTIME", "FULL-TIME"):
+                et = "FT"
+            if et in ("PARTTIME", "PART-TIME"):
+                et = "PT"
+            if et not in ("FT", "PT"):
+                raise HTTPException(status_code=400, detail="Invalid employment_type.")
+            updates_faculty["employment_type"] = et
+
+        if certifications is not None:
+            if isinstance(certifications, str):
+                # allow comma-separated string (frontend usually sends list)
+                certifications = [c.strip() for c in certifications.split(",") if c.strip()]
+            if not isinstance(certifications, list):
+                raise HTTPException(status_code=400, detail="certifications must be a list of strings")
+            clean: List[str] = []
+            for c in certifications:
+                if isinstance(c, str) and c.strip():
+                    clean.append(c.strip())
+            updates_faculty["certifications"] = clean
+
+        if qualified_kacs is not None:
+            if not isinstance(qualified_kacs, list):
+                raise HTTPException(status_code=400, detail="qualified_kacs must be a list of kac_id strings")
+            clean_k: List[str] = []
+            for kid in qualified_kacs:
+                if isinstance(kid, str) and kid.strip():
+                    clean_k.append(kid.strip())
+            updates_faculty["qualified_kacs"] = sorted(set(clean_k))
+
+        if not updates_faculty and not updates_user:
+            return {"ok": True, "updated": {}}
+
+        now = datetime.now(timezone.utc)
+        if updates_faculty:
+            updates_faculty["updated_at"] = now
+            await db[COL_FACULTY].update_one(
+                {"user_id": userId},
+                {"$set": updates_faculty},
+            )
+
+        if updates_user:
+            await db["users"].update_one(
+                {"user_id": userId},
+                {"$set": updates_user},
+            )
+
+        # Notify Chair(s) of Dept. of Software Technology
+        try:
+            dept = await db[COL_DEPTS].find_one(
+                {"$or": [
+                    {"dept_name": {"$regex": r"Software\\s+Technology", "$options": "i"}},
+                    {"dept_code": {"$regex": r"^ST$", "$options": "i"}},
+                ]},
+                {"_id": 0, "department_id": 1, "dept_name": 1},
+            )
+            st_dept_id = (dept or {}).get("department_id")
+
+            chair_role_ids: List[str] = []
+            # Prefer roles collection if present
+            roles_coll = None
+            try:
+                roles_coll = db["roles"]
+            except Exception:
+                roles_coll = None
+            if roles_coll is not None:
+                role_docs = await roles_coll.find(
+                    {"$or": [
+                        {"role_name": {"$regex": r"^chair$", "$options": "i"}},
+                        {"name": {"$regex": r"^chair$", "$options": "i"}},
+                    ]},
+                    {"_id": 0, "role_id": 1},
+                ).to_list(10)
+                chair_role_ids = [str(r.get("role_id") or "").strip() for r in (role_docs or []) if str(r.get("role_id") or "").strip()]
+
+            # Heuristic fallback used in provided seed data
+            if not chair_role_ids:
+                chair_role_ids = ["ROLE0002"]
+
+            chair_user_ids: List[str] = []
+            if st_dept_id:
+                ras = await db["role_assignments"].find(
+                    {
+                        "role_id": {"$in": chair_role_ids},
+                        "scope": {"$elemMatch": {"type": "department", "id": st_dept_id}},
+                    },
+                    {"_id": 0, "user_id": 1},
+                ).to_list(20)
+                chair_user_ids = [str(x.get("user_id") or "").strip() for x in (ras or []) if str(x.get("user_id") or "").strip()]
+
+            # Ensure unique
+            chair_user_ids = sorted(set(chair_user_ids))
+            if chair_user_ids:
+                # Actor display name
+                u = await db["users"].find_one({"user_id": userId}, {"_id": 0, "first_name": 1, "last_name": 1, "email": 1}) or {}
+                actor_name = (f"{(u.get('first_name') or '').strip()} {(u.get('last_name') or '').strip()}".strip() or (u.get("email") or userId))
+
+                changed_fields = []
+                if first_name or last_name:
+                    changed_fields.append("Name")
+                if employment_type:
+                    changed_fields.append("Employment")
+                if certifications is not None:
+                    changed_fields.append("Certifications")
+                if qualified_kacs is not None:
+                    changed_fields.append("Qualified KACs")
+                changed_txt = ", ".join(changed_fields) if changed_fields else "Profile"
+
+                for cuid in chair_user_ids:
+                    await create_notification(
+                        user_id=cuid,
+                        title="Faculty profile updated",
+                        details=f"{actor_name} updated: {changed_txt}.",
+                        meta={
+                            "type": "FACULTY_PROFILE_UPDATE",
+                            "actor_user_id": userId,
+                            "changed": changed_fields,
+                            "when": now.isoformat(),
+                        },
+                        send_email=True,
+                    )
+        except Exception:
+            # Best-effort: profile update should not fail if notification fails.
+            pass
+
+        return {"ok": True, "updated": {**updates_faculty, **updates_user}}
+
 
     # ---------- fetch (list) ----------
     if action == "fetch":
@@ -1899,6 +2522,12 @@ async def faculty_send_load_rfc_message(userId: str = Query(...), payload: Dict[
         "created_at": now.isoformat(),
     })
 
+    # Optional structured schedule request (sent by the Faculty UI)
+    requested = payload.get("requested")
+    if not isinstance(requested, dict):
+        requested = {}
+
+
     await db[COL_LOAD_RFC].update_one(
         qkey,
         {"$set": {
@@ -1911,6 +2540,7 @@ async def faculty_send_load_rfc_message(userId: str = Query(...), payload: Dict[
             "status": "NEEDS_OM",
             "locked": False,
             "messages": msgs,
+            "requested": requested,
             "history": list(existing.get("history") or []),
             "updated_at": now,
         }, "$setOnInsert": {"created_at": now}},
@@ -2018,7 +2648,7 @@ def _build_acceptance_email(term_label: str, rows: list[dict], recipient_email: 
       </table>
 
       <p style="margin-top:16px;">Thank you.<br/>AnimoAssign</p>
-      <p>Log in here: <a href=" http://ccscloud.dlsu.edu.ph:11160/login">http://ccscloud.dlsu.edu.ph:11160/login</a></p>
+      <p>Log in here: <a href="http://ccscloud.dlsu.edu.ph:11160/login">http://ccscloud.dlsu.edu.ph:11160/login</a></p>
     </div>
     """
     return subject, body_text, body_html
@@ -2028,7 +2658,7 @@ def _build_faculty_accept_email(
     term_label: str,
     faculty_name: str,
     rows: List[Dict[str, Any]],
-    login_url: str = " http://ccscloud.dlsu.edu.ph:11160/login",
+    login_url: str = "http://ccscloud.dlsu.edu.ph:11160/login",
 ) -> Tuple[str, str, str]:
     subject = f"[AnimoAssign] Accepted schedule • {term_label}"
 
@@ -2208,6 +2838,29 @@ async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[s
     else:
         email_sent = False
         email_error = "No recipient email found for this user."
+    
+    # --- NEW: notify OM mailbox using the faculty's connected Gmail (best-effort, non-blocking) ---
+    om_mailbox_sent = False
+    om_mailbox_error: Optional[str] = None
+
+    if OM_NOTIFY_EMAIL:
+        om_subject, om_body_text, om_body_html = _build_om_finalized_email(
+            term_label=term_label,
+            faculty_name=faculty_name,
+            rows=proposal_rows,
+            om_link=OM_LOAD_ASSIGNMENT_URL,
+        )
+        try:
+            om_mailbox_sent, om_mailbox_error = await _send_email_via_user_gmail(
+                user_id=userId,  # IMPORTANT: send using the logged-in user's Gmail
+                to_email=OM_NOTIFY_EMAIL,
+                subject=om_subject,
+                body=om_body_text,
+                html_body=om_body_html,
+            )
+        except Exception as e:
+            om_mailbox_sent = False
+            om_mailbox_error = str(e)
 
     # optional rfc_id for notif (latest one)
     rfc_id = None
@@ -2233,5 +2886,59 @@ async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[s
             },
         )
 
-    # Keep old shape + add email fields (won't break existing callers)
-    return {"ok": True, "status": "ACCEPTED", "email_sent": email_sent, "email_error": email_error}
+      # --- NEW: create Google Calendar events (best-effort, non-blocking) ---
+        calendar_ok = False
+        calendar_error: Optional[str] = None
+        calendar_events_created = 0
+
+        calendar_term_id: Optional[str] = None
+        term_start_at = None
+        week_count = _TERM_WEEK_COUNT  # keep your existing constant (e.g., 12)
+
+        try:
+            # IMPORTANT: calendar must follow the NEXT term after is_current:true
+            nxt_term = await _next_term_from_current()  # should return full term doc (term_id, start_at, end_at, ...)
+            if not nxt_term:
+                calendar_error = "No next term found after current term."
+            else:
+                calendar_term_id = (nxt_term.get("term_id") or "").strip()
+                term_start_at = _coerce_dt(nxt_term.get("start_at"))
+                term_end_at = _coerce_dt(nxt_term.get("end_at"))
+
+                if not term_start_at:
+                    calendar_error = f"Next term {calendar_term_id or ''} has no start_at; cannot create calendar events."
+                else:
+                    # Optional: if you want to cap by term range, compute weeks from start_at/end_at.
+                    if term_end_at:
+                        span_weeks = max(1, ((term_end_at.date() - term_start_at.date()).days // 7) + 1)
+                        week_count = min(_TERM_WEEK_COUNT, span_weeks)
+
+                    calendar_ok, calendar_events_created, calendar_error = await _create_term_calendar_for_user(
+                        user_id=userId,
+                        term_start_at=term_start_at,
+                        rows=proposal_rows,
+                        week_count=week_count,
+                    )
+        except Exception as e:
+            calendar_ok = False
+            calendar_error = str(e)
+
+        return {
+             "ok": True,
+            "status": "ACCEPTED",
+
+            "email_sent": email_sent,
+            "email_error": email_error,
+
+            "om_mailbox_email": OM_NOTIFY_EMAIL,
+            "om_mailbox_sent": om_mailbox_sent,
+            "om_mailbox_error": om_mailbox_error,
+
+            "calendar_ok": calendar_ok,
+            "calendar_events_created": calendar_events_created,
+            "calendar_error": calendar_error,
+            "calendar_term_id": calendar_term_id,
+            "term_start_at": (term_start_at.isoformat() if term_start_at else None),
+            "week_count": week_count,
+            "calendar_url_used": _GCAL_EVENTS_INSERT_URL,
+        }

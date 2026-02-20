@@ -18,6 +18,7 @@ import {
 
 import SelectBox from "../../component/SelectBox";
 
+
 function ClipboardStarIcon({
   size = 18,
   className = "",
@@ -39,6 +40,7 @@ function ClipboardStarIcon({
 /* ---------------- Sidebar ---------------- */
 const ITEMS: SidebarItem[] = [
   { label: "Plantilla", to: "/chair/plantilla", Icon: ListChecks },
+  { label: "Load Assignment", to: "/chair/load-assignment", Icon: FileSpreadsheet },
   { label: "Faculty Directory", to: "/chair/faculty-management", Icon: Users },
   { label: "Course Management", to: "/chair/course-management", Icon: BookOpen },
   { label: "Faculty Service", to: "/chair/faculty-service", Icon: FileText },
