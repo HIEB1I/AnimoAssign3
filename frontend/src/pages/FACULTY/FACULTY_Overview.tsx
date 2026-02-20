@@ -1,6 +1,6 @@
 // frontend/src/pages/FACULTY/FAC_Overview.tsx
 import React, { useEffect, useMemo, useRef, useState, useCallback } from "react";
-import { Send as SendIcon, X, BookOpen as SyllabusIcon } from "lucide-react";
+import { Send as SendIcon, X, BookOpen as SyllabusIcon, Pencil, Check, XCircle } from "lucide-react";
 
 import TopBar from "../../component/TopBar";
 import Tabs from "../../component/Tabs";
@@ -8,11 +8,15 @@ import HistoryMain from "./FACULTY_History";
 import PreferencesContent from "./FACULTY_Preferences";
 import DeloadingsContent from "./FACULTY_Deloadings";
 import { InboxContent } from "./FACULTY_Inbox";
+import { acceptTeachingLoadToGcal } from "../../api"; 
+import SelectBox from "../../component/SelectBox";
 
 
 import {
   getFacultyOverviewList,
   getFacultyOverviewProfile,
+  getFacultyOverviewOptions,
+  updateFacultyOverviewProfile,
   getActiveRole,
   setActiveRole,
   userIsChair,
@@ -82,12 +86,15 @@ function ToastViewport({
   );
 }
 
+const lightRedBtn =
+  "inline-flex items-center gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800 hover:bg-red-100";
+
 
 /* =========================================
    0) Page
    ========================================= */
 export default function FAC_Overview() {
-  const [tab, setTab] = useState<"Overview" | "History" | "Preferences" | "Deloadings">("Overview");
+  const [tab, setTab] = useState<"Schedule Overview" | "Submit Preferences" | "My Profile">("Schedule Overview");
   const [showInbox, setShowInbox] = useState(false); // NEW
   const [data, setData] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
@@ -317,7 +324,7 @@ useEffect(() => {
           mode="state"
           activeTab={tab}
           onTabChange={(newTab) => setTab(newTab as typeof tab)}
-          items={[{ label: "Overview" }, { label: "History" }, { label: "Preferences" }, { label: "Deloadings" }]}
+          items={[{ label: "Schedule Overview" }, { label: "Submit Preferences" }, { label: "My Profile" }]}
         />
       )}
 
@@ -327,7 +334,7 @@ useEffect(() => {
           <InboxContent />
         ) : (
           <>
-            {tab === "Overview" && (
+            {tab === "Schedule Overview" && (
               <>
                 <StatCards summary={data.summary} />
                 <div className="my-6" />
@@ -340,15 +347,582 @@ useEffect(() => {
                 />
               </>
             )}
-            {tab === "History" && <HistoryMain />}
-            {tab === "Preferences" && <PreferencesContent />}
-            {tab === "Deloadings" && <DeloadingsContent />}
+            {tab === "Submit Preferences" && <PreferencesContent />}
+            {tab === "My Profile" && (
+              <FacultyProfileTab
+                faculty={data?.faculty}
+                userId={userId}
+                onReload={loadOverview}
+                pushToast={(kind, msg) => pushToast(kind, msg)}
+              />
+            )}
           </>
         )}
       </main>
     </div>
   );
 }
+
+/* =========================================
+   Faculty Profile Tab (REDESIGNED)
+   - Not an information dump: show actionable "guardrails" + qualifications
+   ========================================= */
+function FacultyProfileTab({
+  faculty,
+  userId,
+  onReload,
+  pushToast,
+}: {
+  faculty: any;
+  userId: string;
+  onReload: () => Promise<void>;
+  pushToast: (kind: ToastKind, message: string, title?: string) => void;
+}) {
+  const [editing, setEditing] = useState<null | "name" | "employment" | "certs" | "kacs">(null);
+  const [saving, setSaving] = useState(false);
+  const [kacOptions, setKacOptions] = useState<any[]>([]);
+  const [kacQuery, setKacQuery] = useState("");
+
+  const [draftName, setDraftName] = useState<{ first_name: string; last_name: string }>(() => ({
+    first_name: String(faculty?.first_name || "").trim(),
+    last_name: String(faculty?.last_name || "").trim(),
+  }));
+  const [draftEmployment, setDraftEmployment] = useState<string>(() =>
+    String(faculty?.employment_type || "").trim()
+  );
+  const [draftCerts, setDraftCerts] = useState<string>(() =>
+    (Array.isArray(faculty?.certifications) ? faculty.certifications : []).join(", ")
+  );
+  const [draftKacs, setDraftKacs] = useState<string[]>(() => {
+    const ids = faculty?.qualified_kac_ids;
+    if (Array.isArray(ids)) return ids.map((x: any) => String(x)).filter(Boolean);
+    const fromDetails = Array.isArray(faculty?.qualified_kacs)
+      ? faculty.qualified_kacs.map((k: any) => String(k?.kac_id || "")).filter(Boolean)
+      : [];
+    return fromDetails;
+  });
+
+  useEffect(() => {
+    setDraftName({
+      first_name: String(faculty?.first_name || "").trim(),
+      last_name: String(faculty?.last_name || "").trim(),
+    });
+    setDraftEmployment(String(faculty?.employment_type || "").trim());
+    setDraftCerts((Array.isArray(faculty?.certifications) ? faculty.certifications : []).join(", "));
+    const ids = faculty?.qualified_kac_ids;
+    if (Array.isArray(ids)) setDraftKacs(ids.map((x: any) => String(x)).filter(Boolean));
+  }, [faculty]);
+
+  useEffect(() => {
+    // Load KAC options once for editing.
+    (async () => {
+      try {
+        const res = await getFacultyOverviewOptions(userId);
+        if (res?.ok && Array.isArray(res?.kacs)) setKacOptions(res.kacs);
+      } catch {
+        // best-effort
+      }
+    })();
+  }, [userId]);
+
+  const save = async (kind: "name" | "employment" | "certs" | "kacs") => {
+    if (!userId) return;
+    try {
+      setSaving(true);
+      const payload: any = {};
+      if (kind === "name") {
+        payload.first_name = draftName.first_name.trim();
+        payload.last_name = draftName.last_name.trim();
+        if (!payload.first_name || !payload.last_name) {
+          pushToast("warning", "Please provide both first name and last name.");
+          return;
+        }
+      }
+      if (kind === "employment") {
+        payload.employment_type = draftEmployment;
+        if (!payload.employment_type) {
+          pushToast("warning", "Please select an employment type.");
+          return;
+        }
+      }
+      if (kind === "certs") {
+        const list = draftCerts
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean);
+        payload.certifications = list;
+      }
+      if (kind === "kacs") {
+        payload.qualified_kacs = (draftKacs || []).map((x) => String(x).trim()).filter(Boolean);
+      }
+
+      const res = await updateFacultyOverviewProfile(userId, payload);
+      if (!res?.ok) throw new Error(res?.detail || "Failed to save.");
+      await onReload();
+      setEditing(null);
+      pushToast("success", "Saved.");
+    } catch (e: any) {
+      pushToast("error", e?.message || "Failed to save.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const toggleKac = (id: string) => {
+    setDraftKacs((prev) => {
+      const s = new Set(prev);
+      if (s.has(id)) s.delete(id);
+      else s.add(id);
+      return Array.from(s);
+    });
+  };
+
+  const employmentLabel = (v: any) => {
+    const s = String(v ?? "").trim().toUpperCase();
+    if (s === "FT" || s === "FULLTIME" || s === "FULL-TIME") return "Full-time";
+    if (s === "PT" || s === "PARTTIME" || s === "PART-TIME") return "Part-time";
+    return s || "—";
+  };
+
+  const email = String(faculty?.email || faculty?.email_address || faculty?.emailAddress || "").trim();
+
+  const pills: { label: string; value: string }[] = [
+    { label: "Employment", value: employmentLabel(faculty?.employment_type) },
+    { label: "Teaching experience", value: faculty?.teaching_years != null ? `${faculty.teaching_years} yrs` : "—" },
+  ];
+
+  const guardrails = [
+    { label: "Minimum units (preference baseline)", value: faculty?.min_units ?? "—" },
+    { label: "Max course preps (per term)", value: faculty?.max_preps ?? "—" },
+  ];
+
+  const certifications: any[] = Array.isArray(faculty?.certifications) ? faculty.certifications : [];
+  const kacs: any[] = Array.isArray(faculty?.qualified_kacs) ? faculty.qualified_kacs : [];
+
+  const fullName = faculty?.full_name || faculty?.fullName || "—";
+  const department = faculty?.department || "—";
+  const initials = String(fullName)
+    .split(" ")
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((x) => x[0]?.toUpperCase())
+    .join("") || "—";
+
+  return (
+    <div className="mx-auto w-full max-w-screen-2xl px-4">
+      {/* Header */}
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-stretch lg:justify-between">
+        <div className="flex min-w-0 items-center gap-4 rounded-2xl border border-slate-200 bg-white px-4 py-4 shadow-sm">
+          <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl border border-slate-200 bg-slate-50 text-sm font-bold text-slate-800">
+            {initials}
+          </div>
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <div className="truncate text-lg font-semibold text-slate-900">{fullName}</div>
+              <button
+                type="button"
+                className="rounded-lg p-1 hover:bg-black/5"
+                title="Edit name"
+                onClick={() => setEditing((p) => (p === "name" ? null : "name"))}
+              >
+                <Pencil className="h-4 w-4 text-slate-600" />
+              </button>
+            </div>
+
+            {editing === "name" && (
+              <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                <input
+                  value={draftName.first_name}
+                  onChange={(e) => setDraftName((p) => ({ ...p, first_name: e.target.value }))}
+                  className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm"
+                  placeholder="First name"
+                />
+                <input
+                  value={draftName.last_name}
+                  onChange={(e) => setDraftName((p) => ({ ...p, last_name: e.target.value }))}
+                  className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm"
+                  placeholder="Last name"
+                />
+                <div className="flex items-center gap-2 sm:col-span-2">
+                  <button
+                    type="button"
+                    onClick={() => save("name")}
+                    disabled={saving}
+                    className={cls(
+                      "inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-sm font-semibold",
+                      saving
+                        ? "cursor-default border-slate-200 bg-slate-100 text-slate-500"
+                        : "cursor-pointer border-emerald-500 bg-emerald-400 text-emerald-950 hover:bg-emerald-300"
+                    )}
+                  >
+                    <Check className="h-4 w-4" />
+                    <span>Save</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setEditing(null)}
+                    className={lightRedBtn}
+                  >
+                    <XCircle className="h-4 w-4" />
+                    <span>Cancel</span>
+                  </button>
+                </div>
+              </div>
+            )}
+            <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-slate-600">
+              <span className="font-medium text-slate-700">{department}</span>
+              {email ? (
+                <>
+                  <span className="text-slate-300">•</span>
+                  <span className="truncate">{email}</span>
+                </>
+              ) : null}
+            </div>
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              {pills.map((p) => {
+                const isEmployment = p.label === "Employment";
+                return (
+                  <span
+                    key={p.label}
+                    className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs text-slate-700"
+                    title={p.label}
+                  >
+                    {isEmployment && (
+                      <button
+                        type="button"
+                        className="-ml-1 rounded-full p-1 hover:bg-black/5"
+                        title="Edit employment"
+                        onClick={() => setEditing((cur) => (cur === "employment" ? null : "employment"))}
+                      >
+                        <Pencil className="h-3.5 w-3.5 text-slate-700" />
+                      </button>
+                    )}
+                    <span className="text-slate-500">{p.label}:</span>
+                    <span className="font-medium text-slate-800">{p.value}</span>
+                  </span>
+                );
+              })}
+            </div>
+
+            {editing === "employment" && (
+              <div className="mt-3 flex flex-wrap items-center gap-2">
+                <div className="min-w-[260px]">
+                  <SelectBox
+                    value={(() => {
+                      const s = String(draftEmployment || "").trim();
+                      if (!s) return "Select…";
+                      if (s === "FT" || s === "Full-time") return "Full-time";
+                      if (s === "PT" || s === "Part-time") return "Part-time";
+                      return s;
+                    })()}
+                    onChange={(v) => {
+                      if (v === "Full-time") setDraftEmployment("FT");
+                      else if (v === "Part-time") setDraftEmployment("PT");
+                      else if (v === "Select…") setDraftEmployment("");
+                      else setDraftEmployment(v);
+                    }}
+                    options={["Select…", "Full-time", "Part-time"]}
+                  />
+                </div>
+                <button
+                  type="button"
+                  onClick={() => save("employment")}
+                  disabled={saving}
+                  className={cls(
+                    "inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-sm font-semibold",
+                    saving
+                      ? "cursor-default border-slate-200 bg-slate-100 text-slate-500"
+                      : "cursor-pointer border-emerald-500 bg-emerald-400 text-emerald-950 hover:bg-emerald-300"
+                  )}
+                >
+                  <Check className="h-4 w-4" />
+                  <span>Save</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setEditing(null)}
+                  className={lightRedBtn}
+                >
+                  <XCircle className="h-4 w-4" />
+                  <span>Cancel</span>
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:w-[520px]">
+          {guardrails.map((g) => (
+            <div
+              key={g.label}
+              className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm"
+            >
+              <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">{g.label}</div>
+              <div className="mt-2 text-2xl font-semibold tracking-tight text-slate-900">{g.value}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Qualifications */}
+      <div className="mt-5 grid grid-cols-1 gap-4 lg:grid-cols-3">
+        {/* Certifications */}
+        <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <div className="text-sm font-semibold text-slate-900">Certifications</div>
+              <div className="mt-1 text-xs text-slate-500">Helps match you to specialized courses.</div>
+            </div>
+            <button
+              type="button"
+              className="rounded-lg p-1 hover:bg-black/5"
+              title="Edit certifications"
+              onClick={() => setEditing((p) => (p === "certs" ? null : "certs"))}
+            >
+              <Pencil className="h-4 w-4 text-slate-600" />
+            </button>
+          </div>
+
+          {editing === "certs" && (
+            <div className="mt-3">
+              <div className="text-xs font-medium text-slate-700">Comma-separated</div>
+              <input
+                value={draftCerts}
+                onChange={(e) => setDraftCerts(e.target.value)}
+                className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm"
+                placeholder="e.g., AWS CCP, Scrum Master"
+              />
+              <div className="mt-2 flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => save("certs")}
+                  disabled={saving}
+                  className={cls(
+                    "inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-sm font-semibold",
+                    saving
+                      ? "cursor-default border-slate-200 bg-slate-100 text-slate-500"
+                      : "cursor-pointer border-emerald-500 bg-emerald-400 text-emerald-950 hover:bg-emerald-300"
+                  )}
+                >
+                  <Check className="h-4 w-4" />
+                  <span>Save</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setEditing(null)}
+                  className={lightRedBtn}
+                >
+                  <XCircle className="h-4 w-4" />
+                  <span>Cancel</span>
+                </button>
+              </div>
+            </div>
+          )}
+
+          {certifications.length === 0 ? (
+            <div className="mt-3 rounded-xl border border-dashed border-slate-200 bg-slate-50 px-3 py-3 text-sm text-slate-600">
+              No certifications on file.
+            </div>
+          ) : (
+            <div className="mt-3 flex flex-wrap gap-2">
+              {certifications.map((c, idx) => (
+                <span
+                  key={`${idx}-${String(c)}`}
+                  className="inline-flex items-center rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-medium text-slate-800"
+                >
+                  {typeof c === "string" ? c : c?.name || c?.title || JSON.stringify(c)}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Qualified KACs */}
+        <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm lg:col-span-2">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <div className="text-sm font-semibold text-slate-900">Qualified KACs</div>
+              <div className="mt-1 text-xs text-slate-500">Your coverage map (areas and courses you can be assigned to).</div>
+            </div>
+            <button
+              type="button"
+              className="rounded-lg p-1 hover:bg-black/5"
+              title="Edit qualified KACs"
+              onClick={() => setEditing((p) => (p === "kacs" ? null : "kacs"))}
+            >
+              <Pencil className="h-4 w-4 text-slate-600" />
+            </button>
+          </div>
+
+          {editing === "kacs" && (
+            <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 p-3">
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                <div className="text-xs font-semibold uppercase tracking-wide text-slate-600">Select KACs</div>
+                <div className="relative w-full sm:w-[260px]">
+                  <input
+                    value={kacQuery}
+                    onChange={(e) => setKacQuery(e.target.value)}
+                    className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 pr-9 text-sm"
+                    placeholder="Search KAC…"
+                  />
+                  {kacQuery.trim() ? (
+                    <button
+                      type="button"
+                      className="absolute right-2 top-1/2 -translate-y-1/2 rounded-md p-1 hover:bg-black/5"
+                      aria-label="Clear search"
+                      title="Clear"
+                      onClick={() => setKacQuery("")}
+                    >
+                      <X className="h-4 w-4 text-slate-600" />
+                    </button>
+                  ) : null}
+                </div>
+              </div>
+
+              <div className="mt-3 max-h-[260px] overflow-auto rounded-lg border border-slate-200 bg-white">
+                {kacOptions
+                  .filter((k) => {
+                    const q = kacQuery.trim().toLowerCase();
+                    if (!q) return true;
+                    const s = `${k?.kac_name || ""} ${k?.kac_code || ""} ${k?.program_area || ""}`.toLowerCase();
+                    return s.includes(q);
+                  })
+                  .map((k) => {
+                    const id = String(k?.kac_id || "");
+                    const checked = draftKacs.includes(id);
+                    return (
+                      <label
+                        key={id}
+                        className="flex cursor-pointer items-start gap-3 border-b border-slate-100 px-3 py-2 hover:bg-slate-50"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() => toggleKac(id)}
+                          className="mt-1"
+                        />
+                        <div className="min-w-0">
+                          <div className="text-sm font-semibold text-slate-900">
+                            {k?.kac_name || "—"}
+                            {k?.kac_code ? (
+                              <span className="ml-2 rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-[11px] text-slate-700">
+                                {k.kac_code}
+                              </span>
+                            ) : null}
+                          </div>
+                          <div className="text-xs text-slate-500">{k?.program_area || ""}</div>
+                        </div>
+                      </label>
+                    );
+                  })}
+              </div>
+
+              <div className="mt-3 flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => save("kacs")}
+                  disabled={saving}
+                  className={cls(
+                    "inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-sm font-semibold",
+                    saving
+                      ? "cursor-default border-slate-200 bg-slate-100 text-slate-500"
+                      : "cursor-pointer border-emerald-500 bg-emerald-400 text-emerald-950 hover:bg-emerald-300"
+                  )}
+                >
+                  <Check className="h-4 w-4" />
+                  <span>Save</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setEditing(null)}
+                  className={lightRedBtn}
+                >
+                  <XCircle className="h-4 w-4" />
+                  <span>Cancel</span>
+                </button>
+                <div className="ml-auto text-xs text-slate-600">
+                  Selected: <span className="font-semibold text-slate-900">{draftKacs.length}</span>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {kacs.length === 0 ? (
+            <div className="mt-3 rounded-xl border border-dashed border-slate-200 bg-slate-50 px-3 py-3 text-sm text-slate-600">
+              No KAC qualifications on file.
+            </div>
+          ) : (
+            <div className="mt-3 space-y-2">
+              {kacs.map((k) => (
+                <details key={k.kac_id || k.kac_code || k.kac_name} className="group rounded-xl border border-slate-200 bg-white">
+                  <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-2">
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-sm font-semibold text-slate-900">{k.kac_name || "—"}</span>
+                        <span className="rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-[11px] text-slate-700">
+                          {k.kac_code || k.kac_id || "KAC"}
+                        </span>
+                      </div>
+                      <div className="mt-0.5 text-[12px] text-slate-500">{k.program_area || "—"}</div>
+                    </div>
+                    <span className="text-xs text-slate-500 transition group-open:rotate-180">▾</span>
+                  </summary>
+
+                  <div className="border-t border-slate-200 px-3 py-3">
+                    <div className="text-xs font-medium text-slate-700">Courses under this KAC</div>
+                    {(k.courses || []).length === 0 ? (
+                      <div className="mt-2 text-sm text-slate-600">No course list.</div>
+                    ) : (
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        {(k.courses || []).map((c: any) => (
+                          <span
+                            key={c.course_id || `${c.course_code}-${c.course_title}`}
+                            className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs text-slate-900"
+                            title={c.course_title || ""}
+                          >
+                            <span className="font-semibold">{c.course_code || "—"}</span>
+                            <span className="text-slate-400">•</span>
+                            <span className="max-w-[280px] truncate text-slate-700">{c.course_title || "—"}</span>
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </details>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Records */}
+      <div className="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-2">
+        <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+          <div className="flex items-baseline justify-between gap-3">
+            <div>
+              <div className="text-sm font-semibold text-slate-900">Teaching history</div>
+              <div className="mt-1 text-xs text-slate-500">What you taught and how often (per term + all-time).</div>
+            </div>
+          </div>
+          <div className="mt-4">
+            <HistoryMain embedded />
+          </div>
+        </div>
+
+        <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+          <div>
+            <div className="text-sm font-semibold text-slate-900">Deloadings</div>
+            <div className="mt-1 text-xs text-slate-500">Your recorded deloading arrangements.</div>
+          </div>
+          <div className="mt-4">
+            <DeloadingsContent embedded />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* =========================================
    1) Stat Cards (MODIFIED)
    ========================================= */
@@ -662,23 +1236,40 @@ function groupPlacedByCell(placed: Placed[]): CellGroup[] {
 
 const cls = (...s: (string | false | undefined)[]) => s.filter(Boolean).join(" ");
 
-const ClassBlock = ({ onClick, it }: { onClick?: () => void; it: TLItemForCalendar }) => (
-  <button
-    onClick={onClick}
-    className={cls(
-      "flex w-full flex-col items-center justify-center rounded-xl border shadow-sm",
-      it.is_special_class
-        ? "border-purple-200 bg-purple-100/80 hover:bg-purple-100"
-        : "border-emerald-200 bg-emerald-50/90 hover:bg-emerald-50",
-      it.is_special_class && "cursor-default"
-    )}
-    title={`${it.code} • ${it.sec} | ${it.room} • ${it.mode}`}
-  >
-    <div className="text-[13px] font-extrabold tracking-wide">{it.code}</div>
-    <div className="text-[12px]">{it.sec} | {it.room}</div>
-    {/* Removed mode display here as requested */}
-  </button>
-);
+const getCampusColorForSection = (sec?: string): string | undefined => {
+  const s = String(sec || "").trim().toUpperCase();
+  if (!s) return undefined;
+  // Laguna sections start with XX or XC
+  if (s.startsWith("XX") || s.startsWith("XC")) return "#859EAC";
+  // Manila sections start with S or G
+  if (s.startsWith("S") || s.startsWith("G")) return "#97AC9F";
+  return undefined;
+};
+
+const ClassBlock = ({ onClick, it }: { onClick?: () => void; it: TLItemForCalendar }) => {
+  const campusColor = !it.is_special_class ? getCampusColorForSection(it.sec) : undefined;
+
+  return (
+    <button
+      onClick={onClick}
+      className={cls(
+        "flex w-full flex-col items-center justify-center rounded-xl border shadow-sm",
+        it.is_special_class
+          ? "border-purple-200 bg-purple-100/80 hover:bg-purple-100"
+          : campusColor
+          ? "border-neutral-200 text-white hover:brightness-[1.02]"
+          : "border-emerald-200 bg-emerald-50/90 hover:bg-emerald-50",
+        it.is_special_class && "cursor-default"
+      )}
+      style={campusColor ? { backgroundColor: campusColor } : undefined}
+      title={`${it.code} • ${it.sec} | ${it.room} • ${it.mode}`}
+    >
+      <div className="text-[13px] font-extrabold tracking-wide">{it.code}</div>
+      <div className="text-[12px]">{it.sec} | {it.room}</div>
+      {/* Removed mode display here as requested */}
+    </button>
+  );
+};
 
 type TeachingLoadEnhancedProps = {
   teachingLoad: TLItem[];
@@ -768,12 +1359,29 @@ const scheduleFinalLabel = (() => {
 
   return (
     <section className="mx-auto w-full max-w-screen-2xl px-4">
-      <div className="rounded-xl border border-neutral-200 bg-white p-5">
-        <div className="mb-4 flex items-center justify-between">
+	      <div className="rounded-xl border border-neutral-200 bg-white p-5">
+	        <div className="relative mb-4 flex items-center justify-between">
           <div>
             <h3 className="text-lg font-bold text-neutral-900">Teaching Load Summary</h3>
             <p className="text-sm text-neutral-500">{term?.term_label || ""}</p>
           </div>
+
+	          {/* Legend (centered above the calendar/list controls) */}
+	          <div className="absolute left-1/2 hidden -translate-x-1/2 items-center gap-3 rounded-full border border-neutral-200 bg-white px-3 py-1 text-xs text-neutral-700 shadow-sm md:flex">
+	            <span className="font-semibold text-neutral-800">Legend:</span>
+	            <span className="inline-flex items-center gap-2">
+	              <span className="h-3 w-3 rounded-sm" style={{ backgroundColor: "#97AC9F" }} />
+	              <span>Manila</span>
+	            </span>
+	            <span className="inline-flex items-center gap-2">
+	              <span className="h-3 w-3 rounded-sm" style={{ backgroundColor: "#859EAC" }} />
+	              <span>Laguna</span>
+	            </span>
+	            <span className="inline-flex items-center gap-2">
+	              <span className="h-3 w-3 rounded-sm border border-purple-200 bg-purple-100" />
+	              <span>Special Class</span>
+	            </span>
+	          </div>
           <div className="flex gap-2">
           {["Calendar", "List"].map((v) => (
             <button
@@ -846,6 +1454,25 @@ const scheduleFinalLabel = (() => {
           </button>
         </div>
       </div>
+
+	      {/* Legend (mobile): centered above the calendar/list table */}
+	      <div className="mb-3 flex justify-center md:hidden">
+	        <div className="flex flex-wrap items-center justify-center gap-3 rounded-xl border border-neutral-200 bg-white px-3 py-2 text-xs text-neutral-700 shadow-sm">
+	          <span className="font-semibold text-neutral-800">Legend:</span>
+	          <span className="inline-flex items-center gap-2">
+	            <span className="h-3 w-3 rounded-sm" style={{ backgroundColor: "#97AC9F" }} />
+	            <span>Manila</span>
+	          </span>
+	          <span className="inline-flex items-center gap-2">
+	            <span className="h-3 w-3 rounded-sm" style={{ backgroundColor: "#859EAC" }} />
+	            <span>Laguna</span>
+	          </span>
+	          <span className="inline-flex items-center gap-2">
+	            <span className="h-3 w-3 rounded-sm border border-purple-200 bg-purple-100" />
+	            <span>Special Class</span>
+	          </span>
+	        </div>
+	      </div>
 
       {scheduleFinal && (
         <div className="mt-3 rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900">
@@ -1609,6 +2236,13 @@ function ChangeRequestModal({
                 term_id: (term as any)?.term_id || (term as any)?._id || (term as any)?.id,
                 section_id: sectionId,
                 message: msg,
+                // Structured schedule request so OM approval can auto-apply
+                requested: {
+                  day1: requestedDay1,
+                  time1: requestedTime1,
+                  day2: requestedDay2,
+                  time2: requestedTime2,
+                },
               });
 
               // Optional: show a useful message if Gmail isn't connected

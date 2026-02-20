@@ -542,11 +542,15 @@ function FacultyAccordion() {
           options={campusOptions as unknown as string[]}
         />
 
+        <div className="text-sm font-bold text-gray-900 whitespace-nowrap">
+          Most Taught Course:
+        </div>
+
         <div className="relative flex-1 min-w-[260px]">
           <input
             value={primaryCourseFilter}
             onChange={(e) => setPrimaryCourseFilter(e.target.value)}
-            placeholder="Primary course (most taught)… e.g. CCPROG 2"
+            placeholder="Search by course code…"
             className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30"
           />
           {!!primaryCourseFilter && (

@@ -18,6 +18,7 @@ import {
   respondOmLoadAssignmentRfc,
   getOmSubmittedCourses,
   saveOmNewLine,
+  applyOmPendingOverrides,
 } from "../../api";
 
 import {
@@ -46,6 +47,18 @@ async function runOmSubmitDeadlineReminders(): Promise<any> {
   } catch {
     return { ok: true };
   }
+}
+
+
+// Fetch the planning term (term after the current anchor) without hardcoding.
+// current_term_id = terms.is_current === true
+// planning_term_id = term immediately after current_term_id
+async function getOmPlanningTermIds(): Promise<{ current_term_id?: string; planning_term_id?: string }> {
+  const resp = await fetch("/api/om/load-assignment/planning-term");
+  if (!resp.ok) {
+    throw new Error(`Failed to fetch planning term ids (${resp.status})`);
+  }
+  return await resp.json();
 }
 
 import { cls } from "../../utilities/cls";
@@ -596,6 +609,13 @@ type Row = {
   campus_id?: string;
   /** When OM has already finalized this course for the faculty */
   finalized?: boolean;
+
+  /** True if this row's campus deadline has passed (edits saved as draft only). */
+  is_past_deadline?: boolean;
+  /** True if OM has a pending post-deadline draft for this row. */
+  has_pending_override?: boolean;
+  /** Timestamp of last draft update (best-effort). */
+  pending_override_updated_at?: any;
 };
 
 type ChangeItem = { key: string; label: string };
@@ -1573,6 +1593,9 @@ const StatusChip = ({ r }: { r: Row }) => {
       tabIndex={0}
     >
       {displayStatus === "Conflict" ? "Conflict" : displayStatus}
+      {(r as any).has_pending_override ? (
+        <span className="ml-2 inline-flex items-center rounded-full bg-amber-200/60 px-2 py-0.5 text-[10px] font-bold text-amber-900">Draft</span>
+      ) : null}
       {displayStatus === "Conflict" && r.conflictNote && show && (
         <div
           className={cls(
@@ -2806,6 +2829,8 @@ useEffect(() => {
   // Term label from backend (no hardcoding)
   const [term, setTerm] = useState<string>("");
   const [termId, setTermId] = useState<string>("");
+  const [planningTermId, setPlanningTermId] = useState<string>("");
+
   /** Track the default (active) term id so we can detect archive viewing */
   const [activeTermId, setActiveTermId] = useState<string>("");
 
@@ -2821,6 +2846,31 @@ useEffect(() => {
   >([]);
   const [archiveTermId, setArchiveTermId] = useState<string>("");
   const isArchiveView = !!activeTermId && !!termId && termId !== activeTermId;
+
+
+  // Determine the planning term id (term after the current anchor) for widgets that must
+  // explicitly target the planning term (e.g., Faculty Deloading table).
+  useEffect(() => {
+    if (!userId) return;
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const res: any = await getOmPlanningTermIds();
+        if (cancelled) return;
+        const pid = typeof res?.planning_term_id === "string" ? res.planning_term_id : "";
+        setPlanningTermId(pid);
+      } catch (e) {
+        // Best-effort only: if this fails, we fall back to termId.
+        console.warn("Failed to fetch planning term ids", e);
+        if (!cancelled) setPlanningTermId("");
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [userId]);
 
   useEffect(() => {
     if (!archiveOpen || !userId) return;
@@ -2908,6 +2958,68 @@ const [omSubmitWindows, setOmSubmitWindows] = useState<
   { campus_id: string; campus_name: string; openISO: string; deadlineISO: string; deadline_passed?: boolean; has_apo_submission?: boolean }[]
 >([]);
 const [omDeadlinePassed, setOmDeadlinePassed] = useState<boolean>(false);
+
+  const deadlinePassedByCampus = useMemo(() => {
+    const m: Record<string, boolean> = {};
+    for (const w of omSubmitWindows || []) {
+      const cid = String((w as any)?.campus_id || "").trim();
+      if (!cid) continue;
+      m[cid] = Boolean((w as any)?.deadline_passed);
+    }
+    return m;
+  }, [omSubmitWindows]);
+
+  const pendingDraftCountByCampus = useMemo(() => {
+    const m: Record<string, number> = {};
+    for (const r of rows || []) {
+      const cid = String((r as any)?.campus_id || "").trim();
+      if (!cid) continue;
+      if ((r as any)?.has_pending_override) m[cid] = (m[cid] || 0) + 1;
+    }
+    return m;
+  }, [rows]);
+
+  const isCampusDeadlinePassed = useCallback(
+    (campusId: string) => {
+      const cid = String(campusId || "").trim();
+      if (!cid) return false;
+      return Boolean(deadlinePassedByCampus[cid]);
+    },
+    [deadlinePassedByCampus]
+  );
+
+
+// Infer OM campus_id for UI behaviors (e.g., disabling Add Section after deadline).
+// Priority: session.campus_id → session.campusId → session.campus.* → most common campus_id in loaded rows.
+const inferOmCampusId = useCallback((): string => {
+  const norm = (v: any) => String(v ?? "").trim();
+  const s: any = session as any;
+  const candidate =
+    norm(s?.campus_id) ||
+    norm(s?.campusId) ||
+    norm(s?.campus?.campus_id) ||
+    norm(s?.campus?.id) ||
+    "";
+  if (candidate) return candidate;
+
+  const counts: Record<string, number> = {};
+  for (const rr of rows || []) {
+    const cid = norm((rr as any).campus_id);
+    if (!cid) continue;
+    counts[cid] = (counts[cid] || 0) + 1;
+  }
+  let best = "";
+  let bestN = 0;
+  for (const [cid, n] of Object.entries(counts)) {
+    if (n > bestN) {
+      best = cid;
+      bestN = n;
+    }
+  }
+  return best;
+}, [session, rows]);
+
+
 
   const [newLineSectionDraft, setNewLineSectionDraft] =
   useState<Record<string, string>>({});
@@ -3783,6 +3895,40 @@ const [omDeadlinePassed, setOmDeadlinePassed] = useState<boolean>(false);
     resetHistory();
   };
 
+
+const handleApplyPendingDrafts = useCallback(
+  async (campusId: string) => {
+    if (!userId) return;
+    const cid = String(campusId || "").trim();
+    if (!cid) {
+      showToast("Cannot apply drafts: missing campus.", "error");
+      return;
+    }
+    if (isCampusDeadlinePassed(cid)) {
+      showToast(
+        "Cannot apply drafts: the deadline has passed for this campus. Ask APO to reopen the deadline window.",
+        "error"
+      );
+      return;
+    }
+    try {
+      const resp = await applyOmPendingOverrides(userId, { campus_id: cid } as any);
+      const applied = (resp as any)?.applied_count ?? (resp as any)?.count ?? null;
+      showToast(
+        applied === null
+          ? "Applied pending drafts to APO."
+          : `Applied ${applied} pending draft(s) to APO.`,
+        "success"
+      );
+      await loadFromServer();
+    } catch (e) {
+      console.error(e);
+      showToast(`Apply to APO failed: ${String(e)}`, "error");
+    }
+  },
+  [userId, isCampusDeadlinePassed, applyOmPendingOverrides, loadFromServer]
+);
+
   const getPrimaryScheduleId = (r: Row): string => {
     const ids = (r as any)?.schedule_ids;
     if (Array.isArray(ids)) {
@@ -4127,35 +4273,12 @@ async function handleSaveNewLineRow(r: Row) {
     return "";
   };
 
-  const inferOmCampusId = (): string => {
-    const s: any = session as any;
-    const candidate =
-      norm(s?.campus_id) ||
-      norm(s?.campusId) ||
-      norm(s?.campus?.campus_id) ||
-      norm(s?.campus?.id) ||
-      "";
-    if (candidate) return candidate;
-
-    // Fallback: infer from currently loaded rows (most common campus_id)
-    const counts: Record<string, number> = {};
-    for (const rr of rows) {
-      const cid = norm((rr as any).campus_id);
-      if (!cid) continue;
-      counts[cid] = (counts[cid] || 0) + 1;
-    }
-    let best = "";
-    let bestN = 0;
-    for (const [cid, n] of Object.entries(counts)) {
-      if (n > bestN) {
-        best = cid;
-        bestN = n;
-      }
-    }
-    return best;
-  };
-
   const campusId = inferOmCampusId();
+
+  if (campusId && isCampusDeadlinePassed(campusId)) {
+    showToast('Cannot add section: the APO-set deadline has passed for this campus.', 'error');
+    return;
+  }
   const inferOmApo = (cid: string): "APO Manila" | "APO Laguna" | "" => {
     const up = norm(cid).toUpperCase();
     if (!up) return "";
@@ -4389,7 +4512,8 @@ async function handleSaveNewLineRow(r: Row) {
   }, [deloadAllRows]);
 
   useEffect(() => {
-    if (!termId) return;
+    const deloadTermId = planningTermId || termId;
+    if (!deloadTermId) return;
 
     let cancelled = false;
     (async () => {
@@ -4397,7 +4521,7 @@ async function handleSaveNewLineRow(r: Row) {
       setDeloadAllError("");
       try {
         // 1) Get the list of faculty who have deloadings for the term.
-        const r = await getOmFacultyWithDeloadings(termId);
+        const r = await getOmFacultyWithDeloadings(deloadTermId);
         const fac = Array.isArray(r?.faculty) ? r.faculty : [];
         if (cancelled) return;
         setFacultyWithDeloadings(fac);
@@ -4408,7 +4532,7 @@ async function handleSaveNewLineRow(r: Row) {
             try {
               const res = await getOmFacultyDeloadings({
                 faculty_id: f.faculty_id,
-                term_id: termId || undefined,
+                term_id: deloadTermId || undefined,
               });
               const rows = Array.isArray(res?.rows) ? res.rows : [];
               return rows.map((row) => ({
@@ -4448,7 +4572,7 @@ async function handleSaveNewLineRow(r: Row) {
     return () => {
       cancelled = true;
     };
-  }, [termId]);
+  }, [planningTermId, termId]);
 
   type FacultySummaryRow = {
     facultyId: string;
@@ -5243,6 +5367,16 @@ const courseCodeToInfo = useMemo(() => {
 	                            </div>
 	
 	                            <div className="flex items-center gap-2">
+	                              {!passed && (pendingDraftCountByCampus[String(w.campus_id || '').trim()] || 0) > 0 ? (
+	                                <button
+	                                  type="button"
+	                                  className="inline-flex items-center rounded-md bg-slate-900 px-3 py-1 text-xs font-semibold text-white hover:brightness-110"
+	                                  title="Apply OM pending drafts so APO can see them"
+	                                  onClick={() => void handleApplyPendingDrafts(String(w.campus_id || ''))}
+	                                >
+	                                  Apply to APO
+	                                </button>
+	                              ) : null}
 	                              {passed ? (
 	                                <span className="inline-flex items-center rounded-full bg-red-600 px-2.5 py-1 text-xs font-semibold text-white">Locked</span>
 	                              ) : daysLeft !== null ? (
@@ -5632,11 +5766,11 @@ const courseCodeToInfo = useMemo(() => {
                         {/* 1) Select */}
                         <col className="w-[46px]" />
                         {/* 2) Course Code & Title */}
-                        <col className="w-[260px]" />
+                        <col className="w-[230px]" />
                         {/* 3) Units */}
                         <col className="w-[70px]" />
                         {/* 4) Section (WIDENED) */}
-                        <col className="w-[260px]" />
+                        <col className="w-[100px]" />
                         {/* 5) Faculty */}
                         <col className="w-[280px]" />
                         {/* 6) Day 1 */}
@@ -5770,6 +5904,8 @@ const courseCodeToInfo = useMemo(() => {
                             .synced_from_faculty_service;
                           const isLocked = isArchiveView || fromFacultyService;
                           const isForwardedToFaculty = !!r.forwarded_to_faculty;
+                          const isPastDeadlineRow = Boolean((r as any).is_past_deadline);
+                          const hasDraft = Boolean((r as any).has_pending_override);
                           // Show the red dot only when there is a pending RFC AND the row is still actionable.
                           // Once the schedule is approved/finalized, the message icon is disabled; the dot should disappear.
                           const unread = !!(r as any).pending_rfc;
@@ -5782,6 +5918,10 @@ const courseCodeToInfo = useMemo(() => {
                                   ? fromFacultyService
                                     ? "bg-orange-50 hover:bg-orange-50"
                                     : "bg-gray-100 text-gray-500 hover:bg-gray-100"
+                                  : isPastDeadlineRow
+                                  ? hasDraft
+                                    ? "bg-slate-50 hover:bg-slate-100/40 ring-1 ring-amber-200"
+                                    : "bg-slate-50 hover:bg-slate-100/40"
                                   : isForwardedToFaculty
                                   ? "bg-sky-50 hover:bg-sky-100/40"
                                   : "hover:bg-gray-50"
@@ -6266,8 +6406,27 @@ const courseCodeToInfo = useMemo(() => {
                 <div className="border-t px-4 py-3">
                   <div className="flex items-center justify-between gap-3">
                     <button
-                      onClick={addRow}
-                      className="inline-flex h-10 min-w-[140px] items-center justify-center gap-2 rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium hover:bg-gray-50"
+                      onClick={() => {
+                        const cid = inferOmCampusId();
+                        if (cid && isCampusDeadlinePassed(cid)) {
+                          showToast('Cannot add section: the APO-set deadline has passed for this campus.', 'error');
+                          return;
+                        }
+                        addRow();
+                      }}
+                      disabled={(() => {
+                        const cid = inferOmCampusId();
+                        return !!cid && isCampusDeadlinePassed(cid);
+                      })()}
+                      className={cls(
+                        "inline-flex h-10 min-w-[140px] items-center justify-center gap-2 rounded-md border px-4 py-2 text-sm font-medium",
+                        (() => {
+                          const cid = inferOmCampusId();
+                          return cid && isCampusDeadlinePassed(cid)
+                            ? 'border-gray-200 bg-gray-100 text-gray-400 cursor-not-allowed'
+                            : 'border-gray-300 bg-white hover:bg-gray-50';
+                        })()
+                      )}
                       title="Add new line"
                     >
                       <Plus className="h-4 w-4" />

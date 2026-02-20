@@ -455,8 +455,13 @@ export default function CHAIR_FacultyManagement() {
       email: row.email || "",
       department: row.department || "",
       employment_type,
-      certifications: "",
-      teaching_years: "",
+      certifications: Array.isArray((row as any).certifications)
+        ? ((row as any).certifications as string[]).join(", ")
+        : "",
+      teaching_years:
+        (row as any).teaching_years != null && (row as any).teaching_years !== ""
+          ? String((row as any).teaching_years)
+          : "",
     });
     setEditError("");
 

@@ -1389,16 +1389,243 @@ async def overview_handler(
             {"user_id": userId}, {"_id": 0}
         ).to_list(None)
 
+        # Expand faculty profile details (from faculty_profiles) for the Profile tab
+        employment_type = faculty.get("employment_type")
+        min_units = faculty.get("min_units")
+        max_preps = faculty.get("max_preps")
+        teaching_years = faculty.get("teaching_years")
+        certifications = faculty.get("certifications") or []
+
+        # Qualified KACs (include course list with code + title)
+        kac_ids = faculty.get("qualified_kacs") or []
+        if not isinstance(kac_ids, list):
+            kac_ids = []
+        kac_docs: List[Dict[str, Any]] = []
+        if kac_ids:
+            kac_docs = await db.kacs.find(
+                {"kac_id": {"$in": kac_ids}},
+                {"_id": 0, "kac_id": 1, "kac_name": 1, "kac_code": 1, "program_area": 1, "course_list": 1},
+            ).to_list(None)
+
+        kac_by_id = {str(k.get("kac_id")): k for k in (kac_docs or []) if k}
+        course_ids: List[str] = []
+        for kd in (kac_docs or []):
+            for cid in (kd.get("course_list") or []):
+                if isinstance(cid, str) and cid.strip():
+                    course_ids.append(cid.strip())
+        course_ids = sorted(set(course_ids))
+
+        courses_map: Dict[str, Dict[str, Any]] = {}
+        if course_ids:
+            course_docs = await db[COL_COURSES].find(
+                {"course_id": {"$in": course_ids}},
+                {"_id": 0, "course_id": 1, "course_code": 1, "course_title": 1},
+            ).to_list(None)
+            for cd in course_docs:
+                cid = str(cd.get("course_id") or "").strip()
+                if not cid:
+                    continue
+                courses_map[cid] = {
+                    "course_id": cid,
+                    "course_code": _as_code_str(cd.get("course_code")),
+                    "course_title": cd.get("course_title") or "",
+                }
+
+        qualified_kacs_details: List[Dict[str, Any]] = []
+        for kac_id in kac_ids:
+            kid = str(kac_id or "").strip()
+            if not kid:
+                continue
+            kd = kac_by_id.get(kid)
+            if not kd:
+                continue
+            clist = []
+            for cid in (kd.get("course_list") or []):
+                scid = str(cid or "").strip()
+                if not scid:
+                    continue
+                clist.append(courses_map.get(scid, {"course_id": scid, "course_code": "", "course_title": ""}))
+
+            qualified_kacs_details.append({
+                "kac_id": kid,
+                "kac_name": kd.get("kac_name") or "",
+                "kac_code": kd.get("kac_code") or "",
+                "program_area": kd.get("program_area") or "",
+                "courses": clist,
+            })
+
         return {
             "ok": True,
             "faculty": {
                 "full_name": full_name,
-                "fullName": full_name,   
+                "fullName": full_name,
                 "role": "Faculty",
                 "department": (dept or {}).get("dept_name", "—"),
+
+                # faculty_profiles fields
+                "employment_type": employment_type,
+                "min_units": min_units,
+                "max_preps": max_preps,
+                "teaching_years": teaching_years,
+                "certifications": certifications,
+                "qualified_kacs": qualified_kacs_details,
             },
             "notifications": notifications,
         }
+
+
+    # ---------- profile_update (My Profile edits) ----------
+    if action == "profile_update":
+        data = payload or {}
+
+        # Accept updates for: name, employment, certifications, qualified kacs.
+        first_name = (data.get("first_name") or "").strip()
+        last_name = (data.get("last_name") or "").strip()
+        employment_type = (data.get("employment_type") or "").strip()
+        certifications = data.get("certifications")
+        qualified_kacs = data.get("qualified_kacs")
+
+        updates_faculty: Dict[str, Any] = {}
+        updates_user: Dict[str, Any] = {}
+
+        if first_name or last_name:
+            if not first_name or not last_name:
+                raise HTTPException(status_code=400, detail="Both first_name and last_name are required.")
+            # Keep both collections in sync (some screens read from users, others from faculty_profiles)
+            updates_user["first_name"] = first_name
+            updates_user["last_name"] = last_name
+            updates_faculty["first_name"] = first_name
+            updates_faculty["last_name"] = last_name
+            updates_faculty["full_name"] = f"{first_name} {last_name}".strip()
+
+        if employment_type:
+            et = employment_type.upper().replace(" ", "")
+            if et in ("FULLTIME", "FULL-TIME"):
+                et = "FT"
+            if et in ("PARTTIME", "PART-TIME"):
+                et = "PT"
+            if et not in ("FT", "PT"):
+                raise HTTPException(status_code=400, detail="Invalid employment_type.")
+            updates_faculty["employment_type"] = et
+
+        if certifications is not None:
+            if isinstance(certifications, str):
+                # allow comma-separated string (frontend usually sends list)
+                certifications = [c.strip() for c in certifications.split(",") if c.strip()]
+            if not isinstance(certifications, list):
+                raise HTTPException(status_code=400, detail="certifications must be a list of strings")
+            clean: List[str] = []
+            for c in certifications:
+                if isinstance(c, str) and c.strip():
+                    clean.append(c.strip())
+            updates_faculty["certifications"] = clean
+
+        if qualified_kacs is not None:
+            if not isinstance(qualified_kacs, list):
+                raise HTTPException(status_code=400, detail="qualified_kacs must be a list of kac_id strings")
+            clean_k: List[str] = []
+            for kid in qualified_kacs:
+                if isinstance(kid, str) and kid.strip():
+                    clean_k.append(kid.strip())
+            updates_faculty["qualified_kacs"] = sorted(set(clean_k))
+
+        if not updates_faculty and not updates_user:
+            return {"ok": True, "updated": {}}
+
+        now = datetime.now(timezone.utc)
+        if updates_faculty:
+            updates_faculty["updated_at"] = now
+            await db[COL_FACULTY].update_one(
+                {"user_id": userId},
+                {"$set": updates_faculty},
+            )
+
+        if updates_user:
+            await db["users"].update_one(
+                {"user_id": userId},
+                {"$set": updates_user},
+            )
+
+        # Notify Chair(s) of Dept. of Software Technology
+        try:
+            dept = await db[COL_DEPTS].find_one(
+                {"$or": [
+                    {"dept_name": {"$regex": r"Software\\s+Technology", "$options": "i"}},
+                    {"dept_code": {"$regex": r"^ST$", "$options": "i"}},
+                ]},
+                {"_id": 0, "department_id": 1, "dept_name": 1},
+            )
+            st_dept_id = (dept or {}).get("department_id")
+
+            chair_role_ids: List[str] = []
+            # Prefer roles collection if present
+            roles_coll = None
+            try:
+                roles_coll = db["roles"]
+            except Exception:
+                roles_coll = None
+            if roles_coll is not None:
+                role_docs = await roles_coll.find(
+                    {"$or": [
+                        {"role_name": {"$regex": r"^chair$", "$options": "i"}},
+                        {"name": {"$regex": r"^chair$", "$options": "i"}},
+                    ]},
+                    {"_id": 0, "role_id": 1},
+                ).to_list(10)
+                chair_role_ids = [str(r.get("role_id") or "").strip() for r in (role_docs or []) if str(r.get("role_id") or "").strip()]
+
+            # Heuristic fallback used in provided seed data
+            if not chair_role_ids:
+                chair_role_ids = ["ROLE0002"]
+
+            chair_user_ids: List[str] = []
+            if st_dept_id:
+                ras = await db["role_assignments"].find(
+                    {
+                        "role_id": {"$in": chair_role_ids},
+                        "scope": {"$elemMatch": {"type": "department", "id": st_dept_id}},
+                    },
+                    {"_id": 0, "user_id": 1},
+                ).to_list(20)
+                chair_user_ids = [str(x.get("user_id") or "").strip() for x in (ras or []) if str(x.get("user_id") or "").strip()]
+
+            # Ensure unique
+            chair_user_ids = sorted(set(chair_user_ids))
+            if chair_user_ids:
+                # Actor display name
+                u = await db["users"].find_one({"user_id": userId}, {"_id": 0, "first_name": 1, "last_name": 1, "email": 1}) or {}
+                actor_name = (f"{(u.get('first_name') or '').strip()} {(u.get('last_name') or '').strip()}".strip() or (u.get("email") or userId))
+
+                changed_fields = []
+                if first_name or last_name:
+                    changed_fields.append("Name")
+                if employment_type:
+                    changed_fields.append("Employment")
+                if certifications is not None:
+                    changed_fields.append("Certifications")
+                if qualified_kacs is not None:
+                    changed_fields.append("Qualified KACs")
+                changed_txt = ", ".join(changed_fields) if changed_fields else "Profile"
+
+                for cuid in chair_user_ids:
+                    await create_notification(
+                        user_id=cuid,
+                        title="Faculty profile updated",
+                        details=f"{actor_name} updated: {changed_txt}.",
+                        meta={
+                            "type": "FACULTY_PROFILE_UPDATE",
+                            "actor_user_id": userId,
+                            "changed": changed_fields,
+                            "when": now.isoformat(),
+                        },
+                        send_email=True,
+                    )
+        except Exception:
+            # Best-effort: profile update should not fail if notification fails.
+            pass
+
+        return {"ok": True, "updated": {**updates_faculty, **updates_user}}
+
 
     # ---------- fetch (list) ----------
     if action == "fetch":
@@ -2295,6 +2522,12 @@ async def faculty_send_load_rfc_message(userId: str = Query(...), payload: Dict[
         "created_at": now.isoformat(),
     })
 
+    # Optional structured schedule request (sent by the Faculty UI)
+    requested = payload.get("requested")
+    if not isinstance(requested, dict):
+        requested = {}
+
+
     await db[COL_LOAD_RFC].update_one(
         qkey,
         {"$set": {
@@ -2307,6 +2540,7 @@ async def faculty_send_load_rfc_message(userId: str = Query(...), payload: Dict[
             "status": "NEEDS_OM",
             "locked": False,
             "messages": msgs,
+            "requested": requested,
             "history": list(existing.get("history") or []),
             "updated_at": now,
         }, "$setOnInsert": {"created_at": now}},

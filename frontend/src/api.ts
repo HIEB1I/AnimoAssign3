@@ -1010,7 +1010,7 @@ export async function planAllowExtra(
 
 export async function planRejectOmNewLine(
   userId: string,
-  payload: { course_id: string; section_id?: string }
+  payload: { course_id: string }
 ): Promise<{ ok: true; deleted: number }> {
   const url = `${API_BASE}/apo/courseofferings${q({ userId, action: "planRejectOmNewLine" })}`;
   // See note in planAllowExtra(): absolute URL => use `post()` helper.
@@ -2014,6 +2014,9 @@ export type FacultyRow = {
   teaching_units: string | number;
   faculty_type: string; // Full-Time | Part-Time
   status: string; // Active | On Leave
+  // Optional fields used by Edit Faculty Details
+  certifications?: string[];
+  teaching_years?: number | null;
 };
 
 export type FMOptions = {
@@ -2763,6 +2766,24 @@ export async function getFacultyOverviewProfile(userId: string) {
   return data;
 }
 
+// Updates the Faculty "My Profile" fields (name, employment, certifications, qualified_kacs)
+// Backend: POST /faculty/overview?action=profile_update
+export async function updateFacultyOverviewProfile(
+  userId: string,
+  payload: {
+    first_name?: string;
+    last_name?: string;
+    employment_type?: string;
+    certifications?: string[];
+    qualified_kacs?: string[];
+  }
+) {
+  const { data } = await axios.post(`${API_BASE}/faculty/overview`, payload, {
+    params: { userId, action: "profile_update" },
+  });
+  return data as { ok: boolean; matched?: number; modified?: number; detail?: string };
+}
+
 export async function getFacultyOverviewOptions(userId: string) {
   const { data } = await axios.post(`${API_BASE}/faculty/overview`, {}, {
     params: { userId, action: "options" },
@@ -2792,7 +2813,14 @@ export async function getFacultyLoadAssignmentRfc(
 
 export async function sendFacultyLoadAssignmentRfcMessage(
   userId: string,
-  payload: { term_id?: string; section_id: string; course_code?: string; message: string }
+  payload: {
+    term_id?: string;
+    section_id: string;
+    course_code?: string;
+    message: string;
+    // Optional structured request details (used for auto-apply on OM approval)
+    requested?: { day1?: string; time1?: string; day2?: string; time2?: string };
+  }
 ) {
   const base = (typeof API_BASE !== "undefined" ? API_BASE : "").replace(/\/+$/, "");
   const url = `${base}/faculty/load-assignment/rfc/message?userId=${encodeURIComponent(userId)}`;
@@ -3109,6 +3137,19 @@ export async function submitOmLoadAssignment(
     term?: string;
   };
 }
+
+
+/** Apply OM post-deadline draft overrides to canonical rows so APO can see them (campus-scoped). */
+export async function applyOmPendingOverrides(
+  userId: string,
+  payload: { campus_id: string }
+) {
+  const { data } = await axios.post(`${API_BASE}/om/loadassignment`, payload, {
+    params: { userId, action: "apply_pending_overrides" },
+  });
+  return data as { ok: boolean; applied?: number; campus_id?: string; term?: string };
+}
+
 
 /** Save OM remarks for a section (section is resolved via section_schedules.schedule_id). */
 export async function saveOmSectionRemarks(
