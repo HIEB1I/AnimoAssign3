@@ -201,7 +201,7 @@ function SummaryCards({ data }: { data: AvailabilityHeatmap | null }) {
       if (merged.count <= 1) lowSupportCells += 1;
     }
   }
-  const histLabels = (data.history_terms_labels?.length ? data.history_terms_labels : data.history_terms);
+
   const cards = [
     {
       label: "Faculty Considered",
@@ -210,15 +210,6 @@ function SummaryCards({ data }: { data: AvailabilityHeatmap | null }) {
       tooltip:
         "Faculty who submitted preferences and taught in the last 3 terms.",
       color: "text-emerald-700",
-    },
-    {
-      label: "Faculty with Recent Teaching History",
-      value: data.faculty_with_recent_history,
-      icon: <Clock className="h-5 w-5 text-amber-600" />,
-      tooltip:
-      `Faculty who have recorded teaching assignments within the last ${histLabels.length} term(s) ` +
-      `(${histLabels.join(", ")}). Used as the basis for history-driven forecasting.`,
-      color: "text-amber-700",
     },
     {
       label: "Slots with Low Faculty Support",

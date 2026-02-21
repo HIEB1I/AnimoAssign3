@@ -140,7 +140,7 @@ async def build_faculty_availability_heatmap(
     if not curr_term_id:
         return {"warnings": ["Current term is missing term_id."], "slots": {}, "total_faculty_considered": 0,
                 "faculty_with_recent_pref": 0, "faculty_with_recent_history": 0, "most_supported_slot_count": 0}
-    prev_term = curr_term_id  # use current term prefs (T) to forecast T+1
+    source_term_id = curr_term_id  # use current term prefs (T) to forecast T+1
     hist_terms = await _prev_n_terms(db, curr_term_id, 3)
     weights = _recency_weights(hist_terms)
 
@@ -179,9 +179,11 @@ async def build_faculty_availability_heatmap(
         }
 
     curr_term_id = active_term["term_id"]
+    source_term_id = curr_term_id
 
     # last 3 terms (relative to active term)
     hist_terms = await _prev_n_terms(db, curr_term_id, 3)
+    weights = _recency_weights(hist_terms)
 
     # only faculty who SUBMITTED preferences for the active term
     # (use is_finished if that’s your “submitted” flag; otherwise remove it)
@@ -245,12 +247,14 @@ async def build_faculty_availability_heatmap(
             {"faculty_id": fid, "term_id": curr_term_id},
             projection={"preferred_units": 1}
         )
-        if pref_curr and int(pref_curr.get("preferred_units", 0)) == 0:
+
+        preferred_units = (pref_curr or {}).get("preferred_units") or 0
+        if int(preferred_units) == 0:
             continue
             
         # Candidate if (prev-term pref) OR (has history in last 3 terms)
         has_prev_pref = await db.faculty_preferences.find_one(
-            {"faculty_id": fid, "term_id": prev_term}, projection={"_id": 1}
+            {"faculty_id": fid, "term_id": source_term_id}, projection={"_id": 1}
         ) is not None
         
         has_history_any = False
@@ -314,7 +318,7 @@ async def build_faculty_availability_heatmap(
         # Preference reinforcement from previous term
         pref_keys: set = set()
         prev_doc = await db.faculty_preferences.find_one(
-            {"faculty_id": fid, "term_id": prev_term},
+            {"faculty_id": fid, "term_id": source_term_id},
             projection={"availability_days": 1, "preferred_times": 1}
         )
         if prev_doc:
@@ -406,7 +410,7 @@ async def build_faculty_availability_heatmap(
     for key in grid:
         most_supported_slot_count = max(most_supported_slot_count, grid[key]["count"])
 
-    prev_label = term_label_by_id.get(prev_term, prev_term)
+    prev_label = term_label_by_id.get(source_term_id, source_term_id)
     hist_labels = [term_label_by_id.get(tid, tid) for tid in hist_terms]
     term_label = term_label_by_id.get(cur["term_id"], cur["term_id"])
 
@@ -414,7 +418,7 @@ async def build_faculty_availability_heatmap(
     return {
         "term_id": cur["term_id"],
         "term_label": term_label,
-        "previous_term_for_prefs": prev_term,
+        "previous_term_for_prefs": source_term_id,
         "previous_term_for_prefs_label": prev_label,
         "history_terms": hist_terms,
         "history_terms_labels": hist_labels,
