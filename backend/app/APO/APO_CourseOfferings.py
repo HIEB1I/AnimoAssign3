@@ -2199,17 +2199,43 @@ async def preen_total_for_course(term_id: str, campus_id: Optional[str], course_
     return await _sum(base_cond)
 
 async def _program_latest_batch_number(program_id: str, campus_id: Optional[str]) -> Optional[int]:
-    qs: Dict[str, Any] = {"program_id": program_id}
-    if campus_id:
-        qs["campus_id"] = campus_id
-    latest = None
-    cur = db[COL_BATCHES].find(qs, {"_id": 0, "batch_number": 1, "batch_code": 1})
-    async for b in cur:
-        n = _extract_batch_number(b)
-        if n is not None:
-            latest = n if latest is None else max(latest, n)
-    return latest
+    """Return the latest batch_number for a program.
 
+    Notes:
+    - Some datasets store program_id in batches without leading zeros (e.g., PRGM008 vs PRGM0008).
+    - Some datasets don't store campus_id on batches at all.
+    This function is defensive: it tries multiple program_id formats and falls back when campus-scoped
+    lookup returns nothing.
+    """
+    # Build candidate program_id values to handle both padded and unpadded ids.
+    candidates: List[str] = [program_id]
+    m = re.match(r"^PRGM0*(\d+)$", program_id or "")
+    if m:
+        n = int(m.group(1))
+        candidates.extend([f"PRGM{n:03d}", f"PRGM{n:04d}"])
+    else:
+        m2 = re.match(r"^PRGM(\d+)$", program_id or "")
+        if m2:
+            n = int(m2.group(1))
+            candidates.extend([f"PRGM{n:03d}", f"PRGM{n:04d}"])
+    # de-dup while preserving order
+    candidates = list(dict.fromkeys(candidates))
+
+    async def _scan(qs: Dict[str, Any]) -> Optional[int]:
+        latest_local: Optional[int] = None
+        cur = db[COL_BATCHES].find(qs, {"_id": 0, "batch_number": 1, "batch_code": 1})
+        async for b in cur:
+            bn = _extract_batch_number(b)
+            if bn is not None:
+                latest_local = bn if latest_local is None else max(latest_local, bn)
+        return latest_local
+
+    # Try campus-scoped first (if campus_id exists on batches), then fall back without campus.
+    if campus_id:
+        latest = await _scan({"program_id": {"$in": candidates}, "campus_id": campus_id})
+        if latest is not None:
+            return latest
+    return await _scan({"program_id": {"$in": candidates}})
 def _year_level_name(batch_num: Optional[int], latest_num: Optional[int]) -> Optional[str]:
     if batch_num is None or latest_num is None:
         return None
@@ -2277,6 +2303,90 @@ async def _estimate_cohort_demand_for_course(term_id: str, campus_id: Optional[s
             per_batch = (lvl_count + denom - 1) // denom
             total += per_batch * len(bids)
     return total
+
+async def _estimate_cohort_demand_details_for_course(term_id: str, campus_id: Optional[str], course_id: str) -> Dict[str, Any]:
+    """Return cohort demand total PLUS the inputs used to compute it (for explainability)."""
+    q: Dict[str, Any] = {"term_id": term_id, "course_list": course_id}
+    if campus_id:
+        q["campus_id"] = campus_id
+    currs = [x async for x in db[COL_CURRICULUM].find(q, {"_id": 0, "program_id": 1, "batch_id": 1})]
+    if not currs:
+        return {"total": 0, "programs": []}
+
+    batch_ids = [c.get("batch_id") for c in currs if c.get("batch_id")]
+    by_id: Dict[str, Dict[str, Any]] = {}
+    if batch_ids:
+        async for b in db[COL_BATCHES].find(
+            {"batch_id": {"$in": batch_ids}},
+            {"_id": 0, "batch_id": 1, "batch_code": 1, "batch_number": 1},
+        ):
+            by_id[b["batch_id"]] = b
+
+    prog_ids = sorted({str(c.get("program_id")) for c in currs if c.get("program_id")})
+    prog_map: Dict[str, Dict[str, Any]] = {}
+    if prog_ids:
+        async for p in db[COL_PROGRAMS].find(
+            {"program_id": {"$in": prog_ids}},
+            {"_id": 0, "program_id": 1, "program_code": 1, "program_name": 1, "name": 1},
+        ):
+            pid = str(p.get("program_id") or "").strip()
+            if not pid:
+                continue
+            prog_map[pid] = {
+                "program_id": pid,
+                "program_code": str(p.get("program_code") or "").strip(),
+                "program_name": str(p.get("program_name") or p.get("name") or "").strip(),
+            }
+
+    grouped: Dict[str, Dict[str, List[str]]] = {}
+    latest_cache: Dict[str, Optional[int]] = {}
+    for c in currs:
+        pid, bid = c.get("program_id"), c.get("batch_id")
+        if not pid or not bid:
+            continue
+        if pid not in latest_cache:
+            latest_cache[pid] = await _program_latest_batch_number(pid, campus_id)
+        bn = _extract_batch_number(by_id.get(bid, {}))
+        lvl = _year_level_name(bn, latest_cache[pid])
+        if not lvl:
+            continue
+        grouped.setdefault(pid, {}).setdefault(lvl, []).append(bid)
+
+    total = 0
+    details: List[Dict[str, Any]] = []
+    for pid, levels in grouped.items():
+        stats = await _program_stats_doc(term_id, pid)
+        if not stats:
+            continue
+        pmeta = prog_map.get(pid) or {"program_id": str(pid), "program_code": "", "program_name": ""}
+        prog_entry: Dict[str, Any] = {**pmeta, "levels": []}
+
+        for lvl, bids in levels.items():
+            lvl_count = int(stats.get(lvl, 0) or 0)
+            denom = max(len(bids), 1)
+            per_batch = (lvl_count + denom - 1) // denom
+            prog_entry["levels"].append(
+                {
+                    "year_level": lvl,
+                    "stats_count": lvl_count,
+                    "batches_count": len(bids),
+                    "per_batch_estimate": per_batch,
+                    "contribution": per_batch * len(bids),
+                    "batches": [
+                        {
+                            "batch_id": str(bid),
+                            "batch_code": str((by_id.get(bid) or {}).get("batch_code") or "").strip(),
+                            "batch_number": (by_id.get(bid) or {}).get("batch_number"),
+                        }
+                        for bid in bids
+                    ],
+                }
+            )
+            total += per_batch * len(bids)
+
+        details.append(prog_entry)
+
+    return {"total": total, "programs": details}
 
 async def estimated_demand(term_id: str, campus_id: Optional[str], course_id: str) -> Dict[str, int]:
     preen = await preen_total_for_course(term_id, campus_id, course_id)
@@ -2673,10 +2783,20 @@ def _distribute_sections_round_robin(
         else:
             unowned.append(s)
 
-    # 2) Round-robin distribute remaining sections.
+    # 2) Deterministic distribute remaining sections.
+    # IMPORTANT UX: deleting/adding a section in one row should not cause other rows' sections
+    # to "move" after refresh. Using enumerate(idx % n) causes shifts when list length changes.
+    # We instead assign based on a stable hash of section_id.
     n = len(owner_keys)
-    for idx, s in enumerate(unowned):
-        k = owner_keys[idx % n]
+    for s in unowned:
+        sid = str(s.get("section_id") or "")
+        if sid:
+            # stable bucket via sha1 (avoid Python hash randomization)
+            h = hashlib.sha1(sid.encode("utf-8")).hexdigest()
+            bucket = int(h[:8], 16) % n
+        else:
+            bucket = 0
+        k = owner_keys[bucket]
         alloc[k].append(s)
 
     return alloc
@@ -2924,7 +3044,7 @@ async def _section_count(term_id: str, campus_prefix_pattern: str, course_id: st
 
 async def _pending_changes(
     *, term_id: str, campus_id: str, campus_name: str
-) -> Tuple[bool, List[Dict[str, Any]], str, str]:
+) -> Tuple[bool, List[Dict[str, Any]], Dict[str, Any], str, str]:
     # IMPORTANT:
     # Keep Manila/Laguna truly independent.
     # If pre-enlistment rows are campus-scoped (campus_id stored for this term),
@@ -2992,7 +3112,7 @@ async def _pending_changes(
     cohort_hash = _sha1_of(cohort_map)
 
     if needs_import:
-        return (True, [], preen_hash, cohort_hash)
+        return (True, [], {}, preen_hash, cohort_hash)
 
     currs = [x async for x in db[COL_CURRICULUM].find(
         {"term_id": term_id, "campus_id": campus_id},
@@ -3028,9 +3148,13 @@ async def _pending_changes(
         prefix_map[cid] = prefix_pattern_for_level(campus_name, lvl) or ""
 
     demand_by_course: Dict[str, int] = {}
+    demand_preen_by_course: Dict[str, int] = {}
+    demand_cohort_by_course: Dict[str, int] = {}
     for cid in view_course_ids:
         est = await estimated_demand(term_id, campus_id, cid)
-        demand_by_course[cid] = est["plan"]
+        demand_by_course[cid] = int(est.get("plan") or 0)
+        demand_preen_by_course[cid] = int(est.get("preen") or 0)
+        demand_cohort_by_course[cid] = int(est.get("cohort") or 0)
     cap_by_course = await _planned_capacity_by_course_multi(term_id, prefix_map, view_course_ids)
 
     # --- OM "Add new line" detection (for Keep/Reject) ---
@@ -3038,6 +3162,17 @@ async def _pending_changes(
     extra_allowance: Dict[str, int] = {
         str(k): int(v or 0)
         for k, v in (plan_state.get("extra_sections_allowance") or {}).items()
+        if str(k).strip()
+    }
+
+    # Row-scoped demand overrides (APO accepts keeping fewer total sections than demand suggests).
+    # Stored as a map keyed by "{course_id}:{program_id}:{batch_id}".
+    # NOTE: Although keyed by row, this is applied to the course-level effective target to avoid
+    # breaking the existing planning logic (which is course-scoped). This provides APO "free will"
+    # while keeping the rest of the planner stable.
+    row_overrides: Dict[str, Dict[str, Any]] = {
+        str(k): (v or {})
+        for k, v in (plan_state.get("row_target_overrides") or {}).items()
         if str(k).strip()
     }
 
@@ -3076,16 +3211,105 @@ async def _pending_changes(
             }
         )
 
+    # Curriculum mapping (best effort)
+    # - base_by_course remains PROGRAM-based (existing behavior)
+    # - required_program_batches is for explainability (program+batch list)
     course_to_programs: Dict[str, set] = {}
+    course_to_prog_batches: Dict[str, set] = {}
     for c in currs:
         pid = c.get("program_id")
+        bid = c.get("batch_id")
         for cid in ensure_list(c.get("course_list")):
             if pid and cid:
                 course_to_programs.setdefault(cid, set()).add(pid)
+                course_to_prog_batches.setdefault(cid, set()).add((str(pid), str(bid or "")))
     base_by_course: Dict[str, int] = {cid: max(1, len(ps)) for cid, ps in course_to_programs.items()}
+
+    # Program label map for explainability (best effort)
+    all_prog_ids: List[str] = sorted({str(pid) for s in course_to_programs.values() for pid in s if pid})
+    prog_label_map: Dict[str, Dict[str, str]] = {}
+    if all_prog_ids:
+        progs = await db[COL_PROGRAMS].find(
+            {"program_id": {"$in": all_prog_ids}},
+            {"_id": 0, "program_id": 1, "program_code": 1, "program_name": 1, "name": 1},
+        ).to_list(2000)
+        for p in progs:
+            pid = str(p.get("program_id") or "").strip()
+            if not pid:
+                continue
+            prog_label_map[pid] = {
+                "program_id": pid,
+                "program_code": str(p.get("program_code") or "").strip(),
+                "program_name": str(p.get("program_name") or p.get("name") or "").strip(),
+            }
+
+    # Batch label map for explainability (best effort)
+    all_batch_ids: List[str] = sorted({str(b) for s in course_to_prog_batches.values() for _, b in s if b})
+    batch_label_map: Dict[str, Dict[str, Any]] = {}
+    if all_batch_ids:
+        batches = await db[COL_BATCHES].find(
+            {"batch_id": {"$in": all_batch_ids}},
+            {"_id": 0, "batch_id": 1, "batch_number": 1, "batch_code": 1},
+        ).to_list(5000)
+        for b in batches:
+            bid = str(b.get("batch_id") or "").strip()
+            if not bid:
+                continue
+            batch_label_map[bid] = {
+                "batch_id": bid,
+                "batch_number": b.get("batch_number"),
+                "batch_code": str(b.get("batch_code") or "").strip(),
+            }
+
+    # Pre-enlistment breakdown per course (program/batch rows + counts) for explainability.
+    preen_breakdown_by_course: Dict[str, List[Dict[str, Any]]] = {}
+    try:
+        preen_q: Dict[str, Any] = {"term_id": term_id, "course_id": {"$in": view_course_ids}, "is_archived": {"$ne": True}}
+        if campus_id:
+            preen_q["campus_id"] = campus_id
+        cur = db[COL_PREEN].find(
+            preen_q,
+            {"_id": 0, "course_id": 1, "program_id": 1, "batch_id": 1, "preenlistment_count": 1, "count": 1},
+        )
+        async for r in cur:
+            cid0 = str(r.get("course_id") or "").strip()
+            if not cid0:
+                continue
+            pid = str(r.get("program_id") or "").strip()
+            bid = str(r.get("batch_id") or "").strip()
+            cnt = int(r.get("preenlistment_count") or r.get("count") or 0)
+            if cnt <= 0:
+                continue
+            p = prog_label_map.get(pid) or {"program_id": pid, "program_code": "", "program_name": ""}
+            b = batch_label_map.get(bid) or {"batch_id": bid, "batch_code": "", "batch_number": None}
+            preen_breakdown_by_course.setdefault(cid0, []).append(
+                {
+                    "program_id": pid,
+                    "program_code": p.get("program_code"),
+                    "program_name": p.get("program_name"),
+                    "batch_id": bid,
+                    "batch_code": b.get("batch_code"),
+                    "batch_number": b.get("batch_number"),
+                    "preenlisted": cnt,
+                }
+            )
+        # Keep a stable and readable order.
+        for cid0, items in preen_breakdown_by_course.items():
+            items.sort(key=lambda x: ((x.get("program_code") or ""), (x.get("batch_code") or ""), -(x.get("preenlisted") or 0)))
+    except Exception:
+        preen_breakdown_by_course = {}
+
+    explain_by_course: Dict[str, Dict[str, Any]] = {}
 
     for cid in view_course_ids:
         plan = int(demand_by_course.get(cid) or 0)
+        preen = int(demand_preen_by_course.get(cid) or 0)
+        cohort = int(demand_cohort_by_course.get(cid) or 0)
+        cohort_details = None
+        try:
+            cohort_details = await _estimate_cohort_demand_details_for_course(term_id, campus_id, cid)
+        except Exception:
+            cohort_details = None
         existing = await _section_count(term_id, prefix_map.get(cid, ""), cid)
         base = int(base_by_course.get(cid, 1))
         eff_cap = await effective_section_capacity(term_id, campus_name, cid) or DEFAULT_CAP
@@ -3096,9 +3320,76 @@ async def _pending_changes(
         allow = int(extra_allowance.get(cid, 0) or 0)
         effective_target = target + max(0, allow)
 
+        # Apply row-scoped override if present and still valid for the current demand snapshot.
+        # Validity rule: override holds until APO removes it OR demand inputs change.
+        # Demand change detection uses the pre-enlistment+cohort snapshot hashes.
+        try:
+            overrides_for_course: List[Dict[str, Any]] = []
+            for k, v in row_overrides.items():
+                if not k.startswith(f"{cid}:"):
+                    continue
+                if not isinstance(v, dict):
+                    continue
+                overrides_for_course.append(v)
+
+            if overrides_for_course:
+                valid_overrides = [
+                    o for o in overrides_for_course
+                    if str(o.get("preen_hash") or "") == preen_hash and str(o.get("cohort_hash") or "") == cohort_hash
+                ]
+                if valid_overrides:
+                    accepted_targets = [int(o.get("accepted_course_target_total") or 0) for o in valid_overrides]
+                    accepted_targets = [x for x in accepted_targets if x > 0]
+                    if accepted_targets:
+                        accepted_total = min(accepted_targets)
+                        # If existing already meets/exceeds the planner target, the override is unnecessary.
+                        if existing < effective_target:
+                            effective_target = min(int(effective_target), int(accepted_total))
+        except Exception:
+            # Never block pending changes due to override parsing.
+            pass
+
+        # Programs that require this course (best effort, from curriculum)
+        prog_ids_for_course = sorted({str(p) for p in (course_to_programs.get(cid) or set()) if p})
+        programs_needed: List[Dict[str, str]] = []
+        for pid in prog_ids_for_course:
+            programs_needed.append(prog_label_map.get(pid) or {"program_id": pid, "program_code": "", "program_name": ""})
+
+        # Program+Batch rows that include this course (best effort, for explain display)
+        required_program_batches: List[Dict[str, Any]] = []
+        for (pid, bid) in sorted(course_to_prog_batches.get(cid) or set()):
+            p = prog_label_map.get(pid) or {"program_id": pid, "program_code": "", "program_name": ""}
+            b = batch_label_map.get(bid) or {"batch_id": bid, "batch_number": None, "batch_code": ""}
+            required_program_batches.append({
+                "program_id": p.get("program_id"),
+                "program_code": p.get("program_code"),
+                "program_name": p.get("program_name"),
+                "batch_id": b.get("batch_id"),
+                "batch_number": b.get("batch_number"),
+                "batch_code": b.get("batch_code"),
+            })
+
+        explain_by_course[cid] = {
+            "planning_demand": plan,
+            "demand_preenlistment": preen,
+            "demand_cohort": cohort,
+            "demand_plan_rule": "max(preenlistment, cohort)",
+            "preenlistment_breakdown": preen_breakdown_by_course.get(cid) or [],
+            "cohort_breakdown": cohort_details or {"total": cohort, "programs": []},
+            "eff_cap_used": int(eff_cap or 0),
+            "need_demand_sections": int(need_demand or 0),
+            "base_sections": int(base or 0),
+            "allowance_kept": int(allow or 0),
+            "target_base_demand": int(target or 0),
+            "target_sections": int(effective_target or 0),
+            "existing_sections": int(existing or 0),
+            "programs_needed": programs_needed,
+            "required_program_batches": required_program_batches,
+        }
+
         if existing < effective_target:
             add_by = effective_target - existing
-            changes.append({"type": "sections_increase", "course_id": cid, "by_sections": add_by})
+            changes.append({"type": "sections_increase", "course_id": cid, "by_sections": add_by, "reason": "DEMAND_OR_BASE", "explain": explain_by_course.get(cid)})
         elif existing > effective_target:
             over = existing - effective_target
 
@@ -3118,6 +3409,8 @@ async def _pending_changes(
                 "type": "sections_decrease",
                 "course_id": cid,
                 "by_sections": delete_count,
+                "reason": "OM_NEW_LINE",
+                "explain": explain_by_course.get(cid),
                 "om_added_section_codes": om_codes,
                 "om_rejectable_section_ids": om_ids[:delete_count],
                 "om_delete_count": delete_count,
@@ -3143,11 +3436,11 @@ async def _pending_changes(
         # never block pending changes on metadata enrichment
         pass
 
-    return (False, changes, preen_hash, cohort_hash)
+    return (False, changes, explain_by_course, preen_hash, cohort_hash)
 
 async def _planning_flags(term_id: str, campus_id: str, campus_prefix: str):
     meta = await campus_meta(campus_id)
-    needs_import, pending, preen_hash, cohort_hash = await _pending_changes(
+    needs_import, pending, explain_by_course, preen_hash, cohort_hash = await _pending_changes(
         term_id=term_id, campus_id=campus_id, campus_name=meta.get("campus_name","")
     )
 
@@ -3162,7 +3455,7 @@ async def _planning_flags(term_id: str, campus_id: str, campus_prefix: str):
         or (preen_hash != last_preen)
         or (cohort_hash != last_cohort)
     )
-    return needs_import, approval_required, pending, preen_hash, cohort_hash, plan_state
+    return needs_import, approval_required, pending, explain_by_course, preen_hash, cohort_hash, plan_state
 # --- room availability helpers (capacity/type/time overlap) ---
 # --- room availability helpers (capacity/type/time overlap) ---
 
@@ -4530,7 +4823,7 @@ async def get_course_offerings(
             seen.add(o["course_id"]); uniq.append(o)
         options_by_group[key] = sorted(uniq, key=lambda x: x["course_code"])
 
-    needs_import, approval_required, pending, preen_hash, cohort_hash, plan_state = await _planning_flags(
+    needs_import, approval_required, pending, explain_by_course, preen_hash, cohort_hash, plan_state = await _planning_flags(
         term_id=term_id, campus_id=campus_id, campus_prefix=prefix_default
     )
 
@@ -4896,7 +5189,10 @@ async def get_course_offerings(
         "planning": {
             "needs_import": needs_import,
             "approval_required": approval_required,
-            "pending_changes": pending if approval_required else []
+            "pending_changes": pending if approval_required else [],
+            "explain_by_course": explain_by_course,
+            # Row-scoped overrides for "Accept current section count".
+            "row_target_overrides": (plan_state.get("row_target_overrides") or {})
         }
     }
 
@@ -4909,6 +5205,7 @@ async def post_course_offerings(
         "curriculumAddCourse", "curriculumEditCourse", "curriculumRemoveCourse",
         "approvePlan",
         "planAllowExtra", "planRejectOmNewLine",
+        "planAcceptRowTarget", "planClearRowTarget",
         "specialclassUpdate", 
         "courseCatalog", "search_catalog",
         "catalog.create", 
@@ -6160,7 +6457,7 @@ async def post_course_offerings(
         return {"ok": True, "removed": 1}
 
     if action == "approvePlan":
-        needs_import, pending, preen_hash, cohort_hash = await _pending_changes(
+        needs_import, pending, explain_by_course, preen_hash, cohort_hash = await _pending_changes(
             term_id=term_id, campus_id=campus_id, campus_name=campus.get("campus_name","")
         )
         if needs_import:
@@ -6212,6 +6509,44 @@ async def post_course_offerings(
                 return "XC" if any_cbl else "XX"
             return "G" if level_code(lvl) == "GSM" else "S"
 
+        async def _ordered_owners(cid: str) -> List[Tuple[str, str, int]]:
+            """Return owners for a course in a UI-friendly stable order.
+
+            _create_sections assigns newly created section codes (S11, S12, ...) round-robin
+            across the provided owners list. If owners are ordered by raw IDs, the first
+            generated section can land on an unexpected program/batch row.
+
+            Order rule:
+              1) batch_number ascending
+              2) program_code ascending
+              3) fallback: program_id
+            """
+            owners = list(course_to_owner_set.get(cid, set()) or [])
+            if not owners:
+                return []
+
+            pids = sorted({pid for (_bid, pid, _bn) in owners if pid})
+            pid_to_code: Dict[str, str] = {}
+            if pids:
+                async for p in db[COL_PROGRAMS].find(
+                    {"program_id": {"$in": pids}},
+                    {"_id": 0, "program_id": 1, "program_code": 1},
+                ):
+                    pid = (p.get("program_id") or "").strip()
+                    if pid:
+                        pid_to_code[pid] = (p.get("program_code") or "").strip().upper()
+
+            def _k(t: Tuple[str, str, int]):
+                bid, pid, bn = t
+                return (
+                    int(bn or 0),
+                    pid_to_code.get(pid, "ZZZ"),
+                    pid or "",
+                    bid or "",
+                )
+
+            return sorted(owners, key=_k)
+
         for ch in pending:
             if ch.get("type") == "add_course_to_curriculum":
                 cid = ch.get("course_id")
@@ -6258,7 +6593,7 @@ async def post_course_offerings(
                 need_base = max(0, base - existing)
                 if need_base:
                     creation_prefix = await _choose_creation_prefix(cid)
-                    owners_for_course = sorted(list(course_to_owner_set.get(cid, set())))
+                    owners_for_course = await _ordered_owners(cid)
                     await _create_sections(
                         term_id=term_id,
                         campus_id=campus_id,
@@ -6274,7 +6609,7 @@ async def post_course_offerings(
 
                 if by_sections:
                     creation_prefix = await _choose_creation_prefix(cid)
-                    owners_for_course = sorted(list(course_to_owner_set.get(cid, set())))
+                    owners_for_course = await _ordered_owners(cid)
                     await _create_sections(
                         term_id=term_id,
                         campus_id=campus_id,
@@ -6326,6 +6661,69 @@ async def post_course_offerings(
         )
         return {"ok": True, "kept": keep_n}
 
+    # ----- ACCEPT LOWER SECTION COUNT (ROW-SCOPED OVERRIDE) -----
+    if action == "planAcceptRowTarget":
+        cid = str(payload.get("course_id") or "").strip()
+        pid = str(payload.get("program_id") or "").strip()
+        bid = str(payload.get("batch_id") or "").strip()
+        if not cid or not pid or not bid:
+            raise HTTPException(status_code=400, detail="course_id, program_id, and batch_id are required.")
+
+        # Snapshot hashes so the override automatically invalidates when demand inputs change.
+        preen_map = await _preen_snapshot(term_id, campus_id)
+        cohort_map = await _cohort_snapshot(term_id, campus_id)
+        preen_hash = _sha1_of(preen_map)
+        cohort_hash = _sha1_of(cohort_map)
+
+        # Accept current total section count for this course (course-scoped planner).
+        # NOTE: we intentionally do NOT filter by section_code prefix here.
+        # Prefix filtering can miscount (and can throw if legacy prefixes are inconsistent).
+        sec_q: Dict[str, Any] = {
+            "term_id": term_id,
+            "campus_id": campus_id,
+            "status": {"$ne": "archived"},
+            "$or": [{"course_id": cid}, {"fulfilled_placeholder_course_id": cid}],
+        }
+        try:
+            existing_total = await db[COL_SECTIONS].count_documents(sec_q)
+        except Exception:
+            existing_total = 0
+
+        key = f"{cid}:{pid}:{bid}"
+        obj = {
+            "course_id": cid,
+            "program_id": pid,
+            "batch_id": bid,
+            "accepted_course_target_total": int(existing_total or 0),
+            "preen_hash": preen_hash,
+            "cohort_hash": cohort_hash,
+            "accepted_by": user_id,
+            "accepted_at": now(),
+        }
+
+        await db[COL_PLANSTATE].update_one(
+            {"term_id": term_id, "campus_id": campus_id},
+            {"$set": {f"row_target_overrides.{key}": obj, "updated_at": now()}},
+            upsert=True,
+        )
+
+        return {"ok": True, "override_key": key, "accepted_course_target_total": obj["accepted_course_target_total"]}
+
+    if action == "planClearRowTarget":
+        cid = str(payload.get("course_id") or "").strip()
+        pid = str(payload.get("program_id") or "").strip()
+        bid = str(payload.get("batch_id") or "").strip()
+        if not cid or not pid or not bid:
+            raise HTTPException(status_code=400, detail="course_id, program_id, and batch_id are required.")
+
+        key = f"{cid}:{pid}:{bid}"
+        await db[COL_PLANSTATE].update_one(
+            {"term_id": term_id, "campus_id": campus_id},
+            {"$unset": {f"row_target_overrides.{key}": ""}, "$set": {"updated_at": now()}},
+            upsert=True,
+        )
+        return {"ok": True, "override_key": key}
+
     if action == "planRejectOmNewLine":
         if not payload or not str(payload.get("course_id") or "").strip():
             raise HTTPException(status_code=400, detail="course_id is required.")
@@ -6333,7 +6731,7 @@ async def post_course_offerings(
 
         # Recompute current "Approval required" state and get the exact OM-added section_ids
         meta = await campus_meta(campus_id)
-        _, pending, _, _ = await _pending_changes(
+        _, pending, _explain, _, _ = await _pending_changes(
             term_id=term_id, campus_id=campus_id, campus_name=meta.get("campus_name", "")
         )
         ch = next((x for x in pending if x.get("type") == "sections_decrease" and x.get("course_id") == cid), None)
@@ -6424,7 +6822,7 @@ async def post_course_offerings(
 
         # Return updated pending list so the frontend can immediately reflect the cleared panel, if desired.
         try:
-            _, pending_after, _, _ = await _pending_changes(
+            _, pending_after, _explain_after, _, _ = await _pending_changes(
                 term_id=term_id, campus_id=campus_id, campus_name=meta.get("campus_name", "")
             )
         except Exception:
@@ -6452,7 +6850,7 @@ async def post_course_offerings(
             ge_shs_exempt = (ctype in EDIT_FULL)
 
         if not ge_shs_exempt:
-            needs_import, approval_required, _pending, _ph, _ch, _st = await _planning_flags(
+            needs_import, approval_required, _pending, _explain, _ph, _ch, _st = await _planning_flags(
                 term_id=term_id, campus_prefix=prefix_default, campus_id=campus_id
             )
             if needs_import:
