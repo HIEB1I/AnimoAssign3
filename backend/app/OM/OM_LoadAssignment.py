@@ -365,19 +365,76 @@ async def _find_course_by_code(course_code: str, db) -> dict:
     return await db[COL_COURSES].find_one(q, {"_id": 0}) or {}
 
 
-async def _om_department_ids(user_id: str, db) -> List[str]:
-    """Departments this OM should see (from role_assignments.scope)."""
-    ra = await db.get_collection("role_assignments").find_one(
-        {"user_id": user_id, "role_id": "ROLE0006"},
-        {"_id": 0, "scope": 1},
-    ) or {}
+async def _loadassignment_department_ids(user_id: str, db) -> List[str]:
+    """Department scope for users who can access Load Assignment.
+
+    Historically, Load Assignment was restricted to Office Manager (ROLE0006)
+    and the backend used only that role's scope to determine visible sections.
+
+    However, the UI reuses the same Load Assignment module for other roles that
+    should see the *exact* same department data (e.g., Department Chair and GS
+    Coordinator), especially when they are mapped to the same department.
+
+    This helper resolves department_ids from role_assignments.scope for any
+    Load-Assignment-eligible role.
+    """
+
+    uid = (user_id or "").strip()
+    if not uid:
+        return []
+
+    # Resolve role_ids dynamically from user_roles to avoid hard-coding IDs.
+    # Keep spelling variants for legacy data ("Deparment Chair").
+    eligible_patterns = [
+        r"^Office\s*Manager$",
+        r"^Department\s*Chair$",
+        r"^Deparment\s*Chair$",
+        r"^GS\s*Coordinator$",
+    ]
+
+    role_ids: List[str] = []
+    try:
+        or_terms = [{"role_type": {"$regex": p, "$options": "i"}} for p in eligible_patterns]
+        roles = await db.get_collection("user_roles").find(
+            {"$or": or_terms},
+            {"_id": 0, "role_id": 1},
+        ).to_list(50)
+        for rdoc in roles or []:
+            rid = str((rdoc or {}).get("role_id") or "").strip()
+            if rid and rid not in role_ids:
+                role_ids.append(rid)
+    except Exception:
+        # If user_roles is unavailable, fall back to known IDs.
+        role_ids = ["ROLE0006", "ROLE0002", "ROLE0007"]
 
     dept_ids: List[str] = []
-    for sc in (ra.get("scope") or []):
-        if isinstance(sc, dict) and sc.get("type") == "department":
-            did = str(sc.get("id") or "").strip()
+    try:
+        cur = db.get_collection("role_assignments").find(
+            {"user_id": uid, "role_id": {"$in": role_ids}},
+            {"_id": 0, "scope": 1},
+        )
+        async for ra in cur:
+            for sc in ((ra or {}).get("scope") or []):
+                if isinstance(sc, dict) and sc.get("type") == "department":
+                    did = str(sc.get("id") or "").strip()
+                    if did and did not in dept_ids:
+                        dept_ids.append(did)
+    except Exception:
+        pass
+
+    # Fallback: staff_profiles may store department_id/dept_id even when role
+    # assignments are incomplete. This keeps CHAIR/GS Coordinator functional.
+    if not dept_ids:
+        try:
+            sp = await db.get_collection(COL_STAFF).find_one(
+                {"user_id": uid},
+                {"_id": 0, "department_id": 1, "dept_id": 1},
+            ) or {}
+            did = str(sp.get("department_id") or sp.get("dept_id") or "").strip()
             if did:
                 dept_ids.append(did)
+        except Exception:
+            pass
 
     return dept_ids
 
@@ -1336,7 +1393,7 @@ async def _notify_apo_room_allocation_ready(
         )
 
 async def _fetch_rows(user_id: str, term_id: str, db) -> Dict[str, Any]:
-    dept_ids = await _om_department_ids(user_id, db)
+    dept_ids = await _loadassignment_department_ids(user_id, db)
     if not dept_ids:
         return {"rows": []}
 
@@ -3304,7 +3361,7 @@ async def om_get_submitted_course_offerings(
     if not (active or {}).get("term_id"):
         raise HTTPException(status_code=409, detail="No active/upcoming term found")
 
-    dept_ids = await _om_department_ids(user_id, db)
+    dept_ids = await _loadassignment_department_ids(user_id, db)
     if not dept_ids:
         return {"ok": True, "courses": []}
 
@@ -3419,7 +3476,7 @@ async def om_save_new_line(
         raise HTTPException(status_code=422, detail="Meeting 2 must include Day 2, Begin 2, and End 2")
 
     # Course must be in OM scope AND exist in submitted offerings
-    dept_ids = await _om_department_ids(user_id, db)
+    dept_ids = await _loadassignment_department_ids(user_id, db)
     if not dept_ids:
         raise HTTPException(status_code=403, detail="OM has no department scope")
 
@@ -4556,7 +4613,7 @@ async def run_auto_assignment(
     # Prefs (used for alt-window search on duplicates)
     # Resolve OM department if not explicitly provided
     if not department_id:
-        om_dept_ids = await _om_department_ids(user_id, db)
+        om_dept_ids = await _loadassignment_department_ids(user_id, db)
         if not om_dept_ids:
             raise HTTPException(
                 status_code=403,
