@@ -3503,9 +3503,13 @@ async def om_get_submitted_course_offerings(
                 "course_units_display": {"$ifNull": ["$course.units", {"$ifNull": ["$course.units_per_section", 0]}]},
             }
         },
+        # Campus-specific offerings:
+        # A course can be offered in both Manila and Laguna. We return one entry per (course_id, campus_id)
+        # so the OM "Add section" flow can be restricted by campus deadlines.
         {
             "$group": {
-                "_id": "$course.course_id",
+                "_id": {"course_id": "$course.course_id", "campus_id": "$campus_id"},
+                "campus_id": {"$first": "$campus_id"},
                 "code": {"$first": "$course_code_display"},
                 "title": {"$first": "$course_title_display"},
                 "units": {"$first": "$course_units_display"},
@@ -3513,8 +3517,8 @@ async def om_get_submitted_course_offerings(
                 "capacity": {"$max": {"$ifNull": ["$enrollment_cap", 0]}},
             }
         },
-        {"$project": {"_id": 0, "code": 1, "title": 1, "units": 1, "capacity": 1}},
-        {"$sort": {"code": 1}},
+        {"$project": {"_id": 0, "campus_id": 1, "code": 1, "title": 1, "units": 1, "capacity": 1}},
+        {"$sort": {"code": 1, "campus_id": 1}},
     ]
 
     docs = [x async for x in db[COL_SECTIONS_SUBMITTED].aggregate(pipe)]
@@ -3533,7 +3537,13 @@ async def om_get_submitted_course_offerings(
             cap = int(d.get("capacity") or 0)
         except Exception:
             cap = 0
-        out.append({"code": code, "title": title, "units": units, "capacity": cap})
+        out.append({
+            "campus_id": str(d.get("campus_id") or "").strip(),
+            "code": code,
+            "title": title,
+            "units": units,
+            "capacity": cap,
+        })
 
     return {"ok": True, "courses": out}
 
@@ -3720,6 +3730,22 @@ async def om_save_new_line(
     # Campus routing: prefer the course offering's campus_id (source of truth),
     # fall back to section-prefix inference for safety.
     campus_id = expected_campus_id or _section_to_campus_id(section_code)
+
+    # NEW: Campus-specific deadline lock.
+    # If the APO-set deadline has passed for this campus, OM may not add new sections for it.
+    try:
+        if campus_id:
+            w = await _get_om_submit_window(tid, campus_id, db)
+            if _deadline_passed(w):
+                raise HTTPException(
+                    status_code=403,
+                    detail="Cannot add section: the APO-set deadline has passed for this campus",
+                )
+    except HTTPException:
+        raise
+    except Exception:
+        # Best-effort: do not crash if window lookup fails.
+        pass
 
     # Units/capacity (title is derived)
     try:
