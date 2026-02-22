@@ -2783,23 +2783,206 @@ def _distribute_sections_round_robin(
         else:
             unowned.append(s)
 
-    # 2) Deterministic distribute remaining sections.
-    # IMPORTANT UX: deleting/adding a section in one row should not cause other rows' sections
-    # to "move" after refresh. Using enumerate(idx % n) causes shifts when list length changes.
-    # We instead assign based on a stable hash of section_id.
-    n = len(owner_keys)
-    for s in unowned:
-        sid = str(s.get("section_id") or "")
-        if sid:
-            # stable bucket via sha1 (avoid Python hash randomization)
-            h = hashlib.sha1(sid.encode("utf-8")).hexdigest()
-            bucket = int(h[:8], 16) % n
-        else:
-            bucket = 0
-        k = owner_keys[bucket]
-        alloc[k].append(s)
+    # 2) Deterministic, *contiguous* distribution for remaining (legacy/unowned) sections.
+    n = max(1, len(owner_keys))
+    if unowned:
+        base = len(unowned) // n
+        rem = len(unowned) % n
+        idx = 0
+        for oi, k in enumerate(owner_keys):
+            take = base + (1 if oi < rem else 0)
+            if take <= 0:
+                continue
+            alloc[k].extend(unowned[idx: idx + take])
+            idx += take
+
+        # Defensive: if anything remains due to edge cases, append to last owner.
+        if idx < len(unowned):
+            alloc[owner_keys[-1]].extend(unowned[idx:])
 
     return alloc
+
+
+async def _claim_unowned_sections_to_owners(
+    *, term_id: str, campus_id: str, course_id: str,
+    owners: List[Tuple[str, str, int]],
+    campus_prefix_pattern: Optional[str] = None,
+) -> int:
+    """Persist ownership for legacy/unowned sections so UI rows don't reshuffle.
+
+    When sections don't have owner_batch_id/owner_program_id (old data or older inserts),
+    the Offerings UI must still display them in a predictable *sequential* order per
+    curriculum block.
+
+    We assign unowned sections (sorted by section_code number) into contiguous chunks
+    across the provided owner order, then write owner fields to COL_SECTIONS.
+
+    Returns the number of sections updated.
+    """
+    if not owners:
+        return 0
+
+    q: Dict[str, Any] = {
+        "term_id": term_id,
+        "campus_id": campus_id,
+        "status": {"$ne": "archived"},
+        "$or": [{"course_id": course_id}, {"fulfilled_placeholder_course_id": course_id}],
+    }
+    if campus_prefix_pattern:
+        q["section_code"] = {"$regex": f"^{campus_prefix_pattern}", "$options": "i"}
+
+    secs = [s async for s in db[COL_SECTIONS].find(
+        q,
+        {"_id": 0, "section_id": 1, "section_code": 1, "owner_batch_id": 1, "owner_program_id": 1},
+    )]
+    secs = _sort_sections_by_number(secs)
+
+    # Only claim sections that are truly unowned.
+    unowned: List[Dict[str, Any]] = []
+    for s in secs:
+        ob = (s.get("owner_batch_id") or "").strip()
+        op = (s.get("owner_program_id") or "").strip()
+        if not (ob and op):
+            unowned.append(s)
+
+    if not unowned:
+        return 0
+
+    owner_keys: List[Tuple[str, str]] = [(bid, pid) for (bid, pid, _bn) in owners]
+    n = max(1, len(owner_keys))
+    base = len(unowned) // n
+    rem = len(unowned) % n
+
+    updates: List[Tuple[str, str, str, int]] = []  # (section_id, owner_bid, owner_pid, bn)
+    idx = 0
+    for oi, (bid, pid, bn) in enumerate(owners):
+        take = base + (1 if oi < rem else 0)
+        if take <= 0:
+            continue
+        for s in unowned[idx: idx + take]:
+            sid = (s.get("section_id") or "").strip()
+            if sid:
+                updates.append((sid, bid, pid, int(bn or 0)))
+        idx += take
+
+    # Any remainder goes to last owner.
+    if idx < len(unowned):
+        bid, pid, bn = owners[-1]
+        for s in unowned[idx:]:
+            sid = (s.get("section_id") or "").strip()
+            if sid:
+                updates.append((sid, bid, pid, int(bn or 0)))
+
+    changed = 0
+    for sid, bid, pid, bn in updates:
+        res = await db[COL_SECTIONS].update_one(
+            {"section_id": sid},
+            {"$set": {
+                "owner_batch_id": bid,
+                "owner_program_id": pid,
+                "batch_number": bn,
+                "updated_at": now(),
+            }}
+        )
+        if res.matched_count:
+            changed += 1
+    return changed
+
+
+async def _reseat_sections_to_owners(
+    *, term_id: str, campus_id: str, course_id: str,
+    owners: List[Tuple[str, str, int]],
+    campus_prefix_pattern: Optional[str] = None,
+) -> int:
+    """Force a stable, sequential seating for a course across owner blocks.
+
+    This is required to satisfy BOTH UX rules at the same time:
+
+      1) Initial approved view must be sequential per block
+         (e.g., BSCS: S11,S12; BSIE: S13,S14; BSMSCS: S15,S16)
+      2) Deleting one section must NOT cause other section codes to move blocks.
+
+    We achieve this by persisting owner_batch_id/owner_program_id at approval time,
+    then the Offerings list groups strictly by these persisted owner fields.
+
+    This function overwrites prior owner assignments for NON-LOCKED rows.
+    Manual additions are protected by owner_locked==True or owner_source=='manual'.
+    """
+    if not owners:
+        return 0
+
+    q: Dict[str, Any] = {
+        "term_id": term_id,
+        "campus_id": campus_id,
+        "status": {"$ne": "archived"},
+        "$or": [{"course_id": course_id}, {"fulfilled_placeholder_course_id": course_id}],
+    }
+    if campus_prefix_pattern:
+        q["section_code"] = {"$regex": f"^{campus_prefix_pattern}", "$options": "i"}
+
+    secs = [s async for s in db[COL_SECTIONS].find(
+        q,
+        {
+            "_id": 0,
+            "section_id": 1,
+            "section_code": 1,
+            "owner_batch_id": 1,
+            "owner_program_id": 1,
+            "batch_number": 1,
+            "owner_locked": 1,
+            "owner_source": 1,
+        },
+    )]
+    secs = _sort_sections_by_number(secs)
+
+    movable: List[Dict[str, Any]] = []
+    for s in secs:
+        if bool(s.get("owner_locked")):
+            continue
+        if str(s.get("owner_source") or "").strip().lower() == "manual":
+            continue
+        movable.append(s)
+
+    if not movable:
+        return 0
+
+    n = max(1, len(owners))
+    base = len(movable) // n
+    rem = len(movable) % n
+
+    updates: List[Tuple[str, str, str, int]] = []
+    idx = 0
+    for oi, (bid, pid, bn) in enumerate(owners):
+        take = base + (1 if oi < rem else 0)
+        if take <= 0:
+            continue
+        for s in movable[idx: idx + take]:
+            sid = (s.get("section_id") or "").strip()
+            if sid:
+                updates.append((sid, bid, pid, int(bn or 0)))
+        idx += take
+
+    if idx < len(movable):
+        bid, pid, bn = owners[-1]
+        for s in movable[idx:]:
+            sid = (s.get("section_id") or "").strip()
+            if sid:
+                updates.append((sid, bid, pid, int(bn or 0)))
+
+    changed = 0
+    for sid, bid, pid, bn in updates:
+        res = await db[COL_SECTIONS].update_one(
+            {"section_id": sid},
+            {"$set": {
+                "owner_batch_id": bid,
+                "owner_program_id": pid,
+                "batch_number": bn,
+                "updated_at": now(),
+            }}
+        )
+        if res.matched_count:
+            changed += 1
+    return changed
 
 # ---------- ensure sections by demand ----------
 async def ensure_sections_from_demand(
@@ -2861,6 +3044,20 @@ async def _create_sections(
 ) -> int:
     made = 0
     owners = owners or []
+    # When creating multiple sections at once, avoid round-robin owner assignment.
+    # UX expectation: section codes should be grouped sequentially per owner block
+    # (e.g., first owner's rows get the first contiguous codes).
+    owner_slots: List[Tuple[str, str, int]] = []
+    if owners and count and int(count) > 0:
+        n = len(owners)
+        c = max(0, int(count))
+        base = c // n
+        rem = c % n
+        for oi, o in enumerate(owners):
+            owner_slots.extend([o] * (base + (1 if oi < rem else 0)))
+        # Defensive fallback
+        while len(owner_slots) < c:
+            owner_slots.append(owners[-1])
     for i in range(max(0, int(count))):
         code = await next_section_code(campus_prefix, term_id, course_id)
         sid = await _next_seq_id(COL_SECTIONS, "section_id", "SEC", 4)
@@ -2884,7 +3081,7 @@ async def _create_sections(
         }
 
         if owners:
-            bid, pid, bn = owners[i % len(owners)]
+            bid, pid, bn = (owner_slots[i] if i < len(owner_slots) else owners[-1])
             doc["owner_batch_id"] = bid or None
             doc["owner_program_id"] = pid or None
             doc["batch_number"] = int(bn or 0)
@@ -3015,6 +3212,53 @@ async def _cohort_snapshot(term_id: str, campus_id: str) -> Dict[str, Dict[str, 
             "junior": int(stats.get("junior") or 0),
             "senior": int(stats.get("senior") or 0),
         }
+    return out
+
+def _distribute_sections_by_owner(
+    sections: List[Dict[str, Any]],
+    owners: List[Tuple[str, str, int]],
+) -> Dict[Tuple[str, str], List[Dict[str, Any]]]:
+    """Stable distribution for the Offerings UI.
+
+    **Never move** a section that already has an owner.
+
+    Why: The previous view logic re-distributed *all* sections across owners on
+    every list call (round-robin/chunking). So deleting one section could cause
+    other section codes to "slide" into different batch/program rows.
+
+    This function groups by persisted owner fields (owner_batch_id/owner_program_id).
+    Unowned (legacy) sections are placed best-effort into owners in order, but
+    owned sections remain fixed.
+    """
+    out: Dict[Tuple[str, str], List[Dict[str, Any]]] = {(bid, pid): [] for (bid, pid, _bn) in owners}
+    legacy: List[Dict[str, Any]] = []
+
+    owner_keys = [(bid, pid) for (bid, pid, _bn) in owners]
+    owner_key_set = set(owner_keys)
+
+    for s in _sort_sections_by_number(sections):
+        ob = (s.get("owner_batch_id") or "").strip()
+        op = (s.get("owner_program_id") or "").strip()
+        if ob and op and (ob, op) in owner_key_set:
+            out[(ob, op)].append(s)
+        else:
+            legacy.append(s)
+
+    # Legacy/unowned fallback: place in *contiguous chunks* (sequential), not round-robin.
+    if legacy and owner_keys:
+        n = max(1, len(owner_keys))
+        base = len(legacy) // n
+        rem = len(legacy) % n
+        idx = 0
+        for oi, k in enumerate(owner_keys):
+            take = base + (1 if oi < rem else 0)
+            if take <= 0:
+                continue
+            out[k].extend(legacy[idx: idx + take])
+            idx += take
+        if idx < len(legacy):
+            out[owner_keys[-1]].extend(legacy[idx:])
+
     return out
 
 async def _planned_capacity_by_course_multi(term_id: str, prefix_map: Dict[str, str], course_ids: List[str]) -> Dict[str, int]:
@@ -4901,7 +5145,10 @@ async def get_course_offerings(
     distribution_by_course: Dict[str, Dict[Tuple[str, str], List[Dict[str, Any]]]] = {}
     for cid in allowed_course_ids:
         owners = _unique_owners_in_order(block_keys_by_course.get(cid, []))
-        distribution_by_course[cid] = _distribute_sections_round_robin(campus_sec_by_course.get(cid, []), owners)
+        # IMPORTANT: For Offerings view, sections must stay in their original
+        # batch/program row once assigned. So we group by persisted owner fields
+        # instead of re-distributing on every refresh.
+        distribution_by_course[cid] = _distribute_sections_by_owner(campus_sec_by_course.get(cid, []), owners)
 
     rows: List[Dict[str, Any]] = []
 
@@ -6633,6 +6880,25 @@ async def post_course_offerings(
                     term_id=term_id, campus_id=campus_id, campus_prefix=pref_pat,
                     course_id=cid, target_count=target
                 )
+        try:
+            for cid, owners_set in (course_to_owner_set or {}).items():
+                if not cid:
+                    continue
+                owners_for_course = await _ordered_owners(cid)
+                if not owners_for_course:
+                    continue
+                lvl = (await db[COL_COURSES].find_one({"course_id": cid}, {"_id": 0, "program_level": 1}) or {}).get("program_level")
+                pref_pat = prefix_pattern_for_level(campus.get("campus_name", ""), lvl) or prefix_default
+                await _reseat_sections_to_owners(
+                    term_id=term_id,
+                    campus_id=campus_id,
+                    course_id=cid,
+                    owners=owners_for_course,
+                    campus_prefix_pattern=pref_pat,
+                )
+        except Exception:
+            # Best-effort only; never block approval.
+            pass
 
         await db[COL_PLANSTATE].update_one(
             {"term_id": term_id, "campus_id": campus_id},
@@ -6675,9 +6941,6 @@ async def post_course_offerings(
         preen_hash = _sha1_of(preen_map)
         cohort_hash = _sha1_of(cohort_map)
 
-        # Accept current total section count for this course (course-scoped planner).
-        # NOTE: we intentionally do NOT filter by section_code prefix here.
-        # Prefix filtering can miscount (and can throw if legacy prefixes are inconsistent).
         sec_q: Dict[str, Any] = {
             "term_id": term_id,
             "campus_id": campus_id,
@@ -6740,10 +7003,6 @@ async def post_course_offerings(
         if not ids:
             return {"ok": True, "deleted": 0}
 
-        # IMPORTANT:
-        # "Approval required" is driven by COL_SECTIONS_SUBMITTED (OM snapshot). So to make the panel
-        # disappear immediately, we must delete from BOTH COL_SECTIONS and COL_SECTIONS_SUBMITTED.
-        # Soft rule: never delete Special Class (remarks contains "SPECIAL CLASS") from OM-suggestion actions.
         om_rows = [
             r async for r in db[COL_SECTIONS_SUBMITTED].find(
                 {"term_id": term_id, "campus_id": campus_id, "section_id": {"$in": ids}},
@@ -7084,6 +7343,9 @@ async def post_course_offerings(
             "batch_number": batch_number,
             "owner_program_id": (payload.get("program_id") or "").strip(),
             "owner_batch_id": (payload.get("batch_id") or "").strip(),
+            # Manual rows must NEVER be reseated automatically.
+            "owner_locked": True,
+            "owner_source": "manual",
             "enrolled": None,
             "status": "active",
             "created_at": now(), "updated_at": now(),
@@ -7246,9 +7508,6 @@ async def post_course_offerings(
 
             try:
                 await db[COL_SECTIONS].update_one({"section_id": section_id}, {"$set": sec_updates})
-
-                # Keep OM's load-assignment snapshot in sync for capacity edits (rooms are live via schedules).
-                # OM table reads sections_submitted.enrollment_cap, so update it immediately when APO edits capacity.
                 if 'enrollment_cap' in sec_updates:
                     try:
                         q = {'term_id': term_id, 'section_id': section_id}

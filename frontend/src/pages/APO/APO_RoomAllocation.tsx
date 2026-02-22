@@ -554,14 +554,23 @@ function EditRoomModal({
   onSaved: () => void;
 }) {
   const [selectedDay, setSelectedDay] = useState<Day | "">("");
+  // NOTE: this modal edits *availability* only (unassigned slots). Assigned section slots are locked.
   const [selectedSlots, setSelectedSlots] = useState<string[]>([]);
+  const [lockedSlots, setLockedSlots] = useState<string[]>([]);
+
   useEffect(() => {
-    if (selectedDay) {
-      const slots = room.schedule.filter((s) => s.day === selectedDay).map((s) => s.time_band);
-      setSelectedSlots(slots);
-    } else {
+    if (!selectedDay) {
       setSelectedSlots([]);
+      setLockedSlots([]);
+      return;
     }
+
+    const dayCells = room.schedule.filter((s) => s.day === selectedDay);
+    const avail = dayCells.filter((s) => !s.section_id).map((s) => s.time_band);
+    const locked = dayCells.filter((s) => !!s.section_id).map((s) => s.time_band);
+
+    setSelectedSlots(avail);
+    setLockedSlots(locked);
   }, [selectedDay, room.schedule]);
 
   const user = useMemo(() => {
@@ -605,6 +614,14 @@ function EditRoomModal({
                   onChange={setSelectedSlots}
                   disabled={!selectedDay}
                 />
+                {!!selectedDay && lockedSlots.length > 0 && (
+                  <div className="mt-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                    <div className="font-medium">Locked (already assigned)</div>
+                    <div className="mt-1">
+                      {lockedSlots.join(", ")}. Unassign the section first if you need to free these slots.
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           </div>
@@ -720,7 +737,11 @@ function RoomSchedule({
 
   return (
     <div className="w-full rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
-      <h2 className="text-lg font-bold">Room Allocation</h2>
+      <div className="flex flex-wrap items-center gap-2">
+
+        <h2 className="text-lg font-bold">Room Allocation</h2>
+
+      </div>
       <div className="mb-4 flex items-center gap-2">
         <button onClick={onBack} className="flex items-center gap-2 text-emerald-700 hover:underline">
           <ArrowLeft className="h-5 w-5" />
@@ -1164,6 +1185,36 @@ const refresh = async (): Promise<RoomAllocationResponse | null> => {
     return list;
   }, [rooms, building, typeFilter, search]);
 
+  // Header summary: total rooms + rooms with at least 1 available slot (based on current term's allowed cells)
+  const roomTypeSummary = useMemo(() => {
+    const summary: Record<RoomType, { total: number; available: number; full: number }> = {
+      Classroom: { total: 0, available: 0, full: 0 },
+      ComLab: { total: 0, available: 0, full: 0 },
+    };
+
+    const normalize = (t: string | undefined | null): RoomType | null => {
+      const s = String(t || "").trim().toLowerCase();
+      if (!s) return null;
+      if (s.includes("com") && s.includes("lab")) return "ComLab";
+      if (s.includes("computer") && s.includes("lab")) return "ComLab";
+      if (s.includes("lab")) return "ComLab";
+      if (s.includes("class")) return "Classroom";
+      return null;
+    };
+
+    for (const r of rooms) {
+      const key = normalize(r.room_type);
+      if (!key) continue;
+      summary[key].total += 1;
+      const { open, total } = computeCounts(r);
+      if (total > 0 && open <= 0) summary[key].full += 1;
+      else if (open > 0) summary[key].available += 1;
+    }
+
+    return summary;
+  }, [rooms]);
+
+
   return (
     <div className="min-h-screen w-full bg-gray-50 text-slate-900">
       <TopBar
@@ -1191,7 +1242,31 @@ const refresh = async (): Promise<RoomAllocationResponse | null> => {
             <div className="flex flex-wrap items-center gap-3 justify-between">
               <div className="flex flex-wrap items-center gap-3">
                 <div>
-                  <h2 className="text-lg font-bold">Room Allocation</h2>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h2 className="text-lg font-bold">Room Allocation</h2>
+
+                    <span
+                      className={cls(
+                        "inline-flex items-center gap-1 rounded-full border px-2 py-1 text-xs font-medium",
+                        "border-sky-200 bg-sky-50 text-sky-700"
+                      )}
+                      title="Classrooms: rooms with at least 1 available slot / total classrooms"
+                    >
+                      <Building2 className="h-3.5 w-3.5" />
+                      Classroom: {roomTypeSummary.Classroom.available}/{roomTypeSummary.Classroom.total}
+                    </span>
+
+                    <span
+                      className={cls(
+                        "inline-flex items-center gap-1 rounded-full border px-2 py-1 text-xs font-medium",
+                        "border-violet-200 bg-violet-50 text-violet-700"
+                      )}
+                      title="ComLabs: rooms with at least 1 available slot / total comlabs"
+                    >
+                      <FlaskConical className="h-3.5 w-3.5" />
+                      ComLab: {roomTypeSummary.ComLab.available}/{roomTypeSummary.ComLab.total}
+                    </span>
+                  </div>
                   <p className="text-sm text-gray-500">{headerLabel}</p>
                 </div>
               </div>
