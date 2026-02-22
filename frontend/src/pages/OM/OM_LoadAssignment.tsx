@@ -10,6 +10,8 @@ import { createPortal } from "react-dom";
 import { Outlet, useLocation } from "react-router-dom";
 import AppShell from "../../base/AppShell";
 import { runOmAutoAssign } from "../../api.ts";
+import { getSocket } from "../../realtime/socket";
+import { emitAck } from "../../realtime/ack";
 import {
   submitOmLoadAssignment,
   saveOmSectionRemarks,
@@ -3104,6 +3106,10 @@ useEffect(() => {
       }));
 
       setRows(normalizedNextRows);
+      // Realtime: broadcast the full auto-assign result to other editors (best-effort).
+      try {
+        broadcastLaBulk(normalizedNextRows as any);
+      } catch {}
       setTerm(typeof res?.term === "string" ? res.term : "");
       // Keep term_id in sync so archive-view detection stays correct.
       setTermId(
@@ -3170,6 +3176,69 @@ useEffect(() => {
   /** Track the default (active) term id so we can detect archive viewing */
   const [activeTermId, setActiveTermId] = useState<string>("");
 
+  // Realtime collaboration (Load Assignment)
+  const laRoomsRef = useRef<string[]>([]);
+  const [laPresence, setLaPresence] = useState<
+    { userId: string; fullName: string; cursor?: { rowId?: string | null; field?: string | null } | null }[]
+  >([]);
+
+  // Collaboration row highlighting colors (Google-Docs-style).
+  // IMPORTANT: This is UI-only presence; the backend state-of-truth remains Save/Approve.
+  const editorColorForName = useCallback((fullName: string): string | null => {
+    const n = String(fullName || "").trim().toLowerCase();
+    if (!n) return null;
+    // Requested specific colors
+    if (n.includes("jamie")) return "hotpink"; // OM
+    if (n.includes("nathan")) return "darkgreen"; // CHAIR
+    if (n.includes("byrnn")) return "#ff7a00"; // bright orange
+
+    // Fallback: assign a deterministic color for any other collaborator (e.g., GS Coordinator)
+    // so row highlight indicators always appear for everyone.
+    const palette = [
+      "#2563eb", // blue-600
+      "#7c3aed", // violet-600
+      "#db2777", // pink-600
+      "#ea580c", // orange-600
+      "#16a34a", // green-600
+      "#0f766e", // teal-700
+      "#b45309", // amber-700
+      "#4f46e5", // indigo-600
+    ];
+
+    // Simple stable hash
+    let h = 0;
+    for (let i = 0; i < n.length; i++) {
+      h = (h * 31 + n.charCodeAt(i)) >>> 0;
+    }
+    return palette[h % palette.length];
+  }, []);
+
+  const presenceShadowsByRowId = useMemo(() => {
+    const map: Record<string, string> = {};
+    const others = (laPresence || []).filter(
+      (u) => String(u.userId) && String(u.userId) !== String(userId)
+    );
+
+    const byRow = new Map<string, string[]>();
+    for (const u of others) {
+      const rowId = String((u as any)?.cursor?.rowId || "").trim();
+      if (!rowId) continue;
+      const color = editorColorForName(u.fullName || "");
+      if (!color) continue;
+      const arr = byRow.get(rowId) || [];
+      if (!arr.includes(color)) arr.push(color);
+      byRow.set(rowId, arr);
+    }
+
+    // Build layered inset rings per row.
+    for (const [rowId, colors] of byRow.entries()) {
+      // 2px, 4px, 6px ... inset outlines
+      const shadows = colors.map((c, i) => `inset 0 0 0 ${2 + i * 2}px ${c}`);
+      map[rowId] = shadows.join(", ");
+    }
+    return map;
+  }, [laPresence, userId, editorColorForName]);
+
   /** Archived view UI */
   const [archiveOpen, setArchiveOpen] = useState(false);
   const [archiveTerms, setArchiveTerms] = useState<
@@ -3182,6 +3251,98 @@ useEffect(() => {
   >([]);
   const [archiveTermId, setArchiveTermId] = useState<string>("");
   const isArchiveView = !!activeTermId && !!termId && termId !== activeTermId;
+
+  // Join realtime collaboration room for the currently viewed term.
+  useEffect(() => {
+    const socket = getSocket();
+    const t = (termId || activeTermId || "").trim();
+    if (!socket || !t) return;
+
+    let disposed = false;
+
+    const join = async () => {
+      try {
+        const resp = await emitAck<any>(socket, "loadassignment_join", { termId: t });
+        if (disposed) return;
+        if (!resp?.ok) {
+          laRoomsRef.current = [];
+          setLaPresence([]);
+          return;
+        }
+        const rooms = Array.isArray(resp?.rooms) ? resp.rooms.map((x: any) => String(x || "").trim()).filter(Boolean) : [];
+        laRoomsRef.current = rooms;
+      } catch {
+        // best-effort only
+      }
+    };
+
+    void join();
+
+    const onPresence = (payload: any) => {
+      const rid = String(payload?.roomId || "");
+      if (!rid) return;
+      // show presence for the primary room only
+      if (rid !== (laRoomsRef.current[0] || rid)) return;
+      const users = Array.isArray(payload?.users) ? payload.users : [];
+      setLaPresence(
+        users
+          .map((u: any) => ({
+            userId: String(u?.userId || ""),
+            fullName: String(u?.fullName || ""),
+            cursor: u?.cursor ?? null,
+          }))
+          .filter((u: any) => u.userId)
+      );
+    };
+
+    const onRowUpdate = (payload: any) => {
+      const rid = String(payload?.roomId || "");
+      if (!rid || rid !== (laRoomsRef.current[0] || rid)) return;
+      const row = payload?.row;
+      if (!row || typeof row !== "object") return;
+      const id = String((row as any)?.id || (row as any)?.section_id || "");
+      if (!id) return;
+      setRows((prev) => prev.map((r: any) => (String(r.id) === id ? ({ ...r, ...row } as any) : r)));
+    };
+
+    const onBulkUpdate = (payload: any) => {
+      const rid = String(payload?.roomId || "");
+      if (!rid || rid !== (laRoomsRef.current[0] || rid)) return;
+      const incoming = Array.isArray(payload?.rows) ? payload.rows : [];
+      if (!incoming.length) return;
+      const byId = new Map<string, any>();
+      for (const rr of incoming) {
+        const id = String(rr?.id || rr?.section_id || "");
+        if (id) byId.set(id, rr);
+      }
+      setRows((prev) => prev.map((r: any) => {
+        const rr = byId.get(String(r.id));
+        return rr ? ({ ...r, ...rr } as any) : r;
+      }));
+    };
+
+    socket.on("loadassignment_presence", onPresence);
+    socket.on("loadassignment_row_update", onRowUpdate);
+    socket.on("loadassignment_bulk_update", onBulkUpdate);
+
+    return () => {
+      disposed = true;
+      try {
+        socket.off("loadassignment_presence", onPresence);
+        socket.off("loadassignment_row_update", onRowUpdate);
+        socket.off("loadassignment_bulk_update", onBulkUpdate);
+      } catch {}
+      try {
+        const rooms = laRoomsRef.current.slice();
+        laRoomsRef.current = [];
+        setLaPresence([]);
+        if (rooms.length) {
+          void emitAck<any>(socket, "loadassignment_leave", { rooms });
+        }
+      } catch {}
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [termId, activeTermId]);
 
 
   // Determine the planning term id (term after the current anchor) for widgets that must
@@ -3458,7 +3619,31 @@ const inferOmCampusId = useCallback((): string => {
     bumpHistory();
   };
 
-  const commitRows = (nextRows: Row[], options?: { markDirty?: boolean }) => {
+  const broadcastLaRow = useCallback((row: any) => {
+    const socket = getSocket();
+    const roomId = laRoomsRef.current[0] || "";
+    if (!socket || !roomId || !row) return;
+    void emitAck(socket, "loadassignment_row_update", { roomId, row });
+  }, []);
+
+  const broadcastLaBulk = useCallback((rowsPayload: any[]) => {
+    const socket = getSocket();
+    const roomId = laRoomsRef.current[0] || "";
+    if (!socket || !roomId || !Array.isArray(rowsPayload) || !rowsPayload.length) return;
+    void emitAck(socket, "loadassignment_bulk_update", { roomId, rows: rowsPayload });
+  }, []);
+
+  const broadcastLaCursor = useCallback((rowId?: string, field?: string) => {
+    const socket = getSocket();
+    const roomId = laRoomsRef.current[0] || "";
+    if (!socket || !roomId) return;
+    void emitAck(socket, "loadassignment_cursor", { roomId, rowId: rowId || null, field: field || null });
+  }, []);
+
+  const commitRows = (
+    nextRows: Row[], 
+    options?: { markDirty?: boolean; broadcastRowId?: string | null }
+  ) => {
     // If OM edits a schedule row that is currently "Approved",
     // the approval becomes stale immediately and must be re-sent to faculty.
     // This must happen even before OM clicks "Send to Faculty".
@@ -3624,6 +3809,15 @@ const inferOmCampusId = useCallback((): string => {
 
     setRows(nextRowsWithStatus);
 
+    // Realtime: broadcast the finalized row snapshot (best-effort).
+    try {
+      const rid = String(options?.broadcastRowId || "").trim();
+      if (rid) {
+        const rr = nextRowsWithStatus.find((x) => String((x as any)?.id || "") === rid);
+        if (rr) broadcastLaRow(rr);
+      }
+    } catch {}
+
     if (options?.markDirty !== false) {
       setHasLocalEdits(true);
     }
@@ -3636,7 +3830,13 @@ const inferOmCampusId = useCallback((): string => {
     options?: { markDirty?: boolean }
   ) => {
     const next = rows.map((r) => (r.id === id ? { ...r, ...patch } : r));
-    commitRows(next, { markDirty: options?.markDirty !== false });
+    commitRows(next, { markDirty: options?.markDirty !== false, broadcastRowId: id });
+
+    // Best-effort cursor signal: treat updates as the user editing that row.
+    try {
+      const keys = Object.keys(patch || {});
+      broadcastLaCursor(id, keys[0] || undefined);
+    } catch {}
   };
 
   const handleUndo = () => {
@@ -5656,6 +5856,39 @@ const courseCodeToInfo = useMemo(() => {
                   Manage course assignments and faculty workload distribution
                 </p>
 
+                {/* Realtime collaboration presence */}
+                {(() => {
+                  const others = (laPresence || []).filter((u) => String(u.userId) && String(u.userId) !== String(userId));
+                  if (!others.length) return null;
+                  return (
+                    <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-slate-700">
+                      <span className="inline-flex items-center rounded-full bg-emerald-100 px-2 py-0.5 font-semibold text-emerald-800">
+                        Live
+                      </span>
+                      <span>Editing now:</span>
+                      {others.slice(0, 5).map((u) => {
+                        const c = editorColorForName(u.fullName || "");
+                        return (
+                          <span
+                            key={u.userId}
+                            className="inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-2 py-0.5"
+                          >
+                            <span
+                              className="inline-block h-2.5 w-2.5 rounded-full"
+                              style={{ backgroundColor: c || "#94a3b8" }}
+                              aria-hidden="true"
+                            />
+                            {u.fullName || u.userId}
+                          </span>
+                        );
+                      })}
+                      {others.length > 5 ? (
+                        <span className="text-slate-500">+{others.length - 5} more</span>
+                      ) : null}
+                    </div>
+                  );
+                })()}
+
                 {/* Deadline banner is rendered below using om_submit_windows from /om/load-assignment/list. */}
               </header>
 
@@ -6224,6 +6457,15 @@ const courseCodeToInfo = useMemo(() => {
                           const isForwardedToFaculty = !!r.forwarded_to_faculty;
                           const isPastDeadlineRow = Boolean((r as any).is_past_deadline);
                           const hasDraft = Boolean((r as any).has_pending_override);
+                          const presenceShadow = presenceShadowsByRowId[String(r.id)] || "";
+                          // Previously used Tailwind ring classes; we replicate as boxShadow so it can stack with presence outlines.
+                          const deadlineShadow =
+                            !isLocked && isPastDeadlineRow && hasDraft
+                              ? "0 0 0 1px #FDE68A"
+                              : "";
+                          const combinedShadow = [deadlineShadow, presenceShadow]
+                            .filter(Boolean)
+                            .join(", ");
                           // Show the red dot only when there is a pending RFC AND the row is still actionable.
                           // Once the schedule is approved/finalized, the message icon is disabled; the dot should disappear.
                           const unread = !!(r as any).pending_rfc;
@@ -6238,12 +6480,13 @@ const courseCodeToInfo = useMemo(() => {
                                     : "bg-gray-100 text-gray-500 hover:bg-gray-100"
                                   : isPastDeadlineRow
                                   ? hasDraft
-                                    ? "bg-slate-50 hover:bg-slate-100/40 ring-1 ring-amber-200"
+                                    ? "bg-slate-50 hover:bg-slate-100/40"
                                     : "bg-slate-50 hover:bg-slate-100/40"
                                   : isForwardedToFaculty
                                   ? "bg-sky-50 hover:bg-sky-100/40"
                                   : "hover:bg-gray-50"
                               )}
+                              style={combinedShadow ? { boxShadow: combinedShadow } : undefined}
                             >
                               <td className="px-3 py-2 text-center">
                                 {isRunning && (
