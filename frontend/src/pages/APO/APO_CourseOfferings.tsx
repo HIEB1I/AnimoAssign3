@@ -6582,7 +6582,7 @@ const PlanningSummaryPanel: React.FC<{
           <div>
             <div className="font-semibold text-slate-900">Planning Summary</div>
             <div className="text-sm text-slate-700">
-              Explains section recommendations from pre-enlistment demand and highlights items needing your approval.
+              Section recommendations from pre-enlistment demand and approvals.
             </div>
             <div className="mt-2 flex flex-wrap gap-2 text-xs">
               {coursesWithGap > 0 && (
@@ -6819,7 +6819,7 @@ const PlanningSummaryModal: React.FC<{
                 onClick={onClose}
                 className="rounded-lg border border-white/25 bg-white/10 px-3 py-1.5 text-sm font-semibold text-white hover:bg-white/15"
               >
-                Close
+                X
               </button>
             </div>
           </div>
@@ -6916,7 +6916,7 @@ const PlanningSummaryModal: React.FC<{
                                 Seat gap: <span className="font-semibold">{seat.gap}</span>
                               </span>
                               <span className={cls("rounded-full px-2 py-1 border", seat.suggest > 0 ? "bg-emerald-50 border-emerald-200 text-emerald-800" : "bg-gray-50 border-gray-200")}>
-                                Suggested add’l sections: <span className="font-semibold">{seat.suggest}</span>
+                                Add section: <span className="font-semibold">{seat.suggest}</span>
                               </span>
                             </>
                           ) : (
