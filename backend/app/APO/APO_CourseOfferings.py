@@ -5259,54 +5259,133 @@ async def post_course_offerings(
                     if in_same_term:
                         raise HTTPException(status_code=400, detail=f"Room already assigned (overlap) for {day_full} {st}-{et}.")
 
-            for e in se[:2]:
+            # Persist room edits back to section_schedules.
+            # NOTE: Some legacy Special Class rows may not carry schedule_id in their schedule_entries.
+            # In that case, we fall back to matching schedules by (section_id + day + start_time + end_time)
+            # and update *all* matching schedules to prevent stale room assignments (double-booking).
+            for idx, e in enumerate(se[:2], start=1):
                 if not isinstance(e, dict):
                     continue
 
                 sched_id = str(e.get("schedule_id") or "").strip()
-                if not sched_id:
+
+                # Payload may include day/start/end when schedule_id is missing.
+                day_in = str(e.get("day") or "").strip()
+                st_in = str(e.get("start_time") or "").strip()
+                et_in = str(e.get("end_time") or "").strip()
+                rt_in = str(e.get("room_type") or "").strip()
+
+                def _hhmm(v: str) -> str:
+                    s = re.sub(r"[^\d]", "", str(v or "").strip())
+                    if len(s) == 3:
+                        s = "0" + s
+                    return s if len(s) == 4 else ""
+
+                def _day_code(v: str) -> str:
+                    u = (v or "").strip().upper()
+                    if u in {"M", "T", "W", "H", "F", "S"}:
+                        return u
+                    # accept full names
+                    m = {
+                        "MONDAY": "M",
+                        "TUESDAY": "T",
+                        "WEDNESDAY": "W",
+                        "THURSDAY": "H",
+                        "FRIDAY": "F",
+                        "SATURDAY": "S",
+                    }
+                    return m.get(u, "")
+
+                st_fallback = _hhmm(st_in)
+                et_fallback = _hhmm(et_in)
+                day_code_fallback = _day_code(day_in)
+
+                # Load schedule doc when schedule_id is provided (source of truth).
+                sch = None
+                if sched_id:
+                    sch = await db[COL_SCHEDS].find_one(
+                        {"schedule_id": sched_id},
+                        {"_id": 0, "schedule_id": 1, "section_id": 1, "day": 1, "start_time": 1, "end_time": 1, "room_type": 1, "room_id": 1},
+                    )
+                    if not sch:
+                        raise HTTPException(status_code=404, detail=f"Schedule not found: {sched_id}")
+
+                    # Ensure this schedule_id belongs to the special class record (if schedule_entries exist in the record).
+                    if allowed_sched_ids and sched_id not in allowed_sched_ids:
+                        raise HTTPException(status_code=400, detail=f"Schedule {sched_id} is not part of this special class record.")
+
+                # Determine canonical (section_id, day, start, end)
+                sch_section_id = str((sch or {}).get("section_id") or "").strip() or str(section_id_sc or "").strip()
+
+                # If special_class.section_id is missing or mismatched, repair it using schedule.section_id.
+                if sch_section_id and (not section_id_sc or sch_section_id != section_id_sc):
+                    section_id_sc = sch_section_id
+                    await db[COL_SPECIAL].update_one(
+                        {"term_id": term_id_target, "special_id": special_id},
+                        {"$set": {"section_id": section_id_sc, "updated_at": now()}},
+                    )
+
+                day_code = _day_code(str((sch or {}).get("day") or "")) or day_code_fallback
+                st = _hhmm(str((sch or {}).get("start_time") or "")) or st_fallback
+                et = _hhmm(str((sch or {}).get("end_time") or "")) or et_fallback
+
+                if not (section_id_sc and day_code and st and et):
+                    # Without these, we cannot safely persist to section_schedules.
                     continue
 
-                # Load the schedule doc (source of truth for day/time/section)
-                sch = await db[COL_SCHEDS].find_one(
-                    {"schedule_id": sched_id},
-                    {"_id": 0, "schedule_id": 1, "section_id": 1, "day": 1, "start_time": 1, "end_time": 1, "room_type": 1, "room_id": 1},
-                )
-                if not sch:
-                    raise HTTPException(status_code=404, detail=f"Schedule not found: {sched_id}")
+                # Find all matching schedules for this slot (to eliminate stale bookings).
+                match_ids: List[str] = []
+                async for cand in db[COL_SCHEDS].find(
+                    {"section_id": section_id_sc, "day": {"$in": [day_code, day_code.upper()]}},
+                    {"_id": 0, "schedule_id": 1, "start_time": 1, "end_time": 1},
+                ):
+                    if _hhmm(cand.get("start_time")) == st and _hhmm(cand.get("end_time")) == et:
+                        cid = str(cand.get("schedule_id") or "").strip()
+                        if cid:
+                            match_ids.append(cid)
 
-                # Ensure this schedule_id belongs to the special class record (if schedule_entries exist in the record).
-                # This is safer than strict section_id equality because some legacy special_class rows may have
-                # stale/missing section_id even though the schedule_id is correct.
-                if allowed_sched_ids and sched_id not in allowed_sched_ids:
-                    raise HTTPException(status_code=400, detail=f"Schedule {sched_id} is not part of this special class record.")
+                # If we have a schedule_id and it didn't match by slot (legacy formatting), still include it.
+                if sched_id and sched_id not in match_ids:
+                    match_ids.append(sched_id)
 
-                sch_section_id = str(sch.get("section_id") or "").strip()
+                # If nothing matched and schedule_id was missing, create a schedule doc so Room Allocation sees it.
+                if not match_ids and not sched_id:
+                    base_id = _sch_id_from_sec(section_id_sc, idx)
+                    new_id = base_id
+                    k = 1
+                    while await db[COL_SCHEDS].find_one({"schedule_id": new_id}, {"_id": 1}):
+                        k += 1
+                        new_id = f"{base_id}-{k}"
 
-                # If special_class.section_id is missing, persist it from the schedule for better future joins
-                if not section_id_sc and sch_section_id:
-                    section_id_sc = sch_section_id
-                    await db[COL_SPECIAL].update_one(
-                        {"term_id": term_id_target, "special_id": special_id},
-                        {"$set": {"section_id": section_id_sc, "updated_at": now()}},
-                    )
+                    doc = {
+                        "schedule_id": new_id,
+                        "section_id": section_id_sc,
+                        "day": day_code,
+                        "start_time": st,
+                        "end_time": et,
+                        "room_type": rt_in or None,
+                        "room_id": None,
+                        "created_at": now(),
+                        "updated_at": now(),
+                    }
+                    await db[COL_SCHEDS].insert_one(doc)
+                    match_ids = [new_id]
 
-                # If special_class.section_id exists but does not match the schedule's section_id, repair it (do not block).
-                # The schedule_id is the source of truth for which section we are editing.
-                if sch_section_id and section_id_sc and sch_section_id != section_id_sc:
-                    section_id_sc = sch_section_id
-                    await db[COL_SPECIAL].update_one(
-                        {"term_id": term_id_target, "special_id": special_id},
-                        {"$set": {"section_id": section_id_sc, "updated_at": now()}},
-                    )
+                if not match_ids:
+                    # schedule_id was provided but couldn't be resolved to a slot; this is a data integrity issue.
+                    raise HTTPException(status_code=404, detail=f"No schedule slot found to update for Special Class (section {section_id_sc}).")
 
+                # Apply room change
                 room_id_raw = e.get("room_id")
                 room_id = (str(room_id_raw).strip() if room_id_raw is not None else "")
 
-                old_room_id = (sch.get("room_id") or "")
-                if old_room_id is None:
-                    old_room_id = ""
-                old_room_id = str(old_room_id).strip()
+                # Capture old room (from first matched schedule)
+                old_doc = await db[COL_SCHEDS].find_one(
+                    {"schedule_id": match_ids[0]},
+                    {"_id": 0, "room_id": 1, "day": 1, "start_time": 1, "end_time": 1},
+                ) or {}
+
+                old_room_id = str(old_doc.get("room_id") or "").strip()
 
                 set_doc: Dict[str, Any] = {"updated_at": now()}
 
@@ -5314,27 +5393,34 @@ async def post_course_offerings(
                 if room_id == "" or room_id.lower() in {"null", "none"}:
                     set_doc["room_id"] = None
                 else:
-                    # validate before setting
-                    await _validate_room_change(sch, room_id)
+                    # validate before setting (uses sch when available; otherwise use derived slot info)
+                    sch_for_validate = sch or {
+                        "section_id": section_id_sc,
+                        "day": day_code,
+                        "start_time": st,
+                        "end_time": et,
+                        "room_type": rt_in or None,
+                        "schedule_id": match_ids[0],
+                    }
+                    await _validate_room_change(sch_for_validate, room_id)
                     set_doc["room_id"] = room_id
 
-                qsch: Dict[str, Any] = {"schedule_id": sched_id}
-                if section_id_sc:
-                    qsch["section_id"] = section_id_sc
-
-                await db[COL_SCHEDS].update_one(qsch, {"$set": set_doc})
+                # Update all matching schedules for the slot
+                await db[COL_SCHEDS].update_many(
+                    {"schedule_id": {"$in": match_ids}},
+                    {"$set": set_doc},
+                )
 
                 # Record for notification (only when assigning/changing to a real room)
                 if room_id and room_id.lower() not in {"null", "none"} and room_id != old_room_id:
                     room_changes.append({
-                        "schedule_id": sched_id,
-                        "day": sch.get("day"),
-                        "start_time": sch.get("start_time"),
-                        "end_time": sch.get("end_time"),
+                        "schedule_id": match_ids[0],
+                        "day": old_doc.get("day") or day_code,
+                        "start_time": old_doc.get("start_time") or st,
+                        "end_time": old_doc.get("end_time") or et,
                         "from": old_room_id,
                         "to": room_id,
                     })
-
             # ---- Notify OM/GS when APO allocates/changes room in Special Class ----
             if room_changes:
                 try:

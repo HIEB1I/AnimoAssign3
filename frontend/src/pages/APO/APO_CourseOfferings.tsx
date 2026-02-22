@@ -1642,6 +1642,10 @@ const loadOfferings = async () => {
         remarks: scEditRemarks,
         schedule_entries: next.map((x) => ({
           schedule_id: x?.schedule_id ?? null,
+          day: x?.day ?? null,
+          start_time: x?.start_time ?? null,
+          end_time: x?.end_time ?? null,
+          room_type: x?.room_type ?? null,
           room_id: x?.room_id ?? null,
         })),
       });
