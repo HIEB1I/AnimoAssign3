@@ -22,7 +22,6 @@ from ..main import db
 # In-app bell notifications (same pattern as Faculty Service)
 from ..Notifications import create_notification
 
-
 async def _ensure_user_gmail_address(user_id: str, db) -> None:
     """Best-effort: ensure users.gmail is populated for email notifications.
 
@@ -86,7 +85,17 @@ COL_COURSES = "courses"
 COL_TERMS = "terms"
 COL_DEPTS = "departments"
 COL_CAMPUSES = "campuses"
+COL_LEAVES = "leaves"
+COL_PREFERENCES = "faculty_preferences"
+COL_FACULTY_LOADS = "faculty_loads"
 
+# OM <-> Faculty proposal + RFC collections
+COL_LOAD_PROPOSALS = "faculty_load_proposals"
+COL_LOAD_RFC = "faculty_rfc"
+
+# RFC state machine
+RFC_TERMINAL = {"ACCEPTED", "APPROVED", "REJECTED"}
+RFC_OPEN = {"OPEN", "NEEDS_OM", "NEEDS_FACULTY", "open"}
 
 async def _special_class_section_ids(term_id: str, db) -> set[str]:
     """Collect section_ids that belong to Special Class records for a term.
@@ -190,7 +199,6 @@ async def _special_class_section_ids(term_id: str, db) -> set[str]:
 
     return out
 
-
 def _campus_name_to_id(val: str) -> str:
     """Map Campus column values to campus_id.
 
@@ -213,7 +221,6 @@ def _campus_name_to_id(val: str) -> str:
 
     raise ValueError(f"Invalid Campus value: {s}")
 
-
 def _section_to_campus_id(section_code: str) -> str:
     """APO routing by Section prefix.
 
@@ -228,7 +235,6 @@ def _section_to_campus_id(section_code: str) -> str:
     if s.startswith("S") or s.startswith("G"):
         return "CMPS0001"
     return ""
-
 
 async def _apo_user_ids_for_campus(campus_id: str, db) -> list[str]:
     """Return APO user_ids who are scoped to the given campus.
@@ -310,7 +316,6 @@ async def _apo_user_ids_for_campus(campus_id: str, db) -> list[str]:
 
     return sorted(list(out))
 
-
 async def _all_apo_user_ids(db) -> list[str]:
     """Return all APO user_ids (best-effort).
 
@@ -346,10 +351,6 @@ async def _all_apo_user_ids(db) -> list[str]:
 
     return sorted(uids)
 
-
-
-
-
 async def _find_course_by_code(course_code: str, db) -> dict:
     """Find a course by course_code (supports string or array storage)."""
     import re as _re
@@ -363,7 +364,6 @@ async def _find_course_by_code(course_code: str, db) -> dict:
         {"course_code": {"$elemMatch": {"$regex": rf"^{_re.escape(cc)}$", "$options": "i"}}},
     ]}
     return await db[COL_COURSES].find_one(q, {"_id": 0}) or {}
-
 
 async def _loadassignment_department_ids(user_id: str, db) -> List[str]:
     """Department scope for users who can access Load Assignment.
@@ -438,19 +438,6 @@ async def _loadassignment_department_ids(user_id: str, db) -> List[str]:
 
     return dept_ids
 
-COL_LEAVES = "leaves"
-COL_PREFERENCES = "faculty_preferences"
-COL_FACULTY_LOADS = "faculty_loads"
-
-# OM <-> Faculty proposal + RFC collections
-COL_LOAD_PROPOSALS = "faculty_load_proposals"
-COL_LOAD_RFC = "faculty_rfc"
-
-
-# RFC state machine
-RFC_TERMINAL = {"ACCEPTED", "APPROVED", "REJECTED"}
-RFC_OPEN = {"OPEN", "NEEDS_OM", "NEEDS_FACULTY", "open"}
-
 def _iso(dt):
     try:
         return dt.isoformat()
@@ -524,9 +511,6 @@ def _normalize_rfc_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
 
     return doc
 
-COL_ROLE_ASSIGN = "role_assignments"
-
-
 async def _dept_name_by_id(dept_id: str, db) -> str:
     """Best-effort department name lookup used for notification copy."""
     if not dept_id:
@@ -542,7 +526,6 @@ async def _dept_name_by_id(dept_id: str, db) -> str:
         {"_id": 0, "dept_name": 1, "department_name": 1, "name": 1, "dept_code": 1},
     ) or {}
     return (d.get("dept_name") or d.get("department_name") or d.get("name") or "").strip()
-
 
 async def _chair_user_ids_for_department_id(department_id: str, db) -> List[str]:
     """
@@ -867,7 +850,6 @@ async def _faculty_on_leave_map(db, active_term_id: str):
     print(f"[DEBUG] Active term: {active_term_id}, blocked faculty: {blocked}")
     return blocked
 
-
 # --- APO-set deadline window (OM/GS schedule + faculty encoding) -------------
 
 def _parse_iso_dt(s: str) -> Optional[datetime]:
@@ -880,7 +862,6 @@ def _parse_iso_dt(s: str) -> Optional[datetime]:
         return dt.astimezone(timezone.utc)
     except Exception:
         return None
-
 
 async def _infer_campus_id_for_user(user_id: str, db) -> Optional[str]:
     """Best-effort campus resolver for OM/GS users."""
@@ -937,7 +918,6 @@ async def _infer_campus_id_for_user(user_id: str, db) -> Optional[str]:
 
     return None
 
-
 async def _normalize_campus_id(raw: Optional[str], db) -> Optional[str]:
     """Normalize a campus identifier to campuses.campus_id when possible.
 
@@ -992,7 +972,6 @@ async def _normalize_campus_id(raw: Optional[str], db) -> Optional[str]:
 
     return v
 
-
 async def _get_om_submit_window(term_id: str, campus_id: str, db) -> Optional[Dict[str, str]]:
     term_id = str(term_id or "").strip()
     cid_raw = str(campus_id or "").strip()
@@ -1039,7 +1018,6 @@ async def _get_om_submit_window(term_id: str, campus_id: str, db) -> Optional[Di
         "deadlineISO": str(doc.get("deadlineISO") or ""),
     }
 
-
 async def _has_apo_submission(term_id: str, campus_id: str, db) -> bool:
     term_id = str(term_id or "").strip()
     cid = (await _normalize_campus_id(campus_id, db)) or str(campus_id or "").strip()
@@ -1064,7 +1042,6 @@ async def _has_apo_submission(term_id: str, campus_id: str, db) -> bool:
         return bool(hit)
     except Exception:
         return False
-
 
 async def _infer_campus_id_from_rows(rows: List[Dict[str, Any]], db) -> Optional[str]:
     """Infer campus_id from the submitted grid rows (best-effort).
@@ -1115,7 +1092,6 @@ async def _infer_campus_id_from_rows(rows: List[Dict[str, Any]], db) -> Optional
     # Choose the most common campus among sections
     best = max(counts.items(), key=lambda kv: kv[1])[0]
     return await _normalize_campus_id(best, db)
-
 
 def _deadline_passed(window: Optional[Dict[str, str]]) -> bool:
     if not window:
@@ -1207,7 +1183,6 @@ def _looks_like_room_id(v: str | None) -> bool:
     s = (v or "").strip().upper()
     return s.startswith("ROOM")
 
-
 def _parse_time_str(v: Any) -> str:
     """Best-effort normalize time to HH:MM (24h). Leaves unknown formats untouched."""
     s = str(v or "").strip()
@@ -1235,10 +1210,8 @@ def _parse_time_str(v: Any) -> str:
 
     return s
 
-
 def _norm_header(h: str) -> str:
     return re.sub(r"\s+", " ", str(h or "").strip()).lower()
-
 
 async def _next_seq_id(db, collection: str, field: str, prefix: str, width: int = 4, attempts: int = 50) -> str:
     """Return next ID like 'SEC0001' / 'CRS0001'."""
@@ -1260,20 +1233,17 @@ async def _next_seq_id(db, collection: str, field: str, prefix: str, width: int 
     # last resort: random
     return f"{prefix}{uuid.uuid4().hex[:width].upper()}"
 
-
 def _sch_id_from_sec(section_id: str, slot: int = 1) -> str:
     m = re.match(r"^SEC(\d+)$", (section_id or "").strip().upper())
     if m:
         return f"SCH{int(m.group(1)):04d}-{int(slot):02d}"
     return f"SCH-{section_id}-{int(slot)}"
 
-
 def _asg_id_from_sec(section_id: str) -> str:
     m = re.match(r"^SEC(\d+)$", (section_id or "").strip().upper())
     if m:
         return f"ASG{int(m.group(1)):04d}"
     return f"ASG{uuid.uuid4().hex[:10].upper()}"
-
 
 async def _resolve_room_id(db, room_value: str) -> str | None:
     v = (room_value or "").strip()
@@ -1287,7 +1257,6 @@ async def _resolve_room_id(db, room_value: str) -> str | None:
         {"_id": 0, "room_id": 1},
     )
     return (doc or {}).get("room_id")
-
 
 async def _find_or_create_course_from_csv(db, course_code: str, course_title: str, units: Any) -> str:
     """Return course_id. Creates a minimal SHS course if not found."""
@@ -2861,8 +2830,6 @@ async def om_load_assignment_terms(db=Depends(get_db)):
 
     return {"ok": True, "active_term_id": active_term_id, "terms": terms}
 
-
-
 @router.get("/load-assignment/planning-term")
 async def om_load_assignment_planning_term(db=Depends(get_db)):
     """Return the current (is_current=True) term id and the planning term id.
@@ -2888,7 +2855,6 @@ async def om_load_assignment_planning_term(db=Depends(get_db)):
         "current_term_id": current_term_id,
         "planning_term_id": planning_term_id,
     }
-
 
 @router.get("/load-assignment/list")
 async def get_om_load_assignment_list(user_id: str, term_id: Optional[str] = None, db=Depends(get_db)):
@@ -3335,7 +3301,6 @@ async def get_om_load_assignment_list(user_id: str, term_id: Optional[str] = Non
         "blockedGeCmps2": blocked_ge_cmps2,
     }
 
-
 @router.get("/load-assignment/submitted-courses")
 async def om_get_submitted_course_offerings(
     user_id: str,
@@ -3426,7 +3391,6 @@ async def om_get_submitted_course_offerings(
         out.append({"code": code, "title": title, "units": units, "capacity": cap})
 
     return {"ok": True, "courses": out}
-
 
 @router.post("/load-assignment/new-line")
 async def om_save_new_line(
@@ -3790,8 +3754,6 @@ async def om_save_new_line(
 
     return {"ok": True, "section_id": section_id}
 
-
-
 @router.post("/load-assignment/to-faculty")
 async def om_send_to_faculty(payload: Dict[str, Any] = Body(...), db=Depends(get_db)):
     """Send OM proposed schedule(s) to faculty.
@@ -4011,7 +3973,6 @@ async def om_send_to_faculty(payload: Dict[str, Any] = Body(...), db=Depends(get
 
     return {"ok": True, "term_id": term_id, "sent_faculty": sent}
 
-
 @router.get("/load-assignment/rfc")
 async def om_get_rfc(
     faculty_id: str = Query(...),
@@ -4035,7 +3996,6 @@ async def om_get_rfc(
         return {"ok": True, "rfc": None}
 
     return {"ok": True, "rfc": _normalize_rfc_doc(rfc)}
-
 
 @router.post("/load-assignment/rfc/respond")
 async def respond_load_assignment_rfc(
@@ -4378,7 +4338,6 @@ async def respond_load_assignment_rfc(
         )
 
     return {"ok": True, "status": new_status}
-
 
 @router.post("/load-assignment/finalize-course")
 async def om_finalize_course(payload: Dict[str, Any] = Body(...), db=Depends(get_db)):
