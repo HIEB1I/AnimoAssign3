@@ -1018,6 +1018,22 @@ export async function planRejectOmNewLine(
   return post(url, payload);
 }
 
+export async function planAcceptRowTarget(
+  userId: string,
+  payload: { course_id: string; program_id: string; batch_id: string }
+): Promise<{ ok: true; override_key: string; accepted_course_target_total: number }> {
+  const url = `${API_BASE}/apo/courseofferings${q({ userId, action: "planAcceptRowTarget" })}`;
+  return post(url, payload);
+}
+
+export async function planClearRowTarget(
+  userId: string,
+  payload: { course_id: string; program_id: string; batch_id: string }
+): Promise<{ ok: true; override_key: string }> {
+  const url = `${API_BASE}/apo/courseofferings${q({ userId, action: "planClearRowTarget" })}`;
+  return post(url, payload);
+}
+
 
 export async function setApoOmSubmitWindow(
   userId: string,

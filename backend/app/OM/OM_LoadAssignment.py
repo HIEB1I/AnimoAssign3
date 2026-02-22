@@ -236,6 +236,57 @@ def _section_to_campus_id(section_code: str) -> str:
         return "CMPS0001"
     return ""
 
+
+async def _section_campus_id_for_row(
+    sid: str,
+    section_code: str,
+    term_id: str,
+    db,
+) -> str:
+    """Best-effort campus_id resolver for OM Load Assignment rows.
+
+    Priority:
+      1) sections_submitted.campus_id (snapshot/source of truth for OM grid)
+      2) sections.campus_id (canonical)
+      3) infer from section_code prefix (legacy routing)
+
+    Returns "" when it cannot be resolved. Never raises.
+    """
+
+    sid = (sid or "").strip()
+    section_code = (section_code or "").strip()
+    term_id = (term_id or "").strip()
+
+    if sid and term_id:
+        try:
+            ss = await db[COL_SECTIONS_SUBMITTED].find_one(
+                {"term_id": term_id, "section_id": sid},
+                {"_id": 0, "campus_id": 1},
+            ) or {}
+            cid = str(ss.get("campus_id") or "").strip()
+            if cid:
+                return cid
+        except Exception:
+            pass
+
+    if sid:
+        try:
+            sec = await db[COL_SECTIONS].find_one(
+                {"section_id": sid},
+                {"_id": 0, "campus_id": 1},
+            ) or {}
+            cid = str(sec.get("campus_id") or "").strip()
+            if cid:
+                return cid
+        except Exception:
+            pass
+
+    try:
+        return _section_to_campus_id(section_code)
+    except Exception:
+        return ""
+
+
 async def _apo_user_ids_for_campus(campus_id: str, db) -> list[str]:
     """Return APO user_ids who are scoped to the given campus.
 
@@ -1559,6 +1610,9 @@ async def _fetch_rows(user_id: str, term_id: str, db) -> Dict[str, Any]:
             "title": course_doc.get("course_title", "") or "",
             "units": course_doc.get("units", "") or "",
             "section": d.get("section_code", "") or "",
+            # Campus is needed for campus-specific APO deadlines (Manila vs Laguna).
+            # Prefer explicit campus_id on the submitted snapshot; fall back to prefix inference.
+            "campus_id": (str(d.get("campus_id") or "").strip() or _section_to_campus_id(d.get("section_code", ""))),
             # NEW: keep both faculty_id and display name so manual edits can persist correctly
             "faculty_id": (d.get("asg") or {}).get("faculty_id") or "",
             "faculty": d.get("faculty_name_display", "") or "",
@@ -2073,12 +2127,31 @@ async def loadassignment_handler(
         # Resolve section via section_schedules to avoid guessing/wrong section identifiers.
         sched = await db[COL_SCHED].find_one(
             {"schedule_id": schedule_id},
-            {"_id": 0, "section_id": 1},
+            {"_id": 0, "section_id": 1, "term_id": 1},
         )
         if not sched or not (sched.get("section_id") or "").strip():
             raise HTTPException(status_code=404, detail="Schedule not found")
 
         section_id = str(sched.get("section_id") or "").strip()
+
+        # Enforce campus-specific APO deadline lock for remarks (edit field).
+        # Manila and Laguna deadlines can differ; only lock the affected campus.
+        try:
+            term_id = str(sched.get("term_id") or "").strip()
+            if term_id:
+                campus_id = await _section_campus_id_for_row(section_id, "", term_id, db)
+                if campus_id:
+                    w = await _get_om_submit_window(term_id, campus_id, db)
+                    if _deadline_passed(w):
+                        raise HTTPException(
+                            status_code=403,
+                            detail="Editing is locked because the APO-set deadline for this campus has passed.",
+                        )
+        except HTTPException:
+            raise
+        except Exception:
+            # Best-effort: do not block if window cannot be resolved.
+            pass
 
         res = await db["sections"].update_one(
             {"section_id": section_id},
@@ -2104,6 +2177,44 @@ async def loadassignment_handler(
             )
 
         rows = payload["rows"]
+
+        # Campus-specific APO deadlines:
+        # If a campus' deadline has passed, OM must NOT be able to modify rows of that campus.
+        # This should not block saving other campus rows (e.g., Manila locked but Laguna editable).
+        try:
+            campus_ids_in_rows: set[str] = set()
+            for rr in rows:
+                if not isinstance(rr, dict):
+                    continue
+                cid = str(rr.get("campus_id") or "").strip()
+                if not cid:
+                    # best-effort: infer from section_code
+                    cid = _section_to_campus_id(str(rr.get("section") or "").strip())
+                if cid:
+                    campus_ids_in_rows.add(cid)
+
+            deadline_passed_by_campus: dict[str, bool] = {}
+            for cid in sorted(campus_ids_in_rows):
+                w = await _get_om_submit_window(active["term_id"], cid, db)
+                deadline_passed_by_campus[cid] = _deadline_passed(w)
+
+            if deadline_passed_by_campus:
+                kept: list[dict] = []
+                skipped = 0
+                for rr in rows:
+                    if not isinstance(rr, dict):
+                        continue
+                    cid = str(rr.get("campus_id") or "").strip()
+                    if not cid:
+                        cid = _section_to_campus_id(str(rr.get("section") or "").strip())
+                    if cid and deadline_passed_by_campus.get(cid):
+                        skipped += 1
+                        continue
+                    kept.append(rr)
+                rows = kept
+        except Exception:
+            # Best-effort only: never break SAVE if deadline resolution fails.
+            pass
 
         # Just persist assignments/schedules – no faculty_loads header yet
         await _persist_rows_no_auto(active["term_id"], rows, db)

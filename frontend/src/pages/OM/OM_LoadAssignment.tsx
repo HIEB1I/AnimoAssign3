@@ -4699,6 +4699,28 @@ const handleApplyPendingDrafts = useCallback(
       } as const;
     }
 
+    // Campus-specific APO deadlines:
+    // Only lock rows whose campus deadline has passed (e.g., Manila locked but Laguna still editable).
+    if (isCampusDeadlinePassed(String((r as any)?.campus_id || ""))) {
+      return {
+        course: false,
+        title: false,
+        units: false,
+        section: false,
+        faculty: false,
+        day1: false,
+        begin1: false,
+        end1: false,
+        room1: false,
+        day2: false,
+        begin2: false,
+        end2: false,
+        room2: false,
+        capacity: false,
+        mode: false,
+      } as const;
+    }
+
 
 // Newly added "Add new line" rows have special edit rules:
 // - Editable: all fields EXCEPT Room 1/2, Units, Capacity (auto-filled / APO-assigned).
@@ -6453,7 +6475,8 @@ const courseCodeToInfo = useMemo(() => {
                           const e = getEditFlags(r);
                           const fromFacultyService = !!(r as any)
                             .synced_from_faculty_service;
-                          const isLocked = isArchiveView || fromFacultyService;
+                          const isLockedByApoDeadline = isCampusDeadlinePassed(String((r as any)?.campus_id || ""));
+                          const isLocked = isArchiveView || fromFacultyService || isLockedByApoDeadline;
                           const isForwardedToFaculty = !!r.forwarded_to_faculty;
                           const isPastDeadlineRow = Boolean((r as any).is_past_deadline);
                           const hasDraft = Boolean((r as any).has_pending_override);
