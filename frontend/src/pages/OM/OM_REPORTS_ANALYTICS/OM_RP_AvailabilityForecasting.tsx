@@ -52,7 +52,7 @@ function DataUsedCard({
   return (
     <Card className="p-3 border-emerald-200 bg-emerald-50">
       <div className="flex items-center justify-between">
-        <div className="text-xs text-gray-500">Faculty Considered</div>
+        <div className="text-xs text-gray-500">Data used</div>
         <div className="relative group">
           <button
             type="button"
@@ -268,6 +268,13 @@ export default function OM_RP_AvailabilityForecasting() {
   const [data, setData] = useState<AvailabilityHeatmap | null>(null);
 
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
+  const [suppressHoverKey, setSuppressHoverKey] = useState<string | null>(null);
+  // Hover/copy tooltip (rendered in a fixed layer so it won't be clipped by scroll/overflow containers)
+  const [copyHover, setCopyHover] = useState<null | {
+    keyId: string;
+    email: string;
+    rect: { left: number; top: number; right: number; bottom: number; width: number; height: number };
+  }>(null);
 
   const [termId, setTermId] = useState<string | null>(null);
   const [countingMode, setCountingMode] = useState<"top1" | "top5">(DEFAULT_COUNTING_MODE);
@@ -449,11 +456,15 @@ export default function OM_RP_AvailabilityForecasting() {
     return rows.slice(0, 10);
   }, [data, selectedFacultyId]);
 
+  // Heatmap highlight should reflect the current aggregation setting:
+  // - top1 => highlight only the single best-fit block
+  // - top5 => highlight up to the top 5 best-fit blocks
   const highlightSet = useMemo(() => {
     const set = new Set<string>();
-    for (const r of selectedFacultyBestPairs.slice(0, 5)) set.add(`${r.d1}-${r.d2}-${r.slot}`);
+    const limit = countingMode === "top5" ? 5 : 1;
+    for (const r of selectedFacultyBestPairs.slice(0, limit)) set.add(`${r.d1}-${r.d2}-${r.slot}`);
     return set;
-  }, [selectedFacultyBestPairs]);
+  }, [selectedFacultyBestPairs, countingMode]);
 
   const selectedSlotKeyForHeatmap = useMemo(() => {
     const [d1, d2] = parsePairKey(pairKey);
@@ -466,7 +477,10 @@ export default function OM_RP_AvailabilityForecasting() {
     const done = () => {
       setCopiedKey(key);
       window.clearTimeout((window as any).__om_copy_to);
-      (window as any).__om_copy_to = window.setTimeout(() => setCopiedKey(null), 1200);
+      (window as any).__om_copy_to = window.setTimeout(() => {
+        setCopiedKey(null);
+        setCopyHover((h) => (h?.keyId === key ? null : h));
+      }, 1200);
     };
 
     // Try Clipboard API first
@@ -520,39 +534,84 @@ export default function OM_RP_AvailabilityForecasting() {
   }) {
     const canCopy = !!email;
     const isCopied = copiedKey === keyId;
+    const btnId = `copybtn-${keyId}`;
     return (
-      <span className={cls("relative group inline-flex min-w-0", className)}>
+      <span className={cls("inline-flex min-w-0", className)}>
         <button
+          id={btnId}
           type="button"
           className={cls(
-            "min-w-0 truncate text-left",
+            // Keep name truncation, but allow a small inline confirmation label to show reliably
+            "min-w-0 text-left inline-flex items-center gap-2",
             canCopy ? "cursor-pointer hover:underline" : "cursor-default"
           )}
+          onMouseEnter={() => {
+            if (!email) return;
+            if (suppressHoverKey === keyId) return;
+            const el = document.getElementById(btnId);
+            const r = el?.getBoundingClientRect();
+            if (!r) return;
+            setCopyHover({
+              keyId,
+              email,
+              rect: { left: r.left, top: r.top, right: r.right, bottom: r.bottom, width: r.width, height: r.height },
+            });
+          }}
+          onMouseLeave={() => {
+            if (suppressHoverKey === keyId) setSuppressHoverKey(null);
+            setCopyHover((h) => (h?.keyId === keyId && !isCopied ? null : h));
+          }}
           onClick={(e) => {
             if (stopRowClick) e.stopPropagation();
             if (!canCopy) return;
+            // After a click-to-copy, we auto-hide the tooltip even if the cursor is still on the name.
+            setSuppressHoverKey(keyId);
+            const el = document.getElementById(btnId);
+            const r = el?.getBoundingClientRect();
+            if (r && email) {
+              setCopyHover({
+                keyId,
+                email,
+                rect: { left: r.left, top: r.top, right: r.right, bottom: r.bottom, width: r.width, height: r.height },
+              });
+            }
             copyEmail(email, keyId);
           }}
         >
-          {name}
+          <span className="min-w-0 truncate">{name}</span>
         </button>
-
-        <span className="pointer-events-none absolute left-0 top-6 z-30 hidden max-w-[260px] rounded-md border border-gray-200 bg-white px-2 py-1 text-[11px] text-gray-700 shadow-md group-hover:block">
-          {email ? (
-            <span className="inline-flex items-center gap-2">
-              <span className="truncate">{email}</span>
-              <span className="text-gray-400">•</span>
-              <span className={cls("font-medium", isCopied ? "text-emerald-700" : "text-gray-700")}>
-                {isCopied ? "Copied" : "Click to copy"}
-              </span>
-            </span>
-          ) : (
-            <span className="text-gray-500">No email available</span>
-          )}
-        </span>
       </span>
     );
   }
+
+  const copyTooltip = useMemo(() => {
+    if (!copyHover?.email || !copyHover?.rect) return null;
+    const r = copyHover.rect;
+    const pad = 12;
+    const maxW = 420;
+    const ww = typeof window !== "undefined" ? window.innerWidth : 1024;
+    const wh = typeof window !== "undefined" ? window.innerHeight : 768;
+
+    const left = Math.max(pad, Math.min(r.left, ww - maxW - pad));
+    const preferTop = r.top - 12;
+    const top = preferTop < 60 ? Math.min(wh - 90, r.bottom + 10) : preferTop;
+
+    const isCopied = copiedKey === copyHover.keyId;
+
+    return (
+      <div
+        className="fixed z-[9999] pointer-events-none rounded-lg border border-gray-200 bg-white px-3 py-2 text-[11px] text-gray-700 shadow-lg"
+        style={{ left, top, maxWidth: maxW }}
+      >
+        <div className="flex items-center gap-2 whitespace-nowrap overflow-hidden">
+          <span className="font-medium text-gray-900 max-w-[260px] truncate">{copyHover.email}</span>
+          <span className={cls(isCopied ? "text-emerald-700 font-medium" : "text-gray-500")}>
+            {isCopied ? "Copied email" : "Click to copy"}
+          </span>
+        </div>
+      </div>
+    );
+  }, [copyHover, copiedKey]);
 
   const slotCandidates = useMemo(() => {
     if (!data) return [] as HeatPerson[];
@@ -627,6 +686,7 @@ export default function OM_RP_AvailabilityForecasting() {
 
   return (
     <div className="p-4 md:p-6 space-y-4">
+      {copyTooltip}
       {/* Title + subtitle */}
       <div className="px-1">
         <h1 className="text-2xl font-bold text-gray-900">Availability Forecasting</h1>
@@ -771,9 +831,9 @@ export default function OM_RP_AvailabilityForecasting() {
                   <div className="text-sm font-semibold text-gray-800">Top candidates</div>
                 </div>
 
-                  <div className="mt-2 border border-gray-200 rounded-xl overflow-hidden">
-                    {slotCandidates.length ? (
-                      <div className="divide-y divide-gray-200 max-h-[304px] overflow-auto">
+	                <div className="mt-2 border border-gray-200 rounded-xl overflow-hidden">
+	                  {slotCandidates.length ? (
+	                    <div className="divide-y divide-gray-200 max-h-[304px] overflow-auto">
                       {slotCandidates.map((p) => (
                         <div key={p.faculty_id} className="p-3 flex items-start justify-between gap-3 hover:bg-gray-50">
                           <div className="min-w-0">
@@ -830,8 +890,8 @@ export default function OM_RP_AvailabilityForecasting() {
                   </div>
 
                   {/* suggestions */}
-                    {facultySuggestions.length ? (
-                      <div className="mt-2 max-h-[132px] overflow-auto rounded-xl border border-gray-200 bg-white">
+	                  {facultySuggestions.length ? (
+	                    <div className="mt-2 max-h-[132px] overflow-auto rounded-xl border border-gray-200 bg-white">
                       {facultySuggestions.map((f) => (
                         <button
                           key={f.faculty_id}
@@ -845,9 +905,7 @@ export default function OM_RP_AvailabilityForecasting() {
                             selectedFacultyId === f.faculty_id && "bg-emerald-50"
                           )}
                         >
-                          <div className="text-sm text-gray-900">
-                            <CopyEmailName name={f.name} email={f.email} keyId={`sug-${f.faculty_id}`} stopRowClick />
-                          </div>
+	                          <div className="text-sm text-gray-900 truncate">{f.name}</div>
                         </button>
                       ))}
                     </div>
@@ -867,7 +925,13 @@ export default function OM_RP_AvailabilityForecasting() {
                   {selectedFaculty ? (
                     <Card className="p-3">
                       <div className="flex items-center gap-2">
-                        <div className="font-medium text-gray-900">{selectedFaculty.name}</div>
+	                        <div className="font-medium text-gray-900">
+	                          <CopyEmailName
+	                            name={selectedFaculty.name}
+	                            email={selectedFaculty.email}
+	                            keyId={`sel-${selectedFaculty.faculty_id}`}
+	                          />
+	                        </div>
                         <PersonSignalChips person={selectedFaculty} />
                       </div>
                       <div className="text-xs text-gray-500">Highlighted on the heatmap below.</div>
@@ -937,8 +1001,11 @@ export default function OM_RP_AvailabilityForecasting() {
                       const denom = denomIncluded || 0;
                       const title = `${dayPairFullName(d1, d2)} • ${slot} • ${merged.count}/${denom}`;
 
-                      const isHighlighted = highlightSet.has(`${d1}-${d2}-${slot}`);
-                      const isSelectedSlot = selectedSlotKeyForHeatmap === `${d1}-${d2}-${slot}`;
+                      // IMPORTANT: Only show one highlight intent at a time.
+                      // - In "Check a Faculty" mode, highlight the selected faculty's best-fit block(s).
+                      // - In "Assign a Slot" mode, highlight the currently selected slot.
+                      const isHighlighted = mode === "faculty" && highlightSet.has(`${d1}-${d2}-${slot}`);
+                      const isSelectedSlot = mode === "slot" && selectedSlotKeyForHeatmap === `${d1}-${d2}-${slot}`;
 
                       return (
                         <td
