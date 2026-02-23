@@ -52,7 +52,7 @@ function DataUsedCard({
   return (
     <Card className="p-3 border-emerald-200 bg-emerald-50">
       <div className="flex items-center justify-between">
-        <div className="text-xs text-gray-500">Data used</div>
+        <div className="text-xs text-gray-500">Faculty Considered</div>
         <div className="relative group">
           <button
             type="button"
