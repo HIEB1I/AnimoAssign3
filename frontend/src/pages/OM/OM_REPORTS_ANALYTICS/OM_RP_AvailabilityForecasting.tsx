@@ -267,6 +267,8 @@ export default function OM_RP_AvailabilityForecasting() {
   const [err, setErr] = useState<string | null>(null);
   const [data, setData] = useState<AvailabilityHeatmap | null>(null);
 
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
+
   const [termId, setTermId] = useState<string | null>(null);
   const [countingMode, setCountingMode] = useState<"top1" | "top5">(DEFAULT_COUNTING_MODE);
 
@@ -452,6 +454,105 @@ export default function OM_RP_AvailabilityForecasting() {
     for (const r of selectedFacultyBestPairs.slice(0, 5)) set.add(`${r.d1}-${r.d2}-${r.slot}`);
     return set;
   }, [selectedFacultyBestPairs]);
+
+  const selectedSlotKeyForHeatmap = useMemo(() => {
+    const [d1, d2] = parsePairKey(pairKey);
+    return `${d1}-${d2}-${slotKey}`;
+  }, [pairKey, slotKey]);
+
+  function copyEmail(email: string | undefined, key: string) {
+    if (!email) return;
+
+    const done = () => {
+      setCopiedKey(key);
+      window.clearTimeout((window as any).__om_copy_to);
+      (window as any).__om_copy_to = window.setTimeout(() => setCopiedKey(null), 1200);
+    };
+
+    // Try Clipboard API first
+    if (navigator?.clipboard?.writeText) {
+      navigator.clipboard.writeText(email).then(done).catch(() => {
+        try {
+          const ta = document.createElement("textarea");
+          ta.value = email;
+          ta.style.position = "fixed";
+          ta.style.opacity = "0";
+          document.body.appendChild(ta);
+          ta.select();
+          document.execCommand("copy");
+          document.body.removeChild(ta);
+          done();
+        } catch {
+          /* ignore */
+        }
+      });
+      return;
+    }
+
+    // Fallback
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = email;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+      done();
+    } catch {
+      /* ignore */
+    }
+  }
+
+  function CopyEmailName({
+    name,
+    email,
+    keyId,
+    className = "",
+    stopRowClick = false,
+  }: {
+    name: string;
+    email?: string;
+    keyId: string;
+    className?: string;
+    stopRowClick?: boolean;
+  }) {
+    const canCopy = !!email;
+    const isCopied = copiedKey === keyId;
+    return (
+      <span className={cls("relative group inline-flex min-w-0", className)}>
+        <button
+          type="button"
+          className={cls(
+            "min-w-0 truncate text-left",
+            canCopy ? "cursor-pointer hover:underline" : "cursor-default"
+          )}
+          onClick={(e) => {
+            if (stopRowClick) e.stopPropagation();
+            if (!canCopy) return;
+            copyEmail(email, keyId);
+          }}
+        >
+          {name}
+        </button>
+
+        <span className="pointer-events-none absolute left-0 top-6 z-30 hidden max-w-[260px] rounded-md border border-gray-200 bg-white px-2 py-1 text-[11px] text-gray-700 shadow-md group-hover:block">
+          {email ? (
+            <span className="inline-flex items-center gap-2">
+              <span className="truncate">{email}</span>
+              <span className="text-gray-400">•</span>
+              <span className={cls("font-medium", isCopied ? "text-emerald-700" : "text-gray-700")}>
+                {isCopied ? "Copied" : "Click to copy"}
+              </span>
+            </span>
+          ) : (
+            <span className="text-gray-500">No email available</span>
+          )}
+        </span>
+      </span>
+    );
+  }
 
   const slotCandidates = useMemo(() => {
     if (!data) return [] as HeatPerson[];
@@ -670,17 +771,18 @@ export default function OM_RP_AvailabilityForecasting() {
                   <div className="text-sm font-semibold text-gray-800">Top candidates</div>
                 </div>
 
-                <div className="mt-2 border border-gray-200 rounded-xl overflow-hidden">
-                  {slotCandidates.length ? (
-                    <div className="divide-y divide-gray-200">
-                      {slotCandidates.slice(0, 10).map((p) => (
+                  <div className="mt-2 border border-gray-200 rounded-xl overflow-hidden">
+                    {slotCandidates.length ? (
+                      <div className="divide-y divide-gray-200 max-h-[304px] overflow-auto">
+                      {slotCandidates.map((p) => (
                         <div key={p.faculty_id} className="p-3 flex items-start justify-between gap-3 hover:bg-gray-50">
                           <div className="min-w-0">
                             <div className="flex items-center gap-2 min-w-0">
-                              <div className="font-medium text-gray-900 truncate">{p.name}</div>
+                              <div className="font-medium text-gray-900 truncate">
+                                <CopyEmailName name={p.name} email={p.email} keyId={`slot-${p.faculty_id}`} />
+                              </div>
                               <PersonSignalChips person={p} />
                             </div>
-                            <div className="text-xs text-gray-500 truncate">{p.email || ""}</div>
                             <ScoreBreakdownChips person={p} />
                           </div>
                           <div className="shrink-0 text-right">
@@ -728,8 +830,8 @@ export default function OM_RP_AvailabilityForecasting() {
                   </div>
 
                   {/* suggestions */}
-                  {facultySuggestions.length ? (
-                    <div className="mt-2 max-h-72 overflow-auto rounded-xl border border-gray-200 bg-white">
+                    {facultySuggestions.length ? (
+                      <div className="mt-2 max-h-[132px] overflow-auto rounded-xl border border-gray-200 bg-white">
                       {facultySuggestions.map((f) => (
                         <button
                           key={f.faculty_id}
@@ -743,8 +845,9 @@ export default function OM_RP_AvailabilityForecasting() {
                             selectedFacultyId === f.faculty_id && "bg-emerald-50"
                           )}
                         >
-                          <div className="text-sm text-gray-900">{f.name}</div>
-                          <div className="text-xs text-gray-500 truncate">{f.email || f.faculty_id}</div>
+                          <div className="text-sm text-gray-900">
+                            <CopyEmailName name={f.name} email={f.email} keyId={`sug-${f.faculty_id}`} stopRowClick />
+                          </div>
                         </button>
                       ))}
                     </div>
@@ -835,6 +938,7 @@ export default function OM_RP_AvailabilityForecasting() {
                       const title = `${dayPairFullName(d1, d2)} • ${slot} • ${merged.count}/${denom}`;
 
                       const isHighlighted = highlightSet.has(`${d1}-${d2}-${slot}`);
+                      const isSelectedSlot = selectedSlotKeyForHeatmap === `${d1}-${d2}-${slot}`;
 
                       return (
                         <td
@@ -843,7 +947,7 @@ export default function OM_RP_AvailabilityForecasting() {
                           className={cls(
                             "text-center align-middle select-none",
                             "cursor-pointer",
-                            isHighlighted && "ring-2 ring-red-500 ring-offset-2"
+                            (isHighlighted || isSelectedSlot) && "ring-2 ring-red-500 ring-offset-2"
                           )}
                           style={{
                             background: bg,
