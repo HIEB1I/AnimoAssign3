@@ -973,7 +973,7 @@ function FacultyProfileTab({
             <div>
               <div className="text-sm font-semibold text-emerald-800">Records</div>
               <div className="mt-1 text-xs text-slate-500">
-                View your teaching history and deloadings without the clutter.
+                View your teaching history and deloadings.
               </div>
             </div>
 
@@ -1003,7 +1003,7 @@ function FacultyProfileTab({
                       Use search to quickly find a course; switch AY to browse older terms.
                     </div>
                   </div>
-                  <div className="text-[11px] text-slate-500">Tip: Scroll inside the panel</div>
+             
                 </div>
                 <div className="max-h-[520px] overflow-auto px-3 py-3">
                   <HistoryMain embedded />
@@ -1018,7 +1018,7 @@ function FacultyProfileTab({
                       See your recorded deloading arrangements and their details.
                     </div>
                   </div>
-                  <div className="text-[11px] text-slate-500">Tip: Scroll inside the panel</div>
+                
                 </div>
                 <div className="max-h-[520px] overflow-auto px-3 py-3">
                   <DeloadingsContent embedded />
