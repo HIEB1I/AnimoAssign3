@@ -1991,7 +1991,7 @@ const SendModal = ({
           <h3 className="text-[22px] font-extrabold text-emerald-700">
             Teaching Load Assignments for {termLabel || "Current Term"}
           </h3>
-          <div className="mt-0.5 text-[11px] text-gray-600">
+          <div className="font-bold mt-0.5 text-[18px]">
             To:{" "}
             {Array.from(
               new Set(rows.map((r) => r.faculty || "Unassigned"))
@@ -1999,7 +1999,7 @@ const SendModal = ({
           </div>
         </div>
 
-        <p className="mt-5 text-[13px] text-gray-700">
+        <p className="mt-5 text-[16px] text-gray-700">
           Please let me know if the following teaching load below is acceptable
           to you:
         </p>
@@ -3455,6 +3455,26 @@ const [omSubmitWindows, setOmSubmitWindows] = useState<
   { campus_id: string; campus_name: string; openISO: string; deadlineISO: string; deadline_passed?: boolean; has_apo_submission?: boolean }[]
 >([]);
 const [omDeadlinePassed, setOmDeadlinePassed] = useState<boolean>(false);
+
+  // When ALL configured campuses are past deadline, disable OM actions that modify data.
+  // Toolbar-level because there is nothing left to encode for any campus.
+  // Selection remains available so OM can still send/forward already-locked rows.
+  const allCampusesDeadlinePassed = useMemo(() => {
+    const ws = omSubmitWindows || [];
+    if (!ws.length) return false;
+    const unique = new Map<string, boolean>();
+    for (const w of ws) {
+      const cid = String((w as any)?.campus_id || "").trim();
+      if (!cid) continue;
+      unique.set(cid, Boolean((w as any)?.deadline_passed));
+    }
+    if (!unique.size) return false;
+    for (const passed of unique.values()) {
+      if (!passed) return false;
+    }
+    return true;
+  }, [omSubmitWindows]);
+
 
   const deadlinePassedByCampus = useMemo(() => {
     const m: Record<string, boolean> = {};
@@ -6190,7 +6210,7 @@ const courseCodeToInfo = useMemo(() => {
                     <div className="flex flex-wrap items-center gap-2">
                       <button
                         onClick={handleUndo}
-                        disabled={!canUndo || isAssigning}
+                        disabled={!canUndo || isAssigning || allCampusesDeadlinePassed}
                         className={cls(
                           "inline-flex items-center justify-center rounded-md border border-gray-300 bg-white p-1.5 text-gray-600 shadow-sm",
                           "hover:bg-gray-50",
@@ -6208,7 +6228,7 @@ const courseCodeToInfo = useMemo(() => {
 
                       <button
                         onClick={handleRedo}
-                        disabled={!canRedo || isAssigning}
+                        disabled={!canRedo || isAssigning || allCampusesDeadlinePassed}
                         className={cls(
                           "inline-flex items-center justify-center rounded-md border border-gray-300 bg-white p-1.5 text-gray-600 shadow-sm",
                           "hover:bg-gray-50",
@@ -6228,7 +6248,7 @@ const courseCodeToInfo = useMemo(() => {
                       <button
                         type="button"
                         onClick={openShsImport}
-                        disabled={!isRunning || isAssigning || isArchiveView}
+                        disabled={!isRunning || isAssigning || isArchiveView || allCampusesDeadlinePassed}
                         className={cls(
                           "inline-flex h-10 min-w-[140px] items-center justify-center gap-2 rounded-md bg-[#008e4e] px-4 py-2 text-sm font-medium text-white shadow-sm",
                           "hover:brightness-110",
@@ -6256,7 +6276,7 @@ const courseCodeToInfo = useMemo(() => {
                     {/* New/Moved Auto-assign button */}
                     <button
                       onClick={runAutoAssign}
-                      disabled={isAssigning || hasLocalEdits || isArchiveView}
+                      disabled={isAssigning || hasLocalEdits || isArchiveView || allCampusesDeadlinePassed}
                       className="inline-flex h-10 min-w-[140px] items-center justify-center gap-2 rounded-md bg-emerald-700 px-4 py-2 text-sm font-medium text-white shadow-sm hover:brightness-110 disabled:opacity-60"
                       title={
                         isArchiveView
@@ -6274,7 +6294,9 @@ const courseCodeToInfo = useMemo(() => {
                     {isRunning && (
                       <button
                         onClick={() => loadFromServer()}
-                        className="inline-flex h-10 min-w-[140px] items-center justify-center gap-2 rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium hover:bg-gray-50"
+                        disabled={isAssigning || allCampusesDeadlinePassed}
+                        title={allCampusesDeadlinePassed ? "Locked: all campus deadlines have passed" : "Refresh data from server"}
+                        className={cls("inline-flex h-10 min-w-[140px] items-center justify-center gap-2 rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium hover:bg-gray-50", (isAssigning || allCampusesDeadlinePassed) && "opacity-60 cursor-not-allowed hover:bg-white")}
                       >
                         <RefreshCcw className="h-4 w-4" />
                         Refresh
@@ -6282,7 +6304,7 @@ const courseCodeToInfo = useMemo(() => {
                     )}
 
                     <button
-                      disabled={!hasReco || isArchiveView}
+                      disabled={!hasReco || isArchiveView || allCampusesDeadlinePassed}
                       onClick={handleSaveDraft}
                       className={cls(
                         "inline-flex h-10 min-w-[140px] items-center justify-center gap-2 rounded-md px-4 py-2 text-sm font-medium shadow-sm",
@@ -6516,11 +6538,7 @@ const courseCodeToInfo = useMemo(() => {
                                   <input
                                     type="checkbox"
                                     checked={!!r.selected}
-                                    disabled={isLocked}
-                                    onChange={(ev) =>
-                                      !isLocked &&
-                                      setFacultySelected(r, ev.target.checked)
-                                    }
+                                    onChange={(ev) => setFacultySelected(r, ev.target.checked)}
                                     className="rounded border-gray-300 text-emerald-600 focus:ring-emerald-500"
                                     title={`Select row ${idx + 1}`}
                                   />

@@ -366,7 +366,7 @@ export default function OM_RP_DeloadingUtilization() {
           </div>
         </div>
 
-        {/* ✅ Search faculty deloading history across ALL terms */}
+        {/* Search faculty deloading history across ALL terms */}
         <div className="p-4 border-b border-gray-200 bg-white">
           <div className="flex flex-col gap-2">
             <label className="text-xs font-semibold text-gray-600">
