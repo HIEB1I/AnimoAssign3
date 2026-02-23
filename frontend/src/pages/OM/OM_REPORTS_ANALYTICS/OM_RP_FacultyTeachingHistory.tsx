@@ -191,7 +191,7 @@ export default function OM_RP_FacultyTeachingHistory() {
     <div className="w-full px-8 py-8">
       <h1 className="text-2xl font-bold mb-2">Teaching History per Faculty</h1>
       <p className="text-sm text-gray-600 mb-6">
-      Highlights time/day pressure points (slots that are hard to fill) based on submitted faculty availability/preferences for the target term, so you can anticipate scheduling conflicts early.
+        Shows a descriptive summary of a faculty member's past teaching loads and displays them by term as well(courses/sections taught). 
       </p>
       <FacultyAccordion />
     </div>
