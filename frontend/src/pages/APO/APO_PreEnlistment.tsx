@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 //import Papa, { type ParseResult } from "papaparse";
 import Papa from "papaparse";
-import { Pencil, Check, Upload, Archive, Download, X } from "lucide-react";
+import { Pencil, Check, Upload, Archive, Download, X, AlertTriangle } from "lucide-react";
 import TopBar from "../../component/TopBar";
 import Tabs from "../../component/Tabs";
 import SelectBox from "../../component/SelectBox";
@@ -38,6 +38,9 @@ function setPlanningTermForCampus(
 // Compact, consistent pill wrappers
 const miniBase =
   "inline-flex items-center h-9 rounded-full border-2 border-emerald-200 bg-white px-2 shadow-sm focus-within:border-emerald-400";
+
+// tiny classNames helper
+const cls = (...xs: Array<string | false | null | undefined>) => xs.filter(Boolean).join(" ");
 // Compact pill-style input (matches the dropdown box, no chevron)
 function MiniFieldInput({
   value,
@@ -328,6 +331,68 @@ export default function APO_PreEnlistment() {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
   const [archiving, setArchiving] = useState(false);
+
+
+// Generic, styled confirm dialog (matches APO Course Offerings dialogs)
+const confirmActionRef = React.useRef<null | (() => Promise<void>)>(null);
+type ConfirmDlgState = {
+  open: boolean;
+  title: string;
+  description?: string;
+  confirmText: string;
+  cancelText: string;
+  variant: "default" | "danger" | "warning";
+  content?: React.ReactNode;
+  busy: boolean;
+};
+
+const [confirmDlg, setConfirmDlg] = useState<ConfirmDlgState>({
+  open: false,
+  title: "",
+  description: undefined,
+  confirmText: "Confirm",
+  cancelText: "Cancel",
+  variant: "default",
+  content: undefined,
+  busy: false,
+});
+
+const openConfirm = (opts: {
+  title: string;
+  description?: string;
+  confirmText?: string;
+  cancelText?: string;
+  variant?: "default" | "danger" | "warning";
+  content?: React.ReactNode;
+  onConfirm: () => Promise<void>;
+}) => {
+  confirmActionRef.current = opts.onConfirm;
+  setConfirmDlg({
+    open: true,
+    title: opts.title,
+    description: opts.description,
+    confirmText: opts.confirmText || "Confirm",
+    cancelText: opts.cancelText || "Cancel",
+    variant: opts.variant || "default",
+    content: opts.content,
+    busy: false,
+  });
+};
+
+const closeConfirm = () => {
+  confirmActionRef.current = null;
+  setConfirmDlg((prev) => ({
+    ...prev,
+    open: false,
+    title: "",
+    description: undefined,
+    confirmText: "Confirm",
+    cancelText: "Cancel",
+    variant: "default",
+    content: undefined,
+    busy: false,
+  }));
+};
 
   const [editIndexCourses, setEditIndexCourses] = useState<number | null>(null);
   const [editRowCourses, setEditRowCourses] = useState<string[] | null>(null);
@@ -903,9 +968,42 @@ const [archiveCountTotal, setArchiveCountTotal] = useState(0);
       ? `Term ${activeMeta.term_number ?? ""} ${activeMeta.ay_label}`
       : "current term";
 
-  if (!confirm(`Archive ${label}? This will snapshot active rows for BOTH Manila and Laguna and may advance the term.`)) {
+    openConfirm({
+      title: `Archive ${label}?`,
+      description: "This will snapshot active rows for BOTH Manila and Laguna and may advance the term.",
+      confirmText: "Archive",
+      cancelText: "Cancel",
+      variant: "warning",
+      onConfirm: async () => {
+        try {
+          setArchiving(true);
+
+          // Archive the *same* planning term you are currently viewing
+          const res = await archiveApoPreenlistment(
+            user.userId,
+            activeMeta?.term_id,
+            campusCodeFromUi() || undefined
+          );
+
+          const nextPlanningTermId = (res as any)?.newPlanningTermId as string | undefined;
+
+          // If backend tells us the next planning term, load that explicitly.
+          // Otherwise, let the backend compute it from is_current.
+          if (nextPlanningTermId) {
+            await refresh(nextPlanningTermId);
+          } else {
+            await refresh();
+          }
+        } catch (e: any) {
+          setErr(e?.message || "Failed to archive.");
+          throw e;
+        } finally {
+          setArchiving(false);
+        }
+      },
+    });
+
     return;
-  }
 
     try {
       setArchiving(true);
@@ -1571,10 +1669,15 @@ const [archiveCountTotal, setArchiveCountTotal] = useState(0);
                     if (!user?.userId || !archiveTermId) return;
                     const sel = archiveTerms.find(t => t.term_id === archiveTermId);
                     const label = sel ? `Term ${sel.term_number ?? "—"} ${sel.ay_label}` : archiveTermId;
-                    if (!confirm(`Make ${label} the active term${campusLabel ? ` for ${campusLabel}` : ""}?`)) return;
-
-                    setReactivating(true);
-                    try {
+                    openConfirm({
+                      title: `Make ${label} active${campusLabel ? ` for ${campusLabel}` : ""}?`,
+                      description: "This will switch the active pre-enlistment term used for planning.",
+                      confirmText: "Make Active",
+                      cancelText: "Cancel",
+                      variant: "default",
+                      onConfirm: async () => {
+                        setReactivating(true);
+                        try {
                       const res = await reactivateApoPreenlistment(
                         user.userId,
                         archiveTermId,
@@ -1591,7 +1694,10 @@ const [archiveCountTotal, setArchiveCountTotal] = useState(0);
                     } finally {
                       setReactivating(false);
                     }
-                  }}
+                  },
+                });
+                return;
+              }}
                 >
                   {reactivating ? "Reactivating…" : "Make Active"}
                 </button>
@@ -1733,7 +1839,110 @@ const [archiveCountTotal, setArchiveCountTotal] = useState(0);
             </div>
           </div>
         )}
+
+
+{/* --------------------- Confirm dialog (styled) --------------------- */}
+{confirmDlg.open && (
+  <ConfirmModal
+    open={confirmDlg.open}
+    title={confirmDlg.title}
+    description={confirmDlg.description}
+    confirmText={confirmDlg.confirmText}
+    cancelText={confirmDlg.cancelText}
+    variant={confirmDlg.variant}
+    content={confirmDlg.content}
+    busy={confirmDlg.busy}
+    onClose={closeConfirm}
+    onConfirm={async () => {
+      if (!confirmActionRef.current) return;
+      setConfirmDlg((prev) => ({ ...prev, busy: true }));
+      try {
+        await confirmActionRef.current();
+        closeConfirm();
+      } catch {
+        // keep modal open if action throws; error is handled by caller
+        setConfirmDlg((prev) => ({ ...prev, busy: false }));
+      }
+    }}
+  />
+)}
       </main>
     </div>
   );
 }
+
+const ConfirmModal: React.FC<{
+  open: boolean;
+  title: string;
+  description?: string;
+  confirmText: string;
+  cancelText: string;
+  variant?: "default" | "danger" | "warning";
+  content?: React.ReactNode;
+  busy?: boolean;
+  onClose: () => void;
+  onConfirm: () => void | Promise<void>;
+}> = ({
+  open,
+  title,
+  description,
+  confirmText,
+  cancelText,
+  variant = "default",
+  content,
+  busy,
+  onClose,
+  onConfirm,
+}) => {
+  if (!open) return null;
+  const isDanger = variant === "danger";
+  const isWarning = variant === "warning";
+
+  return (
+    <div className="fixed inset-0 z-[120] grid place-items-center bg-black/40 p-4">
+      <div className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-2xl">
+        <div
+          className={cls(
+            "mx-auto mb-4 grid h-16 w-16 place-items-center rounded-full border-2",
+            isDanger
+              ? "border-rose-600 text-rose-700"
+              : isWarning
+              ? "border-amber-600 text-amber-700"
+              : "border-emerald-600 text-emerald-700"
+          )}
+        >
+          <AlertTriangle className="h-8 w-8" strokeWidth={2.5} />
+        </div>
+
+        <h3 className="mb-2 text-center text-2xl font-semibold">{title}</h3>
+
+        {description && (
+          <p className="mx-auto mb-4 max-w-md text-center text-sm text-neutral-600">{description}</p>
+        )}
+
+        {content && <div className="mb-4">{content}</div>}
+
+        <div className="flex justify-end gap-2">
+          <button
+            onClick={onClose}
+            disabled={!!busy}
+            className="rounded-lg border border-neutral-300 bg-neutral-100 px-4 py-2 text-sm hover:bg-neutral-200 disabled:opacity-50"
+          >
+            {cancelText}
+          </button>
+
+          <button
+            disabled={!!busy}
+            className={cls(
+              "rounded-lg px-4 py-2 text-sm font-medium text-white hover:brightness-110 disabled:opacity-50",
+              isDanger ? "bg-rose-700" : isWarning ? "bg-amber-700" : "bg-emerald-700"
+            )}
+            onClick={onConfirm}
+          >
+            {busy ? "Working…" : confirmText}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};

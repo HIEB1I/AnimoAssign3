@@ -60,6 +60,195 @@ _user_sids: Dict[str, set] = {}
 _sid_conv_ids: Dict[str, set] = {}
 _conv_user_counts: Dict[str, Dict[str, int]] = {}
 
+# ----------------------------
+# Load Assignment collaboration (realtime LA)
+#
+# Goals:
+# - Broadcast row updates (including auto-assign) in real time to other users
+#   viewing the same department + term.
+# - Show "who is editing" presence similar to Google Docs (best-effort).
+#
+# Notes:
+# - This is intentionally IN-MEMORY only. It does NOT persist drafts/changes.
+# - The existing Save/Approve flows remain the source of truth in Mongo.
+# ----------------------------
+LA_ROOM_PREFIX = "la:"
+_la_room_users: Dict[str, Dict[str, Dict[str, Any]]] = {}  # room -> user_id -> info
+_sid_la_rooms: Dict[str, set] = {}  # sid -> set(room)
+
+
+def _la_room_id(term_id: str, dept_id: str) -> str:
+    return f"{LA_ROOM_PREFIX}{str(term_id).strip()}:{str(dept_id).strip()}"
+
+
+def _loadassignment_department_ids_sync(user_id: str) -> List[str]:
+    """Best-effort department scopes for Load Assignment collaboration.
+
+    Mirrors backend/app/OM/OM_LoadAssignment._loadassignment_department_ids()
+    but uses pymongo collections (sync) for Socket.IO.
+    """
+
+    uid = (user_id or "").strip()
+    if not uid:
+        return []
+
+    eligible_patterns = [
+        r"^Office\s*Manager$",
+        r"^Department\s*Chair$",
+        r"^Deparment\s*Chair$",
+        r"^GS\s*Coordinator$",
+    ]
+
+    role_ids: List[str] = []
+    try:
+        roles = get_collection("user_roles").find(
+            {"$or": [{"role_type": {"$regex": p, "$options": "i"}} for p in eligible_patterns]},
+            {"_id": 0, "role_id": 1},
+        )
+        for rdoc in roles:
+            rid = str((rdoc or {}).get("role_id") or "").strip()
+            if rid and rid not in role_ids:
+                role_ids.append(rid)
+    except Exception:
+        # fallback to common known ids
+        role_ids = ["ROLE0006", "ROLE0002", "ROLE0007"]
+
+    def _norm_scope_list(scope_val: Any) -> List[Dict[str, Any]]:
+        """role_assignments.scope can be dict | list[dict] | missing."""
+        if not scope_val:
+            return []
+        if isinstance(scope_val, dict):
+            return [scope_val]
+        if isinstance(scope_val, list):
+            return [s for s in scope_val if isinstance(s, dict)]
+        return []
+
+    def _resolve_department_id_from_hint(hint: Any) -> str:
+        """Resolve a canonical department_id from an id/name/code hint.
+
+        Some deployments store role scopes as:
+          - department_id (e.g., "DEPT0001")
+          - dept_id
+          - dept_code (e.g., "ST")
+          - dept_name (e.g., "Department of Software Technology")
+        We normalize to department_id so all eligible roles join the SAME LA room.
+        """
+        h = str(hint or "").strip()
+        if not h:
+            return ""
+        # Already looks like a department_id
+        if re.match(r"^DEPT\d+\s*$", h, flags=re.IGNORECASE):
+            return h.strip()
+        # Try dept_code or dept_name mapping
+        try:
+            q = {
+                "$or": [
+                    {"department_id": {"$regex": rf"^{re.escape(h)}$", "$options": "i"}},
+                    {"dept_code": {"$regex": rf"^{re.escape(h)}$", "$options": "i"}},
+                    {"dept_name": {"$regex": rf"^{re.escape(h)}$", "$options": "i"}},
+                ]
+            }
+            d = get_collection("departments").find_one(q, {"_id": 0, "department_id": 1}) or {}
+            did = str(d.get("department_id") or "").strip()
+            return did
+        except Exception:
+            return ""
+
+    dept_ids: List[str] = []
+    try:
+        cur = get_collection("role_assignments").find(
+            {"user_id": uid, "role_id": {"$in": role_ids}},
+            {"_id": 0, "scope": 1, "department_id": 1, "dept_id": 1},
+        )
+        for ra in cur:
+            # 1) Direct fields (some deployments store dept here instead of scope)
+            direct = str((ra or {}).get("department_id") or (ra or {}).get("dept_id") or "").strip()
+            if direct:
+                did = _resolve_department_id_from_hint(direct) or direct
+                if did and did not in dept_ids:
+                    dept_ids.append(did)
+
+            # 2) Scoped departments (dict | list[dict])
+            for sc in _norm_scope_list((ra or {}).get("scope")):
+                stype = str(sc.get("type") or "").strip().lower()
+                if stype != "department":
+                    continue
+                # support multiple key variants
+                cand = (
+                    sc.get("id")
+                    or sc.get("department_id")
+                    or sc.get("dept_id")
+                    or sc.get("dept_code")
+                    or sc.get("dept_name")
+                )
+                did = _resolve_department_id_from_hint(cand) or str(cand or "").strip()
+                if did and did not in dept_ids:
+                    dept_ids.append(did)
+    except Exception:
+        pass
+
+    if not dept_ids:
+        try:
+            sp = get_collection("staff_profiles").find_one(
+                {"user_id": uid},
+                {"_id": 0, "department_id": 1, "dept_id": 1},
+            ) or {}
+            did = str(sp.get("department_id") or sp.get("dept_id") or "").strip()
+            if did:
+                dept_ids.append(_resolve_department_id_from_hint(did) or did)
+        except Exception:
+            pass
+
+    # Stable ordering so the client can safely treat the first room as "primary".
+    try:
+        dept_ids = sorted({str(d).strip() for d in dept_ids if str(d).strip()})
+    except Exception:
+        dept_ids = [d for d in dept_ids if str(d).strip()]
+
+    return dept_ids
+
+
+def _la_upsert_presence(room_id: str, user_id: str, full_name: str, sid: str) -> None:
+    room_id = str(room_id)
+    uid = str(user_id).strip()
+    if not room_id or not uid:
+        return
+    _la_room_users.setdefault(room_id, {})[uid] = {
+        "userId": uid,
+        "fullName": full_name,
+        "sid": str(sid),
+        "cursor": None,
+        "updatedAt": _iso(datetime.now(timezone.utc)),
+    }
+
+
+def _la_remove_presence(room_id: str, user_id: str) -> None:
+    room_id = str(room_id)
+    uid = str(user_id).strip()
+    if not room_id or not uid:
+        return
+    m = _la_room_users.get(room_id)
+    if not m:
+        return
+    m.pop(uid, None)
+    if not m:
+        _la_room_users.pop(room_id, None)
+
+
+def _la_room_snapshot(room_id: str) -> List[Dict[str, Any]]:
+    m = _la_room_users.get(str(room_id)) or {}
+    out: List[Dict[str, Any]] = []
+    for _, info in m.items():
+        out.append(
+            {
+                "userId": info.get("userId"),
+                "fullName": info.get("fullName"),
+                "cursor": info.get("cursor"),
+                "updatedAt": info.get("updatedAt"),
+            }
+        )
+    return out
+
 
 def _track_user_connect(user_id: str, sid: str) -> None:
     user_id = str(user_id).strip()
@@ -641,6 +830,27 @@ async def disconnect(sid: str):
         if uid:
             _track_conv_leave_all(uid, sid)
             _track_user_disconnect(uid, sid)
+
+            # Leave Load Assignment rooms + clear presence
+            la_rooms = list(_sid_la_rooms.get(str(sid)) or [])
+            for room_id in la_rooms:
+                try:
+                    _la_remove_presence(room_id, uid)
+                except Exception:
+                    pass
+                try:
+                    await sio.leave_room(sid, room_id)
+                except Exception:
+                    pass
+                try:
+                    await sio.emit(
+                        "loadassignment_presence",
+                        {"roomId": room_id, "users": _la_room_snapshot(room_id)},
+                        room=room_id,
+                    )
+                except Exception:
+                    pass
+            _sid_la_rooms.pop(str(sid), None)
     except Exception:
         pass
     logger.info(f"[socket] disconnect sid={sid} userId={uid}")
@@ -1010,3 +1220,187 @@ async def conversation_get(sid: str, data: Dict[str, Any]):
         return {"ok": False, "error": "Not found"}
 
     return {"ok": True, "conversation": _json_safe(view)}
+
+
+# ----------------------------
+# Load Assignment realtime collaboration
+# ----------------------------
+
+
+@sio.event
+async def loadassignment_join(sid: str, data: Dict[str, Any]):
+    """Join the Load Assignment collaboration room(s) for this user + term.
+
+    Client sends: { termId?: string }
+    Server resolves the user's department scope(s) and joins:
+      la:{termId}:{departmentId}
+    """
+    sess = await sio.get_session(sid)
+    user_id = (sess or {}).get("userId")
+    if not user_id:
+        return {"ok": False, "error": "Not authenticated"}
+
+    term_id = str((data or {}).get("termId") or (data or {}).get("term_id") or "").strip()
+    if not term_id:
+        return {"ok": False, "error": "Missing termId"}
+
+    # Resolve dept scopes
+    dept_ids = await run_in_threadpool(_loadassignment_department_ids_sync, str(user_id))
+    dept_ids = [d for d in dept_ids if str(d).strip()]
+    if not dept_ids:
+        return {"ok": False, "error": "No department scope found"}
+
+    # Resolve presence name
+    u = await run_in_threadpool(_find_user, str(user_id), "")
+    name = _full_name(u) if u else str(user_id)
+
+    rooms: List[str] = []
+    for dept_id in dept_ids:
+        room_id = _la_room_id(term_id, dept_id)
+        rooms.append(room_id)
+        try:
+            await sio.enter_room(sid, room_id)
+        except Exception:
+            continue
+
+        _sid_la_rooms.setdefault(str(sid), set()).add(room_id)
+        _la_upsert_presence(room_id, str(user_id), name, sid)
+
+        # broadcast updated presence to the room
+        try:
+            await sio.emit(
+                "loadassignment_presence",
+                {"roomId": room_id, "users": _la_room_snapshot(room_id)},
+                room=room_id,
+            )
+        except Exception:
+            pass
+
+    return {"ok": True, "rooms": rooms}
+
+
+@sio.event
+async def loadassignment_leave(sid: str, data: Dict[str, Any]):
+    sess = await sio.get_session(sid)
+    user_id = (sess or {}).get("userId")
+    if not user_id:
+        return {"ok": False, "error": "Not authenticated"}
+
+    rooms = (data or {}).get("rooms")
+    if not isinstance(rooms, list):
+        rooms = []
+
+    for room_id in rooms:
+        rid = str(room_id)
+        if not rid:
+            continue
+        try:
+            await sio.leave_room(sid, rid)
+        except Exception:
+            pass
+        try:
+            _la_remove_presence(rid, str(user_id))
+        except Exception:
+            pass
+        try:
+            await sio.emit(
+                "loadassignment_presence",
+                {"roomId": rid, "users": _la_room_snapshot(rid)},
+                room=rid,
+            )
+        except Exception:
+            pass
+
+        try:
+            s = _sid_la_rooms.get(str(sid))
+            if s:
+                s.discard(rid)
+                if not s:
+                    _sid_la_rooms.pop(str(sid), None)
+        except Exception:
+            pass
+
+    return {"ok": True}
+
+
+@sio.event
+async def loadassignment_cursor(sid: str, data: Dict[str, Any]):
+    """Broadcast cursor/selection for presence indicator.
+
+    Client sends: { roomId, rowId?, field? }
+    """
+    sess = await sio.get_session(sid)
+    user_id = (sess or {}).get("userId")
+    if not user_id:
+        return {"ok": False, "error": "Not authenticated"}
+
+    room_id = str((data or {}).get("roomId") or "").strip()
+    if not room_id:
+        return {"ok": False, "error": "Missing roomId"}
+
+    row_id = str((data or {}).get("rowId") or "").strip() or None
+    field = str((data or {}).get("field") or "").strip() or None
+
+    try:
+        m = _la_room_users.get(room_id)
+        if m and str(user_id) in m:
+            m[str(user_id)]["cursor"] = {"rowId": row_id, "field": field}
+            m[str(user_id)]["updatedAt"] = _iso(datetime.now(timezone.utc))
+    except Exception:
+        pass
+
+    payload = {
+        "roomId": room_id,
+        "userId": str(user_id),
+        "rowId": row_id,
+        "field": field,
+    }
+    await sio.emit("loadassignment_cursor", payload, room=room_id, skip_sid=sid)
+
+    # Also update the presence snapshot (cheap, best-effort)
+    try:
+        await sio.emit(
+            "loadassignment_presence",
+            {"roomId": room_id, "users": _la_room_snapshot(room_id)},
+            room=room_id,
+        )
+    except Exception:
+        pass
+
+    return {"ok": True}
+
+
+@sio.event
+async def loadassignment_row_update(sid: str, data: Dict[str, Any]):
+    """Broadcast a finalized row object to all other editors in the room."""
+    sess = await sio.get_session(sid)
+    user_id = (sess or {}).get("userId")
+    if not user_id:
+        return {"ok": False, "error": "Not authenticated"}
+
+    room_id = str((data or {}).get("roomId") or "").strip()
+    row = (data or {}).get("row")
+    if not room_id or not isinstance(row, dict):
+        return {"ok": False, "error": "Invalid payload"}
+
+    payload = {"roomId": room_id, "row": row, "senderId": str(user_id)}
+    await sio.emit("loadassignment_row_update", payload, room=room_id, skip_sid=sid)
+    return {"ok": True}
+
+
+@sio.event
+async def loadassignment_bulk_update(sid: str, data: Dict[str, Any]):
+    """Broadcast many rows (used by Auto-Assign)."""
+    sess = await sio.get_session(sid)
+    user_id = (sess or {}).get("userId")
+    if not user_id:
+        return {"ok": False, "error": "Not authenticated"}
+
+    room_id = str((data or {}).get("roomId") or "").strip()
+    rows = (data or {}).get("rows")
+    if not room_id or not isinstance(rows, list):
+        return {"ok": False, "error": "Invalid payload"}
+
+    payload = {"roomId": room_id, "rows": rows, "senderId": str(user_id)}
+    await sio.emit("loadassignment_bulk_update", payload, room=room_id, skip_sid=sid)
+    return {"ok": True}

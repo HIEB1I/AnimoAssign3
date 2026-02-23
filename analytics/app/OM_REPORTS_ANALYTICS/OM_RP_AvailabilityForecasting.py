@@ -93,6 +93,7 @@ async def build_faculty_availability_heatmap(
     threshold: float = 0.50,
     term_id: Optional[str] = None,
     direction: str = "current",
+    counting_mode: str = "top1",
 ) -> Dict[str, Any]:
     """
     Returns a “propensity-to-assign” heatmap keyed by "D|HH:MM-HH:MM".
@@ -140,7 +141,7 @@ async def build_faculty_availability_heatmap(
     if not curr_term_id:
         return {"warnings": ["Current term is missing term_id."], "slots": {}, "total_faculty_considered": 0,
                 "faculty_with_recent_pref": 0, "faculty_with_recent_history": 0, "most_supported_slot_count": 0}
-    prev_term = curr_term_id  # use current term prefs (T) to forecast T+1
+    source_term_id = curr_term_id  # use current term prefs (T) to forecast T+1
     hist_terms = await _prev_n_terms(db, curr_term_id, 3)
     weights = _recency_weights(hist_terms)
 
@@ -156,6 +157,11 @@ async def build_faculty_availability_heatmap(
     grid: Dict[Tuple[str, str], Dict[str, Any]] = {
         (d, s): {"count": 0, "list": []} for d in DAY_CODES for s in TIME_SLOTS
     }
+
+    # Counting mode: keep the UI honest by letting it count either the single
+    # strongest slot per faculty (Top 1) or a broader set (Top 5).
+    cm = (counting_mode or "top1").strip().lower()
+    top_n_per_faculty = 1 if cm in ("top1", "1", "one") else TOP_N_PER_FACULTY
 
     # New Metrics
     total_faculty_considered: int = 0
@@ -179,9 +185,39 @@ async def build_faculty_availability_heatmap(
         }
 
     curr_term_id = active_term["term_id"]
+    source_term_id = curr_term_id
 
     # last 3 terms (relative to active term)
     hist_terms = await _prev_n_terms(db, curr_term_id, 3)
+    weights = _recency_weights(hist_terms)
+
+    # Faculty population (for inclusion/exclusion transparency)
+    scope_query: Dict[str, Any] = {}
+    if dept_id:
+        scope_query["department_id"] = dept_id
+
+    # Course scope is checked via faculty profile fields (same as below)
+    scope_profiles = [
+        fp async for fp in db.faculty_profiles.find(
+            scope_query,
+            {"faculty_id": 1, "department_id": 1, "qualified_kacs": 1, "course_ids": 1},
+        )
+    ]
+
+    scope_fids: List[str] = []
+    excluded_not_qualified = 0
+    for fp in scope_profiles:
+        fid = fp.get("faculty_id")
+        if not fid:
+            continue
+        if course_id:
+            kvals = set(fp.get("qualified_kacs", [])) | set(fp.get("course_ids", []))
+            if course_id not in kvals:
+                excluded_not_qualified += 1
+                continue
+        scope_fids.append(fid)
+
+    faculty_total_in_scope = len(scope_fids)
 
     # only faculty who SUBMITTED preferences for the active term
     # (use is_finished if that’s your “submitted” flag; otherwise remove it)
@@ -212,6 +248,24 @@ async def build_faculty_availability_heatmap(
 
     # final eligible pool = submitted prefs AND taught in last 3 terms
     eligible_fids = pref_fids_set.intersection(hist_fids)
+
+    # Inclusion/exclusion breakdown (simple + transparent)
+    excluded_no_submitted_prefs = 0
+    excluded_no_recent_history = 0
+    excluded_on_leave = 0
+    excluded_preferred_units_zero = 0
+    excluded_no_signal = 0
+
+    # Compute exclusions relative to the scope pool when available; otherwise fall back
+    # to a conservative approximation based on preference/history presence.
+    base_pool = scope_fids if scope_fids else list(pref_fids_set.union(hist_fids))
+    for fid in base_pool:
+        if fid not in pref_fids_set:
+            excluded_no_submitted_prefs += 1
+            continue
+        if fid not in hist_fids:
+            excluded_no_recent_history += 1
+            continue
     if not eligible_fids:
         return {
             "warnings": [f"No faculty matched: submitted prefs ({curr_term_id}) AND taught in last 3 terms."],
@@ -239,18 +293,22 @@ async def build_faculty_availability_heatmap(
             "end_term_id":   {"$gte": curr_term_id},
         })
         if lv:
+            excluded_on_leave += 1
             continue
             
         pref_curr = await db.faculty_preferences.find_one(
             {"faculty_id": fid, "term_id": curr_term_id},
             projection={"preferred_units": 1}
         )
-        if pref_curr and int(pref_curr.get("preferred_units", 0)) == 0:
+
+        preferred_units = (pref_curr or {}).get("preferred_units") or 0
+        if int(preferred_units) == 0:
+            excluded_preferred_units_zero += 1
             continue
             
         # Candidate if (prev-term pref) OR (has history in last 3 terms)
         has_prev_pref = await db.faculty_preferences.find_one(
-            {"faculty_id": fid, "term_id": prev_term}, projection={"_id": 1}
+            {"faculty_id": fid, "term_id": source_term_id}, projection={"_id": 1}
         ) is not None
         
         has_history_any = False
@@ -260,6 +318,7 @@ async def build_faculty_availability_heatmap(
             ) is not None
             
         if not (has_prev_pref or has_history_any):
+            excluded_no_signal += 1
             continue
 
         # Increment Quality Metrics (only if considered for scoring)
@@ -314,7 +373,7 @@ async def build_faculty_availability_heatmap(
         # Preference reinforcement from previous term
         pref_keys: set = set()
         prev_doc = await db.faculty_preferences.find_one(
-            {"faculty_id": fid, "term_id": prev_term},
+            {"faculty_id": fid, "term_id": source_term_id},
             projection={"availability_days": 1, "preferred_times": 1}
         )
         if prev_doc:
@@ -365,7 +424,7 @@ async def build_faculty_availability_heatmap(
                     scored.append((key, score, "Preferred in previous term", f, preferred))
 
         scored.sort(key=lambda x: x[1], reverse=True)
-        topN = scored[:TOP_N_PER_FACULTY]
+        topN = scored[:top_n_per_faculty]
 
         notes = []
         if not pref_curr:
@@ -406,15 +465,57 @@ async def build_faculty_availability_heatmap(
     for key in grid:
         most_supported_slot_count = max(most_supported_slot_count, grid[key]["count"])
 
-    prev_label = term_label_by_id.get(prev_term, prev_term)
+    prev_label = term_label_by_id.get(source_term_id, source_term_id)
     hist_labels = [term_label_by_id.get(tid, tid) for tid in hist_terms]
     term_label = term_label_by_id.get(cur["term_id"], cur["term_id"])
 
     slots = { f"{d}|{s}": grid[(d, s)] for d in DAY_CODES for s in TIME_SLOTS }
+
+    # Decision-first summaries
+    eligible_included = total_faculty_considered
+    slot_items: List[Dict[str, Any]] = []
+    for (d, s), cell in grid.items():
+        c = int(cell.get("count") or 0)
+        slot_items.append({
+            "day": d,
+            "slot": s,
+            "key": f"{d}|{s}",
+            "count": c,
+            "ratio": (c / eligible_included) if eligible_included > 0 else 0.0,
+        })
+    slot_items_sorted = sorted(slot_items, key=lambda x: (x["count"], x["key"]), reverse=True)
+    top_blocks = slot_items_sorted[:5]
+    risk_blocks = sorted(slot_items, key=lambda x: (x["count"], x["key"]))[:5]
+
+    # Coverage: % of included faculty that appear in at least one recommended block
+    rec_faculty_ids: set = set()
+    for b in top_blocks:
+        cell = slots.get(b["key"], {})
+        for p in (cell.get("list") or []):
+            if p.get("faculty_id"):
+                rec_faculty_ids.add(p["faculty_id"])
+    coverage_pct = round((len(rec_faculty_ids) / eligible_included) * 100, 1) if eligible_included > 0 else 0.0
+
+    excluded_breakdown = {
+        "no_submitted_preferences": excluded_no_submitted_prefs,
+        "no_recent_history": excluded_no_recent_history,
+        "on_leave": excluded_on_leave,
+        "preferred_units_zero": excluded_preferred_units_zero,
+        "not_qualified": excluded_not_qualified,
+        "no_signal": excluded_no_signal,
+    }
+    # Ensure the scope total is never missing/zero when we have included faculty.
+    scope_total_safe = max(
+        int(faculty_total_in_scope or 0),
+        int(len(base_pool) if base_pool else 0),
+        int(eligible_included or 0),
+    )
+
     return {
+
         "term_id": cur["term_id"],
         "term_label": term_label,
-        "previous_term_for_prefs": prev_term,
+        "previous_term_for_prefs": source_term_id,
         "previous_term_for_prefs_label": prev_label,
         "history_terms": hist_terms,
         "history_terms_labels": hist_labels,
@@ -423,6 +524,16 @@ async def build_faculty_availability_heatmap(
         "faculty_with_recent_pref": faculty_with_recent_pref,
         "faculty_with_recent_history": faculty_with_recent_history,
         "most_supported_slot_count": most_supported_slot_count,
+        "counting_mode": "top1" if top_n_per_faculty == 1 else "top5",
+        "top_n_per_faculty": top_n_per_faculty,
+
+        # Decision summary
+        "eligible_faculty_included": eligible_included,
+        "faculty_total_in_scope": scope_total_safe,
+        "excluded_breakdown": excluded_breakdown,
+        "coverage_pct": coverage_pct,
+        "recommended_blocks": top_blocks,
+        "risk_blocks": risk_blocks,
         # Term navigation helpers (used by the frontend Prev/Next buttons)
         "terms": [
             {
@@ -454,10 +565,17 @@ async def faculty_availability_heatmap_endpoint(
     threshold: float = Query(0.50),
     term_id: Optional[str] = Query(None),
     direction: str = Query("current"),
+    counting_mode: str = Query("top1"),
     db=Depends(get_db),
 ):
     return await build_faculty_availability_heatmap(
-        db=db, course_id=course_id, dept_id=dept_id, threshold=threshold, term_id=term_id, direction=direction
+        db=db,
+        course_id=course_id,
+        dept_id=dept_id,
+        threshold=threshold,
+        term_id=term_id,
+        direction=direction,
+        counting_mode=counting_mode,
     )
 
 # add this alias just under the existing endpoint
@@ -468,8 +586,15 @@ async def availability_forecast_alias(
     threshold: float = Query(0.50),
     term_id: Optional[str] = Query(None),
     direction: str = Query("current"),
+    counting_mode: str = Query("top1"),
     db=Depends(get_db),
 ):
     return await build_faculty_availability_heatmap(
-        db=db, course_id=course_id, dept_id=dept_id, threshold=threshold, term_id=term_id, direction=direction
+        db=db,
+        course_id=course_id,
+        dept_id=dept_id,
+        threshold=threshold,
+        term_id=term_id,
+        direction=direction,
+        counting_mode=counting_mode,
     )

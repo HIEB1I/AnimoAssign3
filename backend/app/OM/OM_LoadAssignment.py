@@ -230,6 +230,56 @@ def _section_to_campus_id(section_code: str) -> str:
     return ""
 
 
+async def _section_campus_id_for_row(
+    sid: str,
+    section_code: str,
+    term_id: str,
+    db,
+) -> str:
+    """Best-effort campus_id resolver for OM Load Assignment rows.
+
+    Priority:
+      1) sections_submitted.campus_id (snapshot/source of truth for OM grid)
+      2) sections.campus_id (canonical)
+      3) infer from section_code prefix (legacy routing)
+
+    Returns "" when it cannot be resolved. Never raises.
+    """
+
+    sid = (sid or "").strip()
+    section_code = (section_code or "").strip()
+    term_id = (term_id or "").strip()
+
+    if sid and term_id:
+        try:
+            ss = await db[COL_SECTIONS_SUBMITTED].find_one(
+                {"term_id": term_id, "section_id": sid},
+                {"_id": 0, "campus_id": 1},
+            ) or {}
+            cid = str(ss.get("campus_id") or "").strip()
+            if cid:
+                return cid
+        except Exception:
+            pass
+
+    if sid:
+        try:
+            sec = await db[COL_SECTIONS].find_one(
+                {"section_id": sid},
+                {"_id": 0, "campus_id": 1},
+            ) or {}
+            cid = str(sec.get("campus_id") or "").strip()
+            if cid:
+                return cid
+        except Exception:
+            pass
+
+    try:
+        return _section_to_campus_id(section_code)
+    except Exception:
+        return ""
+
+
 async def _apo_user_ids_for_campus(campus_id: str, db) -> list[str]:
     """Return APO user_ids who are scoped to the given campus.
 
@@ -365,19 +415,76 @@ async def _find_course_by_code(course_code: str, db) -> dict:
     return await db[COL_COURSES].find_one(q, {"_id": 0}) or {}
 
 
-async def _om_department_ids(user_id: str, db) -> List[str]:
-    """Departments this OM should see (from role_assignments.scope)."""
-    ra = await db.get_collection("role_assignments").find_one(
-        {"user_id": user_id, "role_id": "ROLE0006"},
-        {"_id": 0, "scope": 1},
-    ) or {}
+async def _loadassignment_department_ids(user_id: str, db) -> List[str]:
+    """Department scope for users who can access Load Assignment.
+
+    Historically, Load Assignment was restricted to Office Manager (ROLE0006)
+    and the backend used only that role's scope to determine visible sections.
+
+    However, the UI reuses the same Load Assignment module for other roles that
+    should see the *exact* same department data (e.g., Department Chair and GS
+    Coordinator), especially when they are mapped to the same department.
+
+    This helper resolves department_ids from role_assignments.scope for any
+    Load-Assignment-eligible role.
+    """
+
+    uid = (user_id or "").strip()
+    if not uid:
+        return []
+
+    # Resolve role_ids dynamically from user_roles to avoid hard-coding IDs.
+    # Keep spelling variants for legacy data ("Deparment Chair").
+    eligible_patterns = [
+        r"^Office\s*Manager$",
+        r"^Department\s*Chair$",
+        r"^Deparment\s*Chair$",
+        r"^GS\s*Coordinator$",
+    ]
+
+    role_ids: List[str] = []
+    try:
+        or_terms = [{"role_type": {"$regex": p, "$options": "i"}} for p in eligible_patterns]
+        roles = await db.get_collection("user_roles").find(
+            {"$or": or_terms},
+            {"_id": 0, "role_id": 1},
+        ).to_list(50)
+        for rdoc in roles or []:
+            rid = str((rdoc or {}).get("role_id") or "").strip()
+            if rid and rid not in role_ids:
+                role_ids.append(rid)
+    except Exception:
+        # If user_roles is unavailable, fall back to known IDs.
+        role_ids = ["ROLE0006", "ROLE0002", "ROLE0007"]
 
     dept_ids: List[str] = []
-    for sc in (ra.get("scope") or []):
-        if isinstance(sc, dict) and sc.get("type") == "department":
-            did = str(sc.get("id") or "").strip()
+    try:
+        cur = db.get_collection("role_assignments").find(
+            {"user_id": uid, "role_id": {"$in": role_ids}},
+            {"_id": 0, "scope": 1},
+        )
+        async for ra in cur:
+            for sc in ((ra or {}).get("scope") or []):
+                if isinstance(sc, dict) and sc.get("type") == "department":
+                    did = str(sc.get("id") or "").strip()
+                    if did and did not in dept_ids:
+                        dept_ids.append(did)
+    except Exception:
+        pass
+
+    # Fallback: staff_profiles may store department_id/dept_id even when role
+    # assignments are incomplete. This keeps CHAIR/GS Coordinator functional.
+    if not dept_ids:
+        try:
+            sp = await db.get_collection(COL_STAFF).find_one(
+                {"user_id": uid},
+                {"_id": 0, "department_id": 1, "dept_id": 1},
+            ) or {}
+            did = str(sp.get("department_id") or sp.get("dept_id") or "").strip()
             if did:
                 dept_ids.append(did)
+        except Exception:
+            pass
 
     return dept_ids
 
@@ -1336,7 +1443,7 @@ async def _notify_apo_room_allocation_ready(
         )
 
 async def _fetch_rows(user_id: str, term_id: str, db) -> Dict[str, Any]:
-    dept_ids = await _om_department_ids(user_id, db)
+    dept_ids = await _loadassignment_department_ids(user_id, db)
     if not dept_ids:
         return {"rows": []}
 
@@ -1533,6 +1640,9 @@ async def _fetch_rows(user_id: str, term_id: str, db) -> Dict[str, Any]:
             "title": course_doc.get("course_title", "") or "",
             "units": course_doc.get("units", "") or "",
             "section": d.get("section_code", "") or "",
+            # Campus is needed for campus-specific APO deadlines (Manila vs Laguna).
+            # Prefer explicit campus_id on the submitted snapshot; fall back to prefix inference.
+            "campus_id": (str(d.get("campus_id") or "").strip() or _section_to_campus_id(d.get("section_code", ""))),
             # NEW: keep both faculty_id and display name so manual edits can persist correctly
             "faculty_id": (d.get("asg") or {}).get("faculty_id") or "",
             "faculty": d.get("faculty_name_display", "") or "",
@@ -2047,12 +2157,31 @@ async def loadassignment_handler(
         # Resolve section via section_schedules to avoid guessing/wrong section identifiers.
         sched = await db[COL_SCHED].find_one(
             {"schedule_id": schedule_id},
-            {"_id": 0, "section_id": 1},
+            {"_id": 0, "section_id": 1, "term_id": 1},
         )
         if not sched or not (sched.get("section_id") or "").strip():
             raise HTTPException(status_code=404, detail="Schedule not found")
 
         section_id = str(sched.get("section_id") or "").strip()
+
+        # Enforce campus-specific APO deadline lock for remarks (edit field).
+        # Manila and Laguna deadlines can differ; only lock the affected campus.
+        try:
+            term_id = str(sched.get("term_id") or "").strip()
+            if term_id:
+                campus_id = await _section_campus_id_for_row(section_id, "", term_id, db)
+                if campus_id:
+                    w = await _get_om_submit_window(term_id, campus_id, db)
+                    if _deadline_passed(w):
+                        raise HTTPException(
+                            status_code=403,
+                            detail="Editing is locked because the APO-set deadline for this campus has passed.",
+                        )
+        except HTTPException:
+            raise
+        except Exception:
+            # Best-effort: do not block if window cannot be resolved.
+            pass
 
         res = await db["sections"].update_one(
             {"section_id": section_id},
@@ -2078,6 +2207,44 @@ async def loadassignment_handler(
             )
 
         rows = payload["rows"]
+
+        # Campus-specific APO deadlines:
+        # If a campus' deadline has passed, OM must NOT be able to modify rows of that campus.
+        # This should not block saving other campus rows (e.g., Manila locked but Laguna editable).
+        try:
+            campus_ids_in_rows: set[str] = set()
+            for rr in rows:
+                if not isinstance(rr, dict):
+                    continue
+                cid = str(rr.get("campus_id") or "").strip()
+                if not cid:
+                    # best-effort: infer from section_code
+                    cid = _section_to_campus_id(str(rr.get("section") or "").strip())
+                if cid:
+                    campus_ids_in_rows.add(cid)
+
+            deadline_passed_by_campus: dict[str, bool] = {}
+            for cid in sorted(campus_ids_in_rows):
+                w = await _get_om_submit_window(active["term_id"], cid, db)
+                deadline_passed_by_campus[cid] = _deadline_passed(w)
+
+            if deadline_passed_by_campus:
+                kept: list[dict] = []
+                skipped = 0
+                for rr in rows:
+                    if not isinstance(rr, dict):
+                        continue
+                    cid = str(rr.get("campus_id") or "").strip()
+                    if not cid:
+                        cid = _section_to_campus_id(str(rr.get("section") or "").strip())
+                    if cid and deadline_passed_by_campus.get(cid):
+                        skipped += 1
+                        continue
+                    kept.append(rr)
+                rows = kept
+        except Exception:
+            # Best-effort only: never break SAVE if deadline resolution fails.
+            pass
 
         # Just persist assignments/schedules – no faculty_loads header yet
         await _persist_rows_no_auto(active["term_id"], rows, db)
@@ -3304,7 +3471,7 @@ async def om_get_submitted_course_offerings(
     if not (active or {}).get("term_id"):
         raise HTTPException(status_code=409, detail="No active/upcoming term found")
 
-    dept_ids = await _om_department_ids(user_id, db)
+    dept_ids = await _loadassignment_department_ids(user_id, db)
     if not dept_ids:
         return {"ok": True, "courses": []}
 
@@ -3336,9 +3503,13 @@ async def om_get_submitted_course_offerings(
                 "course_units_display": {"$ifNull": ["$course.units", {"$ifNull": ["$course.units_per_section", 0]}]},
             }
         },
+        # Campus-specific offerings:
+        # A course can be offered in both Manila and Laguna. We return one entry per (course_id, campus_id)
+        # so the OM "Add section" flow can be restricted by campus deadlines.
         {
             "$group": {
-                "_id": "$course.course_id",
+                "_id": {"course_id": "$course.course_id", "campus_id": "$campus_id"},
+                "campus_id": {"$first": "$campus_id"},
                 "code": {"$first": "$course_code_display"},
                 "title": {"$first": "$course_title_display"},
                 "units": {"$first": "$course_units_display"},
@@ -3346,8 +3517,8 @@ async def om_get_submitted_course_offerings(
                 "capacity": {"$max": {"$ifNull": ["$enrollment_cap", 0]}},
             }
         },
-        {"$project": {"_id": 0, "code": 1, "title": 1, "units": 1, "capacity": 1}},
-        {"$sort": {"code": 1}},
+        {"$project": {"_id": 0, "campus_id": 1, "code": 1, "title": 1, "units": 1, "capacity": 1}},
+        {"$sort": {"code": 1, "campus_id": 1}},
     ]
 
     docs = [x async for x in db[COL_SECTIONS_SUBMITTED].aggregate(pipe)]
@@ -3366,7 +3537,13 @@ async def om_get_submitted_course_offerings(
             cap = int(d.get("capacity") or 0)
         except Exception:
             cap = 0
-        out.append({"code": code, "title": title, "units": units, "capacity": cap})
+        out.append({
+            "campus_id": str(d.get("campus_id") or "").strip(),
+            "code": code,
+            "title": title,
+            "units": units,
+            "capacity": cap,
+        })
 
     return {"ok": True, "courses": out}
 
@@ -3419,7 +3596,7 @@ async def om_save_new_line(
         raise HTTPException(status_code=422, detail="Meeting 2 must include Day 2, Begin 2, and End 2")
 
     # Course must be in OM scope AND exist in submitted offerings
-    dept_ids = await _om_department_ids(user_id, db)
+    dept_ids = await _loadassignment_department_ids(user_id, db)
     if not dept_ids:
         raise HTTPException(status_code=403, detail="OM has no department scope")
 
@@ -3553,6 +3730,22 @@ async def om_save_new_line(
     # Campus routing: prefer the course offering's campus_id (source of truth),
     # fall back to section-prefix inference for safety.
     campus_id = expected_campus_id or _section_to_campus_id(section_code)
+
+    # NEW: Campus-specific deadline lock.
+    # If the APO-set deadline has passed for this campus, OM may not add new sections for it.
+    try:
+        if campus_id:
+            w = await _get_om_submit_window(tid, campus_id, db)
+            if _deadline_passed(w):
+                raise HTTPException(
+                    status_code=403,
+                    detail="Cannot add section: the APO-set deadline has passed for this campus",
+                )
+    except HTTPException:
+        raise
+    except Exception:
+        # Best-effort: do not crash if window lookup fails.
+        pass
 
     # Units/capacity (title is derived)
     try:
@@ -4556,7 +4749,7 @@ async def run_auto_assignment(
     # Prefs (used for alt-window search on duplicates)
     # Resolve OM department if not explicitly provided
     if not department_id:
-        om_dept_ids = await _om_department_ids(user_id, db)
+        om_dept_ids = await _loadassignment_department_ids(user_id, db)
         if not om_dept_ids:
             raise HTTPException(
                 status_code=403,
