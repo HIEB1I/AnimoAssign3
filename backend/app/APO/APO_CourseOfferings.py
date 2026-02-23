@@ -3419,6 +3419,105 @@ async def _pending_changes(
         if str(k).strip()
     }
 
+    # Course-scoped "keep current" suppression for INCREASE recommendations.
+    # Stored as map course_id -> accepted shortage sections.
+    increase_suppression: Dict[str, int] = {
+        str(k): int(v or 0)
+        for k, v in (plan_state.get("increase_sections_suppression") or {}).items()
+        if str(k).strip()
+    }
+
+    # Option A: accepted extra sections tracked by exact section_id so OM vs APO decisions remain separate.
+    accepted_extra_sections: Dict[str, List[str]] = {}
+    try:
+        raw_acc = plan_state.get("accepted_extra_sections") or {}
+        if isinstance(raw_acc, dict):
+            for cid0, ids in raw_acc.items():
+                cid0 = str(cid0).strip()
+                if not cid0:
+                    continue
+                if not isinstance(ids, list):
+                    continue
+                clean_ids = [str(x).strip() for x in ids if str(x).strip()]
+                if clean_ids:
+                    # dedupe, preserve order
+                    accepted_extra_sections[cid0] = list(dict.fromkeys(clean_ids))
+    except Exception:
+        accepted_extra_sections = {}
+
+    # Prune accepted ids that no longer exist (e.g., extra later deleted) so we don't create false prompts.
+    try:
+        changed = False
+        new_map: Dict[str, List[str]] = {}
+        for cid0, ids in accepted_extra_sections.items():
+            if not ids:
+                continue
+            qv = {
+                "term_id": term_id,
+                "campus_id": campus_id,
+                "status": {"$ne": "archived"},
+                "course_id": cid0,
+                "section_id": {"$in": ids},
+                "remarks": {"$not": {"$regex": r"SPECIAL\s*CLASS", "$options": "i"}},
+            }
+            ok = []
+            async for r in db[COL_SECTIONS].find(qv, {"_id": 0, "section_id": 1}):
+                sid = str(r.get("section_id") or "").strip()
+                if sid:
+                    ok.append(sid)
+            ok = [x for x in ids if x in set(ok)]  # preserve original order
+            if ok:
+                new_map[cid0] = ok
+            if ok != ids:
+                changed = True
+        if changed:
+            accepted_extra_sections = new_map
+            await db[COL_PLANSTATE].update_one(
+                {"term_id": term_id, "campus_id": campus_id},
+                {"$set": {"accepted_extra_sections": accepted_extra_sections, "updated_at": now()}},
+                upsert=True,
+            )
+    except Exception:
+        pass
+
+    # Build accepted section_code labels for Planning Summary (best effort).
+    accepted_extra_codes_by_course: Dict[str, List[str]] = {}
+    try:
+        # Collect all accepted section_ids across courses (dedupe, preserve order).
+        all_acc_ids: List[str] = []
+        for _cid0, _ids in accepted_extra_sections.items():
+            for _sid in (_ids or []):
+                if _sid:
+                    all_acc_ids.append(str(_sid).strip())
+        all_acc_ids = [s for s in all_acc_ids if s]
+        all_acc_ids = list(dict.fromkeys(all_acc_ids))
+
+        if all_acc_ids:
+            qv = {
+                "term_id": term_id,
+                "campus_id": campus_id,
+                "status": {"$ne": "archived"},
+                "section_id": {"$in": all_acc_ids},
+                "remarks": {"$not": {"$regex": r"SPECIAL\s*CLASS", "$options": "i"}},
+            }
+            code_by_id: Dict[str, str] = {}
+            async for r in db[COL_SECTIONS].find(qv, {"_id": 0, "section_id": 1, "section_code": 1, "course_id": 1}):
+                sid = str(r.get("section_id") or "").strip()
+                if not sid:
+                    continue
+                code_by_id[sid] = str(r.get("section_code") or "").strip()
+
+            for _cid0, _ids in accepted_extra_sections.items():
+                codes: List[str] = []
+                for _sid in (_ids or []):
+                    sc = code_by_id.get(str(_sid))
+                    if sc:
+                        codes.append(sc)
+                if codes:
+                    accepted_extra_codes_by_course[_cid0] = codes
+    except Exception:
+        accepted_extra_codes_by_course = {}
+
     # Row-scoped demand overrides (APO accepts keeping fewer total sections than demand suggests).
     # Stored as a map keyed by "{course_id}:{program_id}:{batch_id}".
     # NOTE: Although keyed by row, this is applied to the course-level effective target to avoid
@@ -3615,9 +3714,27 @@ async def _pending_changes(
         need_demand = max(1, ceil((plan or 0) / eff_cap))
         target = max(base, need_demand)
 
-        # Allow APO to permanently keep OM-suggested extra sections for this course (bypasses pre-enlistment target)
-        allow = int(extra_allowance.get(cid, 0) or 0)
-        effective_target = target + max(0, allow)
+        # ---- Course-level suppression/allowances for the Approval Required workflow ----
+        # 1) Increase suppression ("Keep current"):
+        #    If APO accepts being short by N sections, reduce the target by up to N,
+        #    but never below what is currently missing. This suppresses the increase prompt.
+        supp = int(increase_suppression.get(cid, 0) or 0)
+        if supp < 0:
+            supp = 0
+        shortage_now = max(0, target - existing)
+        effective_target_base = target - min(supp, shortage_now)
+
+        # 2) Extra allowance ("Accept extra section"):
+        #    Allow APO to keep extra sections beyond demand. IMPORTANT: do NOT force
+        #    re-adding extras in the future if the extra was deleted later.
+        #    Clamp allowance by extras that currently exist.
+        raw_allow = int(extra_allowance.get(cid, 0) or 0)
+        if raw_allow < 0:
+            raw_allow = 0
+        extras_now = max(0, existing - target)
+        keep_allow = min(raw_allow, extras_now)
+
+        effective_target = int(effective_target_base) + int(keep_allow)
 
         # Apply row-scoped override if present and still valid for the current demand snapshot.
         # Validity rule: override holds until APO removes it OR demand inputs change.
@@ -3678,7 +3795,11 @@ async def _pending_changes(
             "eff_cap_used": int(eff_cap or 0),
             "need_demand_sections": int(need_demand or 0),
             "base_sections": int(base or 0),
-            "allowance_kept": int(allow or 0),
+            "allowance_kept": int(keep_allow or 0),
+            "allowance_stored": int(raw_allow or 0),
+            "increase_suppressed": int(min(supp, shortage_now) or 0),
+            "accepted_extras_count": int(len(accepted_extra_sections.get(cid) or [])),
+            "accepted_extras_section_codes": accepted_extra_codes_by_course.get(cid) or [],
             "target_base_demand": int(target or 0),
             "target_sections": int(effective_target or 0),
             "existing_sections": int(existing or 0),
@@ -3692,6 +3813,17 @@ async def _pending_changes(
         elif existing > effective_target:
             over = existing - effective_target
 
+
+            # Apply section-id based acceptance: accepted extras raise the effective target only as long as those sections still exist.
+            accepted_set = set(accepted_extra_sections.get(cid) or [])
+            if accepted_set and over > 0:
+                allow_accept = min(len(accepted_set), int(over))
+                effective_target = int(effective_target) + int(allow_accept)
+                over = existing - effective_target
+                try:
+                    explain_by_course[cid]["target_sections"] = int(effective_target)
+                except Exception:
+                    pass
             # If OM AND APO both added sections for the same course, we must show them separately.
             # - OM: Keep / Reject (deletes ONLY the OM-stamped section_ids)
             # - APO: Accept extra / Remove (deletes ONLY the APO-added section_ids)
@@ -3700,10 +3832,13 @@ async def _pending_changes(
             # 1) OM-stamped suggestions (newest-first)
             om_secs = om_newline_by_course.get(cid) or []
             if om_secs and remaining_over > 0:
-                om_delete_count = min(remaining_over, len(om_secs))
+                om_delete_count = min(remaining_over, len([s for s in om_secs if s.get("section_id") and (not accepted_set or (s.get("section_id") not in accepted_set))]))
                 if om_delete_count > 0:
                     om_codes = [s.get("section_code") for s in om_secs if s.get("section_code")]
                     om_ids = [s.get("section_id") for s in om_secs if s.get("section_id")]
+                    if accepted_set:
+                        om_ids = [sid for sid in om_ids if sid not in accepted_set]
+                        om_codes = [s.get("section_code") for s in om_secs if s.get("section_code") and (s.get("section_id") not in accepted_set)]
                     changes.append({
                         "type": "sections_decrease",
                         "course_id": cid,
@@ -3722,6 +3857,9 @@ async def _pending_changes(
                 if apo_secs:
                     apo_codes = [s.get("section_code") for s in apo_secs if s.get("section_code")]
                     apo_ids = [s.get("section_id") for s in apo_secs if s.get("section_id")]
+                    if accepted_set:
+                        apo_ids = [sid for sid in apo_ids if sid not in accepted_set]
+                        apo_codes = [s.get("section_code") for s in apo_secs if s.get("section_code") and (s.get("section_id") not in accepted_set)]
                     changes.append({
                         "type": "sections_over_demand",
                         "course_id": cid,
@@ -3761,16 +3899,10 @@ async def _planning_flags(term_id: str, campus_id: str, campus_prefix: str):
     )
 
     plan_state = await db[COL_PLANSTATE].find_one({"term_id": term_id, "campus_id": campus_id}) or {}
-    approved_flag = bool(plan_state.get("approved"))
-    last_preen = plan_state.get("last_preen_hash")
-    last_cohort = plan_state.get("last_cohort_hash")
-
-    approval_required = (not needs_import) and (
-        bool(pending)
-        or (approved_flag is False)
-        or (preen_hash != last_preen)
-        or (cohort_hash != last_cohort)
-    )
+    # NOTE (2026-02): "Approval Required" is now decision-per-item.
+    # No more batch "Approve updates" step. The panel is shown only when there
+    # are unresolved pending changes.
+    approval_required = (not needs_import) and bool(pending)
     return needs_import, approval_required, pending, explain_by_course, preen_hash, cohort_hash, plan_state
 # --- room availability helpers (capacity/type/time overlap) ---
 # --- room availability helpers (capacity/type/time overlap) ---
@@ -5523,7 +5655,9 @@ async def post_course_offerings(
         "addRow", "editRow", "deleteRow", "restoreRow", "forward",
         "curriculumAddCourse", "curriculumEditCourse", "curriculumRemoveCourse",
         "approvePlan",
-        "planAllowExtra", "planRejectOmNewLine", "planRemoveExtra",
+        "planApplyIncrease", "planApplyIncreaseAll", "planKeepCurrentIncrease",
+        "planApplyReduceAll",
+        "planAllowExtra", "planAcceptExtraSections", "planRejectOmNewLine", "planRemoveExtra",
         "planAcceptRowTarget", "planClearRowTarget",
         "specialclassUpdate", 
         "courseCatalog", "search_catalog",
@@ -6775,6 +6909,447 @@ async def post_course_offerings(
         )
         return {"ok": True, "removed": 1}
 
+    # ----- INCREASE DECISIONS (NO BATCH APPROVE STEP) -----
+    if action == "planApplyIncreaseAll":
+        needs_import, pending, _explain_by_course, preen_hash, cohort_hash = await _pending_changes(
+            term_id=term_id, campus_id=campus_id, campus_name=campus.get("campus_name", "")
+        )
+        if needs_import:
+            raise HTTPException(status_code=400, detail="Import Pre-Enlistment first.")
+
+        inc_items = [ch for ch in (pending or []) if str(ch.get("type") or "") == "sections_increase"]
+        if not inc_items:
+            return {"ok": True, "applied": 0, "details": []}
+
+        # Build owner set (program+batch rows) from curriculum to keep section distribution stable.
+        curr = [x async for x in db[COL_CURRICULUM].find(
+            {"term_id": term_id, "campus_id": campus_id},
+            {"_id": 0, "program_id": 1, "batch_id": 1, "course_list": 1}
+        )]
+
+        batch_ids = sorted({(c.get("batch_id") or "").strip() for c in curr if (c.get("batch_id") or "").strip()})
+        batch_number_by_id: Dict[str, int] = {}
+        if batch_ids:
+            async for b in db[COL_BATCHES].find(
+                {"batch_id": {"$in": batch_ids}},
+                {"_id": 0, "batch_id": 1, "batch_number": 1, "batch_code": 1}
+            ):
+                bid = (b.get("batch_id") or "").strip()
+                if bid:
+                    batch_number_by_id[bid] = int(_extract_batch_number(b) or 0)
+
+        course_to_owner_set: Dict[str, set] = {}
+        for c in curr:
+            pid = (c.get("program_id") or "").strip()
+            bid = (c.get("batch_id") or "").strip()
+            bn = int(batch_number_by_id.get(bid, 0))
+            for one_cid in ensure_list(c.get("course_list")):
+                if one_cid and pid and bid:
+                    course_to_owner_set.setdefault(one_cid, set()).add((bid, pid, bn))
+
+        async def _choose_creation_prefix(one_course_id: str) -> str:
+            lvl = (await db[COL_COURSES].find_one({"course_id": one_course_id}, {"_id": 0, "program_level": 1}) or {}).get("program_level")
+            owners = sorted({pid for (_bid, pid, _bn) in course_to_owner_set.get(one_course_id, set())})
+            pname_list: List[str] = []
+            if owners:
+                async for p in db[COL_PROGRAMS].find({"program_id": {"$in": owners}}, {"_id": 0, "program_name": 1}):
+                    if p.get("program_name"):
+                        pname_list.append(p["program_name"])
+            any_cbl = any(_is_cbl_program(nm) for nm in pname_list)
+            if "laguna" in (campus.get("campus_name", "").lower()):
+                if level_code(lvl) == "GSM":
+                    return "XX"
+                return "XC" if any_cbl else "XX"
+            return "G" if level_code(lvl) == "GSM" else "S"
+
+        async def _ordered_owners(one_course_id: str) -> List[Tuple[str, str, int]]:
+            owners = list(course_to_owner_set.get(one_course_id, set()) or [])
+            if not owners:
+                return []
+            pids = sorted({pid for (_bid, pid, _bn) in owners if pid})
+            pid_to_code: Dict[str, str] = {}
+            if pids:
+                async for p in db[COL_PROGRAMS].find(
+                    {"program_id": {"$in": pids}},
+                    {"_id": 0, "program_id": 1, "program_code": 1},
+                ):
+                    pid2 = (p.get("program_id") or "").strip()
+                    if pid2:
+                        pid_to_code[pid2] = (p.get("program_code") or "").strip().upper()
+
+            def _k(t: Tuple[str, str, int]):
+                bid2, pid2, bn2 = t
+                return (int(bn2 or 0), pid_to_code.get(pid2, "ZZZ"), pid2 or "", bid2 or "")
+
+            return sorted(owners, key=_k)
+
+        details: List[Dict[str, Any]] = []
+        applied = 0
+        for ch in inc_items:
+            cid = str(ch.get("course_id") or "").strip()
+            shortage = int(ch.get("by_sections") or 0)
+            if not cid or shortage <= 0:
+                continue
+
+            lvl = (await db[COL_COURSES].find_one({"course_id": cid}, {"_id": 0, "program_level": 1}) or {}).get("program_level")
+            pref_pat = prefix_pattern_for_level(campus.get("campus_name", ""), lvl) or prefix_default
+            sec_q = {
+                "term_id": term_id,
+                "campus_id": campus_id,
+                "status": {"$ne": "archived"},
+                "$or": [{"course_id": cid}, {"fulfilled_placeholder_course_id": cid}],
+            }
+            if pref_pat:
+                sec_q["section_code"] = {"$regex": f"^{pref_pat}", "$options": "i"}
+            existing = await db[COL_SECTIONS].count_documents(sec_q)
+
+            base = max(1, int(len(course_to_owner_set.get(cid, set()) or []) or 1))
+            need_base = max(0, base - existing)
+            created = 0
+
+            if need_base:
+                creation_prefix = await _choose_creation_prefix(cid)
+                owners_for_course = await _ordered_owners(cid)
+                await _create_sections(
+                    term_id=term_id,
+                    campus_id=campus_id,
+                    campus_prefix=creation_prefix,
+                    course_id=cid,
+                    count=need_base,
+                    capacity=await effective_section_capacity(term_id, campus.get("campus_name", ""), cid),
+                    owners=owners_for_course,
+                )
+                created += need_base
+                existing += need_base
+
+            remaining = max(0, shortage - need_base)
+            if remaining:
+                creation_prefix = await _choose_creation_prefix(cid)
+                owners_for_course = await _ordered_owners(cid)
+                await _create_sections(
+                    term_id=term_id,
+                    campus_id=campus_id,
+                    campus_prefix=creation_prefix,
+                    course_id=cid,
+                    count=remaining,
+                    capacity=await effective_section_capacity(term_id, campus.get("campus_name", ""), cid),
+                    owners=owners_for_course,
+                )
+                created += remaining
+
+            if created:
+                applied += 1
+                details.append({"course_id": cid, "created": int(created)})
+
+        try:
+            # Best-effort reseat for stable row distribution.
+            for cid in {d.get("course_id") for d in details if d.get("course_id")}:
+                owners_for_course = await _ordered_owners(str(cid))
+                if not owners_for_course:
+                    continue
+                lvl = (await db[COL_COURSES].find_one({"course_id": cid}, {"_id": 0, "program_level": 1}) or {}).get("program_level")
+                pref_pat = prefix_pattern_for_level(campus.get("campus_name", ""), lvl) or prefix_default
+                await _reseat_sections_to_owners(
+                    term_id=term_id,
+                    campus_id=campus_id,
+                    course_id=str(cid),
+                    owners=owners_for_course,
+                    campus_prefix_pattern=pref_pat,
+                )
+        except Exception:
+            pass
+
+        await db[COL_PLANSTATE].update_one(
+            {"term_id": term_id, "campus_id": campus_id},
+            {"$set": {"last_preen_hash": preen_hash, "last_cohort_hash": cohort_hash, "updated_at": now()}},
+            upsert=True,
+        )
+
+        return {"ok": True, "applied": int(applied or 0), "details": details}
+
+    if action == "planApplyReduceAll":
+        needs_import, pending, _explain_by_course, preen_hash, cohort_hash = await _pending_changes(
+            term_id=term_id, campus_id=campus_id, campus_name=campus.get("campus_name", "")
+        )
+        if needs_import:
+            raise HTTPException(status_code=400, detail="Import Pre-Enlistment first.")
+
+        reduce_items = [
+            ch for ch in (pending or [])
+            if str(ch.get("type") or "") in {"sections_decrease", "sections_over_demand"}
+        ]
+        if not reduce_items:
+            return {"ok": True, "deleted": 0, "details": []}
+
+        deleted_total = 0
+        details: List[Dict[str, Any]] = []
+
+        # OM-added removals
+        for ch in reduce_items:
+            cid = str(ch.get("course_id") or "").strip()
+            if not cid:
+                continue
+            if str(ch.get("type") or "") == "sections_decrease":
+                ids = [str(x).strip() for x in (ch.get("om_rejectable_section_ids") or []) if str(x).strip()]
+                if not ids:
+                    continue
+                # Skip Special Class sections.
+                om_rows = [
+                    r async for r in db[COL_SECTIONS_SUBMITTED].find(
+                        {"term_id": term_id, "campus_id": campus_id, "section_id": {"$in": ids}},
+                        {"_id": 0, "section_id": 1, "remarks": 1, "created_source": 1, "created_by_office": 1},
+                    )
+                ]
+                special_ids = set()
+                om_ok_ids: List[str] = []
+                for r in om_rows:
+                    sid = str(r.get("section_id") or "").strip()
+                    rem = str(r.get("remarks") or "")
+                    if not sid:
+                        continue
+                    if re.search(r"SPECIAL\s*CLASS", rem, flags=re.I):
+                        special_ids.add(sid)
+                        continue
+                    # Ensure OM-stamped
+                    if str(r.get("created_source") or "") == "OM_NEW_LINE" or str(r.get("created_by_office") or "") == "OM":
+                        om_ok_ids.append(sid)
+
+                deletable = [sid for sid in om_ok_ids if sid and sid not in special_ids]
+                if not deletable:
+                    continue
+
+                try:
+                    await db[COL_SCHEDS].delete_many({"term_id": term_id, "section_id": {"$in": deletable}})
+                except Exception:
+                    pass
+                try:
+                    await db[COL_SECTIONS_SUBMITTED].delete_many({"term_id": term_id, "section_id": {"$in": deletable}})
+                    await db[COL_SECTIONS_SUBMITTED].delete_many({"section_id": {"$in": deletable}})
+                except Exception:
+                    pass
+                try:
+                    res_sec_1 = await db[COL_SECTIONS].delete_many({"term_id": term_id, "section_id": {"$in": deletable}})
+                    res_sec_2 = await db[COL_SECTIONS].delete_many({"section_id": {"$in": deletable}})
+                    deleted = int(getattr(res_sec_1, "deleted_count", 0) or 0) + int(getattr(res_sec_2, "deleted_count", 0) or 0)
+                except Exception:
+                    deleted = 0
+
+                if deleted:
+                    deleted_total += int(deleted)
+                    details.append({"course_id": cid, "deleted": int(deleted), "kind": "OM"})
+
+        # APO/manual removals
+        for ch in reduce_items:
+            if str(ch.get("type") or "") != "sections_over_demand":
+                continue
+            cid = str(ch.get("course_id") or "").strip()
+            ids = [str(x).strip() for x in (ch.get("apo_removable_section_ids") or []) if str(x).strip()]
+            if not cid or not ids:
+                continue
+            q: Dict[str, Any] = {
+                "term_id": term_id,
+                "campus_id": campus_id,
+                "course_id": cid,
+                "section_id": {"$in": ids},
+                "remarks": {"$not": {"$regex": r"SPECIAL\\s*CLASS", "$options": "i"}},
+                "$and": [
+                    {"created_source": {"$ne": "OM_NEW_LINE"}},
+                    {"created_by_office": {"$ne": "OM"}},
+                ],
+            }
+            try:
+                await db[COL_SCHEDS].delete_many({"term_id": term_id, "section_id": {"$in": ids}})
+            except Exception:
+                pass
+            try:
+                res = await db[COL_SECTIONS].delete_many(q)
+                deleted = int(getattr(res, "deleted_count", 0) or 0)
+            except Exception:
+                deleted = 0
+
+            if deleted:
+                deleted_total += int(deleted)
+                details.append({"course_id": cid, "deleted": int(deleted), "kind": "APO"})
+
+        await db[COL_PLANSTATE].update_one(
+            {"term_id": term_id, "campus_id": campus_id},
+            {"$set": {"last_preen_hash": preen_hash, "last_cohort_hash": cohort_hash, "updated_at": now()}},
+            upsert=True,
+        )
+
+        return {"ok": True, "deleted": int(deleted_total or 0), "details": details}
+
+    if action in {"planApplyIncrease", "planKeepCurrentIncrease"}:
+        if not payload or not str(payload.get("course_id") or "").strip():
+            raise HTTPException(status_code=400, detail="course_id is required.")
+
+        cid = str(payload.get("course_id") or "").strip()
+
+        needs_import, pending, _explain_by_course, preen_hash, cohort_hash = await _pending_changes(
+            term_id=term_id, campus_id=campus_id, campus_name=campus.get("campus_name", "")
+        )
+        if needs_import:
+            raise HTTPException(status_code=400, detail="Import Pre-Enlistment first.")
+
+        inc_item: Optional[Dict[str, Any]] = None
+        for ch in (pending or []):
+            if str(ch.get("type") or "") == "sections_increase" and str(ch.get("course_id") or "") == cid:
+                inc_item = ch
+                break
+
+        shortage = int((inc_item or {}).get("by_sections") or 0)
+        if shortage < 0:
+            shortage = 0
+
+        if action == "planKeepCurrentIncrease":
+            # Record suppression so this increase prompt stops appearing.
+            # Store the *current shortage*; future shortages larger than this will still prompt.
+            plan_state = await db[COL_PLANSTATE].find_one({"term_id": term_id, "campus_id": campus_id}) or {}
+            sup = plan_state.get("increase_sections_suppression") or {}
+            sup = {str(k): int(v or 0) for k, v in sup.items() if str(k).strip()}
+            sup[cid] = max(int(sup.get(cid, 0) or 0), int(shortage or 0))
+            await db[COL_PLANSTATE].update_one(
+                {"term_id": term_id, "campus_id": campus_id},
+                {"$set": {
+                    "increase_sections_suppression": sup,
+                    "last_preen_hash": preen_hash,
+                    "last_cohort_hash": cohort_hash,
+                    "updated_at": now(),
+                }},
+                upsert=True,
+            )
+            return {"ok": True, "suppressed": int(shortage or 0)}
+
+        # action == planApplyIncrease
+        if not inc_item or shortage <= 0:
+            return {"ok": True, "created": 0}
+
+        # Build owner set (program+batch rows) from curriculum to keep section distribution stable.
+        curr = [x async for x in db[COL_CURRICULUM].find(
+            {"term_id": term_id, "campus_id": campus_id},
+            {"_id": 0, "program_id": 1, "batch_id": 1, "course_list": 1}
+        )]
+
+        batch_ids = sorted({(c.get("batch_id") or "").strip() for c in curr if (c.get("batch_id") or "").strip()})
+        batch_number_by_id: Dict[str, int] = {}
+        if batch_ids:
+            async for b in db[COL_BATCHES].find(
+                {"batch_id": {"$in": batch_ids}},
+                {"_id": 0, "batch_id": 1, "batch_number": 1, "batch_code": 1}
+            ):
+                bid = (b.get("batch_id") or "").strip()
+                if not bid:
+                    continue
+                batch_number_by_id[bid] = int(_extract_batch_number(b) or 0)
+
+        course_to_owner_set: Dict[str, set] = {}
+        for c in curr:
+            pid = (c.get("program_id") or "").strip()
+            bid = (c.get("batch_id") or "").strip()
+            bn = int(batch_number_by_id.get(bid, 0))
+            for course_id in ensure_list(c.get("course_list")):
+                if course_id and pid and bid:
+                    course_to_owner_set.setdefault(course_id, set()).add((bid, pid, bn))
+
+        base = max(1, int(len(course_to_owner_set.get(cid, set()) or []) or 1))
+
+        async def _choose_creation_prefix(one_course_id: str) -> str:
+            lvl = (await db[COL_COURSES].find_one({"course_id": one_course_id}, {"_id": 0, "program_level": 1}) or {}).get("program_level")
+            owners = sorted({pid for (_bid, pid, _bn) in course_to_owner_set.get(one_course_id, set())})
+            pname_list: List[str] = []
+            if owners:
+                async for p in db[COL_PROGRAMS].find({"program_id": {"$in": owners}}, {"_id": 0, "program_name": 1}):
+                    if p.get("program_name"):
+                        pname_list.append(p["program_name"])
+            any_cbl = any(_is_cbl_program(nm) for nm in pname_list)
+            if "laguna" in (campus.get("campus_name", "").lower()):
+                if level_code(lvl) == "GSM":
+                    return "XX"
+                return "XC" if any_cbl else "XX"
+            return "G" if level_code(lvl) == "GSM" else "S"
+
+        async def _ordered_owners(one_course_id: str) -> List[Tuple[str, str, int]]:
+            owners = list(course_to_owner_set.get(one_course_id, set()) or [])
+            if not owners:
+                return []
+            pids = sorted({pid for (_bid, pid, _bn) in owners if pid})
+            pid_to_code: Dict[str, str] = {}
+            if pids:
+                async for p in db[COL_PROGRAMS].find(
+                    {"program_id": {"$in": pids}},
+                    {"_id": 0, "program_id": 1, "program_code": 1},
+                ):
+                    pid2 = (p.get("program_id") or "").strip()
+                    if pid2:
+                        pid_to_code[pid2] = (p.get("program_code") or "").strip().upper()
+
+            def _k(t: Tuple[str, str, int]):
+                bid2, pid2, bn2 = t
+                return (int(bn2 or 0), pid_to_code.get(pid2, "ZZZ"), pid2 or "", bid2 or "")
+
+            return sorted(owners, key=_k)
+
+        lvl = (await db[COL_COURSES].find_one({"course_id": cid}, {"_id": 0, "program_level": 1}) or {}).get("program_level")
+        pref_pat = prefix_pattern_for_level(campus.get("campus_name", ""), lvl) or prefix_default
+
+        sec_q = {
+            "term_id": term_id,
+            "campus_id": campus_id,
+            "status": {"$ne": "archived"},
+            "$or": [{"course_id": cid}, {"fulfilled_placeholder_course_id": cid}],
+        }
+        if pref_pat:
+            sec_q["section_code"] = {"$regex": f"^{pref_pat}", "$options": "i"}
+        existing = await db[COL_SECTIONS].count_documents(sec_q)
+
+        created_total = 0
+        need_base = max(0, base - existing)
+        if need_base:
+            creation_prefix = await _choose_creation_prefix(cid)
+            owners_for_course = await _ordered_owners(cid)
+            await _create_sections(
+                term_id=term_id,
+                campus_id=campus_id,
+                campus_prefix=creation_prefix,
+                course_id=cid,
+                count=need_base,
+                capacity=await effective_section_capacity(term_id, campus.get("campus_name", ""), cid),
+                owners=owners_for_course,
+            )
+            created_total += int(need_base)
+            existing += int(need_base)
+
+        remain = max(0, int(shortage) - int(need_base))
+        if remain:
+            creation_prefix = await _choose_creation_prefix(cid)
+            owners_for_course = await _ordered_owners(cid)
+            await _create_sections(
+                term_id=term_id,
+                campus_id=campus_id,
+                campus_prefix=creation_prefix,
+                course_id=cid,
+                count=remain,
+                capacity=await effective_section_capacity(term_id, campus.get("campus_name", ""), cid),
+                owners=owners_for_course,
+            )
+            created_total += int(remain)
+
+        # Best-effort reseat so the distribution stays stable after creating new sections.
+        try:
+            owners_for_course = await _ordered_owners(cid)
+            if owners_for_course:
+                await _reseat_sections_to_owners(
+                    term_id=term_id,
+                    campus_id=campus_id,
+                    course_id=cid,
+                    owners=owners_for_course,
+                    campus_prefix_pattern=pref_pat,
+                )
+        except Exception:
+            pass
+
+        return {"ok": True, "created": int(created_total)}
+
     if action == "approvePlan":
         needs_import, pending, explain_by_course, preen_hash, cohort_hash = await _pending_changes(
             term_id=term_id, campus_id=campus_id, campus_name=campus.get("campus_name","")
@@ -6978,6 +7553,60 @@ async def post_course_offerings(
             upsert=True
         )
         return {"ok": True, "applied": len(pending)}
+
+    # ----- ACCEPT SPECIFIC EXTRA SECTIONS (SECTION-ID LEVEL) -----
+    # Option A: Record acceptance for exact section_ids so OM vs APO extras remain separate decisions.
+    if action == "planAcceptExtraSections":
+        if not payload or not str(payload.get("course_id") or "").strip():
+            raise HTTPException(status_code=400, detail="course_id is required.")
+        cid = str(payload["course_id"]).strip()
+        raw_ids = payload.get("section_ids") or payload.get("section_id") or []
+        if isinstance(raw_ids, str):
+            raw_ids = [raw_ids]
+        if not isinstance(raw_ids, list) or not raw_ids:
+            raise HTTPException(status_code=400, detail="section_ids is required.")
+        want_ids = [str(x).strip() for x in raw_ids if str(x).strip()]
+        want_ids = list(dict.fromkeys(want_ids))
+        if not want_ids:
+            raise HTTPException(status_code=400, detail="section_ids is required.")
+
+        q_valid: Dict[str, Any] = {
+            "term_id": term_id,
+            "campus_id": campus_id,
+            "status": {"$ne": "archived"},
+            "course_id": cid,
+            "section_id": {"$in": want_ids},
+            "remarks": {"$not": {"$regex": r"SPECIAL\s*CLASS", "$options": "i"}},
+        }
+        valid_set: Set[str] = set()
+        async for r in db[COL_SECTIONS].find(q_valid, {"_id": 0, "section_id": 1}):
+            sid = str(r.get("section_id") or "").strip()
+            if sid:
+                valid_set.add(sid)
+
+        if not valid_set:
+            return {"ok": True, "kept": 0, "skipped": len(want_ids)}
+
+        plan_state = await db[COL_PLANSTATE].find_one({"term_id": term_id, "campus_id": campus_id}) or {}
+        acc = plan_state.get("accepted_extra_sections") or {}
+        if not isinstance(acc, dict):
+            acc = {}
+        existing = acc.get(cid) or []
+        if not isinstance(existing, list):
+            existing = []
+        existing_ids = [str(x).strip() for x in existing if str(x).strip()]
+        merged = list(dict.fromkeys(existing_ids + [x for x in want_ids if x in valid_set]))
+        acc[str(cid)] = merged
+
+        await db[COL_PLANSTATE].update_one(
+            {"term_id": term_id, "campus_id": campus_id},
+            {"$set": {"accepted_extra_sections": acc, "updated_at": now()}},
+            upsert=True,
+        )
+        return {"ok": True, "kept": len(valid_set), "course_id": cid}
+
+
+
 
 
     # ----- KEEP / REJECT OM-ADDED NEW LINES -----

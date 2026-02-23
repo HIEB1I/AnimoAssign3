@@ -1002,6 +1002,40 @@ export async function approveApoOfferingsPlan(
   return post(url);
 }
 
+// Apply a single "Increase" recommendation immediately (no batch approve step)
+export async function planApplyIncrease(
+  userId: string,
+  payload: { course_id: string }
+): Promise<{ ok: true; created: number }> {
+  const url = `${API_BASE}/apo/courseofferings${q({ userId, action: "planApplyIncrease" })}`;
+  return post(url, payload);
+}
+
+// Apply ALL "Increase" recommendations immediately (no batch approve step)
+export async function planApplyIncreaseAll(
+  userId: string
+): Promise<{ ok: true; applied: number; details?: any[] }> {
+  const url = `${API_BASE}/apo/courseofferings${q({ userId, action: "planApplyIncreaseAll" })}`;
+  return post(url);
+}
+
+// Suppress a single "Increase" recommendation (keep current sections)
+export async function planKeepCurrentIncrease(
+  userId: string,
+  payload: { course_id: string; keep_shortage_sections?: number }
+): Promise<{ ok: true; suppressed: number }> {
+  const url = `${API_BASE}/apo/courseofferings${q({ userId, action: "planKeepCurrentIncrease" })}`;
+  return post(url, payload);
+}
+
+// Remove ALL "Reduce" extras (OM-added + APO-added) in one shot
+export async function planApplyReduceAll(
+  userId: string
+): Promise<{ ok: true; deleted: number; details?: any[] }> {
+  const url = `${API_BASE}/apo/courseofferings${q({ userId, action: "planApplyReduceAll" })}`;
+  return post(url);
+}
+
 
 export async function planAllowExtra(
   userId: string,
@@ -1011,6 +1045,15 @@ export async function planAllowExtra(
   // IMPORTANT: `api` axios instance already has baseURL=API_BASE.
   // This function builds an absolute URL, so we must use the low-level `post()` helper
   // (which uses global axios) to avoid generating API_BASE + API_BASE/... (404 Not Found).
+  return post(url, payload);
+}
+
+
+export async function planAcceptExtraSections(
+  userId: string,
+  payload: { course_id: string; section_ids: string[] }
+): Promise<{ ok: true; kept: number; course_id: string }> {
+  const url = `${API_BASE}/apo/courseofferings${q({ userId, action: "planAcceptExtraSections" })}`;
   return post(url, payload);
 }
 

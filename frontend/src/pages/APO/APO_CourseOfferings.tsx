@@ -28,7 +28,10 @@ import {
   deleteApoOfferingRow,
   restoreApoOfferingRow,
   forwardApoCourseOfferings,
-  approveApoOfferingsPlan,
+  planApplyIncrease,
+  planApplyIncreaseAll,
+  planKeepCurrentIncrease,
+  planApplyReduceAll,
   curriculumAddCourse,
   curriculumEditCourse,
   curriculumRemoveCourse,
@@ -47,11 +50,9 @@ import {
   type CreateCoursePayload,  
   type CourseCatalogItem,
   type OmSubmissionWindow,
-  planAllowExtra,
+  planAcceptExtraSections,
   planRemoveExtra,
   planRejectOmNewLine,
-  planAcceptRowTarget,
-  planClearRowTarget,
 } from "../../api";
 
 /* --------------------------------- helpers --------------------------------- */
@@ -702,6 +703,8 @@ type PlanningExplain = {
     batch_number?: number | null;
     batch_code?: string;
   }[];
+  accepted_extras_count?: number;
+  accepted_extras_section_codes?: string[];
 };
 
 type PlanningChange =
@@ -1970,50 +1973,32 @@ const describeApiError = (e: any, fallback: string) => {
     });
   };
 
-const handleKeepOmExtra = async (courseId: string, courseCode: string, bySections: number) => {
+const handleKeepOmExtra = async (courseId: string, courseCode: string, sectionIds: string[]) => {
   if (!user?.userId) return;
-  openConfirm({
-    title: "Keep extra section(s)?",
-    description: `This will keep OM’s suggested section(s) for ${courseCode} and stop showing this item in Approval required.`,
-    confirmText: "Keep",
-    cancelText: "Cancel",
-    variant: "default",
-    onConfirm: async () => {
-      try {
-        await planAllowExtra(user.userId, { course_id: courseId, keep_sections: bySections });
-        await loadOfferings();
-      } catch (e: any) {
-        openNotice("Keep failed", e?.response?.data?.detail || e?.message || "Unable to keep OM-added section(s).");
-        throw e;
-      }
-    },
-  });
+  try {
+    await planAcceptExtraSections(user.userId, { course_id: courseId, section_ids: sectionIds });
+    await loadOfferings();
+  } catch (e: any) {
+    openNotice("Accept extra section failed", e?.response?.data?.detail || e?.message || `Unable to accept extra section(s) for ${courseCode}.`);
+    throw e;
+  }
 };
 
 // APO-added extra sections beyond demand: Accept (keep) or Remove (delete specific newly-added sections)
 // NOTE: These handlers must be passed into PlanReviewModal/PlanningSummaryModal via props.
-const handleAcceptExtraApo = async (courseId: string, courseCode: string, bySections: number) => {
+// APO-added extra sections beyond demand: Accept (keep) or Remove (delete specific newly-added sections)
+const handleAcceptExtraApo = async (courseId: string, courseCode: string, sectionIds: string[]) => {
   if (!user?.userId) return;
-  openConfirm({
-    title: "Accept extra section(s)?",
-    description: `This will keep your extra section(s) for ${courseCode} even if they are beyond demand.`,
-    confirmText: "Accept extra",
-    cancelText: "Cancel",
-    variant: "default",
-    onConfirm: async () => {
-      try {
-        // Reuse allow-extra mechanism (backend should treat this as an allowance, not a permanent target).
-        await planAllowExtra(user.userId, { course_id: courseId, keep_sections: bySections });
-        await loadOfferings();
-      } catch (e: any) {
-        openNotice(
-          "Accept extra failed",
-          e?.response?.data?.detail || e?.message || "Unable to accept extra section(s)."
-        );
-        throw e;
-      }
-    },
-  });
+  try {
+    await planAcceptExtraSections(user.userId, { course_id: courseId, section_ids: sectionIds });
+    await loadOfferings();
+  } catch (e: any) {
+    openNotice(
+      "Accept extra section failed",
+      e?.response?.data?.detail || e?.message || `Unable to accept extra section(s) for ${courseCode}.`
+    );
+    throw e;
+  }
 };
 
 const handleRemoveExtraApo = async (
@@ -2070,59 +2055,62 @@ const handleRejectOmNewLine = async (courseId: string, courseCode: string, secti
   });
 };
 
-const handleAcceptRowTarget = async (
-  courseId: string,
-  programId: string,
-  batchId: string,
-  courseCode: string,
-  acceptedTotal: number
-) => {
-  if (!user?.userId) return;
-  openConfirm({
-    title: "Accept current section count?",
-    description: `You’re choosing to keep the current total (${acceptedTotal}) for ${courseCode}. This will bypass the demand suggestion until pre-enlistment/cohort demand changes or you undo it.`,
-    confirmText: "Accept",
-    cancelText: "Cancel",
-    variant: "default",
-    onConfirm: async () => {
-      try {
-        await planAcceptRowTarget(user.userId, { course_id: courseId, program_id: programId, batch_id: batchId });
-        await loadOfferings();
-      } catch (e: any) {
-        openNotice("Accept failed", e?.response?.data?.detail || e?.message || "Failed to accept the current section count.");
-        throw e;
-      }
-    },
-  });
-};
 
-const handleClearRowTarget = async (courseId: string, programId: string, batchId: string, courseCode: string) => {
-  if (!user?.userId) return;
-  openConfirm({
-    title: "Undo acceptance?",
-    description: `This will restore demand-based suggestions for ${courseCode}.`,
-    confirmText: "Undo",
-    cancelText: "Cancel",
-    variant: "danger",
-    onConfirm: async () => {
-      try {
-        await planClearRowTarget(user.userId, { course_id: courseId, program_id: programId, batch_id: batchId });
-        await loadOfferings();
-      } catch (e: any) {
-        openNotice("Undo failed", e?.response?.data?.detail || e?.message || "Failed to undo acceptance.");
-        throw e;
-      }
-    },
-  });
-};
 
-const handleApprovePlan = async () => {
+
+// --- New per-item decisions (no batch approve) ---
+const handleIncreaseNow = async (courseId: string, courseCode: string) => {
   if (!user?.userId) return;
   try {
-    await approveApoOfferingsPlan(user.userId);
+    await planApplyIncrease(user.userId, { course_id: courseId });
     await loadOfferings();
   } catch (e: any) {
-    openNotice("Approval failed", e?.response?.data?.detail || e?.message || "Failed to approve planning updates.");
+    openNotice(
+      "Increase failed",
+      e?.response?.data?.detail || e?.message || `Failed to increase sections for ${courseCode}.`
+    );
+    throw e;
+  }
+};
+
+const handleKeepCurrentIncrease = async (courseId: string, courseCode: string, bySections: number) => {
+  if (!user?.userId) return;
+  try {
+    await planKeepCurrentIncrease(user.userId, { course_id: courseId, keep_shortage_sections: bySections });
+    await loadOfferings();
+  } catch (e: any) {
+    openNotice(
+      "Keep current failed",
+      e?.response?.data?.detail || e?.message || `Failed to keep current sections for ${courseCode}.`
+    );
+    throw e;
+  }
+};
+
+const handleIncreaseAll = async () => {
+  if (!user?.userId) return;
+  try {
+    await planApplyIncreaseAll(user.userId);
+    await loadOfferings();
+  } catch (e: any) {
+    openNotice(
+      "Increase all failed",
+      e?.response?.data?.detail || e?.message || "Failed to apply all increase recommendations."
+    );
+    throw e;
+  }
+};
+
+const handleReduceAll = async () => {
+  if (!user?.userId) return;
+  try {
+    await planApplyReduceAll(user.userId);
+    await loadOfferings();
+  } catch (e: any) {
+    openNotice(
+      "Reduce all failed",
+      e?.response?.data?.detail || e?.message || "Failed to apply all reduce recommendations."
+    );
     throw e;
   }
 };
@@ -6213,17 +6201,8 @@ ${msg}`,
     approvalRequired={!!data?.planning?.approval_required}
     changes={data?.planning?.pending_changes || []}
     explainByCourse={data?.planning?.explain_by_course || {}}
-    rowOverrides={data?.planning?.row_target_overrides || {}}
     courseIndex={{ ...planCourseIndex, ...extraCourseIndex }}
     onClose={() => setShowPlanningSummaryModal(false)}
-    onKeepOmExtra={handleKeepOmExtra}
-    onRejectOmNewLine={handleRejectOmNewLine}
-    onAcceptRowTarget={handleAcceptRowTarget}
-    onClearRowTarget={handleClearRowTarget}
-    onApprove={async () => {
-      await handleApprovePlan();
-      setShowPlanningSummaryModal(false);
-    }}
     onOpenApprovals={() => setShowPlanModal(true)}
   />
 )}
@@ -6236,11 +6215,11 @@ ${msg}`,
           onRejectOmNewLine={handleRejectOmNewLine}
           onAcceptExtraApo={handleAcceptExtraApo}
           onRemoveExtraApo={handleRemoveExtraApo}
+          onIncreaseNow={handleIncreaseNow}
+          onKeepCurrentIncrease={handleKeepCurrentIncrease}
+          onIncreaseAll={handleIncreaseAll}
+          onReduceAll={handleReduceAll}
           onClose={() => setShowPlanModal(false)}
-          onApprove={async () => {
-            await handleApprovePlan();
-            setShowPlanModal(false);
-          }}
         />
       )}
 
@@ -6670,7 +6649,7 @@ const PlanningSummaryPanel: React.FC<{
           <div>
             <div className="font-semibold text-slate-900">Planning Summary</div>
             <div className="text-sm text-slate-700">
-              Section recommendations from pre-enlistment demand and approvals.
+              Informational summary from pre-enlistment demand. Resolve decisions in Approval Required.
             </div>
             <div className="mt-2 flex flex-wrap gap-2 text-xs">
               {coursesWithGap > 0 && (
@@ -6730,28 +6709,16 @@ const PlanningSummaryModal: React.FC<{
   approvalRequired: boolean;
   changes: PlanningChange[];
   explainByCourse: Record<string, PlanningExplain>;
-  rowOverrides: Record<string, any>;
   courseIndex?: Record<string, { code: string; title?: string } | any>;
   onClose: () => void;
-  onApprove: () => void | Promise<void>;
-  onKeepOmExtra: (courseId: string, courseCode: string, bySections: number) => void | Promise<void>;
-  onRejectOmNewLine: (courseId: string, courseCode: string, sectionId?: string, sectionCode?: string) => void | Promise<void>;
-  onAcceptRowTarget: (courseId: string, programId: string, batchId: string, courseCode: string, acceptedTotal: number) => void | Promise<void>;
-  onClearRowTarget: (courseId: string, programId: string, batchId: string, courseCode: string) => void | Promise<void>;
   onOpenApprovals?: () => void;
 }> = ({
   actionRequired,
   approvalRequired,
   changes,
   explainByCourse,
-  rowOverrides,
   courseIndex,
   onClose,
-  onApprove,
-  onKeepOmExtra,
-  onRejectOmNewLine,
-  onAcceptRowTarget,
-  onClearRowTarget,
   onOpenApprovals,
 }) => {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
@@ -6899,7 +6866,7 @@ const PlanningSummaryModal: React.FC<{
             </div>
             <div className="min-w-0">
               <div className="text-base sm:text-lg font-extrabold tracking-tight">Planning Summary</div>
-              <div className="mt-1 text-sm text-white/90">Review demand-based suggestions and items needing your action.</div>
+              <div className="mt-1 text-sm text-white/90">See demand-based suggestions and which courses have pending approvals. Resolve decisions in Approval Required.</div>
             </div>
 
             <div className="ml-auto flex items-center gap-2">
@@ -6949,13 +6916,11 @@ const PlanningSummaryModal: React.FC<{
             <div className="space-y-3">
               {byCourse.map((c: any) => {
                 const rowKey = String(c.course_id || "");
-                const courseId = String(c.course_id || "");
                 const seat = c.seatAgg;
                 const ex: PlanningExplain | undefined = c.explain;
                 const isOpen = !!expanded[rowKey];
 
                 const dec = (c.changes || []).find((x: any) => x.type === "sections_decrease") as any;
-                const inc = (c.changes || []).find((x: any) => x.type === "sections_increase") as any;
 
                 const omIds: string[] = dec?.om_rejectable_section_ids || [];
                 const omCodes: string[] = dec?.om_added_section_codes || [];
@@ -6963,11 +6928,9 @@ const PlanningSummaryModal: React.FC<{
                 const omCount = isOmDec ? (dec?.om_delete_count || dec?.by_sections || 0) : 0;
                 const overReduce = (!isOmDec && dec && Number(dec?.by_sections || 0) > 0) ? Number(dec?.by_sections || 0) : 0;
 
-                const needsReview =
-                  Number(seat?.gap || 0) > 0 ||
-                  Number(seat?.suggest || 0) > 0 ||
-                  (c?.changes || []).length > 0 ||
-                  Number(omCount || 0) > 0;
+                const needsReview = (c?.changes || []).length > 0;
+
+                // Planning Summary is informational only; approvals are handled in Approval Required.
 
                 // Row overrides are per program/batch row, shown in the row list below.
 
@@ -7042,55 +7005,6 @@ const PlanningSummaryModal: React.FC<{
 
                     {isOpen && (
                       <div className="px-4 pb-4">
-                        {(seat?.gap > 0 || (inc?.by_sections || 0) > 0) && (c.rows || []).length > 0 && (() => {
-                          const existingOverrideKey = Object.keys(rowOverrides || {}).find((k) => k.startsWith(`${courseId}:`));
-                          const hasOverride = !!existingOverrideKey;
-                          const anchorRow = (c.rows || [])
-                            .slice()
-                            .sort((a: any, b: any) => `${a.programCode || ""}${a.batchCode || ""}`.localeCompare(`${b.programCode || ""}${b.batchCode || ""}`))
-                            [0];
-
-                          return (
-                            <div className="mb-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-                              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                                <div className="text-sm text-slate-700">
-                                  If you intentionally want to keep the <span className="font-semibold">current total section count</span> for this course and bypass demand suggestions, you can accept it.
-                                </div>
-
-                                {!hasOverride ? (
-                                <button
-                                  className="shrink-0 whitespace-nowrap rounded-lg bg-rose-600 px-5 py-1.5 text-xs font-semibold text-white hover:bg-rose-700 disabled:opacity-50"
-                                  disabled={!anchorRow || !String(anchorRow?.program_id || "").trim() || !String(anchorRow?.batch_id || "").trim()}
-                                  onClick={() =>
-                                    onAcceptRowTarget(
-                                      courseId,
-                                      String(anchorRow?.program_id || ""),
-                                      String(anchorRow?.batch_id || ""),
-                                      c.course_code || "",
-                                      Number(ex?.existing_sections || 0)
-                                    )
-                                  }
-                                >
-                                  Accept current ({Number(ex?.existing_sections || 0)})
-                                </button>
-                                ) : (
-                                  <button
-                                    className="rounded-lg px-3 py-1.5 text-xs font-semibold text-rose-700 border border-rose-200 hover:bg-rose-50"
-                                    onClick={() => {
-                                      const k = String(existingOverrideKey || "");
-                                      const parts = k.split(":");
-                                      const pid = parts[1] || "";
-                                      const bid = parts[2] || "";
-                                      onClearRowTarget(courseId, pid, bid, c.course_code || "");
-                                    }}
-                                  >
-                                    Undo override
-                                  </button>
-                                )}
-                              </div>
-                            </div>
-                          );
-                        })()}
                         <div className="rounded-xl border border-gray-200 bg-gray-50 p-3 text-sm text-gray-700">
                           {!ex ? (
                             <div>Calculation details are not available for this course.</div>
@@ -7170,7 +7084,21 @@ const PlanningSummaryModal: React.FC<{
                                       </div>
 
                                       <div className="pt-1">
-                                        <div className="font-semibold">4) Sections needed and final target sections</div>
+                                        {Number(ex?.accepted_extras_count || 0) > 0 && (
+                                      <div className="pt-1">
+                                        <div className="font-semibold">Accepted extras</div>
+                                        <div>
+                                          Accepted extras:{" "}
+                                          <span className="font-semibold">{Number(ex?.accepted_extras_count || 0)}</span>
+                                          {Array.isArray(ex?.accepted_extras_section_codes) &&
+                                            ex.accepted_extras_section_codes.length > 0 && (
+                                              <span className="text-slate-700"> ({ex.accepted_extras_section_codes.join(", ")})</span>
+                                            )}
+                                        </div>
+                                      </div>
+                                    )}
+
+                                    <div className="font-semibold">4) Sections needed and final target sections</div>
                                         <div>
                                           One section holds about <span className="font-semibold">{effCap}</span> seats.
                                         </div>
@@ -7188,41 +7116,7 @@ const PlanningSummaryModal: React.FC<{
                       </div>
                     )}
 
-                    {omCount > 0 && (
-                      <div className="px-4 pb-4">
-                        <div className="rounded-xl border border-amber-200 bg-amber-50 p-3">
-                          <div className="font-semibold text-amber-950">OM-added sections awaiting decision</div>
-                          <div className="mt-2 space-y-2">
-                            {Array.from({ length: omCount }).map((_, i) => {
-                              const sid = omIds[i];
-                              const sc = omCodes[i] || sid || `OM section ${i + 1}`;
-                              return (
-                                <div key={sid || i} className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between rounded-lg bg-white border border-amber-200 px-3 py-2">
-                                  <div className="text-sm text-amber-950">
-                                    <span className="font-semibold">{sc}</span> <span className="text-amber-800">added by OM</span>
-                                  </div>
-                                  <div className="flex items-center gap-2">
-                                    <button
-                                      className="rounded-lg border border-emerald-300 bg-emerald-600 px-3 py-1.5 text-sm font-semibold text-white hover:bg-emerald-700"
-                                      onClick={() => onKeepOmExtra(courseId, c.course_code || "", omCount)}
-                                    >
-                                      Keep
-                                    </button>
-                                    <button
-                                      className="rounded-lg border border-red-200 bg-red-600 px-3 py-1.5 text-sm font-semibold text-white hover:bg-red-700"
-                                      onClick={() => onRejectOmNewLine(courseId, c.course_code || "", sid, sc)}
-                                    >
-                                      Reject
-                                    </button>
-                                  </div>
-                                </div>
-                              );
-                            })}
-                          </div>
-                        </div>
-                      </div>
-                    )}
-                  </div>
+                    </div>
                 );
               })}
             </div>
@@ -7231,7 +7125,7 @@ const PlanningSummaryModal: React.FC<{
 
         <div className="px-5 py-4 border-t border-gray-200 flex items-center justify-between">
           <div className="text-xs text-gray-500">
-            {approvalRequired ? "Some planning updates are pending approval." : "No approval required."}
+            {approvalRequired ? "Some planning updates require decisions." : "No approval required."}
           </div>
           <div className="flex items-center gap-2">
             {approvalRequired && !!onOpenApprovals && (
@@ -7241,14 +7135,6 @@ const PlanningSummaryModal: React.FC<{
                 className="rounded-lg border border-emerald-200 bg-white px-4 py-2 text-sm font-semibold text-emerald-800 hover:bg-emerald-50"
               >
                 Open approvals
-              </button>
-            )}
-            {approvalRequired && (
-              <button
-                onClick={onApprove}
-                className="rounded-lg bg-emerald-700 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-emerald-800"
-              >
-                Approve updates
               </button>
             )}
             {!approvalRequired && (
@@ -7272,22 +7158,28 @@ const PlanningSummaryModal: React.FC<{
 const PlanReviewModal: React.FC<{
   changes: PlanningChange[];
   onClose: () => void;
-  onApprove: () => void | Promise<void>;
   // courseIndex is used only for display (course code/title lookups). Keep it permissive.
   courseIndex?: Record<string, { code: string; title?: string } | any>;
-  onKeepOmExtra?: (courseId: string, courseCode: string, bySections: number) => void | Promise<void>;
+  onKeepOmExtra?: (courseId: string, courseCode: string, sectionIds: string[]) => void | Promise<void>;
   onRejectOmNewLine?: (courseId: string, courseCode: string, sectionId?: string, sectionCode?: string) => void | Promise<void>;
-  onAcceptExtraApo?: (courseId: string, courseCode: string, bySections: number) => void | Promise<void>;
+  onAcceptExtraApo?: (courseId: string, courseCode: string, sectionIds: string[]) => void | Promise<void>;
   onRemoveExtraApo?: (courseId: string, courseCode: string, sectionIds?: string[], removeCount?: number) => void | Promise<void>;
+  onIncreaseNow?: (courseId: string, courseCode: string) => void | Promise<void>;
+  onKeepCurrentIncrease?: (courseId: string, courseCode: string, bySections: number) => void | Promise<void>;
+  onIncreaseAll?: () => void | Promise<void>;
+  onReduceAll?: () => void | Promise<void>;
 }> = ({
   changes,
   onClose,
-  onApprove,
   courseIndex = {},
   onKeepOmExtra,
   onRejectOmNewLine,
   onAcceptExtraApo,
   onRemoveExtraApo,
+  onIncreaseNow,
+  onKeepCurrentIncrease,
+  onIncreaseAll,
+  onReduceAll,
 }) => {
   const [busy, setBusy] = useState(false);
   const summary = useMemo(() => {
@@ -7295,7 +7187,7 @@ const PlanReviewModal: React.FC<{
     for (const ch of changes as any[]) {
       if (ch?.type === "add_course_to_curriculum") s.add += 1;
       else if (ch?.type === "sections_increase") s.increase += 1;
-      else if (ch?.type === "sections_decrease") s.reduce += 1;
+      else if (ch?.type === "sections_decrease" || ch?.type === "sections_over_demand") s.reduce += 1;
     }
     return s;
   }, [changes]);
@@ -7343,7 +7235,7 @@ const PlanReviewModal: React.FC<{
               </span>
             )}
             <span className="ml-auto text-xs text-emerald-900">
-              Review the list below, then click <span className="font-semibold">Approve updates</span>.
+              Choose an option for each item to resolve it.
             </span>
           </div>
         </div>
@@ -7356,12 +7248,15 @@ const PlanReviewModal: React.FC<{
           ) : (
             (() => {
               const increases = (changes as any[]).filter((c) => c?.type === "sections_increase");
-              const reduces = (changes as any[]).filter((c) => c?.type === "sections_decrease");
+              const reduces = (changes as any[]).filter(
+                (c) => c?.type === "sections_decrease" || c?.type === "sections_over_demand"
+              );
               const adds = (changes as any[]).filter((c) => c?.type === "add_course_to_curriculum");
               const others = (changes as any[]).filter(
                 (c) =>
                   c?.type !== "sections_increase" &&
                   c?.type !== "sections_decrease" &&
+                  c?.type !== "sections_over_demand" &&
                   c?.type !== "add_course_to_curriculum"
               );
 
@@ -7394,9 +7289,53 @@ const PlanReviewModal: React.FC<{
                     <div className="text-sm font-semibold text-slate-800">
                       {title} <span className="text-xs text-slate-500">({rows.length})</span>
                     </div>
-                    <span className={cls("inline-flex items-center rounded-full px-2.5 py-1 text-[11px] font-semibold", badgeClass)}>
-                      {badgeText}
-                    </span>
+                    <div className="flex items-center gap-2">
+                      {/* Bulk actions only show when there is more than 1 item in the group */}
+                      {kind === "inc" && rows.length > 1 && !!onIncreaseAll && (
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={async () => {
+                            try {
+                              setBusy(true);
+                              await onIncreaseAll();
+                            } finally {
+                              setBusy(false);
+                            }
+                          }}
+                          className="rounded-lg bg-emerald-700 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-800 disabled:opacity-50"
+                        >
+                          Increase all
+                        </button>
+                      )}
+
+                      {kind === "dec" && rows.length > 1 && !!onReduceAll && (
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={async () => {
+                            try {
+                              setBusy(true);
+                              await onReduceAll();
+                            } finally {
+                              setBusy(false);
+                            }
+                          }}
+                          className="rounded-lg bg-rose-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-rose-700 disabled:opacity-50"
+                        >
+                          Reduce all
+                        </button>
+                      )}
+
+                      <span
+                        className={cls(
+                          "inline-flex items-center rounded-full px-2.5 py-1 text-[11px] font-semibold",
+                          badgeClass
+                        )}
+                      >
+                        {badgeText}
+                      </span>
+                    </div>
                   </div>
 
                   <div className="divide-y">
@@ -7460,70 +7399,75 @@ const PlanReviewModal: React.FC<{
                               )}
                             </div>
 
-                            {isReduce && omCodes.length > 0 && (
+                            {kind === "inc" && (
                               <div className="flex items-center gap-2">
                                 <button
                                   type="button"
-                                  className="rounded-lg border border-amber-300 bg-white px-3 py-1.5 text-xs font-semibold text-amber-800 hover:bg-amber-50 disabled:opacity-50"
+                                  className="rounded-lg border border-blue-300 bg-white px-3 py-1.5 text-xs font-semibold text-blue-800 hover:bg-blue-50 disabled:opacity-50"
                                   disabled={busy}
                                   onClick={() =>
-                                    onKeepOmExtra?.(
+                                    onIncreaseNow?.(
                                       String(ch?.course_id || ""),
-                                      String(r.courseCode || ""),
-                                      Number(ch?.by_sections || 1)
+                                      String(r.courseCode || "")
                                     )
                                   }
                                 >
-                                  Keep
+                                  Increase now
+                                </button>
+                                <button
+                                  type="button"
+                                  className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                                  disabled={busy}
+                                  onClick={() =>
+                                    onKeepCurrentIncrease?.(
+                                      String(ch?.course_id || ""),
+                                      String(r.courseCode || ""),
+                                      Number(ch?.by_sections || r.by || 0)
+                                    )
+                                  }
+                                >
+                                  Keep current
+                                </button>
+                              </div>
+                            )}
+
+                            {isReduce && (
+                              <div className="flex items-center gap-2">
+                                <button
+                                  type="button"
+                                  className="rounded-lg border border-emerald-300 bg-white px-3 py-1.5 text-xs font-semibold text-emerald-800 hover:bg-emerald-50 disabled:opacity-50"
+                                  disabled={busy}
+                                  onClick={() => {
+                                    const cid0 = String(ch?.course_id || "");
+                                    const cc0 = String(r.courseCode || "");
+                                    const n = Number(ch?.by_sections || r.by || 1);
+                                    // Unify OM + APO extra into one Reduce decision.
+                                    if (omIds.length > 0) onKeepOmExtra?.(cid0, cc0, (omIds || []).slice(0, n));
+                                    else onAcceptExtraApo?.(cid0, cc0, apoIds);
+                                  }}
+                                >
+                                  Accept extra section
                                 </button>
                                 <button
                                   type="button"
                                   className="rounded-lg border border-rose-300 bg-white px-3 py-1.5 text-xs font-semibold text-rose-700 hover:bg-rose-50 disabled:opacity-50"
                                   disabled={busy}
                                   onClick={() => {
-                                    const sid = String(omIds?.[0] || "").trim();
-                                    const sc = String(omCodes?.[0] || "").trim();
-                                    onRejectOmNewLine?.(
-                                      String(ch?.course_id || ""),
-                                      String(r.courseCode || ""),
-                                      sid || undefined,
-                                      sc || undefined
+                                    const cid0 = String(ch?.course_id || "");
+                                    const cc0 = String(r.courseCode || "");
+                                    // Remove must act on the exact newly-added section(s).
+                                    if (omIds.length > 0) {
+                                      // No section_id => backend deletes the exact computed OM section_ids for this course.
+                                      onRejectOmNewLine?.(cid0, cc0);
+                                      return;
+                                    }
+                                    onRemoveExtraApo?.(
+                                      cid0,
+                                      cc0,
+                                      apoIds.length ? apoIds : undefined,
+                                      Number(ch?.by_sections || apoIds.length || r.by || 1)
                                     );
                                   }}
-                                >
-                                  Reject
-                                </button>
-                              </div>
-                            )}
-
-                            {isApoExtra && (
-                              <div className="flex items-center gap-2">
-                                <button
-                                  type="button"
-                                  className="rounded-lg border border-violet-300 bg-white px-3 py-1.5 text-xs font-semibold text-violet-800 hover:bg-violet-50 disabled:opacity-50"
-                                  disabled={busy}
-                                  onClick={() =>
-                                    onAcceptExtraApo?.(
-                                      String(ch?.course_id || ""),
-                                      String(r.courseCode || ""),
-                                      Number(ch?.by_sections || apoIds.length || 1)
-                                    )
-                                  }
-                                >
-                                  Accept extra
-                                </button>
-                                <button
-                                  type="button"
-                                  className="rounded-lg border border-rose-300 bg-white px-3 py-1.5 text-xs font-semibold text-rose-700 hover:bg-rose-50 disabled:opacity-50"
-                                  disabled={busy}
-                                  onClick={() =>
-                                    onRemoveExtraApo?.(
-                                      String(ch?.course_id || ""),
-                                      String(r.courseCode || ""),
-                                      apoIds.length ? apoIds : undefined,
-                                      Number(ch?.by_sections || apoIds.length || 1)
-                                    )
-                                  }
                                 >
                                   Remove
                                 </button>
@@ -7627,21 +7571,6 @@ const PlanReviewModal: React.FC<{
             disabled={busy}
           >
             Not now
-          </button>
-          <button
-            disabled={busy || changes.length === 0}
-            className="rounded-lg bg-emerald-700 px-4 py-2 text-sm font-extrabold text-white shadow-sm hover:brightness-110 disabled:opacity-50"
-            onClick={async () => {
-              setBusy(true);
-              try {
-                await onApprove();
-              } finally {
-                setBusy(false);
-              }
-            }}
-          >
-            <Check className="inline-block h-4 w-4 mr-1 align-[-2px]" />
-            Approve updates
           </button>
         </div>
       </div>
