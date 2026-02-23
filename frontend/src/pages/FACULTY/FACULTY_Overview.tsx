@@ -532,6 +532,33 @@ function FacultyProfileTab({
     .map((x) => x[0]?.toUpperCase())
     .join("") || "—";
 
+  const [recordsTab, setRecordsTab] = useState<"Teaching history" | "Deloadings">(
+    "Teaching history"
+  );
+
+  const SegBtn = ({
+    active,
+    children,
+    onClick,
+  }: {
+    active: boolean;
+    children: React.ReactNode;
+    onClick: () => void;
+  }) => (
+    <button
+      type="button"
+      onClick={onClick}
+      className={cls(
+        "inline-flex items-center justify-center gap-2 rounded-full px-3 py-1.5 text-xs font-semibold transition",
+        active
+          ? "bg-emerald-600 text-white shadow-sm"
+          : "bg-white text-slate-700 hover:bg-slate-50"
+      )}
+    >
+      {children}
+    </button>
+  );
+
   return (
     <div className="mx-auto w-full max-w-screen-2xl px-4">
       {/* Header */}
@@ -927,26 +954,64 @@ function FacultyProfileTab({
       </div>
 
       {/* Records */}
-      <div className="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-2">
+      <div className="mt-6">
         <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-          <div className="flex items-baseline justify-between gap-3">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
             <div>
-              <div className="text-sm font-semibold text-emerald-800">Teaching history</div>
-              <div className="mt-1 text-xs text-slate-500">What you taught and how often (per term + all-time).</div>
+              <div className="text-sm font-semibold text-emerald-800">Records</div>
+              <div className="mt-1 text-xs text-slate-500">
+                View your teaching history and deloadings without the clutter.
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between gap-3">
+              <div className="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-slate-50 p-1">
+                <SegBtn
+                  active={recordsTab === "Teaching history"}
+                  onClick={() => setRecordsTab("Teaching history")}
+                >
+                  Teaching history
+                </SegBtn>
+                <SegBtn active={recordsTab === "Deloadings"} onClick={() => setRecordsTab("Deloadings")}>
+                  Deloadings
+                </SegBtn>
+              </div>
             </div>
           </div>
-          <div className="mt-4">
-            <HistoryMain embedded />
-          </div>
-        </div>
 
-        <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-          <div>
-            <div className="text-sm font-semibold text-emerald-800">Deloadings</div>
-            <div className="mt-1 text-xs text-slate-500">Your recorded deloading arrangements.</div>
-          </div>
+          {/* Content */}
           <div className="mt-4">
-            <DeloadingsContent embedded />
+            {recordsTab === "Teaching history" ? (
+              <div className="rounded-2xl border border-slate-200 bg-slate-50">
+                <div className="flex flex-col gap-1 border-b border-slate-200 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div>
+                    <div className="text-sm font-semibold text-slate-900">Teaching history</div>
+                    <div className="mt-0.5 text-xs text-slate-600">
+                      Use search to quickly find a course; switch AY to browse older terms.
+                    </div>
+                  </div>
+              
+                </div>
+                <div className="max-h-[520px] overflow-auto px-3 py-3">
+                  <HistoryMain embedded />
+                </div>
+              </div>
+            ) : (
+              <div className="rounded-2xl border border-slate-200 bg-slate-50">
+                <div className="flex flex-col gap-1 border-b border-slate-200 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div>
+                    <div className="text-sm font-semibold text-slate-900">Deloadings</div>
+                    <div className="mt-0.5 text-xs text-slate-600">
+                      See your recorded deloading arrangements and their details.
+                    </div>
+                  </div>
+                 
+                </div>
+                <div className="max-h-[520px] overflow-auto px-3 py-3">
+                  <DeloadingsContent embedded />
+                </div>
+              </div>
+            )}
           </div>
         </div>
       </div>
