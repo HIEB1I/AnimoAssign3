@@ -3480,6 +3480,44 @@ async def _pending_changes(
     except Exception:
         pass
 
+    # Build accepted section_code labels for Planning Summary (best effort).
+    accepted_extra_codes_by_course: Dict[str, List[str]] = {}
+    try:
+        # Collect all accepted section_ids across courses (dedupe, preserve order).
+        all_acc_ids: List[str] = []
+        for _cid0, _ids in accepted_extra_sections.items():
+            for _sid in (_ids or []):
+                if _sid:
+                    all_acc_ids.append(str(_sid).strip())
+        all_acc_ids = [s for s in all_acc_ids if s]
+        all_acc_ids = list(dict.fromkeys(all_acc_ids))
+
+        if all_acc_ids:
+            qv = {
+                "term_id": term_id,
+                "campus_id": campus_id,
+                "status": {"$ne": "archived"},
+                "section_id": {"$in": all_acc_ids},
+                "remarks": {"$not": {"$regex": r"SPECIAL\s*CLASS", "$options": "i"}},
+            }
+            code_by_id: Dict[str, str] = {}
+            async for r in db[COL_SECTIONS].find(qv, {"_id": 0, "section_id": 1, "section_code": 1, "course_id": 1}):
+                sid = str(r.get("section_id") or "").strip()
+                if not sid:
+                    continue
+                code_by_id[sid] = str(r.get("section_code") or "").strip()
+
+            for _cid0, _ids in accepted_extra_sections.items():
+                codes: List[str] = []
+                for _sid in (_ids or []):
+                    sc = code_by_id.get(str(_sid))
+                    if sc:
+                        codes.append(sc)
+                if codes:
+                    accepted_extra_codes_by_course[_cid0] = codes
+    except Exception:
+        accepted_extra_codes_by_course = {}
+
     # Row-scoped demand overrides (APO accepts keeping fewer total sections than demand suggests).
     # Stored as a map keyed by "{course_id}:{program_id}:{batch_id}".
     # NOTE: Although keyed by row, this is applied to the course-level effective target to avoid
@@ -3760,6 +3798,8 @@ async def _pending_changes(
             "allowance_kept": int(keep_allow or 0),
             "allowance_stored": int(raw_allow or 0),
             "increase_suppressed": int(min(supp, shortage_now) or 0),
+            "accepted_extras_count": int(len(accepted_extra_sections.get(cid) or [])),
+            "accepted_extras_section_codes": accepted_extra_codes_by_course.get(cid) or [],
             "target_base_demand": int(target or 0),
             "target_sections": int(effective_target or 0),
             "existing_sections": int(existing or 0),
@@ -3780,6 +3820,10 @@ async def _pending_changes(
                 allow_accept = min(len(accepted_set), int(over))
                 effective_target = int(effective_target) + int(allow_accept)
                 over = existing - effective_target
+                try:
+                    explain_by_course[cid]["target_sections"] = int(effective_target)
+                except Exception:
+                    pass
             # If OM AND APO both added sections for the same course, we must show them separately.
             # - OM: Keep / Reject (deletes ONLY the OM-stamped section_ids)
             # - APO: Accept extra / Remove (deletes ONLY the APO-added section_ids)

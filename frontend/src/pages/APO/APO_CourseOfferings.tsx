@@ -53,8 +53,6 @@ import {
   planAcceptExtraSections,
   planRemoveExtra,
   planRejectOmNewLine,
-  planAcceptRowTarget,
-  planClearRowTarget,
 } from "../../api";
 
 /* --------------------------------- helpers --------------------------------- */
@@ -705,6 +703,8 @@ type PlanningExplain = {
     batch_number?: number | null;
     batch_code?: string;
   }[];
+  accepted_extras_count?: number;
+  accepted_extras_section_codes?: string[];
 };
 
 type PlanningChange =
@@ -2055,51 +2055,8 @@ const handleRejectOmNewLine = async (courseId: string, courseCode: string, secti
   });
 };
 
-const handleAcceptRowTarget = async (
-  courseId: string,
-  programId: string,
-  batchId: string,
-  courseCode: string,
-  acceptedTotal: number
-) => {
-  if (!user?.userId) return;
-  openConfirm({
-    title: "Accept current section count?",
-    description: `You’re choosing to keep the current total (${acceptedTotal}) for ${courseCode}. This will bypass the demand suggestion until pre-enlistment/cohort demand changes or you undo it.`,
-    confirmText: "Accept",
-    cancelText: "Cancel",
-    variant: "default",
-    onConfirm: async () => {
-      try {
-        await planAcceptRowTarget(user.userId, { course_id: courseId, program_id: programId, batch_id: batchId });
-        await loadOfferings();
-      } catch (e: any) {
-        openNotice("Accept failed", e?.response?.data?.detail || e?.message || "Failed to accept the current section count.");
-        throw e;
-      }
-    },
-  });
-};
 
-const handleClearRowTarget = async (courseId: string, programId: string, batchId: string, courseCode: string) => {
-  if (!user?.userId) return;
-  openConfirm({
-    title: "Undo acceptance?",
-    description: `This will restore demand-based suggestions for ${courseCode}.`,
-    confirmText: "Undo",
-    cancelText: "Cancel",
-    variant: "danger",
-    onConfirm: async () => {
-      try {
-        await planClearRowTarget(user.userId, { course_id: courseId, program_id: programId, batch_id: batchId });
-        await loadOfferings();
-      } catch (e: any) {
-        openNotice("Undo failed", e?.response?.data?.detail || e?.message || "Failed to undo acceptance.");
-        throw e;
-      }
-    },
-  });
-};
+
 
 // --- New per-item decisions (no batch approve) ---
 const handleIncreaseNow = async (courseId: string, courseCode: string) => {
@@ -6244,13 +6201,8 @@ ${msg}`,
     approvalRequired={!!data?.planning?.approval_required}
     changes={data?.planning?.pending_changes || []}
     explainByCourse={data?.planning?.explain_by_course || {}}
-    rowOverrides={data?.planning?.row_target_overrides || {}}
     courseIndex={{ ...planCourseIndex, ...extraCourseIndex }}
     onClose={() => setShowPlanningSummaryModal(false)}
-    onKeepOmExtra={handleKeepOmExtra}
-    onRejectOmNewLine={handleRejectOmNewLine}
-    onAcceptRowTarget={handleAcceptRowTarget}
-    onClearRowTarget={handleClearRowTarget}
     onOpenApprovals={() => setShowPlanModal(true)}
   />
 )}
@@ -6697,7 +6649,7 @@ const PlanningSummaryPanel: React.FC<{
           <div>
             <div className="font-semibold text-slate-900">Planning Summary</div>
             <div className="text-sm text-slate-700">
-              Section recommendations from pre-enlistment demand and approvals.
+              Informational summary from pre-enlistment demand. Resolve decisions in Approval Required.
             </div>
             <div className="mt-2 flex flex-wrap gap-2 text-xs">
               {coursesWithGap > 0 && (
@@ -6757,26 +6709,16 @@ const PlanningSummaryModal: React.FC<{
   approvalRequired: boolean;
   changes: PlanningChange[];
   explainByCourse: Record<string, PlanningExplain>;
-  rowOverrides: Record<string, any>;
   courseIndex?: Record<string, { code: string; title?: string } | any>;
   onClose: () => void;
-  onKeepOmExtra: (courseId: string, courseCode: string, sectionIds: string[]) => void | Promise<void>;
-  onRejectOmNewLine: (courseId: string, courseCode: string, sectionId?: string, sectionCode?: string) => void | Promise<void>;
-  onAcceptRowTarget: (courseId: string, programId: string, batchId: string, courseCode: string, acceptedTotal: number) => void | Promise<void>;
-  onClearRowTarget: (courseId: string, programId: string, batchId: string, courseCode: string) => void | Promise<void>;
   onOpenApprovals?: () => void;
 }> = ({
   actionRequired,
   approvalRequired,
   changes,
   explainByCourse,
-  rowOverrides,
   courseIndex,
   onClose,
-  onKeepOmExtra,
-  onRejectOmNewLine,
-  onAcceptRowTarget,
-  onClearRowTarget,
   onOpenApprovals,
 }) => {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
@@ -6924,7 +6866,7 @@ const PlanningSummaryModal: React.FC<{
             </div>
             <div className="min-w-0">
               <div className="text-base sm:text-lg font-extrabold tracking-tight">Planning Summary</div>
-              <div className="mt-1 text-sm text-white/90">Review demand-based suggestions and items needing your action.</div>
+              <div className="mt-1 text-sm text-white/90">See demand-based suggestions and which courses have pending approvals. Resolve decisions in Approval Required.</div>
             </div>
 
             <div className="ml-auto flex items-center gap-2">
@@ -6974,13 +6916,11 @@ const PlanningSummaryModal: React.FC<{
             <div className="space-y-3">
               {byCourse.map((c: any) => {
                 const rowKey = String(c.course_id || "");
-                const courseId = String(c.course_id || "");
                 const seat = c.seatAgg;
                 const ex: PlanningExplain | undefined = c.explain;
                 const isOpen = !!expanded[rowKey];
 
                 const dec = (c.changes || []).find((x: any) => x.type === "sections_decrease") as any;
-                const inc = (c.changes || []).find((x: any) => x.type === "sections_increase") as any;
 
                 const omIds: string[] = dec?.om_rejectable_section_ids || [];
                 const omCodes: string[] = dec?.om_added_section_codes || [];
@@ -6988,11 +6928,9 @@ const PlanningSummaryModal: React.FC<{
                 const omCount = isOmDec ? (dec?.om_delete_count || dec?.by_sections || 0) : 0;
                 const overReduce = (!isOmDec && dec && Number(dec?.by_sections || 0) > 0) ? Number(dec?.by_sections || 0) : 0;
 
-                const needsReview =
-                  Number(seat?.gap || 0) > 0 ||
-                  Number(seat?.suggest || 0) > 0 ||
-                  (c?.changes || []).length > 0 ||
-                  Number(omCount || 0) > 0;
+                const needsReview = (c?.changes || []).length > 0;
+
+                // Planning Summary is informational only; approvals are handled in Approval Required.
 
                 // Row overrides are per program/batch row, shown in the row list below.
 
@@ -7067,55 +7005,6 @@ const PlanningSummaryModal: React.FC<{
 
                     {isOpen && (
                       <div className="px-4 pb-4">
-                        {(seat?.gap > 0 || (inc?.by_sections || 0) > 0) && (c.rows || []).length > 0 && (() => {
-                          const existingOverrideKey = Object.keys(rowOverrides || {}).find((k) => k.startsWith(`${courseId}:`));
-                          const hasOverride = !!existingOverrideKey;
-                          const anchorRow = (c.rows || [])
-                            .slice()
-                            .sort((a: any, b: any) => `${a.programCode || ""}${a.batchCode || ""}`.localeCompare(`${b.programCode || ""}${b.batchCode || ""}`))
-                            [0];
-
-                          return (
-                            <div className="mb-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-                              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                                <div className="text-sm text-slate-700">
-                                  If you intentionally want to keep the <span className="font-semibold">current total section count</span> for this course and bypass demand suggestions, you can accept it.
-                                </div>
-
-                                {!hasOverride ? (
-                                <button
-                                  className="shrink-0 whitespace-nowrap rounded-lg bg-rose-600 px-5 py-1.5 text-xs font-semibold text-white hover:bg-rose-700 disabled:opacity-50"
-                                  disabled={!anchorRow || !String(anchorRow?.program_id || "").trim() || !String(anchorRow?.batch_id || "").trim()}
-                                  onClick={() =>
-                                    onAcceptRowTarget(
-                                      courseId,
-                                      String(anchorRow?.program_id || ""),
-                                      String(anchorRow?.batch_id || ""),
-                                      c.course_code || "",
-                                      Number(ex?.existing_sections || 0)
-                                    )
-                                  }
-                                >
-                                  Accept current ({Number(ex?.existing_sections || 0)})
-                                </button>
-                                ) : (
-                                  <button
-                                    className="rounded-lg px-3 py-1.5 text-xs font-semibold text-rose-700 border border-rose-200 hover:bg-rose-50"
-                                    onClick={() => {
-                                      const k = String(existingOverrideKey || "");
-                                      const parts = k.split(":");
-                                      const pid = parts[1] || "";
-                                      const bid = parts[2] || "";
-                                      onClearRowTarget(courseId, pid, bid, c.course_code || "");
-                                    }}
-                                  >
-                                    Undo override
-                                  </button>
-                                )}
-                              </div>
-                            </div>
-                          );
-                        })()}
                         <div className="rounded-xl border border-gray-200 bg-gray-50 p-3 text-sm text-gray-700">
                           {!ex ? (
                             <div>Calculation details are not available for this course.</div>
@@ -7195,7 +7084,21 @@ const PlanningSummaryModal: React.FC<{
                                       </div>
 
                                       <div className="pt-1">
-                                        <div className="font-semibold">4) Sections needed and final target sections</div>
+                                        {Number(ex?.accepted_extras_count || 0) > 0 && (
+                                      <div className="pt-1">
+                                        <div className="font-semibold">Accepted extras</div>
+                                        <div>
+                                          Accepted extras:{" "}
+                                          <span className="font-semibold">{Number(ex?.accepted_extras_count || 0)}</span>
+                                          {Array.isArray(ex?.accepted_extras_section_codes) &&
+                                            ex.accepted_extras_section_codes.length > 0 && (
+                                              <span className="text-slate-700"> ({ex.accepted_extras_section_codes.join(", ")})</span>
+                                            )}
+                                        </div>
+                                      </div>
+                                    )}
+
+                                    <div className="font-semibold">4) Sections needed and final target sections</div>
                                         <div>
                                           One section holds about <span className="font-semibold">{effCap}</span> seats.
                                         </div>
@@ -7213,41 +7116,7 @@ const PlanningSummaryModal: React.FC<{
                       </div>
                     )}
 
-                    {omCount > 0 && (
-                      <div className="px-4 pb-4">
-                        <div className="rounded-xl border border-amber-200 bg-amber-50 p-3">
-                          <div className="font-semibold text-amber-950">OM-added sections awaiting decision</div>
-                          <div className="mt-2 space-y-2">
-                            {Array.from({ length: omCount }).map((_, i) => {
-                              const sid = omIds[i];
-                              const sc = omCodes[i] || sid || `OM section ${i + 1}`;
-                              return (
-                                <div key={sid || i} className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between rounded-lg bg-white border border-amber-200 px-3 py-2">
-                                  <div className="text-sm text-amber-950">
-                                    <span className="font-semibold">{sc}</span> <span className="text-amber-800">added by OM</span>
-                                  </div>
-                                  <div className="flex items-center gap-2">
-                                    <button
-                                      className="rounded-lg border border-emerald-300 bg-emerald-600 px-3 py-1.5 text-sm font-semibold text-white hover:bg-emerald-700"
-                                      onClick={() => onKeepOmExtra(courseId, c.course_code || "", (omIds || []).slice(0, omCount))}
-                                    >
-                                      Keep
-                                    </button>
-                                    <button
-                                      className="rounded-lg border border-red-200 bg-red-600 px-3 py-1.5 text-sm font-semibold text-white hover:bg-red-700"
-                                      onClick={() => onRejectOmNewLine(courseId, c.course_code || "", sid, sc)}
-                                    >
-                                      Reject
-                                    </button>
-                                  </div>
-                                </div>
-                              );
-                            })}
-                          </div>
-                        </div>
-                      </div>
-                    )}
-                  </div>
+                    </div>
                 );
               })}
             </div>
