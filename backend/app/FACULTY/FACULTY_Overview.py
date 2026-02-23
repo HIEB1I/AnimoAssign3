@@ -1356,10 +1356,30 @@ async def overview_handler(
 
     # ---------- options ----------
     if action == "options":
+        # Provide UI option lists needed by Faculty Overview.
+        # Frontend expects `kacs` here so faculty can edit their Qualified KACs.
+        kacs = await db.kacs.find(
+            {},
+            {
+                "_id": 0,
+                "kac_id": 1,
+                "kac_name": 1,
+                "kac_code": 1,
+                "program_area": 1,
+            },
+        ).to_list(None)
+
+        # Stable ordering for predictable UI.
+        try:
+            kacs.sort(key=lambda x: (str(x.get("program_area") or ""), str(x.get("kac_name") or "")))
+        except Exception:
+            pass
+
         return {
             "ok": True,
             "days": ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"],
             "timeBands": ["07:30 – 09:00","09:15 – 10:45","11:00 – 12:30","12:30 – 14:15","14:30 – 16:00","16:15 – 17:45","18:00 – 19:30","19:45 – 21:00"],
+            "kacs": kacs,
         }
 
     # ---------- profile ----------
