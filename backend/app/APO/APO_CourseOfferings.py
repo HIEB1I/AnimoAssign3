@@ -3278,8 +3278,18 @@ async def _planned_capacity_by_course_multi(term_id: str, prefix_map: Dict[str, 
         out[cid] = total
     return out
 
-async def _section_count(term_id: str, campus_prefix_pattern: str, course_id: str) -> int:
+async def _section_count(term_id: str, campus_prefix_pattern: str, course_id: str, campus_id: Optional[str] = None) -> int:
+    """Count offered sections for planning comparisons.
+
+    IMPORTANT: This must be campus-scoped.
+    Relying only on section_code prefix is not safe because some datasets have
+    empty/legacy prefixes, which would accidentally count OTHER campus sections
+    and keep "Approval required" alive even after APO accepts extra.
+    """
+
     q: Dict[str, Any] = {"term_id": term_id, "status": {"$ne": "archived"}}
+    if campus_id:
+        q["campus_id"] = campus_id
     q["$or"] = [{"course_id": course_id}, {"fulfilled_placeholder_course_id": course_id}]
     if campus_prefix_pattern:
         q["section_code"] = {"$regex": f"^{campus_prefix_pattern}", "$options": "i"}
@@ -3455,6 +3465,51 @@ async def _pending_changes(
             }
         )
 
+    async def _apo_added_sections_for_course(course_id: str, take: int) -> List[Dict[str, str]]:
+        """Return newest APO-added section(s) for a course in this term/campus.
+
+        APO-added means:
+          - created_by_office == 'APO' OR created_source == 'APO_MANUAL_ADD'
+          - OR (legacy) owner_source == 'manual' AND NOT stamped as OM
+
+        Excludes SPECIAL CLASS sections.
+        """
+        if not course_id or take <= 0:
+            return []
+
+        q: Dict[str, Any] = {
+            "term_id": term_id,
+            "campus_id": campus_id,
+            "status": {"$ne": "archived"},
+            "course_id": course_id,
+            "remarks": {"$not": {"$regex": r"SPECIAL\\s*CLASS", "$options": "i"}},
+            "$and": [
+                {"created_source": {"$ne": "OM_NEW_LINE"}},
+                {"created_by_office": {"$ne": "OM"}},
+            ],
+            "$or": [
+                {"created_by_office": "APO"},
+                {"created_source": "APO_MANUAL_ADD"},
+                {"owner_source": "manual"},
+            ],
+        }
+
+        cur2 = db[COL_SECTIONS].find(q, {"_id": 0, "section_id": 1, "section_code": 1, "created_at": 1}).sort(
+            "created_at", -1
+        )
+        out: List[Dict[str, str]] = []
+        async for rr in cur2:
+            sid = str(rr.get("section_id") or "").strip()
+            if not sid:
+                continue
+            out.append({
+                "section_id": sid,
+                "section_code": str(rr.get("section_code") or "").strip(),
+            })
+            if len(out) >= take:
+                break
+        return out
+
     # Curriculum mapping (best effort)
     # - base_by_course remains PROGRAM-based (existing behavior)
     # - required_program_batches is for explainability (program+batch list)
@@ -3554,7 +3609,7 @@ async def _pending_changes(
             cohort_details = await _estimate_cohort_demand_details_for_course(term_id, campus_id, cid)
         except Exception:
             cohort_details = None
-        existing = await _section_count(term_id, prefix_map.get(cid, ""), cid)
+        existing = await _section_count(term_id, prefix_map.get(cid, ""), cid, campus_id)
         base = int(base_by_course.get(cid, 1))
         eff_cap = await effective_section_capacity(term_id, campus_name, cid) or DEFAULT_CAP
         need_demand = max(1, ceil((plan or 0) / eff_cap))
@@ -3637,28 +3692,45 @@ async def _pending_changes(
         elif existing > effective_target:
             over = existing - effective_target
 
-            # Only show "Reduce" items that were caused by OM inline suggestions (do not nag APO for other overages here).
+            # If OM AND APO both added sections for the same course, we must show them separately.
+            # - OM: Keep / Reject (deletes ONLY the OM-stamped section_ids)
+            # - APO: Accept extra / Remove (deletes ONLY the APO-added section_ids)
+            remaining_over = int(over)
+
+            # 1) OM-stamped suggestions (newest-first)
             om_secs = om_newline_by_course.get(cid) or []
-            if not om_secs:
-                continue
+            if om_secs and remaining_over > 0:
+                om_delete_count = min(remaining_over, len(om_secs))
+                if om_delete_count > 0:
+                    om_codes = [s.get("section_code") for s in om_secs if s.get("section_code")]
+                    om_ids = [s.get("section_id") for s in om_secs if s.get("section_id")]
+                    changes.append({
+                        "type": "sections_decrease",
+                        "course_id": cid,
+                        "by_sections": om_delete_count,
+                        "reason": "OM_NEW_LINE",
+                        "explain": explain_by_course.get(cid),
+                        "om_added_section_codes": om_codes,
+                        "om_rejectable_section_ids": om_ids[:om_delete_count],
+                        "om_delete_count": om_delete_count,
+                    })
+                    remaining_over = max(0, remaining_over - om_delete_count)
 
-            delete_count = min(int(over), len(om_secs))
-            if delete_count <= 0:
-                continue
-
-            om_codes = [s.get("section_code") for s in om_secs if s.get("section_code")]
-            om_ids = [s.get("section_id") for s in om_secs if s.get("section_id")]
-
-            changes.append({
-                "type": "sections_decrease",
-                "course_id": cid,
-                "by_sections": delete_count,
-                "reason": "OM_NEW_LINE",
-                "explain": explain_by_course.get(cid),
-                "om_added_section_codes": om_codes,
-                "om_rejectable_section_ids": om_ids[:delete_count],
-                "om_delete_count": delete_count,
-            })
+            # 2) APO-added extra sections (newest-first)
+            if remaining_over > 0:
+                apo_secs = await _apo_added_sections_for_course(cid, remaining_over)
+                if apo_secs:
+                    apo_codes = [s.get("section_code") for s in apo_secs if s.get("section_code")]
+                    apo_ids = [s.get("section_id") for s in apo_secs if s.get("section_id")]
+                    changes.append({
+                        "type": "sections_over_demand",
+                        "course_id": cid,
+                        "by_sections": len(apo_ids),
+                        "reason": "APO_EXTRA",
+                        "explain": explain_by_course.get(cid),
+                        "apo_added_section_codes": apo_codes,
+                        "apo_removable_section_ids": apo_ids,
+                    })
 
 
     # Enrich pending changes with course_code/title so the UI can display codes
@@ -5451,7 +5523,7 @@ async def post_course_offerings(
         "addRow", "editRow", "deleteRow", "restoreRow", "forward",
         "curriculumAddCourse", "curriculumEditCourse", "curriculumRemoveCourse",
         "approvePlan",
-        "planAllowExtra", "planRejectOmNewLine",
+        "planAllowExtra", "planRejectOmNewLine", "planRemoveExtra",
         "planAcceptRowTarget", "planClearRowTarget",
         "specialclassUpdate", 
         "courseCatalog", "search_catalog",
@@ -6992,16 +7064,33 @@ async def post_course_offerings(
             raise HTTPException(status_code=400, detail="course_id is required.")
         cid = str(payload["course_id"]).strip()
 
-        # Recompute current "Approval required" state and get the exact OM-added section_ids
+        # If the UI passes a specific section_id, delete ONLY that section (must be OM-stamped).
+        requested_sid = str(payload.get("section_id") or "").strip()
+        if requested_sid:
+            ok = await db[COL_SECTIONS_SUBMITTED].count_documents({
+                "section_id": requested_sid,
+                "$or": [
+                    {"created_source": "OM_NEW_LINE"},
+                    {"created_by_office": "OM"},
+                ]
+            }) > 0
+            if not ok:
+                # Not OM-stamped; do nothing to avoid deleting base/system/APO sections.
+                return {"ok": True, "deleted": 0}
+            ids = [requested_sid]
+        else:
+            # Recompute current "Approval required" state and get the exact OM-added section_ids
+            meta = await campus_meta(campus_id)
+            _, pending, _explain, _, _ = await _pending_changes(
+                term_id=term_id, campus_id=campus_id, campus_name=meta.get("campus_name", "")
+            )
+            ch = next((x for x in pending if x.get("type") == "sections_decrease" and x.get("course_id") == cid), None)
+            ids = (ch or {}).get("om_rejectable_section_ids") or []
+            ids = [str(x).strip() for x in ids if str(x).strip()]
+            if not ids:
+                return {"ok": True, "deleted": 0}
+
         meta = await campus_meta(campus_id)
-        _, pending, _explain, _, _ = await _pending_changes(
-            term_id=term_id, campus_id=campus_id, campus_name=meta.get("campus_name", "")
-        )
-        ch = next((x for x in pending if x.get("type") == "sections_decrease" and x.get("course_id") == cid), None)
-        ids = (ch or {}).get("om_rejectable_section_ids") or []
-        ids = [str(x).strip() for x in ids if str(x).strip()]
-        if not ids:
-            return {"ok": True, "deleted": 0}
 
         om_rows = [
             r async for r in db[COL_SECTIONS_SUBMITTED].find(
@@ -7021,7 +7110,14 @@ async def post_course_offerings(
             return {"ok": True, "deleted": 0}
 
         # Delete schedules + the section rows (planning term)
-        await db[COL_SCHEDS].delete_many({"term_id": term_id, "section_id": {"$in": deletable}})
+        deleted_sched = 0
+        deleted_submitted = 0
+        deleted_sections = 0
+        try:
+            res_sched = await db[COL_SCHEDS].delete_many({"term_id": term_id, "section_id": {"$in": deletable}})
+            deleted_sched = int(getattr(res_sched, "deleted_count", 0) or 0)
+        except Exception:
+            deleted_sched = 0
 
         # Capture section_code(s) before deleting canonical sections so notifications can be human readable.
         section_code_map: dict[str, str] = {}
@@ -7037,47 +7133,67 @@ async def post_course_offerings(
 
         # Delete OM snapshot rows that keep "Approval required" alive.
         # We do a strict delete first, then a defensive fallback (sometimes term_id/campus_id can be missing in old data).
-        await db[COL_SECTIONS_SUBMITTED].delete_many({"term_id": term_id, "section_id": {"$in": deletable}})
-        await db[COL_SECTIONS_SUBMITTED].delete_many({"section_id": {"$in": deletable}})
+        try:
+            res_sub_1 = await db[COL_SECTIONS_SUBMITTED].delete_many({"term_id": term_id, "section_id": {"$in": deletable}})
+            res_sub_2 = await db[COL_SECTIONS_SUBMITTED].delete_many({"section_id": {"$in": deletable}})
+            deleted_submitted = int(getattr(res_sub_1, "deleted_count", 0) or 0) + int(getattr(res_sub_2, "deleted_count", 0) or 0)
+        except Exception:
+            deleted_submitted = 0
 
         # Delete canonical sections
-        await db[COL_SECTIONS].delete_many({"term_id": term_id, "section_id": {"$in": deletable}})
-        await db[COL_SECTIONS].delete_many({"section_id": {"$in": deletable}})
+        try:
+            res_sec_1 = await db[COL_SECTIONS].delete_many({"term_id": term_id, "section_id": {"$in": deletable}})
+            res_sec_2 = await db[COL_SECTIONS].delete_many({"section_id": {"$in": deletable}})
+            deleted_sections = int(getattr(res_sec_1, "deleted_count", 0) or 0) + int(getattr(res_sec_2, "deleted_count", 0) or 0)
+        except Exception:
+            deleted_sections = 0
+
+        # Defensive verification: if the section still exists, do NOT send a "rejected" notification.
+        # This prevents false notifications when deletions fail due to data inconsistencies.
+        still_exists = 0
+        try:
+            still_exists = await db[COL_SECTIONS].count_documents({"section_id": {"$in": deletable}})
+        except Exception:
+            still_exists = 0
 
         # Notify OM/GS (in-app + email) using existing notification helper.
         # Best-effort: never block the reject action.
-        try:
-            course_meta = (await map_courses([cid])).get(cid) or {}
-            course_code = course_meta.get("course_code") or ""
-            if isinstance(course_code, list):
-                course_code = course_code[0] if course_code else ""
-            recipients = await _om_and_gs_user_ids_for_department_id(
-                (course_meta.get("department_id") or "").strip(),
-                campus_id,
-                db,
-            )
-            deleted_codes = [section_code_map.get(sid, sid) for sid in deletable]
-            details = (
-                f"APO rejected OM-added section(s) for {course_code or cid}."
-                f"\nDeleted section(s): {', '.join(deleted_codes)}"
-            )
-            for rid in recipients:
-                await create_notification(
-                    user_id=str(rid),
-                    title="OM section suggestion rejected",
-                    details=details,
-                    meta={
-                        "term_id": term_id,
-                        "campus_id": campus_id,
-                        "course_id": cid,
-                        "deleted_section_ids": deletable,
-                        "deleted_section_codes": deleted_codes,
-                    },
-                    send_email=True,
-                    email_from_user_id=userId,
-                )
-        except Exception:
+        if (deleted_sections <= 0) or (still_exists and still_exists > 0):
+            # Nothing was deleted (or rows still exist) — skip sending a misleading rejection notice.
             pass
+        else:
+            try:
+                course_meta = (await map_courses([cid])).get(cid) or {}
+                course_code = course_meta.get("course_code") or ""
+                if isinstance(course_code, list):
+                    course_code = course_code[0] if course_code else ""
+                recipients = await _om_and_gs_user_ids_for_department_id(
+                    (course_meta.get("department_id") or "").strip(),
+                    campus_id,
+                    db,
+                )
+                deleted_codes = [section_code_map.get(sid, sid) for sid in deletable]
+                details = (
+                    f"APO rejected OM-added section(s) for {course_code or cid}."
+                    f"\nDeleted section(s): {', '.join(deleted_codes)}"
+                )
+                for rid in recipients:
+                    await create_notification(
+                        user_id=str(rid),
+                        title="OM section suggestion rejected",
+                        details=details,
+                        meta={
+                            "term_id": term_id,
+                            "campus_id": campus_id,
+                            "course_id": cid,
+                            "deleted_section_ids": deletable,
+                            "deleted_section_codes": deleted_codes,
+                        },
+                        send_email=True,
+                        email_from_user_id=userId,
+                    )
+            except Exception:
+                pass
 
         # Return updated pending list so the frontend can immediately reflect the cleared panel, if desired.
         try:
@@ -7088,6 +7204,76 @@ async def post_course_offerings(
             pending_after = None
 
         return {"ok": True, "deleted": len(deletable), "deleted_section_ids": deletable, "pending_after": pending_after}
+
+    # ----- REMOVE APO-ADDED EXTRA SECTIONS (SPECIFIC IDS) -----
+    if action == "planRemoveExtra":
+        if not payload or not str(payload.get("course_id") or "").strip():
+            raise HTTPException(status_code=400, detail="course_id is required.")
+        cid = str(payload["course_id"]).strip()
+
+        # Prefer explicit ids from the UI.
+        ids = payload.get("section_ids") or payload.get("section_id") or []
+        if isinstance(ids, str):
+            ids = [ids]
+        ids = [str(x).strip() for x in (ids or []) if str(x).strip()]
+
+        if not ids:
+            meta = await campus_meta(campus_id)
+            _, pending, _explain, _, _ = await _pending_changes(
+                term_id=term_id, campus_id=campus_id, campus_name=meta.get("campus_name", "")
+            )
+            ch = next((x for x in pending if x.get("type") == "sections_over_demand" and x.get("course_id") == cid), None)
+            ids = (ch or {}).get("apo_removable_section_ids") or []
+            ids = [str(x).strip() for x in ids if str(x).strip()]
+            if not ids:
+                return {"ok": True, "deleted": 0}
+
+        # Safety: delete only APO/manual sections for this course in this term.
+        q: Dict[str, Any] = {
+            "term_id": term_id,
+            "campus_id": campus_id,
+            "course_id": cid,
+            "section_id": {"$in": ids},
+            "remarks": {"$not": {"$regex": r"SPECIAL\\s*CLASS", "$options": "i"}},
+            "$and": [
+                {"created_source": {"$ne": "OM_NEW_LINE"}},
+                {"created_by_office": {"$ne": "OM"}},
+            ],
+        }
+
+        section_code_map: Dict[str, str] = {}
+        try:
+            cur = db[COL_SECTIONS].find(q, {"_id": 0, "section_id": 1, "section_code": 1})
+            for doc in await cur.to_list(length=5000):
+                sid = (doc or {}).get("section_id")
+                sc = (doc or {}).get("section_code")
+                if sid and sc:
+                    section_code_map[str(sid)] = str(sc)
+        except Exception:
+            section_code_map = {}
+
+        deleted_sched = 0
+        deleted_sections = 0
+        try:
+            res_sched = await db[COL_SCHEDS].delete_many({"term_id": term_id, "section_id": {"$in": ids}})
+            deleted_sched = int(getattr(res_sched, "deleted_count", 0) or 0)
+        except Exception:
+            deleted_sched = 0
+
+        try:
+            res_sec = await db[COL_SECTIONS].delete_many(q)
+            deleted_sections = int(getattr(res_sec, "deleted_count", 0) or 0)
+        except Exception:
+            deleted_sections = 0
+
+        deleted_codes = [section_code_map.get(sid, sid) for sid in ids]
+        return {
+            "ok": True,
+            "deleted": int(deleted_sections or 0),
+            "deleted_section_ids": ids,
+            "deleted_section_codes": deleted_codes,
+            "deleted_sched": int(deleted_sched or 0),
+        }
     # ----- GE/SHS EXEMPTION -----
     plan_warning = False
     if action in {"addRow", "editRow", "deleteRow", "restoreRow"}:
@@ -7349,6 +7535,11 @@ async def post_course_offerings(
             "enrolled": None,
             "status": "active",
             "created_at": now(), "updated_at": now(),
+            # Stamp provenance so planner can differentiate APO vs OM additions.
+            "created_by_office": "APO",
+            "created_source": "APO_MANUAL_ADD",
+            # NOTE: post_course_offerings receives `userId` (camelCase) from query.
+            "created_by_user_id": userId,
         }
 
         doc.update(_reset_submission_fields())   

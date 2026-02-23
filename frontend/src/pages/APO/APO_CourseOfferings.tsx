@@ -48,6 +48,7 @@ import {
   type CourseCatalogItem,
   type OmSubmissionWindow,
   planAllowExtra,
+  planRemoveExtra,
   planRejectOmNewLine,
   planAcceptRowTarget,
   planClearRowTarget,
@@ -711,7 +712,29 @@ type PlanningChange =
       target?: { program_id: string; batch_id: string } | null;
     }
   | { type: "sections_increase"; course_id: string; by_sections?: number; by_capacity?: number; reason?: string; explain?: PlanningExplain | null }
-  | { type: "sections_decrease"; course_id: string; by_sections?: number; by_capacity?: number; reason?: string; explain?: PlanningExplain | null; om_added_section_codes?: string[]; om_rejectable_section_ids?: string[]; om_delete_count?: number };
+  | {
+      type: "sections_decrease";
+      course_id: string;
+      by_sections?: number;
+      by_capacity?: number;
+      reason?: string;
+      explain?: PlanningExplain | null;
+      om_added_section_codes?: string[];
+      om_rejectable_section_ids?: string[];
+      om_delete_count?: number;
+      // APO extra handling
+      apo_added_section_codes?: string[];
+      apo_removable_section_ids?: string[];
+    }
+  | {
+      // APO-added sections beyond demand (requires Accept extra / Remove decision)
+      type: "sections_over_demand";
+      course_id: string;
+      by_sections?: number;
+      reason?: string;
+      apo_added_section_codes?: string[];
+      apo_removable_section_ids?: string[];
+    };
 
 type OfferingsResponse = {
   campus: { campus_id: string; campus_name: string };
@@ -1961,6 +1984,64 @@ const handleKeepOmExtra = async (courseId: string, courseCode: string, bySection
         await loadOfferings();
       } catch (e: any) {
         openNotice("Keep failed", e?.response?.data?.detail || e?.message || "Unable to keep OM-added section(s).");
+        throw e;
+      }
+    },
+  });
+};
+
+// APO-added extra sections beyond demand: Accept (keep) or Remove (delete specific newly-added sections)
+// NOTE: These handlers must be passed into PlanReviewModal/PlanningSummaryModal via props.
+const handleAcceptExtraApo = async (courseId: string, courseCode: string, bySections: number) => {
+  if (!user?.userId) return;
+  openConfirm({
+    title: "Accept extra section(s)?",
+    description: `This will keep your extra section(s) for ${courseCode} even if they are beyond demand.`,
+    confirmText: "Accept extra",
+    cancelText: "Cancel",
+    variant: "default",
+    onConfirm: async () => {
+      try {
+        // Reuse allow-extra mechanism (backend should treat this as an allowance, not a permanent target).
+        await planAllowExtra(user.userId, { course_id: courseId, keep_sections: bySections });
+        await loadOfferings();
+      } catch (e: any) {
+        openNotice(
+          "Accept extra failed",
+          e?.response?.data?.detail || e?.message || "Unable to accept extra section(s)."
+        );
+        throw e;
+      }
+    },
+  });
+};
+
+const handleRemoveExtraApo = async (
+  courseId: string,
+  courseCode: string,
+  sectionIds?: string[],
+  removeCount?: number
+) => {
+  if (!user?.userId) return;
+  openConfirm({
+    title: "Remove extra section(s)?",
+    description: `This will delete the APO-added extra section(s) for ${courseCode}.`,
+    confirmText: "Remove",
+    cancelText: "Cancel",
+    variant: "danger",
+    onConfirm: async () => {
+      try {
+        await planRemoveExtra(user.userId, {
+          course_id: courseId,
+          section_ids: Array.isArray(sectionIds) && sectionIds.length ? sectionIds : undefined,
+          remove_sections: typeof removeCount === "number" ? removeCount : undefined,
+        });
+        await loadOfferings();
+      } catch (e: any) {
+        openNotice(
+          "Remove failed",
+          e?.response?.data?.detail || e?.message || "Unable to remove extra section(s)."
+        );
         throw e;
       }
     },
@@ -3300,7 +3381,12 @@ const promptSaveEdit = () => {
 
         if ("conflict" in res) {
           const SAFE_AUTO_CODES = new Set(["NO_ROOM_SET", "SEAT_DEFICIT", "PREFIX_MISMATCH", "CODE_WITHOUT_NUMBER", "PLAN_NOT_APPROVED"]);
-          const canAuto = isGE || (res.conflict.violations || []).every((v: any) => SAFE_AUTO_CODES.has(v.code));
+          const violations = (res.conflict.violations || []) as any[];
+          const hasOverDemand = violations.some((v: any) => v?.code === "OVER_DEMAND");
+
+          // IMPORTANT: Even if GE rows are allowed to auto-override other warnings,
+          // we still require an explicit accept when adding capacity beyond demand.
+          const canAuto = !hasOverDemand && (isGE || violations.every((v: any) => SAFE_AUTO_CODES.has(v.code)));
           if (!canAuto) {
             handleConflict("add", res.conflict, base);
             return;
@@ -6148,6 +6234,8 @@ ${msg}`,
           courseIndex={{ ...planCourseIndex, ...extraCourseIndex }}  // ⟵ merged
           onKeepOmExtra={handleKeepOmExtra}
           onRejectOmNewLine={handleRejectOmNewLine}
+          onAcceptExtraApo={handleAcceptExtraApo}
+          onRemoveExtraApo={handleRemoveExtraApo}
           onClose={() => setShowPlanModal(false)}
           onApprove={async () => {
             await handleApprovePlan();
@@ -6188,8 +6276,8 @@ ${msg}`,
             // refresh curriculum options so newly created course appears in editor/suggestions
             await loadCurriculum();
           }}
-          onAck={(title, details) => setOpAck({ open: true, title, details })}
-          onNotice={(title, message) => setNoticeDlg({ open: true, title, message })}
+          onAck={(title: string, details: string) => setOpAck({ open: true, title, details })}
+          onNotice={(title: string, message: string) => setNoticeDlg({ open: true, title, message })}
         />
       )}
 
@@ -6566,7 +6654,7 @@ const PlanningSummaryPanel: React.FC<{
 
   const omPending = useMemo(() => {
     return (changes || [])
-      .filter((c) => c.type === "sections_decrease")
+      .filter((c: any) => c.type === "sections_decrease" && (c as any)?.reason === "OM_NEW_LINE")
       .reduce((acc, c: any) => acc + (c.om_delete_count || c.by_sections || 0), 0);
   }, [changes]);
 
@@ -6685,7 +6773,7 @@ const PlanningSummaryModal: React.FC<{
     for (const v of byCourse.values()) totalSeatGap += v;
     const pendingCount = (changes || []).length;
     const omPending = (changes || [])
-      .filter((c) => (c as any)?.type === "sections_decrease")
+      .filter((c: any) => (c as any)?.type === "sections_decrease" && (c as any)?.reason === "OM_NEW_LINE")
       .reduce((acc, c: any) => acc + (c?.om_delete_count || c?.by_sections || 0), 0);
     return {
       coursesWithGap: coursesWithGap.size,
@@ -6869,9 +6957,11 @@ const PlanningSummaryModal: React.FC<{
                 const dec = (c.changes || []).find((x: any) => x.type === "sections_decrease") as any;
                 const inc = (c.changes || []).find((x: any) => x.type === "sections_increase") as any;
 
-                const omCount = dec?.om_delete_count || dec?.by_sections || 0;
                 const omIds: string[] = dec?.om_rejectable_section_ids || [];
                 const omCodes: string[] = dec?.om_added_section_codes || [];
+                const isOmDec = (dec?.reason === "OM_NEW_LINE") && (omIds.length > 0 || omCodes.length > 0);
+                const omCount = isOmDec ? (dec?.om_delete_count || dec?.by_sections || 0) : 0;
+                const overReduce = (!isOmDec && dec && Number(dec?.by_sections || 0) > 0) ? Number(dec?.by_sections || 0) : 0;
 
                 const needsReview =
                   Number(seat?.gap || 0) > 0 ||
@@ -6928,6 +7018,12 @@ const PlanningSummaryModal: React.FC<{
                           {omCount > 0 && (
                             <span className="rounded-full bg-amber-50 px-2 py-1 border border-amber-200 text-amber-900">
                               OM items: {omCount} pending
+                            </span>
+                          )}
+
+                          {overReduce > 0 && (
+                            <span className="rounded-full bg-slate-50 px-2 py-1 border border-slate-200 text-slate-800">
+                              Over demand: reduce {overReduce} section{overReduce === 1 ? "" : "s"}
                             </span>
                           )}
                         </div>
@@ -7181,7 +7277,18 @@ const PlanReviewModal: React.FC<{
   courseIndex?: Record<string, { code: string; title?: string } | any>;
   onKeepOmExtra?: (courseId: string, courseCode: string, bySections: number) => void | Promise<void>;
   onRejectOmNewLine?: (courseId: string, courseCode: string, sectionId?: string, sectionCode?: string) => void | Promise<void>;
-}> = ({ changes, onClose, onApprove, courseIndex = {}, onKeepOmExtra, onRejectOmNewLine }) => {
+  onAcceptExtraApo?: (courseId: string, courseCode: string, bySections: number) => void | Promise<void>;
+  onRemoveExtraApo?: (courseId: string, courseCode: string, sectionIds?: string[], removeCount?: number) => void | Promise<void>;
+}> = ({
+  changes,
+  onClose,
+  onApprove,
+  courseIndex = {},
+  onKeepOmExtra,
+  onRejectOmNewLine,
+  onAcceptExtraApo,
+  onRemoveExtraApo,
+}) => {
   const [busy, setBusy] = useState(false);
   const summary = useMemo(() => {
     const s = { total: changes.length, add: 0, increase: 0, reduce: 0 };
@@ -7297,7 +7404,10 @@ const PlanReviewModal: React.FC<{
                       const ch = r.raw;
                       const omCodes = Array.isArray(ch?.om_added_section_codes) ? ch.om_added_section_codes : [];
                       const omIds = Array.isArray(ch?.om_rejectable_section_ids) ? ch.om_rejectable_section_ids : [];
+                      const apoCodes = Array.isArray(ch?.apo_added_section_codes) ? ch.apo_added_section_codes : [];
+                      const apoIds = Array.isArray(ch?.apo_removable_section_ids) ? ch.apo_removable_section_ids : [];
                       const isReduce = kind === "dec";
+                      const isApoExtra = String(ch?.reason || "") === "APO_EXTRA" || String(ch?.type || "") === "sections_over_demand";
 
                       return (
                         <div key={idx} className="px-4 py-3">
@@ -7326,6 +7436,25 @@ const PlanReviewModal: React.FC<{
                                   ))}
                                   {omCodes.length > 6 && (
                                     <span className="text-[11px] font-medium text-amber-800">+{omCodes.length - 6}</span>
+                                  )}
+                                </div>
+                              )}
+
+                              {isApoExtra && apoCodes.length > 0 && (
+                                <div className="mt-2 flex flex-wrap items-center gap-1">
+                                  <span className="inline-flex items-center rounded-full bg-violet-100 px-2 py-0.5 text-[11px] font-semibold text-violet-800">
+                                    APO‑added
+                                  </span>
+                                  {apoCodes.slice(0, 6).map((sc: string) => (
+                                    <span
+                                      key={sc}
+                                      className="inline-flex items-center rounded-full border border-violet-200 bg-violet-50 px-2 py-0.5 text-[11px] font-medium text-violet-900"
+                                    >
+                                      {sc}
+                                    </span>
+                                  ))}
+                                  {apoCodes.length > 6 && (
+                                    <span className="text-[11px] font-medium text-violet-800">+{apoCodes.length - 6}</span>
                                   )}
                                 </div>
                               )}
@@ -7363,6 +7492,40 @@ const PlanReviewModal: React.FC<{
                                   }}
                                 >
                                   Reject
+                                </button>
+                              </div>
+                            )}
+
+                            {isApoExtra && (
+                              <div className="flex items-center gap-2">
+                                <button
+                                  type="button"
+                                  className="rounded-lg border border-violet-300 bg-white px-3 py-1.5 text-xs font-semibold text-violet-800 hover:bg-violet-50 disabled:opacity-50"
+                                  disabled={busy}
+                                  onClick={() =>
+                                    onAcceptExtraApo?.(
+                                      String(ch?.course_id || ""),
+                                      String(r.courseCode || ""),
+                                      Number(ch?.by_sections || apoIds.length || 1)
+                                    )
+                                  }
+                                >
+                                  Accept extra
+                                </button>
+                                <button
+                                  type="button"
+                                  className="rounded-lg border border-rose-300 bg-white px-3 py-1.5 text-xs font-semibold text-rose-700 hover:bg-rose-50 disabled:opacity-50"
+                                  disabled={busy}
+                                  onClick={() =>
+                                    onRemoveExtraApo?.(
+                                      String(ch?.course_id || ""),
+                                      String(r.courseCode || ""),
+                                      apoIds.length ? apoIds : undefined,
+                                      Number(ch?.by_sections || apoIds.length || 1)
+                                    )
+                                  }
+                                >
+                                  Remove
                                 </button>
                               </div>
                             )}
