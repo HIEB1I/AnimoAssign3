@@ -1,6 +1,16 @@
 // frontend/src/pages/FACULTY/FAC_Overview.tsx
 import React, { useEffect, useMemo, useRef, useState, useCallback } from "react";
-import { Send as SendIcon, X, BookOpen as SyllabusIcon, Pencil, Check, XCircle } from "lucide-react";
+import {
+  Send as SendIcon,
+  X,
+  BookOpen as SyllabusIcon,
+  Pencil,
+  Check,
+  XCircle,
+  BadgeCheck,
+  Layers,
+  Gauge,
+} from "lucide-react";
 
 import TopBar from "../../component/TopBar";
 import Tabs from "../../component/Tabs";
@@ -93,7 +103,7 @@ const lightRedBtn =
    0) Page
    ========================================= */
 export default function FAC_Overview() {
-  const [tab, setTab] = useState<"Schedule Overview" | "Submit Preferences" | "My Profile">("Schedule Overview");
+  const [tab, setTab] = useState<"My Profile" | "Schedule Overview" | "Submit Preferences">("My Profile");
   const [showInbox, setShowInbox] = useState(false); // NEW
   const [data, setData] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
@@ -323,7 +333,7 @@ useEffect(() => {
           mode="state"
           activeTab={tab}
           onTabChange={(newTab) => setTab(newTab as typeof tab)}
-          items={[{ label: "Schedule Overview" }, { label: "Submit Preferences" }, { label: "My Profile" }]}
+          items={[{ label: "My Profile" }, { label: "Schedule Overview" }, { label: "Submit Preferences" }]}
         />
       )}
 
@@ -366,6 +376,21 @@ useEffect(() => {
    Faculty Profile Tab (REDESIGNED)
    - Not an information dump: show actionable "guardrails" + qualifications
    ========================================= */
+function ProfileSectionTitle({
+  icon: Icon,
+  children,
+}: {
+  icon: any;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="flex items-center gap-2 text-[13px] font-semibold text-emerald-800">
+      <Icon className="h-4 w-4" />
+      {children}
+    </div>
+  );
+}
+
 function FacultyProfileTab({
   faculty,
   userId,
@@ -510,8 +535,8 @@ function FacultyProfileTab({
   return (
     <div className="mx-auto w-full max-w-screen-2xl px-4">
       {/* Header */}
-      <div className="flex flex-col gap-4 lg:flex-row lg:items-stretch lg:justify-between">
-        <div className="flex min-w-0 items-center gap-4 rounded-2xl border border-slate-200 bg-white px-4 py-4 shadow-sm">
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-stretch">
+        <div className="flex min-w-0 flex-1 items-center gap-4 rounded-2xl border border-slate-200 bg-white px-4 py-4 shadow-sm">
           <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl border border-slate-200 bg-slate-50 text-sm font-bold text-slate-800">
             {initials}
           </div>
@@ -656,7 +681,14 @@ function FacultyProfileTab({
               key={g.label}
               className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm"
             >
-              <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">{g.label}</div>
+              <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-emerald-700">
+                {g.label.toLowerCase().includes("minimum units") ? (
+                  <Gauge className="h-4 w-4" />
+                ) : (
+                  <Layers className="h-4 w-4" />
+                )}
+                <span>{g.label}</span>
+              </div>
               <div className="mt-2 text-2xl font-semibold tracking-tight text-slate-900">{g.value}</div>
             </div>
           ))}
@@ -669,7 +701,7 @@ function FacultyProfileTab({
         <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
           <div className="flex items-center justify-between gap-3">
             <div>
-              <div className="text-sm font-semibold text-slate-900">Certifications</div>
+              <ProfileSectionTitle icon={BadgeCheck}>Certifications</ProfileSectionTitle>
               <div className="mt-1 text-xs text-slate-500">Helps match you to specialized courses.</div>
             </div>
             <button
@@ -740,7 +772,7 @@ function FacultyProfileTab({
         <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm lg:col-span-2">
           <div className="flex items-center justify-between gap-3">
             <div>
-              <div className="text-sm font-semibold text-slate-900">Qualified KACs</div>
+              <ProfileSectionTitle icon={Layers}>Qualified KACs</ProfileSectionTitle>
               <div className="mt-1 text-xs text-slate-500">Your coverage map (areas and courses you can be assigned to).</div>
             </div>
             <button
@@ -899,7 +931,7 @@ function FacultyProfileTab({
         <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
           <div className="flex items-baseline justify-between gap-3">
             <div>
-              <div className="text-sm font-semibold text-slate-900">Teaching history</div>
+              <div className="text-sm font-semibold text-emerald-800">Teaching history</div>
               <div className="mt-1 text-xs text-slate-500">What you taught and how often (per term + all-time).</div>
             </div>
           </div>
@@ -910,7 +942,7 @@ function FacultyProfileTab({
 
         <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
           <div>
-            <div className="text-sm font-semibold text-slate-900">Deloadings</div>
+            <div className="text-sm font-semibold text-emerald-800">Deloadings</div>
             <div className="mt-1 text-xs text-slate-500">Your recorded deloading arrangements.</div>
           </div>
           <div className="mt-4">
@@ -1367,7 +1399,6 @@ const scheduleFinalLabel = (() => {
 
 	          {/* Legend (centered above the calendar/list controls) */}
 	          <div className="absolute left-1/2 hidden -translate-x-1/2 items-center gap-3 rounded-full border border-neutral-200 bg-white px-3 py-1 text-xs text-neutral-700 shadow-sm md:flex">
-	            <span className="font-semibold text-neutral-800">Legend:</span>
 	            <span className="inline-flex items-center gap-2">
 	              <span className="h-3 w-3 rounded-sm" style={{ backgroundColor: "#97AC9F" }} />
 	              <span>Manila</span>

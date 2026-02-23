@@ -550,15 +550,20 @@ async def get_room_allocation(
         {"_id": 0, "schedule_id": 1, "day": 1, "start_time": 1, "end_time": 1, "room_id": 1},
     )
     availability_raw = [a async for a in avail_cur]
-    availability = [
-        {
-            "schedule_id": a.get("schedule_id"),
-            "room_id": a.get("room_id"),
-            "day": normalize_day(a.get("day")),
-            "time_band": band_of(a.get("start_time", ""), a.get("end_time", "")),
-        }
-        for a in availability_raw
-    ]
+    # Availability placeholders:
+    # - Normal rows: have start_time/end_time => maps to a TIME_BAND
+    # - CLOSED sentinel rows: have closed=True and no time band
+    availability = []
+    for a in availability_raw:
+        availability.append(
+            {
+                "schedule_id": a.get("schedule_id"),
+                "room_id": a.get("room_id"),
+                "day": normalize_day(a.get("day")),
+                "closed": True if a.get("closed") is True else False,
+                "time_band": band_of(a.get("start_time", ""), a.get("end_time", "")),
+            }
+        )
 
     # faculty map for scoped sections only
     fac_map_first = await faculty_by_section_first(sec_ids, term_id)
@@ -594,9 +599,14 @@ async def get_room_allocation(
         }
 
         # 2) Saved availability placeholders (normalized days)
+        #    CLOSED sentinels contribute to saved_days but not to saved_avail_keys.
         avail_for_room = [a for a in availability if a["room_id"] == rid]
-        saved_avail_keys = {(a["day"], a["time_band"]) for a in avail_for_room}
         saved_days = {a["day"] for a in avail_for_room}
+        saved_avail_keys = {
+            (a["day"], a["time_band"])
+            for a in avail_for_room
+            if (a.get("closed") is not True) and (a.get("time_band") in TIME_BANDS)
+        }
 
         allowed_keys = set(assigned_keys) | saved_avail_keys
 
@@ -788,6 +798,11 @@ async def post_room_allocation(
         day_full = (payload.get("day") or "").strip()
         if day_full not in DOW:
             raise HTTPException(status_code=400, detail="Invalid day.")
+        # IMPORTANT:
+        # - If the user selects specific time bands, we store them as availability placeholders.
+        # - If the user selects NONE (empty list), that means the room is CLOSED for that day.
+        #   We must persist a sentinel "closed" marker so the GET overlay logic does NOT
+        #   re-apply campus default open hours for that day.
         sel_bands: List[str] = payload.get("time_bands") or []
         for tb in sel_bands:
             if tb not in TIME_BANDS:
@@ -801,13 +816,16 @@ async def post_room_allocation(
                     "section_id": {"$exists": False},
                     "day": {"$in": day_aliases(day_full)},
                 },
-                {"_id": 0, "schedule_id": 1, "start_time": 1, "end_time": 1},
+                {"_id": 0, "schedule_id": 1, "start_time": 1, "end_time": 1, "closed": 1},
             )
         ]
 
         existing_norm: Set[Tuple[str, str]] = set()
         ids_by_norm: Dict[Tuple[str, str], List[str]] = {}
         for e_doc in existing_docs:
+            # Ignore prior "closed" sentinels in the time-band set (handled separately below)
+            if e_doc.get("closed") is True:
+                continue
             st0 = _t4(e_doc.get("start_time"))
             et0 = _t4(e_doc.get("end_time"))
             if st0 and et0:
@@ -845,6 +863,27 @@ async def post_room_allocation(
             remove_ids += ids_by_norm.get(key, [])
         if remove_ids:
             await db[COL_SCHEDS].delete_many({"schedule_id": {"$in": remove_ids}})
+
+        # Maintain the day-level CLOSED sentinel.
+        # - If user selected 0 bands => ensure sentinel exists.
+        # - If user selected >=1 bands => remove any sentinel for that day.
+        day_code = denormalize_day(day_full)
+        closed_schedule_id = f"AVAIL-CLOSED-{room_id}-{day_code}"
+        if len(selected_norm) == 0:
+            await db[COL_SCHEDS].update_one(
+                {"schedule_id": closed_schedule_id},
+                {"$set": {
+                    "schedule_id": closed_schedule_id,
+                    "day": day_code,
+                    "room_id": room_id,
+                    "closed": True,
+                    "updated_at": now(),
+                    "created_at": now(),
+                }},
+                upsert=True,
+            )
+        else:
+            await db[COL_SCHEDS].delete_many({"schedule_id": closed_schedule_id})
 
         return {"ok": True, "added": len(to_add), "removed": len(remove_ids)}
 
@@ -921,6 +960,19 @@ async def post_room_allocation(
             et0 = _t4(a.get("end_time"))
             if st0 and et0:
                 avail_pairs.add((st0, et0))
+
+        # If there's an explicit CLOSED sentinel for this day, the room is closed regardless of campus defaults.
+        closed_marker = await db[COL_SCHEDS].find_one(
+            {
+                "room_id": room_id,
+                "section_id": {"$exists": False},
+                "day": {"$in": day_aliases(day_full)},
+                "closed": True,
+            },
+            {"_id": 0, "schedule_id": 1},
+        )
+        if closed_marker and not avail_pairs:
+            raise HTTPException(status_code=400, detail="Room is not available for this day/time.")
 
         default_days = default_open_days_for_campus(campus.get("campus_name", ""))
         if avail_pairs:

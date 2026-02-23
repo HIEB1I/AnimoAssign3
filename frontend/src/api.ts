@@ -155,11 +155,17 @@ export async function fetchFacultyAvailabilityHeatmap<T = unknown>(params?: {
   course_id?: string;
   dept_id?: string;
   threshold?: number; // default handled server-side (e.g., 0.50)
+  term_id?: string;
+  direction?: "current" | "prev" | "next";
+  counting_mode?: "top1" | "top5";
 }): Promise<T> {
   const qs = new URLSearchParams();
   if (params?.course_id) qs.set("course_id", params.course_id);
   if (params?.dept_id) qs.set("dept_id", params.dept_id);
   if (params?.threshold !== undefined) qs.set("threshold", String(params.threshold));
+  if (params?.term_id) qs.set("term_id", params.term_id);
+  if (params?.direction) qs.set("direction", params.direction);
+  if (params?.counting_mode) qs.set("counting_mode", params.counting_mode);
 
   const url =
     `${ANALYTICS_BASE.replace(/\/+$/, "")}/faculty-availability-heatmap` +
@@ -1015,6 +1021,32 @@ export async function planRejectOmNewLine(
   Promise<{ ok: true; deleted: number }> {
   const url = `${API_BASE}/apo/courseofferings${q({ userId, action: "planRejectOmNewLine" })}`;
   // See note in planAllowExtra(): absolute URL => use `post()` helper.
+  return post(url, payload);
+}
+
+// Remove APO-added extra sections beyond demand (prefer passing specific section_ids)
+export async function planRemoveExtra(
+  userId: string,
+  payload: { course_id: string; section_ids?: string[]; remove_sections?: number }
+): Promise<{ ok: true; deleted: number }> {
+  const url = `${API_BASE}/apo/courseofferings${q({ userId, action: "planRemoveExtra" })}`;
+  // See note in planAllowExtra(): absolute URL => use `post()` helper.
+  return post(url, payload);
+}
+
+export async function planAcceptRowTarget(
+  userId: string,
+  payload: { course_id: string; program_id: string; batch_id: string }
+): Promise<{ ok: true; override_key: string; accepted_course_target_total: number }> {
+  const url = `${API_BASE}/apo/courseofferings${q({ userId, action: "planAcceptRowTarget" })}`;
+  return post(url, payload);
+}
+
+export async function planClearRowTarget(
+  userId: string,
+  payload: { course_id: string; program_id: string; batch_id: string }
+): Promise<{ ok: true; override_key: string }> {
+  const url = `${API_BASE}/apo/courseofferings${q({ userId, action: "planClearRowTarget" })}`;
   return post(url, payload);
 }
 
