@@ -494,10 +494,12 @@ function HistoryMain({ embedded = false }: { embedded?: boolean } = {}) {
         {rows.length > 0 && (
           <div className={cls("grid grid-cols-1 gap-4", embedded ? "mt-4" : "mb-6")}>
             <div
-              className={cls(
-                "rounded-xl border border-gray-200 p-4",
-                embedded ? "bg-slate-50" : "bg-white"
-              )}
+            className={cls(
+              "rounded-xl border p-4 shadow-sm ring-1",
+              embedded
+                ? "border-emerald-200 bg-emerald-50 ring-emerald-200"
+                : "border-emerald-300 bg-emerald-50 ring-emerald-300"
+            )}
             >
               <div className="text-xs font-semibold uppercase tracking-wide text-gray-500">
                 Most taught (all-time)

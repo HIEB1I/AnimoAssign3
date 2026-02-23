@@ -1774,14 +1774,14 @@ const ROOM_OPTIONS = ["Online", "Classroom", "Comlab"];
 const TIME_BEGIN_OPTIONS = [
   // Match APO time-band menu content: show full band label in menu,
   // but keep stored/selected value as HHMM (shown in-cell via SelectBox displayLabel).
-  { value: "0730", label: "0730" },
-  { value: "0915", label: "0915" },
-  { value: "1100", label: "1100" },
-  { value: "1245", label: "1245" },
-  { value: "1430", label: "1430" },
-  { value: "1615", label: "1615" },
-  { value: "1800", label: "1800" },
-  { value: "1945", label: "1945" },
+  { value: "0730", label: "0730 - 0900" },
+  { value: "0915", label: "0915 - 1045" },
+  { value: "1100", label: "1100 - 1230" },
+  { value: "1245", label: "1245 - 1415" },
+  { value: "1430", label: "1430 - 1600" },
+  { value: "1615", label: "1615 - 1745" },
+  { value: "1800", label: "1800 - 1930" },
+  { value: "1945", label: "1945 - 2100" },
 ];
 
 const TIME_END_OPTIONS = [
