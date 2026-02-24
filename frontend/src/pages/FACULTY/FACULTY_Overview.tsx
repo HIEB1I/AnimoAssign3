@@ -327,47 +327,53 @@ useEffect(() => {
 
 
 
-      {/* Hide Overview/History/Preferences when Inbox is open */}
-      {!showInbox && (
-        <Tabs
-          mode="state"
-          activeTab={tab}
-          onTabChange={(newTab) => setTab(newTab as typeof tab)}
-          items={[{ label: "My Profile" }, { label: "Schedule Overview" }, { label: "Submit Preferences" }]}
-        />
-      )}
+      {/* Tabs should remain visible even when Inbox is open (match APO Inbox UX) */}
+      <Tabs
+        mode="state"
+        activeTab={tab}
+        onTabChange={(newTab) => {
+          // If the user clicks a tab while viewing the Inbox, close Inbox and switch.
+          if (showInbox) setShowInbox(false);
+          setTab(newTab as typeof tab);
+        }}
+        items={[{ label: "My Profile" }, { label: "Schedule Overview" }, { label: "Submit Preferences" }]}
+      />
 
-      <main className={cls("w-full", showInbox ? "p-0" : "p-6 pb-24")}> 
-        {/* If Inbox was requested via the TopBar icon, render it "like a tab" */}
-        {showInbox ? (
+      {/*
+        IMPORTANT: Match APO Inbox sizing.
+        APO renders <InboxShell /> directly under <Tabs /> with no extra page padding.
+        Faculty previously rendered inbox inside <main className="p-6">, which made it narrower.
+      */}
+      {showInbox ? (
+        <div className="w-full">
           <InboxContent />
-        ) : (
-          <>
-            {tab === "Schedule Overview" && (
-              <>
-                <StatCards summary={data.summary} />
-                <div className="my-6" />
-                <TeachingLoadEnhanced
-                  teachingLoad={data.teaching_load}
-                  term={data.term}
-                  workflow={data}
-                  onToast={pushToast}
-                  onRefresh={loadOverview}
-                />
-              </>
-            )}
-            {tab === "Submit Preferences" && <PreferencesContent />}
-            {tab === "My Profile" && (
-              <FacultyProfileTab
-                faculty={data?.faculty}
-                userId={userId}
-                onReload={loadOverview}
-                pushToast={(kind, msg) => pushToast(kind, msg)}
+        </div>
+      ) : (
+        <main className={cls("w-full", "p-6 pb-24")}>
+          {tab === "Schedule Overview" && (
+            <>
+              <StatCards summary={data.summary} />
+              <div className="my-6" />
+              <TeachingLoadEnhanced
+                teachingLoad={data.teaching_load}
+                term={data.term}
+                workflow={data}
+                onToast={pushToast}
+                onRefresh={loadOverview}
               />
-            )}
-          </>
-        )}
-      </main>
+            </>
+          )}
+          {tab === "Submit Preferences" && <PreferencesContent />}
+          {tab === "My Profile" && (
+            <FacultyProfileTab
+              faculty={data?.faculty}
+              userId={userId}
+              onReload={loadOverview}
+              pushToast={(kind, msg) => pushToast(kind, msg)}
+            />
+          )}
+        </main>
+      )}
     </div>
   );
 }
