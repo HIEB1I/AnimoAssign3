@@ -1366,8 +1366,43 @@ async def overview_handler(
                 "kac_name": 1,
                 "kac_code": 1,
                 "program_area": 1,
+                "course_list": 1,
             },
         ).to_list(None)
+
+        # Expand course_list (course_id) to course_code + course_title so the frontend can
+        # show the course list while editing Qualified KACs in My Profile.
+        course_ids: List[str] = []
+        for kd in (kacs or []):
+            for cid in (kd.get("course_list") or []):
+                if isinstance(cid, str) and cid.strip():
+                    course_ids.append(cid.strip())
+        course_ids = sorted(set(course_ids))
+
+        courses_map: Dict[str, Dict[str, Any]] = {}
+        if course_ids:
+            course_docs = await db[COL_COURSES].find(
+                {"course_id": {"$in": course_ids}},
+                {"_id": 0, "course_id": 1, "course_code": 1, "course_title": 1},
+            ).to_list(None)
+            for cd in (course_docs or []):
+                cid = str(cd.get("course_id") or "").strip()
+                if not cid:
+                    continue
+                courses_map[cid] = {
+                    "course_id": cid,
+                    "course_code": _as_code_str(cd.get("course_code")),
+                    "course_title": cd.get("course_title") or "",
+                }
+
+        for kd in (kacs or []):
+            clist = []
+            for cid in (kd.get("course_list") or []):
+                scid = str(cid or "").strip()
+                if not scid:
+                    continue
+                clist.append(courses_map.get(scid, {"course_id": scid, "course_code": "", "course_title": ""}))
+            kd["courses"] = clist
 
         # Stable ordering for predictable UI.
         try:
