@@ -442,44 +442,45 @@ function HistoryMain({ embedded = false }: { embedded?: boolean } = {}) {
             </div>
           </div>
 
-          {/* AY dropdown + Prev/Next controls stacked */}
-          <div className="flex flex-col gap-2">
+          {/* AY dropdown with Prev (left) / Next (right) controls */}
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={goPrev}
+              disabled={atFirst}
+              className={`whitespace-nowrap rounded-lg border px-3 py-2 text-sm font-semibold ${
+                atFirst
+                  ? "cursor-default border-gray-200 bg-gray-100 text-gray-500"
+                  : "cursor-pointer border-emerald-500 bg-emerald-400 text-emerald-950 hover:bg-emerald-300"
+              }`}
+              aria-label="View newer academic year"
+              title="Previous (newer) AY"
+            >
+              ‹ Prev AY
+            </button>
+
             <Dropdown
               value={ay}
               onChange={setAy}
               options={AY_OPTIONS}
               placeholder="Select academic year"
+              className="min-w-0 flex-1"
             />
-            <div className="flex items-center justify-end gap-2">
-              <button
-                type="button"
-                onClick={goPrev}
-                disabled={atFirst}
-                className={cls(
-                  "inline-flex items-center gap-1 rounded-lg border px-2.5 py-1 text-xs",
-                  "border-gray-200 text-gray-700 hover:bg-gray-50",
-                  "disabled:cursor-not-allowed disabled:opacity-50"
-                )}
-                aria-label="View newer academic year"
-                title="Previous (newer) AY"
-              >
-                ‹ Prev AY
-              </button>
-              <button
-                type="button"
-                onClick={goNext}
-                disabled={atLast}
-                className={cls(
-                  "inline-flex items-center gap-1 rounded-lg border px-2.5 py-1 text-xs",
-                  "border-gray-200 text-gray-700 hover:bg-gray-50",
-                  "disabled:cursor-not-allowed disabled:opacity-50"
-                )}
-                aria-label="View older academic year"
-                title="Next (older) AY"
-              >
-                Next AY ›
-              </button>
-            </div>
+
+            <button
+              type="button"
+              onClick={goNext}
+              disabled={atLast}
+              className={`whitespace-nowrap rounded-lg border px-3 py-2 text-sm font-semibold ${
+                atLast
+                  ? "cursor-default border-gray-200 bg-gray-100 text-gray-500"
+                  : "cursor-pointer border-emerald-500 bg-emerald-400 text-emerald-950 hover:bg-emerald-300"
+              }`}
+              aria-label="View older academic year"
+              title="Next (older) AY"
+            >
+              Next AY ›
+            </button>
           </div>
         </div>
 
@@ -585,9 +586,6 @@ function HistoryMain({ embedded = false }: { embedded?: boolean } = {}) {
                                 <div className="shrink-0 text-right">
                                   <div className="inline-flex items-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-800">
                                     This term: {c.termCount}
-                                  </div>
-                                  <div className="mt-1 text-[11px] text-gray-500">
-                                    All-time: {c.totalCount}
                                   </div>
                                 </div>
                               </div>
