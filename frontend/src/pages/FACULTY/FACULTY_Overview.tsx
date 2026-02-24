@@ -4,7 +4,7 @@ import {
   Send as SendIcon,
   X,
   BookOpen as SyllabusIcon,
-  Pencil,
+  Edit,
   Check,
   XCircle,
   BadgeCheck,
@@ -682,7 +682,7 @@ function FacultyProfileTab({
                 title="Edit name"
                 onClick={() => setEditing((p) => (p === "name" ? null : "name"))}
               >
-                <Pencil className="h-4 w-4 text-slate-600" />
+                <Edit className="h-4 w-4 text-slate-600" />
               </button>
             </div>
 
@@ -774,7 +774,7 @@ function FacultyProfileTab({
                     title="Edit employment"
                     onClick={() => setEditing((cur) => (cur === "employment" ? null : "employment"))}
                   >
-                    <Pencil className="h-4 w-4 text-slate-600" />
+                    <Edit className="h-4 w-4 text-slate-600" />
                   </button>
                 )}
               </div>
@@ -845,7 +845,7 @@ function FacultyProfileTab({
               title="Edit certifications"
               onClick={() => setEditing((p) => (p === "certs" ? null : "certs"))}
             >
-              <Pencil className="h-4 w-4 text-slate-600" />
+              <Edit className="h-4 w-4 text-slate-600" />
             </button>
           </div>
 
@@ -916,7 +916,7 @@ function FacultyProfileTab({
               title="Edit qualified KACs"
               onClick={() => setEditing((p) => (p === "kacs" ? null : "kacs"))}
             >
-              <Pencil className="h-4 w-4 text-slate-600" />
+              <Edit className="h-4 w-4 text-slate-600" />
             </button>
           </div>
 
@@ -1476,7 +1476,7 @@ const ClassBlock = ({ onClick, it }: { onClick?: () => void; it: TLItemForCalend
         it.is_special_class
           ? "border-purple-200 bg-purple-100/80 hover:bg-purple-100"
           : campusColor
-          ? "border-neutral-200 text-white hover:brightness-[1.02]"
+          ? "border-neutral-200 text-black hover:brightness-[1.02]"
           : "border-emerald-200 bg-emerald-50/90 hover:bg-emerald-50",
         it.is_special_class && "cursor-default"
       )}
@@ -1538,6 +1538,11 @@ function TeachingLoadEnhanced({ teachingLoad, term, workflow, onToast, onRefresh
   const [view, setView] = useState<"Calendar" | "List">("Calendar");
   const [modal, setModal] = useState<{ day: DayLong; item: TLItemForCalendar } | null>(null);
   const [isAccepting, setIsAccepting] = useState(false);
+
+  // Calendar row sizing:
+  // - Keep empty rows compact and consistent (match the schedule card height)
+  // - Still allow rows to expand if a slot contains multiple cards
+  const CALENDAR_ROW_MIN_PX = 60;
 
   // Schedule is finalized only when backend explicitly marks it so (e.g., an admin lock).
   // Faculty acceptance should NOT lock/finalize; OM can still edit/resend, and faculty can RFC/accept again.
@@ -1724,12 +1729,12 @@ const scheduleFinalLabel = (() => {
 
               <div
                 className="relative grid grid-cols-[140px_repeat(6,1fr)]"
-                style={{ gridAutoRows: "minmax(84px, auto)" }}
+                style={{ gridAutoRows: `minmax(${CALENDAR_ROW_MIN_PX}px, max-content)` }}
               >
                 {TIME_BANDS_LABEL.map((band, r) => (
                   <React.Fragment key={band}>
                     <div
-                      className="flex items-center justify-center border-r border-neutral-300 bg-neutral-50 px-2 text-center text-[13px]"
+                      className="flex h-full items-center justify-center border-r border-neutral-300 bg-neutral-50 px-2 text-center text-[13px]"
                       style={{ gridColumn: 1, gridRow: r + 1 }}
                     >
                       {band}
@@ -1738,7 +1743,7 @@ const scheduleFinalLabel = (() => {
                     {DAY_ORDER.filter(d => d !== "TBA").map((_, c) => (
                       <div
                         key={`${c}-${r}`}
-                        className="border border-neutral-300"
+                        className="h-full border border-neutral-300"
                         style={{ gridColumn: c + 2, gridRow: r + 1 }}
                       />
                     ))}

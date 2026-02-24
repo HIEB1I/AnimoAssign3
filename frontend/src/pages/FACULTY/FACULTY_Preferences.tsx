@@ -93,7 +93,35 @@ function MultiSelectDropdown({
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!searchable || !q) return normalized;
-    return normalized.filter((o) => (o.label || o.value).toLowerCase().includes(q));
+    const courseTokens = (o: any): string[] => {
+      const out: string[] = [];
+
+      const pushMany = (arr: any[]) =>
+        arr.forEach((x) => {
+          if (!x) return;
+          if (typeof x === "string") {
+            out.push(x);
+            return;
+          }
+          if (typeof x === "object") {
+            // tolerate different backend shapes
+            const code = x.course_code ?? x.courseCode ?? x.code ?? x.course_id ?? x.courseId ?? x.id;
+            const title = x.course_title ?? x.courseTitle ?? x.title;
+            if (typeof code === "string") out.push(code);
+            if (typeof title === "string") out.push(title);
+          }
+        });
+
+      if (Array.isArray(o?.courses_display)) pushMany(o.courses_display);
+      if (Array.isArray(o?.course_list)) pushMany(o.course_list);
+      if (Array.isArray(o?.courses)) pushMany(o.courses);
+      return out;
+    };
+
+    return normalized.filter((o: any) => {
+      const hay = [o.label || "", o.value || "", ...courseTokens(o)].join(" ").toLowerCase();
+      return hay.includes(q);
+    });
   }, [normalized, query, searchable]);
 
   useEffect(() => {
@@ -186,7 +214,7 @@ function MultiSelectDropdown({
                   ref={inputRef}
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
-                  placeholder="Type to search…"
+                  placeholder="Search by KAC or course code…"
                   className="w-full rounded-xl border border-gray-200 bg-white px-3 py-2 pr-9 text-[14px] outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20"
                 />
                 {query.trim() ? (
@@ -1167,7 +1195,7 @@ function EditForm({
                                       researchOutOfRange
                                         ? "border-red-300"
                                         : negativeUnitsWarn
-                                          ? "border-amber-400"
+                                          ? "border-red-300"
                                           : "border-neutral-300"
                                     )}
                                     placeholder="Units"
@@ -1260,7 +1288,7 @@ function EditForm({
                                 )}
 
                                 {negativeUnitsWarn && (
-                                  <div className="mt-1 flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 p-2 text-[13px] text-amber-800">
+                                  <div className="mt-1 flex items-start gap-2 rounded-md border border-red-200 bg-red-50 p-2 text-[13px] text-red-800">
                                     <AlertTriangle className="mt-0.5 h-4 w-4" />
                                     {deloadUnitsWarn[i]}
                                   </div>
@@ -1456,7 +1484,7 @@ function EditForm({
                                   researchOutOfRange
                                     ? "border-red-300"
                                     : negativeUnitsWarn
-                                      ? "border-amber-400"
+                                      ? "border-red-300"
                                       : "border-neutral-300"
                                 )}
                                 placeholder="Units"
@@ -1548,7 +1576,7 @@ function EditForm({
                               )}
 
                               {negativeUnitsWarn && (
-                                <div className="sm:col-span-3 mt-1 flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 p-2 text-[13px] text-amber-800">
+                                <div className="sm:col-span-3 mt-1 flex items-start gap-2 rounded-md border border-red-200 bg-red-50 p-2 text-[13px] text-red-800">
                                   <AlertTriangle className="mt-0.5 h-4 w-4" />
                                   {deloadUnitsWarn[i]}
                                 </div>
@@ -1872,42 +1900,7 @@ function EditForm({
             </div>
           )}
 
-                    {/* Selected KACs → Courses preview (quick view) */}
-                    {Array.isArray(form.kac) && form.kac.length > 0 && (
-                      <div className="mt-3 rounded-2xl border border-slate-200 bg-slate-50/60 p-4">
-                        <div className="mb-2 flex items-center gap-2 text-[13px] font-semibold text-slate-800">
-                          <BookOpen className="h-4 w-4" />
-                          Courses under your selected KACs
-                        </div>
-                        <div className="space-y-3">
-                          {form.kac.map((kacName) => {
-                            const opt: any =
-                              (kacDisplayOptions as any[]).find((x: any) => x.value === kacName || x.label === kacName) || {};
-                            const courses: string[] = Array.isArray(opt?.courses_display) ? opt.courses_display : [];
-                            return (
-                              <div key={kacName} className="rounded-xl border border-slate-200 bg-white p-3">
-                                <div className="text-[13px] font-semibold text-slate-900">{kacName}</div>
-                                {courses.length === 0 ? (
-                                  <div className="mt-2 text-sm text-slate-600">No course list.</div>
-                                ) : (
-                                  <div className="mt-2 flex flex-wrap gap-2">
-                                    {courses.map((c) => (
-                                      <span
-                                        key={c}
-                                        className="inline-flex items-center rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs text-slate-900"
-                                        title={c}
-                                      >
-                                        {c}
-                                      </span>
-                                    ))}
-                                  </div>
-                                )}
-                              </div>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    )}
+
                   </div>
 
                   {/* Deloading */}
@@ -1969,7 +1962,7 @@ function EditForm({
                                   researchOutOfRange
                                     ? "border-red-300"
                                     : negativeUnitsWarn
-                                      ? "border-amber-400"
+                                      ? "border-red-300"
                                       : "border-neutral-300"
                                 )}
                                 placeholder="Units"
@@ -2061,7 +2054,7 @@ function EditForm({
                               )}
 
                               {negativeUnitsWarn && (
-                                <div className="sm:col-span-3 mt-1 flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 p-2 text-[13px] text-amber-800">
+                                <div className="sm:col-span-3 mt-1 flex items-start gap-2 rounded-md border border-red-200 bg-red-50 p-2 text-[13px] text-red-800">
                                   <AlertTriangle className="mt-0.5 h-4 w-4" />
                                   {deloadUnitsWarn[i]}
                                 </div>
