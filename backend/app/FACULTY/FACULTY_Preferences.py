@@ -647,6 +647,21 @@ async def preferences_root(
       async for k in db.kacs.find({}, {"_id": 0}).limit(200):
           kacs.append(k)
 
+      # NEW: Provide a lightweight course_id -> course_code index so the frontend
+      # can display course codes for each KAC's course_list without extra API calls.
+      courses_index: Dict[str, str] = {}
+      async for c in db.courses.find({}, {"_id": 0, "course_id": 1, "course_code": 1}).limit(2000):
+          cid = (c.get("course_id") or "").strip()
+          if not cid:
+              continue
+          code_val = c.get("course_code")
+          code = ""
+          if isinstance(code_val, list):
+              code = (code_val[0] if code_val else "") or ""
+          elif isinstance(code_val, str):
+              code = code_val
+          courses_index[cid] = (code or cid).strip()
+
       days_display = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
       time_slots_display = [
           "07:30 - 09:00", "09:15 - 10:45", "11:00 - 12:30", "12:45 - 14:15",
@@ -736,6 +751,7 @@ async def preferences_root(
       return {
           "ok": True,
           "kacs": kacs,
+          "courses_index": courses_index,
           "days_display": days_display,
           "time_slots_display": time_slots_display,
           "prefs_window": prefs_window,

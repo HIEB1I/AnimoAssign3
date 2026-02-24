@@ -356,7 +356,8 @@ function HistoryMain({ embedded = false }: { embedded?: boolean } = {}) {
         if (b.totalCount !== a.totalCount) return b.totalCount - a.totalCount;
         return (a.code || "").localeCompare(b.code || "");
       })
-      .slice(0, 5);
+      // Show only the top 1 most taught course
+      .slice(0, 1);
   }, [allTimeCounts]);
 
   // Aggregate to "what you've taught" (per term) + analytics (counts)
@@ -503,7 +504,7 @@ function HistoryMain({ embedded = false }: { embedded?: boolean } = {}) {
             )}
             >
               <div className="text-xs font-semibold uppercase tracking-wide text-gray-500">
-                Most taught (all-time)
+                Most taught course
               </div>
               <div className="mt-3 space-y-2">
                 {mostTaught.length === 0 ? (

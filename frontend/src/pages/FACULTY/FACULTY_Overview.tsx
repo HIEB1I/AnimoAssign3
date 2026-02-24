@@ -9,7 +9,6 @@ import {
   XCircle,
   BadgeCheck,
   Layers,
-  Gauge,
 } from "lucide-react";
 
 import TopBar from "../../component/TopBar";
@@ -556,14 +555,16 @@ function FacultyProfileTab({
 
   const email = String(faculty?.email || faculty?.email_address || faculty?.emailAddress || "").trim();
 
-  const pills: { label: string; value: string }[] = [
-    { label: "Employment", value: employmentLabel(faculty?.employment_type) },
-    { label: "Teaching experience", value: faculty?.teaching_years != null ? `${faculty.teaching_years} yrs` : "—" },
-  ];
+  // Pills intentionally kept empty for now; key profile attributes are shown as cards on the right.
+  const pills: { label: string; value: string }[] = [];
 
-  const guardrails = [
-    { label: "Minimum units (preference baseline)", value: faculty?.min_units ?? "—" },
-    { label: "Max course preps (per term)", value: faculty?.max_preps ?? "—" },
+  const guardrails: { key: "employment" | "teaching"; label: string; value: string }[] = [
+    { key: "employment", label: "Employment", value: employmentLabel(faculty?.employment_type) },
+    {
+      key: "teaching",
+      label: "Teaching experience",
+      value: faculty?.teaching_years != null ? `${faculty.teaching_years} yrs` : "—",
+    },
   ];
 
   const certifications: any[] = Array.isArray(faculty?.certifications) ? faculty.certifications : [];
@@ -702,7 +703,7 @@ function FacultyProfileTab({
                       "inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-sm font-semibold",
                       saving
                         ? "cursor-default border-slate-200 bg-slate-100 text-slate-500"
-                        : "cursor-pointer border-emerald-500 bg-emerald-400 text-emerald-950 hover:bg-emerald-300"
+                        : "cursor-pointer border-[#007a55] bg-[#007a55] text-white hover:bg-[#006a49]"
                     )}
                   >
                     <Check className="h-4 w-4" />
@@ -728,74 +729,18 @@ function FacultyProfileTab({
                 </>
               ) : null}
             </div>
-            <div className="mt-2 flex flex-wrap items-center gap-2">
-              {pills.map((p) => {
-                const isEmployment = p.label === "Employment";
-                return (
+            {pills.length > 0 && (
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+                {pills.map((p) => (
                   <span
                     key={p.label}
                     className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs text-slate-700"
                     title={p.label}
                   >
-                    {isEmployment && (
-                      <button
-                        type="button"
-                        className="-ml-1 rounded-full p-1 hover:bg-black/5"
-                        title="Edit employment"
-                        onClick={() => setEditing((cur) => (cur === "employment" ? null : "employment"))}
-                      >
-                        <Pencil className="h-3.5 w-3.5 text-slate-700" />
-                      </button>
-                    )}
                     <span className="text-slate-500">{p.label}:</span>
                     <span className="font-medium text-slate-800">{p.value}</span>
                   </span>
-                );
-              })}
-            </div>
-
-            {editing === "employment" && (
-              <div className="mt-3 flex flex-wrap items-center gap-2">
-                <div className="min-w-[260px]">
-                  <SelectBox
-                    value={(() => {
-                      const s = String(draftEmployment || "").trim();
-                      if (!s) return "Select…";
-                      if (s === "FT" || s === "Full-time") return "Full-time";
-                      if (s === "PT" || s === "Part-time") return "Part-time";
-                      return s;
-                    })()}
-                    onChange={(v) => {
-                      if (v === "Full-time") setDraftEmployment("FT");
-                      else if (v === "Part-time") setDraftEmployment("PT");
-                      else if (v === "Select…") setDraftEmployment("");
-                      else setDraftEmployment(v);
-                    }}
-                    options={["Select…", "Full-time", "Part-time"]}
-                  />
-                </div>
-                <button
-                  type="button"
-                  onClick={() => save("employment")}
-                  disabled={saving}
-                  className={cls(
-                    "inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-sm font-semibold",
-                    saving
-                      ? "cursor-default border-slate-200 bg-slate-100 text-slate-500"
-                      : "cursor-pointer border-emerald-500 bg-emerald-400 text-emerald-950 hover:bg-emerald-300"
-                  )}
-                >
-                  <Check className="h-4 w-4" />
-                  <span>Save</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setEditing(null)}
-                  className={lightRedBtn}
-                >
-                  <XCircle className="h-4 w-4" />
-                  <span>Cancel</span>
-                </button>
+                ))}
               </div>
             )}
           </div>
@@ -804,18 +749,76 @@ function FacultyProfileTab({
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:w-[520px]">
           {guardrails.map((g) => (
             <div
-              key={g.label}
+              key={g.key}
               className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm"
             >
-              <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-emerald-700">
-                {g.label.toLowerCase().includes("minimum units") ? (
-                  <Gauge className="h-4 w-4" />
-                ) : (
-                  <Layers className="h-4 w-4" />
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-emerald-700">
+                  {g.key === "employment" ? (
+                    <BadgeCheck className="h-4 w-4" />
+                  ) : (
+                    <SyllabusIcon className="h-4 w-4" />
+                  )}
+                  <span>{g.label}</span>
+                </div>
+                {g.key === "employment" && (
+                  <button
+                    type="button"
+                    className="rounded-lg p-1 hover:bg-black/5"
+                    title="Edit employment"
+                    onClick={() => setEditing((cur) => (cur === "employment" ? null : "employment"))}
+                  >
+                    <Pencil className="h-4 w-4 text-slate-600" />
+                  </button>
                 )}
-                <span>{g.label}</span>
               </div>
-              <div className="mt-2 text-2xl font-semibold tracking-tight text-slate-900">{g.value}</div>
+             <div className="mt-2 text-lg font-semibold text-slate-900">{g.value}</div>
+
+              {g.key === "employment" && editing === "employment" && (
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  {/* Keep the dropdown narrow so it won't collide with the action buttons */}
+                  <div className="w-[180px] sm:w-[220px] max-w-full">
+                    <SelectBox
+                      value={(() => {
+                        const s = String(draftEmployment || "").trim();
+                        if (!s) return "Select…";
+                        if (s === "FT" || s === "Full-time") return "Full-time";
+                        if (s === "PT" || s === "Part-time") return "Part-time";
+                        return s;
+                      })()}
+                      onChange={(v) => {
+                        if (v === "Full-time") setDraftEmployment("FT");
+                        else if (v === "Part-time") setDraftEmployment("PT");
+                        else if (v === "Select…") setDraftEmployment("");
+                        else setDraftEmployment(v);
+                      }}
+                      options={["Select…", "Full-time", "Part-time"]}
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => save("employment")}
+                    disabled={saving}
+                    className={cls(
+                      "inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-sm font-semibold",
+                      saving
+                        ? "cursor-default border-slate-200 bg-slate-100 text-slate-500"
+                        : "cursor-pointer border-[#007a55] bg-[#007a55] text-white hover:bg-[#006a49]"
+                    )}
+                  >
+                    <Check className="h-4 w-4" />
+                    <span>Save</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setEditing(null)}
+                    className={lightRedBtn}
+                  >
+                    <XCircle className="h-4 w-4" />
+                    <span>Cancel</span>
+                  </button>
+                </div>
+              )}
             </div>
           ))}
         </div>
@@ -858,7 +861,7 @@ function FacultyProfileTab({
                     "inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-sm font-semibold",
                     saving
                       ? "cursor-default border-slate-200 bg-slate-100 text-slate-500"
-                      : "cursor-pointer border-emerald-500 bg-emerald-400 text-emerald-950 hover:bg-emerald-300"
+                      : "cursor-pointer border-[#007a55] bg-[#007a55] text-white hover:bg-[#006a49]"
                   )}
                 >
                   <Check className="h-4 w-4" />
@@ -998,7 +1001,7 @@ function FacultyProfileTab({
                     "inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-sm font-semibold",
                     saving
                       ? "cursor-default border-slate-200 bg-slate-100 text-slate-500"
-                      : "cursor-pointer border-emerald-500 bg-emerald-400 text-emerald-950 hover:bg-emerald-300"
+                      : "cursor-pointer border-[#007a55] bg-[#007a55] text-white hover:bg-[#006a49]"
                   )}
                 >
                   <Check className="h-4 w-4" />
@@ -1072,7 +1075,7 @@ function FacultyProfileTab({
         <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
           <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
             <div>
-              <div className="text-sm font-semibold text-emerald-800">Records</div>
+              <div className="text-sm font-semibold text-emerald-800">Other Records</div>
               <div className="mt-1 text-xs text-slate-500">
                 View your teaching history and deloadings.
               </div>
