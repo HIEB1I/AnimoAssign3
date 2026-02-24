@@ -390,7 +390,7 @@ function ProfileSectionTitle({
   children: React.ReactNode;
 }) {
   return (
-    <div className="flex items-center gap-2 text-[13px] font-semibold text-emerald-800">
+    <div className="flex items-center gap-2 text-sm font-semibold uppercase tracking-wide text-emerald-800">
       <Icon className="h-4 w-4" />
       {children}
     </div>
@@ -655,7 +655,7 @@ function FacultyProfileTab({
       type="button"
       onClick={onClick}
       className={cls(
-        "inline-flex items-center justify-center gap-2 rounded-full px-3 py-1.5 text-xs font-semibold transition",
+        "inline-flex items-center justify-center gap-2 rounded-full px-3 py-1.5 text-xs font-semibold uppercase tracking-wide transition",
         active
           ? "bg-emerald-600 text-white shadow-sm"
           : "bg-white text-slate-700 hover:bg-slate-50"
@@ -759,7 +759,7 @@ function FacultyProfileTab({
               className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm"
             >
               <div className="flex items-center justify-between gap-2">
-                <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-emerald-700">
+                <div className="flex items-center gap-2 text-sm font-semibold uppercase tracking-wide text-emerald-800">
                   {g.key === "employment" ? (
                     <BadgeCheck className="h-4 w-4" />
                   ) : (
@@ -923,7 +923,7 @@ function FacultyProfileTab({
           {editing === "kacs" && (
             <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 p-3">
               <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                <div className="text-xs font-semibold uppercase tracking-wide text-slate-600">Select KACs</div>
+                <div className="text-sm font-semibold uppercase tracking-wide text-emerald-800">Select KACs</div>
                 <div className="relative w-full sm:w-[260px]">
                   <input
                     value={kacQuery}
@@ -1081,7 +1081,7 @@ function FacultyProfileTab({
         <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
           <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
             <div>
-              <div className="text-sm font-semibold text-emerald-800">Other Records</div>
+              <div className="text-sm font-semibold uppercase tracking-wide text-emerald-800">Other Records</div>
               <div className="mt-1 text-xs text-slate-500">
                 View your teaching history and deloadings.
               </div>
@@ -1108,7 +1108,7 @@ function FacultyProfileTab({
               <div className="rounded-2xl border border-slate-200 bg-slate-50">
                 <div className="flex flex-col gap-1 border-b border-slate-200 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
                   <div>
-                    <div className="text-sm font-semibold text-slate-900">Teaching history</div>
+                    <div className="text-sm font-semibold uppercase tracking-wide text-emerald-800">Teaching history</div>
                     <div className="mt-0.5 text-xs text-slate-600">
                       Use search to quickly find a course; switch AY to browse older terms.
                     </div>
@@ -1123,7 +1123,7 @@ function FacultyProfileTab({
               <div className="rounded-2xl border border-slate-200 bg-slate-50">
                 <div className="flex flex-col gap-1 border-b border-slate-200 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
                   <div>
-                    <div className="text-sm font-semibold text-slate-900">Deloadings</div>
+                    <div className="text-sm font-semibold uppercase tracking-wide text-emerald-800">Deloadings</div>
                     <div className="mt-0.5 text-xs text-slate-600">
                       See your recorded deloading arrangements and their details.
                     </div>
