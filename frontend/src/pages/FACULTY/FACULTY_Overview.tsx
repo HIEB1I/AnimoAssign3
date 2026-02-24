@@ -26,6 +26,7 @@ import {
   getFacultyOverviewProfile,
   getFacultyOverviewOptions,
   updateFacultyOverviewProfile,
+  getFacultyPreferencesList,
   getActiveRole,
   setActiveRole,
   userIsChair,
@@ -406,6 +407,7 @@ function FacultyProfileTab({
   const [saving, setSaving] = useState(false);
   const [kacOptions, setKacOptions] = useState<any[]>([]);
   const [kacQuery, setKacQuery] = useState("");
+  const [preferredKacIds, setPreferredKacIds] = useState<string[]>([]);
 
   const [draftName, setDraftName] = useState<{ first_name: string; last_name: string }>(() => ({
     first_name: String(faculty?.first_name || "").trim(),
@@ -458,6 +460,37 @@ function FacultyProfileTab({
         if (res?.ok && Array.isArray(res?.kacs)) setKacOptions(res.kacs);
       } catch {
         // best-effort
+      }
+    })();
+  }, [userId]);
+
+  useEffect(() => {
+    // Best-effort: pull the latest submitted preferences so we can merge preferred_kacs
+    // into the Qualified KACs display (requested UX).
+    (async () => {
+      try {
+        const res = await getFacultyPreferencesList(userId);
+        const prefs: any[] = Array.isArray(res?.preferences) ? res.preferences : [];
+        if (!prefs.length) {
+          setPreferredKacIds([]);
+          return;
+        }
+
+        // Prefer a finished submission if present; otherwise fall back to most recent.
+        const pref = prefs.find((p) => Boolean(p?.is_finished)) || prefs[0];
+        const raw = Array.isArray(pref?.preferred_kacs) ? pref.preferred_kacs : [];
+
+        const ids = raw
+          .map((k: any) => {
+            if (typeof k === "string") return k.trim();
+            return String(k?.kac_id || k?.kacId || "").trim();
+          })
+          .filter(Boolean);
+
+        setPreferredKacIds(Array.from(new Set(ids)));
+      } catch {
+        // best-effort
+        setPreferredKacIds([]);
       }
     })();
   }, [userId]);
@@ -534,7 +567,60 @@ function FacultyProfileTab({
   ];
 
   const certifications: any[] = Array.isArray(faculty?.certifications) ? faculty.certifications : [];
-  const kacs: any[] = Array.isArray(faculty?.qualified_kacs) ? faculty.qualified_kacs : [];
+
+  const mergedKacs: any[] = useMemo(() => {
+    const base: any[] = Array.isArray(faculty?.qualified_kacs) ? faculty.qualified_kacs : [];
+    const byId = new Map<string, any>();
+
+    for (const k of base) {
+      const id = String(k?.kac_id || k?.kacId || "").trim();
+      if (!id) continue;
+      // Ensure a consistent `courses` shape.
+      // If profile payload doesn't include expanded courses, fall back to options.
+      const opt = (kacOptions || []).find((o: any) => String(o?.kac_id || "").trim() === id);
+      const courses =
+        Array.isArray((k as any)?.courses) && (k as any).courses.length > 0
+          ? (k as any).courses
+          : Array.isArray((opt as any)?.courses)
+            ? (opt as any).courses
+            : [];
+
+      byId.set(id, {
+        ...k,
+        kac_id: id,
+        courses,
+      });
+    }
+
+    for (const idRaw of preferredKacIds || []) {
+      const id = String(idRaw || "").trim();
+      if (!id || byId.has(id)) continue;
+      const opt = (kacOptions || []).find((o: any) => String(o?.kac_id || "").trim() === id);
+      byId.set(id, {
+        kac_id: id,
+        kac_name: opt?.kac_name || id,
+        kac_code: opt?.kac_code || "",
+        program_area: opt?.program_area || "",
+        // Preferred KACs must show the same course list as qualified KACs.
+        courses: Array.isArray((opt as any)?.courses) ? (opt as any).courses : [],
+      });
+    }
+
+    const arr = Array.from(byId.values());
+    try {
+      arr.sort((a: any, b: any) => {
+        const pa = String(a?.program_area || "");
+        const pb = String(b?.program_area || "");
+        if (pa !== pb) return pa.localeCompare(pb);
+        const na = String(a?.kac_name || "");
+        const nb = String(b?.kac_name || "");
+        return na.localeCompare(nb);
+      });
+    } catch {
+      // ignore
+    }
+    return arr;
+  }, [faculty, preferredKacIds, kacOptions]);
 
   const fullName = faculty?.full_name || faculty?.fullName || "—";
   const department = faculty?.department || "—";
@@ -882,6 +968,21 @@ function FacultyProfileTab({
                             ) : null}
                           </div>
                           <div className="text-xs text-slate-500">{k?.program_area || ""}</div>
+                          {Array.isArray((k as any)?.courses) && (k as any).courses.length > 0 ? (
+                            <div className="mt-2 flex flex-wrap gap-2">
+                              {(k as any).courses.map((c: any) => (
+                                <span
+                                  key={c.course_id || `${c.course_code}-${c.course_title}`}
+                                  className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs text-slate-900"
+                                  title={c.course_title || ""}
+                                >
+                                  <span className="font-semibold">{c.course_code || "—"}</span>
+                                  <span className="text-slate-400">•</span>
+                                  <span className="max-w-[260px] truncate text-slate-700">{c.course_title || "—"}</span>
+                                </span>
+                              ))}
+                            </div>
+                          ) : null}
                         </div>
                       </label>
                     );
@@ -918,13 +1019,13 @@ function FacultyProfileTab({
             </div>
           )}
 
-          {kacs.length === 0 ? (
+          {mergedKacs.length === 0 ? (
             <div className="mt-3 rounded-xl border border-dashed border-slate-200 bg-slate-50 px-3 py-3 text-sm text-slate-600">
               No KAC qualifications on file.
             </div>
           ) : (
             <div className="mt-3 space-y-2">
-              {kacs.map((k) => (
+              {mergedKacs.map((k) => (
                 <details key={k.kac_id || k.kac_code || k.kac_name} className="group rounded-xl border border-slate-200 bg-white">
                   <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-2">
                     <div className="min-w-0">
