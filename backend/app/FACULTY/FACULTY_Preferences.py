@@ -396,6 +396,14 @@ async def _sync_deloadings(db, faculty_id: str, term_id: str, items: list[dict])
       units_num = r.get("units", 0) or 0
       detail = (r.get("detail") or "").strip()
 
+      # Units should never be negative (UI also blocks this)
+      try:
+          units_float = float(units_num)
+      except Exception:
+          raise HTTPException(status_code=400, detail="Deloading units must be a number.")
+      if units_float < 0:
+          raise HTTPException(status_code=400, detail="Deloading units cannot be negative.")
+
       needs_spec = t in ("Administrative", "Research")
       if needs_spec and not detail:
         raise HTTPException(
@@ -410,7 +418,7 @@ async def _sync_deloadings(db, faculty_id: str, term_id: str, items: list[dict])
       normalized.append({
           "type": t,
           "type_id": type_id,
-          "units": float(units_num),
+          "units": units_float,
           "notes": detail if needs_spec else "",
       })
 

@@ -623,18 +623,18 @@ function EditForm({
   const [form, setForm] = useState<SavedPrefs>(initial);
   const [step, setStep] = useState<number>(form.prefUnits && form.prefUnits.trim() ? 2 : 1);
 
-	// Field-level validation (only for Preferred Time Slots minimum selection rule)
-	const [timeSlotsError, setTimeSlotsError] = useState<string>("");
+  // Field-level validation (only for Preferred Time Slots minimum selection rule)
+  const [timeSlotsError, setTimeSlotsError] = useState<string>("");
 
-	// Field-level validation for required inputs (show warnings instead of silently blocking save)
-	const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
-	const clearFieldError = (key: string) =>
-		setFieldErrors((prev) => {
-			if (!prev[key]) return prev;
-			const next = { ...prev };
-			delete next[key];
-			return next;
-		});
+  // Field-level validation for required inputs (show warnings instead of silently blocking save)
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+  const clearFieldError = (key: string) =>
+    setFieldErrors((prev) => {
+      if (!prev[key]) return prev;
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
 
   const ZERO_LOAD_LABEL = "0.0 units - no teaching load (for full-time only)";
   const isZeroTeachingLoad = form.prefUnits === ZERO_LOAD_LABEL;
@@ -700,42 +700,56 @@ function EditForm({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isTeachingBreak, isZeroTeachingLoad, isLeave]);
 
-	// Clear Preferred Time Slots field error as soon as the user satisfies the rule
-	useEffect(() => {
-		const ZERO_LOAD_LABEL_LOCAL = "0.0 units - no teaching load (for full-time only)";
-		const hasZeroLoad = form.prefUnits === ZERO_LOAD_LABEL_LOCAL;
-		if (isTeachingBreak || hasZeroLoad) {
-			if (timeSlotsError) setTimeSlotsError("");
-			return;
-		}
-		if (timeSlotsError && (form.timeSlots?.length ?? 0) >= 3) {
-			setTimeSlotsError("");
-		}
-	}, [form.prefUnits, form.timeSlots, isTeachingBreak, timeSlotsError]);
+  // Clear Preferred Time Slots field error as soon as the user satisfies the rule
+  useEffect(() => {
+    const ZERO_LOAD_LABEL_LOCAL = "0.0 units - no teaching load (for full-time only)";
+    const hasZeroLoad = form.prefUnits === ZERO_LOAD_LABEL_LOCAL;
+    if (isTeachingBreak || hasZeroLoad) {
+      if (timeSlotsError) setTimeSlotsError("");
+      return;
+    }
+    if (timeSlotsError && (form.timeSlots?.length ?? 0) >= 3) {
+      setTimeSlotsError("");
+    }
+  }, [form.prefUnits, form.timeSlots, isTeachingBreak, timeSlotsError]);
 
-	// Leave return-date field error (Expected date of Return)
-	const [breakReturnDateError, setBreakReturnDateError] = useState<string>("");
-	useEffect(() => {
-		// If not a leave, hide/clear any date error
-		if (!isLeave && breakReturnDateError) setBreakReturnDateError("");
-	}, [isLeave, breakReturnDateError]);
+  // Leave return-date field error (Expected date of Return)
+  const [breakReturnDateError, setBreakReturnDateError] = useState<string>("");
+  useEffect(() => {
+    // If not a leave, hide/clear any date error
+    if (!isLeave && breakReturnDateError) setBreakReturnDateError("");
+  }, [isLeave, breakReturnDateError]);
 
-	function isBeforeToday(isoYYYYMMDD: string): boolean {
-		if (!/^\d{4}-\d{2}-\d{2}$/.test(isoYYYYMMDD)) return false;
-		const d = new Date(`${isoYYYYMMDD}T00:00:00`);
-		if (Number.isNaN(d.getTime())) return false;
-		const today = new Date();
-		today.setHours(0, 0, 0, 0);
-		return d.getTime() < today.getTime();
-	}
+  function isBeforeToday(isoYYYYMMDD: string): boolean {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(isoYYYYMMDD)) return false;
+    const d = new Date(`${isoYYYYMMDD}T00:00:00`);
+    if (Number.isNaN(d.getTime())) return false;
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    return d.getTime() < today.getTime();
+  }
 
   // deloading rows
   const [deloadRows, setDeloadRows] = useState<DeloadRow[]>(() =>
     form.noDeloading ? [] : form.deloadings || []
   );
+  // prevent negative deloading units (warning shown if user attempts)
+  const [deloadUnitsWarn, setDeloadUnitsWarn] = useState<Record<number, string>>({});
   useEffect(() => {
     if (form.noDeloading) setDeloadRows([]);
   }, [form.noDeloading]);
+
+  // keep warning map indices in-bounds if rows are added/removed
+  useEffect(() => {
+    setDeloadUnitsWarn((prev) => {
+      const next: Record<number, string> = {};
+      for (const k of Object.keys(prev)) {
+        const idx = Number(k);
+        if (!Number.isNaN(idx) && idx >= 0 && idx < deloadRows.length) next[idx] = prev[idx];
+      }
+      return next;
+    });
+  }, [deloadRows.length]);
 
   // campus auto-mapping + lock
   function autoCampusFor(delivery: string): string {
@@ -758,9 +772,9 @@ function EditForm({
       if (!/^\d{4}-\d{2}-\d{2}$/.test(form.breakReturnDate) || Number.isNaN(Date.parse(form.breakReturnDate))) {
         return { ok: false, msg: "Expected date of Return must be a valid date." };
       }
-		if (isBeforeToday(form.breakReturnDate)) {
-			return { ok: false, msg: "Expected date of Return cannot be before the current date." };
-		}
+    if (isBeforeToday(form.breakReturnDate)) {
+      return { ok: false, msg: "Expected date of Return cannot be before the current date." };
+    }
       return { ok: true };
     }
 
@@ -786,13 +800,13 @@ function EditForm({
           msg: "Preferred Teaching Days are required when you have a teaching load.",
         };
       }
-	      // Preferred Time Slots: require at least 3 selections (field-specific rule)
-	      if (!form.timeSlots || form.timeSlots.length < 3) {
-	        return {
-	          ok: false,
-	          msg: "Please select at least 3 Preferred Time Slots.",
-	        };
-	      }
+        // Preferred Time Slots: require at least 3 selections (field-specific rule)
+        if (!form.timeSlots || form.timeSlots.length < 3) {
+          return {
+            ok: false,
+            msg: "Please select at least 3 Preferred Time Slots.",
+          };
+        }
       if (!form.kac || form.kac.length === 0) {
         return {
           ok: false,
@@ -806,6 +820,9 @@ function EditForm({
       if (!form.noDeloading && needsSpecify && !(r.detail || "").trim()) {
         return { ok: false, msg: `Please provide details for "${r.type}".` };
       }
+      if (r.units != null && r.units < 0) {
+        return { ok: false, msg: "Deloading units cannot be negative." };
+      }
       if (r.type === "Research" && r.units != null && (r.units < 1 || r.units > 9)) {
         return { ok: false, msg: "Research deloading units must be between 1 and 9." };
       }
@@ -814,54 +831,54 @@ function EditForm({
     return { ok: true };
   }
 
-	function validateAndSetWarnings(): boolean {
-		const errs: Record<string, string> = {};
-		const ZERO_LOAD_LABEL_LOCAL = "0.0 units - no teaching load (for full-time only)";
-		const hasZeroLoad = form.prefUnits === ZERO_LOAD_LABEL_LOCAL;
+  function validateAndSetWarnings(): boolean {
+    const errs: Record<string, string> = {};
+    const ZERO_LOAD_LABEL_LOCAL = "0.0 units - no teaching load (for full-time only)";
+    const hasZeroLoad = form.prefUnits === ZERO_LOAD_LABEL_LOCAL;
 
-		// Required: Preferred Teaching Units (always required)
-		if (!form.prefUnits || !prefUnitOptions.includes(form.prefUnits as any)) {
-			errs.prefUnits = "Preferred Teaching Units is required.";
-		}
+    // Required: Preferred Teaching Units (always required)
+    if (!form.prefUnits || !prefUnitOptions.includes(form.prefUnits as any)) {
+      errs.prefUnits = "Preferred Teaching Units is required.";
+    }
 
-		// Leave requirements
-		if (isLeave) {
-			if (!form.breakReason.trim()) errs.breakReason = "Reason for taking a break/leave is required.";
-			if (!form.breakReturnDate) {
-				errs.breakReturnDate = "Expected date of Return is required.";
-			} else {
-				// validate date
-				if (!/^\d{4}-\d{2}-\d{2}$/.test(form.breakReturnDate) || Number.isNaN(Date.parse(form.breakReturnDate))) {
-					errs.breakReturnDate = "Expected date of Return must be a valid date.";
-				} else if (isBeforeToday(form.breakReturnDate)) {
-					errs.breakReturnDate = "Expected date of Return cannot be before the current date.";
-				}
-			}
-		}
+    // Leave requirements
+    if (isLeave) {
+      if (!form.breakReason.trim()) errs.breakReason = "Reason for taking a break/leave is required.";
+      if (!form.breakReturnDate) {
+        errs.breakReturnDate = "Expected date of Return is required.";
+      } else {
+        // validate date
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(form.breakReturnDate) || Number.isNaN(Date.parse(form.breakReturnDate))) {
+          errs.breakReturnDate = "Expected date of Return must be a valid date.";
+        } else if (isBeforeToday(form.breakReturnDate)) {
+          errs.breakReturnDate = "Expected date of Return cannot be before the current date.";
+        }
+      }
+    }
 
-		// Teaching-load requirements (only when not break and not zero-load)
-		if (!isTeachingBreak && !hasZeroLoad) {
-			if (!form.delivery.trim()) errs.delivery = "Preferred Delivery Mode is required.";
-			if (!form.days || form.days.length === 0) errs.days = "Preferred Teaching Days are required.";
-			if (!form.timeSlots || form.timeSlots.length < 3) {
-				errs.timeSlots = "Please select at least 3 Preferred Time Slots.";
-			}
-			if (!form.kac || form.kac.length === 0) errs.kac = "Knowledge Area Cluster (KAC) is required.";
-		}
+    // Teaching-load requirements (only when not break and not zero-load)
+    if (!isTeachingBreak && !hasZeroLoad) {
+      if (!form.delivery.trim()) errs.delivery = "Preferred Delivery Mode is required.";
+      if (!form.days || form.days.length === 0) errs.days = "Preferred Teaching Days are required.";
+      if (!form.timeSlots || form.timeSlots.length < 3) {
+        errs.timeSlots = "Please select at least 3 Preferred Time Slots.";
+      }
+      if (!form.kac || form.kac.length === 0) errs.kac = "Knowledge Area Cluster (KAC) is required.";
+    }
 
-		setFieldErrors(errs);
-		setTimeSlotsError(errs.timeSlots || "");
-		setBreakReturnDateError(errs.breakReturnDate || "");
+    setFieldErrors(errs);
+    setTimeSlotsError(errs.timeSlots || "");
+    setBreakReturnDateError(errs.breakReturnDate || "");
 
-		if (Object.keys(errs).length > 0) return false;
-		const v = validate();
-		if (!v.ok) {
-			// Non-required validation issues (e.g., deloading details/range)
-			alert(v.msg);
-			return false;
-		}
-		return true;
-	}
+    if (Object.keys(errs).length > 0) return false;
+    const v = validate();
+    if (!v.ok) {
+      // Non-required validation issues (e.g., deloading details/range)
+      alert(v.msg);
+      return false;
+    }
+    return true;
+  }
 
   // toggles
   const DAY_PAIR: Record<string, string> = {
@@ -900,19 +917,19 @@ function EditForm({
           return i < 0 ? 999 : i;
         };
         next.sort((a, b) => order(a) - order(b));
-			// Clear required-field warning once at least one day is selected
-			if (next.length > 0) clearFieldError("days");
+      // Clear required-field warning once at least one day is selected
+      if (next.length > 0) clearFieldError("days");
         return { ...f, days: next };
       }
 
       const has = arr.includes(value);
-	  const next = has ? arr.filter((v) => v !== value) : [...arr, value];
-	  // Clear required-field warning once minimum time slots rule is satisfied
-	  if (key === "timeSlots" && next.length >= 3) {
-		  clearFieldError("timeSlots");
-		  if (timeSlotsError) setTimeSlotsError("");
-	  }
-	  return { ...f, [key]: next };
+    const next = has ? arr.filter((v) => v !== value) : [...arr, value];
+    // Clear required-field warning once minimum time slots rule is satisfied
+    if (key === "timeSlots" && next.length >= 3) {
+      clearFieldError("timeSlots");
+      if (timeSlotsError) setTimeSlotsError("");
+    }
+    return { ...f, [key]: next };
     });
 
   // Corrected showAE logic: Hide if on teaching break
@@ -963,12 +980,12 @@ function EditForm({
                 }}
                 options={prefUnitOptions}
               />
-				{fieldErrors.prefUnits && (
-					<div className="mt-2 flex items-start gap-2 rounded-md border border-red-200 bg-red-50 p-2 text-[13px] text-red-800">
-						<AlertTriangle className="mt-0.5 h-4 w-4" />
-						<span>{fieldErrors.prefUnits}</span>
-					</div>
-				)}
+        {fieldErrors.prefUnits && (
+          <div className="mt-2 flex items-start gap-2 rounded-md border border-red-200 bg-red-50 p-2 text-[13px] text-red-800">
+            <AlertTriangle className="mt-0.5 h-4 w-4" />
+            <span>{fieldErrors.prefUnits}</span>
+          </div>
+        )}
               {/* Preferred units guidance */}
               {form.prefUnits !== TEACHING_BREAK && form.prefUnits !== ZERO_LOAD_LABEL && (
                 <div className="mt-2 flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 p-2 text-[12px] text-amber-900">
@@ -1028,6 +1045,7 @@ function EditForm({
                               r.type === "Research" &&
                               r.units != null &&
                               (r.units < 1 || r.units > 9);
+                            const negativeUnitsWarn = !!deloadUnitsWarn[i];
                             return (
                               <div
                                 key={i}
@@ -1054,15 +1072,25 @@ function EditForm({
                                       "w-full sm:w-40 rounded-2xl border px-4 py-3 text-[15px] shadow-sm outline-none",
                                       researchOutOfRange
                                         ? "border-red-300"
-                                        : "border-neutral-300"
+                                        : negativeUnitsWarn
+                                          ? "border-amber-400"
+                                          : "border-neutral-300"
                                     )}
                                     placeholder="Units"
                                     value={r.units ?? ""}
                                     onChange={(e) => {
-                                      const v =
-                                        e.target.value === ""
-                                          ? null
-                                          : Number(e.target.value);
+                                      const raw = e.target.value;
+                                      let v = raw === "" ? null : Number(raw);
+                                      if (v != null && v < 0) {
+                                        setDeloadUnitsWarn((m) => ({ ...m, [i]: "Units cannot be negative." }));
+                                        v = 0;
+                                      } else {
+                                        setDeloadUnitsWarn((m) => {
+                                          if (!m[i]) return m;
+                                          const { [i]: _, ...rest } = m;
+                                          return rest;
+                                        });
+                                      }
                                       setDeloadRows((rows) =>
                                         rows.map((x, idx) =>
                                           idx === i ? { ...x, units: v } : x
@@ -1136,6 +1164,13 @@ function EditForm({
                                     terms).
                                   </div>
                                 )}
+
+                                {negativeUnitsWarn && (
+                                  <div className="mt-1 flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 p-2 text-[13px] text-amber-800">
+                                    <AlertTriangle className="mt-0.5 h-4 w-4" />
+                                    {deloadUnitsWarn[i]}
+                                  </div>
+                                )}
                               </div>
                             );
                           })}
@@ -1162,22 +1197,22 @@ function EditForm({
                           <input
                             type="text"
                             className={cls(
-							"w-full rounded-2xl border px-4 py-3 text-[15px] shadow-sm outline-none",
-							fieldErrors.breakReason ? "border-red-500 focus:ring-2 focus:ring-red-500/20" : "border-neutral-300"
-						)}
+              "w-full rounded-2xl border px-4 py-3 text-[15px] shadow-sm outline-none",
+              fieldErrors.breakReason ? "border-red-500 focus:ring-2 focus:ring-red-500/20" : "border-neutral-300"
+            )}
                             placeholder="Reason..."
                             value={form.breakReason}
                             onChange={(e) => {
-							  setForm({ ...form, breakReason: e.target.value });
-							  if (e.target.value.trim()) clearFieldError("breakReason");
-							}}
+                setForm({ ...form, breakReason: e.target.value });
+                if (e.target.value.trim()) clearFieldError("breakReason");
+              }}
                           />
-						{fieldErrors.breakReason && (
-							<div className="mt-2 flex items-start gap-2 rounded-md border border-red-200 bg-red-50 p-2 text-[13px] text-red-800">
-								<AlertTriangle className="mt-0.5 h-4 w-4" />
-								<span>{fieldErrors.breakReason}</span>
-							</div>
-						)}
+            {fieldErrors.breakReason && (
+              <div className="mt-2 flex items-start gap-2 rounded-md border border-red-200 bg-red-50 p-2 text-[13px] text-red-800">
+                <AlertTriangle className="mt-0.5 h-4 w-4" />
+                <span>{fieldErrors.breakReason}</span>
+              </div>
+            )}
                         </div>
 
                         <div>
@@ -1186,25 +1221,25 @@ function EditForm({
                             <input
                               type="date"
                               value={form.breakReturnDate}
-										  onChange={(e) => {
-											  const v = e.target.value;
-											  setForm({ ...form, breakReturnDate: v });
-							  if (v) clearFieldError("breakReturnDate");
-											  if (!v) {
-												  setBreakReturnDateError("");
-												  return;
-											  }
-								  if (isBeforeToday(v)) {
-									  setBreakReturnDateError("Expected date of Return cannot be before the current date.");
-											  } else {
-												  setBreakReturnDateError("");
-											  }
-										  }}
-										  className={cls(
-											  DD_BASE,
-											  "pr-12",
-											  breakReturnDateError ? "border-red-500 focus:ring-red-500/20" : ""
-										  )}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        setForm({ ...form, breakReturnDate: v });
+                if (v) clearFieldError("breakReturnDate");
+                        if (!v) {
+                          setBreakReturnDateError("");
+                          return;
+                        }
+                  if (isBeforeToday(v)) {
+                    setBreakReturnDateError("Expected date of Return cannot be before the current date.");
+                        } else {
+                          setBreakReturnDateError("");
+                        }
+                      }}
+                      className={cls(
+                        DD_BASE,
+                        "pr-12",
+                        breakReturnDateError ? "border-red-500 focus:ring-red-500/20" : ""
+                      )}
                             />
                             <CalendarDays className="pointer-events-none absolute right-4 top-1/2 h-5 w-5 -translate-y-1/2 text-neutral-500" />
                           </div>
@@ -1229,15 +1264,15 @@ function EditForm({
                     </button>
                     <button
                       disabled={deadlinePassed}
-	                      onClick={() => {
-							if (!validateAndSetWarnings()) return;
-							setTimeSlotsError("");
-							setBreakReturnDateError("");
-							onSave({
-							  ...form,
-							  deloadings: form.noDeloading ? [] : deloadRows,
-							});
-	                      }}
+                        onClick={() => {
+              if (!validateAndSetWarnings()) return;
+              setTimeSlotsError("");
+              setBreakReturnDateError("");
+              onSave({
+                ...form,
+                deloadings: form.noDeloading ? [] : deloadRows,
+              });
+                        }}
                       className={cls(
                         "inline-flex h-9 items-center justify-center rounded-2xl px-4 text-sm font-medium text-white shadow active:translate-y-[0.5px]",
                         deadlinePassed
@@ -1299,6 +1334,7 @@ function EditForm({
                             r.type === "Research" &&
                             r.units != null &&
                             (r.units < 1 || r.units > 9);
+                          const negativeUnitsWarn = !!deloadUnitsWarn[i];
 
                           return (
                             <div
@@ -1325,15 +1361,25 @@ function EditForm({
                                   "rounded-2xl border px-4 py-3 text-[15px] shadow-sm outline-none",
                                   researchOutOfRange
                                     ? "border-red-300"
-                                    : "border-neutral-300"
+                                    : negativeUnitsWarn
+                                      ? "border-amber-400"
+                                      : "border-neutral-300"
                                 )}
                                 placeholder="Units"
                                 value={r.units ?? ""}
                                 onChange={(e) => {
-                                  const v =
-                                    e.target.value === ""
-                                      ? null
-                                      : Number(e.target.value);
+                                  const raw = e.target.value;
+                                  let v = raw === "" ? null : Number(raw);
+                                  if (v != null && v < 0) {
+                                    setDeloadUnitsWarn((m) => ({ ...m, [i]: "Units cannot be negative." }));
+                                    v = 0;
+                                  } else {
+                                    setDeloadUnitsWarn((m) => {
+                                      if (!m[i]) return m;
+                                      const { [i]: _, ...rest } = m;
+                                      return rest;
+                                    });
+                                  }
                                   setDeloadRows((rows) =>
                                     rows.map((x, idx) =>
                                       idx === i ? { ...x, units: v } : x
@@ -1404,6 +1450,13 @@ function EditForm({
                                   Research deloading units per term should be
                                   between 1 and 9. Note: the 9-unit cap is for the
                                   entire academic year (3 terms).
+                                </div>
+                              )}
+
+                              {negativeUnitsWarn && (
+                                <div className="sm:col-span-3 mt-1 flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 p-2 text-[13px] text-amber-800">
+                                  <AlertTriangle className="mt-0.5 h-4 w-4" />
+                                  {deloadUnitsWarn[i]}
                                 </div>
                               )}
                             </div>
@@ -1511,14 +1564,14 @@ function EditForm({
                     </button>
                     <button
                       disabled={deadlinePassed}
-	                    	  onClick={() => {
-							if (!validateAndSetWarnings()) return;
-							setTimeSlotsError("");
-							onSave({
-							  ...form,
-							  deloadings: form.noDeloading ? [] : deloadRows,
-							});
-	                    	  }}
+                          onClick={() => {
+              if (!validateAndSetWarnings()) return;
+              setTimeSlotsError("");
+              onSave({
+                ...form,
+                deloadings: form.noDeloading ? [] : deloadRows,
+              });
+                          }}
                       className={cls(
                         "inline-flex h-9 items-center justify-center rounded-2xl px-4 text-sm font-medium text-white shadow active:translate-y-[0.5px]",
                         deadlinePassed
@@ -1546,18 +1599,18 @@ function EditForm({
                         onChange={(v) => {
                           const nextCampus = autoCampusFor(v);
                           setForm({ ...form, delivery: v, campus: nextCampus });
-						  clearFieldError("delivery");
+              clearFieldError("delivery");
                         }}
                         options={OPT.delivery}
                         placeholder="— Select Delivery Mode —"
-						error={!!fieldErrors.delivery}
+            error={!!fieldErrors.delivery}
                       />
-					  {fieldErrors.delivery && (
-						<div className="mt-2 flex items-start gap-2 rounded-md border border-red-200 bg-red-50 p-2 text-[13px] text-red-800">
-							<AlertTriangle className="mt-0.5 h-4 w-4" />
-							<span>{fieldErrors.delivery}</span>
-						</div>
-					  )}
+            {fieldErrors.delivery && (
+            <div className="mt-2 flex items-start gap-2 rounded-md border border-red-200 bg-red-50 p-2 text-[13px] text-red-800">
+              <AlertTriangle className="mt-0.5 h-4 w-4" />
+              <span>{fieldErrors.delivery}</span>
+            </div>
+            )}
                     </div>
                     {form.delivery && (
                       <div>
@@ -1608,12 +1661,12 @@ function EditForm({
         ))}
       </div>
     </div>
-	{fieldErrors.days && (
-		<div className="mt-2 flex items-start gap-2 rounded-md border border-red-200 bg-red-50 p-2 text-[13px] text-red-800">
-			<AlertTriangle className="mt-0.5 h-4 w-4" />
-			<span>{fieldErrors.days}</span>
-		</div>
-	)}
+  {fieldErrors.days && (
+    <div className="mt-2 flex items-start gap-2 rounded-md border border-red-200 bg-red-50 p-2 text-[13px] text-red-800">
+      <AlertTriangle className="mt-0.5 h-4 w-4" />
+      <span>{fieldErrors.days}</span>
+    </div>
+  )}
   </div>
 
   {/* RIGHT: Preferred Time Slots */}
@@ -1632,12 +1685,12 @@ function EditForm({
         </label>
       ))}
     </div>
-	    {!!timeSlotsError && (
-	      <div className="mt-2 flex items-start gap-2 rounded-md border border-red-200 bg-red-50 p-2 text-[13px] text-red-800">
-	        <AlertTriangle className="mt-0.5 h-4 w-4" />
-	        <span>{timeSlotsError}</span>
-	      </div>
-	    )}
+      {!!timeSlotsError && (
+        <div className="mt-2 flex items-start gap-2 rounded-md border border-red-200 bg-red-50 p-2 text-[13px] text-red-800">
+          <AlertTriangle className="mt-0.5 h-4 w-4" />
+          <span>{timeSlotsError}</span>
+        </div>
+      )}
   </div>
 </div>
 
@@ -1684,19 +1737,19 @@ function EditForm({
                     <MultiSelectDropdown
                       values={form.kac as string[]}
                       onChange={(v) => {
-						  setForm({ ...form, kac: v });
-						  if (v && v.length > 0) clearFieldError("kac");
-						}}
+              setForm({ ...form, kac: v });
+              if (v && v.length > 0) clearFieldError("kac");
+            }}
                       options={kacDisplayOptions}
                       placeholder="— Select KAC —"
-						error={!!fieldErrors.kac}
+            error={!!fieldErrors.kac}
                     />
-					{fieldErrors.kac && (
-						<div className="mt-2 flex items-start gap-2 rounded-md border border-red-200 bg-red-50 p-2 text-[13px] text-red-800">
-							<AlertTriangle className="mt-0.5 h-4 w-4" />
-							<span>{fieldErrors.kac}</span>
-						</div>
-					)}
+          {fieldErrors.kac && (
+            <div className="mt-2 flex items-start gap-2 rounded-md border border-red-200 bg-red-50 p-2 text-[13px] text-red-800">
+              <AlertTriangle className="mt-0.5 h-4 w-4" />
+              <span>{fieldErrors.kac}</span>
+            </div>
+          )}
                   </div>
 
                   {/* Deloading */}
@@ -1731,6 +1784,7 @@ function EditForm({
                             r.type === "Research" &&
                             r.units != null &&
                             (r.units < 1 || r.units > 9);
+                          const negativeUnitsWarn = !!deloadUnitsWarn[i];
                           return (
                             <div
                               key={i}
@@ -1756,15 +1810,25 @@ function EditForm({
                                   "rounded-2xl border px-4 py-3 text-[15px] shadow-sm outline-none",
                                   researchOutOfRange
                                     ? "border-red-300"
-                                    : "border-neutral-300"
+                                    : negativeUnitsWarn
+                                      ? "border-amber-400"
+                                      : "border-neutral-300"
                                 )}
                                 placeholder="Units"
                                 value={r.units ?? ""}
                                 onChange={(e) => {
-                                  const v =
-                                    e.target.value === ""
-                                      ? null
-                                      : Number(e.target.value);
+                                  const raw = e.target.value;
+                                  let v = raw === "" ? null : Number(raw);
+                                  if (v != null && v < 0) {
+                                    setDeloadUnitsWarn((m) => ({ ...m, [i]: "Units cannot be negative." }));
+                                    v = 0;
+                                  } else {
+                                    setDeloadUnitsWarn((m) => {
+                                      if (!m[i]) return m;
+                                      const { [i]: _, ...rest } = m;
+                                      return rest;
+                                    });
+                                  }
                                   setDeloadRows((rows) =>
                                     rows.map((x, idx) =>
                                       idx === i ? { ...x, units: v } : x
@@ -1837,6 +1901,13 @@ function EditForm({
                                   entire academic year (3 terms).
                                 </div>
                               )}
+
+                              {negativeUnitsWarn && (
+                                <div className="sm:col-span-3 mt-1 flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 p-2 text-[13px] text-amber-800">
+                                  <AlertTriangle className="mt-0.5 h-4 w-4" />
+                                  {deloadUnitsWarn[i]}
+                                </div>
+                              )}
                             </div>
                           );
                         })}
@@ -1878,14 +1949,14 @@ function EditForm({
                     </button>
                     <button
                       disabled={deadlinePassed}
-	                      onClick={() => {
-							if (!validateAndSetWarnings()) return;
-							setTimeSlotsError("");
-							onSave({
-							  ...form,
-							  deloadings: form.noDeloading ? [] : deloadRows,
-							});
-	                      }}
+                        onClick={() => {
+              if (!validateAndSetWarnings()) return;
+              setTimeSlotsError("");
+              onSave({
+                ...form,
+                deloadings: form.noDeloading ? [] : deloadRows,
+              });
+                        }}
                       className={cls(
                         "inline-flex h-9 items-center justify-center rounded-2xl px-4 text-sm font-medium text-white shadow active:translate-y-[0.5px]",
                         deadlinePassed
