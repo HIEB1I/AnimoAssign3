@@ -111,11 +111,13 @@ function Dropdown({
         aria-haspopup="listbox"
         aria-expanded={open}
         className={cls(
-          "w-full rounded-xl border border-gray-200 bg-white py-2.5 pl-3 pr-10 text-left text-sm shadow-sm outline-none",
+          "w-full min-w-0 rounded-xl border border-gray-200 bg-white py-2.5 pl-3 pr-10 text-left text-sm shadow-sm outline-none",
           "hover:bg-gray-50 focus:ring-2 focus:ring-emerald-500/30"
         )}
       >
-        {value || <span className="text-gray-400">{placeholder}</span>}
+        <span className="block min-w-0 truncate">
+          {value || <span className="text-gray-400">{placeholder}</span>}
+        </span>
         <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2">
           ▾
         </span>
@@ -419,8 +421,13 @@ function HistoryMain({ embedded = false }: { embedded?: boolean } = {}) {
         )}
 
         {/* Filters */}
-        <div className={cls("grid grid-cols-1 gap-3 sm:grid-cols-3", embedded ? "" : "mb-2")}>
-          <div className="col-span-2">
+        <div
+          className={cls(
+            "flex w-full flex-col gap-3 sm:flex-row sm:items-center",
+            embedded ? "" : "mb-2"
+          )}
+        >
+          <div className="w-full sm:flex-1">
             <div className="relative flex items-center gap-2 rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm shadow-sm">
               <Search className="h-4 w-4 text-gray-500" />
               <input
@@ -444,44 +451,44 @@ function HistoryMain({ embedded = false }: { embedded?: boolean } = {}) {
           </div>
 
           {/* AY dropdown with Prev (left) / Next (right) controls */}
-          <div className="flex items-center gap-2">
+          <div className="w-full sm:w-[360px] md:w-[420px]">
+            <div className="grid w-full grid-cols-1 items-center gap-2 sm:grid-cols-[auto_minmax(0,1fr)_auto]">
             <button
               type="button"
               onClick={goPrev}
               disabled={atFirst}
-              className={`whitespace-nowrap rounded-lg border px-3 py-2 text-sm font-semibold ${
+              className={`shrink-0 w-full sm:w-auto whitespace-nowrap rounded-lg border px-3 py-2 text-sm font-semibold ${
                 atFirst
                   ? "cursor-default border-gray-200 bg-gray-100 text-gray-500"
-                  : "cursor-pointer border-emerald-500 bg-emerald-400 text-emerald-950 hover:bg-emerald-300"
+                  : "cursor-pointer border-[#007a55] bg-[#007a55] text-white hover:bg-[#006a4a]"
               }`}
-              aria-label="View newer academic year"
-              title="Previous (newer) AY"
             >
               ‹ Prev AY
             </button>
 
-            <Dropdown
-              value={ay}
-              onChange={setAy}
-              options={AY_OPTIONS}
-              placeholder="Select academic year"
-              className="min-w-0 flex-1"
-            />
+            <div className="min-w-0 w-full">
+              <Dropdown
+                value={ay}
+                onChange={setAy}
+                options={AY_OPTIONS}
+                placeholder="Select academic year"
+                className="w-full"
+              />
+            </div>
 
             <button
               type="button"
               onClick={goNext}
               disabled={atLast}
-              className={`whitespace-nowrap rounded-lg border px-3 py-2 text-sm font-semibold ${
+              className={`shrink-0 w-full sm:w-auto whitespace-nowrap rounded-lg border px-3 py-2 text-sm font-semibold ${
                 atLast
                   ? "cursor-default border-gray-200 bg-gray-100 text-gray-500"
-                  : "cursor-pointer border-emerald-500 bg-emerald-400 text-emerald-950 hover:bg-emerald-300"
+                  : "cursor-pointer border-[#007a55] bg-[#007a55] text-white hover:bg-[#006a4a]"
               }`}
-              aria-label="View older academic year"
-              title="Next (older) AY"
             >
               Next AY ›
             </button>
+            </div>
           </div>
         </div>
 
