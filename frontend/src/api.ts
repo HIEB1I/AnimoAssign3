@@ -2917,7 +2917,7 @@ export async function sendFacultyLoadAssignmentRfcMessage(
 
 export async function acceptFacultyLoadAssignment(
   userId: string,
-  payload: { term_id?: string }
+  payload: { term_id?: string; send_to_gcal?: boolean }
 ) {
   const base = (typeof API_BASE !== "undefined" ? API_BASE : "").replace(/\/+$/, "");
   const url = `${base}/faculty/load-assignment/accept?userId=${encodeURIComponent(userId)}`;
@@ -2937,33 +2937,6 @@ export async function acceptFacultyLoadAssignment(
     return { ok: true, raw: text };
   }
 }
-
-export async function acceptTeachingLoadToGcal(
-  userId: string,
-  payload: { items: any[]; weeks?: number; userId?: string }
-) {
-  const base = (typeof API_BASE !== "undefined" ? API_BASE : "").replace(/\/+$/, "");
-  const url = `${base}/gcal/teaching-load/accept`;
-
-  const r = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      userId,
-      items: payload.items || [],
-      weeks: payload.weeks ?? 5,
-    }),
-  });
-
-  if (!r.ok) throw new Error(await r.text());
-  return r.json() as Promise<{
-    calendarId: string;
-    connected_email?: string;
-    created_count: number;
-    skipped_count: number;
-  }>;
-}
-
 
 /* =========================================================
    ===============  FACULTY: HISTORY  ======================

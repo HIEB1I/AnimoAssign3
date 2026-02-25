@@ -1538,6 +1538,7 @@ function TeachingLoadEnhanced({ teachingLoad, term, workflow, onToast, onRefresh
   const [view, setView] = useState<"Calendar" | "List">("Calendar");
   const [modal, setModal] = useState<{ day: DayLong; item: TLItemForCalendar } | null>(null);
   const [isAccepting, setIsAccepting] = useState(false);
+  const [sendToGcal, setSendToGcal] = useState(true); // default ON to keep current behavior
 
   // Calendar row sizing:
   // - Keep empty rows compact and consistent (match the schedule card height)
@@ -1622,6 +1623,7 @@ const scheduleFinalLabel = (() => {
             </button>
           ))}
 
+          <div className="flex flex-col items-start">
           <button
             type="button"
             onClick={async () => {
@@ -1633,18 +1635,21 @@ const scheduleFinalLabel = (() => {
                 const userId = raw.userId || raw.user_id || raw.id || "";
                 const termId = (term as any)?.term_id || (term as any)?._id || (term as any)?.id;
 
-                const resp: any = await acceptFacultyLoadAssignment(userId, termId ? { term_id: termId } : {});
+                const resp: any = await acceptFacultyLoadAssignment(
+                  userId,
+                  { ...(termId ? { term_id: termId } : {}), send_to_gcal: sendToGcal }
+                );
+
                 console.log("ACCEPT resp:", resp);
 
-
-                if (resp?.calendar_ok === false) {
-                  onToast?.(
-                    "warning",
-                    resp?.calendar_error || "Calendar was not created.",
-                    "Accepted (calendar issue)"
-                  );
-                } else if (resp?.calendar_ok === true) {
-                  onToast?.("success", "Schedule accepted and calendar scheduled by term dates.", "Success");
+                if (sendToGcal) {
+                  if (resp?.calendar_ok === false) {
+                    onToast?.("warning", resp?.calendar_error || "Calendar was not created.", "Accepted (calendar issue)");
+                  } else if (resp?.calendar_ok === true) {
+                    onToast?.("success", "Schedule accepted and calendar scheduled by term dates.", "Success");
+                  } else {
+                    onToast?.("success", "Schedule accepted.", "Success");
+                  }
                 } else {
                   onToast?.("success", "Schedule accepted.", "Success");
                 }
@@ -1675,6 +1680,18 @@ const scheduleFinalLabel = (() => {
               ? "Accepting…"
               : "Accept Schedule"}
           </button>
+
+          <label className="mt-2 inline-flex items-center gap-2 text-xs text-slate-700 select-none">
+            <input
+              type="checkbox"
+              className="h-3.5 w-3.5 rounded border-neutral-300 text-emerald-700 focus:ring-emerald-600/40"
+              checked={sendToGcal}
+              onChange={(e) => setSendToGcal(e.target.checked)}
+              disabled={isAccepting || scheduleFinal || isAlreadyApproved}
+            />
+            <span>Send to GCalendar</span>
+          </label>
+        </div>
         </div>
       </div>
 
