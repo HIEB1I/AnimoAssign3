@@ -45,6 +45,15 @@ const DD_BASE =
 const DD_MENU =
   "absolute z-20 mt-2 max-h-80 w-full overflow-auto rounded-2xl border border-gray-300 bg-white shadow-lg";
 
+
+/* ---------- shared button styles ---------- */
+const BTN_BASE = "inline-flex h-9 items-center justify-center rounded-lg px-4 text-sm font-medium shadow active:translate-y-[0.5px]";
+const BTN_PRIMARY = cls(BTN_BASE, "bg-emerald-700 text-white hover:brightness-110");
+const BTN_NEUTRAL =
+  "inline-flex h-9 items-center justify-center rounded-lg border border-neutral-200 bg-neutral-100 px-4 text-sm text-slate-900 shadow-sm hover:bg-neutral-200/70 active:translate-y-[0.5px]";
+const BTN_REMOVE =
+  "inline-flex h-9 items-center justify-center rounded-lg border border-neutral-200 bg-neutral-50 px-4 text-sm text-neutral-800 hover:bg-neutral-100 active:translate-y-[0.5px]";
+
 /* ---------- multi-select dropdown ---------- */
 function MultiSelectDropdown({
   values,
@@ -93,7 +102,35 @@ function MultiSelectDropdown({
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!searchable || !q) return normalized;
-    return normalized.filter((o) => (o.label || o.value).toLowerCase().includes(q));
+    const courseTokens = (o: any): string[] => {
+      const out: string[] = [];
+
+      const pushMany = (arr: any[]) =>
+        arr.forEach((x) => {
+          if (!x) return;
+          if (typeof x === "string") {
+            out.push(x);
+            return;
+          }
+          if (typeof x === "object") {
+            // tolerate different backend shapes
+            const code = x.course_code ?? x.courseCode ?? x.code ?? x.course_id ?? x.courseId ?? x.id;
+            const title = x.course_title ?? x.courseTitle ?? x.title;
+            if (typeof code === "string") out.push(code);
+            if (typeof title === "string") out.push(title);
+          }
+        });
+
+      if (Array.isArray(o?.courses_display)) pushMany(o.courses_display);
+      if (Array.isArray(o?.course_list)) pushMany(o.course_list);
+      if (Array.isArray(o?.courses)) pushMany(o.courses);
+      return out;
+    };
+
+    return normalized.filter((o: any) => {
+      const hay = [o.label || "", o.value || "", ...courseTokens(o)].join(" ").toLowerCase();
+      return hay.includes(q);
+    });
   }, [normalized, query, searchable]);
 
   useEffect(() => {
@@ -186,7 +223,7 @@ function MultiSelectDropdown({
                   ref={inputRef}
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
-                  placeholder="Type to search…"
+                  placeholder="Search by KAC or course code…"
                   className="w-full rounded-xl border border-gray-200 bg-white px-3 py-2 pr-9 text-[14px] outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20"
                 />
                 {query.trim() ? (
@@ -1103,7 +1140,7 @@ function EditForm({
                   <button
                     type="button"
                     onClick={onClose}
-                    className="inline-flex h-9 items-center justify-center rounded-2xl border border-neutral-200 bg-neutral-100 px-4 text-sm text-slate-900 shadow-sm hover:bg-neutral-200/70 active:translate-y-[0.5px]"
+                    className={BTN_NEUTRAL}
                   >
                     Cancel
                   </button>
@@ -1167,7 +1204,7 @@ function EditForm({
                                       researchOutOfRange
                                         ? "border-red-300"
                                         : negativeUnitsWarn
-                                          ? "border-amber-400"
+                                          ? "border-red-300"
                                           : "border-neutral-300"
                                     )}
                                     placeholder="Units"
@@ -1260,7 +1297,7 @@ function EditForm({
                                 )}
 
                                 {negativeUnitsWarn && (
-                                  <div className="mt-1 flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 p-2 text-[13px] text-amber-800">
+                                  <div className="mt-1 flex items-start gap-2 rounded-md border border-red-200 bg-red-50 p-2 text-[13px] text-red-800">
                                     <AlertTriangle className="mt-0.5 h-4 w-4" />
                                     {deloadUnitsWarn[i]}
                                   </div>
@@ -1276,7 +1313,7 @@ function EditForm({
                                 { type: "Administrative", units: null, detail: "" },
                               ])
                             }
-                            className="inline-flex h-9 items-center justify-center rounded-2xl bg-emerald-700 px-4 text-sm text-white shadow hover:brightness-110"
+                            className={BTN_PRIMARY}
                           >
                             Add Deloading
                           </button>
@@ -1352,7 +1389,7 @@ function EditForm({
                   <div className="flex items-center justify-end gap-2 pt-1">
                     <button
                       onClick={onClose}
-                      className="inline-flex h-9 items-center justify-center rounded-2xl border border-neutral-200 bg-neutral-100 px-4 text-sm text-slate-900 shadow-sm hover:bg-neutral-200/70 active:translate-y-[0.5px]"
+                      className={BTN_NEUTRAL}
                     >
                       Cancel
                     </button>
@@ -1368,10 +1405,10 @@ function EditForm({
               });
                         }}
                       className={cls(
-                        "inline-flex h-9 items-center justify-center rounded-2xl px-4 text-sm font-medium text-white shadow active:translate-y-[0.5px]",
+                        BTN_BASE,
                         deadlinePassed
-                          ? "cursor-not-allowed bg-emerald-300"
-                          : "bg-[#1F7A49] hover:brightness-[1.06]"
+                          ? "cursor-not-allowed bg-emerald-300 text-white"
+                          : "bg-emerald-700 text-white hover:brightness-110"
                       )}
                       title={
                         deadlinePassed
@@ -1456,7 +1493,7 @@ function EditForm({
                                   researchOutOfRange
                                     ? "border-red-300"
                                     : negativeUnitsWarn
-                                      ? "border-amber-400"
+                                      ? "border-red-300"
                                       : "border-neutral-300"
                                 )}
                                 placeholder="Units"
@@ -1488,7 +1525,7 @@ function EditForm({
                                     rows.filter((_, idx) => idx !== i)
                                   )
                                 }
-                                className="rounded-2xl border border-neutral-200 bg-neutral-50 px-4 text-[14px] hover:bg-neutral-100"
+                                className={BTN_REMOVE}
                               >
                                 Remove
                               </button>
@@ -1548,7 +1585,7 @@ function EditForm({
                               )}
 
                               {negativeUnitsWarn && (
-                                <div className="sm:col-span-3 mt-1 flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 p-2 text-[13px] text-amber-800">
+                                <div className="sm:col-span-3 mt-1 flex items-start gap-2 rounded-md border border-red-200 bg-red-50 p-2 text-[13px] text-red-800">
                                   <AlertTriangle className="mt-0.5 h-4 w-4" />
                                   {deloadUnitsWarn[i]}
                                 </div>
@@ -1565,7 +1602,7 @@ function EditForm({
                               { type: "Administrative", units: null, detail: "" },
                             ])
                           }
-                          className="inline-flex h-9 items-center justify-center rounded-2xl bg-emerald-700 px-4 text-sm text-white shadow hover:brightness-110"
+                          className={BTN_PRIMARY}
                         >
                           Add Deloading
                         </button>
@@ -1652,7 +1689,7 @@ function EditForm({
                   <div className="flex items-center justify-end gap-2 pt-1">
                     <button
                       onClick={onClose}
-                      className="inline-flex h-9 items-center justify-center rounded-2xl border border-neutral-200 bg-neutral-100 px-4 text-sm text-slate-900 shadow-sm hover:bg-neutral-200/70 active:translate-y-[0.5px]"
+                      className={BTN_NEUTRAL}
                     >
                       Cancel
                     </button>
@@ -1667,10 +1704,10 @@ function EditForm({
               });
                           }}
                       className={cls(
-                        "inline-flex h-9 items-center justify-center rounded-2xl px-4 text-sm font-medium text-white shadow active:translate-y-[0.5px]",
+                        BTN_BASE,
                         deadlinePassed
-                          ? "cursor-not-allowed bg-emerald-300"
-                          : "bg-[#1F7A49] hover:brightness-[1.06]"
+                          ? "cursor-not-allowed bg-emerald-300 text-white"
+                          : "bg-emerald-700 text-white hover:brightness-110"
                       )}
                       title={
                         deadlinePassed
@@ -1872,42 +1909,7 @@ function EditForm({
             </div>
           )}
 
-                    {/* Selected KACs → Courses preview (quick view) */}
-                    {Array.isArray(form.kac) && form.kac.length > 0 && (
-                      <div className="mt-3 rounded-2xl border border-slate-200 bg-slate-50/60 p-4">
-                        <div className="mb-2 flex items-center gap-2 text-[13px] font-semibold text-slate-800">
-                          <BookOpen className="h-4 w-4" />
-                          Courses under your selected KACs
-                        </div>
-                        <div className="space-y-3">
-                          {form.kac.map((kacName) => {
-                            const opt: any =
-                              (kacDisplayOptions as any[]).find((x: any) => x.value === kacName || x.label === kacName) || {};
-                            const courses: string[] = Array.isArray(opt?.courses_display) ? opt.courses_display : [];
-                            return (
-                              <div key={kacName} className="rounded-xl border border-slate-200 bg-white p-3">
-                                <div className="text-[13px] font-semibold text-slate-900">{kacName}</div>
-                                {courses.length === 0 ? (
-                                  <div className="mt-2 text-sm text-slate-600">No course list.</div>
-                                ) : (
-                                  <div className="mt-2 flex flex-wrap gap-2">
-                                    {courses.map((c) => (
-                                      <span
-                                        key={c}
-                                        className="inline-flex items-center rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs text-slate-900"
-                                        title={c}
-                                      >
-                                        {c}
-                                      </span>
-                                    ))}
-                                  </div>
-                                )}
-                              </div>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    )}
+
                   </div>
 
                   {/* Deloading */}
@@ -1969,7 +1971,7 @@ function EditForm({
                                   researchOutOfRange
                                     ? "border-red-300"
                                     : negativeUnitsWarn
-                                      ? "border-amber-400"
+                                      ? "border-red-300"
                                       : "border-neutral-300"
                                 )}
                                 placeholder="Units"
@@ -2001,7 +2003,7 @@ function EditForm({
                                     rows.filter((_, idx) => idx !== i)
                                   )
                                 }
-                                className="rounded-2xl border border-neutral-200 bg-neutral-50 px-4 text-[14px] hover:bg-neutral-100"
+                                className={BTN_REMOVE}
                               >
                                 Remove
                               </button>
@@ -2061,7 +2063,7 @@ function EditForm({
                               )}
 
                               {negativeUnitsWarn && (
-                                <div className="sm:col-span-3 mt-1 flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 p-2 text-[13px] text-amber-800">
+                                <div className="sm:col-span-3 mt-1 flex items-start gap-2 rounded-md border border-red-200 bg-red-50 p-2 text-[13px] text-red-800">
                                   <AlertTriangle className="mt-0.5 h-4 w-4" />
                                   {deloadUnitsWarn[i]}
                                 </div>
@@ -2077,7 +2079,7 @@ function EditForm({
                               { type: "Administrative", units: null, detail: "" },
                             ])
                           }
-                          className="inline-flex h-9 items-center justify-center rounded-2xl bg-emerald-700 px-4 text-sm text-white shadow hover:brightness-110"
+                          className={BTN_PRIMARY}
                         >
                           Add Deloading
                         </button>
@@ -2101,7 +2103,7 @@ function EditForm({
                   <div className="flex items-center justify-end gap-2 pt-1">
                     <button
                       onClick={onClose}
-                      className="inline-flex h-9 items-center justify-center rounded-2xl border border-neutral-200 bg-neutral-100 px-4 text-sm text-slate-900 shadow-sm hover:bg-neutral-200/70 active:translate-y-[0.5px]"
+                      className={BTN_NEUTRAL}
                     >
                       Cancel
                     </button>
@@ -2116,10 +2118,10 @@ function EditForm({
               });
                         }}
                       className={cls(
-                        "inline-flex h-9 items-center justify-center rounded-2xl px-4 text-sm font-medium text-white shadow active:translate-y-[0.5px]",
+                        BTN_BASE,
                         deadlinePassed
-                          ? "cursor-not-allowed bg-emerald-300"
-                          : "bg-[#1F7A49] hover:brightness-[1.06]"
+                          ? "cursor-not-allowed bg-emerald-300 text-white"
+                          : "bg-emerald-700 text-white hover:brightness-110"
                       )}
                       title={
                         deadlinePassed
@@ -2153,6 +2155,8 @@ function EditForm({
 export default function FACULTY_Preferences() {
   const [saved, setSaved] = useState<SavedPrefs>(initialSaved);
   const [openEdit, setOpenEdit] = useState(false); /* set to true to open */
+  const [reuseBusy, setReuseBusy] = useState(false);
+  const [reuseNotice, setReuseNotice] = useState<string>("");
 
   // prefs window state (from backend options)
   const [prefsWindow, setPrefsWindow] = useState<{ openISO: string; deadlineISO: string }>({
@@ -2400,6 +2404,21 @@ useEffect(() => {
     }
   };
 
+  const handleReusePrevious = async () => {
+    try {
+      setReuseNotice("");
+      setReuseBusy(true);
+      const payload = toServerPayload(saved, true);
+      const res = await submitFacultyPreferences(userId, payload);
+      await afterSubmitRefresh(res);
+      setReuseNotice("Previous preferences submitted successfully.");
+    } catch (e: any) {
+      alert(e?.response?.data?.detail || e?.message || "Failed to submit previous preferences.");
+    } finally {
+      setReuseBusy(false);
+    }
+  };
+
   if (loading) {
     return (
       <section className="mx-auto w-full max-w-screen-2xl px-4">
@@ -2474,6 +2493,12 @@ useEffect(() => {
       <DeadlineBanner openISO={prefsWindow.openISO} deadlineISO={prefsWindow.deadlineISO} />
 
       <div className="rounded-xl border border-neutral-200 bg-white p-5">
+        {!!reuseNotice && (
+          <div className="mb-4 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-800">
+            {reuseNotice}
+          </div>
+        )}
+
         <div className="mb-4 flex items-start justify-between">
           <div>
             <h2 className="text-[15px] font-semibold text-neutral-900">Faculty Preferences</h2>
@@ -2482,24 +2507,55 @@ useEffect(() => {
             </p>
           </div>
 
-          <button
-            disabled={editingLocked}
-            onClick={() => setOpenEdit(true)}
-            className={cls(
-              "inline-flex h-8 items-center gap-2 rounded-2xl px-3 text-[13px] font-medium text-white shadow",
-              editingLocked ? "cursor-not-allowed bg-gray-300 text-gray-600" : "bg-emerald-700 hover:brightness-110"
-            )}
-            title={
-              !openPassedPage
-                ? "Submissions not open yet"
-                : deadlinePassedPage
-                ? "Deadline passed — editing locked"
-                : "Edit preferences"
-            }
-          >
-            <Settings className="h-4 w-4" />
-            Edit Preferences
-          </button>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              disabled={editingLocked || reuseBusy}
+              onClick={handleReusePrevious}
+              className={cls(
+                BTN_BASE,
+                "gap-2",
+                editingLocked || reuseBusy
+                  ? "cursor-not-allowed bg-gray-200 text-gray-600"
+                  : "bg-neutral-100 text-slate-900 hover:bg-neutral-200/70"
+              )}
+              title={
+                !openPassedPage
+                  ? "Submissions not open yet"
+                  : deadlinePassedPage
+                  ? "Deadline passed — submissions locked"
+                  : "Submit your previously saved preferences"
+              }
+            >
+              <BookOpen className="h-4 w-4" />
+              {reuseBusy ? "Submitting…" : "Use Previous Preferences"}
+            </button>
+
+            <button
+              disabled={editingLocked}
+              onClick={() => {
+                setReuseNotice("");
+                setOpenEdit(true);
+              }}
+              className={cls(
+                BTN_BASE,
+                "gap-2",
+                editingLocked
+                  ? "cursor-not-allowed bg-gray-300 text-gray-600"
+                  : "bg-emerald-700 text-white hover:brightness-110"
+              )}
+              title={
+                !openPassedPage
+                  ? "Submissions not open yet"
+                  : deadlinePassedPage
+                  ? "Deadline passed — editing locked"
+                  : "Edit preferences"
+              }
+            >
+              <Settings className="h-4 w-4" />
+              Edit Preferences
+            </button>
+          </div>
         </div>
 
         <div className="grid grid-cols-1 gap-x-8 gap-y-6 lg:grid-cols-2">

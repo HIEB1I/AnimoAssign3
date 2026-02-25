@@ -4,7 +4,7 @@ import {
   Send as SendIcon,
   X,
   BookOpen as SyllabusIcon,
-  Pencil,
+  Edit,
   Check,
   XCircle,
   BadgeCheck,
@@ -327,47 +327,53 @@ useEffect(() => {
 
 
 
-      {/* Hide Overview/History/Preferences when Inbox is open */}
-      {!showInbox && (
-        <Tabs
-          mode="state"
-          activeTab={tab}
-          onTabChange={(newTab) => setTab(newTab as typeof tab)}
-          items={[{ label: "My Profile" }, { label: "Schedule Overview" }, { label: "Submit Preferences" }]}
-        />
-      )}
+      {/* Tabs should remain visible even when Inbox is open (match APO Inbox UX) */}
+      <Tabs
+        mode="state"
+        activeTab={tab}
+        onTabChange={(newTab) => {
+          // If the user clicks a tab while viewing the Inbox, close Inbox and switch.
+          if (showInbox) setShowInbox(false);
+          setTab(newTab as typeof tab);
+        }}
+        items={[{ label: "My Profile" }, { label: "Schedule Overview" }, { label: "Submit Preferences" }]}
+      />
 
-      <main className={cls("w-full", showInbox ? "p-0" : "p-6 pb-24")}> 
-        {/* If Inbox was requested via the TopBar icon, render it "like a tab" */}
-        {showInbox ? (
+      {/*
+        IMPORTANT: Match APO Inbox sizing.
+        APO renders <InboxShell /> directly under <Tabs /> with no extra page padding.
+        Faculty previously rendered inbox inside <main className="p-6">, which made it narrower.
+      */}
+      {showInbox ? (
+        <div className="w-full">
           <InboxContent />
-        ) : (
-          <>
-            {tab === "Schedule Overview" && (
-              <>
-                <StatCards summary={data.summary} />
-                <div className="my-6" />
-                <TeachingLoadEnhanced
-                  teachingLoad={data.teaching_load}
-                  term={data.term}
-                  workflow={data}
-                  onToast={pushToast}
-                  onRefresh={loadOverview}
-                />
-              </>
-            )}
-            {tab === "Submit Preferences" && <PreferencesContent />}
-            {tab === "My Profile" && (
-              <FacultyProfileTab
-                faculty={data?.faculty}
-                userId={userId}
-                onReload={loadOverview}
-                pushToast={(kind, msg) => pushToast(kind, msg)}
+        </div>
+      ) : (
+        <main className={cls("w-full", "p-6 pb-24")}>
+          {tab === "Schedule Overview" && (
+            <>
+              <StatCards summary={data.summary} />
+              <div className="my-6" />
+              <TeachingLoadEnhanced
+                teachingLoad={data.teaching_load}
+                term={data.term}
+                workflow={data}
+                onToast={pushToast}
+                onRefresh={loadOverview}
               />
-            )}
-          </>
-        )}
-      </main>
+            </>
+          )}
+          {tab === "Submit Preferences" && <PreferencesContent />}
+          {tab === "My Profile" && (
+            <FacultyProfileTab
+              faculty={data?.faculty}
+              userId={userId}
+              onReload={loadOverview}
+              pushToast={(kind, msg) => pushToast(kind, msg)}
+            />
+          )}
+        </main>
+      )}
     </div>
   );
 }
@@ -384,7 +390,7 @@ function ProfileSectionTitle({
   children: React.ReactNode;
 }) {
   return (
-    <div className="flex items-center gap-2 text-[13px] font-semibold text-emerald-800">
+    <div className="flex items-center gap-2 text-sm font-semibold uppercase tracking-wide text-emerald-800">
       <Icon className="h-4 w-4" />
       {children}
     </div>
@@ -649,7 +655,7 @@ function FacultyProfileTab({
       type="button"
       onClick={onClick}
       className={cls(
-        "inline-flex items-center justify-center gap-2 rounded-full px-3 py-1.5 text-xs font-semibold transition",
+        "inline-flex items-center justify-center gap-2 rounded-full px-3 py-1.5 text-xs font-semibold uppercase tracking-wide transition",
         active
           ? "bg-emerald-600 text-white shadow-sm"
           : "bg-white text-slate-700 hover:bg-slate-50"
@@ -676,7 +682,7 @@ function FacultyProfileTab({
                 title="Edit name"
                 onClick={() => setEditing((p) => (p === "name" ? null : "name"))}
               >
-                <Pencil className="h-4 w-4 text-slate-600" />
+                <Edit className="h-4 w-4 text-slate-600" />
               </button>
             </div>
 
@@ -753,7 +759,7 @@ function FacultyProfileTab({
               className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm"
             >
               <div className="flex items-center justify-between gap-2">
-                <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-emerald-700">
+                <div className="flex items-center gap-2 text-sm font-semibold uppercase tracking-wide text-emerald-800">
                   {g.key === "employment" ? (
                     <BadgeCheck className="h-4 w-4" />
                   ) : (
@@ -768,7 +774,7 @@ function FacultyProfileTab({
                     title="Edit employment"
                     onClick={() => setEditing((cur) => (cur === "employment" ? null : "employment"))}
                   >
-                    <Pencil className="h-4 w-4 text-slate-600" />
+                    <Edit className="h-4 w-4 text-slate-600" />
                   </button>
                 )}
               </div>
@@ -839,7 +845,7 @@ function FacultyProfileTab({
               title="Edit certifications"
               onClick={() => setEditing((p) => (p === "certs" ? null : "certs"))}
             >
-              <Pencil className="h-4 w-4 text-slate-600" />
+              <Edit className="h-4 w-4 text-slate-600" />
             </button>
           </div>
 
@@ -910,14 +916,14 @@ function FacultyProfileTab({
               title="Edit qualified KACs"
               onClick={() => setEditing((p) => (p === "kacs" ? null : "kacs"))}
             >
-              <Pencil className="h-4 w-4 text-slate-600" />
+              <Edit className="h-4 w-4 text-slate-600" />
             </button>
           </div>
 
           {editing === "kacs" && (
             <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 p-3">
               <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                <div className="text-xs font-semibold uppercase tracking-wide text-slate-600">Select KACs</div>
+                <div className="text-sm font-semibold uppercase tracking-wide text-emerald-800">Select KACs</div>
                 <div className="relative w-full sm:w-[260px]">
                   <input
                     value={kacQuery}
@@ -1075,7 +1081,7 @@ function FacultyProfileTab({
         <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
           <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
             <div>
-              <div className="text-sm font-semibold text-emerald-800">Other Records</div>
+              <div className="text-sm font-semibold uppercase tracking-wide text-emerald-800">Other Records</div>
               <div className="mt-1 text-xs text-slate-500">
                 View your teaching history and deloadings.
               </div>
@@ -1102,7 +1108,7 @@ function FacultyProfileTab({
               <div className="rounded-2xl border border-slate-200 bg-slate-50">
                 <div className="flex flex-col gap-1 border-b border-slate-200 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
                   <div>
-                    <div className="text-sm font-semibold text-slate-900">Teaching history</div>
+                    <div className="text-sm font-semibold uppercase tracking-wide text-emerald-800">Teaching history</div>
                     <div className="mt-0.5 text-xs text-slate-600">
                       Use search to quickly find a course; switch AY to browse older terms.
                     </div>
@@ -1117,7 +1123,7 @@ function FacultyProfileTab({
               <div className="rounded-2xl border border-slate-200 bg-slate-50">
                 <div className="flex flex-col gap-1 border-b border-slate-200 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
                   <div>
-                    <div className="text-sm font-semibold text-slate-900">Deloadings</div>
+                    <div className="text-sm font-semibold uppercase tracking-wide text-emerald-800">Deloadings</div>
                     <div className="mt-0.5 text-xs text-slate-600">
                       See your recorded deloading arrangements and their details.
                     </div>
@@ -1470,7 +1476,7 @@ const ClassBlock = ({ onClick, it }: { onClick?: () => void; it: TLItemForCalend
         it.is_special_class
           ? "border-purple-200 bg-purple-100/80 hover:bg-purple-100"
           : campusColor
-          ? "border-neutral-200 text-white hover:brightness-[1.02]"
+          ? "border-neutral-200 text-black hover:brightness-[1.02]"
           : "border-emerald-200 bg-emerald-50/90 hover:bg-emerald-50",
         it.is_special_class && "cursor-default"
       )}
@@ -1532,6 +1538,12 @@ function TeachingLoadEnhanced({ teachingLoad, term, workflow, onToast, onRefresh
   const [view, setView] = useState<"Calendar" | "List">("Calendar");
   const [modal, setModal] = useState<{ day: DayLong; item: TLItemForCalendar } | null>(null);
   const [isAccepting, setIsAccepting] = useState(false);
+  const [sendToGcal, setSendToGcal] = useState(true); // default ON to keep current behavior
+
+  // Calendar row sizing:
+  // - Keep empty rows compact and consistent (match the schedule card height)
+  // - Still allow rows to expand if a slot contains multiple cards
+  const CALENDAR_ROW_MIN_PX = 60;
 
   // Schedule is finalized only when backend explicitly marks it so (e.g., an admin lock).
   // Faculty acceptance should NOT lock/finalize; OM can still edit/resend, and faculty can RFC/accept again.
@@ -1611,6 +1623,7 @@ const scheduleFinalLabel = (() => {
             </button>
           ))}
 
+          <div className="flex flex-col items-start">
           <button
             type="button"
             onClick={async () => {
@@ -1622,18 +1635,21 @@ const scheduleFinalLabel = (() => {
                 const userId = raw.userId || raw.user_id || raw.id || "";
                 const termId = (term as any)?.term_id || (term as any)?._id || (term as any)?.id;
 
-                const resp: any = await acceptFacultyLoadAssignment(userId, termId ? { term_id: termId } : {});
+                const resp: any = await acceptFacultyLoadAssignment(
+                  userId,
+                  { ...(termId ? { term_id: termId } : {}), send_to_gcal: sendToGcal }
+                );
+
                 console.log("ACCEPT resp:", resp);
 
-
-                if (resp?.calendar_ok === false) {
-                  onToast?.(
-                    "warning",
-                    resp?.calendar_error || "Calendar was not created.",
-                    "Accepted (calendar issue)"
-                  );
-                } else if (resp?.calendar_ok === true) {
-                  onToast?.("success", "Schedule accepted and calendar scheduled by term dates.", "Success");
+                if (sendToGcal) {
+                  if (resp?.calendar_ok === false) {
+                    onToast?.("warning", resp?.calendar_error || "Calendar was not created.", "Accepted (calendar issue)");
+                  } else if (resp?.calendar_ok === true) {
+                    onToast?.("success", "Schedule accepted and calendar scheduled by term dates.", "Success");
+                  } else {
+                    onToast?.("success", "Schedule accepted.", "Success");
+                  }
                 } else {
                   onToast?.("success", "Schedule accepted.", "Success");
                 }
@@ -1664,6 +1680,18 @@ const scheduleFinalLabel = (() => {
               ? "Accepting…"
               : "Accept Schedule"}
           </button>
+
+          <label className="mt-2 inline-flex items-center gap-2 text-xs text-slate-700 select-none">
+            <input
+              type="checkbox"
+              className="h-3.5 w-3.5 rounded border-neutral-300 text-emerald-700 focus:ring-emerald-600/40"
+              checked={sendToGcal}
+              onChange={(e) => setSendToGcal(e.target.checked)}
+              disabled={isAccepting || scheduleFinal || isAlreadyApproved}
+            />
+            <span>Send to GCalendar</span>
+          </label>
+        </div>
         </div>
       </div>
 
@@ -1718,12 +1746,12 @@ const scheduleFinalLabel = (() => {
 
               <div
                 className="relative grid grid-cols-[140px_repeat(6,1fr)]"
-                style={{ gridAutoRows: "minmax(84px, auto)" }}
+                style={{ gridAutoRows: `minmax(${CALENDAR_ROW_MIN_PX}px, max-content)` }}
               >
                 {TIME_BANDS_LABEL.map((band, r) => (
                   <React.Fragment key={band}>
                     <div
-                      className="flex items-center justify-center border-r border-neutral-300 bg-neutral-50 px-2 text-center text-[13px]"
+                      className="flex h-full items-center justify-center border-r border-neutral-300 bg-neutral-50 px-2 text-center text-[13px]"
                       style={{ gridColumn: 1, gridRow: r + 1 }}
                     >
                       {band}
@@ -1732,7 +1760,7 @@ const scheduleFinalLabel = (() => {
                     {DAY_ORDER.filter(d => d !== "TBA").map((_, c) => (
                       <div
                         key={`${c}-${r}`}
-                        className="border border-neutral-300"
+                        className="h-full border border-neutral-300"
                         style={{ gridColumn: c + 2, gridRow: r + 1 }}
                       />
                     ))}
