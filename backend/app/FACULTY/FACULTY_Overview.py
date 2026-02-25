@@ -2798,7 +2798,14 @@ async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[s
     if not faculty:
         raise HTTPException(status_code=404, detail="Faculty not found")
 
-    user = await db["users"].find_one({"user_id": userId}, {"_id": 0, "email": 1, "gmail": 1, "google_token": 1, "first_name": 1, "last_name": 1}) or {}
+    user = await db["users"].find_one(
+        {"user_id": userId},
+        {"_id": 0, "email": 1, "gmail": 1, "google_token": 1, "first_name": 1, "last_name": 1},
+    ) or {}
+
+    # Calendar checkbox flag (default True = keeps current behavior)
+    send_to_gcal = payload.get("send_to_gcal", True)
+    send_to_gcal = True if send_to_gcal is None else bool(send_to_gcal)
 
     term_id = (payload.get("term_id") or "").strip()
     if not term_id:
@@ -2813,16 +2820,15 @@ async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[s
     if not proposal:
         return {"ok": True, "message": "No proposal to accept."}
 
-    proposal_rows = proposal.get("rows", []) or []
+    base_rows = proposal.get("rows", []) or []
 
-    # Include reflected Special Classes in the acceptance email (Approved -> reflected to Faculty).
+    # Email rows include reflected special classes; calendar rows use base schedule only
+    email_rows = list(base_rows)
     try:
         sc_rows = await _fetch_reflected_special_classes_for_faculty(term_id=term_id, faculty_id=fid)
         if sc_rows:
-            # Email builder expects the same keys used by teaching load rows.
-            proposal_rows = list(proposal_rows) + sc_rows
+            email_rows += sc_rows
     except Exception:
-        # Never block accept due to Special Class reflection failures.
         pass
 
     # do not allow accept if pending RFC exists
@@ -2833,15 +2839,23 @@ async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[s
         if st and st not in RFC_TERMINAL:
             raise HTTPException(
                 status_code=409,
-                detail="You have a pending RFC. Please wait for OM to respond before accepting the schedule."
+                detail="You have a pending RFC. Please wait for OM to respond before accepting the schedule.",
             )
 
     await db[COL_LOAD_PROPOSALS].update_one(
         {"faculty_id": fid, "term_id": term_id},
-        {"$set": {"status": "approved", "locked": True, "accepted_at": _now_utc(), "updated_at": _now_utc()},
-         "$setOnInsert": {"created_at": _now_utc()}},
+        {
+            "$set": {
+                "status": "approved",
+                "locked": True,
+                "accepted_at": _now_utc(),
+                "updated_at": _now_utc(),
+            },
+            "$setOnInsert": {"created_at": _now_utc()},
+        },
     )
 
+    # Best-effort finalize all rows
     try:
         await db[COL_LOAD_PROPOSALS].update_one(
             {"faculty_id": fid, "term_id": term_id},
@@ -2856,15 +2870,17 @@ async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[s
         {"$set": {"status": "ACCEPTED", "locked": True, "updated_at": now}},
     )
 
-    # --- NEW: send acceptance email to the faculty (best-effort, non-blocking) ---
+    # --- send acceptance email to the faculty (best-effort, non-blocking) ---
     recipient_email = (
         ((user.get("google_token") or {}).get("connected_email") or "").strip()
         or (user.get("gmail") or "").strip()
         or (user.get("email") or "").strip()
     )
 
-    # Term label (best effort)
-    term_doc = await db[COL_TERMS].find_one({"term_id": term_id}, {"_id": 0, "acad_year_start": 1, "term_number": 1}) or {}
+    term_doc = await db[COL_TERMS].find_one(
+        {"term_id": term_id},
+        {"_id": 0, "acad_year_start": 1, "term_number": 1},
+    ) or {}
     term_label = _term_label(term_doc) if term_doc else term_id
 
     faculty_name = f"{(faculty.get('first_name') or '').strip()} {(faculty.get('last_name') or '').strip()}".strip() or "Faculty"
@@ -2876,8 +2892,8 @@ async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[s
         subject, body_text, body_html = _build_faculty_accept_email(
             term_label=term_label,
             faculty_name=faculty_name,
-            rows=proposal_rows,
-            login_url=" http://ccscloud.dlsu.edu.ph:11160/login",
+            rows=email_rows,
+            login_url="http://ccscloud.dlsu.edu.ph:11160/login",  # removed leading space
         )
         try:
             email_sent, email_error = await _send_email_via_user_gmail(
@@ -2891,10 +2907,9 @@ async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[s
             email_sent = False
             email_error = str(e)
     else:
-        email_sent = False
         email_error = "No recipient email found for this user."
-    
-    # --- NEW: notify OM mailbox using the faculty's connected Gmail (best-effort, non-blocking) ---
+
+    # --- notify OM mailbox using the faculty's connected Gmail (best-effort, non-blocking) ---
     om_mailbox_sent = False
     om_mailbox_error: Optional[str] = None
 
@@ -2902,12 +2917,12 @@ async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[s
         om_subject, om_body_text, om_body_html = _build_om_finalized_email(
             term_label=term_label,
             faculty_name=faculty_name,
-            rows=proposal_rows,
+            rows=base_rows,  # schedule rows only (usually what OM wants)
             om_link=OM_LOAD_ASSIGNMENT_URL,
         )
         try:
             om_mailbox_sent, om_mailbox_error = await _send_email_via_user_gmail(
-                user_id=userId,  # IMPORTANT: send using the logged-in user's Gmail
+                user_id=userId,
                 to_email=OM_NOTIFY_EMAIL,
                 subject=om_subject,
                 body=om_body_text,
@@ -2941,19 +2956,19 @@ async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[s
             },
         )
 
-      # --- NEW: create Google Calendar events (best-effort, non-blocking) ---
-        calendar_ok = False
-        calendar_error: Optional[str] = None
-        calendar_events_created = 0
+    # --- create Google Calendar events (only if checkbox enabled) ---
+    calendar_ok: Optional[bool] = None
+    calendar_error: Optional[str] = None
+    calendar_events_created = 0
+    calendar_term_id: Optional[str] = None
+    term_start_at = None
+    week_count = _TERM_WEEK_COUNT
 
-        calendar_term_id: Optional[str] = None
-        term_start_at = None
-        week_count = _TERM_WEEK_COUNT  # keep your existing constant (e.g., 12)
-
+    if send_to_gcal:
         try:
-            # IMPORTANT: calendar must follow the NEXT term after is_current:true
-            nxt_term = await _next_term_from_current()  # should return full term doc (term_id, start_at, end_at, ...)
+            nxt_term = await _next_term_from_current()
             if not nxt_term:
+                calendar_ok = False
                 calendar_error = "No next term found after current term."
             else:
                 calendar_term_id = (nxt_term.get("term_id") or "").strip()
@@ -2961,9 +2976,9 @@ async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[s
                 term_end_at = _coerce_dt(nxt_term.get("end_at"))
 
                 if not term_start_at:
+                    calendar_ok = False
                     calendar_error = f"Next term {calendar_term_id or ''} has no start_at; cannot create calendar events."
                 else:
-                    # Optional: if you want to cap by term range, compute weeks from start_at/end_at.
                     if term_end_at:
                         span_weeks = max(1, ((term_end_at.date() - term_start_at.date()).days // 7) + 1)
                         week_count = min(_TERM_WEEK_COUNT, span_weeks)
@@ -2971,29 +2986,30 @@ async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[s
                     calendar_ok, calendar_events_created, calendar_error = await _create_term_calendar_for_user(
                         user_id=userId,
                         term_start_at=term_start_at,
-                        rows=proposal_rows,
+                        rows=base_rows,
                         week_count=week_count,
                     )
         except Exception as e:
             calendar_ok = False
             calendar_error = str(e)
 
-        return {
-             "ok": True,
-            "status": "ACCEPTED",
+    return {
+        "ok": True,
+        "status": "ACCEPTED",
 
-            "email_sent": email_sent,
-            "email_error": email_error,
+        "email_sent": email_sent,
+        "email_error": email_error,
 
-            "om_mailbox_email": OM_NOTIFY_EMAIL,
-            "om_mailbox_sent": om_mailbox_sent,
-            "om_mailbox_error": om_mailbox_error,
+        "om_mailbox_email": OM_NOTIFY_EMAIL,
+        "om_mailbox_sent": om_mailbox_sent,
+        "om_mailbox_error": om_mailbox_error,
 
-            "calendar_ok": calendar_ok,
-            "calendar_events_created": calendar_events_created,
-            "calendar_error": calendar_error,
-            "calendar_term_id": calendar_term_id,
-            "term_start_at": (term_start_at.isoformat() if term_start_at else None),
-            "week_count": week_count,
-            "calendar_url_used": _GCAL_EVENTS_INSERT_URL,
-        }
+        "send_to_gcal": send_to_gcal,
+        "calendar_ok": calendar_ok,
+        "calendar_events_created": calendar_events_created,
+        "calendar_error": calendar_error,
+        "calendar_term_id": calendar_term_id,
+        "term_start_at": (term_start_at.isoformat() if term_start_at else None),
+        "week_count": week_count,
+        "calendar_url_used": _GCAL_EVENTS_INSERT_URL,
+    }
