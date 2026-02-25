@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Papa from "papaparse";
 import {
   Edit,
@@ -2237,6 +2237,23 @@ const planCourseIndex = useMemo(() => {
 
   return m;
 }, [data?.rows, data?.course_options_by_group]);
+
+// For user-friendly “Section codes (in table)” chips in Planning Summary & Approval Required.
+const sectionCodesByCourse = useMemo(() => {
+  const m: Record<string, string[]> = {};
+  for (const r of (data?.rows || []) as OfferingRow[]) {
+    const cid = String(r?.course?.course_id || "").trim();
+    const sc = String((r as any)?.section_code || r?.section?.section_code || "").trim();
+    if (!cid || !sc) continue;
+    if (!m[cid]) m[cid] = [];
+    m[cid].push(sc);
+  }
+  // unique + sort
+  for (const k of Object.keys(m)) {
+    m[k] = Array.from(new Set(m[k])).sort((a, b) => a.localeCompare(b));
+  }
+  return m;
+}, [data?.rows]);
 // extra index entries we resolve on demand
 const [extraCourseIndex, setExtraCourseIndex] = useState<Record<string, { code: string; title: string }>>({});
 
@@ -2403,6 +2420,38 @@ useEffect(() => {
 
   // NOTE: Previously we had a jump-to-row helper for an action-required panel.
   // Planning is now centralized in the Planning Summary drawer.
+
+  const jumpToSectionInTable = useCallback((courseId: string, sectionCode: string) => {
+    const norm = (s: any) => String(s || "").toUpperCase().replace(/\s+/g, "");
+    const cid = String(courseId || "");
+    const target = (filtered || []).find(
+      (r) => String(r?.course?.course_id || "") === cid && norm(r?.section?.section_code) === norm(sectionCode)
+    );
+    if (!target) return;
+
+    const idKey = normCode(target.batch.batch_code) || "—";
+    const progKey = target.program.program_code || "—";
+    const groupKey = `${idKey}::${progKey}`;
+
+    // Ensure the correct program group is expanded.
+    setCollapsedGroups((prev) => ({ ...prev, [groupKey]: false }));
+
+    // Close drawers/modals so the table is visible.
+    setShowPlanModal(false);
+    setShowPlanningSummaryModal(false);
+
+    // Allow React to render the expanded group before scrolling.
+    setTimeout(() => {
+      const rowKey = rowKeyOf(target);
+      const el = document.getElementById(`row-${rowKey}`);
+      if (el) {
+        el.scrollIntoView({ behavior: "smooth", block: "center" });
+        el.classList.add("ring-2", "ring-emerald-400", "ring-offset-2");
+        setTimeout(() => el.classList.remove("ring-2", "ring-emerald-400", "ring-offset-2"), 1200);
+      }
+    }, 120);
+  }, [filtered]);
+
 
   /* ---------------------------- offerings: editing --------------------------- */
 
@@ -6202,6 +6251,8 @@ ${msg}`,
     changes={data?.planning?.pending_changes || []}
     explainByCourse={data?.planning?.explain_by_course || {}}
     courseIndex={{ ...planCourseIndex, ...extraCourseIndex }}
+    sectionCodesByCourse={sectionCodesByCourse}
+    onJumpToSection={jumpToSectionInTable}
     onClose={() => setShowPlanningSummaryModal(false)}
     onOpenApprovals={() => setShowPlanModal(true)}
   />
@@ -6211,6 +6262,8 @@ ${msg}`,
         <PlanReviewModal
           changes={data.planning.pending_changes || []}
           courseIndex={{ ...planCourseIndex, ...extraCourseIndex }}  // ⟵ merged
+          sectionCodesByCourse={sectionCodesByCourse}
+          onJumpToSection={jumpToSectionInTable}
           onKeepOmExtra={handleKeepOmExtra}
           onRejectOmNewLine={handleRejectOmNewLine}
           onAcceptExtraApo={handleAcceptExtraApo}
@@ -6653,17 +6706,17 @@ const PlanningSummaryPanel: React.FC<{
             </div>
             <div className="mt-2 flex flex-wrap gap-2 text-xs">
               {coursesWithGap > 0 && (
-                <span className="rounded-full border border-amber-200 bg-amber-50 px-2 py-1 text-amber-900">
+                <span className="rounded-full border border-sky-200 bg-sky-50 px-2 py-1 text-sky-900">
                   Courses with gaps: <span className="font-semibold">{coursesWithGap}</span>
                 </span>
               )}
               {totalSeatGap > 0 && (
-                <span className="rounded-full border border-sky-200 bg-sky-50 px-2 py-1 text-sky-900">
+                <span className="rounded-full border border-yellow-200 bg-yellow-50 px-2 py-1 text-yellow-900">
                   Total seat gap: <span className="font-semibold">{totalSeatGap}</span>
                 </span>
               )}
               {pendingCount > 0 && (
-                <span className="rounded-full border border-violet-200 bg-violet-50 px-2 py-1 text-violet-900">
+                <span className="rounded-full border border-red-200 bg-red-50 px-2 py-1 text-red-900">
                   Pending approvals: <span className="font-semibold">{pendingCount}</span>
                 </span>
               )}
@@ -6710,16 +6763,21 @@ const PlanningSummaryModal: React.FC<{
   changes: PlanningChange[];
   explainByCourse: Record<string, PlanningExplain>;
   courseIndex?: Record<string, { code: string; title?: string } | any>;
+  // Current section codes visible in the table (informational only)
+  sectionCodesByCourse?: Record<string, string[]>;
   onClose: () => void;
   onOpenApprovals?: () => void;
+  onJumpToSection?: (courseId: string, sectionCode: string) => void;
 }> = ({
   actionRequired,
   approvalRequired,
   changes,
   explainByCourse,
   courseIndex,
+  sectionCodesByCourse = {},
   onClose,
   onOpenApprovals,
+  onJumpToSection,
 }) => {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
 
@@ -6853,6 +6911,15 @@ const PlanningSummaryModal: React.FC<{
     });
   }, [actionRequired, changes, explainByCourse, courseIndex]);
 
+  const pendingCourseIds = useMemo(() => {
+    const s = new Set<string>();
+    for (const ch of changes || []) s.add(String((ch as any)?.course_id || ""));
+    return s;
+  }, [changes]);
+
+  // NOTE: we previously had a non-clickable chip renderer here, but the UX now
+  // uses clickable chips inline so the user can jump directly to the section row.
+
   const hasAny = byCourse.length > 0;
 
   return (
@@ -6884,17 +6951,17 @@ const PlanningSummaryModal: React.FC<{
         <div className="border-b border-emerald-200 bg-emerald-50 px-5 py-3">
           <div className="flex flex-wrap items-center gap-2 text-sm text-emerald-950">
             {modalSummary.coursesWithGap > 0 && (
-              <span className="inline-flex items-center rounded-full bg-amber-100 px-3 py-1 font-semibold text-amber-900">
+              <span className="inline-flex items-center rounded-full bg-sky-100 px-3 py-1 font-semibold text-sky-900">
                 Courses with gaps: {modalSummary.coursesWithGap}
               </span>
             )}
             {modalSummary.totalSeatGap > 0 && (
-              <span className="inline-flex items-center rounded-full bg-sky-100 px-3 py-1 font-semibold text-sky-900">
+              <span className="inline-flex items-center rounded-full bg-yellow-100 px-3 py-1 font-semibold text-yellow-900">
                 Total seat gap: {modalSummary.totalSeatGap}
               </span>
             )}
             {modalSummary.pendingCount > 0 && (
-              <span className="inline-flex items-center rounded-full bg-violet-100 px-3 py-1 font-semibold text-violet-900">
+              <span className="inline-flex items-center rounded-full bg-red-100 px-3 py-1 font-semibold text-red-900">
                 Pending approvals: {modalSummary.pendingCount}
               </span>
             )}
@@ -6928,7 +6995,7 @@ const PlanningSummaryModal: React.FC<{
                 const omCount = isOmDec ? (dec?.om_delete_count || dec?.by_sections || 0) : 0;
                 const overReduce = (!isOmDec && dec && Number(dec?.by_sections || 0) > 0) ? Number(dec?.by_sections || 0) : 0;
 
-                const needsReview = (c?.changes || []).length > 0;
+                const needsReview = pendingCourseIds.has(rowKey);
 
                 // Planning Summary is informational only; approvals are handled in Approval Required.
 
@@ -6939,43 +7006,128 @@ const PlanningSummaryModal: React.FC<{
                     key={rowKey}
                     className={cls(
                       "rounded-xl border shadow-sm",
-                      needsReview ? "border-rose-200 bg-rose-50" : "border-gray-200 bg-white"
+                      needsReview ? "border-red-200 bg-red-50/40" : "border-gray-200 bg-white"
                     )}
                   >
                     <div className="px-4 py-3 flex items-start justify-between gap-3">
-                      <div>
-                        <div className="font-semibold text-gray-900">
-                          {c.course_code || "—"} <span className="font-normal text-gray-600">— {c.course_title || ""}</span>
+                      <div className="flex-1 min-w-0">
+                        {/* 3-line compact summary (requested format) */}
+                        <div className="flex items-start justify-between gap-2 w-full">
+                          <div className="font-semibold text-gray-900 truncate">{c.course_code || "—"}</div>
+                          <div className="flex items-center gap-2 flex-shrink-0">
+                            {needsReview ? (
+                              <span className="inline-flex items-center h-6 leading-none rounded-full border border-transparent bg-red-100 px-2.5 text-[11px] font-semibold text-red-900">
+                                Pending approval
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center h-6 leading-none rounded-full border border-transparent bg-emerald-50 px-2.5 text-[11px] font-semibold text-emerald-800">
+                                No action needed
+                              </span>
+                            )}
+
+                            {needsReview && !!onOpenApprovals && (
+                              <button
+                                type="button"
+                                className="inline-flex items-center h-6 leading-none rounded-full border border-red-200 bg-white px-2.5 text-[11px] font-semibold text-red-900 hover:bg-red-50"
+                                onClick={() => {
+                                  onClose();
+                                  onOpenApprovals?.();
+                                }}
+                                title="Open the Approval Required list for this course"
+                              >
+                                Review
+                              </button>
+                            )}
+                          </div>
                         </div>
 
-                        {needsReview && (
-                          <div className="mt-2">
-                            <span className="inline-flex items-center rounded-full bg-rose-100 px-2.5 py-1 text-[11px] font-semibold text-rose-800">
-                              Needs review
-                            </span>
-                          </div>
-                        )}
+                        {(() => {
+                          const codes = sectionCodesByCourse[rowKey] || [];
+                          const cur = ex ? Number(ex.existing_sections || 0) : codes.length;
+                          const tgt = ex ? Number(ex.target_sections || 0) : cur;
+                          const diff = tgt - cur;
+                          const diffTxt = diff >= 0 ? `+${diff}` : `${diff}`;
+                          const changeList: any[] = Array.isArray(c.changes) ? c.changes : [];
+                          const omAdded = new Set<string>(
+                            changeList.flatMap((x: any) => (Array.isArray(x?.om_added_section_codes) ? x.om_added_section_codes : []))
+                          );
+                          const apoAdded = new Set<string>(
+                            changeList.flatMap((x: any) => (Array.isArray(x?.apo_added_section_codes) ? x.apo_added_section_codes : []))
+                          );
+                          return (
+                            <>
+                              <div className="mt-1 text-xs text-slate-700">Sections: {cur}→{tgt} ({diffTxt})</div>
+                              <div className="mt-0.5 text-xs text-slate-700">
+  <span className="mr-1">Current:</span>
+  {codes.length ? (
+    <span className="inline-flex flex-wrap gap-1">
+      {codes.map((code) => (
+        <button
+          key={code}
+          type="button"
+          className={cls(
+            "inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-semibold",
+            (omAdded.has(code) || apoAdded.has(code))
+              ? "bg-emerald-700 text-white hover:bg-emerald-800"
+              : "bg-slate-100 text-slate-800 hover:bg-slate-200"
+          )}
+          onClick={(e) => {
+            e.stopPropagation();
+            onJumpToSection?.(rowKey, code);
+          }}
+          title="Jump to this section in the table"
+        >
+          {code}
+        </button>
+      ))}
+    </span>
+  ) : (
+    <span>—</span>
+  )}
+</div>
+                            </>
+                          );
+                        })()}
 
+                        {/* Demand/seat numbers: show only when they explain a meaningful difference */}
                         <div className="mt-2 flex flex-wrap gap-2 text-xs">
                           {seat ? (
-                            <>
-                              <span className="rounded-full bg-gray-50 px-2 py-1 border border-gray-200">
-                                Demand: <span className="font-semibold">{seat.demand}</span>
-                              </span>
-                              <span className="rounded-full bg-gray-50 px-2 py-1 border border-gray-200">
-                                Planned seats: <span className="font-semibold">{seat.planned}</span>
-                              </span>
-                              <span className="rounded-full bg-gray-50 px-2 py-1 border border-gray-200">
-                                Seat gap: <span className="font-semibold">{seat.gap}</span>
-                              </span>
-                              <span className={cls("rounded-full px-2 py-1 border", seat.suggest > 0 ? "bg-emerald-50 border-emerald-200 text-emerald-800" : "bg-gray-50 border-gray-200")}>
-                                Add section: <span className="font-semibold">{seat.suggest}</span>
-                              </span>
-                            </>
+                            (() => {
+                              const allZero =
+                                Number(seat.demand || 0) === 0 &&
+                                Number(seat.planned || 0) === 0 &&
+                                Number(seat.gap || 0) === 0 &&
+                                Number(seat.suggest || 0) === 0;
+                              if (allZero) {
+                                return (
+                                  <span className="rounded-full bg-gray-50 px-2 py-1 border border-gray-200">
+                                    Planned seats already match available demand.
+                                  </span>
+                                );
+                              }
+                              return (
+                                <>
+                                  <span className="rounded-full bg-gray-50 px-2 py-1 border border-gray-200">
+                                    Demand: <span className="font-semibold">{seat.demand}</span>
+                                  </span>
+                                  <span className="rounded-full bg-gray-50 px-2 py-1 border border-gray-200">
+                                    Planned seats: <span className="font-semibold">{seat.planned}</span>
+                                  </span>
+                                  {Number(seat.gap || 0) > 0 && (
+                                    <span className="rounded-full bg-amber-50 px-2 py-1 border border-amber-200 text-amber-900">
+                                      Seat gap: <span className="font-semibold">{seat.gap}</span>
+                                    </span>
+                                  )}
+                                  {Number(seat.suggest || 0) > 0 && (
+                                    <span className="rounded-full bg-emerald-50 px-2 py-1 border border-emerald-200 text-emerald-800">
+                                      Suggested add: <span className="font-semibold">{seat.suggest}</span>
+                                    </span>
+                                  )}
+                                </>
+                              );
+                            })()
                           ) : (
-                            <span className="rounded-full bg-gray-50 px-2 py-1 border border-gray-200">
-                              No seat gap detected
-                            </span>
+                            <span className="rounded-full bg-gray-50 px-2 py-1 border border-gray-200">No summary available</span>
                           )}
 
                           {omCount > 0 && (
@@ -7160,6 +7312,9 @@ const PlanReviewModal: React.FC<{
   onClose: () => void;
   // courseIndex is used only for display (course code/title lookups). Keep it permissive.
   courseIndex?: Record<string, { code: string; title?: string } | any>;
+  // Current section codes visible in the table (informational only)
+  sectionCodesByCourse?: Record<string, string[]>;
+  onJumpToSection?: (courseId: string, sectionCode: string) => void;
   onKeepOmExtra?: (courseId: string, courseCode: string, sectionIds: string[]) => void | Promise<void>;
   onRejectOmNewLine?: (courseId: string, courseCode: string, sectionId?: string, sectionCode?: string) => void | Promise<void>;
   onAcceptExtraApo?: (courseId: string, courseCode: string, sectionIds: string[]) => void | Promise<void>;
@@ -7172,6 +7327,8 @@ const PlanReviewModal: React.FC<{
   changes,
   onClose,
   courseIndex = {},
+  sectionCodesByCourse = {},
+  onJumpToSection,
   onKeepOmExtra,
   onRejectOmNewLine,
   onAcceptExtraApo,
@@ -7225,7 +7382,7 @@ const PlanReviewModal: React.FC<{
               </span>
             )}
             {summary.increase > 0 && (
-              <span className="inline-flex items-center rounded-full bg-blue-100 px-3 py-1 font-semibold text-blue-800">
+              <span className="inline-flex items-center rounded-full bg-emerald-100 px-3 py-1 font-semibold text-emerald-800">
                 Increase: {summary.increase}
               </span>
             )}
@@ -7341,6 +7498,8 @@ const PlanReviewModal: React.FC<{
                   <div className="divide-y">
                     {rows.map((r, idx) => {
                       const ch = r.raw;
+                      const cid = String(ch?.course_id || "");
+                      const ex: PlanningExplain | undefined = ch?.explain;
                       const omCodes = Array.isArray(ch?.om_added_section_codes) ? ch.om_added_section_codes : [];
                       const omIds = Array.isArray(ch?.om_rejectable_section_ids) ? ch.om_rejectable_section_ids : [];
                       const apoCodes = Array.isArray(ch?.apo_added_section_codes) ? ch.apo_added_section_codes : [];
@@ -7352,48 +7511,78 @@ const PlanReviewModal: React.FC<{
                         <div key={idx} className="px-4 py-3">
                           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
                             <div className="min-w-0">
+                              {/* 3-line compact summary (requested format) */}
                               <div className="text-sm font-semibold text-slate-900">{r.courseCode}</div>
-                              <div className="mt-0.5 text-xs text-slate-600">
-                                {kind === "inc" && <>Add <span className="font-semibold">+{r.by}</span> section(s)</>}
-                                {kind === "dec" && <>Reduce <span className="font-semibold">−{r.by}</span> section(s)</>}
-                                {kind === "add" && <>Add to curriculum</>}
-                                {kind === "other" && <>Update</>}
-                              </div>
+                              {(() => {
+                                const codes = (cid ? (sectionCodesByCourse[cid] || []) : []);
+                                const cur = ex ? Number(ex.existing_sections || 0) : codes.length;
+                                const tgt = ex ? Number(ex.target_sections || 0) : cur;
+                                const diff = tgt - cur;
+                                const diffTxt = diff >= 0 ? `+${diff}` : `${diff}`;
+                                return (
+                                  <>
+                                    <div className="mt-1 text-xs text-slate-700">Sections: {cur}→{tgt} ({diffTxt})</div>
+                                    <div className="mt-0.5 text-xs text-slate-700">
+  <span className="mr-1">Current:</span>
+  {codes.length ? (
+    <span className="inline-flex flex-wrap gap-1">
+      {codes.map((code) => (
+        <button
+          key={code}
+          type="button"
+          className="inline-flex items-center rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-semibold text-slate-800 hover:bg-slate-200"
+          onClick={(e) => {
+            e.stopPropagation();
+            onJumpToSection?.(cid, code);
+          }}
+          title="Jump to this section in the table"
+        >
+          {code}
+        </button>
+      ))}
+    </span>
+  ) : (
+    <span>—</span>
+  )}
+</div>
+                                  </>
+                                );
+                              })()}
 
                               {isReduce && omCodes.length > 0 && (
                                 <div className="mt-2 flex flex-wrap items-center gap-1">
-                                  <span className="inline-flex items-center rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-semibold text-amber-800">
+                                  <span className="inline-flex items-center rounded-full bg-emerald-700 px-2 py-0.5 text-[11px] font-semibold text-white">
                                     OM‑added
                                   </span>
                                   {omCodes.slice(0, 6).map((sc: string) => (
                                     <span
                                       key={sc}
-                                      className="inline-flex items-center rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-900"
+                                      className="inline-flex items-center rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-900"
                                     >
                                       {sc}
                                     </span>
                                   ))}
                                   {omCodes.length > 6 && (
-                                    <span className="text-[11px] font-medium text-amber-800">+{omCodes.length - 6}</span>
+                                    <span className="text-[11px] font-medium text-emerald-900">+{omCodes.length - 6}</span>
                                   )}
                                 </div>
                               )}
 
                               {isApoExtra && apoCodes.length > 0 && (
                                 <div className="mt-2 flex flex-wrap items-center gap-1">
-                                  <span className="inline-flex items-center rounded-full bg-violet-100 px-2 py-0.5 text-[11px] font-semibold text-violet-800">
+                                  <span className="inline-flex items-center rounded-full bg-emerald-700 px-2 py-0.5 text-[11px] font-semibold text-white">
                                     APO‑added
                                   </span>
                                   {apoCodes.slice(0, 6).map((sc: string) => (
                                     <span
                                       key={sc}
-                                      className="inline-flex items-center rounded-full border border-violet-200 bg-violet-50 px-2 py-0.5 text-[11px] font-medium text-violet-900"
+                                      className="inline-flex items-center rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-900"
                                     >
                                       {sc}
                                     </span>
                                   ))}
                                   {apoCodes.length > 6 && (
-                                    <span className="text-[11px] font-medium text-violet-800">+{apoCodes.length - 6}</span>
+                                    <span className="text-[11px] font-medium text-emerald-900">+{apoCodes.length - 6}</span>
                                   )}
                                 </div>
                               )}
@@ -7403,7 +7592,7 @@ const PlanReviewModal: React.FC<{
                               <div className="flex items-center gap-2">
                                 <button
                                   type="button"
-                                  className="rounded-lg border border-blue-300 bg-white px-3 py-1.5 text-xs font-semibold text-blue-800 hover:bg-blue-50 disabled:opacity-50"
+                                  className="rounded-lg border border-emerald-300 bg-white px-3 py-1.5 text-xs font-semibold text-emerald-800 hover:bg-emerald-50 disabled:opacity-50"
                                   disabled={busy}
                                   onClick={() =>
                                     onIncreaseNow?.(
@@ -7488,7 +7677,7 @@ const PlanReviewModal: React.FC<{
                   <SectionList
                     key="inc"
                     title="Increase sections"
-                    badgeClass="bg-blue-100 text-blue-800"
+                    badgeClass="bg-emerald-100 text-emerald-800"
                     badgeText="Increase"
                     kind="inc"
                     rows={increases
