@@ -1485,6 +1485,61 @@ async def fs_respond(
         # notifications should not block the response flow
         pass
 
+    # Notify the assigned faculty (in-app + Gmail) that they have been serviced
+    # to the requesting department.
+    try:
+        fac_uid: str | None = None
+        fac_id = str((fac_out or {}).get("faculty_id") or "").strip()
+        if fac_id:
+            prof = await db.faculty_profiles.find_one(
+                {"faculty_id": fac_id},
+                {"_id": 0, "user_id": 1, "first_name": 1, "last_name": 1},
+            )
+            if prof and prof.get("user_id"):
+                fac_uid = str(prof.get("user_id") or "").strip() or None
+
+        if fac_uid:
+            dept_name = await _canon_dept_name(row.get("from_department") or "")
+            dept_name = dept_name or (row.get("from_department") or "")
+
+            sch_parts: list[str] = []
+            if day1 and begin1 and end1:
+                sch_parts.append(f"{day1} {begin1}–{end1}")
+            elif day1 or begin1 or end1:
+                sch_parts.append(f"{day1} {begin1}–{end1}".strip())
+            if day2 and begin2 and end2:
+                sch_parts.append(f"{day2} {begin2}–{end2}")
+            elif day2 or begin2 or end2:
+                sch_parts.append(f"{day2} {begin2}–{end2}".strip())
+            sch_text = "; ".join([p for p in sch_parts if p.strip()])
+            if not sch_text:
+                sch_text = "Schedule: TBA"
+
+            details = (
+                f"You have been serviced to {dept_name or 'a department'} for "
+                f"{row.get('course_code','')} – {row.get('course_title','')}. "
+                f"{sch_text}."
+            )
+
+            await create_notification(
+                user_id=fac_uid,
+                title="Faculty Service: Serviced",
+                details=details,
+                meta={
+                    "route": "/faculty/overview",
+                    "fs_id": fs_id,
+                    "kind": "faculty_service_serviced",
+                    "from_department": dept_name,
+                    "course_code": row.get("course_code"),
+                    "section_id": row.get("section_id"),
+                },
+                send_email=True,
+                email_from_user_id=(userId or payload.get("user_id") or payload.get("userId") or None),
+            )
+    except Exception:
+        # notifications should not block the response flow
+        pass
+
     doc = await db.faculty_service.find_one({"fs_id": fs_id}, {"_id": 0})
     return {"ok": True, "row": doc}
 

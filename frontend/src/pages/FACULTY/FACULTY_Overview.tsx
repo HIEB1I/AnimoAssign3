@@ -1346,6 +1346,8 @@ type TLItem = {
   // Special Class reflection (OM_SpecialClass -> Faculty)
   is_special_class?: boolean;
   special_id?: string;
+  is_serviced?: boolean;
+  serviced_department?: string;
   course_code: string;
   course_title: string;
   section: string;
@@ -1373,6 +1375,8 @@ type TLItemForCalendar = {
   syllabus?: string;
   is_special_class?: boolean;
   special_id?: string;
+  is_serviced?: boolean;
+  serviced_department?: string;
   // Store original item for modal
   originalItem: TLItem;
 };
@@ -1477,6 +1481,8 @@ function placeItems(teachingLoad: TLItem[]): Placed[] {
           syllabus: it.syllabus,
           is_special_class: Boolean((it as any)?.is_special_class),
           special_id: (it as any)?.special_id,
+          is_serviced: Boolean((it as any)?.is_serviced),
+          serviced_department: (it as any)?.serviced_department,
           originalItem: it, // Pass the full original item
         },
       });
@@ -1519,19 +1525,22 @@ const getCampusColorForSection = (sec?: string): string | undefined => {
 };
 
 const ClassBlock = ({ onClick, it }: { onClick?: () => void; it: TLItemForCalendar }) => {
-  const campusColor = !it.is_special_class ? getCampusColorForSection(it.sec) : undefined;
+  const isServiced = !!it.is_serviced;
+  const campusColor = !it.is_special_class && !isServiced ? getCampusColorForSection(it.sec) : undefined;
 
   return (
     <button
-      onClick={onClick}
+      onClick={it.is_special_class || isServiced ? undefined : onClick}
       className={cls(
         "flex w-full flex-col items-center justify-center rounded-xl border shadow-sm",
         it.is_special_class
           ? "border-purple-200 bg-purple-100/80 hover:bg-purple-100"
+          : isServiced
+          ? "border-yellow-200 bg-yellow-50 hover:bg-yellow-100/60"
           : campusColor
           ? "border-neutral-200 text-black hover:brightness-[1.02]"
           : "border-emerald-200 bg-emerald-50/90 hover:bg-emerald-50",
-        it.is_special_class && "cursor-default"
+        (it.is_special_class || isServiced) && "cursor-default"
       )}
       style={campusColor ? { backgroundColor: campusColor } : undefined}
       title={`${it.code} • ${it.sec} | ${it.room} • ${it.mode}`}
@@ -1658,7 +1667,12 @@ const scheduleFinalLabel = (() => {
 	              <span className="h-3 w-3 rounded-sm border border-purple-200 bg-purple-100" />
 	              <span>Special Class</span>
 	            </span>
-	          </div>
+	          
+<span className="inline-flex items-center gap-2">
+  <span className="h-3 w-3 rounded-sm border border-yellow-200 bg-yellow-50" />
+  <span>Serviced</span>
+</span>
+</div>
           <div className="flex gap-2">
           {["Calendar", "List"].map((v) => (
             <button
@@ -1764,6 +1778,10 @@ const scheduleFinalLabel = (() => {
 	            <span className="h-3 w-3 rounded-sm border border-purple-200 bg-purple-100" />
 	            <span>Special Class</span>
 	          </span>
+	          <span className="inline-flex items-center gap-2">
+	            <span className="h-3 w-3 rounded-sm border border-yellow-200 bg-yellow-50" />
+	            <span>Serviced</span>
+	          </span>
 	        </div>
 	      </div>
 
@@ -1836,9 +1854,9 @@ const scheduleFinalLabel = (() => {
                           it={it}
                           onClick={() => {
                             if (scheduleFinal) return;
-                            // Reflected Special Classes are distinct from the regular OM schedule.
-                            // They must NOT allow RFC.
+                            // Reflected Special Classes and Serviced classes must NOT allow RFC.
                             if (it.is_special_class) return;
+                            if ((it as any)?.is_serviced) return;
                             setModal({ day: g.day, item: it });
                           }}
                         />
@@ -1872,7 +1890,7 @@ const scheduleFinalLabel = (() => {
                   <thead className="bg-gray-50 text-gray-700">
                     <tr className="[&>th]:border-b [&>th]:border-gray-200">
                       {LIST_HEADERS.map((h) => (
-                        <th key={h} className="px-4 py-3 text-left font-semibold">
+                        <th key={h} className={cls("px-4 py-3 font-semibold", h === "Course Code & Title" ? "text-left" : "text-center")}>
                           {h}
                         </th>
                       ))}
@@ -1890,20 +1908,21 @@ const scheduleFinalLabel = (() => {
                         const t1 = splitBeginEnd(it.time1);
                         const t2 = splitBeginEnd(it.time2);
                         const isSpecial = Boolean((it as any)?.is_special_class);
+                        const isServiced = !isSpecial && Boolean((it as any)?.is_serviced);
 
                         // Days: for special classes show initial-only (M/T/W/H/F/S/U) to match regular.
                         const d1Raw = it.day1 && it.day1 !== "TBA" ? it.day1 : "";
                         const d2Raw = it.day2 && it.day2 !== "TBA" ? it.day2 : "";
-                        const d1 = d1Raw ? (isSpecial ? dayInitial(d1Raw) : d1Raw) : "—";
-                        const d2 = d2Raw ? (isSpecial ? dayInitial(d2Raw) : d2Raw) : "—";
+                        const d1 = d1Raw ? ((isSpecial || isServiced) ? dayInitial(d1Raw) : d1Raw) : "—";
+                        const d2 = d2Raw ? ((isSpecial || isServiced) ? dayInitial(d2Raw) : d2Raw) : "—";
 
                         // Rooms: for special classes show TBA instead of ONLINE.
                         const room1Display = isSpecial
                           ? normalizeRoomDisplayForSpecial((it as any).room1)
-                          : (it.room1 || "—");
+                          : (isServiced ? ((it as any).room1 || "TBA") : ((it as any).room1 || "—"));
                         const room2Display = isSpecial
                           ? normalizeRoomDisplayForSpecial((it as any).room2)
-                          : (it.room2 || "—");
+                          : (isServiced ? ((it as any).room2 || "TBA") : ((it as any).room2 || "—"));
 
                         // Mode: for special classes auto-derive from rooms (FOL if both rooms unassigned/TBA/ONLINE, else HYB).
                         // In List view: Special Classes should NOT show "Special Class" in the Mode column.
@@ -1916,7 +1935,7 @@ const scheduleFinalLabel = (() => {
                           <tr
                             key={idx}
                             className={cls(
-                              isSpecial ? "bg-purple-50" : "bg-white",
+                              isSpecial ? "bg-purple-50" : (isServiced ? "bg-yellow-50" : "bg-white"),
                               "[&>td]:border-t [&>td]:border-gray-100"
                             )}
                           >
@@ -1926,17 +1945,17 @@ const scheduleFinalLabel = (() => {
                                 <div className="mt-0.5 text-[12px] text-gray-600">{it.course_title || "—"}</div>
                               </div>
                             </td>
-                            <td className="px-4 py-3 align-middle">{it.section || "—"}</td>
-                            <td className="px-4 py-3 align-middle">{d1}</td>
-                            <td className="px-4 py-3 align-middle">{t1.begin}</td>
-                            <td className="px-4 py-3 align-middle">{t1.end}</td>
-                            <td className="px-4 py-3 align-middle">{room1Display}</td>
-                            <td className="px-4 py-3 align-middle">{d2}</td>
-                            <td className="px-4 py-3 align-middle">{t2.begin}</td>
-                            <td className="px-4 py-3 align-middle">{t2.end}</td>
-                            <td className="px-4 py-3 align-middle">{room2Display}</td>
-                            <td className="px-4 py-3 align-middle text-gray-800">{modeDisplay}</td>
-                            <td className="px-4 py-3 align-middle">
+                            <td className="px-4 py-3 align-middle text-center">{it.section || "—"}</td>
+                            <td className="px-4 py-3 align-middle text-center">{d1}</td>
+                            <td className="px-4 py-3 align-middle text-center">{t1.begin}</td>
+                            <td className="px-4 py-3 align-middle text-center">{t1.end}</td>
+                            <td className="px-4 py-3 align-middle text-center">{room1Display}</td>
+                            <td className="px-4 py-3 align-middle text-center">{d2}</td>
+                            <td className="px-4 py-3 align-middle text-center">{t2.begin}</td>
+                            <td className="px-4 py-3 align-middle text-center">{t2.end}</td>
+                            <td className="px-4 py-3 align-middle text-center">{room2Display}</td>
+                            <td className="px-4 py-3 align-middle text-center text-gray-800">{modeDisplay}</td>
+                            <td className="px-4 py-3 align-middle text-center">
                               <button
                                 type="button"
                                 onClick={() => openSyllabus(it)}

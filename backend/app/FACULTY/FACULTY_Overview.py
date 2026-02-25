@@ -55,6 +55,7 @@ COL_DEPTS = "departments"
 
 # Special Class reflection (OM_SpecialClass -> Faculty)
 COL_SPECIAL_CLASS = "special_class"
+COL_FACULTY_SERVICE = "faculty_service"
 
 # OM <-> Faculty proposal + RFC collections
 COL_LOAD_PROPOSALS = "faculty_load_proposals"
@@ -480,13 +481,23 @@ async def _create_term_calendar_for_user(
         course_code = rr.get("course_code") or rr.get("course") or ""
         section = rr.get("section") or ""
         mode = rr.get("mode") or ""
+
+        # Special class display rule: treat ONLINE as TBA (so email/list and calendar are consistent).
+        def _room_for_calendar(raw_room: Any) -> str:
+            s = ("" if raw_room is None else str(raw_room)).strip()
+            if not s:
+                return "TBA"
+            if bool(rr.get("is_special_class")) and s.upper() == "ONLINE":
+                return "TBA"
+            return s
+
         # Meeting 1
         ev1 = _make_event(
             course_code=course_code,
             section=section,
             day_full=rr.get("day1") or "",
             time_band=rr.get("time1") or "",
-            room=rr.get("room1") or "Online",
+            room=_room_for_calendar(rr.get("room1") or "TBA"),
             mode=mode,
         )
         if ev1:
@@ -503,7 +514,7 @@ async def _create_term_calendar_for_user(
             section=section,
             day_full=rr.get("day2") or "",
             time_band=rr.get("time2") or "",
-            room=rr.get("room2") or rr.get("room1") or "Online",
+            room=_room_for_calendar(rr.get("room2") or rr.get("room1") or "TBA"),
             mode=mode,
         )
         if ev2:
@@ -820,6 +831,214 @@ async def _fetch_reflected_special_classes_for_faculty(
     # Keep stable ordering: sort by course_code then section.
     out.sort(key=lambda x: (x.get("course_code", ""), x.get("section", "")))
     return out
+
+
+def _is_real_room_label(room_label: str) -> bool:
+    r = str(room_label or "").strip().upper()
+    if not r:
+        return False
+    return r not in {"TBA", "ONLINE", "—", "N/A"}
+
+def _serviced_mode_from_rooms(room1: str | None, room2: str | None) -> str:
+    # Requirement: if APO assigned a room in either Room 1 or Room 2 (or both), mode should be HYB.
+    # Otherwise default to FOL.
+    return "HYB" if (_is_real_room_label(room1 or "") or _is_real_room_label(room2 or "")) else "FOL"
+
+async def _serviced_section_map_for_faculty(*, term_id: str, faculty_id: str) -> Dict[str, str]:
+    """Return section_id -> from_department for CHAIR-approved Faculty Service rows (status=responded).
+
+    faculty_service rows do not store term_id directly; we validate section membership in the given term
+    to avoid stale artifacts after DB restore/clean.
+    """
+    term_id = (term_id or "").strip()
+    faculty_id = (faculty_id or "").strip()
+    if not term_id or not faculty_id:
+        return {}
+
+    docs = await db[COL_FACULTY_SERVICE].find(
+        {"status": "responded", "faculty.faculty_id": faculty_id},
+        {"_id": 0, "section_id": 1, "from_department": 1},
+    ).to_list(None)
+
+    sec_ids = [str((d or {}).get("section_id") or "").strip() for d in (docs or [])]
+    sec_ids = [s for s in sec_ids if s]
+    if not sec_ids:
+        return {}
+
+    sec_docs = await db[COL_SECTIONS].find(
+        {"section_id": {"$in": sec_ids}, "$or": [{"term_id": term_id}, {"termId": term_id}]},
+        {"_id": 0, "section_id": 1},
+    ).to_list(None)
+    valid = {str(s.get("section_id") or "").strip() for s in (sec_docs or []) if s and s.get("section_id")}
+
+    out: Dict[str, str] = {}
+    for d in (docs or []):
+        sid = str((d or {}).get("section_id") or "").strip()
+        if not sid or sid not in valid:
+            continue
+        out[sid] = str((d or {}).get("from_department") or "").strip()
+    return out
+
+async def _apply_section_schedule_to_row(row: Dict[str, Any], section_id: str) -> None:
+    """Override day/time/room fields from authoritative section_schedules + rooms.
+
+    This guarantees:
+    - If room is not assigned -> 'TBA' (so Calendar and List match)
+    - Auto-updates when APO assigns rooms
+    """
+    section_id = (section_id or "").strip()
+    if not section_id:
+        return
+
+    sch = await _special_class_schedule_two(
+        section_id=section_id,
+        schedule_id1=None,
+        schedule_id2=None,
+        schedule_cleared=False,
+    )
+
+    day1 = _day_code_to_long(sch.get("day1"))
+    time1 = _fmt_band_from_hhmm(sch.get("begin1"), sch.get("end1"))
+    room1 = (sch.get("room1") or "TBA") or "TBA"
+
+    day2_raw = _day_code_to_long(sch.get("day2")) if sch.get("day2") else ""
+    time2_raw = _fmt_band_from_hhmm(sch.get("begin2"), sch.get("end2")) if (sch.get("begin2") or sch.get("end2")) else ""
+    room2_raw = (sch.get("room2") or "").strip()
+
+    if day2_raw and day2_raw != "TBA" and time2_raw and time2_raw != "TBA":
+        day2 = day2_raw
+        time2 = time2_raw
+        room2 = room2_raw or "TBA"
+    else:
+        day2 = None
+        time2 = None
+        room2 = None
+
+    row["day1"] = day1 or "TBA"
+    row["time1"] = time1 or "TBA"
+    row["room1"] = room1 or "TBA"
+    row["day2"] = day2
+    row["time2"] = time2
+    row["room2"] = room2
+
+    # Mode rule for serviced rows.
+    if bool(row.get("is_serviced")) and not bool(row.get("is_special_class")):
+        row["mode"] = _serviced_mode_from_rooms(row.get("room1"), row.get("room2"))
+
+async def _fetch_reflected_faculty_service_rows_for_faculty(
+    *,
+    term_id: str,
+    faculty_id: str,
+    exclude_section_ids: set[str] | None = None,
+    limit: int = 500,
+) -> List[Dict[str, Any]]:
+    """Build synthetic teaching_load rows for CHAIR-approved Faculty Service assignments.
+
+    Faculty overview normally shows rows from `faculty_assignments`. However, Faculty Service approvals
+    (status=responded) may not create a faculty_assignments record.
+    We reflect them similarly to Special Classes via synthetic rows.
+    """
+    term_id = (term_id or "").strip()
+    faculty_id = (faculty_id or "").strip()
+    if not term_id or not faculty_id:
+        return []
+
+    exclude_section_ids = exclude_section_ids or set()
+
+    docs = await db[COL_FACULTY_SERVICE].find(
+        {"status": "responded", "faculty.faculty_id": faculty_id},
+        {"_id": 0, "section_id": 1, "from_department": 1},
+    ).sort([("updated_at", -1), ("created_at", -1)]).limit(limit).to_list(limit)
+
+    sec_ids = [str((d or {}).get("section_id") or "").strip() for d in (docs or [])]
+    sec_ids = [s for s in sec_ids if s and s not in exclude_section_ids]
+    if not sec_ids:
+        return []
+
+    sec_docs = await db[COL_SECTIONS].find(
+        {"section_id": {"$in": sec_ids}, "$or": [{"term_id": term_id}, {"termId": term_id}]},
+        {"_id": 0, "section_id": 1, "section_code": 1, "section": 1, "section_name": 1, "course_id": 1},
+    ).to_list(None)
+
+    sec_by_id: Dict[str, Dict[str, Any]] = {
+        str(s.get("section_id") or "").strip(): (s or {})
+        for s in (sec_docs or [])
+        if s and s.get("section_id")
+    }
+
+    valid_ids = [sid for sid in sec_ids if sid in sec_by_id]
+    if not valid_ids:
+        return []
+
+    course_ids = [str(sec_by_id[sid].get("course_id") or "").strip() for sid in valid_ids]
+    course_ids = [c for c in course_ids if c]
+    course_by_id: Dict[str, Dict[str, Any]] = {}
+    if course_ids:
+        course_docs = await db[COL_COURSES].find(
+            {"course_id": {"$in": course_ids}},
+            {"_id": 0, "course_id": 1, "course_code": 1, "course_title": 1, "units": 1, "syllabus": 1},
+        ).to_list(None)
+        course_by_id = {
+            str(c.get("course_id") or "").strip(): (c or {})
+            for c in (course_docs or [])
+            if c and c.get("course_id")
+        }
+
+    # Latest doc per section_id (first wins because sorted newest first)
+    doc_by_sid: Dict[str, Dict[str, Any]] = {}
+    for d in (docs or []):
+        sid = str((d or {}).get("section_id") or "").strip()
+        if sid and sid in valid_ids and sid not in doc_by_sid:
+            doc_by_sid[sid] = d or {}
+
+    out: List[Dict[str, Any]] = []
+    for sid in valid_ids:
+        d = doc_by_sid.get(sid, {})
+        sec = sec_by_id.get(sid, {})
+        course = course_by_id.get(str(sec.get("course_id") or "").strip(), {})
+
+        cc = course.get("course_code")
+        if isinstance(cc, list):
+            cc = cc[0] if cc else ""
+        course_code = _as_code_str(cc or "")
+        course_title = _as_code_str(course.get("course_title") or "")
+        units = course.get("units") or 0
+        syllabus = course.get("syllabus") or ""
+
+        section_display = _as_code_str(
+            (sec.get("section_code") or sec.get("section") or sec.get("section_name") or "—")
+        )
+
+        row: Dict[str, Any] = {
+            "course_code": course_code or "—",
+            "course_title": course_title or "—",
+            "section": section_display or "—",
+            "section_id": sid,
+            "special_id": "",
+            "is_special_class": False,
+            "is_serviced": True,
+            "serviced_department": str(d.get("from_department") or "").strip(),
+            "units": units or 0,
+            "mode": "FOL",
+            "day1": "TBA",
+            "day2": None,
+            "room1": "TBA",
+            "room2": None,
+            "time1": "TBA",
+            "time2": None,
+            "syllabus": syllabus,
+            "finalized": False,
+        }
+
+        await _apply_section_schedule_to_row(row, sid)
+        # Ensure mode obeys serviced rule
+        row["mode"] = _serviced_mode_from_rooms(row.get("room1"), row.get("room2"))
+
+        out.append(row)
+
+    out.sort(key=lambda x: (x.get("course_code", ""), x.get("section", "")))
+    return out
+
 
 
 def _calc_units_and_preps(teaching_load: List[Dict[str, Any]]) -> Tuple[float, int]:
@@ -2123,9 +2342,53 @@ async def overview_handler(
             term_id=term.get("term_id"),
             faculty_id=faculty.get("faculty_id"),
         )
-
         merged_load = (final_teaching_load or []) + (special_rows or [])
-        merged_load.sort(key=lambda x: (x.get("course_code", ""), x.get("section", ""), str(bool(x.get("is_special_class")))))
+
+        # ---------------- Faculty Service (Serviced) reflection ----------------
+        # Mark existing load rows as serviced (yellow styling) and append synthetic serviced rows
+        # when Faculty Service approvals did not create a faculty_assignments record.
+        existing_section_ids: set[str] = set()
+        for rr in (merged_load or []):
+            sid0 = str(rr.get("section_id") or rr.get("sectionId") or "").strip()
+            if sid0 and not sid0.startswith("SPECIAL:"):
+                existing_section_ids.add(sid0)
+
+        serviced_map = await _serviced_section_map_for_faculty(
+            term_id=term.get("term_id"),
+            faculty_id=faculty.get("faculty_id"),
+        )
+
+        if serviced_map:
+            for rr in (merged_load or []):
+                if bool(rr.get("is_special_class")):
+                    continue
+                sid = str(rr.get("section_id") or rr.get("sectionId") or "").strip()
+                if sid and sid in serviced_map:
+                    rr["is_serviced"] = True
+                    rr["serviced_department"] = serviced_map.get(sid) or ""
+                    try:
+                        await _apply_section_schedule_to_row(rr, sid)
+                    except Exception:
+                        pass
+                    rr["mode"] = _serviced_mode_from_rooms(rr.get("room1"), rr.get("room2"))
+                else:
+                    rr["is_serviced"] = False
+                    rr["serviced_department"] = ""
+
+        try:
+            serviced_rows = await _fetch_reflected_faculty_service_rows_for_faculty(
+                term_id=term.get("term_id"),
+                faculty_id=faculty.get("faculty_id"),
+                exclude_section_ids=existing_section_ids,
+            )
+            if serviced_rows:
+                merged_load.extend(serviced_rows)
+        except Exception:
+            pass
+
+        merged_load.sort(
+            key=lambda x: (x.get("course_code", ""), x.get("section", ""), str(bool(x.get("is_special_class"))))
+        )
 
         # IMPORTANT: Special Classes must be reflected in the Faculty schedule views,
         # but they must NOT be included in the teaching units and course prep calculations.
@@ -2143,17 +2406,18 @@ async def overview_handler(
         summary["teaching_units_over_by"] = max(0, int(round(total_units - units_max))) if summary["exceeded_teaching_units"] else 0
         summary["course_preps_over_by"] = max(0, int(course_preps - preps_max)) if summary["exceeded_course_preps"] else 0
 
-        return {
-            "ok": True,
-            "term": term,
-            "summary": summary,
-            "teaching_load": merged_load,
-            # Only report "proposed" state if we have a valid (non-stale) proposal payload to show.
-            "is_proposed": bool(proposed_load and proposal_status_l in ("proposed", "reply", "replied")),
-            "proposal_status": proposal_status,
-            "rfc": rfc_norm,
-            "schedule_final": schedule_final,
-        }
+
+    return {
+        "ok": True,
+        "term": term,
+        "summary": summary,
+        "teaching_load": merged_load,
+        # Only report "proposed" state if we have a valid (non-stale) proposal payload to show.
+        "is_proposed": bool(proposed_load and proposal_status_l in ("proposed", "reply", "replied")),
+        "proposal_status": proposal_status,
+        "rfc": rfc_norm,
+        "schedule_final": schedule_final,
+    }
     raise HTTPException(status_code=400, detail="Invalid action parameter.")
 
 
@@ -2380,6 +2644,51 @@ async def get_faculty_overview(userId: str = Query(...)):
         faculty_id=faculty.get("faculty_id"),
     )
     merged_load = (final_teaching_load or []) + (special_rows or [])
+
+    # ---------------- Faculty Service (Serviced) reflection ----------------
+    # Mark existing load rows as serviced (yellow styling) and append synthetic serviced rows
+    # when Faculty Service approvals did not create a faculty_assignments record.
+    existing_section_ids: set[str] = set()
+    for rr in (merged_load or []):
+        sid0 = str(rr.get("section_id") or rr.get("sectionId") or "").strip()
+        if sid0 and not sid0.startswith("SPECIAL:"):
+            existing_section_ids.add(sid0)
+
+    serviced_map = await _serviced_section_map_for_faculty(
+        term_id=term.get("term_id"),
+        faculty_id=faculty.get("faculty_id"),
+    )
+
+    if serviced_map:
+        for rr in (merged_load or []):
+            if bool(rr.get("is_special_class")):
+                continue
+            sid = str(rr.get("section_id") or rr.get("sectionId") or "").strip()
+            if sid and sid in serviced_map:
+                rr["is_serviced"] = True
+                rr["serviced_department"] = serviced_map.get(sid) or ""
+                # Keep schedule/room consistent with calendar/list (TBA stays TBA)
+                try:
+                    await _apply_section_schedule_to_row(rr, sid)
+                except Exception:
+                    pass
+                # Enforce serviced mode rule
+                rr["mode"] = _serviced_mode_from_rooms(rr.get("room1"), rr.get("room2"))
+            else:
+                rr["is_serviced"] = False
+                rr["serviced_department"] = ""
+
+    # Add synthetic rows for serviced sections not present in regular load
+    try:
+        serviced_rows = await _fetch_reflected_faculty_service_rows_for_faculty(
+            term_id=term.get("term_id"),
+            faculty_id=faculty.get("faculty_id"),
+            exclude_section_ids=existing_section_ids,
+        )
+        if serviced_rows:
+            merged_load.extend(serviced_rows)
+    except Exception:
+        pass
 
     # IMPORTANT: Special Classes must be reflected in the Faculty schedule views,
     # but they must NOT be included in the teaching units and course prep calculations.
@@ -2763,22 +3072,29 @@ def _build_faculty_accept_email(
         s = ("" if v is None else str(v)).strip()
         return (not s) or (s.upper() in ("ONLINE", "TBA"))
 
+
     def _format_row_for_email(r: Dict[str, Any]) -> Dict[str, Any]:
-        if not bool(r.get("is_special_class")):
+        is_special = bool(r.get("is_special_class"))
+        is_serviced = bool(r.get("is_serviced"))
+        if not (is_special or is_serviced):
             return r
 
         rr = dict(r)
+
+        # Day initials should be used for both Special and Serviced classes
         rr["day1"] = _day_to_initial(rr.get("day1"))
         rr["day2"] = _day_to_initial(rr.get("day2")) if rr.get("day2") not in (None, "") else ""
 
-        rr["room1"] = _room_to_email_display(rr.get("room1"))
-        rr["room2"] = _room_to_email_display(rr.get("room2")) if rr.get("room2") not in (None, "") else ""
+        # Special-class-specific formatting rules
+        if is_special:
+            rr["room1"] = _room_to_email_display(rr.get("room1"))
+            rr["room2"] = _room_to_email_display(rr.get("room2")) if rr.get("room2") not in (None, "") else ""
 
-        # Mode override for special classes per requirement
-        if _is_unassigned_room(r.get("room1")) and _is_unassigned_room(r.get("room2")):
-            rr["mode"] = "FOL"
-        else:
-            rr["mode"] = "HYB"
+            # Mode override for special classes per requirement
+            if _is_unassigned_room(r.get("room1")) and _is_unassigned_room(r.get("room2")):
+                rr["mode"] = "FOL"
+            else:
+                rr["mode"] = "HYB"
 
         return rr
 
@@ -2805,8 +3121,15 @@ def _build_faculty_accept_email(
     tr_html = ""
     for r in rows:
         r = _format_row_for_email(r)
-        # Visual cue in email: highlight special classes
-        tr_style = ' style="background:#f3e8ff;"' if bool(r.get("is_special_class")) else ""
+        # Visual cues in email:
+        # - Special Classes: light purple
+        # - Serviced Classes: light yellow
+        if bool(r.get("is_special_class")):
+            tr_style = ' style="background:#f3e8ff;"'
+        elif bool(r.get("is_serviced")):
+            tr_style = ' style="background:#fefce8;"'
+        else:
+            tr_style = ""
         tr_html += f"""
         <tr{tr_style}>
           <td>{td(r.get("course_code",""))}</td>
@@ -2888,12 +3211,57 @@ async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[s
 
     base_rows = proposal.get("rows", []) or []
 
-    # Email rows include reflected special classes; calendar rows use base schedule only
+    # Email rows include reflected special classes + serviced classes.
+    # Calendar rows also include special + serviced rows so they sync to Google Calendar on accept.
     email_rows = list(base_rows)
+    calendar_rows = list(base_rows)
+
+    # Some deployments include Faculty Service (serviced) sections inside the proposal rows
+    # but without a marker. Ensure these rows are flagged so they appear (and are styled)
+    # in the acceptance email, and stay consistent for calendar creation.
+    try:
+        serviced_map = await _serviced_section_map_for_faculty(term_id=term_id, faculty_id=fid)
+        if serviced_map:
+            for rr in email_rows:
+                sid = str((rr or {}).get("section_id") or "").strip()
+                if sid and sid in serviced_map:
+                    rr["is_serviced"] = True
+                    rr["serviced_department"] = serviced_map.get(sid) or rr.get("serviced_department") or ""
+                    rr["mode"] = _serviced_mode_from_rooms(rr.get("room1"), rr.get("room2"))
+            for rr in calendar_rows:
+                sid = str((rr or {}).get("section_id") or "").strip()
+                if sid and sid in serviced_map:
+                    rr["is_serviced"] = True
+                    rr["serviced_department"] = serviced_map.get(sid) or rr.get("serviced_department") or ""
+                    rr["mode"] = _serviced_mode_from_rooms(rr.get("room1"), rr.get("room2"))
+    except Exception:
+        # Best-effort only. If this fails, we still try to reflect serviced rows below.
+        serviced_map = {}
+
+    # Exclude real section rows when reflecting serviced rows to avoid duplicates.
+    exclude_section_ids = {
+        str((r or {}).get("section_id") or "").strip()
+        for r in (base_rows or [])
+        if str((r or {}).get("section_id") or "").strip()
+    }
+
     try:
         sc_rows = await _fetch_reflected_special_classes_for_faculty(term_id=term_id, faculty_id=fid)
         if sc_rows:
             email_rows += sc_rows
+            calendar_rows += sc_rows
+    except Exception:
+        pass
+
+    try:
+        serviced_rows = await _fetch_reflected_faculty_service_rows_for_faculty(
+            term_id=term_id,
+            faculty_id=fid,
+            exclude_section_ids=exclude_section_ids,
+        )
+        if serviced_rows:
+            email_rows += serviced_rows
+            calendar_rows += serviced_rows
     except Exception:
         pass
 
@@ -3052,7 +3420,7 @@ async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[s
                     calendar_ok, calendar_events_created, calendar_error = await _create_term_calendar_for_user(
                         user_id=userId,
                         term_start_at=term_start_at,
-                        rows=base_rows,
+                        rows=calendar_rows,
                         week_count=week_count,
                     )
         except Exception as e:
