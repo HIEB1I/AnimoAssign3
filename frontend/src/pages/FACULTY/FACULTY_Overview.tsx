@@ -20,6 +20,53 @@ import { InboxContent } from "./FACULTY_Inbox";
 import SelectBox from "../../component/SelectBox";
 
 
+// ---------------- Special-class display helpers ----------------
+// NOTE: These are intentionally *display* helpers only (no persistence side-effects).
+// Requirements:
+// - For special classes, show TBA instead of ONLINE.
+// - For special classes (List view), show day initials (M/T/W/H/F/S/U) instead of full words.
+// - For special classes, mode should be FOL if BOTH rooms are unassigned (empty/TBA/ONLINE), else HYB.
+const isRoomUnassignedForSpecial = (v?: unknown) => {
+  const s = String(v ?? "").trim();
+  if (!s) return true;
+  const u = s.toUpperCase();
+  return u === "TBA" || u === "ONLINE";
+};
+
+const normalizeRoomDisplayForSpecial = (v?: unknown) => {
+  const s = String(v ?? "").trim();
+  if (!s) return "—";
+  const u = s.toUpperCase();
+  if (u === "ONLINE") return "TBA";
+  return s;
+};
+
+const dayInitial = (d?: unknown) => {
+  const s = String(d ?? "").trim();
+  if (!s) return "";
+  const u = s.toUpperCase();
+  if (u === "TBA") return "TBA";
+  // If already a short code, keep it.
+  if (s.length <= 2) return u;
+  const norm = s.toLowerCase();
+  if (norm.startsWith("mon")) return "M";
+  if (norm.startsWith("tue")) return "T";
+  if (norm.startsWith("wed")) return "W";
+  // Common local abbreviation: Thursday = H
+  if (norm.startsWith("thu")) return "H";
+  if (norm.startsWith("fri")) return "F";
+  if (norm.startsWith("sat")) return "S";
+  if (norm.startsWith("sun")) return "U";
+  return s.charAt(0).toUpperCase();
+};
+
+const specialModeFromRooms = (room1?: unknown, room2?: unknown) => {
+  return isRoomUnassignedForSpecial(room1) && isRoomUnassignedForSpecial(room2)
+    ? "FOL"
+    : "HYB";
+};
+
+
 import {
   getFacultyOverviewList,
   getFacultyOverviewProfile,
@@ -1419,7 +1466,13 @@ function placeItems(teachingLoad: TLItem[]): Placed[] {
           mode: it.mode,
           // IMPORTANT: Even if there is no assigned room yet, the schedule must still reflect.
           // Use a neutral placeholder instead of implying an online room.
-          room: (room && String(room).trim()) ? String(room).trim() : "TBA",
+          // Special class requirement: show TBA instead of ONLINE for Room 1/2 in Calendar view.
+          room: (() => {
+            const base = (room && String(room).trim()) ? String(room).trim() : "TBA";
+            const isSpecial = Boolean((it as any)?.is_special_class);
+            if (isSpecial && String(base).trim().toUpperCase() === "ONLINE") return "TBA";
+            return base;
+          })(),
           time: time,
           syllabus: it.syllabus,
           is_special_class: Boolean((it as any)?.is_special_class),
@@ -1836,15 +1889,28 @@ const scheduleFinalLabel = (() => {
                       teachingLoad.map((it, idx) => {
                         const t1 = splitBeginEnd(it.time1);
                         const t2 = splitBeginEnd(it.time2);
-                        const d1 = it.day1 && it.day1 !== "TBA" ? it.day1 : "—";
-                        const d2 = it.day2 && it.day2 !== "TBA" ? it.day2 : "—";
-
                         const isSpecial = Boolean((it as any)?.is_special_class);
+
+                        // Days: for special classes show initial-only (M/T/W/H/F/S/U) to match regular.
+                        const d1Raw = it.day1 && it.day1 !== "TBA" ? it.day1 : "";
+                        const d2Raw = it.day2 && it.day2 !== "TBA" ? it.day2 : "";
+                        const d1 = d1Raw ? (isSpecial ? dayInitial(d1Raw) : d1Raw) : "—";
+                        const d2 = d2Raw ? (isSpecial ? dayInitial(d2Raw) : d2Raw) : "—";
+
+                        // Rooms: for special classes show TBA instead of ONLINE.
+                        const room1Display = isSpecial
+                          ? normalizeRoomDisplayForSpecial((it as any).room1)
+                          : (it.room1 || "—");
+                        const room2Display = isSpecial
+                          ? normalizeRoomDisplayForSpecial((it as any).room2)
+                          : (it.room2 || "—");
+
+                        // Mode: for special classes auto-derive from rooms (FOL if both rooms unassigned/TBA/ONLINE, else HYB).
                         // In List view: Special Classes should NOT show "Special Class" in the Mode column.
                         const modeRaw = String(it.mode || "").trim();
                         const modeDisplay = isSpecial
-                          ? modeRaw && modeRaw.toLowerCase() !== "special class" ? modeRaw : "—"
-                          : modeRaw || "—";
+                          ? specialModeFromRooms((it as any).room1, (it as any).room2)
+                          : (modeRaw || "—");
 
                         return (
                           <tr
@@ -1864,11 +1930,11 @@ const scheduleFinalLabel = (() => {
                             <td className="px-4 py-3 align-middle">{d1}</td>
                             <td className="px-4 py-3 align-middle">{t1.begin}</td>
                             <td className="px-4 py-3 align-middle">{t1.end}</td>
-                            <td className="px-4 py-3 align-middle">{it.room1 || "—"}</td>
+                            <td className="px-4 py-3 align-middle">{room1Display}</td>
                             <td className="px-4 py-3 align-middle">{d2}</td>
                             <td className="px-4 py-3 align-middle">{t2.begin}</td>
                             <td className="px-4 py-3 align-middle">{t2.end}</td>
-                            <td className="px-4 py-3 align-middle">{it.room2 || "—"}</td>
+                            <td className="px-4 py-3 align-middle">{room2Display}</td>
                             <td className="px-4 py-3 align-middle text-gray-800">{modeDisplay}</td>
                             <td className="px-4 py-3 align-middle">
                               <button
@@ -2253,14 +2319,14 @@ function ChangeRequestModal({
 	                <div className="grid grid-cols-3 gap-0 px-3 py-2 text-sm">
 	                  <div className="font-medium text-neutral-800">{dayAbbrev(oi?.day1) || "TBA"}</div>
 	                  <div className="font-medium text-neutral-800">{String(oi?.time1 || "TBA")}</div>
-	                  <div className="text-right text-neutral-700">{String(oi?.room1 || "TBA")}</div>
+	                  <div className="text-right text-neutral-700">{normalizeRoomDisplayForSpecial(oi?.room1) || "TBA"}</div>
 	                </div>
 
 	                {hasSecond ? (
 	                  <div className="grid grid-cols-3 gap-0 border-t border-neutral-100 px-3 py-2 text-sm">
 	                    <div className="font-medium text-neutral-800">{dayAbbrev(oi?.day2) || "TBA"}</div>
 	                    <div className="font-medium text-neutral-800">{String(oi?.time2 || "TBA")}</div>
-	                    <div className="text-right text-neutral-700">{String(oi?.room2 || "TBA")}</div>
+	                    <div className="text-right text-neutral-700">{normalizeRoomDisplayForSpecial(oi?.room2) || "TBA"}</div>
 	                  </div>
 	                ) : (
 	                  <div className="grid grid-cols-3 border-t border-neutral-100 px-3 py-2 text-sm text-neutral-500">

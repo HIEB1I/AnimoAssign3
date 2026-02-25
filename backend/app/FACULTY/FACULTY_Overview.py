@@ -2720,6 +2720,68 @@ def _build_faculty_accept_email(
     def td(x: Any) -> str:
         return _html_escape("" if x is None else str(x))
 
+    # --- Special-class formatting for ACCEPTED-SCHEDULE email ---
+    # Requirements:
+    # - For special classes: TBA or Online classes display as TBA (not ONLINE)
+    # - For special classes: Day 1/Day 2 use initials only (like regular classes)
+    # - For special classes: Mode auto FOL if both rooms are unassigned/TBA/ONLINE, else HYB
+    _DAY_INITIAL = {
+        "MONDAY": "M",
+        "TUESDAY": "T",
+        "WEDNESDAY": "W",
+        "THURSDAY": "H",  # common academic abbreviation
+        "FRIDAY": "F",
+        "SATURDAY": "S",
+        "SUNDAY": "U",
+        # pass-through if already an initial
+        "M": "M",
+        "T": "T",
+        "W": "W",
+        "H": "H",
+        "F": "F",
+        "S": "S",
+        "U": "U",
+    }
+
+    def _day_to_initial(v: Any) -> str:
+        s = ("" if v is None else str(v)).strip()
+        if not s:
+            return ""
+        if s.upper() == "TBA":
+            return "TBA"
+        return _DAY_INITIAL.get(s.upper(), s[:1].upper())
+
+    def _room_to_email_display(v: Any) -> str:
+        s = ("" if v is None else str(v)).strip()
+        if not s:
+            return "TBA"
+        if s.upper() in ("ONLINE", "TBA"):
+            return "TBA"
+        return s
+
+    def _is_unassigned_room(v: Any) -> bool:
+        s = ("" if v is None else str(v)).strip()
+        return (not s) or (s.upper() in ("ONLINE", "TBA"))
+
+    def _format_row_for_email(r: Dict[str, Any]) -> Dict[str, Any]:
+        if not bool(r.get("is_special_class")):
+            return r
+
+        rr = dict(r)
+        rr["day1"] = _day_to_initial(rr.get("day1"))
+        rr["day2"] = _day_to_initial(rr.get("day2")) if rr.get("day2") not in (None, "") else ""
+
+        rr["room1"] = _room_to_email_display(rr.get("room1"))
+        rr["room2"] = _room_to_email_display(rr.get("room2")) if rr.get("room2") not in (None, "") else ""
+
+        # Mode override for special classes per requirement
+        if _is_unassigned_room(r.get("room1")) and _is_unassigned_room(r.get("room2")):
+            rr["mode"] = "FOL"
+        else:
+            rr["mode"] = "HYB"
+
+        return rr
+
     # Plain text fallback
     lines = [
         f"Dear {faculty_name},",
@@ -2729,6 +2791,7 @@ def _build_faculty_accept_email(
         "Schedule:",
     ]
     for r in rows:
+        r = _format_row_for_email(r)
         lines.append(
             f"- {r.get('course_code','')} {r.get('section','')} | {r.get('units','')}u | "
             f"{r.get('day1','')} {r.get('time1','')} {r.get('room1','')} | "
@@ -2741,18 +2804,21 @@ def _build_faculty_accept_email(
     # HTML table (inbox-style)
     tr_html = ""
     for r in rows:
+        r = _format_row_for_email(r)
+        # Visual cue in email: highlight special classes
+        tr_style = ' style="background:#f3e8ff;"' if bool(r.get("is_special_class")) else ""
         tr_html += f"""
-        <tr>
+        <tr{tr_style}>
           <td>{td(r.get("course_code",""))}</td>
           <td style="text-align:center;">{td(r.get("section",""))}</td>
           <td style="text-align:center;">{td(r.get("units",""))}</td>
           <td style="text-align:center;">{td(r.get("mode",""))}</td>
           <td style="text-align:center;">{td(r.get("day1",""))}</td>
           <td style="text-align:center;">{td(r.get("time1",""))}</td>
-          <td>{td(r.get("room1",""))}</td>
+          <td style="text-align:center;">{td(r.get("room1",""))}</td>
           <td style="text-align:center;">{td(r.get("day2",""))}</td>
           <td style="text-align:center;">{td(r.get("time2",""))}</td>
-          <td>{td(r.get("room2",""))}</td>
+          <td style="text-align:center;">{td(r.get("room2",""))}</td>
         </tr>
         """
 
