@@ -3639,6 +3639,112 @@ export async function restoreFacultyService(
   return data as { ok: boolean; row: FacultyServiceRow };
 }
 
+// -----------------------------------------------------------------------------
+// OM mirror endpoints for Faculty Service
+// -----------------------------------------------------------------------------
+
+export async function getOMFSOptions(params?: {
+  q?: string;
+  toDepartment?: ToDept;
+  requesterDepartment?: string;
+  courseCode?: string;
+}) {
+  const sp = new URLSearchParams();
+  if (params?.q) sp.set("q", params.q);
+  if (params?.toDepartment) sp.set("toDepartment", params.toDepartment);
+  if (params?.requesterDepartment) sp.set("requesterDepartment", params.requesterDepartment);
+  if (params?.courseCode) sp.set("courseCode", params.courseCode);
+  const { data } = await api.get(`/om/faculty-service/options?${sp.toString()}`);
+  return data as {
+    ok: boolean;
+    courses: Array<{ code: string; title: string; units?: number }>;
+    sections?: Array<{ section_id: string; section_code: string }>;
+    departments: ToDept[];
+    timeBegins: string[];
+    days: DayShort[];
+    facultyOptions?: Array<{ faculty_id: string; first_name: string; last_name: string; email?: string; label: string }>;
+    activeTerm?: any;
+  };
+}
+
+export async function listOMFacultyService(params?: {
+  status?: string;
+  dept?: string;
+  search?: string;
+  box?: "sent" | "received";
+}) {
+  const sp = new URLSearchParams();
+  if (params?.status) sp.set("status", params.status);
+  if (params?.dept) sp.set("dept", params.dept);
+  if (params?.search) sp.set("search", params.search);
+  if (params?.box) sp.set("box", params.box);
+
+  const { data } = await api.get(`/om/faculty-service/list?${sp.toString()}`);
+  return data as { ok: boolean; rows: FacultyServiceRow[] };
+}
+
+export async function createOMFacultyService(payload: {
+  course_code: string;
+  section_id: string;
+  section?: string;
+  course_title?: string;
+  units?: number | null;
+  to_department: ToDept;
+  remarks?: string;
+  from_department?: string;
+}) {
+  const { data } = await api.post(`/om/faculty-service/create`, payload);
+  return data as { ok: boolean; row: FacultyServiceRow };
+}
+
+export async function sendOMFacultyService(fs_id: string) {
+  const { data } = await api.post(`/om/faculty-service/send/${encodeURIComponent(fs_id)}`);
+  return data as { ok: boolean; row: FacultyServiceRow };
+}
+
+export async function respondOMFacultyService(
+  fs_id: string,
+  payload: {
+    faculty: FacultyLite;
+    day1?: DayShort | "";
+    begin1?: string | "";
+    end1?: string | "";
+    day2?: DayShort | "";
+    begin2?: string | "";
+    end2?: string | "";
+    remarks?: string;
+  }
+) {
+  const { data } = await api.post(`/om/faculty-service/respond/${encodeURIComponent(fs_id)}`, payload);
+  return data as { ok: boolean; row: FacultyServiceRow };
+}
+
+export async function rejectOMFacultyService(fs_id: string, payload?: { remarks?: string }) {
+  const { data } = await api.post(`/om/faculty-service/reject/${encodeURIComponent(fs_id)}`, payload || {});
+  return data as { ok: boolean; row: FacultyServiceRow };
+}
+
+export async function restoreOMFacultyService(
+  fs_id: string,
+  payload: Partial<
+    Pick<
+      FacultyServiceRow,
+      | "status"
+      | "faculty"
+      | "day1"
+      | "begin1"
+      | "end1"
+      | "day2"
+      | "begin2"
+      | "end2"
+      | "remarks"
+    >
+  >
+) {
+  const { data } = await api.post(`/om/faculty-service/restore/${encodeURIComponent(fs_id)}`, payload || {});
+  return data as { ok: boolean; row: FacultyServiceRow };
+}
+
 
 
 
