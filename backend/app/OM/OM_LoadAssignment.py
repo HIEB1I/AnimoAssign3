@@ -1410,7 +1410,7 @@ async def _notify_apo_room_allocation_ready(
             email_from_user_id=om_user_id,
         )
 
-async def _fetch_rows(user_id: str, term_id: str, db) -> Dict[str, Any]:
+async def _fetch_rows(user_id: str, term_id: str, db, archived_view: bool = False) -> Dict[str, Any]:
     dept_ids = await _loadassignment_department_ids(user_id, db)
     if not dept_ids:
         return {"rows": []}
@@ -1420,8 +1420,30 @@ async def _fetch_rows(user_id: str, term_id: str, db) -> Dict[str, Any]:
     # and must not appear in the OM load assignment table.
     special_section_ids = await _special_class_section_ids(term_id, db)
 
+    # Primary source of truth for Load Assignment rows is `sections_submitted`.
+    # However, some legacy deployments/terms may only have section offerings in `sections`
+    # (or were migrated before `sections_submitted` existed). This caused Archived Loads
+    # to appear empty for those older terms.
+    #
+    # Fix: try `sections_submitted` first; if there are no rows for the requested term,
+    # fall back to `sections` for that term.
+
+    # For Archived Loads, include legacy rows where `submitted_for_scheduling` is missing/null.
+    # For the active/planning term, keep the strict behavior: submitted_for_scheduling=True.
+    submitted_match: Dict[str, Any]
+    if archived_view:
+        submitted_match = {
+            "$or": [
+                {"submitted_for_scheduling": True},
+                {"submitted_for_scheduling": {"$exists": False}},
+                {"submitted_for_scheduling": None},
+            ]
+        }
+    else:
+        submitted_match = {"submitted_for_scheduling": True}
+
     pipe: List[Dict[str, Any]] = [
-        {"$match": {"term_id": term_id, "submitted_for_scheduling": True}} if term_id else {"$match": {"submitted_for_scheduling": True}},
+        {"$match": {"term_id": term_id, **submitted_match}} if term_id else {"$match": submitted_match},
 
         # Filter out Special Class section_ids (best-effort). Keep this early for performance.
         ({"$match": {"section_id": {"$nin": sorted(list(special_section_ids))}}} if special_section_ids else {"$match": {}}),
@@ -1473,6 +1495,15 @@ async def _fetch_rows(user_id: str, term_id: str, db) -> Dict[str, Any]:
     ]
 
     docs = [x async for x in db[COL_SECTIONS_SUBMITTED].aggregate(pipe)]
+
+    # Legacy fallback: if a term has no `sections_submitted` rows, try `sections`.
+    # Only do this when the primary query returns nothing to avoid duplicates.
+    if term_id and not docs:
+        try:
+            docs = [x async for x in db[COL_SECTIONS].aggregate(pipe)]
+        except Exception:
+            # Best-effort only; keep existing behavior.
+            docs = []
 
     # Preload section remarks from the canonical `sections` collection.
     # Remarks are stored in sections.remarks (not in sections_submitted).
@@ -2962,13 +2993,30 @@ async def om_load_assignment_terms(db=Depends(get_db)):
             continue
 
         # Skip academic terms that have no archived load data.
-        # Archived loads come from `sections_submitted` (submitted_for_scheduling=True),
-        # so if there are no submitted sections for a term, it shouldn't appear in the archive selector.
+        # Archived loads primarily come from `sections_submitted` (submitted_for_scheduling=True).
+        # However, legacy terms may not have the `submitted_for_scheduling` flag at all
+        # (field missing / null). Those terms should still be selectable in Archived Loads.
+        # We therefore treat (True OR missing OR null) as "archived-load-capable".
+        # We also check `sections` as a legacy fallback for deployments migrated before
+        # `sections_submitted` existed.
         try:
+            submitted_flag_or_legacy = {
+                "$or": [
+                    {"submitted_for_scheduling": True},
+                    {"submitted_for_scheduling": {"$exists": False}},
+                    {"submitted_for_scheduling": None},
+                ]
+            }
+
             has_archived = await db[COL_SECTIONS_SUBMITTED].find_one(
-                {"term_id": tid, "submitted_for_scheduling": True},
+                {"term_id": tid, **submitted_flag_or_legacy},
                 {"_id": 1},
             )
+            if not has_archived:
+                has_archived = await db[COL_SECTIONS].find_one(
+                    {"term_id": tid, **submitted_flag_or_legacy},
+                    {"_id": 1},
+                )
             if not has_archived:
                 continue
         except Exception:
@@ -3015,6 +3063,11 @@ async def om_load_assignment_planning_term(db=Depends(get_db)):
 @router.get("/load-assignment/list")
 async def get_om_load_assignment_list(user_id: str, term_id: Optional[str] = None, db=Depends(get_db)):
     # Default behavior remains: if no term_id is provided, use the OM active term.
+    # If a term_id is provided and it is NOT the active term, treat it as an Archived view.
+    planning = await _active_term()
+    planning_term_id = (planning or {}).get("term_id")
+
+    is_archived_view = False
     if term_id:
         active = await db[COL_TERMS].find_one(
             {"term_id": term_id},
@@ -3022,8 +3075,9 @@ async def get_om_load_assignment_list(user_id: str, term_id: Optional[str] = Non
         )
         if not active:
             raise HTTPException(status_code=404, detail="term_id not found")
+        is_archived_view = bool(planning_term_id and str(term_id) != str(planning_term_id))
     else:
-        active = await _active_term()
+        active = planning
 
     # Whether this term's load recommendation has already been forwarded to the Chair.
     # Forwarding is a final act and should remain disabled across refresh/auto-assign.
@@ -3042,7 +3096,7 @@ async def get_om_load_assignment_list(user_id: str, term_id: Optional[str] = Non
     if not (active or {}).get("term_id"):
         raise HTTPException(status_code=409, detail="No active/upcoming term found")
 
-    base = await _fetch_rows(user_id, term_id=active["term_id"], db=db)
+    base = await _fetch_rows(user_id, term_id=active["term_id"], db=db, archived_view=is_archived_view)
     rows = base["rows"]
 
     # `selected` is a UI-only flag used by the OM table checkboxes.
