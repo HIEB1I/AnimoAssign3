@@ -54,6 +54,19 @@ def _code_as_str(v: Any) -> str:
         return (v[0] if v else "") or ""
     return str(v or "")
 
+
+def _campus_label(name: Any) -> Optional[str]:
+    """Normalize campus names to stable labels used in UI filters."""
+    s = str(name or "").strip()
+    if not s:
+        return None
+    u = s.upper()
+    if "MANILA" in u:
+        return "Manila"
+    if "LAGUNA" in u:
+        return "Laguna"
+    return s
+
 # ---------------------------------------------------------
 # Core Logic
 # ---------------------------------------------------------
@@ -71,29 +84,42 @@ def _code_as_str(v: Any) -> str:
 
 
 async def fetch_teaching_history(faculty_id: str) -> List[Dict[str, Any]]:
+    """Return teaching history rows for a faculty.
+
+    Fixes missing-history cases:
+      1) Some legacy data stored assignment docs under a different identifier (commonly user_id).
+         We therefore match assignments where faculty_id is ANY of:
+           - the requested id
+           - the resolved faculty_profiles.faculty_id
+           - the resolved faculty_profiles.user_id (when present)
+      2) We intentionally DO NOT filter out archived assignments here.
+         This matches FACULTY_History behavior: archived rows can represent past teaching loads.
+    """
     db = get_db()
 
-    # # 1. Get faculty profile to determine department fallback
-    # faculty = await db.faculty_profiles.find_one({"faculty_id": faculty_id})
-    # if not faculty:
-    #     return []
-    
-    # dept_fallback_campus = await _dept_fallback_campus_name(db, faculty.get("department_id"))
-
-    # 1. Validate faculty exists (no campus fallback)
-    faculty = await db.faculty_profiles.find_one({"faculty_id": faculty_id})
+    # 1) Resolve faculty profile by either faculty_id OR user_id (defensive)
+    faculty = await db.faculty_profiles.find_one(
+        {"$or": [{"faculty_id": faculty_id}, {"user_id": faculty_id}]},
+        {"_id": 0}
+    )
     if not faculty:
         return []
+
+    # Match assignments by both faculty_id and user_id to catch legacy docs
+    faculty_ids = list({
+        str(faculty_id),
+        str(faculty.get("faculty_id") or ""),
+        str(faculty.get("user_id") or ""),
+    } - {""})
     
     # Standard teaching units baseline depends on employment type
     emp_type = (faculty.get("employment_type") or "").strip().upper()
-    standard_load_units = 6 if emp_type == "PT" else 12  # default FT=12
+    standard_load_units = 6 if (emp_type == "PT" or "PART" in emp_type) else 12  # default FT=12
 
-    # 2. Aggregation Pipeline
-    # NOTE: Removed "is_archived": {"$ne": True} to ensure ALL history is shown, 
-    # matching FACULTY_History logic.
+    # 2) Aggregation Pipeline
+    # NOTE: Intentionally no is_archived filter (match FACULTY_History behavior).
     pipeline: List[Dict[str, Any]] = [
-        {"$match": {"faculty_id": faculty_id}}, 
+        {"$match": {"faculty_id": {"$in": faculty_ids}}},
         
         # Join Section
         {"$lookup": {"from": "sections", "localField": "section_id", "foreignField": "section_id", "as": "sec"}},
@@ -106,6 +132,19 @@ async def fetch_teaching_history(faculty_id: str) -> List[Dict[str, Any]]:
         # Join Term
         {"$lookup": {"from": "terms", "localField": "sec.term_id", "foreignField": "term_id", "as": "t"}},
         {"$unwind": {"path": "$t", "preserveNullAndEmptyArrays": True}},
+
+        # Section campus fallback (more reliable than room-based campus when room_id is missing)
+        {"$addFields": {
+            "sec_campus_id_one": {
+                "$cond": [
+                    {"$isArray": "$sec.campus_id"},
+                    {"$arrayElemAt": ["$sec.campus_id", 0]},
+                    "$sec.campus_id"
+                ]
+            }
+        }},
+        {"$lookup": {"from": "campuses", "localField": "sec_campus_id_one", "foreignField": "campus_id", "as": "sec_camp"}},
+        {"$unwind": {"path": "$sec_camp", "preserveNullAndEmptyArrays": True}},
         
         # Join Schedules (One-to-Many fan-out)
         {"$lookup": {"from": "section_schedules", "localField": "sec.section_id", "foreignField": "section_id", "as": "scheds"}},
@@ -135,6 +174,7 @@ async def fetch_teaching_history(faculty_id: str) -> List[Dict[str, Any]]:
             "sched_end": "$scheds.end_time",
             "room_number": {"$ifNull": ["$scheds.room", "$room.room_number"]}, 
             "campus_name": "$camp.campus_name",
+            "section_campus_name": "$sec_camp.campus_name",
         }},
 
         # Group back per section to consolidate meeting patterns
@@ -146,6 +186,7 @@ async def fetch_teaching_history(faculty_id: str) -> List[Dict[str, Any]]:
             "units": {"$first": "$units"},
             "term_number": {"$first": "$term_number"},
             "ay_start": {"$first": "$ay_start"},
+            "section_campus_name": {"$first": "$section_campus_name"},
             "meetings": {"$push": {
                 "day": "$sched_day",
                 "room_type": "$sched_room_type",
@@ -168,7 +209,7 @@ async def fetch_teaching_history(faculty_id: str) -> List[Dict[str, Any]]:
         # even if day/time are null. No fallback: N/A when missing.
         campus_counts: Dict[str, int] = {}
         for m in meetings:
-            c = (m.get("campus") or "").strip()
+            c = _campus_label(m.get("campus"))
             if not c:
                 continue
             campus_counts[c] = campus_counts.get(c, 0) + 1
@@ -176,46 +217,84 @@ async def fetch_teaching_history(faculty_id: str) -> List[Dict[str, Any]]:
         primary_campus = "N/A"
         if campus_counts:
             primary_campus = max(campus_counts.items(), key=lambda kv: kv[1])[0]
-        
-        # Normalize and sort by day order
-        norm_meet: List[Tuple[int, Dict[str, Any]]] = []
-        for m in meetings:
-            if not m.get("day"): continue 
-            full_day = _to_full_day(m.get("day"))
-            norm_meet.append((DAY_ORDER.get(full_day, 99), {
+
+        # Normalize meetings (dedupe) and keep per-day begin/end so Day 2 can have a different time.
+        norm_meet: List[Tuple[int, str, Dict[str, Any]]] = []
+        seen = set()
+        for mm in meetings:
+            day_raw = mm.get("day")
+            if not day_raw:
+                continue
+            full_day = _to_full_day(day_raw)
+            begin = _fmt_hhmm(mm.get("start"))
+            end = _fmt_hhmm(mm.get("end"))
+            room = (mm.get("room") or None)
+            campus = _campus_label(mm.get("campus"))
+
+            room_type = str(mm.get("room_type") or "").strip()
+            mode_guess = room_type or ("F2F" if room else "Online")
+
+            key = (full_day, begin, end, room or "", campus or "", mode_guess)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            norm_meet.append((DAY_ORDER.get(full_day, 99), begin or "", {
                 "day": full_day,
-                "room": m.get("room") or None,
-                "mode": (m.get("room_type") or "Online"),
-                "time": _band(m.get("start"), m.get("end")),
-                "campus": m.get("campus") or None,
+                "begin": begin or None,
+                "end": end or None,
+                "room": room,
+                "mode": mode_guess,
+                "campus": campus,
             }))
-        
-        norm_meet.sort(key=lambda x: (x[0], (x[1].get("time") or "")))
+
+        norm_meet.sort(key=lambda x: (x[0], x[1]))
 
         day1 = room1 = day2 = room2 = None
+        begin1 = end1 = begin2 = end2 = None
         mode = None
-        time_band = ""
         campus_name = None
 
         if norm_meet:
-            m1 = norm_meet[0][1]
-            day1 = m1["day"]
-            room1 = m1["room"] or "Online"
-            mode = m1["mode"]
-            time_band = m1["time"]
-            campus_name = m1["campus"]
-        
-        if len(norm_meet) > 1:
-            m2 = norm_meet[1][1]
-            day2 = m2["day"]
-            room2 = m2["room"] or "Online"
-            campus_name = campus_name or m2["campus"]
-        
-        campus_name = campus_name or primary_campus or "N/A"
+            m1 = norm_meet[0][2]
+            day1 = m1.get("day")
+            begin1 = m1.get("begin")
+            end1 = m1.get("end")
+            mode = m1.get("mode")
+            campus_name = m1.get("campus")
 
-        if mode == "Online" and (not room1 or room1 == "Online"):
-            room1 = "N/A"
-        
+            is_online = "ONLINE" in str(mode or "").upper()
+            if is_online:
+                room1 = "N/A"
+            else:
+                room1 = m1.get("room") or "TBA"
+
+        if len(norm_meet) > 1:
+            m2 = norm_meet[1][2]
+            day2 = m2.get("day")
+            begin2 = m2.get("begin")
+            end2 = m2.get("end")
+
+            is_online = "ONLINE" in str(mode or "").upper()
+            if is_online:
+                room2 = "N/A"
+            else:
+                room2 = m2.get("room") or "TBA"
+
+            campus_name = campus_name or m2.get("campus")
+
+        # Campus fallback priority: meeting campus → most common meeting campus → section campus → N/A
+        sec_campus = _campus_label(r.get("section_campus_name"))
+        campus_name = _campus_label(campus_name) or primary_campus or sec_campus or "N/A"
+
+        # Build time string for backwards compatibility with the frontend parser.
+        band1 = _band(begin1, end1) if (begin1 or end1) else ""
+        band2 = _band(begin2, end2) if (begin2 or end2) else ""
+        if band1 and band2 and band2 != band1:
+            time_band = f"{band1} | {band2}"
+        else:
+            time_band = band1 or band2 or ""
+
         results.append({
             "ay": _ay_label(r.get("ay_start")),
             "term_name": f"Term {r.get('term_number') or '?'}", 
@@ -232,7 +311,9 @@ async def fetch_teaching_history(faculty_id: str) -> List[Dict[str, Any]]:
             "mode": mode or "Online",
             
             "day1": day1, "room1": room1,
+            "begin1": begin1, "end1": end1,
             "day2": day2, "room2": room2,
+            "begin2": begin2, "end2": end2,
             "time": time_band,
             
             "ay_start_sort": r.get("ay_start") or 0,
