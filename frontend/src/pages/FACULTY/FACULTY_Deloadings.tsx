@@ -228,10 +228,10 @@ export default function FACULTY_Deloadings({ embedded = false }: { embedded?: bo
                 onClick={() => load("prev")}
                 disabled={!data?.has_prev || loading}
                 className={`rounded-lg border px-3 py-2 text-sm font-semibold ${
-                  !data?.has_prev || loading
-                    ? "cursor-default border-gray-200 bg-gray-100 text-gray-500"
-                    : "cursor-pointer border-emerald-500 bg-emerald-400 text-emerald-950 hover:bg-emerald-300"
-                }`}
+                !data?.has_prev || loading
+                  ? "cursor-default border-gray-200 bg-gray-100 text-gray-500"
+                  : "cursor-pointer border-[#007a55] bg-[#007a55] text-white hover:bg-[#006a4a]"
+              }`}
                 title="Previous term"
               >
                 ← Prev
@@ -251,7 +251,7 @@ export default function FACULTY_Deloadings({ embedded = false }: { embedded?: bo
                 className={`rounded-lg border px-3 py-2 text-sm font-semibold ${
                   !data?.has_next || loading
                     ? "cursor-default border-gray-200 bg-gray-100 text-gray-500"
-                    : "cursor-pointer border-emerald-500 bg-emerald-400 text-emerald-950 hover:bg-emerald-300"
+                    : "cursor-pointer border-[#007a55] bg-[#007a55] text-white hover:bg-[#006a4a]"
                 }`}
                 title="Next term"
               >

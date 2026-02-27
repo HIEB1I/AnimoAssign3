@@ -4478,26 +4478,60 @@ async def respond_load_assignment_rfc(
     if fac_user_id:
         # Backfill missing users.gmail (some Faculty accounts only have users.email).
         await _ensure_user_gmail_address(fac_user_id, db)
+
+        # Best-effort: include the specific course + section in the notification body
+        # so both in-app and Gmail messages are self-contained.
+        course_code = ""
+        section_code = ""
+        course_section_line = ""
+        if section_id:
+            try:
+                sec = await db[COL_SECTIONS].find_one(
+                    {"section_id": section_id},
+                    {"_id": 0, "section_code": 1, "course_id": 1, "course_code": 1, "section": 1, "course": 1},
+                ) or {}
+
+                section_code = str(sec.get("section_code") or sec.get("section") or "").strip()
+
+                cc = sec.get("course_code") or sec.get("course") or ""
+                if isinstance(cc, list):
+                    cc = cc[0] if cc else ""
+                course_code = str(cc or "").strip()
+
+                cid = str(sec.get("course_id") or "").strip()
+                if not course_code and cid:
+                    cdoc = await db[COL_COURSES].find_one({"course_id": cid}, {"_id": 0, "course_code": 1}) or {}
+                    cc2 = cdoc.get("course_code") or ""
+                    if isinstance(cc2, list):
+                        cc2 = cc2[0] if cc2 else ""
+                    course_code = str(cc2 or "").strip()
+
+                if course_code or section_code:
+                    label = " – ".join([p for p in [course_code, section_code] if p])
+                    course_section_line = f"Course/Section: {label}\n\n"
+            except Exception:
+                course_section_line = ""
+
         if action == "reply":
             title = "Load Assignment: OM replied to your Request for Change"
-            details = message
+            details = (course_section_line + message).strip()
             kind = "load_rfc_reply"
         elif action == "approve":
             title = "Load Assignment: OM approved your request"
             if message:
-                details = message
+                details = (course_section_line + message).strip()
             else:
-                details = "Your Request for Change was approved."
+                details = (course_section_line + "Your Request for Change was approved.").strip()
                 # If the RFC contained schedule details, we auto-applied them on approval.
                 try:
                     if 'applied' in locals() and applied:
-                        details = "Your Request for Change was approved and the requested schedule was applied."
+                        details = (course_section_line + "Your Request for Change was approved and the requested schedule was applied.").strip()
                 except Exception:
                     pass
             kind = "load_rfc_approved"
         else:
             title = "Load Assignment: OM rejected your request"
-            details = message or "Your Request for Change was rejected."
+            details = (course_section_line + (message or "Your Request for Change was rejected.")).strip()
             kind = "load_rfc_rejected"
 
         # Send BOTH in-app + Gmail notification (best-effort) using the OM's connected Gmail.
@@ -4514,6 +4548,8 @@ async def respond_load_assignment_rfc(
                 "faculty_id": faculty_id,
                 "section_id": section_id,
                 "rfc_id": rfc_id,
+                "course_code": course_code,
+                "section_code": section_code,
             },
             send_email=True,
             email_from_user_id=user_id,
@@ -4543,6 +4579,40 @@ async def om_finalize_course(payload: Dict[str, Any] = Body(...), db=Depends(get
     if fac_user_id:
         # Backfill missing users.gmail (some Faculty accounts only have users.email).
         await _ensure_user_gmail_address(fac_user_id, db)
+
+        # Best-effort: include the specific course + section in the notification body
+        # so both in-app and Gmail messages are self-contained.
+        course_code = ""
+        section_code = ""
+        course_section_line = ""
+        if section_id:
+            try:
+                sec = await db[COL_SECTIONS].find_one(
+                    {"section_id": section_id},
+                    {"_id": 0, "section_code": 1, "course_id": 1, "course_code": 1, "section": 1, "course": 1},
+                ) or {}
+
+                section_code = str(sec.get("section_code") or sec.get("section") or "").strip()
+
+                cc = sec.get("course_code") or sec.get("course") or ""
+                if isinstance(cc, list):
+                    cc = cc[0] if cc else ""
+                course_code = str(cc or "").strip()
+
+                cid = str(sec.get("course_id") or "").strip()
+                if not course_code and cid:
+                    cdoc = await db[COL_COURSES].find_one({"course_id": cid}, {"_id": 0, "course_code": 1}) or {}
+                    cc2 = cdoc.get("course_code") or ""
+                    if isinstance(cc2, list):
+                        cc2 = cc2[0] if cc2 else ""
+                    course_code = str(cc2 or "").strip()
+
+                if course_code or section_code:
+                    label = " – ".join([p for p in [course_code, section_code] if p])
+                    course_section_line = f"Course/Section: {label}\n\n"
+            except Exception:
+                course_section_line = ""
+
         # Send BOTH in-app + Gmail notification (best-effort) using the OM's connected Gmail.
         await create_notification(
             user_id=fac_user_id,

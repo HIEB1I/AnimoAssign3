@@ -55,6 +55,7 @@ COL_DEPTS = "departments"
 
 # Special Class reflection (OM_SpecialClass -> Faculty)
 COL_SPECIAL_CLASS = "special_class"
+COL_FACULTY_SERVICE = "faculty_service"
 
 # OM <-> Faculty proposal + RFC collections
 COL_LOAD_PROPOSALS = "faculty_load_proposals"
@@ -480,13 +481,23 @@ async def _create_term_calendar_for_user(
         course_code = rr.get("course_code") or rr.get("course") or ""
         section = rr.get("section") or ""
         mode = rr.get("mode") or ""
+
+        # Special class display rule: treat ONLINE as TBA (so email/list and calendar are consistent).
+        def _room_for_calendar(raw_room: Any) -> str:
+            s = ("" if raw_room is None else str(raw_room)).strip()
+            if not s:
+                return "TBA"
+            if bool(rr.get("is_special_class")) and s.upper() == "ONLINE":
+                return "TBA"
+            return s
+
         # Meeting 1
         ev1 = _make_event(
             course_code=course_code,
             section=section,
             day_full=rr.get("day1") or "",
             time_band=rr.get("time1") or "",
-            room=rr.get("room1") or "Online",
+            room=_room_for_calendar(rr.get("room1") or "TBA"),
             mode=mode,
         )
         if ev1:
@@ -503,7 +514,7 @@ async def _create_term_calendar_for_user(
             section=section,
             day_full=rr.get("day2") or "",
             time_band=rr.get("time2") or "",
-            room=rr.get("room2") or rr.get("room1") or "Online",
+            room=_room_for_calendar(rr.get("room2") or rr.get("room1") or "TBA"),
             mode=mode,
         )
         if ev2:
@@ -820,6 +831,214 @@ async def _fetch_reflected_special_classes_for_faculty(
     # Keep stable ordering: sort by course_code then section.
     out.sort(key=lambda x: (x.get("course_code", ""), x.get("section", "")))
     return out
+
+
+def _is_real_room_label(room_label: str) -> bool:
+    r = str(room_label or "").strip().upper()
+    if not r:
+        return False
+    return r not in {"TBA", "ONLINE", "—", "N/A"}
+
+def _serviced_mode_from_rooms(room1: str | None, room2: str | None) -> str:
+    # Requirement: if APO assigned a room in either Room 1 or Room 2 (or both), mode should be HYB.
+    # Otherwise default to FOL.
+    return "HYB" if (_is_real_room_label(room1 or "") or _is_real_room_label(room2 or "")) else "FOL"
+
+async def _serviced_section_map_for_faculty(*, term_id: str, faculty_id: str) -> Dict[str, str]:
+    """Return section_id -> from_department for CHAIR-approved Faculty Service rows (status=responded).
+
+    faculty_service rows do not store term_id directly; we validate section membership in the given term
+    to avoid stale artifacts after DB restore/clean.
+    """
+    term_id = (term_id or "").strip()
+    faculty_id = (faculty_id or "").strip()
+    if not term_id or not faculty_id:
+        return {}
+
+    docs = await db[COL_FACULTY_SERVICE].find(
+        {"status": "responded", "faculty.faculty_id": faculty_id},
+        {"_id": 0, "section_id": 1, "from_department": 1},
+    ).to_list(None)
+
+    sec_ids = [str((d or {}).get("section_id") or "").strip() for d in (docs or [])]
+    sec_ids = [s for s in sec_ids if s]
+    if not sec_ids:
+        return {}
+
+    sec_docs = await db[COL_SECTIONS].find(
+        {"section_id": {"$in": sec_ids}, "$or": [{"term_id": term_id}, {"termId": term_id}]},
+        {"_id": 0, "section_id": 1},
+    ).to_list(None)
+    valid = {str(s.get("section_id") or "").strip() for s in (sec_docs or []) if s and s.get("section_id")}
+
+    out: Dict[str, str] = {}
+    for d in (docs or []):
+        sid = str((d or {}).get("section_id") or "").strip()
+        if not sid or sid not in valid:
+            continue
+        out[sid] = str((d or {}).get("from_department") or "").strip()
+    return out
+
+async def _apply_section_schedule_to_row(row: Dict[str, Any], section_id: str) -> None:
+    """Override day/time/room fields from authoritative section_schedules + rooms.
+
+    This guarantees:
+    - If room is not assigned -> 'TBA' (so Calendar and List match)
+    - Auto-updates when APO assigns rooms
+    """
+    section_id = (section_id or "").strip()
+    if not section_id:
+        return
+
+    sch = await _special_class_schedule_two(
+        section_id=section_id,
+        schedule_id1=None,
+        schedule_id2=None,
+        schedule_cleared=False,
+    )
+
+    day1 = _day_code_to_long(sch.get("day1"))
+    time1 = _fmt_band_from_hhmm(sch.get("begin1"), sch.get("end1"))
+    room1 = (sch.get("room1") or "TBA") or "TBA"
+
+    day2_raw = _day_code_to_long(sch.get("day2")) if sch.get("day2") else ""
+    time2_raw = _fmt_band_from_hhmm(sch.get("begin2"), sch.get("end2")) if (sch.get("begin2") or sch.get("end2")) else ""
+    room2_raw = (sch.get("room2") or "").strip()
+
+    if day2_raw and day2_raw != "TBA" and time2_raw and time2_raw != "TBA":
+        day2 = day2_raw
+        time2 = time2_raw
+        room2 = room2_raw or "TBA"
+    else:
+        day2 = None
+        time2 = None
+        room2 = None
+
+    row["day1"] = day1 or "TBA"
+    row["time1"] = time1 or "TBA"
+    row["room1"] = room1 or "TBA"
+    row["day2"] = day2
+    row["time2"] = time2
+    row["room2"] = room2
+
+    # Mode rule for serviced rows.
+    if bool(row.get("is_serviced")) and not bool(row.get("is_special_class")):
+        row["mode"] = _serviced_mode_from_rooms(row.get("room1"), row.get("room2"))
+
+async def _fetch_reflected_faculty_service_rows_for_faculty(
+    *,
+    term_id: str,
+    faculty_id: str,
+    exclude_section_ids: set[str] | None = None,
+    limit: int = 500,
+) -> List[Dict[str, Any]]:
+    """Build synthetic teaching_load rows for CHAIR-approved Faculty Service assignments.
+
+    Faculty overview normally shows rows from `faculty_assignments`. However, Faculty Service approvals
+    (status=responded) may not create a faculty_assignments record.
+    We reflect them similarly to Special Classes via synthetic rows.
+    """
+    term_id = (term_id or "").strip()
+    faculty_id = (faculty_id or "").strip()
+    if not term_id or not faculty_id:
+        return []
+
+    exclude_section_ids = exclude_section_ids or set()
+
+    docs = await db[COL_FACULTY_SERVICE].find(
+        {"status": "responded", "faculty.faculty_id": faculty_id},
+        {"_id": 0, "section_id": 1, "from_department": 1},
+    ).sort([("updated_at", -1), ("created_at", -1)]).limit(limit).to_list(limit)
+
+    sec_ids = [str((d or {}).get("section_id") or "").strip() for d in (docs or [])]
+    sec_ids = [s for s in sec_ids if s and s not in exclude_section_ids]
+    if not sec_ids:
+        return []
+
+    sec_docs = await db[COL_SECTIONS].find(
+        {"section_id": {"$in": sec_ids}, "$or": [{"term_id": term_id}, {"termId": term_id}]},
+        {"_id": 0, "section_id": 1, "section_code": 1, "section": 1, "section_name": 1, "course_id": 1},
+    ).to_list(None)
+
+    sec_by_id: Dict[str, Dict[str, Any]] = {
+        str(s.get("section_id") or "").strip(): (s or {})
+        for s in (sec_docs or [])
+        if s and s.get("section_id")
+    }
+
+    valid_ids = [sid for sid in sec_ids if sid in sec_by_id]
+    if not valid_ids:
+        return []
+
+    course_ids = [str(sec_by_id[sid].get("course_id") or "").strip() for sid in valid_ids]
+    course_ids = [c for c in course_ids if c]
+    course_by_id: Dict[str, Dict[str, Any]] = {}
+    if course_ids:
+        course_docs = await db[COL_COURSES].find(
+            {"course_id": {"$in": course_ids}},
+            {"_id": 0, "course_id": 1, "course_code": 1, "course_title": 1, "units": 1, "syllabus": 1},
+        ).to_list(None)
+        course_by_id = {
+            str(c.get("course_id") or "").strip(): (c or {})
+            for c in (course_docs or [])
+            if c and c.get("course_id")
+        }
+
+    # Latest doc per section_id (first wins because sorted newest first)
+    doc_by_sid: Dict[str, Dict[str, Any]] = {}
+    for d in (docs or []):
+        sid = str((d or {}).get("section_id") or "").strip()
+        if sid and sid in valid_ids and sid not in doc_by_sid:
+            doc_by_sid[sid] = d or {}
+
+    out: List[Dict[str, Any]] = []
+    for sid in valid_ids:
+        d = doc_by_sid.get(sid, {})
+        sec = sec_by_id.get(sid, {})
+        course = course_by_id.get(str(sec.get("course_id") or "").strip(), {})
+
+        cc = course.get("course_code")
+        if isinstance(cc, list):
+            cc = cc[0] if cc else ""
+        course_code = _as_code_str(cc or "")
+        course_title = _as_code_str(course.get("course_title") or "")
+        units = course.get("units") or 0
+        syllabus = course.get("syllabus") or ""
+
+        section_display = _as_code_str(
+            (sec.get("section_code") or sec.get("section") or sec.get("section_name") or "—")
+        )
+
+        row: Dict[str, Any] = {
+            "course_code": course_code or "—",
+            "course_title": course_title or "—",
+            "section": section_display or "—",
+            "section_id": sid,
+            "special_id": "",
+            "is_special_class": False,
+            "is_serviced": True,
+            "serviced_department": str(d.get("from_department") or "").strip(),
+            "units": units or 0,
+            "mode": "FOL",
+            "day1": "TBA",
+            "day2": None,
+            "room1": "TBA",
+            "room2": None,
+            "time1": "TBA",
+            "time2": None,
+            "syllabus": syllabus,
+            "finalized": False,
+        }
+
+        await _apply_section_schedule_to_row(row, sid)
+        # Ensure mode obeys serviced rule
+        row["mode"] = _serviced_mode_from_rooms(row.get("room1"), row.get("room2"))
+
+        out.append(row)
+
+    out.sort(key=lambda x: (x.get("course_code", ""), x.get("section", "")))
+    return out
+
 
 
 def _calc_units_and_preps(teaching_load: List[Dict[str, Any]]) -> Tuple[float, int]:
@@ -1356,10 +1575,65 @@ async def overview_handler(
 
     # ---------- options ----------
     if action == "options":
+        # Provide UI option lists needed by Faculty Overview.
+        # Frontend expects `kacs` here so faculty can edit their Qualified KACs.
+        kacs = await db.kacs.find(
+            {},
+            {
+                "_id": 0,
+                "kac_id": 1,
+                "kac_name": 1,
+                "kac_code": 1,
+                "program_area": 1,
+                "course_list": 1,
+            },
+        ).to_list(None)
+
+        # Expand course_list (course_id) to course_code + course_title so the frontend can
+        # show the course list while editing Qualified KACs in My Profile.
+        course_ids: List[str] = []
+        for kd in (kacs or []):
+            for cid in (kd.get("course_list") or []):
+                if isinstance(cid, str) and cid.strip():
+                    course_ids.append(cid.strip())
+        course_ids = sorted(set(course_ids))
+
+        courses_map: Dict[str, Dict[str, Any]] = {}
+        if course_ids:
+            course_docs = await db[COL_COURSES].find(
+                {"course_id": {"$in": course_ids}},
+                {"_id": 0, "course_id": 1, "course_code": 1, "course_title": 1},
+            ).to_list(None)
+            for cd in (course_docs or []):
+                cid = str(cd.get("course_id") or "").strip()
+                if not cid:
+                    continue
+                courses_map[cid] = {
+                    "course_id": cid,
+                    "course_code": _as_code_str(cd.get("course_code")),
+                    "course_title": cd.get("course_title") or "",
+                }
+
+        for kd in (kacs or []):
+            clist = []
+            for cid in (kd.get("course_list") or []):
+                scid = str(cid or "").strip()
+                if not scid:
+                    continue
+                clist.append(courses_map.get(scid, {"course_id": scid, "course_code": "", "course_title": ""}))
+            kd["courses"] = clist
+
+        # Stable ordering for predictable UI.
+        try:
+            kacs.sort(key=lambda x: (str(x.get("program_area") or ""), str(x.get("kac_name") or "")))
+        except Exception:
+            pass
+
         return {
             "ok": True,
             "days": ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"],
             "timeBands": ["07:30 – 09:00","09:15 – 10:45","11:00 – 12:30","12:30 – 14:15","14:30 – 16:00","16:15 – 17:45","18:00 – 19:30","19:45 – 21:00"],
+            "kacs": kacs,
         }
 
     # ---------- profile ----------
@@ -2068,9 +2342,53 @@ async def overview_handler(
             term_id=term.get("term_id"),
             faculty_id=faculty.get("faculty_id"),
         )
-
         merged_load = (final_teaching_load or []) + (special_rows or [])
-        merged_load.sort(key=lambda x: (x.get("course_code", ""), x.get("section", ""), str(bool(x.get("is_special_class")))))
+
+        # ---------------- Faculty Service (Serviced) reflection ----------------
+        # Mark existing load rows as serviced (yellow styling) and append synthetic serviced rows
+        # when Faculty Service approvals did not create a faculty_assignments record.
+        existing_section_ids: set[str] = set()
+        for rr in (merged_load or []):
+            sid0 = str(rr.get("section_id") or rr.get("sectionId") or "").strip()
+            if sid0 and not sid0.startswith("SPECIAL:"):
+                existing_section_ids.add(sid0)
+
+        serviced_map = await _serviced_section_map_for_faculty(
+            term_id=term.get("term_id"),
+            faculty_id=faculty.get("faculty_id"),
+        )
+
+        if serviced_map:
+            for rr in (merged_load or []):
+                if bool(rr.get("is_special_class")):
+                    continue
+                sid = str(rr.get("section_id") or rr.get("sectionId") or "").strip()
+                if sid and sid in serviced_map:
+                    rr["is_serviced"] = True
+                    rr["serviced_department"] = serviced_map.get(sid) or ""
+                    try:
+                        await _apply_section_schedule_to_row(rr, sid)
+                    except Exception:
+                        pass
+                    rr["mode"] = _serviced_mode_from_rooms(rr.get("room1"), rr.get("room2"))
+                else:
+                    rr["is_serviced"] = False
+                    rr["serviced_department"] = ""
+
+        try:
+            serviced_rows = await _fetch_reflected_faculty_service_rows_for_faculty(
+                term_id=term.get("term_id"),
+                faculty_id=faculty.get("faculty_id"),
+                exclude_section_ids=existing_section_ids,
+            )
+            if serviced_rows:
+                merged_load.extend(serviced_rows)
+        except Exception:
+            pass
+
+        merged_load.sort(
+            key=lambda x: (x.get("course_code", ""), x.get("section", ""), str(bool(x.get("is_special_class"))))
+        )
 
         # IMPORTANT: Special Classes must be reflected in the Faculty schedule views,
         # but they must NOT be included in the teaching units and course prep calculations.
@@ -2088,17 +2406,18 @@ async def overview_handler(
         summary["teaching_units_over_by"] = max(0, int(round(total_units - units_max))) if summary["exceeded_teaching_units"] else 0
         summary["course_preps_over_by"] = max(0, int(course_preps - preps_max)) if summary["exceeded_course_preps"] else 0
 
-        return {
-            "ok": True,
-            "term": term,
-            "summary": summary,
-            "teaching_load": merged_load,
-            # Only report "proposed" state if we have a valid (non-stale) proposal payload to show.
-            "is_proposed": bool(proposed_load and proposal_status_l in ("proposed", "reply", "replied")),
-            "proposal_status": proposal_status,
-            "rfc": rfc_norm,
-            "schedule_final": schedule_final,
-        }
+
+    return {
+        "ok": True,
+        "term": term,
+        "summary": summary,
+        "teaching_load": merged_load,
+        # Only report "proposed" state if we have a valid (non-stale) proposal payload to show.
+        "is_proposed": bool(proposed_load and proposal_status_l in ("proposed", "reply", "replied")),
+        "proposal_status": proposal_status,
+        "rfc": rfc_norm,
+        "schedule_final": schedule_final,
+    }
     raise HTTPException(status_code=400, detail="Invalid action parameter.")
 
 
@@ -2325,6 +2644,51 @@ async def get_faculty_overview(userId: str = Query(...)):
         faculty_id=faculty.get("faculty_id"),
     )
     merged_load = (final_teaching_load or []) + (special_rows or [])
+
+    # ---------------- Faculty Service (Serviced) reflection ----------------
+    # Mark existing load rows as serviced (yellow styling) and append synthetic serviced rows
+    # when Faculty Service approvals did not create a faculty_assignments record.
+    existing_section_ids: set[str] = set()
+    for rr in (merged_load or []):
+        sid0 = str(rr.get("section_id") or rr.get("sectionId") or "").strip()
+        if sid0 and not sid0.startswith("SPECIAL:"):
+            existing_section_ids.add(sid0)
+
+    serviced_map = await _serviced_section_map_for_faculty(
+        term_id=term.get("term_id"),
+        faculty_id=faculty.get("faculty_id"),
+    )
+
+    if serviced_map:
+        for rr in (merged_load or []):
+            if bool(rr.get("is_special_class")):
+                continue
+            sid = str(rr.get("section_id") or rr.get("sectionId") or "").strip()
+            if sid and sid in serviced_map:
+                rr["is_serviced"] = True
+                rr["serviced_department"] = serviced_map.get(sid) or ""
+                # Keep schedule/room consistent with calendar/list (TBA stays TBA)
+                try:
+                    await _apply_section_schedule_to_row(rr, sid)
+                except Exception:
+                    pass
+                # Enforce serviced mode rule
+                rr["mode"] = _serviced_mode_from_rooms(rr.get("room1"), rr.get("room2"))
+            else:
+                rr["is_serviced"] = False
+                rr["serviced_department"] = ""
+
+    # Add synthetic rows for serviced sections not present in regular load
+    try:
+        serviced_rows = await _fetch_reflected_faculty_service_rows_for_faculty(
+            term_id=term.get("term_id"),
+            faculty_id=faculty.get("faculty_id"),
+            exclude_section_ids=existing_section_ids,
+        )
+        if serviced_rows:
+            merged_load.extend(serviced_rows)
+    except Exception:
+        pass
 
     # IMPORTANT: Special Classes must be reflected in the Faculty schedule views,
     # but they must NOT be included in the teaching units and course prep calculations.
@@ -2665,6 +3029,75 @@ def _build_faculty_accept_email(
     def td(x: Any) -> str:
         return _html_escape("" if x is None else str(x))
 
+    # --- Special-class formatting for ACCEPTED-SCHEDULE email ---
+    # Requirements:
+    # - For special classes: TBA or Online classes display as TBA (not ONLINE)
+    # - For special classes: Day 1/Day 2 use initials only (like regular classes)
+    # - For special classes: Mode auto FOL if both rooms are unassigned/TBA/ONLINE, else HYB
+    _DAY_INITIAL = {
+        "MONDAY": "M",
+        "TUESDAY": "T",
+        "WEDNESDAY": "W",
+        "THURSDAY": "H",  # common academic abbreviation
+        "FRIDAY": "F",
+        "SATURDAY": "S",
+        "SUNDAY": "U",
+        # pass-through if already an initial
+        "M": "M",
+        "T": "T",
+        "W": "W",
+        "H": "H",
+        "F": "F",
+        "S": "S",
+        "U": "U",
+    }
+
+    def _day_to_initial(v: Any) -> str:
+        s = ("" if v is None else str(v)).strip()
+        if not s:
+            return ""
+        if s.upper() == "TBA":
+            return "TBA"
+        return _DAY_INITIAL.get(s.upper(), s[:1].upper())
+
+    def _room_to_email_display(v: Any) -> str:
+        s = ("" if v is None else str(v)).strip()
+        if not s:
+            return "TBA"
+        if s.upper() in ("ONLINE", "TBA"):
+            return "TBA"
+        return s
+
+    def _is_unassigned_room(v: Any) -> bool:
+        s = ("" if v is None else str(v)).strip()
+        return (not s) or (s.upper() in ("ONLINE", "TBA"))
+
+
+    def _format_row_for_email(r: Dict[str, Any]) -> Dict[str, Any]:
+        is_special = bool(r.get("is_special_class"))
+        is_serviced = bool(r.get("is_serviced"))
+        if not (is_special or is_serviced):
+            return r
+
+        rr = dict(r)
+
+        # Day initials should be used for both Special and Serviced classes
+        rr["day1"] = _day_to_initial(rr.get("day1"))
+        rr["day2"] = _day_to_initial(rr.get("day2")) if rr.get("day2") not in (None, "") else ""
+
+        # Special-class-specific formatting rules
+        if is_special:
+            rr["room1"] = _room_to_email_display(rr.get("room1"))
+            rr["room2"] = _room_to_email_display(rr.get("room2")) if rr.get("room2") not in (None, "") else ""
+
+            # Mode override for special classes per requirement
+            if _is_unassigned_room(r.get("room1")) and _is_unassigned_room(r.get("room2")):
+                rr["mode"] = "FOL"
+            else:
+                rr["mode"] = "HYB"
+
+        return rr
+
     # Plain text fallback
     lines = [
         f"Dear {faculty_name},",
@@ -2674,6 +3107,7 @@ def _build_faculty_accept_email(
         "Schedule:",
     ]
     for r in rows:
+        r = _format_row_for_email(r)
         lines.append(
             f"- {r.get('course_code','')} {r.get('section','')} | {r.get('units','')}u | "
             f"{r.get('day1','')} {r.get('time1','')} {r.get('room1','')} | "
@@ -2686,18 +3120,28 @@ def _build_faculty_accept_email(
     # HTML table (inbox-style)
     tr_html = ""
     for r in rows:
+        r = _format_row_for_email(r)
+        # Visual cues in email:
+        # - Special Classes: light purple
+        # - Serviced Classes: light yellow
+        if bool(r.get("is_special_class")):
+            tr_style = ' style="background:#f3e8ff;"'
+        elif bool(r.get("is_serviced")):
+            tr_style = ' style="background:#fefce8;"'
+        else:
+            tr_style = ""
         tr_html += f"""
-        <tr>
+        <tr{tr_style}>
           <td>{td(r.get("course_code",""))}</td>
           <td style="text-align:center;">{td(r.get("section",""))}</td>
           <td style="text-align:center;">{td(r.get("units",""))}</td>
           <td style="text-align:center;">{td(r.get("mode",""))}</td>
           <td style="text-align:center;">{td(r.get("day1",""))}</td>
           <td style="text-align:center;">{td(r.get("time1",""))}</td>
-          <td>{td(r.get("room1",""))}</td>
+          <td style="text-align:center;">{td(r.get("room1",""))}</td>
           <td style="text-align:center;">{td(r.get("day2",""))}</td>
           <td style="text-align:center;">{td(r.get("time2",""))}</td>
-          <td>{td(r.get("room2",""))}</td>
+          <td style="text-align:center;">{td(r.get("room2",""))}</td>
         </tr>
         """
 
@@ -2743,7 +3187,14 @@ async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[s
     if not faculty:
         raise HTTPException(status_code=404, detail="Faculty not found")
 
-    user = await db["users"].find_one({"user_id": userId}, {"_id": 0, "email": 1, "gmail": 1, "google_token": 1, "first_name": 1, "last_name": 1}) or {}
+    user = await db["users"].find_one(
+        {"user_id": userId},
+        {"_id": 0, "email": 1, "gmail": 1, "google_token": 1, "first_name": 1, "last_name": 1},
+    ) or {}
+
+    # Calendar checkbox flag (default True = keeps current behavior)
+    send_to_gcal = payload.get("send_to_gcal", True)
+    send_to_gcal = True if send_to_gcal is None else bool(send_to_gcal)
 
     term_id = (payload.get("term_id") or "").strip()
     if not term_id:
@@ -2758,16 +3209,60 @@ async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[s
     if not proposal:
         return {"ok": True, "message": "No proposal to accept."}
 
-    proposal_rows = proposal.get("rows", []) or []
+    base_rows = proposal.get("rows", []) or []
 
-    # Include reflected Special Classes in the acceptance email (Approved -> reflected to Faculty).
+    # Email rows include reflected special classes + serviced classes.
+    # Calendar rows also include special + serviced rows so they sync to Google Calendar on accept.
+    email_rows = list(base_rows)
+    calendar_rows = list(base_rows)
+
+    # Some deployments include Faculty Service (serviced) sections inside the proposal rows
+    # but without a marker. Ensure these rows are flagged so they appear (and are styled)
+    # in the acceptance email, and stay consistent for calendar creation.
+    try:
+        serviced_map = await _serviced_section_map_for_faculty(term_id=term_id, faculty_id=fid)
+        if serviced_map:
+            for rr in email_rows:
+                sid = str((rr or {}).get("section_id") or "").strip()
+                if sid and sid in serviced_map:
+                    rr["is_serviced"] = True
+                    rr["serviced_department"] = serviced_map.get(sid) or rr.get("serviced_department") or ""
+                    rr["mode"] = _serviced_mode_from_rooms(rr.get("room1"), rr.get("room2"))
+            for rr in calendar_rows:
+                sid = str((rr or {}).get("section_id") or "").strip()
+                if sid and sid in serviced_map:
+                    rr["is_serviced"] = True
+                    rr["serviced_department"] = serviced_map.get(sid) or rr.get("serviced_department") or ""
+                    rr["mode"] = _serviced_mode_from_rooms(rr.get("room1"), rr.get("room2"))
+    except Exception:
+        # Best-effort only. If this fails, we still try to reflect serviced rows below.
+        serviced_map = {}
+
+    # Exclude real section rows when reflecting serviced rows to avoid duplicates.
+    exclude_section_ids = {
+        str((r or {}).get("section_id") or "").strip()
+        for r in (base_rows or [])
+        if str((r or {}).get("section_id") or "").strip()
+    }
+
     try:
         sc_rows = await _fetch_reflected_special_classes_for_faculty(term_id=term_id, faculty_id=fid)
         if sc_rows:
-            # Email builder expects the same keys used by teaching load rows.
-            proposal_rows = list(proposal_rows) + sc_rows
+            email_rows += sc_rows
+            calendar_rows += sc_rows
     except Exception:
-        # Never block accept due to Special Class reflection failures.
+        pass
+
+    try:
+        serviced_rows = await _fetch_reflected_faculty_service_rows_for_faculty(
+            term_id=term_id,
+            faculty_id=fid,
+            exclude_section_ids=exclude_section_ids,
+        )
+        if serviced_rows:
+            email_rows += serviced_rows
+            calendar_rows += serviced_rows
+    except Exception:
         pass
 
     # do not allow accept if pending RFC exists
@@ -2778,15 +3273,23 @@ async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[s
         if st and st not in RFC_TERMINAL:
             raise HTTPException(
                 status_code=409,
-                detail="You have a pending RFC. Please wait for OM to respond before accepting the schedule."
+                detail="You have a pending RFC. Please wait for OM to respond before accepting the schedule.",
             )
 
     await db[COL_LOAD_PROPOSALS].update_one(
         {"faculty_id": fid, "term_id": term_id},
-        {"$set": {"status": "approved", "locked": True, "accepted_at": _now_utc(), "updated_at": _now_utc()},
-         "$setOnInsert": {"created_at": _now_utc()}},
+        {
+            "$set": {
+                "status": "approved",
+                "locked": True,
+                "accepted_at": _now_utc(),
+                "updated_at": _now_utc(),
+            },
+            "$setOnInsert": {"created_at": _now_utc()},
+        },
     )
 
+    # Best-effort finalize all rows
     try:
         await db[COL_LOAD_PROPOSALS].update_one(
             {"faculty_id": fid, "term_id": term_id},
@@ -2801,15 +3304,17 @@ async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[s
         {"$set": {"status": "ACCEPTED", "locked": True, "updated_at": now}},
     )
 
-    # --- NEW: send acceptance email to the faculty (best-effort, non-blocking) ---
+    # --- send acceptance email to the faculty (best-effort, non-blocking) ---
     recipient_email = (
         ((user.get("google_token") or {}).get("connected_email") or "").strip()
         or (user.get("gmail") or "").strip()
         or (user.get("email") or "").strip()
     )
 
-    # Term label (best effort)
-    term_doc = await db[COL_TERMS].find_one({"term_id": term_id}, {"_id": 0, "acad_year_start": 1, "term_number": 1}) or {}
+    term_doc = await db[COL_TERMS].find_one(
+        {"term_id": term_id},
+        {"_id": 0, "acad_year_start": 1, "term_number": 1},
+    ) or {}
     term_label = _term_label(term_doc) if term_doc else term_id
 
     faculty_name = f"{(faculty.get('first_name') or '').strip()} {(faculty.get('last_name') or '').strip()}".strip() or "Faculty"
@@ -2821,8 +3326,8 @@ async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[s
         subject, body_text, body_html = _build_faculty_accept_email(
             term_label=term_label,
             faculty_name=faculty_name,
-            rows=proposal_rows,
-            login_url=" http://ccscloud.dlsu.edu.ph:11160/login",
+            rows=email_rows,
+            login_url="http://ccscloud.dlsu.edu.ph:11160/login",  # removed leading space
         )
         try:
             email_sent, email_error = await _send_email_via_user_gmail(
@@ -2836,10 +3341,9 @@ async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[s
             email_sent = False
             email_error = str(e)
     else:
-        email_sent = False
         email_error = "No recipient email found for this user."
-    
-    # --- NEW: notify OM mailbox using the faculty's connected Gmail (best-effort, non-blocking) ---
+
+    # --- notify OM mailbox using the faculty's connected Gmail (best-effort, non-blocking) ---
     om_mailbox_sent = False
     om_mailbox_error: Optional[str] = None
 
@@ -2847,12 +3351,12 @@ async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[s
         om_subject, om_body_text, om_body_html = _build_om_finalized_email(
             term_label=term_label,
             faculty_name=faculty_name,
-            rows=proposal_rows,
+            rows=base_rows,  # schedule rows only (usually what OM wants)
             om_link=OM_LOAD_ASSIGNMENT_URL,
         )
         try:
             om_mailbox_sent, om_mailbox_error = await _send_email_via_user_gmail(
-                user_id=userId,  # IMPORTANT: send using the logged-in user's Gmail
+                user_id=userId,
                 to_email=OM_NOTIFY_EMAIL,
                 subject=om_subject,
                 body=om_body_text,
@@ -2886,19 +3390,19 @@ async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[s
             },
         )
 
-      # --- NEW: create Google Calendar events (best-effort, non-blocking) ---
-        calendar_ok = False
-        calendar_error: Optional[str] = None
-        calendar_events_created = 0
+    # --- create Google Calendar events (only if checkbox enabled) ---
+    calendar_ok: Optional[bool] = None
+    calendar_error: Optional[str] = None
+    calendar_events_created = 0
+    calendar_term_id: Optional[str] = None
+    term_start_at = None
+    week_count = _TERM_WEEK_COUNT
 
-        calendar_term_id: Optional[str] = None
-        term_start_at = None
-        week_count = _TERM_WEEK_COUNT  # keep your existing constant (e.g., 12)
-
+    if send_to_gcal:
         try:
-            # IMPORTANT: calendar must follow the NEXT term after is_current:true
-            nxt_term = await _next_term_from_current()  # should return full term doc (term_id, start_at, end_at, ...)
+            nxt_term = await _next_term_from_current()
             if not nxt_term:
+                calendar_ok = False
                 calendar_error = "No next term found after current term."
             else:
                 calendar_term_id = (nxt_term.get("term_id") or "").strip()
@@ -2906,9 +3410,9 @@ async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[s
                 term_end_at = _coerce_dt(nxt_term.get("end_at"))
 
                 if not term_start_at:
+                    calendar_ok = False
                     calendar_error = f"Next term {calendar_term_id or ''} has no start_at; cannot create calendar events."
                 else:
-                    # Optional: if you want to cap by term range, compute weeks from start_at/end_at.
                     if term_end_at:
                         span_weeks = max(1, ((term_end_at.date() - term_start_at.date()).days // 7) + 1)
                         week_count = min(_TERM_WEEK_COUNT, span_weeks)
@@ -2916,29 +3420,30 @@ async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[s
                     calendar_ok, calendar_events_created, calendar_error = await _create_term_calendar_for_user(
                         user_id=userId,
                         term_start_at=term_start_at,
-                        rows=proposal_rows,
+                        rows=calendar_rows,
                         week_count=week_count,
                     )
         except Exception as e:
             calendar_ok = False
             calendar_error = str(e)
 
-        return {
-             "ok": True,
-            "status": "ACCEPTED",
+    return {
+        "ok": True,
+        "status": "ACCEPTED",
 
-            "email_sent": email_sent,
-            "email_error": email_error,
+        "email_sent": email_sent,
+        "email_error": email_error,
 
-            "om_mailbox_email": OM_NOTIFY_EMAIL,
-            "om_mailbox_sent": om_mailbox_sent,
-            "om_mailbox_error": om_mailbox_error,
+        "om_mailbox_email": OM_NOTIFY_EMAIL,
+        "om_mailbox_sent": om_mailbox_sent,
+        "om_mailbox_error": om_mailbox_error,
 
-            "calendar_ok": calendar_ok,
-            "calendar_events_created": calendar_events_created,
-            "calendar_error": calendar_error,
-            "calendar_term_id": calendar_term_id,
-            "term_start_at": (term_start_at.isoformat() if term_start_at else None),
-            "week_count": week_count,
-            "calendar_url_used": _GCAL_EVENTS_INSERT_URL,
-        }
+        "send_to_gcal": send_to_gcal,
+        "calendar_ok": calendar_ok,
+        "calendar_events_created": calendar_events_created,
+        "calendar_error": calendar_error,
+        "calendar_term_id": calendar_term_id,
+        "term_start_at": (term_start_at.isoformat() if term_start_at else None),
+        "week_count": week_count,
+        "calendar_url_used": _GCAL_EVENTS_INSERT_URL,
+    }

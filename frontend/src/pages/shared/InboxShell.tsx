@@ -267,13 +267,14 @@ export default function InboxShell({
   }, []);
 
   const handleBack = () => {
-    if (window.history.length > 1) {
-      navigate(-1);
-      return;
-    }
-
+    // IMPORTANT UX CONTRACT (match APO + embedded flows):
+    // - If this inbox is embedded (closeEventName provided), Back should simply close the inbox
+    //   and MUST NOT use browser history (prevents jumping to other modules like APO).
+    // - If this inbox is a standalone route page (no closeEventName), Back should always go to
+    //   the provided fallbackRoute (APO uses /apo/preenlistment).
     if (closeEventName) {
       window.dispatchEvent(new Event(closeEventName));
+      return;
     }
 
     navigate(fallbackRoute);

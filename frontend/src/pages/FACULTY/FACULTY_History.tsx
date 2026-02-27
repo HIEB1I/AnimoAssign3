@@ -111,11 +111,13 @@ function Dropdown({
         aria-haspopup="listbox"
         aria-expanded={open}
         className={cls(
-          "w-full rounded-xl border border-gray-200 bg-white py-2.5 pl-3 pr-10 text-left text-sm shadow-sm outline-none",
+          "w-full min-w-0 rounded-xl border border-gray-200 bg-white py-2.5 pl-3 pr-10 text-left text-sm shadow-sm outline-none",
           "hover:bg-gray-50 focus:ring-2 focus:ring-emerald-500/30"
         )}
       >
-        {value || <span className="text-gray-400">{placeholder}</span>}
+        <span className="block min-w-0 truncate">
+          {value || <span className="text-gray-400">{placeholder}</span>}
+        </span>
         <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2">
           ▾
         </span>
@@ -356,7 +358,8 @@ function HistoryMain({ embedded = false }: { embedded?: boolean } = {}) {
         if (b.totalCount !== a.totalCount) return b.totalCount - a.totalCount;
         return (a.code || "").localeCompare(b.code || "");
       })
-      .slice(0, 5);
+      // Show only the top 1 most taught course
+      .slice(0, 1);
   }, [allTimeCounts]);
 
   // Aggregate to "what you've taught" (per term) + analytics (counts)
@@ -418,8 +421,13 @@ function HistoryMain({ embedded = false }: { embedded?: boolean } = {}) {
         )}
 
         {/* Filters */}
-        <div className={cls("grid grid-cols-1 gap-3 sm:grid-cols-3", embedded ? "" : "mb-2")}>
-          <div className="col-span-2">
+        <div
+          className={cls(
+            "flex w-full flex-col gap-3 sm:flex-row sm:items-center",
+            embedded ? "" : "mb-2"
+          )}
+        >
+          <div className="w-full sm:flex-1">
             <div className="relative flex items-center gap-2 rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm shadow-sm">
               <Search className="h-4 w-4 text-gray-500" />
               <input
@@ -442,43 +450,44 @@ function HistoryMain({ embedded = false }: { embedded?: boolean } = {}) {
             </div>
           </div>
 
-          {/* AY dropdown + Prev/Next controls stacked */}
-          <div className="flex flex-col gap-2">
-            <Dropdown
-              value={ay}
-              onChange={setAy}
-              options={AY_OPTIONS}
-              placeholder="Select academic year"
-            />
-            <div className="flex items-center justify-end gap-2">
-              <button
-                type="button"
-                onClick={goPrev}
-                disabled={atFirst}
-                className={cls(
-                  "inline-flex items-center gap-1 rounded-lg border px-2.5 py-1 text-xs",
-                  "border-gray-200 text-gray-700 hover:bg-gray-50",
-                  "disabled:cursor-not-allowed disabled:opacity-50"
-                )}
-                aria-label="View newer academic year"
-                title="Previous (newer) AY"
-              >
-                ‹ Prev AY
-              </button>
-              <button
-                type="button"
-                onClick={goNext}
-                disabled={atLast}
-                className={cls(
-                  "inline-flex items-center gap-1 rounded-lg border px-2.5 py-1 text-xs",
-                  "border-gray-200 text-gray-700 hover:bg-gray-50",
-                  "disabled:cursor-not-allowed disabled:opacity-50"
-                )}
-                aria-label="View older academic year"
-                title="Next (older) AY"
-              >
-                Next AY ›
-              </button>
+          {/* AY dropdown with Prev (left) / Next (right) controls */}
+          <div className="w-full sm:w-[360px] md:w-[420px]">
+            <div className="grid w-full grid-cols-1 items-center gap-2 sm:grid-cols-[auto_minmax(0,1fr)_auto]">
+            <button
+              type="button"
+              onClick={goPrev}
+              disabled={atFirst}
+              className={`shrink-0 w-full sm:w-auto whitespace-nowrap rounded-lg border px-3 py-2 text-sm font-semibold ${
+                atFirst
+                  ? "cursor-default border-gray-200 bg-gray-100 text-gray-500"
+                  : "cursor-pointer border-[#007a55] bg-[#007a55] text-white hover:bg-[#006a4a]"
+              }`}
+            >
+              ‹ Prev AY
+            </button>
+
+            <div className="min-w-0 w-full">
+              <Dropdown
+                value={ay}
+                onChange={setAy}
+                options={AY_OPTIONS}
+                placeholder="Select academic year"
+                className="w-full"
+              />
+            </div>
+
+            <button
+              type="button"
+              onClick={goNext}
+              disabled={atLast}
+              className={`shrink-0 w-full sm:w-auto whitespace-nowrap rounded-lg border px-3 py-2 text-sm font-semibold ${
+                atLast
+                  ? "cursor-default border-gray-200 bg-gray-100 text-gray-500"
+                  : "cursor-pointer border-[#007a55] bg-[#007a55] text-white hover:bg-[#006a4a]"
+              }`}
+            >
+              Next AY ›
+            </button>
             </div>
           </div>
         </div>
@@ -494,13 +503,15 @@ function HistoryMain({ embedded = false }: { embedded?: boolean } = {}) {
         {rows.length > 0 && (
           <div className={cls("grid grid-cols-1 gap-4", embedded ? "mt-4" : "mb-6")}>
             <div
-              className={cls(
-                "rounded-xl border border-gray-200 p-4",
-                embedded ? "bg-slate-50" : "bg-white"
-              )}
+            className={cls(
+              "rounded-xl border p-4 shadow-sm ring-1",
+              embedded
+                ? "border-emerald-200 bg-emerald-50 ring-emerald-200"
+                : "border-emerald-300 bg-emerald-50 ring-emerald-300"
+            )}
             >
               <div className="text-xs font-semibold uppercase tracking-wide text-gray-500">
-                Most taught (all-time)
+                Most taught course
               </div>
               <div className="mt-3 space-y-2">
                 {mostTaught.length === 0 ? (
@@ -583,9 +594,6 @@ function HistoryMain({ embedded = false }: { embedded?: boolean } = {}) {
                                 <div className="shrink-0 text-right">
                                   <div className="inline-flex items-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-800">
                                     This term: {c.termCount}
-                                  </div>
-                                  <div className="mt-1 text-[11px] text-gray-500">
-                                    All-time: {c.totalCount}
                                   </div>
                                 </div>
                               </div>

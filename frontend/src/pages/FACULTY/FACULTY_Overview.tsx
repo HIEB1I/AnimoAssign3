@@ -4,12 +4,11 @@ import {
   Send as SendIcon,
   X,
   BookOpen as SyllabusIcon,
-  Pencil,
+  Edit,
   Check,
   XCircle,
   BadgeCheck,
   Layers,
-  Gauge,
 } from "lucide-react";
 
 import TopBar from "../../component/TopBar";
@@ -21,11 +20,59 @@ import { InboxContent } from "./FACULTY_Inbox";
 import SelectBox from "../../component/SelectBox";
 
 
+// ---------------- Special-class display helpers ----------------
+// NOTE: These are intentionally *display* helpers only (no persistence side-effects).
+// Requirements:
+// - For special classes, show TBA instead of ONLINE.
+// - For special classes (List view), show day initials (M/T/W/H/F/S/U) instead of full words.
+// - For special classes, mode should be FOL if BOTH rooms are unassigned (empty/TBA/ONLINE), else HYB.
+const isRoomUnassignedForSpecial = (v?: unknown) => {
+  const s = String(v ?? "").trim();
+  if (!s) return true;
+  const u = s.toUpperCase();
+  return u === "TBA" || u === "ONLINE";
+};
+
+const normalizeRoomDisplayForSpecial = (v?: unknown) => {
+  const s = String(v ?? "").trim();
+  if (!s) return "—";
+  const u = s.toUpperCase();
+  if (u === "ONLINE") return "TBA";
+  return s;
+};
+
+const dayInitial = (d?: unknown) => {
+  const s = String(d ?? "").trim();
+  if (!s) return "";
+  const u = s.toUpperCase();
+  if (u === "TBA") return "TBA";
+  // If already a short code, keep it.
+  if (s.length <= 2) return u;
+  const norm = s.toLowerCase();
+  if (norm.startsWith("mon")) return "M";
+  if (norm.startsWith("tue")) return "T";
+  if (norm.startsWith("wed")) return "W";
+  // Common local abbreviation: Thursday = H
+  if (norm.startsWith("thu")) return "H";
+  if (norm.startsWith("fri")) return "F";
+  if (norm.startsWith("sat")) return "S";
+  if (norm.startsWith("sun")) return "U";
+  return s.charAt(0).toUpperCase();
+};
+
+const specialModeFromRooms = (room1?: unknown, room2?: unknown) => {
+  return isRoomUnassignedForSpecial(room1) && isRoomUnassignedForSpecial(room2)
+    ? "FOL"
+    : "HYB";
+};
+
+
 import {
   getFacultyOverviewList,
   getFacultyOverviewProfile,
   getFacultyOverviewOptions,
   updateFacultyOverviewProfile,
+  getFacultyPreferencesList,
   getActiveRole,
   setActiveRole,
   userIsChair,
@@ -327,47 +374,53 @@ useEffect(() => {
 
 
 
-      {/* Hide Overview/History/Preferences when Inbox is open */}
-      {!showInbox && (
-        <Tabs
-          mode="state"
-          activeTab={tab}
-          onTabChange={(newTab) => setTab(newTab as typeof tab)}
-          items={[{ label: "My Profile" }, { label: "Schedule Overview" }, { label: "Submit Preferences" }]}
-        />
-      )}
+      {/* Tabs should remain visible even when Inbox is open (match APO Inbox UX) */}
+      <Tabs
+        mode="state"
+        activeTab={tab}
+        onTabChange={(newTab) => {
+          // If the user clicks a tab while viewing the Inbox, close Inbox and switch.
+          if (showInbox) setShowInbox(false);
+          setTab(newTab as typeof tab);
+        }}
+        items={[{ label: "My Profile" }, { label: "Schedule Overview" }, { label: "Submit Preferences" }]}
+      />
 
-      <main className={cls("w-full", showInbox ? "p-0" : "p-6 pb-24")}> 
-        {/* If Inbox was requested via the TopBar icon, render it "like a tab" */}
-        {showInbox ? (
+      {/*
+        IMPORTANT: Match APO Inbox sizing.
+        APO renders <InboxShell /> directly under <Tabs /> with no extra page padding.
+        Faculty previously rendered inbox inside <main className="p-6">, which made it narrower.
+      */}
+      {showInbox ? (
+        <div className="w-full">
           <InboxContent />
-        ) : (
-          <>
-            {tab === "Schedule Overview" && (
-              <>
-                <StatCards summary={data.summary} />
-                <div className="my-6" />
-                <TeachingLoadEnhanced
-                  teachingLoad={data.teaching_load}
-                  term={data.term}
-                  workflow={data}
-                  onToast={pushToast}
-                  onRefresh={loadOverview}
-                />
-              </>
-            )}
-            {tab === "Submit Preferences" && <PreferencesContent />}
-            {tab === "My Profile" && (
-              <FacultyProfileTab
-                faculty={data?.faculty}
-                userId={userId}
-                onReload={loadOverview}
-                pushToast={(kind, msg) => pushToast(kind, msg)}
+        </div>
+      ) : (
+        <main className={cls("w-full", "p-6 pb-24")}>
+          {tab === "Schedule Overview" && (
+            <>
+              <StatCards summary={data.summary} />
+              <div className="my-6" />
+              <TeachingLoadEnhanced
+                teachingLoad={data.teaching_load}
+                term={data.term}
+                workflow={data}
+                onToast={pushToast}
+                onRefresh={loadOverview}
               />
-            )}
-          </>
-        )}
-      </main>
+            </>
+          )}
+          {tab === "Submit Preferences" && <PreferencesContent />}
+          {tab === "My Profile" && (
+            <FacultyProfileTab
+              faculty={data?.faculty}
+              userId={userId}
+              onReload={loadOverview}
+              pushToast={(kind, msg) => pushToast(kind, msg)}
+            />
+          )}
+        </main>
+      )}
     </div>
   );
 }
@@ -384,7 +437,7 @@ function ProfileSectionTitle({
   children: React.ReactNode;
 }) {
   return (
-    <div className="flex items-center gap-2 text-[13px] font-semibold text-emerald-800">
+    <div className="flex items-center gap-2 text-sm font-semibold uppercase tracking-wide text-emerald-800">
       <Icon className="h-4 w-4" />
       {children}
     </div>
@@ -406,6 +459,7 @@ function FacultyProfileTab({
   const [saving, setSaving] = useState(false);
   const [kacOptions, setKacOptions] = useState<any[]>([]);
   const [kacQuery, setKacQuery] = useState("");
+  const [preferredKacIds, setPreferredKacIds] = useState<string[]>([]);
 
   const [draftName, setDraftName] = useState<{ first_name: string; last_name: string }>(() => ({
     first_name: String(faculty?.first_name || "").trim(),
@@ -433,8 +487,21 @@ function FacultyProfileTab({
     });
     setDraftEmployment(String(faculty?.employment_type || "").trim());
     setDraftCerts((Array.isArray(faculty?.certifications) ? faculty.certifications : []).join(", "));
+    // Keep the KAC selection in sync with whatever shape the backend returns.
+    // - Newer shape: `qualified_kac_ids: string[]`
+    // - Current profile payload: `qualified_kacs: {kac_id,...}[]`
     const ids = faculty?.qualified_kac_ids;
-    if (Array.isArray(ids)) setDraftKacs(ids.map((x: any) => String(x)).filter(Boolean));
+    if (Array.isArray(ids)) {
+      setDraftKacs(ids.map((x: any) => String(x)).filter(Boolean));
+    } else if (Array.isArray(faculty?.qualified_kacs)) {
+      setDraftKacs(
+        faculty.qualified_kacs
+          .map((k: any) => String(k?.kac_id || "").trim())
+          .filter(Boolean)
+      );
+    } else {
+      setDraftKacs([]);
+    }
   }, [faculty]);
 
   useEffect(() => {
@@ -445,6 +512,37 @@ function FacultyProfileTab({
         if (res?.ok && Array.isArray(res?.kacs)) setKacOptions(res.kacs);
       } catch {
         // best-effort
+      }
+    })();
+  }, [userId]);
+
+  useEffect(() => {
+    // Best-effort: pull the latest submitted preferences so we can merge preferred_kacs
+    // into the Qualified KACs display (requested UX).
+    (async () => {
+      try {
+        const res = await getFacultyPreferencesList(userId);
+        const prefs: any[] = Array.isArray(res?.preferences) ? res.preferences : [];
+        if (!prefs.length) {
+          setPreferredKacIds([]);
+          return;
+        }
+
+        // Prefer a finished submission if present; otherwise fall back to most recent.
+        const pref = prefs.find((p) => Boolean(p?.is_finished)) || prefs[0];
+        const raw = Array.isArray(pref?.preferred_kacs) ? pref.preferred_kacs : [];
+
+        const ids = raw
+          .map((k: any) => {
+            if (typeof k === "string") return k.trim();
+            return String(k?.kac_id || k?.kacId || "").trim();
+          })
+          .filter(Boolean);
+
+        setPreferredKacIds(Array.from(new Set(ids)));
+      } catch {
+        // best-effort
+        setPreferredKacIds([]);
       }
     })();
   }, [userId]);
@@ -510,18 +608,73 @@ function FacultyProfileTab({
 
   const email = String(faculty?.email || faculty?.email_address || faculty?.emailAddress || "").trim();
 
-  const pills: { label: string; value: string }[] = [
-    { label: "Employment", value: employmentLabel(faculty?.employment_type) },
-    { label: "Teaching experience", value: faculty?.teaching_years != null ? `${faculty.teaching_years} yrs` : "—" },
-  ];
+  // Pills intentionally kept empty for now; key profile attributes are shown as cards on the right.
+  const pills: { label: string; value: string }[] = [];
 
-  const guardrails = [
-    { label: "Minimum units (preference baseline)", value: faculty?.min_units ?? "—" },
-    { label: "Max course preps (per term)", value: faculty?.max_preps ?? "—" },
+  const guardrails: { key: "employment" | "teaching"; label: string; value: string }[] = [
+    { key: "employment", label: "Employment", value: employmentLabel(faculty?.employment_type) },
+    {
+      key: "teaching",
+      label: "Teaching experience",
+      value: faculty?.teaching_years != null ? `${faculty.teaching_years} yrs` : "—",
+    },
   ];
 
   const certifications: any[] = Array.isArray(faculty?.certifications) ? faculty.certifications : [];
-  const kacs: any[] = Array.isArray(faculty?.qualified_kacs) ? faculty.qualified_kacs : [];
+
+  const mergedKacs: any[] = useMemo(() => {
+    const base: any[] = Array.isArray(faculty?.qualified_kacs) ? faculty.qualified_kacs : [];
+    const byId = new Map<string, any>();
+
+    for (const k of base) {
+      const id = String(k?.kac_id || k?.kacId || "").trim();
+      if (!id) continue;
+      // Ensure a consistent `courses` shape.
+      // If profile payload doesn't include expanded courses, fall back to options.
+      const opt = (kacOptions || []).find((o: any) => String(o?.kac_id || "").trim() === id);
+      const courses =
+        Array.isArray((k as any)?.courses) && (k as any).courses.length > 0
+          ? (k as any).courses
+          : Array.isArray((opt as any)?.courses)
+            ? (opt as any).courses
+            : [];
+
+      byId.set(id, {
+        ...k,
+        kac_id: id,
+        courses,
+      });
+    }
+
+    for (const idRaw of preferredKacIds || []) {
+      const id = String(idRaw || "").trim();
+      if (!id || byId.has(id)) continue;
+      const opt = (kacOptions || []).find((o: any) => String(o?.kac_id || "").trim() === id);
+      byId.set(id, {
+        kac_id: id,
+        kac_name: opt?.kac_name || id,
+        kac_code: opt?.kac_code || "",
+        program_area: opt?.program_area || "",
+        // Preferred KACs must show the same course list as qualified KACs.
+        courses: Array.isArray((opt as any)?.courses) ? (opt as any).courses : [],
+      });
+    }
+
+    const arr = Array.from(byId.values());
+    try {
+      arr.sort((a: any, b: any) => {
+        const pa = String(a?.program_area || "");
+        const pb = String(b?.program_area || "");
+        if (pa !== pb) return pa.localeCompare(pb);
+        const na = String(a?.kac_name || "");
+        const nb = String(b?.kac_name || "");
+        return na.localeCompare(nb);
+      });
+    } catch {
+      // ignore
+    }
+    return arr;
+  }, [faculty, preferredKacIds, kacOptions]);
 
   const fullName = faculty?.full_name || faculty?.fullName || "—";
   const department = faculty?.department || "—";
@@ -531,6 +684,33 @@ function FacultyProfileTab({
     .slice(0, 2)
     .map((x) => x[0]?.toUpperCase())
     .join("") || "—";
+
+  const [recordsTab, setRecordsTab] = useState<"Teaching history" | "Deloadings">(
+    "Teaching history"
+  );
+
+  const SegBtn = ({
+    active,
+    children,
+    onClick,
+  }: {
+    active: boolean;
+    children: React.ReactNode;
+    onClick: () => void;
+  }) => (
+    <button
+      type="button"
+      onClick={onClick}
+      className={cls(
+        "inline-flex items-center justify-center gap-2 rounded-full px-3 py-1.5 text-xs font-semibold uppercase tracking-wide transition",
+        active
+          ? "bg-emerald-600 text-white shadow-sm"
+          : "bg-white text-slate-700 hover:bg-slate-50"
+      )}
+    >
+      {children}
+    </button>
+  );
 
   return (
     <div className="mx-auto w-full max-w-screen-2xl px-4">
@@ -549,7 +729,7 @@ function FacultyProfileTab({
                 title="Edit name"
                 onClick={() => setEditing((p) => (p === "name" ? null : "name"))}
               >
-                <Pencil className="h-4 w-4 text-slate-600" />
+                <Edit className="h-4 w-4 text-slate-600" />
               </button>
             </div>
 
@@ -576,7 +756,7 @@ function FacultyProfileTab({
                       "inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-sm font-semibold",
                       saving
                         ? "cursor-default border-slate-200 bg-slate-100 text-slate-500"
-                        : "cursor-pointer border-emerald-500 bg-emerald-400 text-emerald-950 hover:bg-emerald-300"
+                        : "cursor-pointer border-[#007a55] bg-[#007a55] text-white hover:bg-[#006a49]"
                     )}
                   >
                     <Check className="h-4 w-4" />
@@ -602,74 +782,18 @@ function FacultyProfileTab({
                 </>
               ) : null}
             </div>
-            <div className="mt-2 flex flex-wrap items-center gap-2">
-              {pills.map((p) => {
-                const isEmployment = p.label === "Employment";
-                return (
+            {pills.length > 0 && (
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+                {pills.map((p) => (
                   <span
                     key={p.label}
                     className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs text-slate-700"
                     title={p.label}
                   >
-                    {isEmployment && (
-                      <button
-                        type="button"
-                        className="-ml-1 rounded-full p-1 hover:bg-black/5"
-                        title="Edit employment"
-                        onClick={() => setEditing((cur) => (cur === "employment" ? null : "employment"))}
-                      >
-                        <Pencil className="h-3.5 w-3.5 text-slate-700" />
-                      </button>
-                    )}
                     <span className="text-slate-500">{p.label}:</span>
                     <span className="font-medium text-slate-800">{p.value}</span>
                   </span>
-                );
-              })}
-            </div>
-
-            {editing === "employment" && (
-              <div className="mt-3 flex flex-wrap items-center gap-2">
-                <div className="min-w-[260px]">
-                  <SelectBox
-                    value={(() => {
-                      const s = String(draftEmployment || "").trim();
-                      if (!s) return "Select…";
-                      if (s === "FT" || s === "Full-time") return "Full-time";
-                      if (s === "PT" || s === "Part-time") return "Part-time";
-                      return s;
-                    })()}
-                    onChange={(v) => {
-                      if (v === "Full-time") setDraftEmployment("FT");
-                      else if (v === "Part-time") setDraftEmployment("PT");
-                      else if (v === "Select…") setDraftEmployment("");
-                      else setDraftEmployment(v);
-                    }}
-                    options={["Select…", "Full-time", "Part-time"]}
-                  />
-                </div>
-                <button
-                  type="button"
-                  onClick={() => save("employment")}
-                  disabled={saving}
-                  className={cls(
-                    "inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-sm font-semibold",
-                    saving
-                      ? "cursor-default border-slate-200 bg-slate-100 text-slate-500"
-                      : "cursor-pointer border-emerald-500 bg-emerald-400 text-emerald-950 hover:bg-emerald-300"
-                  )}
-                >
-                  <Check className="h-4 w-4" />
-                  <span>Save</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setEditing(null)}
-                  className={lightRedBtn}
-                >
-                  <XCircle className="h-4 w-4" />
-                  <span>Cancel</span>
-                </button>
+                ))}
               </div>
             )}
           </div>
@@ -678,18 +802,76 @@ function FacultyProfileTab({
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:w-[520px]">
           {guardrails.map((g) => (
             <div
-              key={g.label}
+              key={g.key}
               className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm"
             >
-              <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-emerald-700">
-                {g.label.toLowerCase().includes("minimum units") ? (
-                  <Gauge className="h-4 w-4" />
-                ) : (
-                  <Layers className="h-4 w-4" />
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2 text-sm font-semibold uppercase tracking-wide text-emerald-800">
+                  {g.key === "employment" ? (
+                    <BadgeCheck className="h-4 w-4" />
+                  ) : (
+                    <SyllabusIcon className="h-4 w-4" />
+                  )}
+                  <span>{g.label}</span>
+                </div>
+                {g.key === "employment" && (
+                  <button
+                    type="button"
+                    className="rounded-lg p-1 hover:bg-black/5"
+                    title="Edit employment"
+                    onClick={() => setEditing((cur) => (cur === "employment" ? null : "employment"))}
+                  >
+                    <Edit className="h-4 w-4 text-slate-600" />
+                  </button>
                 )}
-                <span>{g.label}</span>
               </div>
-              <div className="mt-2 text-2xl font-semibold tracking-tight text-slate-900">{g.value}</div>
+             <div className="mt-2 text-lg font-semibold text-slate-900">{g.value}</div>
+
+              {g.key === "employment" && editing === "employment" && (
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  {/* Keep the dropdown narrow so it won't collide with the action buttons */}
+                  <div className="w-[180px] sm:w-[220px] max-w-full">
+                    <SelectBox
+                      value={(() => {
+                        const s = String(draftEmployment || "").trim();
+                        if (!s) return "Select…";
+                        if (s === "FT" || s === "Full-time") return "Full-time";
+                        if (s === "PT" || s === "Part-time") return "Part-time";
+                        return s;
+                      })()}
+                      onChange={(v) => {
+                        if (v === "Full-time") setDraftEmployment("FT");
+                        else if (v === "Part-time") setDraftEmployment("PT");
+                        else if (v === "Select…") setDraftEmployment("");
+                        else setDraftEmployment(v);
+                      }}
+                      options={["Select…", "Full-time", "Part-time"]}
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => save("employment")}
+                    disabled={saving}
+                    className={cls(
+                      "inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-sm font-semibold",
+                      saving
+                        ? "cursor-default border-slate-200 bg-slate-100 text-slate-500"
+                        : "cursor-pointer border-[#007a55] bg-[#007a55] text-white hover:bg-[#006a49]"
+                    )}
+                  >
+                    <Check className="h-4 w-4" />
+                    <span>Save</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setEditing(null)}
+                    className={lightRedBtn}
+                  >
+                    <XCircle className="h-4 w-4" />
+                    <span>Cancel</span>
+                  </button>
+                </div>
+              )}
             </div>
           ))}
         </div>
@@ -710,7 +892,7 @@ function FacultyProfileTab({
               title="Edit certifications"
               onClick={() => setEditing((p) => (p === "certs" ? null : "certs"))}
             >
-              <Pencil className="h-4 w-4 text-slate-600" />
+              <Edit className="h-4 w-4 text-slate-600" />
             </button>
           </div>
 
@@ -732,7 +914,7 @@ function FacultyProfileTab({
                     "inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-sm font-semibold",
                     saving
                       ? "cursor-default border-slate-200 bg-slate-100 text-slate-500"
-                      : "cursor-pointer border-emerald-500 bg-emerald-400 text-emerald-950 hover:bg-emerald-300"
+                      : "cursor-pointer border-[#007a55] bg-[#007a55] text-white hover:bg-[#006a49]"
                   )}
                 >
                   <Check className="h-4 w-4" />
@@ -781,14 +963,14 @@ function FacultyProfileTab({
               title="Edit qualified KACs"
               onClick={() => setEditing((p) => (p === "kacs" ? null : "kacs"))}
             >
-              <Pencil className="h-4 w-4 text-slate-600" />
+              <Edit className="h-4 w-4 text-slate-600" />
             </button>
           </div>
 
           {editing === "kacs" && (
             <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 p-3">
               <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                <div className="text-xs font-semibold uppercase tracking-wide text-slate-600">Select KACs</div>
+                <div className="text-sm font-semibold uppercase tracking-wide text-emerald-800">Select KACs</div>
                 <div className="relative w-full sm:w-[260px]">
                   <input
                     value={kacQuery}
@@ -842,6 +1024,21 @@ function FacultyProfileTab({
                             ) : null}
                           </div>
                           <div className="text-xs text-slate-500">{k?.program_area || ""}</div>
+                          {Array.isArray((k as any)?.courses) && (k as any).courses.length > 0 ? (
+                            <div className="mt-2 flex flex-wrap gap-2">
+                              {(k as any).courses.map((c: any) => (
+                                <span
+                                  key={c.course_id || `${c.course_code}-${c.course_title}`}
+                                  className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs text-slate-900"
+                                  title={c.course_title || ""}
+                                >
+                                  <span className="font-semibold">{c.course_code || "—"}</span>
+                                  <span className="text-slate-400">•</span>
+                                  <span className="max-w-[260px] truncate text-slate-700">{c.course_title || "—"}</span>
+                                </span>
+                              ))}
+                            </div>
+                          ) : null}
                         </div>
                       </label>
                     );
@@ -857,7 +1054,7 @@ function FacultyProfileTab({
                     "inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-sm font-semibold",
                     saving
                       ? "cursor-default border-slate-200 bg-slate-100 text-slate-500"
-                      : "cursor-pointer border-emerald-500 bg-emerald-400 text-emerald-950 hover:bg-emerald-300"
+                      : "cursor-pointer border-[#007a55] bg-[#007a55] text-white hover:bg-[#006a49]"
                   )}
                 >
                   <Check className="h-4 w-4" />
@@ -878,13 +1075,13 @@ function FacultyProfileTab({
             </div>
           )}
 
-          {kacs.length === 0 ? (
+          {mergedKacs.length === 0 ? (
             <div className="mt-3 rounded-xl border border-dashed border-slate-200 bg-slate-50 px-3 py-3 text-sm text-slate-600">
               No KAC qualifications on file.
             </div>
           ) : (
             <div className="mt-3 space-y-2">
-              {kacs.map((k) => (
+              {mergedKacs.map((k) => (
                 <details key={k.kac_id || k.kac_code || k.kac_name} className="group rounded-xl border border-slate-200 bg-white">
                   <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-2">
                     <div className="min-w-0">
@@ -927,26 +1124,64 @@ function FacultyProfileTab({
       </div>
 
       {/* Records */}
-      <div className="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-2">
+      <div className="mt-6">
         <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-          <div className="flex items-baseline justify-between gap-3">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
             <div>
-              <div className="text-sm font-semibold text-emerald-800">Teaching history</div>
-              <div className="mt-1 text-xs text-slate-500">What you taught and how often (per term + all-time).</div>
+              <div className="text-sm font-semibold uppercase tracking-wide text-emerald-800">Other Records</div>
+              <div className="mt-1 text-xs text-slate-500">
+                View your teaching history and deloadings.
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between gap-3">
+              <div className="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-slate-50 p-1">
+                <SegBtn
+                  active={recordsTab === "Teaching history"}
+                  onClick={() => setRecordsTab("Teaching history")}
+                >
+                  Teaching history
+                </SegBtn>
+                <SegBtn active={recordsTab === "Deloadings"} onClick={() => setRecordsTab("Deloadings")}>
+                  Deloadings
+                </SegBtn>
+              </div>
             </div>
           </div>
-          <div className="mt-4">
-            <HistoryMain embedded />
-          </div>
-        </div>
 
-        <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-          <div>
-            <div className="text-sm font-semibold text-emerald-800">Deloadings</div>
-            <div className="mt-1 text-xs text-slate-500">Your recorded deloading arrangements.</div>
-          </div>
+          {/* Content */}
           <div className="mt-4">
-            <DeloadingsContent embedded />
+            {recordsTab === "Teaching history" ? (
+              <div className="rounded-2xl border border-slate-200 bg-slate-50">
+                <div className="flex flex-col gap-1 border-b border-slate-200 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div>
+                    <div className="text-sm font-semibold uppercase tracking-wide text-emerald-800">Teaching history</div>
+                    <div className="mt-0.5 text-xs text-slate-600">
+                      Use search to quickly find a course; switch AY to browse older terms.
+                    </div>
+                  </div>
+             
+                </div>
+                <div className="max-h-[520px] overflow-auto px-3 py-3">
+                  <HistoryMain embedded />
+                </div>
+              </div>
+            ) : (
+              <div className="rounded-2xl border border-slate-200 bg-slate-50">
+                <div className="flex flex-col gap-1 border-b border-slate-200 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div>
+                    <div className="text-sm font-semibold uppercase tracking-wide text-emerald-800">Deloadings</div>
+                    <div className="mt-0.5 text-xs text-slate-600">
+                      See your recorded deloading arrangements and their details.
+                    </div>
+                  </div>
+                
+                </div>
+                <div className="max-h-[520px] overflow-auto px-3 py-3">
+                  <DeloadingsContent embedded />
+                </div>
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -1111,6 +1346,8 @@ type TLItem = {
   // Special Class reflection (OM_SpecialClass -> Faculty)
   is_special_class?: boolean;
   special_id?: string;
+  is_serviced?: boolean;
+  serviced_department?: string;
   course_code: string;
   course_title: string;
   section: string;
@@ -1138,6 +1375,8 @@ type TLItemForCalendar = {
   syllabus?: string;
   is_special_class?: boolean;
   special_id?: string;
+  is_serviced?: boolean;
+  serviced_department?: string;
   // Store original item for modal
   originalItem: TLItem;
 };
@@ -1231,11 +1470,19 @@ function placeItems(teachingLoad: TLItem[]): Placed[] {
           mode: it.mode,
           // IMPORTANT: Even if there is no assigned room yet, the schedule must still reflect.
           // Use a neutral placeholder instead of implying an online room.
-          room: (room && String(room).trim()) ? String(room).trim() : "TBA",
+          // Special class requirement: show TBA instead of ONLINE for Room 1/2 in Calendar view.
+          room: (() => {
+            const base = (room && String(room).trim()) ? String(room).trim() : "TBA";
+            const isSpecial = Boolean((it as any)?.is_special_class);
+            if (isSpecial && String(base).trim().toUpperCase() === "ONLINE") return "TBA";
+            return base;
+          })(),
           time: time,
           syllabus: it.syllabus,
           is_special_class: Boolean((it as any)?.is_special_class),
           special_id: (it as any)?.special_id,
+          is_serviced: Boolean((it as any)?.is_serviced),
+          serviced_department: (it as any)?.serviced_department,
           originalItem: it, // Pass the full original item
         },
       });
@@ -1278,19 +1525,22 @@ const getCampusColorForSection = (sec?: string): string | undefined => {
 };
 
 const ClassBlock = ({ onClick, it }: { onClick?: () => void; it: TLItemForCalendar }) => {
-  const campusColor = !it.is_special_class ? getCampusColorForSection(it.sec) : undefined;
+  const isServiced = !!it.is_serviced;
+  const campusColor = !it.is_special_class && !isServiced ? getCampusColorForSection(it.sec) : undefined;
 
   return (
     <button
-      onClick={onClick}
+      onClick={it.is_special_class || isServiced ? undefined : onClick}
       className={cls(
         "flex w-full flex-col items-center justify-center rounded-xl border shadow-sm",
         it.is_special_class
           ? "border-purple-200 bg-purple-100/80 hover:bg-purple-100"
+          : isServiced
+          ? "border-yellow-200 bg-yellow-50 hover:bg-yellow-100/60"
           : campusColor
-          ? "border-neutral-200 text-white hover:brightness-[1.02]"
+          ? "border-neutral-200 text-black hover:brightness-[1.02]"
           : "border-emerald-200 bg-emerald-50/90 hover:bg-emerald-50",
-        it.is_special_class && "cursor-default"
+        (it.is_special_class || isServiced) && "cursor-default"
       )}
       style={campusColor ? { backgroundColor: campusColor } : undefined}
       title={`${it.code} • ${it.sec} | ${it.room} • ${it.mode}`}
@@ -1350,6 +1600,12 @@ function TeachingLoadEnhanced({ teachingLoad, term, workflow, onToast, onRefresh
   const [view, setView] = useState<"Calendar" | "List">("Calendar");
   const [modal, setModal] = useState<{ day: DayLong; item: TLItemForCalendar } | null>(null);
   const [isAccepting, setIsAccepting] = useState(false);
+  const [sendToGcal, setSendToGcal] = useState(true); // default ON to keep current behavior
+
+  // Calendar row sizing:
+  // - Keep empty rows compact and consistent (match the schedule card height)
+  // - Still allow rows to expand if a slot contains multiple cards
+  const CALENDAR_ROW_MIN_PX = 60;
 
   // Schedule is finalized only when backend explicitly marks it so (e.g., an admin lock).
   // Faculty acceptance should NOT lock/finalize; OM can still edit/resend, and faculty can RFC/accept again.
@@ -1411,7 +1667,12 @@ const scheduleFinalLabel = (() => {
 	              <span className="h-3 w-3 rounded-sm border border-purple-200 bg-purple-100" />
 	              <span>Special Class</span>
 	            </span>
-	          </div>
+	          
+<span className="inline-flex items-center gap-2">
+  <span className="h-3 w-3 rounded-sm border border-yellow-200 bg-yellow-50" />
+  <span>Serviced</span>
+</span>
+</div>
           <div className="flex gap-2">
           {["Calendar", "List"].map((v) => (
             <button
@@ -1429,6 +1690,7 @@ const scheduleFinalLabel = (() => {
             </button>
           ))}
 
+          <div className="flex flex-col items-start">
           <button
             type="button"
             onClick={async () => {
@@ -1440,18 +1702,21 @@ const scheduleFinalLabel = (() => {
                 const userId = raw.userId || raw.user_id || raw.id || "";
                 const termId = (term as any)?.term_id || (term as any)?._id || (term as any)?.id;
 
-                const resp: any = await acceptFacultyLoadAssignment(userId, termId ? { term_id: termId } : {});
+                const resp: any = await acceptFacultyLoadAssignment(
+                  userId,
+                  { ...(termId ? { term_id: termId } : {}), send_to_gcal: sendToGcal }
+                );
+
                 console.log("ACCEPT resp:", resp);
 
-
-                if (resp?.calendar_ok === false) {
-                  onToast?.(
-                    "warning",
-                    resp?.calendar_error || "Calendar was not created.",
-                    "Accepted (calendar issue)"
-                  );
-                } else if (resp?.calendar_ok === true) {
-                  onToast?.("success", "Schedule accepted and calendar scheduled by term dates.", "Success");
+                if (sendToGcal) {
+                  if (resp?.calendar_ok === false) {
+                    onToast?.("warning", resp?.calendar_error || "Calendar was not created.", "Accepted (calendar issue)");
+                  } else if (resp?.calendar_ok === true) {
+                    onToast?.("success", "Schedule accepted and calendar scheduled by term dates.", "Success");
+                  } else {
+                    onToast?.("success", "Schedule accepted.", "Success");
+                  }
                 } else {
                   onToast?.("success", "Schedule accepted.", "Success");
                 }
@@ -1482,6 +1747,18 @@ const scheduleFinalLabel = (() => {
               ? "Accepting…"
               : "Accept Schedule"}
           </button>
+
+          <label className="mt-2 inline-flex items-center gap-2 text-xs text-slate-700 select-none">
+            <input
+              type="checkbox"
+              className="h-3.5 w-3.5 rounded border-neutral-300 text-emerald-700 focus:ring-emerald-600/40"
+              checked={sendToGcal}
+              onChange={(e) => setSendToGcal(e.target.checked)}
+              disabled={isAccepting || scheduleFinal || isAlreadyApproved}
+            />
+            <span>Send to GCalendar</span>
+          </label>
+        </div>
         </div>
       </div>
 
@@ -1500,6 +1777,10 @@ const scheduleFinalLabel = (() => {
 	          <span className="inline-flex items-center gap-2">
 	            <span className="h-3 w-3 rounded-sm border border-purple-200 bg-purple-100" />
 	            <span>Special Class</span>
+	          </span>
+	          <span className="inline-flex items-center gap-2">
+	            <span className="h-3 w-3 rounded-sm border border-yellow-200 bg-yellow-50" />
+	            <span>Serviced</span>
 	          </span>
 	        </div>
 	      </div>
@@ -1536,12 +1817,12 @@ const scheduleFinalLabel = (() => {
 
               <div
                 className="relative grid grid-cols-[140px_repeat(6,1fr)]"
-                style={{ gridAutoRows: "minmax(84px, auto)" }}
+                style={{ gridAutoRows: `minmax(${CALENDAR_ROW_MIN_PX}px, max-content)` }}
               >
                 {TIME_BANDS_LABEL.map((band, r) => (
                   <React.Fragment key={band}>
                     <div
-                      className="flex items-center justify-center border-r border-neutral-300 bg-neutral-50 px-2 text-center text-[13px]"
+                      className="flex h-full items-center justify-center border-r border-neutral-300 bg-neutral-50 px-2 text-center text-[13px]"
                       style={{ gridColumn: 1, gridRow: r + 1 }}
                     >
                       {band}
@@ -1550,7 +1831,7 @@ const scheduleFinalLabel = (() => {
                     {DAY_ORDER.filter(d => d !== "TBA").map((_, c) => (
                       <div
                         key={`${c}-${r}`}
-                        className="border border-neutral-300"
+                        className="h-full border border-neutral-300"
                         style={{ gridColumn: c + 2, gridRow: r + 1 }}
                       />
                     ))}
@@ -1573,9 +1854,9 @@ const scheduleFinalLabel = (() => {
                           it={it}
                           onClick={() => {
                             if (scheduleFinal) return;
-                            // Reflected Special Classes are distinct from the regular OM schedule.
-                            // They must NOT allow RFC.
+                            // Reflected Special Classes and Serviced classes must NOT allow RFC.
                             if (it.is_special_class) return;
+                            if ((it as any)?.is_serviced) return;
                             setModal({ day: g.day, item: it });
                           }}
                         />
@@ -1609,7 +1890,7 @@ const scheduleFinalLabel = (() => {
                   <thead className="bg-gray-50 text-gray-700">
                     <tr className="[&>th]:border-b [&>th]:border-gray-200">
                       {LIST_HEADERS.map((h) => (
-                        <th key={h} className="px-4 py-3 text-left font-semibold">
+                        <th key={h} className={cls("px-4 py-3 font-semibold", h === "Course Code & Title" ? "text-left" : "text-center")}>
                           {h}
                         </th>
                       ))}
@@ -1626,21 +1907,35 @@ const scheduleFinalLabel = (() => {
                       teachingLoad.map((it, idx) => {
                         const t1 = splitBeginEnd(it.time1);
                         const t2 = splitBeginEnd(it.time2);
-                        const d1 = it.day1 && it.day1 !== "TBA" ? it.day1 : "—";
-                        const d2 = it.day2 && it.day2 !== "TBA" ? it.day2 : "—";
-
                         const isSpecial = Boolean((it as any)?.is_special_class);
+                        const isServiced = !isSpecial && Boolean((it as any)?.is_serviced);
+
+                        // Days: for special classes show initial-only (M/T/W/H/F/S/U) to match regular.
+                        const d1Raw = it.day1 && it.day1 !== "TBA" ? it.day1 : "";
+                        const d2Raw = it.day2 && it.day2 !== "TBA" ? it.day2 : "";
+                        const d1 = d1Raw ? ((isSpecial || isServiced) ? dayInitial(d1Raw) : d1Raw) : "—";
+                        const d2 = d2Raw ? ((isSpecial || isServiced) ? dayInitial(d2Raw) : d2Raw) : "—";
+
+                        // Rooms: for special classes show TBA instead of ONLINE.
+                        const room1Display = isSpecial
+                          ? normalizeRoomDisplayForSpecial((it as any).room1)
+                          : (isServiced ? ((it as any).room1 || "TBA") : ((it as any).room1 || "—"));
+                        const room2Display = isSpecial
+                          ? normalizeRoomDisplayForSpecial((it as any).room2)
+                          : (isServiced ? ((it as any).room2 || "TBA") : ((it as any).room2 || "—"));
+
+                        // Mode: for special classes auto-derive from rooms (FOL if both rooms unassigned/TBA/ONLINE, else HYB).
                         // In List view: Special Classes should NOT show "Special Class" in the Mode column.
                         const modeRaw = String(it.mode || "").trim();
                         const modeDisplay = isSpecial
-                          ? modeRaw && modeRaw.toLowerCase() !== "special class" ? modeRaw : "—"
-                          : modeRaw || "—";
+                          ? specialModeFromRooms((it as any).room1, (it as any).room2)
+                          : (modeRaw || "—");
 
                         return (
                           <tr
                             key={idx}
                             className={cls(
-                              isSpecial ? "bg-purple-50" : "bg-white",
+                              isSpecial ? "bg-purple-50" : (isServiced ? "bg-yellow-50" : "bg-white"),
                               "[&>td]:border-t [&>td]:border-gray-100"
                             )}
                           >
@@ -1650,17 +1945,17 @@ const scheduleFinalLabel = (() => {
                                 <div className="mt-0.5 text-[12px] text-gray-600">{it.course_title || "—"}</div>
                               </div>
                             </td>
-                            <td className="px-4 py-3 align-middle">{it.section || "—"}</td>
-                            <td className="px-4 py-3 align-middle">{d1}</td>
-                            <td className="px-4 py-3 align-middle">{t1.begin}</td>
-                            <td className="px-4 py-3 align-middle">{t1.end}</td>
-                            <td className="px-4 py-3 align-middle">{it.room1 || "—"}</td>
-                            <td className="px-4 py-3 align-middle">{d2}</td>
-                            <td className="px-4 py-3 align-middle">{t2.begin}</td>
-                            <td className="px-4 py-3 align-middle">{t2.end}</td>
-                            <td className="px-4 py-3 align-middle">{it.room2 || "—"}</td>
-                            <td className="px-4 py-3 align-middle text-gray-800">{modeDisplay}</td>
-                            <td className="px-4 py-3 align-middle">
+                            <td className="px-4 py-3 align-middle text-center">{it.section || "—"}</td>
+                            <td className="px-4 py-3 align-middle text-center">{d1}</td>
+                            <td className="px-4 py-3 align-middle text-center">{t1.begin}</td>
+                            <td className="px-4 py-3 align-middle text-center">{t1.end}</td>
+                            <td className="px-4 py-3 align-middle text-center">{room1Display}</td>
+                            <td className="px-4 py-3 align-middle text-center">{d2}</td>
+                            <td className="px-4 py-3 align-middle text-center">{t2.begin}</td>
+                            <td className="px-4 py-3 align-middle text-center">{t2.end}</td>
+                            <td className="px-4 py-3 align-middle text-center">{room2Display}</td>
+                            <td className="px-4 py-3 align-middle text-center text-gray-800">{modeDisplay}</td>
+                            <td className="px-4 py-3 align-middle text-center">
                               <button
                                 type="button"
                                 onClick={() => openSyllabus(it)}
@@ -2043,14 +2338,14 @@ function ChangeRequestModal({
 	                <div className="grid grid-cols-3 gap-0 px-3 py-2 text-sm">
 	                  <div className="font-medium text-neutral-800">{dayAbbrev(oi?.day1) || "TBA"}</div>
 	                  <div className="font-medium text-neutral-800">{String(oi?.time1 || "TBA")}</div>
-	                  <div className="text-right text-neutral-700">{String(oi?.room1 || "TBA")}</div>
+	                  <div className="text-right text-neutral-700">{normalizeRoomDisplayForSpecial(oi?.room1) || "TBA"}</div>
 	                </div>
 
 	                {hasSecond ? (
 	                  <div className="grid grid-cols-3 gap-0 border-t border-neutral-100 px-3 py-2 text-sm">
 	                    <div className="font-medium text-neutral-800">{dayAbbrev(oi?.day2) || "TBA"}</div>
 	                    <div className="font-medium text-neutral-800">{String(oi?.time2 || "TBA")}</div>
-	                    <div className="text-right text-neutral-700">{String(oi?.room2 || "TBA")}</div>
+	                    <div className="text-right text-neutral-700">{normalizeRoomDisplayForSpecial(oi?.room2) || "TBA"}</div>
 	                  </div>
 	                ) : (
 	                  <div className="grid grid-cols-3 border-t border-neutral-100 px-3 py-2 text-sm text-neutral-500">

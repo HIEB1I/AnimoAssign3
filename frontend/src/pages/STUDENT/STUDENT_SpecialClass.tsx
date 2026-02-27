@@ -298,6 +298,17 @@ function formatHHMM(v?: string) {
   return raw;
 }
 
+function normalizeRoomDisplay(v?: unknown) {
+  const s = String(v ?? "").trim();
+  if (!s) return "";
+  const u = s.toUpperCase();
+  if (u === "ONLINE") return "TBA";
+  if (u === "ONLINE CLASS" || u === "ONLINECLASS") return "TBA";
+  // Some backends send "Online" casing.
+  if (u === "ONLINE") return "TBA";
+  return s;
+}
+
 /**
  * Returns a compact "Day/s" + "Time" display without duplicating the same time below the table.
  * - If both slots share the same time range: Day/s = "M, H", Time = "0730 - 0900"
@@ -346,12 +357,12 @@ function StatusCard({ a }: { a: StudentSpecialClassView }) {
   const d1 = String(a.day1 || "").trim() || "—";
   const b1 = formatHHMM(String(a.begin1 || "").trim()) || "—";
   const e1 = formatHHMM(String(a.end1 || "").trim()) || "—";
-  const r1 = String((a as any).room1 || "").trim() || "—";
+  const r1 = normalizeRoomDisplay((a as any).room1) || "—";
 
   const d2 = String(a.day2 || "").trim() || "—";
   const b2 = formatHHMM(String(a.begin2 || "").trim()) || "—";
   const e2 = formatHHMM(String(a.end2 || "").trim()) || "—";
-  const r2 = String((a as any).room2 || "").trim() || "—";
+  const r2 = normalizeRoomDisplay((a as any).room2) || "—";
 
   // ✅ Remarks column shows APPLICATION remarks
   const remarksCell = String(a.remarks || "").trim() || "—";
