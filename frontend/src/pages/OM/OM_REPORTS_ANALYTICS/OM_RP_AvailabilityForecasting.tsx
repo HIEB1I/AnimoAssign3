@@ -409,6 +409,7 @@ export default function OM_RP_AvailabilityForecasting() {
 
   const facultySuggestions = useMemo(() => {
     // Show ALL matches (scrollable list) — not only top 12.
+    const q = facultyQuery.trim();
     if (!q) return facultyDirectory;
     return facultyDirectory.filter((f) => matchesQuery({ name: f.name, email: f.email, q }));
   }, [facultyDirectory, facultyQuery]);
