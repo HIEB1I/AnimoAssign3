@@ -22,7 +22,7 @@ DAY_MAP = {
     "Fri": "F", "Friday": "F", "F": "F",
     "Sat": "S", "Saturday": "S", "S": "S",
 }
-TOP_N_PER_FACULTY = 5
+TOP_N_PER_FACULTY = 4
 
 def _clamp(x: float, lo: float = 0.0, hi: float = 1.0) -> float:
     return max(lo, min(hi, x))
@@ -162,6 +162,12 @@ async def build_faculty_availability_heatmap(
     # strongest slot per faculty (Top 1) or a broader set (Top 5).
     cm = (counting_mode or "top1").strip().lower()
     top_n_per_faculty = 1 if cm in ("top1", "1", "one") else TOP_N_PER_FACULTY
+    # accept explicit "top4"/"4"
+    if cm in ("top4", "4", "four"):
+        top_n_per_faculty = 4
+    if cm in ("top5", "5", "five"):
+        # backward-compatible: UI now uses top4
+        top_n_per_faculty = 4
 
     # New Metrics
     total_faculty_considered: int = 0
@@ -524,7 +530,7 @@ async def build_faculty_availability_heatmap(
         "faculty_with_recent_pref": faculty_with_recent_pref,
         "faculty_with_recent_history": faculty_with_recent_history,
         "most_supported_slot_count": most_supported_slot_count,
-        "counting_mode": "top1" if top_n_per_faculty == 1 else "top5",
+        "counting_mode": "top1" if top_n_per_faculty == 1 else "top4",
         "top_n_per_faculty": top_n_per_faculty,
 
         # Decision summary

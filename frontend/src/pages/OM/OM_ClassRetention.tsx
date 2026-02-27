@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { Search, Plus, Check, X, Trash2, Edit } from "lucide-react";
+import { Search, Plus, Check, X, Trash2, Edit, Download, ChevronDown } from "lucide-react";
 import { cls } from "../../utilities/cls";
 import SelectBox from "../../component/SelectBox";
 import {
@@ -40,6 +40,8 @@ const toNumOrNull = (v: string) => (v.trim() === "" ? null : Number(v));
 export default function OM_ClassRetention(
   { renderExtraActions }: { renderExtraActions?: ExtraActionsRender } = {}
 ) {
+
+  const [exportOpen, setExportOpen] = useState(false);
 
   const [activeTermId, setActiveTermId] = useState<string>("");
   const [activeTermLabel, setActiveTermLabel] = useState<string>("");
@@ -201,6 +203,127 @@ export default function OM_ClassRetention(
     // value is calculated from faculty_assignments on the server
   };
 
+  // CHAIR Plantilla-style Excel export (HTML -> .xls), formatted like the Office of the Provost template.
+  // NOTE: "Name of Faculty" is intentionally left blank per the template requirement.
+  const exportTableExcel = () => {
+    if (!rows || rows.length === 0) {
+      alert("No retention rows to export.");
+      return;
+    }
+
+    const normalizeForExcel = (value: string) => {
+      let v = value ?? "";
+      if (v === "—") v = "";
+      v = v
+        .replace(/[\u2012\u2013\u2014\u2015]/g, "-")
+        .replace(/[\u2018\u2019]/g, "'")
+        .replace(/[\u201C\u201D]/g, '"')
+        .replace(/\u00A0/g, " ")
+        .replace(/[\r\n\t]/g, " ");
+      v = v.replace(/\s+/g, " ").trim();
+      return v;
+    };
+
+    const esc = (v: string) =>
+      v.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+    const termLine = activeTermLabel ? activeTermLabel : "";
+    const COLS = 8;
+
+    const headerRows = `
+      <tr><td colspan="${COLS}" style="text-align:center;font-weight:bold;font-size:14pt;">De La Salle University</td></tr>
+      <tr><td colspan="${COLS}" style="text-align:center;font-weight:bold;">OFFICE OF THE PROVOST</td></tr>
+      <tr><td colspan="${COLS}" style="text-align:center;font-weight:bold;">APPLICATION FOR RETENTION OF CLASSES AS REGULAR</td></tr>
+      <tr><td colspan="${COLS}" style="text-align:center;">${esc(termLine)}</td></tr>
+      <tr><td colspan="${COLS}" style="height:12px;"></td></tr>
+
+      <tr>
+        <td style="font-weight:bold;">DATE:</td>
+        <td colspan="3"></td>
+        <td style="font-weight:bold;">For:</td>
+        <td colspan="3"></td>
+      </tr>
+      <tr>
+        <td style="font-weight:bold;">From:</td>
+        <td colspan="3"></td>
+        <td style="font-weight:bold;">Endorsed by:</td>
+        <td colspan="3"></td>
+      </tr>
+      <tr><td colspan="${COLS}" style="height:12px;"></td></tr>
+      <tr><td colspan="${COLS}">This is to request for the retention of the following classes as <b>REGULAR</b>.</td></tr>
+      <tr><td colspan="${COLS}" style="height:12px;"></td></tr>
+    `;
+
+    const tableHeader = `
+      <tr>
+        <th style="border:1px solid #000;background:#f3f4f6;padding:6px;text-align:center;">No.</th>
+        <th style="border:1px solid #000;background:#f3f4f6;padding:6px;text-align:center;">Course Code</th>
+        <th style="border:1px solid #000;background:#f3f4f6;padding:6px;text-align:center;">Section</th>
+        <th style="border:1px solid #000;background:#f3f4f6;padding:6px;text-align:center;">Student Units</th>
+        <th style="border:1px solid #000;background:#f3f4f6;padding:6px;text-align:center;">Faculty Units</th>
+        <th style="border:1px solid #000;background:#f3f4f6;padding:6px;text-align:center;">No. of Enrolled Students</th>
+        <th style="border:1px solid #000;background:#f3f4f6;padding:6px;text-align:center;">Name of Faculty</th>
+        <th style="border:1px solid #000;background:#f3f4f6;padding:6px;text-align:center;">Provost Approval</th>
+      </tr>
+    `;
+
+    const bodyRows = rows
+      .map((r, i) => {
+        const cells = [
+          String(i + 1),
+          r.course_code || "",
+          r.section_code || "",
+          r.student_units ?? "",
+          r.faculty_units ?? "",
+          r.enrolled ?? "",
+          "", // blank faculty
+          "", // blank approval
+        ].map((c) => esc(normalizeForExcel(String(c ?? ""))));
+
+        return `
+          <tr>
+            <td style="border:1px solid #000;padding:6px;text-align:center;">${cells[0]}</td>
+            <td style="border:1px solid #000;padding:6px;">${cells[1]}</td>
+            <td style="border:1px solid #000;padding:6px;text-align:center;">${cells[2]}</td>
+            <td style="border:1px solid #000;padding:6px;text-align:center;">${cells[3]}</td>
+            <td style="border:1px solid #000;padding:6px;text-align:center;">${cells[4]}</td>
+            <td style="border:1px solid #000;padding:6px;text-align:center;">${cells[5]}</td>
+            <td style="border:1px solid #000;padding:6px;"></td>
+            <td style="border:1px solid #000;padding:6px;"></td>
+          </tr>
+        `;
+      })
+      .join("");
+
+    const safeTerm = (activeTermLabel || "").replace(/[^a-z0-9\-\s_]/gi, "").trim();
+    const filename = safeTerm
+      ? `Class_Retention_${safeTerm}.xls`
+      : "Class_Retention.xls";
+
+    const html = `
+      <html>
+        <head><meta charset="utf-8" /></head>
+        <body>
+          <table cellspacing="0" cellpadding="0" style="border-collapse:collapse;font-family:Calibri;font-size:11pt;">
+            ${headerRows}
+            ${tableHeader}
+            ${bodyRows}
+          </table>
+        </body>
+      </html>
+    `;
+
+    const blob = new Blob([html], { type: "application/vnd.ms-excel;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
   return (
     <main className="w-full px-8 py-8">
       <header className="mb-4">
@@ -227,12 +350,45 @@ export default function OM_ClassRetention(
         <div className="ml-auto flex items-center gap-2">
           <button
             onClick={startAdd}
-            className="inline-flex items-center gap-2 rounded-md bg-emerald-600 px-3 py-2 text-sm font-medium text-white shadow-sm hover:brightness-110"
+            className="inline-flex items-center gap-2 rounded-md bg-emerald-500 px-3 py-2 text-sm font-medium text-white shadow-sm"
           >
             <Plus className="h-4 w-4" />
             Add Class
           </button>
+          <div className="relative">
+            <button
+              type="button"
+              onClick={() => setExportOpen((v) => !v)}
+              disabled={loading}
+              className="inline-flex items-center gap-2 rounded-md bg-emerald-600 px-3 py-2 text-sm font-medium text-white shadow-sm hover:brightness-110"
+            >
+              <Download className="h-4 w-4" />
+              Export
+              <ChevronDown className="h-4 w-4" />
+            </button>
 
+            {exportOpen && (
+              <div
+                className="absolute right-0 mt-2 w-56 rounded-lg border border-gray-200 bg-white shadow-lg z-50"
+                onMouseLeave={() => setExportOpen(false)}
+              >
+                <button
+                  type="button"
+                  onClick={() => {
+                    setExportOpen(false);
+                    exportTableExcel();
+                  }}
+                  disabled={rows.length === 0 || loading}
+                  className={cls(
+                    "w-full text-left px-3 py-2 text-sm hover:bg-gray-50",
+                    (rows.length === 0 || loading) && "opacity-60 cursor-not-allowed"
+                  )}
+                >
+                  Export table (Excel)
+                </button>
+              </div>
+            )}
+          </div>
           {renderExtraActions?.({ rows, loading })}
         </div>
 
