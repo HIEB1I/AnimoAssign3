@@ -8617,19 +8617,57 @@ async def post_course_offerings(
                                 fac_user_ids.add(u2)
 
                     # Send notifications if any faculty recipients exist
-                    for fuid in sorted(list(fac_user_ids)):
+                    # Include Faculty Service assignees (status=responded) even if no faculty_assignments row exists.
+                    serviced_user_ids: set[str] = set()
+                    serviced_from_dept = ""
+                    try:
+                        fs = await db["faculty_service"].find_one(
+                            {"status": "responded", "section_id": section_id},
+                            {"_id": 0, "faculty": 1, "from_department": 1},
+                        ) or {}
+                        serviced_from_dept = str(fs.get("from_department") or "").strip()
+                        fid = str(((fs.get("faculty") or {}) or {}).get("faculty_id") or "").strip()
+                        if fid:
+                            fp = await db[COL_FAC_PROFILES].find_one({"faculty_id": fid}, {"_id": 0, "user_id": 1}) or {}
+                            u3 = str(fp.get("user_id") or "").strip()
+                            if u3:
+                                serviced_user_ids.add(u3)
+                    except Exception:
+                        serviced_user_ids = set()
+
+                    all_recips = set(fac_user_ids) | set(serviced_user_ids)
+
+                    for fuid in sorted(list(all_recips)):
                         try:
+                            is_serviced_fac = fuid in serviced_user_ids
+                            dk = (dedupe_key + "::SERVICED") if is_serviced_fac else dedupe_key
+
                             hitf = await db["notifications"].find_one(
-                                {"user_id": fuid, "meta.dedupe_key": dedupe_key},
+                                {"user_id": fuid, "meta.dedupe_key": dk},
                                 {"_id": 1},
                             )
                             if hitf:
                                 continue
+
+                            title_use = ("Serviced Class: Room Assigned" if is_serviced_fac else title)
+                            details_use = details
+                            if is_serviced_fac:
+                                extra = f" (Serviced to {serviced_from_dept})" if serviced_from_dept else ""
+                                details_use = (
+                                    f"APO assigned a room to your serviced class for {course_code} – {scode} ({campus_name}).{extra}\n"
+                                    + "\n".join(lines)
+                                )
+
+                            meta_use = {**meta, "route": "/faculty/overview", "dedupe_key": dk}
+                            if is_serviced_fac:
+                                meta_use["kind"] = "apo_room_assignment_updated_serviced"
+                                meta_use["serviced_to"] = serviced_from_dept
+
                             await create_notification(
                                 user_id=fuid,
-                                title=title,
-                                details=details,
-                                meta={**meta, "route": "/faculty/overview"},
+                                title=title_use,
+                                details=details_use,
+                                meta=meta_use,
                                 send_email=True,
                                 email_from_user_id=userId,
                             )
