@@ -8,6 +8,57 @@ import { fetchFacultyAvailabilityHeatmap } from "../../../api";
 /* ---------------- Small helpers ---------------- */
 const cls = (...s: (string | false | undefined)[]) => s.filter(Boolean).join(" ");
 
+function normalizeText(s: string) {
+  return (s || "")
+    .toLowerCase()
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/[^a-z0-9\s@._-]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function buildNameVariants(name: string) {
+  const base = normalizeText(name);
+  const variants = new Set<string>();
+  if (base) variants.add(base);
+
+  // Support common display formats like "Last, First Middle".
+  if (name && name.includes(",")) {
+    const [aRaw, bRaw] = name.split(",", 2);
+    const a = normalizeText(aRaw);
+    const b = normalizeText(bRaw);
+    if (a && b) {
+      variants.add(`${a} ${b}`.trim());
+      variants.add(`${b} ${a}`.trim());
+    }
+  }
+
+  return Array.from(variants);
+}
+
+function matchesQuery({ name, email, q }: { name: string; email?: string; q: string }) {
+  const qq = normalizeText(q);
+  if (!qq) return true;
+
+  const tokens = qq.split(" ").filter(Boolean);
+  const emailN = normalizeText(email || "");
+  const nameVariants = buildNameVariants(name);
+
+  // Match if any variant contains the whole query OR all tokens are present.
+  for (const h of nameVariants) {
+    if (!h) continue;
+    if (h.includes(qq)) return true;
+    if (tokens.every((t) => h.includes(t))) return true;
+  }
+
+  if (emailN) {
+    if (emailN.includes(qq)) return true;
+    if (tokens.every((t) => emailN.includes(t))) return true;
+  }
+
+  return false;
+}
+
 function Card({ className = "", children }: { className?: string; children: any }) {
   return <div className={cls("bg-white rounded-xl border border-gray-200 shadow-sm", className)}>{children}</div>;
 }
@@ -358,9 +409,9 @@ export default function OM_RP_AvailabilityForecasting() {
 
   const facultySuggestions = useMemo(() => {
     // Show ALL matches (scrollable list) — not only top 12.
-    const q = facultyQuery.trim().toLowerCase();
+    const q = facultyQuery.trim();
     if (!q) return facultyDirectory;
-    return facultyDirectory.filter((f) => f.name.toLowerCase().includes(q) || (f.email || "").toLowerCase().includes(q));
+    return facultyDirectory.filter((f) => matchesQuery({ name: f.name, email: f.email, q }));
   }, [facultyDirectory, facultyQuery]);
 
   const selectedFaculty = useMemo(() => {
@@ -413,9 +464,9 @@ export default function OM_RP_AvailabilityForecasting() {
     if (!data) return [] as HeatPerson[];
     const [d1, d2] = parsePairKey(pairKey);
     const merged = mergePairCells(getSingleCell(data, d1, slotKey), getSingleCell(data, d2, slotKey));
-    const q = candidateQuery.trim().toLowerCase();
+    const q = candidateQuery.trim();
     if (!q) return merged.list;
-    return merged.list.filter((p) => p.name.toLowerCase().includes(q));
+    return merged.list.filter((p) => matchesQuery({ name: p.name, email: p.email, q }));
   }, [data, pairKey, slotKey, candidateQuery]);
 
   // Fetch
@@ -500,7 +551,7 @@ export default function OM_RP_AvailabilityForecasting() {
 
       {/* Title + subtitle */}
       <div className="px-1">
-        <h1 className="text-2xl font-bold text-gray-900">Availability Forecasting</h1>
+        <h1 className="text-2xl font-bold text-gray-900">Time/Day Slot Availability Indicators</h1>
         <p className="mt-1 text-sm text-gray-600">
           Predicts best-fit teaching blocks using submitted preferences and recent teaching patterns to help assign faculty to time slots faster.
         </p>
@@ -603,8 +654,11 @@ export default function OM_RP_AvailabilityForecasting() {
                   <input
                     value={facultyQuery}
                     onChange={(e) => {
-                      setFacultyQuery(e.target.value);
-                      if (!e.target.value.trim()) setSelectedFacultyId(null);
+                      const v = e.target.value;
+                      setFacultyQuery(v);
+                      // If the user starts typing while a faculty is selected, treat it as a new search.
+                      if (!v.trim()) setSelectedFacultyId(null);
+                      else if (selectedFacultyId) setSelectedFacultyId(null);
                       setStartMode("faculty");
                     }}
                     placeholder="Search by name…"
@@ -708,7 +762,7 @@ export default function OM_RP_AvailabilityForecasting() {
                 </div>
               </div>
 
-              <div className="mt-2 text-[11px] text-gray-500">
+              <div className="mt-2 text-[11px] text-red-500">
                 This report is predicted support (preferences + last 3 terms patterns), not confirmed availability.
               </div>
             </Card>
@@ -771,7 +825,7 @@ export default function OM_RP_AvailabilityForecasting() {
                 )}
               </div>
 
-              <div className="mt-2 text-[11px] text-gray-500">
+              <div className="mt-2 text-[11px] text-red-500">
                 Highlights show predicted best-fit slots, not guaranteed free time.
               </div>
             </Card>
