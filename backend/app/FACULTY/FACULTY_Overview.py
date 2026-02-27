@@ -1801,7 +1801,45 @@ async def overview_handler(
             for kid in qualified_kacs:
                 if isinstance(kid, str) and kid.strip():
                     clean_k.append(kid.strip())
-            updates_faculty["qualified_kacs"] = sorted(set(clean_k))
+            # Normalize + dedupe for storage.
+            new_qualified = sorted(set(clean_k))
+            updates_faculty["qualified_kacs"] = new_qualified
+
+            # IMPORTANT FIX:
+            # The Faculty "My Profile" UI intentionally displays a merged view of
+            # `qualified_kacs` + `preferred_kacs` (latest submitted preferences).
+            # When a faculty member removes a KAC from their Qualified list, they
+            # expect it to disappear from that merged view immediately.
+            #
+            # To prevent confusion ("it didn't work"), we automatically remove any
+            # KACs that were REMOVED from `qualified_kacs` from stored `preferred_kacs`
+            # for this faculty.
+            try:
+                prev_qualified_raw = faculty.get("qualified_kacs") or []
+                prev_qualified: List[str] = []
+                if isinstance(prev_qualified_raw, list):
+                    for x in prev_qualified_raw:
+                        if isinstance(x, str) and x.strip():
+                            prev_qualified.append(x.strip())
+                removed_ids = sorted(set(prev_qualified) - set(new_qualified))
+
+                fac_id = str(faculty.get("faculty_id") or "").strip()
+                if removed_ids and fac_id:
+                    now_pref = datetime.now(timezone.utc)
+                    # Handle common storage shapes:
+                    # - preferred_kacs: ["KAC001", ...]
+                    # - preferred_kacs: [{"kac_id": "KAC001"}, ...]
+                    await db.faculty_preferences.update_many(
+                        {"faculty_id": fac_id, "preferred_kacs": {"$in": removed_ids}},
+                        {"$pull": {"preferred_kacs": {"$in": removed_ids}}, "$set": {"updated_at": now_pref}},
+                    )
+                    await db.faculty_preferences.update_many(
+                        {"faculty_id": fac_id, "preferred_kacs.kac_id": {"$in": removed_ids}},
+                        {"$pull": {"preferred_kacs": {"kac_id": {"$in": removed_ids}}}, "$set": {"updated_at": now_pref}},
+                    )
+            except Exception:
+                # Best-effort: profile update should not fail if preference sync fails.
+                pass
 
         if not updates_faculty and not updates_user:
             return {"ok": True, "updated": {}}

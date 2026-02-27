@@ -150,7 +150,27 @@ const lightRedBtn =
    0) Page
    ========================================= */
 export default function FAC_Overview() {
-  const [tab, setTab] = useState<"My Profile" | "Schedule Overview" | "Submit Preferences">("My Profile");
+  const raw = JSON.parse(localStorage.getItem("animo.user") || "{}");
+  const userId = raw.userId || raw.user_id || raw.id;
+
+  const TAB_VALUES = ["My Profile", "Schedule Overview", "Submit Preferences"] as const;
+  type FacultyTab = (typeof TAB_VALUES)[number];
+
+  const tabStorageKey = userId
+    ? `animo.faculty.overview.activeTab.${userId}`
+    : "animo.faculty.overview.activeTab";
+
+  const readInitialTab = (): FacultyTab => {
+    try {
+      const saved = localStorage.getItem(tabStorageKey);
+      if (!saved) return "My Profile";
+      return (TAB_VALUES as readonly string[]).includes(saved) ? (saved as FacultyTab) : "My Profile";
+    } catch {
+      return "My Profile";
+    }
+  };
+
+  const [tab, setTab] = useState<FacultyTab>(readInitialTab);
   const [showInbox, setShowInbox] = useState(false); // NEW
   const [data, setData] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
@@ -186,6 +206,15 @@ const pushToast = useCallback(
       }
     }, []);
 
+  // Persist active tab across refresh.
+  useEffect(() => {
+    try {
+      localStorage.setItem(tabStorageKey, tab);
+    } catch {
+      // ignore storage write failures (private mode / denied storage)
+    }
+  }, [tab, tabStorageKey]);
+
 
   // Expose a global helper so other components can open the inbox if needed
   useEffect(() => {
@@ -203,9 +232,6 @@ const pushToast = useCallback(
       window.removeEventListener("faculty:closeInbox", onClose);
     };
   }, []);
-
-  const raw = JSON.parse(localStorage.getItem("animo.user") || "{}");
-  const userId = raw.userId || raw.user_id || raw.id;
 
   const loadOverview = useCallback(async () => {
   if (!userId) {
@@ -481,6 +507,7 @@ function FacultyProfileTab({
   });
 
   useEffect(() => {
+    if (editing) return;
     setDraftName({
       first_name: String(faculty?.first_name || "").trim(),
       last_name: String(faculty?.last_name || "").trim(),
@@ -502,7 +529,7 @@ function FacultyProfileTab({
     } else {
       setDraftKacs([]);
     }
-  }, [faculty]);
+  }, [faculty, editing]);
 
   useEffect(() => {
     // Load KAC options once for editing.
@@ -575,7 +602,26 @@ function FacultyProfileTab({
         payload.certifications = list;
       }
       if (kind === "kacs") {
-        payload.qualified_kacs = (draftKacs || []).map((x) => String(x).trim()).filter(Boolean);
+        const nextQualified = (draftKacs || []).map((x) => String(x).trim()).filter(Boolean);
+        payload.qualified_kacs = nextQualified;
+
+        // IMPORTANT FIX (UI): "My Profile" displays a merged list of Qualified + Preferred KACs.
+        // If the user removes a KAC from Qualified, and that KAC also exists in Preferred,
+        // it should disappear immediately to avoid confusion.
+        const prevIdsRaw = faculty?.qualified_kac_ids;
+        const prevFromIds = Array.isArray(prevIdsRaw)
+          ? prevIdsRaw.map((x: any) => String(x).trim()).filter(Boolean)
+          : [];
+        const prevFromDetails = Array.isArray(faculty?.qualified_kacs)
+          ? faculty.qualified_kacs
+              .map((k: any) => String(k?.kac_id || k?.kacId || "").trim())
+              .filter(Boolean)
+          : [];
+        const prevQualified = prevFromIds.length ? prevFromIds : prevFromDetails;
+        const removed = new Set(prevQualified.filter((id: string) => !nextQualified.includes(id)));
+        if (removed.size) {
+          setPreferredKacIds((prev) => (prev || []).filter((id) => !removed.has(String(id).trim())));
+        }
       }
 
       const res = await updateFacultyOverviewProfile(userId, payload);
@@ -591,10 +637,12 @@ function FacultyProfileTab({
   };
 
   const toggleKac = (id: string) => {
+    const norm = String(id || "").trim();
+    if (!norm) return;
     setDraftKacs((prev) => {
-      const s = new Set(prev);
-      if (s.has(id)) s.delete(id);
-      else s.add(id);
+      const s = new Set((prev || []).map((x) => String(x || "").trim()).filter(Boolean));
+      if (s.has(norm)) s.delete(norm);
+      else s.add(norm);
       return Array.from(s);
     });
   };
@@ -643,6 +691,7 @@ function FacultyProfileTab({
         ...k,
         kac_id: id,
         courses,
+        from_preferences: false,
       });
     }
 
@@ -657,6 +706,7 @@ function FacultyProfileTab({
         program_area: opt?.program_area || "",
         // Preferred KACs must show the same course list as qualified KACs.
         courses: Array.isArray((opt as any)?.courses) ? (opt as any).courses : [],
+        from_preferences: true,
       });
     }
 
@@ -976,7 +1026,7 @@ function FacultyProfileTab({
                     value={kacQuery}
                     onChange={(e) => setKacQuery(e.target.value)}
                     className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 pr-9 text-sm"
-                    placeholder="Search KAC…"
+                    placeholder="Search KAC or Course code…"
                   />
                   {kacQuery.trim() ? (
                     <button
@@ -997,11 +1047,16 @@ function FacultyProfileTab({
                   .filter((k) => {
                     const q = kacQuery.trim().toLowerCase();
                     if (!q) return true;
-                    const s = `${k?.kac_name || ""} ${k?.kac_code || ""} ${k?.program_area || ""}`.toLowerCase();
+                    const courseHay = Array.isArray((k as any)?.courses)
+                      ? (k as any).courses
+                          .map((c: any) => `${c?.course_code || ""} ${c?.course_title || ""}`)
+                          .join(" ")
+                      : "";
+                    const s = `${k?.kac_name || ""} ${k?.kac_code || ""} ${k?.program_area || ""} ${courseHay}`.toLowerCase();
                     return s.includes(q);
                   })
                   .map((k) => {
-                    const id = String(k?.kac_id || "");
+                    const id = String(k?.kac_id || "").trim();
                     const checked = draftKacs.includes(id);
                     return (
                       <label
@@ -1090,6 +1145,11 @@ function FacultyProfileTab({
                         <span className="rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-[11px] text-slate-700">
                           {k.kac_code || k.kac_id || "KAC"}
                         </span>
+                        {k?.from_preferences ? (
+                          <span className="rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[11px] text-amber-700">
+                            From Preferences
+                          </span>
+                        ) : null}
                       </div>
                       <div className="mt-0.5 text-[12px] text-slate-500">{k.program_area || "—"}</div>
                     </div>
