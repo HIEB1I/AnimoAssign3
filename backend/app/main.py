@@ -149,6 +149,7 @@ from .OM.OM_FacultyForm import router as om_facultyform
 from .OM.OM_StudentPetition import router as om_studentpetition
 from .OM.OM_SpecialClass import router as om_specialclass
 from .OM.OM_ClassRetention import router as om_classretention
+from .OM.OM_FacultyService import router as om_faculty_service_router
 
 from .OM.OM_Inbox import router as om_inbox_router
 from .OM.OM_LoadAssignment import router as om_loadassignment_router
@@ -207,6 +208,7 @@ app.include_router(om_facultyform, prefix="/api")
 app.include_router(om_studentpetition, prefix="/api")
 app.include_router(om_specialclass, prefix="/api")
 app.include_router(om_classretention, prefix="/api")
+app.include_router(om_faculty_service_router, prefix="/api")
 
 app.include_router(facultyoverview_router, prefix="/api")
 app.include_router(faculty_prefs_router, prefix="/api")

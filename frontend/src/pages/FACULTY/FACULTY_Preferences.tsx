@@ -1,7 +1,7 @@
 // FACULTY_Preferences.tsx
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { CalendarDays, MapPin, Monitor, BookOpen, Settings, Info, AlertTriangle, X } from "lucide-react";
+import { CalendarDays, MapPin, Monitor, BookOpen, Settings, Info, AlertTriangle, X, ChevronDown, CheckCircle2 } from "lucide-react";
 import {
   getFacultyPreferencesProfile,
   getFacultyPreferencesOptions,
@@ -44,6 +44,47 @@ const DD_BASE =
   "w-full rounded-2xl border border-gray-300 bg-white py-3 pl-4 pr-10 text-left text-[15px] shadow-sm outline-none hover:bg-gray-50 focus:ring-2 focus:ring-emerald-500/30";
 const DD_MENU =
   "absolute z-20 mt-2 max-h-80 w-full overflow-auto rounded-2xl border border-gray-300 bg-white shadow-lg";
+
+
+
+/* ---------- modal ---------- */
+function Modal({
+  open,
+  title,
+  onClose,
+  children,
+  footer,
+}: {
+  open: boolean;
+  title: string;
+  onClose: () => void;
+  children: React.ReactNode;
+  footer?: React.ReactNode;
+}) {
+  if (!open) return null;
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-black/40" onClick={onClose} />
+      <div className="relative z-10 w-full max-w-3xl rounded-2xl border border-neutral-200 bg-white shadow-xl">
+        <div className="flex items-start justify-between gap-3 border-b border-neutral-200 px-5 py-4">
+          <div>
+            <h3 className="text-base font-semibold text-neutral-900">{title}</h3>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className={cls("rounded-lg p-1.5 text-neutral-500 hover:bg-neutral-100 hover:text-neutral-800")}
+            aria-label="Close"
+          >
+            <X className="h-5 w-5" />
+          </button>
+        </div>
+        <div className="px-5 py-4">{children}</div>
+        {footer ? <div className="border-t border-neutral-200 px-5 py-4">{footer}</div> : null}
+      </div>
+    </div>
+  );
+}
 
 
 /* ---------- shared button styles ---------- */
@@ -689,6 +730,17 @@ function AELine1Schedule() {
    =========================== */
 type DeloadRow = { type: string; detail?: string; units: number | null };
 type FutureTerm = { term_id: string; label: string; start_date?: string };
+
+type TermMeta = { acad_year_start?: number | string; acad_year_end?: number | string; term_number?: number | string };
+type PreferenceRecord = {
+  term_id?: string;
+  submitted_at?: string;
+  term_label?: string;
+  term_meta?: TermMeta;
+  // plus all other backend fields (unknown)
+  [k: string]: any;
+};
+
 
 type SavedPrefs = {
   prefUnits: string;
@@ -1882,7 +1934,6 @@ function EditForm({
                         const more = Math.max(0, courses.length - shown.length);
                         return (
                           <div>
-                            <div className="text-[12px] font-medium text-slate-700">Courses under this KAC</div>
                             <div className="mt-1 flex flex-wrap gap-1.5">
                               {shown.map((c) => (
                                 <span
@@ -2157,6 +2208,28 @@ export default function FACULTY_Preferences() {
   const [openEdit, setOpenEdit] = useState(false); /* set to true to open */
   const [reuseBusy, setReuseBusy] = useState(false);
   const [reuseNotice, setReuseNotice] = useState<string>("");
+  const [infoOpen, setInfoOpen] = useState(false);
+
+  const [preferences, setPreferences] = useState<PreferenceRecord[]>([]);
+  const [activeTermId, setActiveTermId] = useState<string>("");
+  const [selectedHistoryTermId, setSelectedHistoryTermId] = useState<string>("");
+  const [reuseMenuOpen, setReuseMenuOpen] = useState(false);
+  const [reuseMenuHover, setReuseMenuHover] = useState(0);
+  const reuseMenuBtnRef = useRef<HTMLButtonElement>(null);
+  const reuseMenuListRef = useRef<HTMLDivElement>(null);
+  const [reuseModalOpen, setReuseModalOpen] = useState(false);
+  const [reuseModalStep, setReuseModalStep] = useState<"preview" | "confirm">("preview");
+  const [reuseConfirmChecked, setReuseConfirmChecked] = useState(false);
+
+  const [submissionRecordOpen, setSubmissionRecordOpen] = useState(false);
+  const [submissionRecord, setSubmissionRecord] = useState<{
+    termLabel: string;
+    submittedAt: string;
+    prefs: SavedPrefs;
+    source: "edit" | "reuse";
+    reusedFromLabel?: string;
+  } | null>(null);
+
 
   // prefs window state (from backend options)
   const [prefsWindow, setPrefsWindow] = useState<{ openISO: string; deadlineISO: string }>({
@@ -2187,6 +2260,87 @@ export default function FACULTY_Preferences() {
 
   const raw = JSON.parse(localStorage.getItem("animo.user") || "{}");
   const userId = raw.userId || raw.user_id || raw.id;
+
+
+
+  const formatPreferenceLabel = (rec?: PreferenceRecord | null) => {
+    if (!rec) return "—";
+    // Prefer backend-provided term_label
+    const tl = String(rec.term_label || "").trim();
+    if (tl) return `${tl} Preference`;
+
+    const meta = (rec.term_meta || {}) as TermMeta;
+    const tnRaw = meta.term_number;
+    const aySRaw = meta.acad_year_start;
+    const ayERaw = meta.acad_year_end;
+
+    const tn = tnRaw != null && String(tnRaw).trim() ? Number(tnRaw) : NaN;
+    const ayS = aySRaw != null && String(aySRaw).trim() ? Number(aySRaw) : NaN;
+    const ayE =
+      ayERaw != null && String(ayERaw).trim()
+        ? Number(ayERaw)
+        : Number.isFinite(ayS)
+        ? ayS + 1
+        : NaN;
+
+    if (Number.isFinite(tn) && Number.isFinite(ayS) && Number.isFinite(ayE)) {
+      return `Term ${tn} AY ${ayS}–${ayE} Preference`;
+    }
+    const tid = String(rec.term_id || "").trim();
+    return tid ? `${tid} Preference` : "Preference";
+  };
+
+  const preferenceHistory = useMemo(() => {
+    const list = Array.isArray(preferences) ? preferences : [];
+    // keep distinct term_ids, newest first
+    const seen = new Set<string>();
+    const out: PreferenceRecord[] = [];
+    for (const r of list) {
+      const tid = String(r?.term_id || "").trim();
+      if (!tid || seen.has(tid)) continue;
+      seen.add(tid);
+      out.push(r);
+      if (out.length >= 3) break;
+    }
+    return out;
+  }, [preferences]);
+
+  const selectedHistoryRecord = useMemo(() => {
+    if (!selectedHistoryTermId) return preferenceHistory[0] || null;
+    return preferenceHistory.find((r) => String(r.term_id || "") === selectedHistoryTermId) || null;
+  }, [preferenceHistory, selectedHistoryTermId]);
+  useEffect(() => {
+    // keep hover in sync with the selected record whenever the menu opens
+    if (!reuseMenuOpen) return;
+    const idx = preferenceHistory.findIndex(
+      (r) => String(r.term_id || "") === String(selectedHistoryTermId || "")
+    );
+    setReuseMenuHover(Math.max(0, idx));
+  }, [reuseMenuOpen, preferenceHistory, selectedHistoryTermId]);
+
+  useEffect(() => {
+    // close the "Use Previous Preferences" history menu when clicking outside
+    const close = (e: MouseEvent) => {
+      if (!reuseMenuOpen) return;
+      const t = e.target as Node;
+      if (reuseMenuBtnRef.current?.contains(t)) return;
+      if (reuseMenuListRef.current?.contains(t)) return;
+      setReuseMenuOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [reuseMenuOpen]);
+
+  useEffect(() => {
+    if (editingLocked || reuseBusy) setReuseMenuOpen(false);
+  }, [editingLocked, reuseBusy]);
+
+
+  const activeTermRecord = useMemo(() => {
+    const tid = String(activeTermId || "").trim();
+    if (!tid) return null;
+    return (preferences || []).find((r) => String(r.term_id || "") === tid) || null;
+  }, [preferences, activeTermId]);
 
   // server -> SavedPrefs
   function fromServerToSaved(latest: any): SavedPrefs {
@@ -2286,6 +2440,7 @@ useEffect(() => {
           openISO: opts?.prefs_window?.openISO || "",
           deadlineISO: opts?.prefs_window?.deadlineISO || "",
         });
+        setActiveTermId(String(opts?.activeTerm?.term_id || opts?.prefs_window?.term_id || "").trim());
 
         setKacOptions((opts?.kacs || []) as any);
         setDaysMaster(
@@ -2313,8 +2468,29 @@ useEffect(() => {
         setEmploymentType(et === "PT" ? "PT" : "FT");
 
         const list = await getFacultyPreferencesList(userId);
-        const latest = (list?.preferences || [])[0];
+        const prefs = (list?.preferences || []) as PreferenceRecord[];
+        setPreferences(prefs);
+
+        // Prefer showing the latest saved prefs (existing behavior),
+        // but keep track of which term it's from so the UI can label it clearly.
+        const latest = prefs[0];
         if (latest) setSaved(fromServerToSaved(latest));
+
+        // Establish history dropdown default (last 3 distinct terms)
+        const seen = new Set<string>();
+        const hist: PreferenceRecord[] = [];
+        for (const r of prefs) {
+          const tid = String(r?.term_id || "").trim();
+          if (!tid || seen.has(tid)) continue;
+          seen.add(tid);
+          hist.push(r);
+          if (hist.length >= 3) break;
+        }
+        // Default: most recent non-active term if available; otherwise most recent term
+        const activeTid = String((opts?.activeTerm?.term_id || opts?.prefs_window?.term_id || "") as any).trim();
+        const defaultRec =
+          hist.find((r) => String(r.term_id || "") !== activeTid) || hist[0] || null;
+        setSelectedHistoryTermId(defaultRec ? String(defaultRec.term_id || "") : "");
       } catch (e: any) {
         alert(`Failed to load preferences: ${e?.message || e}`);
       } finally {
@@ -2384,11 +2560,28 @@ useEffect(() => {
     } as const;
   };
 
-  async function afterSubmitRefresh(res: any) {
+  async function afterSubmitRefresh(
+    res: any,
+    source: "edit" | "reuse",
+    reusedFromLabel?: string
+  ) {
     if (res?.ok && res?.preference) {
       const normalized = fromServerToSaved(res.preference);
       setSaved(normalized);
       setOpenEdit(false);
+
+      const termLabel = formatPreferenceLabel(res.preference as any);
+      const submittedAtRaw =
+        (res.preference?.submitted_at || res.preference?.updated_at || res.preference?.created_at || "") as any;
+      const submittedAt = typeof submittedAtRaw === "string" ? submittedAtRaw : String(submittedAtRaw || "");
+      setSubmissionRecord({
+        termLabel,
+        submittedAt,
+        prefs: normalized,
+        source,
+        reusedFromLabel,
+      });
+      setSubmissionRecordOpen(true);
       return;
     }
     throw new Error(res?.detail || "Save failed.");
@@ -2398,20 +2591,35 @@ useEffect(() => {
     try {
       const payload = toServerPayload(v, true);
       const res = await submitFacultyPreferences(userId, payload);
-      await afterSubmitRefresh(res);
+      await afterSubmitRefresh(res, "edit");
     } catch (e: any) {
       alert(e?.response?.data?.detail || e?.message || "Failed to save preferences.");
     }
   };
 
-  const handleReusePrevious = async () => {
+  const handleReusePrevious = () => {
+    setReuseNotice("");
+    setReuseModalStep("preview");
+    setReuseConfirmChecked(false);
+    setReuseModalOpen(true);
+  };
+
+  const handleReuseSubmitConfirmed = async () => {
+    const src = selectedHistoryRecord;
+    if (!src) {
+      setReuseNotice("No previous preference record found to reuse.");
+      setReuseModalOpen(false);
+      return;
+    }
+
     try {
-      setReuseNotice("");
       setReuseBusy(true);
-      const payload = toServerPayload(saved, true);
+      const srcSaved = fromServerToSaved(src);
+      const payload = toServerPayload(srcSaved, true);
       const res = await submitFacultyPreferences(userId, payload);
-      await afterSubmitRefresh(res);
+      await afterSubmitRefresh(res, "reuse", formatPreferenceLabel(src));
       setReuseNotice("Previous preferences submitted successfully.");
+      setReuseModalOpen(false);
     } catch (e: any) {
       alert(e?.response?.data?.detail || e?.message || "Failed to submit previous preferences.");
     } finally {
@@ -2486,7 +2694,16 @@ useEffect(() => {
 
   /* -------------------- SAVED VIEW -------------------- */
   
+
   const savedReturnDateLabel = saved.breakReturnDate || "";
+
+  const latestRecord = (preferences || [])[0] || null;
+  const latestLabel = formatPreferenceLabel(latestRecord);
+  const activeLabel = activeTermId
+    ? formatPreferenceLabel(activeTermRecord || ({ term_id: activeTermId } as any))
+    : "—";
+  const latestIsActive = !!activeTermId && String(latestRecord?.term_id || "") === String(activeTermId);
+
 
   return (
     <section className="mx-auto w-full max-w-screen-2xl px-4">
@@ -2501,35 +2718,104 @@ useEffect(() => {
 
         <div className="mb-4 flex items-start justify-between">
           <div>
-            <h2 className="text-[15px] font-semibold text-neutral-900">Faculty Preferences</h2>
+            <div className="flex items-center gap-1">
+              <h2 className="text-[15px] font-semibold text-neutral-900">Faculty Preferences</h2>
+              <button
+                type="button"
+                onClick={() => setInfoOpen(true)}
+                className="inline-flex items-center justify-center rounded-full p-1 text-neutral-500 hover:bg-neutral-100 hover:text-neutral-800"
+                aria-label="About Faculty Preferences"
+                title="About Faculty Preferences"
+              >
+                <Info className="h-4 w-4" />
+              </button>
+            </div>
             <p className="mt-0.5 text-sm text-neutral-500">
               Configure your teaching preferences for the upcoming term
             </p>
+
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              <Tag tone="amber">
+                <Info className="h-3.5 w-3.5" />
+                Planning term: {activeLabel}
+              </Tag>
+
+              <Tag tone={latestIsActive ? "emerald" : "gray"}>
+                <BookOpen className="h-3.5 w-3.5" />
+                Currently loaded: {latestLabel}
+              </Tag>
+            </div>
+
+            
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
-            <button
-              type="button"
-              disabled={editingLocked || reuseBusy}
-              onClick={handleReusePrevious}
-              className={cls(
-                BTN_BASE,
-                "gap-2",
-                editingLocked || reuseBusy
-                  ? "cursor-not-allowed bg-gray-200 text-gray-600"
-                  : "bg-neutral-100 text-slate-900 hover:bg-neutral-200/70"
+            <div className="relative">
+              <button
+                ref={reuseMenuBtnRef}
+                type="button"
+                disabled={editingLocked || reuseBusy || preferenceHistory.length === 0}
+                onClick={() => setReuseMenuOpen((v) => !v)}
+                aria-haspopup="listbox"
+                aria-expanded={reuseMenuOpen}
+                className={cls(
+                  BTN_BASE,
+                  "gap-2 min-w-[290px]",
+                  editingLocked || reuseBusy || preferenceHistory.length === 0
+                    ? "cursor-not-allowed bg-gray-200 text-gray-600"
+                    : "bg-neutral-100 text-slate-900 hover:bg-neutral-200/70"
+                )}
+                title={
+                  preferenceHistory.length === 0
+                    ? "No previous preferences found"
+                    : !openPassedPage
+                    ? "Submissions not open yet"
+                    : deadlinePassedPage
+                    ? "Deadline passed — submissions locked"
+                    : "Choose which previous preference to submit"
+                }
+              >
+                <BookOpen className="h-4 w-4" />
+                {reuseBusy ? "Submitting…" : "Use Previous Preferences"}
+                <ChevronDown className="ml-1 h-4 w-4 opacity-70" />
+              </button>
+
+              {reuseMenuOpen && preferenceHistory.length > 0 && (
+                <div
+                  ref={reuseMenuListRef}
+                  role="listbox"
+                  className={cls(DD_MENU, "w-[360px]")}
+                >
+                  {preferenceHistory.map((r, i) => {
+                    const tid = String(r.term_id || "");
+                    const label = formatPreferenceLabel(r);
+                    const selected = tid === String(selectedHistoryTermId || "");
+                    return (
+                      <button
+                        key={tid}
+                        role="option"
+                        aria-selected={selected}
+                        onMouseEnter={() => setReuseMenuHover(i)}
+                        onClick={() => {
+                          setSelectedHistoryTermId(tid);
+                          setReuseMenuOpen(false);
+                          handleReusePrevious();
+                        }}
+                        className={cls(
+                          "block w-full px-4 py-3 text-left text-[15px]",
+                          i === reuseMenuHover && "bg-emerald-50"
+                        )}
+                      >
+                        <span className="flex items-center justify-between gap-3">
+                          <span className="truncate">{label}</span>
+                          {selected && <CheckCircle2 className="h-4 w-4 text-emerald-700" />}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
               )}
-              title={
-                !openPassedPage
-                  ? "Submissions not open yet"
-                  : deadlinePassedPage
-                  ? "Deadline passed — submissions locked"
-                  : "Submit your previously saved preferences"
-              }
-            >
-              <BookOpen className="h-4 w-4" />
-              {reuseBusy ? "Submitting…" : "Use Previous Preferences"}
-            </button>
+            </div>
 
             <button
               disabled={editingLocked}
@@ -2650,6 +2936,355 @@ useEffect(() => {
           </div>
         </div>
       </div>
+
+      
+      {/* Info modal */} 
+      <Modal
+        open={infoOpen}
+        title="About Faculty Preferences"
+        onClose={() => setInfoOpen(false)}
+        footer={
+          <div className="flex items-center justify-end">
+            <button
+              type="button"
+              className={cls(BTN_BASE, "bg-neutral-100 text-slate-900 hover:bg-neutral-200/70")}
+              onClick={() => setInfoOpen(false)}
+            >
+              Close
+            </button>
+          </div>
+        }
+      >
+        <div className="space-y-3 text-sm text-neutral-700">
+          <p>
+            <span className="font-semibold text-neutral-900">Faculty Preferences</span> is where you set the
+            preferences and constraints used for building your teaching assignment for the upcoming term.
+          </p>
+
+          <div className="rounded-lg border border-neutral-200 bg-neutral-50 p-3">
+            <p className="font-medium text-neutral-900">Use Previous Preferences</p>
+            <p className="mt-1">
+              Copies a saved preference set from a prior term into the currently selected planning term. You’ll see
+              a preview and then a confirmation step before it is applied.
+            </p>
+          </div>
+
+          <div className="rounded-lg border border-neutral-200 bg-neutral-50 p-3">
+            <p className="font-medium text-neutral-900">Edit Preferences</p>
+            <p className="mt-1">
+              Opens the editable form for the current planning term so you can make changes and submit a new set of
+              preferences.
+            </p>
+          </div>
+        </div>
+      </Modal>
+
+{/* Preview + confirmation modal for "Use Previous Preferences" */}
+      <Modal
+        open={reuseModalOpen}
+        title={reuseModalStep === "preview" ? "Preview previous preferences" : "Confirm submission"}
+        onClose={() => {
+          if (!reuseBusy) {
+            setReuseModalOpen(false);
+            setReuseModalStep("preview");
+            setReuseConfirmChecked(false);
+          }
+        }}
+        footer={
+          reuseModalStep === "preview" ? (
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              <button
+                type="button"
+                className={cls(BTN_BASE, "bg-neutral-100 text-slate-900 hover:bg-neutral-200/70")}
+                onClick={() => setReuseModalOpen(false)}
+                disabled={reuseBusy}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className={cls(BTN_BASE, "bg-emerald-700 text-white hover:brightness-110")}
+                onClick={() => {
+                  setReuseModalStep("confirm");
+                  setReuseConfirmChecked(false);
+                }}
+                disabled={reuseBusy || !selectedHistoryRecord}
+              >
+                Continue
+              </button>
+            </div>
+          ) : (
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <button
+                type="button"
+                className={cls(BTN_BASE, "bg-neutral-100 text-slate-900 hover:bg-neutral-200/70")}
+                onClick={() => setReuseModalStep("preview")}
+                disabled={reuseBusy}
+              >
+                Back
+              </button>
+              <button
+                type="button"
+                className={cls(
+                  BTN_BASE,
+                  reuseBusy || !reuseConfirmChecked
+                    ? "cursor-not-allowed bg-gray-200 text-gray-600"
+                    : "bg-emerald-700 text-white hover:brightness-110"
+                )}
+                onClick={handleReuseSubmitConfirmed}
+                disabled={reuseBusy || !reuseConfirmChecked}
+              >
+                {reuseBusy ? "Submitting…" : "Confirm & Submit"}
+              </button>
+            </div>
+          )
+        }
+      >
+        {!selectedHistoryRecord ? (
+          <div className="text-sm text-neutral-600">No previous preference record available.</div>
+        ) : reuseModalStep === "preview" ? (
+          <div className="space-y-4">
+            <div className="rounded-xl border border-neutral-200 bg-neutral-50 p-3 text-sm text-neutral-700">
+              You are about to submit <span className="font-semibold">{formatPreferenceLabel(selectedHistoryRecord)}</span>{" "}
+              for the planning term <span className="font-semibold">{activeLabel}</span>.
+            </div>
+
+            <div className="grid grid-cols-1 gap-x-8 gap-y-6 lg:grid-cols-2">
+              {(() => {
+                const p = fromServerToSaved(selectedHistoryRecord);
+                const returnLabel = p.breakReturnDate || "";
+                return (
+                  <>
+                    <div>
+                      <SectionTitle icon={BookOpen}>Teaching Load</SectionTitle>
+                      <Row label="Preferred Teaching Units" value={<Tag tone="gray">{p.prefUnits || "—"}</Tag>} />
+                      {p.onBreak && p.noDeloading && (
+                        <>
+                          <Row label="Break Reason" value={<span className="text-neutral-900">{p.breakReason}</span>} />
+                          <Row
+                            label="Expected date of Return"
+                            value={<span className="text-neutral-900">{returnLabel || "—"}</span>}
+                          />
+                        </>
+                      )}
+                      <Row
+                        label="Deloading"
+                        value={
+                          p.noDeloading || p.deloadings.length === 0 ? (
+                            <span className="text-neutral-400">None</span>
+                          ) : (
+                            <div className="flex flex-col gap-1">
+                              {p.deloadings.map((r, i) => (
+                                <div key={i} className="text-sm">
+                                  <Tag tone="gray">{r.type}</Tag>{" "}
+                                  <Tag tone="gray">{(r.units ?? 0) + " units"}</Tag>
+                                </div>
+                              ))}
+                            </div>
+                          )
+                        }
+                      />
+                      <div className="mt-3 border-b border-neutral-200" />
+                    </div>
+
+                    <div>
+                      <SectionTitle icon={MapPin}>Location &amp; Mode</SectionTitle>
+                      <Row label="Campus Preference" value={<Tag tone="gray">{p.campus || "—"}</Tag>} />
+                      <Row
+                        label="Delivery Mode"
+                        value={p.delivery ? <Tag tone="gray">{p.delivery}</Tag> : <span className="text-neutral-400">—</span>}
+                      />
+                      <div className="mt-3 border-b border-transparent lg:border-b-0" />
+                    </div>
+
+                    <div>
+                      <SectionTitle icon={CalendarDays}>Schedule Preferences</SectionTitle>
+                      <Row label="Preferred Days" value={<Pills items={p.days} />} />
+                      <Row label="Preferred Time Slots" value={<Pills items={p.timeSlots} />} />
+                    </div>
+
+                    <div>
+                      <SectionTitle icon={Monitor}>Academic Specialization</SectionTitle>
+                      <Row
+                        label="Knowledge Areas"
+                        value={
+                          (p.kac || []).length ? (
+                            <div className="flex flex-wrap gap-1.5">
+                              {p.kac.map((k: any) => (
+                                <Tag key={String(k)} tone="blue">
+                                  {String(k)}
+                                </Tag>
+                              ))}
+                            </div>
+                          ) : (
+                            <span className="text-neutral-400">—</span>
+                          )
+                        }
+                      />
+                    </div>
+
+                    <div className="lg:col-span-2">
+                      <SectionTitle icon={BookOpen}>Remarks</SectionTitle>
+                      <div className="text-sm text-neutral-800">
+                        {p.remarks?.trim() || <span className="text-neutral-400">No remarks</span>}
+                      </div>
+                    </div>
+                  </>
+                );
+              })()}
+            </div>
+          </div>
+        ) : (
+          <div className="space-y-4">
+            <div className="flex items-start gap-3 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+              <AlertTriangle className="mt-0.5 h-5 w-5" />
+              <div>
+                <div className="font-semibold">Please confirm</div>
+                <div className="mt-0.5 text-amber-900/90">
+                  This will submit the selected previous preferences for the planning term. This action may overwrite an existing saved preference for the planning term.
+                </div>
+              </div>
+            </div>
+
+            <label className="flex cursor-pointer items-start gap-2 text-sm text-neutral-700">
+              <input
+                type="checkbox"
+                className="mt-1 h-4 w-4 rounded border-neutral-300 text-emerald-700"
+                checked={reuseConfirmChecked}
+                onChange={(e) => setReuseConfirmChecked(e.target.checked)}
+                disabled={reuseBusy}
+              />
+              <span>
+                I understand and want to submit <span className="font-semibold">{formatPreferenceLabel(selectedHistoryRecord)}</span> for{" "}
+                <span className="font-semibold">{activeLabel}</span>.
+              </span>
+            </label>
+          </div>
+        )}
+      </Modal>
+
+      {/* After submission, show an exact record of what was saved */}
+      <Modal
+        open={submissionRecordOpen}
+        title="Submission record"
+        onClose={() => setSubmissionRecordOpen(false)}
+        footer={
+          <div className="flex items-center justify-end">
+            <button
+              type="button"
+              className={cls(BTN_BASE, "bg-emerald-700 text-white hover:brightness-110")}
+              onClick={() => setSubmissionRecordOpen(false)}
+            >
+              Close
+            </button>
+          </div>
+        }
+      >
+        {!submissionRecord ? (
+          <div className="text-sm text-neutral-600">No submission record.</div>
+        ) : (
+          <div className="space-y-4">
+            <div className="flex items-start gap-3 rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900">
+              <CheckCircle2 className="mt-0.5 h-5 w-5" />
+              <div>
+                <div className="font-semibold">{submissionRecord.termLabel}</div>
+                {!!submissionRecord.submittedAt && (
+                  <div className="mt-0.5 text-emerald-900/90">Submitted at: {submissionRecord.submittedAt}</div>
+                )}
+                {submissionRecord.source === "reuse" && submissionRecord.reusedFromLabel ? (
+                  <div className="mt-0.5 text-emerald-900/90">Reused from: {submissionRecord.reusedFromLabel}</div>
+                ) : null}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 gap-x-8 gap-y-6 lg:grid-cols-2">
+              {(() => {
+                const p = submissionRecord.prefs;
+                const returnLabel = p.breakReturnDate || "";
+                return (
+                  <>
+                    <div>
+                      <SectionTitle icon={BookOpen}>Teaching Load</SectionTitle>
+                      <Row label="Preferred Teaching Units" value={<Tag tone="gray">{p.prefUnits || "—"}</Tag>} />
+                      {p.onBreak && p.noDeloading && (
+                        <>
+                          <Row label="Break Reason" value={<span className="text-neutral-900">{p.breakReason}</span>} />
+                          <Row
+                            label="Expected date of Return"
+                            value={<span className="text-neutral-900">{returnLabel || "—"}</span>}
+                          />
+                        </>
+                      )}
+                      <Row
+                        label="Deloading"
+                        value={
+                          p.noDeloading || p.deloadings.length === 0 ? (
+                            <span className="text-neutral-400">None</span>
+                          ) : (
+                            <div className="flex flex-col gap-1">
+                              {p.deloadings.map((r, i) => (
+                                <div key={i} className="text-sm">
+                                  <Tag tone="gray">{r.type}</Tag>{" "}
+                                  <Tag tone="gray">{(r.units ?? 0) + " units"}</Tag>
+                                </div>
+                              ))}
+                            </div>
+                          )
+                        }
+                      />
+                      <div className="mt-3 border-b border-neutral-200" />
+                    </div>
+
+                    <div>
+                      <SectionTitle icon={MapPin}>Location &amp; Mode</SectionTitle>
+                      <Row label="Campus Preference" value={<Tag tone="gray">{p.campus || "—"}</Tag>} />
+                      <Row
+                        label="Delivery Mode"
+                        value={p.delivery ? <Tag tone="gray">{p.delivery}</Tag> : <span className="text-neutral-400">—</span>}
+                      />
+                      <div className="mt-3 border-b border-transparent lg:border-b-0" />
+                    </div>
+
+                    <div>
+                      <SectionTitle icon={CalendarDays}>Schedule Preferences</SectionTitle>
+                      <Row label="Preferred Days" value={<Pills items={p.days} />} />
+                      <Row label="Preferred Time Slots" value={<Pills items={p.timeSlots} />} />
+                    </div>
+
+                    <div>
+                      <SectionTitle icon={Monitor}>Academic Specialization</SectionTitle>
+                      <Row
+                        label="Knowledge Areas"
+                        value={
+                          (p.kac || []).length ? (
+                            <div className="flex flex-wrap gap-1.5">
+                              {p.kac.map((k: any) => (
+                                <Tag key={String(k)} tone="blue">
+                                  {String(k)}
+                                </Tag>
+                              ))}
+                            </div>
+                          ) : (
+                            <span className="text-neutral-400">—</span>
+                          )
+                        }
+                      />
+                    </div>
+
+                    <div className="lg:col-span-2">
+                      <SectionTitle icon={BookOpen}>Remarks</SectionTitle>
+                      <div className="text-sm text-neutral-800">
+                        {p.remarks?.trim() || <span className="text-neutral-400">No remarks</span>}
+                      </div>
+                    </div>
+                  </>
+                );
+              })()}
+            </div>
+          </div>
+        )}
+      </Modal>
+
     </section>
   );
 }

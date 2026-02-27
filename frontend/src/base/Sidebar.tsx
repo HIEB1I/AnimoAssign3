@@ -49,6 +49,7 @@ const defaultItems: SidebarItem[] = [
   { to: "/om/course-management", label: "Course Management", Icon: BookOpen },
   { to: "/om/reports-analytics", label: "Reports and Analytics", Icon: BarChart3 },
   { to: "/om/faculty-form", label: "Faculty Preferences", Icon: FileText },
+  { to: "/om/faculty-service", label: "Faculty Service", Icon: ClipboardList },
   { to: "/om/student-petition", label: "Student Petition", Icon: FilePlus },
   { to: "/om/special-class", label: "Special Class", Icon: ClipboardStarIcon },
   { to: "/om/class-retention", label: "Class Retention", Icon: BookMarked },

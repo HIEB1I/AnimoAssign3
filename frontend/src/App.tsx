@@ -26,6 +26,7 @@ import OM_StudentPetition from "./pages/OM/OM_StudentPetition";
 import OM_SpecialClass from "./pages/OM/OM_SpecialClass";
 import OM_ClassRetention from "./pages/OM/OM_ClassRetention";
 import OM_Inbox from "./pages/OM/OM_Inbox";
+import OM_FacultyService from "./pages/OM/OM_FacultyService";
 
 
 // ----- Reports & Analytics sub-pages -----
@@ -154,6 +155,7 @@ export default function App() {
              <Route path="special-class" element={<OM_SpecialClass />} />
             <Route path="class-retention" element={<OM_ClassRetention />} />
             <Route path="special-class" element={<OM_SpecialClass />} />
+            <Route path="faculty-service" element={<OM_FacultyService />} />
 
   <Route path="reports-analytics" element={<OM_ReportsAnalytics />} />
   <Route path="reports-analytics/teaching-history" element={<OM_RP_FacultyTeachingHistory />} />
@@ -174,6 +176,7 @@ export default function App() {
           <Route path="/om/faculty-form" element={<Navigate to="/om/home/faculty-form" replace />} />
           <Route path="/om/student-petition" element={<Navigate to="/om/home/student-petition" replace />} />
           <Route path="/om/special-class" element={<Navigate to="/om/home/special-class" replace />} />
+          <Route path="/om/faculty-service" element={<Navigate to="/om/home/faculty-service" replace />} />
           <Route path="/om/class-retention" element={<Navigate to="/om/home/class-retention" replace />} />
           <Route path="/om/reports-analytics" element={<Navigate to="/om/home/reports-analytics" replace />} />
           <Route path="/om/reports-analytics/teaching-history" element={<Navigate to="/om/home/reports-analytics/teaching-history" replace />} />

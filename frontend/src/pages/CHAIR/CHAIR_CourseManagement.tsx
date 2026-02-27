@@ -51,7 +51,7 @@ function EditPeopleButton({ onEdit }: { onEdit: () => void }) {
         className="inline-flex items-center gap-2  px-3 py-2 text-xs font-medium text-gray-800 hover:bg-gray-50"
       >
         <Edit className="h-4 w-4" />
-        <span>People</span>
+        <span>Edit People</span>
       </button>
 
       {/* Tooltip */}

@@ -925,6 +925,44 @@ async def _apply_section_schedule_to_row(row: Dict[str, Any], section_id: str) -
     if bool(row.get("is_serviced")) and not bool(row.get("is_special_class")):
         row["mode"] = _serviced_mode_from_rooms(row.get("room1"), row.get("room2"))
 
+
+async def _apply_section_rooms_to_row(row: Dict[str, Any], section_id: str) -> None:
+    """Refresh ONLY the room fields from authoritative section_schedules + rooms.
+
+    Why this exists:
+    - OM can forward a proposal to faculty (faculty_load_proposals.rows)
+    - APO may later assign a physical room by updating section_schedules.room_id
+    - Faculty view should immediately reflect the room assignment even if the
+      proposal row payload is stale.
+
+    This function intentionally does NOT override day/time to avoid changing
+    the displayed schedule if OM's proposal differs from the stored schedules.
+    """
+    section_id = (section_id or "").strip()
+    if not section_id:
+        return
+
+    sch = await _special_class_schedule_two(
+        section_id=section_id,
+        schedule_id1=None,
+        schedule_id2=None,
+        schedule_cleared=False,
+    )
+
+    # Room 1
+    room1 = (sch.get("room1") or "").strip() or "TBA"
+    row["room1"] = room1
+
+    # Room 2 (only set when second meeting actually exists)
+    day2_raw = (sch.get("day2") or "").strip()
+    has_second = bool(day2_raw and day2_raw != "TBA")
+    if has_second:
+        room2 = (sch.get("room2") or "").strip() or "TBA"
+        row["room2"] = room2
+    else:
+        # Keep consistent with the schema used elsewhere: None when no 2nd meeting.
+        row["room2"] = None
+
 async def _fetch_reflected_faculty_service_rows_for_faculty(
     *,
     term_id: str,
@@ -1801,7 +1839,45 @@ async def overview_handler(
             for kid in qualified_kacs:
                 if isinstance(kid, str) and kid.strip():
                     clean_k.append(kid.strip())
-            updates_faculty["qualified_kacs"] = sorted(set(clean_k))
+            # Normalize + dedupe for storage.
+            new_qualified = sorted(set(clean_k))
+            updates_faculty["qualified_kacs"] = new_qualified
+
+            # IMPORTANT FIX:
+            # The Faculty "My Profile" UI intentionally displays a merged view of
+            # `qualified_kacs` + `preferred_kacs` (latest submitted preferences).
+            # When a faculty member removes a KAC from their Qualified list, they
+            # expect it to disappear from that merged view immediately.
+            #
+            # To prevent confusion ("it didn't work"), we automatically remove any
+            # KACs that were REMOVED from `qualified_kacs` from stored `preferred_kacs`
+            # for this faculty.
+            try:
+                prev_qualified_raw = faculty.get("qualified_kacs") or []
+                prev_qualified: List[str] = []
+                if isinstance(prev_qualified_raw, list):
+                    for x in prev_qualified_raw:
+                        if isinstance(x, str) and x.strip():
+                            prev_qualified.append(x.strip())
+                removed_ids = sorted(set(prev_qualified) - set(new_qualified))
+
+                fac_id = str(faculty.get("faculty_id") or "").strip()
+                if removed_ids and fac_id:
+                    now_pref = datetime.now(timezone.utc)
+                    # Handle common storage shapes:
+                    # - preferred_kacs: ["KAC001", ...]
+                    # - preferred_kacs: [{"kac_id": "KAC001"}, ...]
+                    await db.faculty_preferences.update_many(
+                        {"faculty_id": fac_id, "preferred_kacs": {"$in": removed_ids}},
+                        {"$pull": {"preferred_kacs": {"$in": removed_ids}}, "$set": {"updated_at": now_pref}},
+                    )
+                    await db.faculty_preferences.update_many(
+                        {"faculty_id": fac_id, "preferred_kacs.kac_id": {"$in": removed_ids}},
+                        {"$pull": {"preferred_kacs": {"kac_id": {"$in": removed_ids}}}, "$set": {"updated_at": now_pref}},
+                    )
+            except Exception:
+                # Best-effort: profile update should not fail if preference sync fails.
+                pass
 
         if not updates_faculty and not updates_user:
             return {"ok": True, "updated": {}}
@@ -2319,6 +2395,23 @@ async def overview_handler(
             # If all proposal rows were filtered out (stale), treat as no proposal.
             if proposed_load:
                 final_teaching_load = proposed_load
+
+                # --- Refresh room assignments from authoritative schedules ---
+                # Proposal rows can become stale when APO assigns physical rooms after
+                # OM forwarded the proposal. OM screens read from section_schedules,
+                # so we mirror that behavior here by re-resolving room1/room2 from
+                # section_schedules + rooms for each regular class row.
+                for rr in (final_teaching_load or []):
+                    if bool(rr.get("is_special_class")):
+                        continue
+                    sid = str(rr.get("section_id") or rr.get("sectionId") or "").strip()
+                    if not sid:
+                        continue
+                    try:
+                        await _apply_section_rooms_to_row(rr, sid)
+                    except Exception:
+                        # Non-fatal: keep proposal payload rooms if refresh fails.
+                        pass
 
                 # Faculty-side label:
                 # - Locked -> Finalized

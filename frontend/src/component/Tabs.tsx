@@ -38,7 +38,7 @@ export default function Tabs({
         - Avoid max-width centering here; pages below already manage their own layout.
       */}
       <div className="w-full px-4 py-3">
-        <div className="w-full rounded-xl bg-gray-200 px-3 py-2 shadow-sm">
+        <div className="w-full rounded-xl bg-[#91BA8D] px-3 py-2 shadow-sm">
           <div className={cls("grid w-full gap-2", cols)}>
             {items.map(({ label, icon: Icon, to }) =>
               mode === "nav" && to ? (
