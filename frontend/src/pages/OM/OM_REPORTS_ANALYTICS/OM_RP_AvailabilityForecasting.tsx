@@ -500,7 +500,7 @@ export default function OM_RP_AvailabilityForecasting() {
 
       {/* Title + subtitle */}
       <div className="px-1">
-        <h1 className="text-2xl font-bold text-gray-900">Availability Forecasting</h1>
+        <h1 className="text-2xl font-bold text-gray-900">Time/Day Slot Availability Indicators</h1>
         <p className="mt-1 text-sm text-gray-600">
           Predicts best-fit teaching blocks using submitted preferences and recent teaching patterns to help assign faculty to time slots faster.
         </p>
@@ -708,7 +708,7 @@ export default function OM_RP_AvailabilityForecasting() {
                 </div>
               </div>
 
-              <div className="mt-2 text-[11px] text-gray-500">
+              <div className="mt-2 text-[11px] text-red-500">
                 This report is predicted support (preferences + last 3 terms patterns), not confirmed availability.
               </div>
             </Card>
@@ -771,7 +771,7 @@ export default function OM_RP_AvailabilityForecasting() {
                 )}
               </div>
 
-              <div className="mt-2 text-[11px] text-gray-500">
+              <div className="mt-2 text-[11px] text-red-500">
                 Highlights show predicted best-fit slots, not guaranteed free time.
               </div>
             </Card>
