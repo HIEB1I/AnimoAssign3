@@ -157,7 +157,7 @@ export async function fetchFacultyAvailabilityHeatmap<T = unknown>(params?: {
   threshold?: number; // default handled server-side (e.g., 0.50)
   term_id?: string;
   direction?: "current" | "prev" | "next";
-  counting_mode?: "top1" | "top5";
+  counting_mode?: "top1" | "top4";
 }): Promise<T> {
   const qs = new URLSearchParams();
   if (params?.course_id) qs.set("course_id", params.course_id);
@@ -2551,6 +2551,9 @@ export type OMSpecialClassRow = {
   room2_room_type?: string;
 
   submitted_at?: string;
+
+  // timestamps (DB snake_case)
+  updated_at?: string;
 
   schedule_id1?: string | null;
   schedule_id2?: string | null;
