@@ -1,5 +1,6 @@
 // frontend/src/pages/OM/OM_FacultyForm.tsx
 import { useEffect, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import SelectBox from "../../component/SelectBox";
 import { cls } from "../../utilities/cls";
 import {
@@ -167,6 +168,12 @@ function ViewPreferenceButton({ onView }: { onView: () => void }) {
 
 /* ---------------- Page ---------------- */
 export default function OM_FacultyForm() {
+  const [searchParams] = useSearchParams();
+  const deepLinkFacultyId = (searchParams.get('facultyId') || '').trim();
+  const deepLinkTermId = (searchParams.get('termId') || '').trim();
+  const deepLinkOpen = (searchParams.get('open') || '').trim();
+  const shouldAutoOpen = !!deepLinkFacultyId && (deepLinkOpen === '1' || deepLinkOpen.toLowerCase() === 'true');
+
   // filters
   const [department, setDepartment] = useState("All Departments");
   const [status, setStatus] = useState("All Status");
@@ -367,7 +374,33 @@ useEffect(() => {
     return () => clearTimeout(t);
   }, [searchInput]);
 
-  // Fetch table rows when filters/search change
+  
+  // If opened from Course Profile deep-link, reset filters/search to ensure the faculty is visible
+  useEffect(() => {
+    if (!shouldAutoOpen) return;
+    setDepartment('All Departments');
+    setStatus('All Status');
+    setFacultyType('All Faculty Type');
+    setSearchInput('');
+    setSearch('');
+  }, [shouldAutoOpen]);
+
+  const autoOpenedRef = useRef(false);
+  useEffect(() => {
+    if (autoOpenedRef.current) return;
+    if (!shouldAutoOpen) return;
+    if (!deepLinkFacultyId) return;
+    if (loading) return;
+    if (!rows || rows.length === 0) return;
+
+    const target = rows.find((r) => (r.faculty_id || '').trim() === deepLinkFacultyId);
+    if (!target) return;
+
+    autoOpenedRef.current = true;
+    openView(target, deepLinkTermId || activeTerm?.term_id);
+  }, [shouldAutoOpen, deepLinkFacultyId, deepLinkTermId, loading, rows, activeTerm?.term_id]);
+
+// Fetch table rows when filters/search change
   useEffect(() => {
     (async () => {
       try {
@@ -378,7 +411,7 @@ useEffect(() => {
           facultyType,
           status,
           search,
-          termId: activeTerm?.term_id,
+          termId: deepLinkTermId || activeTerm?.term_id,
         });
         if (!ok) throw new Error("Failed to load faculty preferences");
         setRows(rows);
@@ -397,16 +430,16 @@ useEffect(() => {
         setLoading(false);
       }
     })();
-  }, [department, facultyType, status, search, activeTerm?.term_id]);
+  }, [department, facultyType, status, search, activeTerm?.term_id, deepLinkTermId]);
 
-  const openView = async (row: OMFRow) => {
+  const openView = async (row: OMFRow, termIdOverride?: string) => {
     setSelected(row);
     setPref(null);
     setPrefLoading(true);
     try {
       const { ok, preference } = await getOMFPreference(
         row.faculty_id,
-        activeTerm?.term_id
+        termIdOverride || deepLinkTermId || activeTerm?.term_id
       );
       if (ok) setPref(preference ?? null);
     } finally {

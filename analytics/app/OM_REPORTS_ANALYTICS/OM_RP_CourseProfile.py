@@ -2,6 +2,7 @@
 from typing import Any, Dict, List, Optional
 from collections import defaultdict
 import math
+import re
 
 from fastapi import APIRouter, Query
 from fastapi.responses import JSONResponse
@@ -11,12 +12,10 @@ from ..db_async import get_db
 router = APIRouter()
 
 
-
 def _fmt_ay(start: Optional[int]) -> str:
     if start is None:
         return "—"
     return f"{start}–{start + 1}"
-
 
 def _fmt_term(n: Optional[int]) -> str:
     return f"Term {n}" if isinstance(n, int) else "—"
@@ -27,136 +26,165 @@ async def get_course_profile_for(
     direction: str = "current",
 ) -> Dict[str, Any]:
     """
-    Returns Course Profile payload, including new descriptive analytics metrics.
+    Returns Course Profile payload used by Reports & Analytics.
+
+    Key goals:
+    - Never crash on mixed/dirty data (e.g., acad_year_start stored as str in some docs).
+    - Avoid oversized aggregation outputs (do not $push huge arrays).
+    - Prefer active (non-archived) assignment rows per section; fallback to archived when no active exists.
     """
     db = get_db()
+
+    def _safe_int(x: Any) -> Optional[int]:
+        if isinstance(x, int):
+            return x
+        if isinstance(x, float) and x.is_integer():
+            return int(x)
+        if isinstance(x, str):
+            s = x.strip()
+            if not s:
+                return None
+            try:
+                return int(s)
+            except Exception:
+                return None
+        return None
+
     q = (query or "").strip()
     if not q:
         return {"course_id": "", "title": "Not found"}
 
-    # 1) find course by id OR element of course_code[] (case-insensitive)
-    course = await db.courses.find_one({
-        "$or": [
-            {"course_id":   {"$regex": f"^{q}$", "$options": "i"}},
-            {"course_code": {"$elemMatch": {"$regex": f"^{q}$", "$options": "i"}}},
-        ]
-    })
+    # 1) Find course by id OR element of course_code[] (case-insensitive).
+    # NOTE: We intentionally match an *element* of course_code[]; callers should pass either course_id
+    # or a single code (not a joined string like "CODE1 / CODE2").
+    course = await db.courses.find_one(
+        {
+            "$or": [
+                {"course_id": {"$regex": f"^{re.escape(q)}$", "$options": "i"}},
+                {"course_code": {"$elemMatch": {"$regex": f"^{re.escape(q)}$", "$options": "i"}}},
+            ]
+        }
+    )
     if not course:
         return {"course_id": q, "title": "Not found"}
 
-    course_id   = course.get("course_id")
-    course_code = course.get("course_code") or []
-    title       = course.get("course_title") or course.get("title") or ""
+    course_id: str = course.get("course_id")
+    course_code: List[str] = course.get("course_code") or []
+    title: str = course.get("course_title") or course.get("title") or ""
 
-    # KACs that include this course
-    kac_docs = await db.kacs.find(
-        {"course_list": course_id},
-        {"kac_id": 1, "course_list": 1}
-    ).to_list(None)
+    # 2) KACs that include this course (used for "Qualified KAC" + Preferences panel).
+    kac_docs = await db.kacs.find({"course_list": course_id}, {"kac_id": 1}).to_list(None)
+    kac_ids = [k.get("kac_id") for k in kac_docs if k.get("kac_id")]
 
-    kac_ids = [k["kac_id"] for k in kac_docs]
-
-    qualified: List[Dict[str, Any]] = []
-
-    # A) taught THIS course (ALWAYS compute)
-    sec_ids = await db.sections.distinct("section_id", {"course_id": course_id})
-    taught_ids: set = set()
-    if sec_ids:
-        taught_ids = set(
-            await db.faculty_assignments.distinct("faculty_id", {"section_id": {"$in": sec_ids}})
-        )
-
-    # B) KAC-qualified (ONLY if kac_ids exists)
     kac_qualified_ids: set = set()
     if kac_ids:
-        kac_qualified_ids = set(
-            await db.faculty_profiles.distinct("faculty_id", {"qualified_kacs": {"$in": kac_ids}})
-        )
+        kac_qualified_ids = {
+            str(x)
+            for x in await db.faculty_profiles.distinct(
+                "faculty_id", {"qualified_kacs": {"$in": kac_ids}}
+            )
+            if x
+        }
 
-    # Union: teaching history is enough to be "qualified"
-    fac_ids = sorted(taught_ids | kac_qualified_ids)
-
-    if fac_ids:
-        fps = await db.faculty_profiles.find(
-            {"faculty_id": {"$in": fac_ids}}, {"faculty_id": 1, "user_id": 1}
-        ).to_list(None)
-        prof_by_fid = {fp["faculty_id"]: fp for fp in fps}
-
-        # Gather all relevant user_ids for name lookup
-        user_ids = {fp.get("user_id") for fp in fps if fp.get("user_id")} | set(fac_ids)
-        users = await db.users.find(
-            {"user_id": {"$in": list(user_ids)}},
-            {"user_id": 1, "first_name": 1, "last_name": 1, "email": 1}
-        ).to_list(None)
-        user_by_id = {u["user_id"]: u for u in users}
-
-    # CODE SNIPPET CHANGE/ADDITION:
-    # This version:
-    # - builds teaching history per faculty with a LIST of (AY, Term) occurrences
-    # - includes it in qualified_faculty payload
-    # - fixes the indentation bug (build qualified list ONCE, outside the aggregate loop)
-
-    teach_hist_by_fid: Dict[str, Dict[str, Any]] = {}
-
+    # 3) Teaching history per faculty (distinct AY/Term occurrences).
+    # Prefer active assignment rows per section; fallback to archived if no active exists for that section.
     pipeline_teach_hist = [
         {"$match": {"course_id": course_id}},
         {"$lookup": {
             "from": "terms",
             "localField": "term_id",
             "foreignField": "term_id",
-            "as": "term"
+            "as": "term",
         }},
         {"$unwind": {"path": "$term", "preserveNullAndEmptyArrays": True}},
         {"$lookup": {
             "from": "faculty_assignments",
-            "localField": "section_id",
-            "foreignField": "section_id",
-            "as": "fa"
+            "let": {"sid": "$section_id"},
+            "pipeline": [
+                {"$match": {"$expr": {"$eq": ["$section_id", "$$sid"]}}},
+                {"$project": {"_id": 0, "faculty_id": 1, "is_archived": 1}},
+            ],
+            "as": "fa_all",
         }},
-        {"$unwind": {"path": "$fa", "preserveNullAndEmptyArrays": False}},
+        {"$addFields": {
+            "fa_active": {
+                "$filter": {
+                    "input": "$fa_all",
+                    "as": "fa",
+                    "cond": {"$ne": ["$$fa.is_archived", True]},
+                }
+            }
+        }},
+        {"$addFields": {
+            "fa_use": {
+                "$cond": [
+                    {"$gt": [{"$size": "$fa_active"}, 0]},
+                    "$fa_active",
+                    "$fa_all",
+                ]
+            }
+        }},
+        {"$unwind": {"path": "$fa_use", "preserveNullAndEmptyArrays": False}},
         {"$project": {
             "_id": 0,
-            "faculty_id": "$fa.faculty_id",
+            "faculty_id": {"$toString": "$fa_use.faculty_id"},
             "acad_year_start": "$term.acad_year_start",
             "term_number": "$term.term_number",
         }},
-        # unique list of (AY, Term) where they taught the course
         {"$group": {
             "_id": "$faculty_id",
             "terms": {"$addToSet": {"ay": "$acad_year_start", "term": "$term_number"}},
         }},
-        {"$project": {
-            "_id": 0,
-            "faculty_id": {"$toString": "$_id"},
-            "terms": 1,
-        }},
+        {"$project": {"_id": 0, "faculty_id": "$_id", "terms": 1}},
     ]
 
-    rows_th = await db.sections.aggregate(pipeline_teach_hist, allowDiskUse=True).to_list(None)
+    teach_hist_by_fid: Dict[str, Dict[str, Any]] = {}
+    taught_ids: set = set()
 
+    rows_th = await db.sections.aggregate(pipeline_teach_hist, allowDiskUse=True).to_list(None)
     for r in rows_th:
+        fid = str(r.get("faculty_id") or "").strip()
+        if not fid:
+            continue
+
         terms_raw = r.get("terms") or []
-        # keep only valid ints
-        terms_clean = [
-            {"acad_year_start": t.get("ay"), "term_number": t.get("term")}
-            for t in terms_raw
-            if isinstance(t.get("ay"), int) and isinstance(t.get("term"), int)
-        ]
-        # sort newest -> oldest
+        terms_clean: List[Dict[str, int]] = []
+        for t in terms_raw:
+            ay = _safe_int(t.get("ay"))
+            tn = _safe_int(t.get("term"))
+            if isinstance(ay, int) and isinstance(tn, int):
+                terms_clean.append({"acad_year_start": ay, "term_number": tn})
+
         terms_clean.sort(key=lambda x: (x["acad_year_start"], x["term_number"]), reverse=True)
 
-        teach_hist_by_fid[r["faculty_id"]] = {
-            "count": len(terms_clean),  # count of distinct term occurrences
-            "terms": terms_clean,       # list of AY/Term occurrences
-        }
+        teach_hist_by_fid[fid] = {"count": len(terms_clean), "terms": terms_clean}
+        taught_ids.add(fid)
 
-    # Build qualified list
-    qualified = []
+    # 4) Qualified faculty = taught OR KAC-qualified
+    fac_ids = sorted(taught_ids | kac_qualified_ids)
+
+    prof_by_fid: Dict[str, Dict[str, Any]] = {}
+    user_by_id: Dict[str, Dict[str, Any]] = {}
+    if fac_ids:
+        fps = await db.faculty_profiles.find(
+            {"faculty_id": {"$in": fac_ids}}, {"faculty_id": 1, "user_id": 1}
+        ).to_list(None)
+        prof_by_fid = {str(fp.get("faculty_id")): fp for fp in fps if fp.get("faculty_id")}
+
+        user_ids = {str(fp.get("user_id")) for fp in fps if fp.get("user_id")} | set(fac_ids)
+        users = await db.users.find(
+            {"user_id": {"$in": list(user_ids)}},
+            {"user_id": 1, "first_name": 1, "last_name": 1, "email": 1},
+        ).to_list(None)
+        user_by_id = {str(u.get("user_id")): u for u in users if u.get("user_id")}
+
+    qualified: List[Dict[str, Any]] = []
     for fid in fac_ids:
-        uid = (prof_by_fid.get(fid) or {}).get("user_id") or fid
-        u = user_by_id.get(uid, user_by_id.get(fid, {}))
+        fp = prof_by_fid.get(fid, {})
+        uid = str(fp.get("user_id") or fid)
+        u = user_by_id.get(uid) or user_by_id.get(fid) or {}
 
-        source_bits = []
+        source_bits: List[str] = []
         if fid in taught_ids:
             source_bits.append("Teaching History")
         if fid in kac_qualified_ids:
@@ -165,195 +193,178 @@ async def get_course_profile_for(
         out = {
             "faculty_id": fid,
             "first_name": u.get("first_name"),
-            "last_name":  u.get("last_name"),
-            "email":      u.get("email"),
-            "source":     " & ".join(source_bits) if source_bits else "—",
+            "last_name": u.get("last_name"),
+            "email": u.get("email"),
+            "source": " & ".join(source_bits) if source_bits else "—",
         }
 
-        # Attach detailed teaching history for hover UI
         if fid in taught_ids:
-            out["teaching_history"] = teach_hist_by_fid.get(str(fid), {"count": 0, "terms": []})
+            out["teaching_history"] = teach_hist_by_fid.get(fid, {"count": 0, "terms": []})
 
         qualified.append(out)
 
-    # -------- Past instructors (aggregated) AND NEW METRICS CALCULATION --------
-    past: List[Dict[str, Any]] = []
-    
-    # Aggregation for past instructors and section history
+    # 5) Past instructors insight (COUNT DISTINCT SECTIONS per faculty).
+    # IMPORTANT: do NOT push large arrays to avoid 16MB document limits.
     pipeline_past = [
         {"$match": {"course_id": course_id}},
         {"$lookup": {
             "from": "faculty_assignments",
-            "localField": "section_id",
-            "foreignField": "section_id",
-            "as": "fa"
+            "let": {"sid": "$section_id"},
+            "pipeline": [
+                {"$match": {"$expr": {"$eq": ["$section_id", "$$sid"]}}},
+                {"$project": {"_id": 0, "faculty_id": 1, "is_archived": 1}},
+            ],
+            "as": "fa_all",
         }},
-        {"$unwind": "$fa"},
-        {"$lookup": {
-            "from": "terms",
-            "localField": "term_id",
-            "foreignField": "term_id",
-            "as": "term"
+        {"$addFields": {
+            "fa_active": {
+                "$filter": {
+                    "input": "$fa_all",
+                    "as": "fa",
+                    "cond": {"$ne": ["$$fa.is_archived", True]},
+                }
+            }
         }},
-        {"$unwind": {"path": "$term", "preserveNullAndEmptyArrays": True}},
-        {"$project": {
-            "_id": 0,
-            "faculty_id": "$fa.faculty_id",
-            "section_id": 1,
-            "section_code": 1,
-            "term_id": 1,
-            "acad_year_start": "$term.acad_year_start",
-            "term_number": "$term.term_number",
+        {"$addFields": {
+            "fa_use": {
+                "$cond": [
+                    {"$gt": [{"$size": "$fa_active"}, 0]},
+                    "$fa_active",
+                    "$fa_all",
+                ]
+            }
         }},
-        {"$group": {
-            "_id": "$faculty_id",
-            "sections": {"$push": {
-                "course_code": course_code,
-                "section_id": "$section_id",
-                "section_code": "$section_code",
-                "term_id": "$term_id",
-                "acad_year_start": "$acad_year_start",
-                "term_number": "$term_number",
-            }},
-            "count": {"$sum": 1}
-        }},
-        # Lookup user info
+        {"$unwind": {"path": "$fa_use", "preserveNullAndEmptyArrays": False}},
+        {"$project": {"faculty_id": {"$toString": "$fa_use.faculty_id"}, "section_id": 1}},
+        {"$group": {"_id": "$faculty_id", "sections": {"$addToSet": "$section_id"}}},
+        {"$project": {"_id": 0, "faculty_id": "$_id", "count": {"$size": "$sections"}}},
+
+        # names
         {"$lookup": {
             "from": "faculty_profiles",
-            "localField": "_id",
-            "foreignField": "faculty_id",
-            "as": "fp"
+            "let": {"fid": "$faculty_id"},
+            "pipeline": [
+                {"$match": {"$expr": {"$eq": [{"$toString": "$faculty_id"}, "$$fid"]}}},
+                {"$project": {"_id": 0, "user_id": 1}},
+            ],
+            "as": "fp",
         }},
         {"$unwind": {"path": "$fp", "preserveNullAndEmptyArrays": True}},
         {"$lookup": {
             "from": "users",
-            "let": { "uid": "$fp.user_id", "fid": "$_id" },
+            "let": {"uid": "$fp.user_id", "fid": "$faculty_id"},
             "pipeline": [
-                { "$match": {
-                    "$expr": { "$or": [
-                        { "$eq": ["$user_id", "$$uid"] },
-                        { "$eq": ["$user_id", "$$fid"] }
-                    ]}
-                }},
-                { "$project": { "first_name": 1, "last_name": 1, "email": 1 } }
+                {"$match": {"$expr": {"$or": [
+                    {"$eq": ["$user_id", "$$uid"]},
+                    {"$eq": ["$user_id", "$$fid"]},
+                ]}}},
+                {"$project": {"_id": 0, "first_name": 1, "last_name": 1, "email": 1}},
             ],
-            "as": "user"
+            "as": "user",
         }},
-        {"$unwind": { "path": "$user", "preserveNullAndEmptyArrays": True }},
+        {"$unwind": {"path": "$user", "preserveNullAndEmptyArrays": True}},
         {"$project": {
-            "_id": 0,
-            "faculty_id": { "$toString": "$_id" },
-            "first_name": "$user.first_name",
-            "last_name":  "$user.last_name",
-            "email":      "$user.email",
+            "faculty_id": 1,
             "count": 1,
-            "sections": 1
+            "first_name": "$user.first_name",
+            "last_name": "$user.last_name",
+            "email": "$user.email",
         }},
-        {"$sort": { "count": -1, "last_name": 1, "first_name": 1 }},
+        {"$sort": {"count": -1, "last_name": 1, "first_name": 1}},
     ]
 
-    # Aggregate to get all past instructor data
-    async for row in db.sections.aggregate(pipeline_past, allowDiskUse=True):
-        past.append({
-            "faculty_id": row["faculty_id"],
-            "first_name": row.get("first_name"),
-            "last_name":  row.get("last_name"),
-            "email":      row.get("email"),
-            "count":      row.get("count", 0),
-            # Only store section counts, not the full list of sections, for the main instructor list
-            # We'll re-run a simpler aggregation for the detailed metrics
-            "sections":   row.get("sections", [])
-        })
+    past = await db.sections.aggregate(pipeline_past, allowDiskUse=True).to_list(None)
+    top_3_instructors = past[:3]
+    remaining_instructors_count = max(len(past) - len(top_3_instructors), 0)
+    other_instructors = past[3:] if len(past) > 3 else []
 
-    # NEW METRICS CALCULATION (Separate, simpler aggregation for course history)
+    # 6) History metrics (course demand over time, unique instructors, most recent taught).
     pipeline_history = [
         {"$match": {"course_id": course_id}},
         {"$lookup": {
             "from": "terms",
             "localField": "term_id",
             "foreignField": "term_id",
-            "as": "term"
+            "as": "term",
         }},
         {"$unwind": {"path": "$term", "preserveNullAndEmptyArrays": True}},
         {"$lookup": {
             "from": "faculty_assignments",
-            "localField": "section_id",
-            "foreignField": "section_id",
-            "as": "fa"
+            "let": {"sid": "$section_id"},
+            "pipeline": [
+                {"$match": {"$expr": {"$eq": ["$section_id", "$$sid"]}}},
+                {"$project": {"_id": 0, "faculty_id": 1, "is_archived": 1}},
+            ],
+            "as": "fa_all",
         }},
-        {"$unwind": {"path": "$fa", "preserveNullAndEmptyArrays": True}},
+        {"$addFields": {
+            "fa_active": {
+                "$filter": {
+                    "input": "$fa_all",
+                    "as": "fa",
+                    "cond": {"$ne": ["$$fa.is_archived", True]},
+                }
+            }
+        }},
+        {"$addFields": {
+            "fa_use": {
+                "$cond": [
+                    {"$gt": [{"$size": "$fa_active"}, 0]},
+                    "$fa_active",
+                    "$fa_all",
+                ]
+            }
+        }},
         {"$project": {
             "_id": 0,
             "section_id": 1,
             "acad_year_start": "$term.acad_year_start",
             "term_number": "$term.term_number",
-            "faculty_id": "$fa.faculty_id",
-        }}
+            "faculty_ids": {
+                "$map": {"input": "$fa_use", "as": "fa", "in": "$$fa.faculty_id"}
+            },
+        }},
     ]
 
-    history_data = await db.sections.aggregate(pipeline_history, allowDiskUse=True).to_list(None)
+    history_rows = await db.sections.aggregate(pipeline_history, allowDiskUse=True).to_list(None)
 
-    # WHOLE REPLACEMENT BLOCK (paste this in place of the block above)
-    # This outputs ay_demand_visual rows with { ay, t1, t2, t3 }.
-
-    # Calculate metrics from history_data
     unique_sections_for_count: set = set()
     unique_instructors: set = set()
     academic_years: set = set()
-
-    # per AY -> per term -> count (T1/T2/T3)
     ay_term_counts: Dict[int, Dict[int, int]] = defaultdict(lambda: defaultdict(int))
 
-    most_recent_ay: Optional[int] = None
-    most_recent_term: Optional[int] = None
+    most_recent: Optional[tuple] = None  # (ay, term)
 
-    for entry in history_data:
+    for entry in history_rows:
         sid = entry.get("section_id")
-        if not sid:
+        if not sid or sid in unique_sections_for_count:
             continue
+        unique_sections_for_count.add(sid)
 
-        # count each section only once overall (avoids duplicates from multiple faculty_assignments rows)
-        if sid not in unique_sections_for_count:
-            unique_sections_for_count.add(sid)
+        ay = _safe_int(entry.get("acad_year_start"))
+        tn = _safe_int(entry.get("term_number"))
 
-            ay = entry.get("acad_year_start")
-            tn = entry.get("term_number")
+        if isinstance(ay, int):
+            academic_years.add(ay)
+            if isinstance(tn, int) and tn in (1, 2, 3):
+                ay_term_counts[ay][tn] += 1
 
-            if isinstance(ay, int):
-                academic_years.add(ay)
+        # unique instructors for this section (active-first, fallback already applied)
+        for fid in (entry.get("faculty_ids") or []):
+            if fid:
+                unique_instructors.add(str(fid))
 
-                # bucket into T1/T2/T3
-                if isinstance(tn, int) and tn in (1, 2, 3):
-                    ay_term_counts[ay][tn] += 1
+        if isinstance(ay, int) and isinstance(tn, int):
+            if most_recent is None or (ay, tn) > most_recent:
+                most_recent = (ay, tn)
 
-        # Track unique instructors (still okay even if duplicates)
-        fid = entry.get("faculty_id")
-        if fid:
-            unique_instructors.add(fid)
-
-        # Track Most Recent Term Taught
-        ay = entry.get("acad_year_start")
-        term = entry.get("term_number")
-        if ay is not None and term is not None:
-            if most_recent_ay is None or ay > most_recent_ay:
-                most_recent_ay = ay
-                most_recent_term = term
-            elif ay == most_recent_ay and (most_recent_term is None or term > most_recent_term):
-                most_recent_term = term
-
-    # Total sections across all terms (unique section_id)
     total_sections = len(unique_sections_for_count)
-
-    # Number of unique instructors
     num_unique_instructors = len(unique_instructors)
-
-    # Total academic years covered
     num_acad_years = len(academic_years)
+    avg_teaching_frequency = (
+        round(total_sections / num_acad_years, 2) if num_acad_years > 0 else 0.0
+    )
 
-    # Average teaching frequency (per AY)
-    avg_teaching_frequency = round(total_sections / num_acad_years, 2) if num_acad_years > 0 else 0.0
-
-    # Format AY term counts for the frontend table (AY, T1, T2, T3)
     ay_demand_visual: List[Dict[str, Any]] = []
     for ay in sorted(ay_term_counts.keys()):
         ay_demand_visual.append({
@@ -362,22 +373,22 @@ async def get_course_profile_for(
             "t2": int(ay_term_counts[ay].get(2, 0)),
             "t3": int(ay_term_counts[ay].get(3, 0)),
         })
-    
-    top_3_instructors = past[:3]
-    remaining_instructors_count = max(len(past) - len(top_3_instructors), 0)
-    other_instructors = past[3:] if len(past) > 3 else []
 
-    # -------- Term context + Preferences --------
-    # This report follows the same term paging logic used in Deloading Utilization.
-    # The default view is the *planning* term = next term after the DB's is_current.
+    most_recent_ay = most_recent[0] if most_recent else None
+    most_recent_term = most_recent[1] if most_recent else None
+
+    # 7) Term context + Preferences (same paging logic as other analytics reports)
     preferences: Any = "N/A"
 
-    terms: List[Dict[str, Any]] = await db.terms.find(
-        {},
-        {"term_id": 1, "term_number": 1, "acad_year_start": 1, "is_current": 1},
-    ).sort([("acad_year_start", 1), ("term_number", 1), ("term_id", 1)]).to_list(None)
+    terms: List[Dict[str, Any]] = (
+        await db.terms.find(
+            {},
+            {"term_id": 1, "term_number": 1, "acad_year_start": 1, "is_current": 1},
+        )
+        .sort([("acad_year_start", 1), ("term_number", 1), ("term_id", 1)])
+        .to_list(None)
+    )
 
-    # Determine default index (planning term if possible)
     default_index = 0
     cur_idx = -1
     for i, t in enumerate(terms):
@@ -389,7 +400,6 @@ async def get_course_profile_for(
     elif terms:
         default_index = len(terms) - 1
 
-    # Anchor term selection (if provided)
     idx = default_index
     if anchor_term_id:
         for i, t in enumerate(terms):
@@ -397,25 +407,21 @@ async def get_course_profile_for(
                 idx = i
                 break
 
-    # Apply paging direction relative to the anchor/default
     if direction == "next":
         idx = min(idx + 1, len(terms) - 1) if terms else 0
     elif direction == "prev":
         idx = max(idx - 1, 0) if terms else 0
-    else:
-        # "current" (or unknown) -> keep idx
-        pass
 
     selected_term = terms[idx] if terms else None
     has_prev = bool(terms) and idx > 0
     has_next = bool(terms) and idx < (len(terms) - 1)
 
+    # Preferences list for the selected term (only if the course is in some KAC list)
     prefs_list: List[Dict[str, Any]] = []
-
     active_term_display = None
     if selected_term:
-        ay = selected_term.get("acad_year_start")
-        tn = selected_term.get("term_number")
+        ay = _safe_int(selected_term.get("acad_year_start"))
+        tn = _safe_int(selected_term.get("term_number"))
         if isinstance(ay, int) and isinstance(tn, int):
             active_term_display = f"AY {_fmt_ay(ay)} {_fmt_term(tn)}"
         elif isinstance(ay, int):
@@ -424,17 +430,16 @@ async def get_course_profile_for(
             active_term_display = _fmt_term(tn)
 
     if selected_term and kac_ids:
-        # ... (Keep the rest of the preferences pipeline) ...
         pipeline_prefs = [
             {"$match": {
-                "term_id": selected_term["term_id"],
-                "preferred_kacs": {"$in": kac_ids}
+                "term_id": selected_term.get("term_id"),
+                "preferred_kacs": {"$in": kac_ids},
             }},
             {"$lookup": {
                 "from": "faculty_profiles",
                 "localField": "faculty_id",
                 "foreignField": "faculty_id",
-                "as": "fp"
+                "as": "fp",
             }},
             {"$unwind": {"path": "$fp", "preserveNullAndEmptyArrays": True}},
             {"$lookup": {
@@ -443,43 +448,30 @@ async def get_course_profile_for(
                 "pipeline": [
                     {"$match": {"$expr": {"$or": [
                         {"$eq": ["$user_id", "$$uid"]},
-                        {"$eq": ["$user_id", "$$fid"]}
+                        {"$eq": ["$user_id", "$$fid"]},
                     ]}}},
-                    {"$project": {"first_name": 1, "last_name": 1, "email": 1}}
+                    {"$project": {"_id": 0, "first_name": 1, "last_name": 1, "email": 1}},
                 ],
-                "as": "user"
+                "as": "user",
             }},
             {"$unwind": {"path": "$user", "preserveNullAndEmptyArrays": True}},
-            {"$project": {
-                "_id": 0,
-                "faculty_id": 1,
-                "first_name": "$user.first_name",
-                "last_name":  "$user.last_name",
-                "email":      "$user.email",
-            }},
             {"$group": {
                 "_id": "$faculty_id",
                 "faculty_id": {"$first": "$faculty_id"},
-                "first_name": {"$first": "$first_name"},
-                "last_name":  {"$first": "$last_name"},
-                "email":      {"$first": "$email"}
+                "first_name": {"$first": "$user.first_name"},
+                "last_name": {"$first": "$user.last_name"},
+                "email": {"$first": "$user.email"},
             }},
-            {"$project": {
-                "_id": 0,
-                "faculty_id": 1,
-                "first_name": 1,
-                "last_name":  1,
-                "email":      1
-            }},
-            {"$sort": {"last_name": 1, "first_name": 1}}
+            {"$project": {"_id": 0, "faculty_id": 1, "first_name": 1, "last_name": 1, "email": 1}},
+            {"$sort": {"last_name": 1, "first_name": 1}},
         ]
 
         async for row in db.faculty_preferences.aggregate(pipeline_prefs, allowDiskUse=True):
             prefs_list.append({
                 "faculty_id": row.get("faculty_id"),
                 "first_name": row.get("first_name"),
-                "last_name":  row.get("last_name"),
-                "email":      row.get("email"),
+                "last_name": row.get("last_name"),
+                "email": row.get("email"),
             })
 
         if prefs_list:
@@ -491,17 +483,14 @@ async def get_course_profile_for(
     else:
         preferences = "No term found."
 
-
-    # Final return structure
     return {
         "course_id": course_id,
         "course_code": course_code,
         "title": title,
         "qualified_faculty": qualified,
-        # Only return the aggregate metrics and top 3 instructors
         "past_instructors_top3": top_3_instructors,
         "past_instructors_remaining_count": remaining_instructors_count,
-        "past_instructors_others": other_instructors,  # for expandable list
+        "past_instructors_others": other_instructors,
         "term": {
             "term_id": (selected_term or {}).get("term_id"),
             "acad_year_start": (selected_term or {}).get("acad_year_start"),
@@ -519,8 +508,6 @@ async def get_course_profile_for(
             for t in terms
         ],
         "current_index": idx,
-        # "active_term" is the term context used by the report UI.
-        # It follows Deloading Utilization's logic: planning (next-after-current) when available.
         "active_term": {
             "term_id": (selected_term or {}).get("term_id"),
             "acad_year_start": (selected_term or {}).get("acad_year_start"),
@@ -534,11 +521,10 @@ async def get_course_profile_for(
                 "acad_year_start": most_recent_ay,
                 "term_number": most_recent_term,
             },
-            "ay_demand_visual": ay_demand_visual, # for the chart
+            "ay_demand_visual": ay_demand_visual,
         },
         "preferences": preferences,
     }
-
 
 @router.get("/analytics/course-profile-for")
 async def course_profile_for(
