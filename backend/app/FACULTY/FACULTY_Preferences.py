@@ -559,6 +559,35 @@ async def _enrich_pref(doc: Dict[str, Any]) -> Dict[str, Any]:
           # Legacy support: ensure return_date is present if needed by UI
           out["break_return_date"] = leave_doc.get("return_date", "")
   
+
+  # ------------------------------
+  # Term meta (for UI labeling / history)
+  # ------------------------------
+  try:
+      _tid = out.get("term_id")
+      if _tid:
+          tdoc = await db[COL_TERMS].find_one(
+              {"term_id": _tid},
+              {"_id": 0, "acad_year_start": 1, "acad_year_end": 1, "term_number": 1},
+          )
+          if tdoc:
+              out["term_meta"] = tdoc
+              ay_s = tdoc.get("acad_year_start")
+              ay_e = tdoc.get("acad_year_end")
+              tn = tdoc.get("term_number")
+              if ay_s is not None and tn is not None:
+                  try:
+                      ay_s_i = int(ay_s)
+                      ay_e_i = int(ay_e) if ay_e is not None else (ay_s_i + 1)
+                      tn_i = int(tn)
+                      out["term_label"] = f"Term {tn_i} AY {ay_s_i}–{ay_e_i}"
+                  except Exception:
+                      # best-effort only
+                      pass
+  except Exception:
+      # best-effort only
+      pass
+
   mode = out.get("mode") or {}
   campus_ids = mode.get("campus_id")
   if isinstance(campus_ids, str) and campus_ids.strip():
