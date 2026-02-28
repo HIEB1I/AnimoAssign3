@@ -486,15 +486,15 @@ export default function OM_FacultyManagement() {
         {loading ? (
           <div className="border border-gray-200 bg-white shadow-sm overflow-visible rounded-xl">
             <table className="w-full table-fixed text-sm">
-              <thead className="bg-white border-b text-gray-700">
+              <thead className="bg-gray-50 border-b text-gray-900">
                 <tr>
-                  <th className="w-[30%] text-left px-4 py-3">Faculty</th>
-                  <th className="w-[12%] text-center px-4 py-3">Faculty Type</th>
-                  <th className="w-[22%] text-left px-4 py-3">Certifications</th>
-                  <th className="w-[12%] text-center px-4 py-3">Hire Date</th>
-                  <th className="w-[10%] text-center px-4 py-3">Teaching Years</th>
-                  <th className="w-[10%] text-center px-4 py-3">Status</th>
-                  <th className="w-16 text-center px-2 py-3">Actions</th>
+                  <th className="w-[30%] text-left px-4 py-2">Faculty</th>
+                  <th className="w-[12%] text-center px-4 py-2">Faculty Type</th>
+                  <th className="w-[22%] text-left px-4 py-2">Certifications</th>
+                  <th className="w-[12%] text-center px-4 py-2">Hire Date</th>
+                  <th className="w-[10%] text-center px-4 py-2">Teaching Years</th>
+                  <th className="w-[10%] text-center px-4 py-2">Status</th>
+                  <th className="w-16 text-center px-2 py-2">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y">
@@ -509,15 +509,15 @@ export default function OM_FacultyManagement() {
         ) : rows.length === 0 ? (
           <div className="border border-gray-200 bg-white shadow-sm overflow-visible rounded-xl">
             <table className="w-full table-fixed text-sm">
-              <thead className="bg-white border-b text-gray-700">
+              <thead className="bg-gray-50 border-b text-gray-900">
                 <tr>
-                  <th className="w-[30%] text-left px-4 py-3">Faculty</th>
-                  <th className="w-[12%] text-center px-4 py-3">Faculty Type</th>
-                  <th className="w-[22%] text-left px-4 py-3">Certifications</th>
-                  <th className="w-[12%] text-center px-4 py-3">Hire Date</th>
-                  <th className="w-[10%] text-center px-4 py-3">Teaching Years</th>
-                  <th className="w-[10%] text-center px-4 py-3">Status</th>
-                  <th className="w-16 text-center px-2 py-3">Actions</th>
+                  <th className="w-[30%] text-left px-4 py-2">Faculty</th>
+                  <th className="w-[12%] text-center px-4 py-2">Faculty Type</th>
+                  <th className="w-[22%] text-left px-4 py-2">Certifications</th>
+                  <th className="w-[12%] text-center px-4 py-2">Hire Date</th>
+                  <th className="w-[10%] text-center px-4 py-2">Teaching Years</th>
+                  <th className="w-[10%] text-center px-4 py-2">Status</th>
+                  <th className="w-16 text-center px-2 py-2">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y">
@@ -542,15 +542,15 @@ export default function OM_FacultyManagement() {
               <div className="border border-gray-200 bg-white shadow-sm overflow-visible rounded-xl">
                 <div className="overflow-x-auto rounded-xl">
                   <table className="w-full table-fixed text-sm">
-                    <thead className="bg-white border-b text-gray-700">
+                    <thead className="bg-gray-50 border-b text-gray-900">
                       <tr>
-                        <th className="w-[30%] text-left px-4 py-3">Faculty</th>
-                        <th className="w-[12%] text-center px-4 py-3">Faculty Type</th>
-                        <th className="w-[22%] text-left px-4 py-3">Certifications</th>
-                        <th className="w-[12%] text-center px-4 py-3">Hire Date</th>
-                        <th className="w-[10%] text-center px-4 py-3">Teaching Years</th>
-                        <th className="w-[10%] text-center px-4 py-3">Status</th>
-                        <th className="w-16 text-center px-2 py-3"> </th>
+                        <th className="w-[30%] text-left px-4 py-2">Faculty</th>
+                        <th className="w-[12%] text-center px-4 py-2">Faculty Type</th>
+                        <th className="w-[22%] text-left px-4 py-2">Certifications</th>
+                        <th className="w-[12%] text-center px-4 py-2">Hire Date</th>
+                        <th className="w-[10%] text-center px-4 py-2">Teaching Years</th>
+                        <th className="w-[10%] text-center px-4 py-2">Status</th>
+                        <th className="w-16 text-center px-2 py-2">Actions</th>
                       </tr>
                     </thead>
 

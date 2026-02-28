@@ -1487,8 +1487,8 @@ export default function OM_SpecialClass() {
                         )}
                       </td>
 
-                      <td className="px-4 py-3">
-  <div className="flex items-center justify-center gap-3">
+                      <td className="px-2 py-3 whitespace-nowrap">
+  <div className="flex items-center justify-center gap-1">
     {editing ? (
       <>
         <button
@@ -1525,7 +1525,7 @@ export default function OM_SpecialClass() {
           }}
           disabled={!r.faculty_id}
           className={cls(
-            "relative inline-flex items-center justify-center p-1.5 rounded-md text-blue-700 hover:bg-blue-50",
+            "relative inline-flex items-center justify-center p-1 rounded-md text-blue-700 hover:bg-blue-50",
             !r.faculty_id && "opacity-50 cursor-not-allowed hover:bg-transparent"
           )}
           title={r.faculty_id ? "Message" : "Assign a faculty first to open conversation"}
@@ -1544,7 +1544,7 @@ export default function OM_SpecialClass() {
         <button
           type="button"
           onClick={() => openView(r)}
-          className="inline-flex items-center justify-center p-1.5 rounded-md text-gray-700 hover:bg-gray-100"
+          className="inline-flex items-center justify-center p-1 rounded-md text-gray-700 hover:bg-gray-100"
           title="View Application"
           aria-label="View Application"
         >
@@ -1554,7 +1554,7 @@ export default function OM_SpecialClass() {
         <button
           type="button"
           onClick={() => beginEdit(r)}
-          className="inline-flex items-center justify-center p-1.5 rounded-md text-emerald-700 hover:bg-emerald-50"
+          className="inline-flex items-center justify-center p-1 rounded-md text-emerald-700 hover:bg-emerald-50"
           title="Edit"
           aria-label="Edit"
         >

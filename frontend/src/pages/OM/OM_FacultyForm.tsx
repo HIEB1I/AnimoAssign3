@@ -568,7 +568,7 @@ useEffect(() => {
               <th className="w-[32%] text-left px-4 py-3">Faculty</th>
               <th className="w-[32%] text-center px-4 py-3">Department</th>
               <th className="w-[13.5%] text-center px-4 py-3">Faculty Type</th>
-              <th className="w-[13.5%] text-center px-4 py-3">Submission Date</th>
+              <th className="w-[13.5%] text-center px-4 py-3">Last Submitted</th>
               <th className="w-[13.5%] text-center px-4 py-3">Status</th>
               <th className="w-[14%] text-center px-4 py-3"> </th>
             </tr>
