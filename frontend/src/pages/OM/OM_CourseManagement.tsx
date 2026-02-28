@@ -219,8 +219,9 @@ export default function OM_CourseManagement() {
 
       {err && <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{err}</div>}
 
-      <div className="sticky top-0 z-10 mb-6 -mx-8 px-8 pt-2">
-        <div className="flex flex-wrap items-center gap-3 rounded-2xl border border-gray-200 bg-white/90 p-4 shadow-sm backdrop-blur">
+      {/* Sticky filter bar (solid background so content doesn't visually overlap while scrolling) */}
+      <div className="sticky top-0 z-20 mb-6 -mx-8 bg-white px-8 pt-2 pb-2">
+        <div className="flex flex-wrap items-center gap-3 rounded-2xl border border-gray-200 bg-white p-4 shadow-sm">
         <div className="relative flex-1 min-w-[240px]">
           <SearchIcon className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-500" />
           <input
@@ -277,7 +278,7 @@ export default function OM_CourseManagement() {
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <h2 className="text-sm font-semibold text-gray-900">{kac}</h2>
-                  <Badge tone="blue">{items.length} course{items.length === 1 ? "" : "s"}</Badge>
+                  <span className="text-xs text-gray-500">{`Showing ${items.length} of ${rows.length}`}</span>
                 </div>
               </div>
 

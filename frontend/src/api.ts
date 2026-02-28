@@ -2083,6 +2083,7 @@ export async function getOmHeader(userEmail?: string, userId?: string): Promise<
    ========================================================= */
 export type FacultyRow = {
   faculty_id: string;
+  user_id?: string;
   name: string;
   email: string;
   department: string;
@@ -2172,6 +2173,37 @@ export async function getFacultyProfile(facultyId: string) {
       load?: { teaching?: number; admin?: number; research?: number; faculty_units?: number };
     };
   };
+}
+
+export type FacultyDetailsResponse = {
+  ok: boolean;
+  faculty_id: string;
+  details: {
+    first_name: string;
+    last_name: string;
+    email: string;
+    department: string;
+    faculty_type: string;
+    certifications: string[];
+    hire_date: string | null;
+    teaching_years: number | null;
+  };
+  deloading: null | {
+    type_id: string | null;
+    deloading_type: string | null;
+    units_deloaded: number | null;
+    notes: string | null;
+    term_id: string;
+    term_label?: string | null;
+    updated_at?: string | null;
+  };
+};
+
+export async function getFacultyDetails(facultyId: string): Promise<FacultyDetailsResponse> {
+  const { data } = await axios.post(`${API_BASE}/om/facultymanagement`, {}, {
+    params: { action: "details", facultyId },
+  });
+  return data as FacultyDetailsResponse;
 }
 
 export async function getFacultySchedule(

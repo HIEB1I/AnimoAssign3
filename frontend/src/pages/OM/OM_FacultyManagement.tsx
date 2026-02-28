@@ -1,5 +1,5 @@
 /* ------------- OM_FacultyManagement.tsx ------------- */
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import SelectBox from "../../component/SelectBox";
 import { cls } from "../../utilities/cls";
 import {
@@ -7,16 +7,20 @@ import {
   Users,
   Calendar,
   BookOpen,
+  MoreVertical,
+  Eye,
   X as XIcon,
 } from "lucide-react";
 
 import {
   getFacultyOptions,
   listFaculty,
+  getFacultyDetails,
   getFacultySchedule,
   getFacultyHistory,
   type FacultyRow,
   type FMOptions,
+  type FacultyDetailsResponse,
 } from "../../api";
 
 function InitialsAvatar({ name }: { name: string }) {
@@ -37,28 +41,7 @@ function InitialsAvatar({ name }: { name: string }) {
   );
 }
 
-function ActionButton({
-  onClick,
-  icon,
-  label,
-}: {
-  onClick: () => void;
-  icon: ReactNode;
-  label: string;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs font-medium text-gray-700 shadow-sm hover:bg-gray-50"
-      title={label}
-      aria-label={label}
-    >
-      <span className="text-gray-600">{icon}</span>
-      <span className="hidden sm:inline">{label}</span>
-    </button>
-  );
-}
+// NOTE: Buttons were replaced by a 3-dots actions dropdown per UI requirements.
 
 /* ---------- Schedule + Teaching History table helpers (Reports & Analytics style) ---------- */
 type ScheduleRow = {
@@ -215,7 +198,7 @@ function renderTeachingHistoryByTerm(flatRows: HistRow[]) {
 
 /* ---------------- Page ---------------- */
 export default function OM_FacultyManagement() {
-  type ModalType = null | "schedule" | "history";
+  type ModalType = null | "details" | "schedule" | "history";
 
   // filters
   const [department, setDepartment] = useState("All Departments");
@@ -238,12 +221,21 @@ const [historyYears, setHistoryYears] = useState<number[]>([]);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string>("");
 
-  // baseline dept counts (used for “Showing X of Y”)
-  const [baselineDeptCounts, setBaselineDeptCounts] = useState<Record<string, number>>({});
+  // baseline total count for “Showing X of Y” (Y = total faculty in directory)
+  const [baselineTotalFaculty, setBaselineTotalFaculty] = useState<number>(0);
 
   // modals
   const [activeModal, setActiveModal] = useState<ModalType>(null);
   const [selected, setSelected] = useState<FacultyRow | null>(null);
+
+  // row actions dropdown
+  const [openMenuId, setOpenMenuId] = useState<string | null>(null);
+  const openMenuRef = useRef<HTMLDivElement | null>(null);
+
+  // details modal
+  const [details, setDetails] = useState<FacultyDetailsResponse | null>(null);
+  const [detailsLoading, setDetailsLoading] = useState(false);
+  const [modalError, setModalError] = useState<string>("");
 
   const [schedule, setSchedule] = useState<any>(null);
   const [history, setHistory] = useState<{ teaching_history: HistRow[] } | null>(null);
@@ -273,6 +265,47 @@ const ay = opt.activeTerm?.acad_year_start;
     return () => clearTimeout(t);
   }, [searchInput]);
 
+  // Ensure we always know the total faculty count in the directory (for "X of Y")
+  useEffect(() => {
+    if (baselineTotalFaculty > 0) return;
+    (async () => {
+      try {
+        const { ok, rows } = await listFaculty({
+          department: "All Departments",
+          facultyType: "All Type",
+          search: "",
+        });
+        if (ok) setBaselineTotalFaculty((rows || []).length);
+      } catch {
+        // ignore baseline fetch errors (page still works)
+      }
+    })();
+  }, [baselineTotalFaculty]);
+
+
+  // Close actions dropdown on outside click / ESC
+  useEffect(() => {
+    if (!openMenuId) return;
+
+    const onDown = (e: MouseEvent) => {
+      const target = e.target as Node;
+      if (openMenuRef.current && !openMenuRef.current.contains(target)) {
+        setOpenMenuId(null);
+      }
+    };
+
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpenMenuId(null);
+    };
+
+    window.addEventListener("mousedown", onDown);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mousedown", onDown);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [openMenuId]);
+
   // Fetch rows (status filter is client-side)
   useEffect(() => {
     (async () => {
@@ -290,14 +323,14 @@ const ay = opt.activeTerm?.acad_year_start;
 
         setRows(filtered);
 
-        // baseline counts update only when search is empty
-        if (!search) {
-          const counts: Record<string, number> = {};
-          for (const r of filtered) {
-            const k = (r.department || "Uncategorized").trim() || "Uncategorized";
-            counts[k] = (counts[k] || 0) + 1;
-          }
-          setBaselineDeptCounts(counts);
+        // Set baseline total once from the full directory (no filters/search)
+        if (
+          baselineTotalFaculty === 0 &&
+          department === "All Departments" &&
+          facultyType === "All Type" &&
+          !search
+        ) {
+          setBaselineTotalFaculty((rows || []).length);
         }
       } catch (e: any) {
         setRows([]);
@@ -306,10 +339,12 @@ const ay = opt.activeTerm?.acad_year_start;
         setLoading(false);
       }
     })();
-  }, [department, facultyType, statusFilter, search]);
+  }, [department, facultyType, statusFilter, search, baselineTotalFaculty]);
 
   const openModal = (type: Exclude<ModalType, null>, item: FacultyRow) => {
     setSelected(item);
+    setDetails(null);
+    setModalError("");
     if (type === "history") {
       setHistoryYears([]);
       setHistoryYearIndex(0);
@@ -320,11 +355,15 @@ const ay = opt.activeTerm?.acad_year_start;
 
   const closeModal = () => {
     setActiveModal(null);
+    setModalError("");
     setSelected(null);
     setSchedule(null);
     setHistory(null);
+    setDetails(null);
+    setDetailsLoading(false);
     setHistoryYears([]);
     setHistoryYearIndex(0);
+    setOpenMenuId(null);
   };
 
   // Load modal content
@@ -332,12 +371,21 @@ const ay = opt.activeTerm?.acad_year_start;
     (async () => {
       if (!activeModal || !selected) return;
       try {
-        if (activeModal === "schedule") {
-          const data = await getFacultySchedule(selected.faculty_id);
+        // In seeded/legacy data, `faculty_assignments.faculty_id` may store either
+        // faculty_profiles.faculty_id OR users.user_id. The list API returns
+        // `user_id` (when resolvable), so prefer it for schedule/history queries.
+        const facKey = (selected as any)?.user_id || selected.faculty_id;
+        if (activeModal === "details") {
+          setDetailsLoading(true);
+          const data = await getFacultyDetails(selected.faculty_id);
+          setDetails(data);
+          setDetailsLoading(false);
+        } else if (activeModal === "schedule") {
+          const data = await getFacultySchedule(facKey);
           setSchedule(data);
         } else if (activeModal === "history") {
           if (!historyYears.length) {
-            const data = await getFacultyHistory(selected.faculty_id);
+            const data = await getFacultyHistory(facKey);
             const yrs = Array.isArray(data?.academicYears) ? data.academicYears : [];
             setHistoryYears(yrs);
 
@@ -348,12 +396,20 @@ const ay = opt.activeTerm?.acad_year_start;
             setHistory({ teaching_history: data?.teaching_history || [] });
           } else {
             const ay = historyYears[historyYearIndex];
-            const data = await getFacultyHistory(selected.faculty_id, ay);
+            const data = await getFacultyHistory(facKey, ay);
             setHistory({ teaching_history: data?.teaching_history || [] });
           }
         }
-      } catch {
-        /* ignore */
+      } catch (e: any) {
+        const msg =
+          e?.message ||
+          (activeModal === "details"
+            ? "Failed to load faculty details."
+            : activeModal === "schedule"
+              ? "Failed to load schedule."
+              : "Failed to load teaching history.");
+        setModalError(String(msg));
+        setDetailsLoading(false);
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -494,7 +550,7 @@ const scheduleMeta = useMemo(() => {
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <h2 className="text-sm font-semibold text-gray-900">{dept}</h2>
-                  <span className="text-xs text-gray-500">{`Showing ${items.length} of ${baselineDeptCounts[dept] ?? items.length}`}</span>
+                  <span className="text-xs text-gray-500">{`Showing ${items.length} of ${baselineTotalFaculty || items.length}`}</span>
                 </div>
               </div>
 
@@ -552,17 +608,76 @@ const scheduleMeta = useMemo(() => {
                           </div>
                         </div>
 
-                        <div className="flex flex-wrap items-center justify-end gap-2">
-                          <ActionButton
-                            onClick={() => openModal("schedule", r)}
-                            icon={<Calendar className="h-3.5 w-3.5" />}
-                            label="Schedule"
-                          />
-                          <ActionButton
-                            onClick={() => openModal("history", r)}
-                            icon={<BookOpen className="h-3.5 w-3.5" />}
-                            label="History"
-                          />
+                        <div
+                          className="relative flex items-center justify-end"
+                          ref={(node) => {
+                            if (openMenuId === r.faculty_id) openMenuRef.current = node;
+                          }}
+                        >
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setOpenMenuId((cur) => (cur === r.faculty_id ? null : r.faculty_id))
+                            }
+                            className={cls(
+                              "inline-flex h-9 w-9 items-center justify-center rounded-lg border border-gray-200 bg-white text-gray-700 shadow-sm hover:bg-gray-50",
+                              openMenuId === r.faculty_id ? "ring-2 ring-emerald-500/30" : ""
+                            )}
+                            aria-haspopup="menu"
+                            aria-expanded={openMenuId === r.faculty_id}
+                            aria-label="Actions"
+                            title="Actions"
+                          >
+                            <MoreVertical className="h-4 w-4" />
+                          </button>
+
+                          {openMenuId === r.faculty_id && (
+                            <div
+                              role="menu"
+                              className="absolute right-0 top-11 z-30 w-56 overflow-hidden rounded-xl border border-gray-200 bg-white shadow-lg"
+                            >
+                              <button
+                                type="button"
+                                role="menuitem"
+                                className="flex w-full items-center gap-2 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
+                                onClick={() => {
+                                  setOpenMenuId(null);
+                                  openModal("details", r);
+                                }}
+                              >
+                                <Eye className="h-4 w-4 text-gray-500" />
+                                <span>View more details</span>
+                              </button>
+
+                              <div className="h-px bg-gray-100" />
+
+                              <button
+                                type="button"
+                                role="menuitem"
+                                className="flex w-full items-center gap-2 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
+                                onClick={() => {
+                                  setOpenMenuId(null);
+                                  openModal("schedule", r);
+                                }}
+                              >
+                                <Calendar className="h-4 w-4 text-gray-500" />
+                                <span>Schedule</span>
+                              </button>
+
+                              <button
+                                type="button"
+                                role="menuitem"
+                                className="flex w-full items-center gap-2 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
+                                onClick={() => {
+                                  setOpenMenuId(null);
+                                  openModal("history", r);
+                                }}
+                              >
+                                <BookOpen className="h-4 w-4 text-gray-500" />
+                                <span>History</span>
+                              </button>
+                            </div>
+                          )}
                         </div>
                       </div>
                     </div>
@@ -574,9 +689,9 @@ const scheduleMeta = useMemo(() => {
         )}
       </section>
 
-            {/* -------- Schedule / History Modals -------- */}
-      {activeModal && selected && (
-        <div className="fixed inset-0 z-[40] grid place-items-center bg-black/40 p-4">
+			{/* -------- Schedule / History Modals -------- */}
+	  {activeModal && selected && (
+		<div className="fixed inset-0 z-[2000] grid place-items-center bg-black/40 p-4">
           <div className="relative w-full max-w-screen-xl rounded-2xl bg-white shadow-2xl overflow-y-auto max-h-[90vh]">
             {/* Top-right close (X) */}
             <button
@@ -589,6 +704,111 @@ const scheduleMeta = useMemo(() => {
             </button>
 
             <div className="p-6 pt-10">
+              {!!modalError && (
+                <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                  {modalError}
+                </div>
+              )}
+
+              {activeModal === "details" && (
+                <>
+                  <div className="text-center mb-4">
+                    <h2 className="text-lg font-semibold text-emerald-700">Faculty Details</h2>
+                    <p className="text-sm text-neutral-500">{selected?.name ?? ""}</p>
+                  </div>
+
+                  {detailsLoading ? (
+                    <div className="rounded-lg border border-neutral-200 bg-neutral-50 px-3 py-2 text-sm text-neutral-600">
+                      Loading details…
+                    </div>
+                  ) : !details ? (
+                    <div className="rounded-lg border border-neutral-200 bg-neutral-50 px-3 py-3 text-sm text-neutral-600">
+                      No details found.
+                    </div>
+                  ) : (
+                    <div className="space-y-6">
+                      <div className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
+                        <div className="text-sm font-semibold text-emerald-700 mb-3">Basic Information</div>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-3 text-sm">
+                          <div>
+                            <div className="text-xs text-gray-500">First Name</div>
+                            <div className="font-medium text-gray-900">{details.details.first_name || "—"}</div>
+                          </div>
+                          <div>
+                            <div className="text-xs text-gray-500">Last Name</div>
+                            <div className="font-medium text-gray-900">{details.details.last_name || "—"}</div>
+                          </div>
+                          <div>
+                            <div className="text-xs text-gray-500">Email</div>
+                            <div className="font-medium text-gray-900">{details.details.email || "—"}</div>
+                          </div>
+                          <div>
+                            <div className="text-xs text-gray-500">Department</div>
+                            <div className="font-medium text-gray-900">{details.details.department || "—"}</div>
+                          </div>
+                          <div>
+                            <div className="text-xs text-gray-500">Faculty Type</div>
+                            <div className="font-medium text-gray-900">{details.details.faculty_type || "—"}</div>
+                          </div>
+                          <div>
+                            <div className="text-xs text-gray-500">Hire Date</div>
+                            <div className="font-medium text-gray-900">{details.details.hire_date || "—"}</div>
+                          </div>
+                          <div>
+                            <div className="text-xs text-gray-500">Teaching Years</div>
+                            <div className="font-medium text-gray-900">{details.details.teaching_years ?? "—"}</div>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
+                        <div className="text-sm font-semibold text-emerald-700 mb-3">Certifications</div>
+                        {details.details.certifications?.length ? (
+                          <div className="flex flex-wrap gap-2">
+                            {details.details.certifications.map((c, i) => (
+                              <span
+                                key={i}
+                                className="inline-flex items-center rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-800"
+                              >
+                                {c}
+                              </span>
+                            ))}
+                          </div>
+                        ) : (
+                          <div className="text-sm text-gray-600">—</div>
+                        )}
+                      </div>
+
+                      <div className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
+                        <div className="text-sm font-semibold text-emerald-700 mb-3">Deloading (Active Term)</div>
+                        {!details.deloading ? (
+                          <div className="text-sm text-gray-600">No deloading record for the active term.</div>
+                        ) : (
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-3 text-sm">
+                            <div className="md:col-span-2">
+                              <div className="text-xs text-gray-500">Term</div>
+                              <div className="font-medium text-gray-900">{details.deloading.term_label || details.deloading.term_id}</div>
+                            </div>
+                            <div>
+                              <div className="text-xs text-gray-500">Type</div>
+                              <div className="font-medium text-gray-900">{details.deloading.deloading_type || "—"}</div>
+                            </div>
+                            <div>
+                              <div className="text-xs text-gray-500">Units Deloaded</div>
+                              <div className="font-medium text-gray-900">{details.deloading.units_deloaded ?? "—"}</div>
+                            </div>
+                            <div className="md:col-span-2">
+                              <div className="text-xs text-gray-500">Notes</div>
+                              <div className="font-medium text-gray-900">{details.deloading.notes || "—"}</div>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
+
               {activeModal === "schedule" && (
                 <>
                   <div className="text-center mb-4">
@@ -608,7 +828,8 @@ const scheduleMeta = useMemo(() => {
                             const tid = scheduleMeta.terms?.[i]?.term_id;
                             if (!tid) return;
                             setSchedule(null);
-                            const data = await getFacultySchedule(selected.faculty_id, tid);
+                            const facKey = (selected as any)?.user_id || selected.faculty_id;
+                            const data = await getFacultySchedule(facKey, tid);
                             setSchedule(data);
                           }}
                           disabled={scheduleMeta.termIndex <= 0}
@@ -645,7 +866,8 @@ const scheduleMeta = useMemo(() => {
                             const tid = scheduleMeta.terms?.[i]?.term_id;
                             if (!tid) return;
                             setSchedule(null);
-                            const data = await getFacultySchedule(selected.faculty_id, tid);
+                            const facKey = (selected as any)?.user_id || selected.faculty_id;
+                            const data = await getFacultySchedule(facKey, tid);
                             setSchedule(data);
                           }}
                           disabled={scheduleMeta.termIndex >= (scheduleMeta.terms?.length || 0) - 1}

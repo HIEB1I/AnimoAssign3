@@ -603,10 +603,19 @@ function FacultyAccordion() {
           const rows = cache[id] || [];
 
           return (
-            <li key={id} className="bg-white">
+            <li
+              key={id}
+              className={
+                isOpen
+                  ? "bg-gray-50/60 transition-colors"
+                  : "bg-white transition-colors"
+              }
+            >
               <button
                 onClick={() => toggle(f)}
-                className="w-full flex items-center justify-between gap-3 px-4 py-3 text-left hover:bg-gray-50"
+                className={`w-full flex items-center justify-between gap-3 px-4 py-3 text-left transition-colors ${
+                  isOpen ? "hover:bg-gray-100/60" : "hover:bg-gray-50"
+                }`}
               >
                 <span className="inline-flex items-center gap-2">
                   {isOpen ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
