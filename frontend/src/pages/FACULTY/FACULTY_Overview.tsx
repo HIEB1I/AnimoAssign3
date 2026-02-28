@@ -2272,7 +2272,7 @@ const scheduleFinalLabel = (() => {
 
                 const resp: any = await acceptFacultyLoadAssignment(
                   userId,
-                  { ...(termId ? { term_id: termId } : {}), send_to_gcal: sendToGcal }
+                  { ...(termId ? { term_id: termId } : {}), send_to_gcal: sendToGcal, gcal_action: "cleanup", }
                 );
 
                 console.log("ACCEPT resp:", resp);
@@ -2322,7 +2322,7 @@ const scheduleFinalLabel = (() => {
 	                    className="h-3.5 w-3.5 rounded border-neutral-300 text-emerald-700 focus:ring-emerald-600/40"
 	                    checked={sendToGcal}
 	                    onChange={(e) => setSendToGcal(e.target.checked)}
-	                    disabled={isAccepting || scheduleFinal || isAlreadyApproved}
+	                    disabled={isAccepting}
 	                  />
 	                  <span>Send to GCalendar</span>
 	                </label>
@@ -2339,10 +2339,11 @@ const scheduleFinalLabel = (() => {
 	                    const userId = raw.userId || raw.user_id || raw.id || "";
 	                    const termId = (term as any)?.term_id || (term as any)?._id || (term as any)?.id;
 
-	                    const resp: any = await acceptFacultyLoadAssignment(
-	                      userId,
-	                      ({ ...(termId ? { term_id: termId } : {}), send_to_gcal: true, sync_special_only: true, overwrite_gcal: true } as any)
-	                    );
+	                    const resp: any = await acceptFacultyLoadAssignment(userId, {
+                      ...(termId ? { term_id: termId } : {}),
+                      send_to_gcal: true,
+                      gcal_action: "cleanup", // resync + remove deleted schedule events
+                    } as any);
 
 	                    if (resp?.calendar_ok === false) {
 	                      onToast?.("warning", resp?.calendar_error || "Calendar was not created.", "Sync issue");

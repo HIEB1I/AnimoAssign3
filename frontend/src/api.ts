@@ -2966,7 +2966,7 @@ export async function sendFacultyLoadAssignmentRfcMessage(
 
 export async function acceptFacultyLoadAssignment(
   userId: string,
-  payload: { term_id?: string; send_to_gcal?: boolean }
+  payload: { term_id?: string; send_to_gcal?: boolean; gcal_action?: "sync" | "cleanup" | "reset" }
 ) {
   const base = (typeof API_BASE !== "undefined" ? API_BASE : "").replace(/\/+$/, "");
   const url = `${base}/faculty/load-assignment/accept?userId=${encodeURIComponent(userId)}`;
