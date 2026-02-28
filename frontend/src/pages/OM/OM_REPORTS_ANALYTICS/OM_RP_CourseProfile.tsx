@@ -125,6 +125,8 @@ function buildTermPoints(rows: AYDemandRow[]): TermPoint[] {
 
 function AreaDemandChart({ rows }: { rows: AYDemandRow[] }) {
   const pts = useMemo(() => buildTermPoints(rows), [rows]);
+  const [hoverIdx, setHoverIdx] = useState<number | null>(null);
+
   if (!pts.length) {
     return <div className="py-6 text-center text-sm text-gray-500">No history data available.</div>;
   }
@@ -162,6 +164,37 @@ function AreaDemandChart({ rows }: { rows: AYDemandRow[] }) {
     return g;
   }, [pts]);
 
+  // Vertical separators between academic years (between T3 and next T1)
+  const aySeparators = useMemo(() => {
+    const xs: number[] = [];
+    for (let i = 2; i < pts.length - 1; i += 3) {
+      xs.push((x(i) + x(i + 1)) / 2);
+    }
+    return xs;
+  }, [pts, innerW]);
+
+  // Tooltip (hover on dot)
+  const hover = hoverIdx === null ? null : pts[hoverIdx];
+  const tooltip = useMemo(() => {
+    if (!hover || hoverIdx === null) return null;
+
+    const hx = x(hoverIdx);
+    const hy = y(hover.value);
+
+    const label = `${fmtAY(hover.ay)} • T${hover.term}: ${hover.value} section${hover.value === 1 ? "" : "s"}`;
+    const approxW = Math.min(280, Math.max(150, Math.round(label.length * 6.4 + 18)));
+    const th = 26;
+
+    let tx = hx + 10;
+    if (tx + approxW > W - pad.r) tx = hx - approxW - 10;
+    tx = Math.max(pad.l, Math.min(tx, W - pad.r - approxW));
+
+    let ty = hy - 34;
+    ty = Math.max(pad.t + 4, ty);
+
+    return { label, tx, ty, tw: approxW, th, hx, hy };
+  }, [hoverIdx, hover]);
+
   return (
     <div className="w-full overflow-x-auto">
       <svg viewBox={`0 0 ${W} ${H}`} className="min-w-[620px] w-full">
@@ -178,14 +211,59 @@ function AreaDemandChart({ rows }: { rows: AYDemandRow[] }) {
           );
         })}
 
+        {/* AY separators */}
+        {aySeparators.map((xx, idx) => (
+          <line
+            key={`ay-sep-${idx}`}
+            x1={xx}
+            y1={pad.t}
+            x2={xx}
+            y2={pad.t + innerH}
+            stroke="#a2a4a7"
+            strokeDasharray="4 4"
+          />
+        ))}
+
         {/* area + line */}
         <path d={areaD} fill="#D1FAE5" opacity={0.9} />
         <path d={lineD} fill="none" stroke="#10B981" strokeWidth={2.5} />
 
         {/* points */}
-        {pts.map((p, i) => (
-          <circle key={p.key} cx={x(i)} cy={y(p.value)} r={4} fill="#10B981" />
-        ))}
+        {pts.map((p, i) => {
+          const isHover = hoverIdx === i;
+          return (
+            <circle
+              key={p.key}
+              cx={x(i)}
+              cy={y(p.value)}
+              r={isHover ? 5 : 4}
+              fill="#10B981"
+              style={{ cursor: "pointer" }}
+              onMouseEnter={() => setHoverIdx(i)}
+              onMouseLeave={() => setHoverIdx(null)}
+            />
+          );
+        })}
+
+        {/* tooltip */}
+        {tooltip ? (
+          <g>
+            <line x1={tooltip.hx} y1={tooltip.hy} x2={tooltip.hx} y2={tooltip.ty + tooltip.th} stroke="#D1D5DB" />
+            <rect
+              x={tooltip.tx}
+              y={tooltip.ty}
+              width={tooltip.tw}
+              height={tooltip.th}
+              rx={8}
+              ry={8}
+              fill="#FFFFFF"
+              stroke="#D1D5DB"
+            />
+            <text x={tooltip.tx + 9} y={tooltip.ty + 17} fontSize={11} fill="#111827">
+              {tooltip.label}
+            </text>
+          </g>
+        ) : null}
 
         {/* term labels */}
         {pts.map((p, i) => (
@@ -201,12 +279,21 @@ function AreaDemandChart({ rows }: { rows: AYDemandRow[] }) {
           </text>
         ))}
 
-        {/* AY labels (green) */}
+        {/* horizontal separator before AY labels */}
+        <line
+          x1={pad.l}
+          y1={pad.t + innerH + 26}
+          x2={W - pad.r}
+          y2={pad.t + innerH + 26}
+          stroke="#E5E7EB"
+        />
+
+        {/* AY labels */}
         {ayGroups.map((g) => (
           <text
             key={`ay-${g.ay}`}
             x={x(g.midIndex)}
-            y={pad.t + innerH + 36}
+            y={pad.t + innerH + 44}
             fontSize={11}
             textAnchor="middle"
             fill="#047857"
@@ -220,8 +307,11 @@ function AreaDemandChart({ rows }: { rows: AYDemandRow[] }) {
   );
 }
 
+
 function CourseDemandOverTime({
   rows,
+  totalSections,
+  mostRecent,
 }: {
   rows: AYDemandRow[];
   totalSections: number;
@@ -231,38 +321,34 @@ function CourseDemandOverTime({
 
   return (
     <div className="bg-white p-4 rounded-lg border border-gray-200 shadow-sm">
-      <div className="flex items-start justify-between gap-3 mb-2">
+      <div className="flex flex-wrap items-start justify-between gap-3 mb-2">
         <h3 className="text-md font-semibold text-emerald-700 flex items-center gap-2">
           <BarChart2 className="w-4 h-4 text-emerald-500" />
           Course Demand Over Time
         </h3>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="inline-flex items-center rounded-full border border-gray-200 bg-white px-2 py-0.5 text-xs font-semibold text-gray-700">
+            {`Total sections: ${Number(totalSections ?? 0)}`}
+          </span>
+          {mostRecent && mostRecent !== "—" ? (
+            <span className="inline-flex items-center rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-xs font-semibold text-amber-900">
+              {`Most recent: ${mostRecent}`}
+            </span>
+          ) : null}
+        </div>
       </div>
 
       <p className="text-xs text-gray-700 mb-3">Demand trend shows the sections offered per term over time.</p>
 
       <AreaDemandChart rows={sorted} />
 
-      <div className="mt-3 overflow-auto rounded-md border border-gray-200">
-        <table className="w-full text-sm">
-          <thead className="bg-gray-50 text-gray-600">
-            <tr>
-              <th className="text-left px-3 py-2 font-semibold">Academic Year</th>
-              <th className="text-right px-3 py-2 font-semibold">T1 Sections</th>
-              <th className="text-right px-3 py-2 font-semibold">T2 Sections</th>
-              <th className="text-right px-3 py-2 font-semibold">T3 Sections</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y">
-            {sorted.map((r) => (
-              <tr key={r.ay} className="bg-white">
-                <td className="px-3 py-2 whitespace-nowrap font-semibold text-emerald-700">{fmtAY(r.ay)}</td>
-                <td className="px-3 py-2 text-right font-semibold text-gray-900">{Number(r.t1 ?? 0)}</td>
-                <td className="px-3 py-2 text-right font-semibold text-gray-900">{Number(r.t2 ?? 0)}</td>
-                <td className="px-3 py-2 text-right font-semibold text-gray-900">{Number(r.t3 ?? 0)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+      <div className="mt-3 flex items-center justify-between gap-3 border-t border-gray-100 pt-3">
+        <p className="text-xs text-gray-600">Hover over a dot to see the section count for that term.</p>
+        <div className="text-[11px] text-gray-500">
+          <span className="font-semibold text-gray-700">T1</span> / <span className="font-semibold text-gray-700">T2</span> /{" "}
+          <span className="font-semibold text-gray-700">T3</span>
+        </div>
       </div>
     </div>
   );
@@ -483,10 +569,13 @@ export default function OM_RP_CourseProfile() {
     for (const p of data.preferences as InstructorInfo[]) {
       const fid = (p?.faculty_id || "").trim();
       if (!fid) continue;
+      // Preferences (Planning Term) should only show faculty who have taught this course before.
+      const taughtCount = taughtMap.get(fid)?.count || 0;
+      if (taughtCount <= 0) continue;
       if (!seen.has(fid)) seen.set(fid, p);
     }
     return Array.from(seen.values());
-  }, [data]);
+  }, [data, taughtMap]);
 
   function renderFacultyCard(person: InstructorInfo, opts?: { showNoHistoryText?: boolean }) {
     const meta = taughtMap.get(person.faculty_id);

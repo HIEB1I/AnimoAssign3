@@ -2177,33 +2177,68 @@ export async function getFacultyProfile(facultyId: string) {
 export async function getFacultySchedule(
   facultyId: string,
   termId?: string
-): Promise<{ ok: boolean; term_id: string | null; teaching_load: Array<{
-  course_code: string;
-  course_title: string;
-  section: string;
-  units: number;
-  mode: string;
-  day1: string;
-  begin1: string;
-  end1: string;
-  day2: string;
-  begin2: string;
-  end2: string;
-}> }> {
+): Promise<{
+  ok: boolean;
+  term_id: string | null;
+  term?: { term_id: string; acad_year_start?: number; term_number?: number } | null;
+  active_term_id?: string | null;
+  terms?: Array<{ term_id: string; acad_year_start?: number; term_number?: number; is_active?: boolean }>;
+  term_index?: number;
+  teaching_load: Array<{
+    course_code: string;
+    course_title: string;
+    section: string;
+    units: number;
+    mode: string;
+    day1: string;
+    begin1: string;
+    end1: string;
+    day2: string;
+    begin2: string;
+    end2: string;
+  }>;
+}> {
   const { data } = await axios.post(
     `${API_BASE}/om/facultymanagement`,
     {},
     { params: { action: "schedule", facultyId, termId } }
   );
-  // Normalize to always provide teaching_load array
+
   const tl = Array.isArray(data?.teaching_load) ? data.teaching_load : [];
-  return { ok: !!data?.ok, term_id: data?.term_id ?? null, teaching_load: tl };
+  const termsRaw = Array.isArray(data?.terms) ? data.terms : [];
+
+  const terms = termsRaw.map((t: any) => ({
+    term_id: String(t?.term_id ?? ""),
+    acad_year_start: typeof t?.acad_year_start === "number" ? t.acad_year_start : t?.acad_year_start != null ? Number(t.acad_year_start) : undefined,
+    term_number: typeof t?.term_number === "number" ? t.term_number : t?.term_number != null ? Number(t.term_number) : undefined,
+    is_active: !!t?.is_active,
+  })).filter((t: any) => t.term_id);
+
+  const term = data?.term
+    ? {
+        term_id: String(data.term.term_id ?? data?.term_id ?? ""),
+        acad_year_start: typeof data.term.acad_year_start === "number" ? data.term.acad_year_start : data.term.acad_year_start != null ? Number(data.term.acad_year_start) : undefined,
+        term_number: typeof data.term.term_number === "number" ? data.term.term_number : data.term.term_number != null ? Number(data.term.term_number) : undefined,
+      }
+    : null;
+
+  const term_index = typeof data?.term_index === "number" ? data.term_index : undefined;
+
+  return {
+    ok: !!data?.ok,
+    term_id: data?.term_id ?? null,
+    term,
+    active_term_id: data?.active_term_id ?? null,
+    terms,
+    term_index,
+    teaching_load: tl,
+  };
 }
 
 export async function getFacultyHistory(
   facultyId: string,
   termOrAy?: string | number
-): Promise<{ ok: boolean; term_id: string | null; teaching_history: Array<{
+): Promise<{ ok: boolean; acad_year_start: number | null; academicYears: number[]; teaching_history: Array<{
   code: string;
   title: string;
   section: string;
@@ -2221,6 +2256,16 @@ export async function getFacultyHistory(
   else if (typeof termOrAy === "string" && termOrAy) params.termId = termOrAy;
 
   const { data } = await axios.post(`${API_BASE}/om/facultymanagement`, {}, { params });
+
+  const academicYears: number[] = Array.isArray(data?.academicYears)
+    ? data.academicYears.map((x: any) => Number(x)).filter((n: any) => Number.isFinite(n))
+    : [];
+  const acad_year_start: number | null =
+    typeof data?.acad_year_start === "number"
+      ? data.acad_year_start
+      : data?.acad_year_start != null && String(data.acad_year_start).trim() !== ""
+        ? Number(data.acad_year_start)
+        : null;
 
   // Normalize backend response ({ terms: Record<string, any[]> }) to teaching_history[]
   const teaching_history: Array<any> = [];
@@ -2251,7 +2296,8 @@ export async function getFacultyHistory(
 
   return {
     ok: !!data?.ok,
-    term_id: (data?.term_id ?? null) as string | null,
+    acad_year_start,
+    academicYears,
     teaching_history,
   };
 }

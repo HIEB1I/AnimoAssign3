@@ -50,6 +50,31 @@ async def get_course_profile_for(
                 return None
         return None
 
+    def _id_variants_for_in(ids: List[Any]) -> List[Any]:
+        """Build a safe $in list that matches both string and int representations.
+
+        This avoids silent join misses when collections store ids as mixed types (e.g., 123 vs "123").
+        """
+        out: List[Any] = []
+        seen: set = set()
+        for raw in ids or []:
+            s = str(raw).strip() if raw is not None else ""
+            if not s:
+                continue
+
+            ks = ("s", s)
+            if ks not in seen:
+                out.append(s)
+                seen.add(ks)
+
+            n = _safe_int(s)
+            if isinstance(n, int):
+                ki = ("i", n)
+                if ki not in seen:
+                    out.append(n)
+                    seen.add(ki)
+        return out
+
     q = (query or "").strip()
     if not q:
         return {"course_id": "", "title": "Not found"}
@@ -157,7 +182,11 @@ async def get_course_profile_for(
 
         terms_clean.sort(key=lambda x: (x["acad_year_start"], x["term_number"]), reverse=True)
 
-        teach_hist_by_fid[fid] = {"count": len(terms_clean), "terms": terms_clean}
+        teach_hist_by_fid[fid] = {
+            "count": len(terms_clean),
+            "terms": terms_clean,
+            "most_recent_taught": terms_clean[0] if terms_clean else None,
+        }
         taught_ids.add(fid)
 
     # 4) Qualified faculty = taught OR KAC-qualified
@@ -166,14 +195,17 @@ async def get_course_profile_for(
     prof_by_fid: Dict[str, Dict[str, Any]] = {}
     user_by_id: Dict[str, Dict[str, Any]] = {}
     if fac_ids:
+        fac_ids_in = _id_variants_for_in(fac_ids)
+
         fps = await db.faculty_profiles.find(
-            {"faculty_id": {"$in": fac_ids}}, {"faculty_id": 1, "user_id": 1}
+            {"faculty_id": {"$in": fac_ids_in}}, {"faculty_id": 1, "user_id": 1}
         ).to_list(None)
         prof_by_fid = {str(fp.get("faculty_id")): fp for fp in fps if fp.get("faculty_id")}
 
-        user_ids = {str(fp.get("user_id")) for fp in fps if fp.get("user_id")} | set(fac_ids)
+        user_ids_raw = {fp.get("user_id") for fp in fps if fp.get("user_id")} | set(fac_ids)
+        user_ids_in = _id_variants_for_in(list(user_ids_raw))
         users = await db.users.find(
-            {"user_id": {"$in": list(user_ids)}},
+            {"user_id": {"$in": user_ids_in}},
             {"user_id": 1, "first_name": 1, "last_name": 1, "email": 1},
         ).to_list(None)
         user_by_id = {str(u.get("user_id")): u for u in users if u.get("user_id")}
@@ -199,7 +231,9 @@ async def get_course_profile_for(
         }
 
         if fid in taught_ids:
-            out["teaching_history"] = teach_hist_by_fid.get(fid, {"count": 0, "terms": []})
+            out["teaching_history"] = teach_hist_by_fid.get(
+                fid, {"count": 0, "terms": [], "most_recent_taught": None}
+            )
 
         qualified.append(out)
 
@@ -252,11 +286,14 @@ async def get_course_profile_for(
         {"$unwind": {"path": "$fp", "preserveNullAndEmptyArrays": True}},
         {"$lookup": {
             "from": "users",
-            "let": {"uid": "$fp.user_id", "fid": "$faculty_id"},
+            "let": {
+                "uid": {"$toString": "$fp.user_id"},
+                "fid": {"$toString": "$faculty_id"},
+            },
             "pipeline": [
                 {"$match": {"$expr": {"$or": [
-                    {"$eq": ["$user_id", "$$uid"]},
-                    {"$eq": ["$user_id", "$$fid"]},
+                    {"$eq": [{"$toString": "$user_id"}, "$$uid"]},
+                    {"$eq": [{"$toString": "$user_id"}, "$$fid"]},
                 ]}}},
                 {"$project": {"_id": 0, "first_name": 1, "last_name": 1, "email": 1}},
             ],
@@ -274,6 +311,13 @@ async def get_course_profile_for(
     ]
 
     past = await db.sections.aggregate(pipeline_past, allowDiskUse=True).to_list(None)
+
+    # Attach teaching history (incl. most recent term) so the UI can show "Last taught".
+    for row in past:
+        fid = str(row.get("faculty_id") or "").strip()
+        if fid and fid in teach_hist_by_fid:
+            row["teaching_history"] = teach_hist_by_fid[fid]
+
     top_3_instructors = past[:3]
     remaining_instructors_count = max(len(past) - len(top_3_instructors), 0)
     other_instructors = past[3:] if len(past) > 3 else []
@@ -435,26 +479,37 @@ async def get_course_profile_for(
                 "term_id": selected_term.get("term_id"),
                 "preferred_kacs": {"$in": kac_ids},
             }},
+            # Normalize ids to strings to avoid silent join misses across mixed id types.
+            {"$addFields": {"faculty_id": {"$toString": "$faculty_id"}}},
+
             {"$lookup": {
                 "from": "faculty_profiles",
-                "localField": "faculty_id",
-                "foreignField": "faculty_id",
+                "let": {"fid": "$faculty_id"},
+                "pipeline": [
+                    {"$match": {"$expr": {"$eq": [{"$toString": "$faculty_id"}, "$$fid"]}}},
+                    {"$project": {"_id": 0, "user_id": 1}},
+                ],
                 "as": "fp",
             }},
             {"$unwind": {"path": "$fp", "preserveNullAndEmptyArrays": True}},
+
             {"$lookup": {
                 "from": "users",
-                "let": {"uid": "$fp.user_id", "fid": "$faculty_id"},
+                "let": {
+                    "uid": {"$toString": "$fp.user_id"},
+                    "fid": "$faculty_id",
+                },
                 "pipeline": [
                     {"$match": {"$expr": {"$or": [
-                        {"$eq": ["$user_id", "$$uid"]},
-                        {"$eq": ["$user_id", "$$fid"]},
+                        {"$eq": [{"$toString": "$user_id"}, "$$uid"]},
+                        {"$eq": [{"$toString": "$user_id"}, "$$fid"]},
                     ]}}},
                     {"$project": {"_id": 0, "first_name": 1, "last_name": 1, "email": 1}},
                 ],
                 "as": "user",
             }},
             {"$unwind": {"path": "$user", "preserveNullAndEmptyArrays": True}},
+
             {"$group": {
                 "_id": "$faculty_id",
                 "faculty_id": {"$first": "$faculty_id"},
@@ -465,10 +520,34 @@ async def get_course_profile_for(
             {"$project": {"_id": 0, "faculty_id": 1, "first_name": 1, "last_name": 1, "email": 1}},
             {"$sort": {"last_name": 1, "first_name": 1}},
         ]
+        # Only show faculty who BOTH:
+        # 1) submitted a preference for the planning term, AND
+        # 2) have taught this course before (course-specific teaching history).
 
+        term_id = (selected_term or {}).get("term_id")
+
+        # Count ANY preference submissions for the term (regardless of KAC) so messaging is accurate.
+        pref_all_ids = set()
+        try:
+            pref_all_raw = await db.faculty_preferences.distinct("faculty_id", {"term_id": term_id})
+            pref_all_ids = {str(x).strip() for x in (pref_all_raw or []) if x is not None and str(x).strip()}
+        except Exception:
+            pref_all_rows = await db.faculty_preferences.aggregate([
+                {"$match": {"term_id": term_id}},
+                {"$group": {"_id": {"$toString": "$faculty_id"}}},
+            ]).to_list(None)
+            pref_all_ids = {r["_id"] for r in (pref_all_rows or []) if r.get("_id")}
+
+        raw_kac_pref_count = 0
         async for row in db.faculty_preferences.aggregate(pipeline_prefs, allowDiskUse=True):
+            raw_kac_pref_count += 1
+            fid = str(row.get("faculty_id") or "").strip()
+            if not fid:
+                continue
+            if fid not in taught_ids:
+                continue
             prefs_list.append({
-                "faculty_id": row.get("faculty_id"),
+                "faculty_id": fid,
                 "first_name": row.get("first_name"),
                 "last_name": row.get("last_name"),
                 "email": row.get("email"),
@@ -477,7 +556,19 @@ async def get_course_profile_for(
         if prefs_list:
             preferences = prefs_list
         else:
-            preferences = f"No faculty preference submissions yet for {active_term_display or '—'}."
+            if len(pref_all_ids) == 0:
+                preferences = f"No faculty preference submissions yet for {active_term_display or '—'}."
+            elif raw_kac_pref_count == 0:
+                preferences = (
+                    f"{len(pref_all_ids)} faculty submitted preferences for {active_term_display or '—'}, "
+                    "but none selected this course's KAC(s)."
+                )
+            else:
+                preferences = (
+                    f"{raw_kac_pref_count} faculty selected this course's KAC(s) for {active_term_display or '—'}, "
+                    "but none of them have taught this course before. "
+                    "Past instructors are listed under 'Has taught before'."
+                )
     elif selected_term and not kac_ids:
         preferences = f"No matching KAC lists this course for {active_term_display or '—'}."
     else:
