@@ -534,7 +534,7 @@ export default function OM_FacultyManagement() {
             <div key={dept} className="space-y-2">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
-                  <h2 className="text-base font-semibold text-emerald-700">{dept}</h2>
+                  <h2 className="text-base font-semibold text-gray-800">{dept}</h2>
                   <span className="text-xs text-gray-500">{`Showing ${items.length} of ${baselineTotalFaculty || items.length}`}</span>
                 </div>
               </div>
@@ -550,7 +550,7 @@ export default function OM_FacultyManagement() {
                         <th className="w-[12%] text-center px-4 py-3">Hire Date</th>
                         <th className="w-[10%] text-center px-4 py-3">Teaching Years</th>
                         <th className="w-[10%] text-center px-4 py-3">Status</th>
-                        <th className="w-16 text-center px-2 py-3">Actions</th>
+                        <th className="w-16 text-center px-2 py-3"> </th>
                       </tr>
                     </thead>
 

@@ -292,7 +292,7 @@ export default function OM_CourseManagement() {
             <div key={kac} className="space-y-3">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
-                  <h2 className="text-base font-semibold text-emerald-700">{kac}</h2>
+                  <h2 className="text-base font-semibold text-gray-800">{kac}</h2>
                   <span className="text-xs text-gray-500">{`Showing ${items.length} of ${totalAll > 0 ? totalAll : "—"}`}</span>
                 </div>
               </div>

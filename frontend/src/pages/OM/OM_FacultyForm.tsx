@@ -570,7 +570,7 @@ useEffect(() => {
               <th className="w-[13.5%] text-center px-4 py-3">Faculty Type</th>
               <th className="w-[13.5%] text-center px-4 py-3">Submission Date</th>
               <th className="w-[13.5%] text-center px-4 py-3">Status</th>
-              <th className="w-[14%] text-center px-4 py-3">Preference</th>
+              <th className="w-[14%] text-center px-4 py-3"> </th>
             </tr>
           </thead>
           <tbody className="divide-y">
