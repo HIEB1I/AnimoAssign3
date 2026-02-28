@@ -524,6 +524,14 @@ export default function OM_RP_AvailabilityForecasting() {
   return (
     <div className="p-4 md:p-6 space-y-4">
       {/* Top bar: Back • Term • Slots per faculty */}
+
+      {/* Title + subtitle */}
+      <div className="px-1">
+        <h1 className="text-2xl font-bold text-gray-900">Time/Day Slot Availability Indicators</h1>
+        <p className="mt-1 text-sm text-gray-600">
+          Predicts best-fit teaching blocks using submitted preferences and recent teaching patterns to help assign faculty to time slots faster.
+        </p>
+      </div>
       <div className="flex flex-wrap items-center justify-between gap-3">
         <Link
           to="/om/reports-analytics"
@@ -548,15 +556,6 @@ export default function OM_RP_AvailabilityForecasting() {
 
         <div />
       </div>
-
-      {/* Title + subtitle */}
-      <div className="px-1">
-        <h1 className="text-2xl font-bold text-gray-900">Time/Day Slot Availability Indicators</h1>
-        <p className="mt-1 text-sm text-gray-600">
-          Predicts best-fit teaching blocks using submitted preferences and recent teaching patterns to help assign faculty to time slots faster.
-        </p>
-      </div>
-
       <WarningPanel warnings={data?.warnings || []} />
 
       {/* Controls (compact) */}

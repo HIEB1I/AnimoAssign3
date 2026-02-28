@@ -223,6 +223,138 @@ async def _active_term() -> Dict[str, Any]:
     # If no next term, stick with current (still better than nothing)
     return current
 
+
+async def _current_term() -> Dict[str, Any]:
+    """Return the CURRENT/ACTIVE term (not the planning/next term)."""
+    current = await db[COL_TERMS].find_one(
+        {
+            "$or": [
+                {"status": "active"},
+                {"status": "Active"},
+                {"is_current": True},
+                {"is_active": True},
+                {"active": True},
+            ]
+        },
+        {"_id": 0, "term_id": 1, "acad_year_start": 1, "term_number": 1},
+    )
+    if not current:
+        last = await db[COL_TERMS].find(
+            {}, {"_id": 0, "term_id": 1, "term_number": 1, "acad_year_start": 1}
+        ).sort([("acad_year_start", -1), ("term_number", -1)]).limit(1).to_list(1)
+        current = last[0] if last else None
+    return current or {}
+
+
+async def _faculty_academic_years(fid_str: str) -> List[int]:
+    """Return academic years where the faculty has (non-archived) teaching assignments."""
+    if not fid_str:
+        return []
+
+    pipeline: List[Dict[str, Any]] = [
+        {"$match": {"$expr": {"$and": [
+            {"$eq": [{"$toString": "$faculty_id"}, fid_str]},
+            {"$ne": ["$is_archived", True]},
+        ]}}},
+        {"$lookup": {"from": COL_SECTIONS, "localField": "section_id", "foreignField": "section_id", "as": "sec"}},
+        {"$unwind": {"path": "$sec", "preserveNullAndEmptyArrays": False}},
+        {"$lookup": {
+            "from": COL_TERMS,
+            "let": {"tid": "$sec.term_id"},
+            "pipeline": [
+                {"$match": {"$expr": {"$eq": [
+                    {"$toString": "$term_id"},
+                    {"$toString": "$$tid"},
+                ]}}},
+                {"$project": {"_id": 0, "acad_year_start": 1}},
+            ],
+            "as": "t"
+        }},
+        {"$unwind": {"path": "$t", "preserveNullAndEmptyArrays": False}},
+        {"$match": {"t.acad_year_start": {"$ne": None}}},
+        {"$group": {"_id": "$t.acad_year_start"}},
+        {"$project": {"_id": 0, "acad_year_start": "$_id"}},
+        {"$sort": {"acad_year_start": -1}},
+    ]
+
+    years: List[int] = []
+    async for r in db[COL_ASSIGNMENTS].aggregate(pipeline, allowDiskUse=True):
+        y = r.get("acad_year_start")
+        try:
+            years.append(int(y))
+        except Exception:
+            continue
+
+    return sorted(set(years), reverse=True)
+
+
+
+async def _faculty_terms(fid_str: str) -> List[Dict[str, Any]]:
+    """Return distinct term docs where the faculty has (non-archived) assignments."""
+    if not fid_str:
+        return []
+
+    pipeline: List[Dict[str, Any]] = [
+        {"$match": {"$expr": {"$and": [
+            {"$eq": [{"$toString": "$faculty_id"}, fid_str]},
+            {"$ne": ["$is_archived", True]},
+        ]}}},
+        {"$lookup": {"from": COL_SECTIONS, "localField": "section_id", "foreignField": "section_id", "as": "sec"}},
+        {"$unwind": {"path": "$sec", "preserveNullAndEmptyArrays": False}},
+        {"$group": {"_id": {"$toString": "$sec.term_id"}}},
+        {"$project": {"_id": 0, "term_id": "$_id"}},
+        {"$lookup": {
+            "from": COL_TERMS,
+            "let": {"tid": "$term_id"},
+            "pipeline": [
+                {"$match": {"$expr": {"$eq": [
+                    {"$toString": "$term_id"},
+                    {"$toString": "$$tid"},
+                ]}}},
+                {"$project": {"_id": 0, "term_id": 1, "acad_year_start": 1, "term_number": 1}},
+            ],
+            "as": "t"
+        }},
+        {"$unwind": {"path": "$t", "preserveNullAndEmptyArrays": True}},
+        {"$project": {
+            "_id": 0,
+            "term_id": {"$ifNull": ["$t.term_id", "$term_id"]},
+            "acad_year_start": "$t.acad_year_start",
+            "term_number": "$t.term_number",
+        }},
+    ]
+
+    raw = [r async for r in db[COL_ASSIGNMENTS].aggregate(pipeline, allowDiskUse=True)]
+    out: List[Dict[str, Any]] = []
+    seen = set()
+    for r in raw:
+        tid = r.get("term_id")
+        tid_str = str(tid) if tid is not None else ""
+        if not tid_str or tid_str in seen:
+            continue
+        seen.add(tid_str)
+        out.append({
+            "term_id": tid,
+            "acad_year_start": r.get("acad_year_start"),
+            "term_number": r.get("term_number"),
+        })
+
+    def _k(t: Dict[str, Any]):
+        ay = t.get("acad_year_start")
+        try:
+            ay = int(ay)
+        except Exception:
+            ay = 9999
+        tn = t.get("term_number")
+        try:
+            tn = int(tn)
+        except Exception:
+            tn = 99
+        return (ay, tn, str(t.get("term_id") or ""))
+
+    out.sort(key=_k)
+    return out
+
 # ---------- Route ----------
 @router.post("/facultymanagement")
 async def facultymanagement_handler(
@@ -359,6 +491,7 @@ async def facultymanagement_handler(
         active = await _active_term()
         active_term_id = active.get("term_id")
 
+        active_term_id_str = str(active_term_id) if active_term_id is not None else None
         early_match: Dict[str, Any] = {}
         if facultyType and facultyType.strip().lower() != "all type":
             code = {"Full-Time": "FT", "Part-Time": "PT"}.get(facultyType.strip())
@@ -383,7 +516,7 @@ async def facultymanagement_handler(
                 "let": {"uid": "$user_id", "femail": "$email"},
                 "pipeline": [
                     {"$match": {"$expr": {"$or": [
-                        {"$and": [{"$ne": ["$$uid", None]}, {"$eq": ["$user_id", "$$uid"]}]},
+                        {"$and": [{"$ne": ["$$uid", None]}, {"$eq": [{"$toString": "$user_id"}, {"$toString": "$$uid"}]}]},
                         {"$and": [{"$ne": ["$$femail", None]}, {"$eq": ["$email", "$$femail"]}]},
                     ]}}},  # noqa: E231
                     {"$project": {"_id": 0, "first_name": 1, "last_name": 1, "status": 1, "email": 1}}
@@ -399,7 +532,7 @@ async def facultymanagement_handler(
                         {
                             # All prefs for this faculty
                             "$match": {
-                                "$expr": {"$eq": ["$faculty_id", "$$fid"]},
+                                "$expr": {"$eq": [{"$toString": "$faculty_id"}, {"$toString": "$$fid"}]},
                             }
                         },
                         {
@@ -409,8 +542,8 @@ async def facultymanagement_handler(
                                     "$cond": [
                                         {
                                             "$and": [
-                                                {"$ne": [active_term_id, None]},
-                                                {"$eq": ["$term_id", active_term_id]},
+                                                {"$ne": [active_term_id_str, None]},
+                                                {"$eq": [{"$toString": "$term_id"}, active_term_id_str]},
                                             ]
                                         },
                                         1,
@@ -434,8 +567,10 @@ async def facultymanagement_handler(
                         {
                             "$project": {
                                 "_id": 0,
+                                "term_id": 1,
+                                "_is_active_term": 1,
                                 "preferred_units": 1,
-                                "on_break": 1,  # <-- NEW: we need this for status logic
+                                "on_break": 1,
                             }
                         },
 
@@ -452,7 +587,12 @@ async def facultymanagement_handler(
                 "email_display": {"$ifNull": ["$u.email", "$email"]},
                 "status_display": {
                     "$cond": [
-                        {"$eq": ["$pref.on_break", True]},
+                        {
+                            "$and": [
+                                {"$eq": ["$pref._is_active_term", 1]},
+                                {"$eq": ["$pref.on_break", True]},
+                            ]
+                        },
                         "On Leave",
                         {
                             "$cond": [
@@ -472,7 +612,7 @@ async def facultymanagement_handler(
                         "default": {"$ifNull": ["$employment_type", ""]},
                     }
                 },
-                "teaching_units_display": {"$ifNull": ["$pref.preferred_units", "N/A"]},
+                "teaching_units_display": {"$cond": [{"$eq": ["$pref._is_active_term", 1]}, {"$ifNull": ["$pref.preferred_units", "N/A"]}, "N/A"]},
             }},
             {"$match": {"$expr": {"$or": [
                 {"$eq": [dept_filter, ""]},
@@ -511,20 +651,26 @@ async def facultymanagement_handler(
         if not facultyId:
             raise HTTPException(status_code=400, detail="facultyId is required.")
 
-        # Resolve working term if not provided
+        fid_str = str(facultyId)
+
+        # Resolve CURRENT term if not provided (schedule should reflect active teaching load)
         if not termId:
-            active = await _active_term()
-            termId = active.get("term_id")
+            current = await _current_term()
+            termId = current.get("term_id") if current else None
+            if not termId:
+                active = await _active_term()
+                termId = active.get("term_id")
 
         # faculty_assignments -> sections (filter by term) -> courses -> section_schedules
         pipeline: List[Dict[str, Any]] = [
-            {"$match": {"faculty_id": facultyId, "is_archived": False}},
+            {"$match": {"$expr": {"$and": [ {"$eq": [{"$toString": "$faculty_id"}, fid_str]}, {"$ne": ["$is_archived", True]} ]}}},
             {"$lookup": {"from": COL_SECTIONS, "localField": "section_id", "foreignField": "section_id", "as": "sec"}},
             {"$unwind": {"path": "$sec", "preserveNullAndEmptyArrays": True}},
         ]
 
-        if termId:
-            pipeline.append({"$match": {"sec.term_id": termId}})
+        term_id_str = str(termId) if termId is not None else None
+        if term_id_str:
+            pipeline.append({"$match": {"$expr": {"$eq": [{"$toString": "$sec.term_id"}, term_id_str]}}})
 
         pipeline.extend([
             {"$lookup": {"from": COL_COURSES, "localField": "sec.course_id", "foreignField": "course_id", "as": "course"}},
@@ -626,8 +772,60 @@ async def facultymanagement_handler(
 
         out_rows.sort(key=lambda x: (x.get("course_code") or "", x.get("section") or ""))
 
-        return {"ok": True, "term_id": termId, "teaching_load": out_rows}
+        # Build term navigation metadata for UI (Prev/Next Term header)
+        current_term = await _current_term()
+        active_term_id = current_term.get("term_id") if current_term else None
 
+        terms = await _faculty_terms(fid_str)
+        term_id_str = str(termId) if termId is not None else ""
+
+        # Ensure the selected term is included even if it has zero rows
+        if term_id_str and all(str(t.get("term_id")) != term_id_str for t in terms):
+            tdoc = await db[COL_TERMS].find_one(
+                {"$expr": {"$eq": [{"$toString": "$term_id"}, term_id_str]}},
+                {"_id": 0, "term_id": 1, "acad_year_start": 1, "term_number": 1},
+            )
+            if tdoc:
+                terms.append(tdoc)
+            else:
+                terms.append({"term_id": termId, "acad_year_start": None, "term_number": None})
+
+            def _k(t: Dict[str, Any]):
+                ay = t.get("acad_year_start")
+                try:
+                    ay = int(ay)
+                except Exception:
+                    ay = 9999
+                tn = t.get("term_number")
+                try:
+                    tn = int(tn)
+                except Exception:
+                    tn = 99
+                return (ay, tn, str(t.get("term_id") or ""))
+
+            terms.sort(key=_k)
+
+        active_term_id_str = str(active_term_id) if active_term_id is not None else ""
+        for t in terms:
+            t["is_active"] = bool(active_term_id_str) and (str(t.get("term_id")) == active_term_id_str)
+
+        term_index = 0
+        for i, t in enumerate(terms):
+            if term_id_str and str(t.get("term_id")) == term_id_str:
+                term_index = i
+                break
+
+        term_doc = terms[term_index] if terms else {"term_id": termId, "acad_year_start": None, "term_number": None, "is_active": False}
+
+        return {
+            "ok": True,
+            "term_id": termId,
+            "term": {"term_id": term_doc.get("term_id"), "acad_year_start": term_doc.get("acad_year_start"), "term_number": term_doc.get("term_number")},
+            "active_term_id": active_term_id,
+            "terms": [{"term_id": t.get("term_id"), "acad_year_start": t.get("acad_year_start"), "term_number": t.get("term_number"), "is_active": t.get("is_active", False)} for t in terms],
+            "term_index": term_index,
+            "teaching_load": out_rows,
+        }
 
     # ----- HISTORY: per AY grouped by term -----
     # ----- HISTORY: per AY grouped by term -----
@@ -635,22 +833,35 @@ async def facultymanagement_handler(
         if not facultyId:
             raise HTTPException(status_code=400, detail="facultyId is required.")
 
-        # Default AY = most recent
-        if acadYearStart is None:
-            latest = await db[COL_TERMS].find({}, {"_id": 0, "acad_year_start": 1}) \
-                .sort([("acad_year_start", -1)]).limit(1).to_list(1)
-            acadYearStart = latest[0]["acad_year_start"] if latest else None
-            if acadYearStart is None:
-                return {"ok": True, "acad_year_start": None, "terms": {}}
+        fid_str = str(facultyId)
+
+        # Default AY = most recent AY *with data* for this faculty
+        ay_list = await _faculty_academic_years(fid_str)
+        if not ay_list:
+            return {"ok": True, "acad_year_start": None, "academicYears": [], "terms": {}}
+
+        if acadYearStart is None or acadYearStart not in ay_list:
+            acadYearStart = ay_list[0]
 
         # Build like FACULTY_History: assign -> section -> course -> term -> schedules -> room -> campus
         pipeline = [
-            {"$match": {"faculty_id": facultyId, "is_archived": False}},
+            {"$match": {"$expr": {"$and": [ {"$eq": [{"$toString": "$faculty_id"}, fid_str]}, {"$ne": ["$is_archived", True]} ]}}},
             {"$lookup": {"from": "sections", "localField": "section_id", "foreignField": "section_id", "as": "sec"}},
             {"$unwind": {"path": "$sec", "preserveNullAndEmptyArrays": True}},
             {"$lookup": {"from": "courses", "localField": "sec.course_id", "foreignField": "course_id", "as": "course"}},
             {"$unwind": {"path": "$course", "preserveNullAndEmptyArrays": True}},
-            {"$lookup": {"from": "terms", "localField": "sec.term_id", "foreignField": "term_id", "as": "t"}},
+            {"$lookup": {
+                "from": "terms",
+                "let": {"tid": "$sec.term_id"},
+                "pipeline": [
+                    {"$match": {"$expr": {"$eq": [
+                        {"$toString": "$term_id"},
+                        {"$toString": "$$tid"},
+                    ]}}},
+                    {"$project": {"_id": 0, "term_number": 1, "acad_year_start": 1}},
+                ],
+                "as": "t"
+            }},
             {"$unwind": {"path": "$t", "preserveNullAndEmptyArrays": True}},
             # Filter by AY via joined terms (not on the assignment doc)
             {"$match": {"t.acad_year_start": acadYearStart}},
@@ -731,24 +942,38 @@ async def facultymanagement_handler(
             if isinstance(code, list):
                 code = (code[0] if code else "") or ""
 
-            flat.append({
-                "term": f"Term {r.get('term_number') or ''}".strip(),
-                "code": code or "",
-                "title": r.get("course_title") or "",
-                "section": r.get("section_code") or "",
-                "units": r.get("units", 0) or 0,
-                "day1": day1 or "",
-                "begin1": begin1 or "",
-                "end1": end1 or "",
-                "day2": day2 or "",
-                "begin2": begin2 or "",
-                "end2": end2 or "",
-            })
+            tn = r.get("term_number")
+            try:
+                            tn_int = int(tn) if tn is not None else None
+            except Exception:
+                            tn_int = None
+            tn_norm = tn_int if tn_int in (1, 2, 3) else 1
+            term_label = f"Term {tn_norm}"
 
-        # Group by term for OM payload → { terms: { "Term 1": [...] } }
+            flat.append({
+                            "term": term_label,
+                            "term_number": tn_norm,
+                            "code": code or "",
+                            "title": r.get("course_title") or "",
+                            "section": r.get("section_code") or "",
+                            "units": r.get("units", 0) or 0,
+                            "day1": day1 or "",
+                            "begin1": begin1 or "",
+                            "end1": end1 or "",
+                            "day2": day2 or "",
+                            "begin2": begin2 or "",
+                            "end2": end2 or "",
+                        })
+
+                # Sort and group by term for OM payload → { terms: { "Term 1": [...] } }
+        flat.sort(key=lambda x: (x.get("term_number", 1), x.get("code") or "", x.get("section") or ""))
+
         grouped = {"Term 1": [], "Term 2": [], "Term 3": []}
         for r in flat:
-            grouped.setdefault(r["term"] or "Term 1", []).append({
+            term = r.get("term") or "Term 1"
+            if term not in grouped:
+                term = "Term 1"
+            grouped[term].append({
                 "code": r["code"],
                 "title": r["title"],
                 "section": r["section"],
@@ -761,7 +986,7 @@ async def facultymanagement_handler(
                 "end2": r.get("end2"),
             })
 
-        return {"ok": True, "acad_year_start": acadYearStart, "terms": grouped}
+        return {"ok": True, "acad_year_start": acadYearStart, "academicYears": ay_list, "terms": grouped}
 
 
     raise HTTPException(status_code=400, detail="Invalid action parameter.")
