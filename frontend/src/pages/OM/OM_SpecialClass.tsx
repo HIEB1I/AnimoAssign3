@@ -414,7 +414,7 @@ function DetailRow({ label, value }: { label: string; value: any }) {
   );
 }
 
-export default function OM_SpecialClass() {
+export default function OM_SpecialClass({ hideMessageIcon = false }: { hideMessageIcon?: boolean } = {}) {
   const [status, setStatus] = useState("All Status");
   const [searchInput, setSearchInput] = useState("");
   const [q, setQ] = useState("");
@@ -1512,6 +1512,7 @@ export default function OM_SpecialClass() {
       </>
     ) : (
       <>
+        {!hideMessageIcon && (
         <button
           type="button"
           onClick={() => {
@@ -1540,6 +1541,7 @@ export default function OM_SpecialClass() {
             />
           )}
         </button>
+        )}
 
         <button
           type="button"
@@ -1703,6 +1705,7 @@ export default function OM_SpecialClass() {
       )}
 
       {/* Special Class conversation (RFC thread) */}
+      {!hideMessageIcon && (
       <SpecialConversationModal
         open={!!conv?.open}
         onClose={() => setConv(null)}
@@ -1713,6 +1716,7 @@ export default function OM_SpecialClass() {
         sectionId={conv?.sectionId}
         onToast={toast}
       />
+      )}
     </main>
   );
 }
