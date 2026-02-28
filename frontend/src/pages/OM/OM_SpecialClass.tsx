@@ -440,6 +440,7 @@ export default function OM_SpecialClass() {
   const [rows, setRows] = useState<OMSpecialClassRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
+  const [errKind, setErrKind] = useState<"success" | "error">("error");
 
   // selection
   const [selectedIds, setSelectedIds] = useState<Record<string, boolean>>({});
@@ -481,6 +482,7 @@ export default function OM_SpecialClass() {
 
   const toast = (message: string, kind?: "success" | "error") => {
     // This screen uses an inline banner for feedback; keep it consistent.
+    setErrKind(kind === "success" ? "success" : "error");
     setErr(message);
     if (kind === "success") {
       window.setTimeout(() => setErr(""), 2500);
@@ -558,6 +560,7 @@ export default function OM_SpecialClass() {
         });
         setRoomIdToInfo(rm);
       } catch (e: any) {
+        setErrKind("error");
         setErr(e?.response?.data?.detail || e?.message || "Failed to load options.");
       }
     })();
@@ -573,6 +576,8 @@ export default function OM_SpecialClass() {
     try {
       setLoading(true);
       setErr("");
+      setErrKind("error");
+      setErrKind("error");
       const res = await listOMSC({ status, q });
       if (!res.ok) throw new Error("Failed to load special class applications");
       const incoming = res.rows || [];
@@ -588,6 +593,7 @@ export default function OM_SpecialClass() {
       });
     } catch (e: any) {
       setRows([]);
+      setErrKind("error");
       setErr(e?.response?.data?.detail || e?.message || "Failed to load special class.");
     } finally {
       setLoading(false);
@@ -645,7 +651,9 @@ export default function OM_SpecialClass() {
 
     try {
       setErr("");
+      setErrKind("error");
       if (selectedList.length === 0) {
+        setErrKind("error");
         setErr("Select at least one application to export.");
         return;
       }
@@ -658,6 +666,7 @@ export default function OM_SpecialClass() {
         downloadBlob(blob, makeFileName(id));
       }
     } catch (e: any) {
+      setErrKind("error");
       setErr(e?.response?.data?.detail || e?.message || "Failed to export selected PDF.");
     } finally {
       setLoading(false);
@@ -668,6 +677,7 @@ export default function OM_SpecialClass() {
   // NOTE: This intentionally keeps "Name of Faculty" blank, matching the user's template requirement.
   const exportTableExcel = () => {
     if (!rows || rows.length === 0) {
+      setErrKind("error");
       setErr("No rows to export.");
       return;
     }
@@ -1019,6 +1029,7 @@ export default function OM_SpecialClass() {
       setDidClearAll(false);
       await load();
     } catch (e: any) {
+      setErrKind("error");
       setErr(e?.response?.data?.detail || e?.message || "Failed to update special class.");
     } finally {
       setLoading(false);
@@ -1061,7 +1072,14 @@ export default function OM_SpecialClass() {
       </header>
 
       {err && (
-        <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+        <div
+          className={cls(
+            "mb-4 rounded-lg px-3 py-2 text-sm",
+            errKind === "success"
+              ? "border border-emerald-200 bg-emerald-50 text-emerald-700"
+              : "border border-red-200 bg-red-50 text-red-700"
+          )}
+        >
           {err}
         </div>
       )}
@@ -1164,7 +1182,7 @@ export default function OM_SpecialClass() {
 
                 <th className="text-center px-4 py-2 whitespace-nowrap">Status</th>
                 <th className="text-left px-4 py-2 whitespace-nowrap">Remarks</th>
-                <th className="w-20 px-4 py-2" />
+                <th className="w-20 px-4 py-2 text-center whitespace-nowrap">Action</th>
               </tr>
             </thead>
 
@@ -1518,7 +1536,7 @@ export default function OM_SpecialClass() {
                                 }}
                                 disabled={!r.faculty_id}
                                 className={cls(
-                                  "flex h-8 w-8 items-center justify-center rounded-full border border-purple-200 text-purple-700",
+                                  "relative flex h-8 w-8 items-center justify-center rounded-full border border-purple-200 text-purple-700",
                                   "hover:bg-purple-50",
                                   !r.faculty_id && "opacity-50 cursor-not-allowed hover:bg-transparent"
                                 )}
@@ -1526,6 +1544,13 @@ export default function OM_SpecialClass() {
                                 aria-label="Message"
                               >
                                 <MessageSquareText className="h-4 w-4" />
+                                {Boolean((r as any)?.rfc_needs_om) && (
+                                  <span
+                                    className="absolute -top-0.5 -right-0.5 h-2.5 w-2.5 rounded-full bg-red-600"
+                                    aria-label="New message"
+                                    title="New message"
+                                  />
+                                )}
                               </button>
 
                               <button

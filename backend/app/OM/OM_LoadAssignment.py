@@ -4533,6 +4533,23 @@ async def respond_load_assignment_rfc(
         # Backfill missing users.gmail (some Faculty accounts only have users.email).
         await _ensure_user_gmail_address(fac_user_id, db)
 
+        # Detect whether this RFC belongs to a Special Class thread.
+        # In Special Class, the frontend reuses this RFC API but passes special_id as `section_id`.
+        # If we treat it as a real section_id, the notification deep-link and labeling are wrong,
+        # and faculty may not find the conversation from the notification.
+        is_special_class = False
+        special_doc: Dict[str, Any] = {}
+        if section_id:
+            try:
+                special_doc = await db["special_class"].find_one(
+                    {"special_id": section_id},
+                    {"_id": 0, "special_id": 1, "course_id": 1, "course_code": 1, "section": 1, "section_code": 1, "term_id": 1},
+                ) or {}
+                is_special_class = bool(special_doc)
+            except Exception:
+                is_special_class = False
+                special_doc = {}
+
         # Best-effort: include the specific course + section in the notification body
         # so both in-app and Gmail messages are self-contained.
         course_code = ""
@@ -4540,25 +4557,41 @@ async def respond_load_assignment_rfc(
         course_section_line = ""
         if section_id:
             try:
-                sec = await db[COL_SECTIONS].find_one(
-                    {"section_id": section_id},
-                    {"_id": 0, "section_code": 1, "course_id": 1, "course_code": 1, "section": 1, "course": 1},
-                ) or {}
+                if is_special_class:
+                    # Special Class rows often store a course_code/section_code directly.
+                    cc = special_doc.get("course_code") or ""
+                    if isinstance(cc, list):
+                        cc = cc[0] if cc else ""
+                    course_code = str(cc or "").strip()
+                    section_code = str(special_doc.get("section_code") or special_doc.get("section") or "").strip()
 
-                section_code = str(sec.get("section_code") or sec.get("section") or "").strip()
+                    cid = str(special_doc.get("course_id") or "").strip()
+                    if not course_code and cid:
+                        cdoc = await db[COL_COURSES].find_one({"course_id": cid}, {"_id": 0, "course_code": 1}) or {}
+                        cc2 = cdoc.get("course_code") or ""
+                        if isinstance(cc2, list):
+                            cc2 = cc2[0] if cc2 else ""
+                        course_code = str(cc2 or "").strip()
+                else:
+                    sec = await db[COL_SECTIONS].find_one(
+                        {"section_id": section_id},
+                        {"_id": 0, "section_code": 1, "course_id": 1, "course_code": 1, "section": 1, "course": 1},
+                    ) or {}
 
-                cc = sec.get("course_code") or sec.get("course") or ""
-                if isinstance(cc, list):
-                    cc = cc[0] if cc else ""
-                course_code = str(cc or "").strip()
+                    section_code = str(sec.get("section_code") or sec.get("section") or "").strip()
 
-                cid = str(sec.get("course_id") or "").strip()
-                if not course_code and cid:
-                    cdoc = await db[COL_COURSES].find_one({"course_id": cid}, {"_id": 0, "course_code": 1}) or {}
-                    cc2 = cdoc.get("course_code") or ""
-                    if isinstance(cc2, list):
-                        cc2 = cc2[0] if cc2 else ""
-                    course_code = str(cc2 or "").strip()
+                    cc = sec.get("course_code") or sec.get("course") or ""
+                    if isinstance(cc, list):
+                        cc = cc[0] if cc else ""
+                    course_code = str(cc or "").strip()
+
+                    cid = str(sec.get("course_id") or "").strip()
+                    if not course_code and cid:
+                        cdoc = await db[COL_COURSES].find_one({"course_id": cid}, {"_id": 0, "course_code": 1}) or {}
+                        cc2 = cdoc.get("course_code") or ""
+                        if isinstance(cc2, list):
+                            cc2 = cc2[0] if cc2 else ""
+                        course_code = str(cc2 or "").strip()
 
                 if course_code or section_code:
                     label = " – ".join([p for p in [course_code, section_code] if p])
@@ -4566,12 +4599,22 @@ async def respond_load_assignment_rfc(
             except Exception:
                 course_section_line = ""
 
+        # Build a correct faculty deep-link + labels for Special Class vs regular load.
+        if is_special_class:
+            base_route = f"/faculty/overview?view=Special&open_special_rfc=1&term_id={term_id}&faculty_id={faculty_id}&special_id={section_id}&rfc_id={rfc_id}"
+            title_prefix = "Special Class"
+            kind_prefix = "special_class_rfc"
+        else:
+            base_route = f"/faculty/overview?open_rfc=1&term_id={term_id}&faculty_id={faculty_id}&section_id={section_id}&rfc_id={rfc_id}"
+            title_prefix = "Load Assignment"
+            kind_prefix = "load_rfc"
+
         if action == "reply":
-            title = "Load Assignment: OM replied to your Request for Change"
+            title = f"{title_prefix}: OM replied to your Request for Change"
             details = (course_section_line + message).strip()
-            kind = "load_rfc_reply"
+            kind = f"{kind_prefix}_reply"
         elif action == "approve":
-            title = "Load Assignment: OM approved your request"
+            title = f"{title_prefix}: OM approved your request"
             if message:
                 details = (course_section_line + message).strip()
             else:
@@ -4582,11 +4625,11 @@ async def respond_load_assignment_rfc(
                         details = (course_section_line + "Your Request for Change was approved and the requested schedule was applied.").strip()
                 except Exception:
                     pass
-            kind = "load_rfc_approved"
+            kind = f"{kind_prefix}_approved"
         else:
-            title = "Load Assignment: OM rejected your request"
+            title = f"{title_prefix}: OM rejected your request"
             details = (course_section_line + (message or "Your Request for Change was rejected.")).strip()
-            kind = "load_rfc_rejected"
+            kind = f"{kind_prefix}_rejected"
 
         # Send BOTH in-app + Gmail notification (best-effort) using the OM's connected Gmail.
         await create_notification(
@@ -4596,7 +4639,7 @@ async def respond_load_assignment_rfc(
             meta={
                 # Deep-link Faculty to the RFC thread (and the specific course row)
                 # so they don't need to hunt for it manually.
-                "route": f"/faculty/overview?open_rfc=1&term_id={term_id}&faculty_id={faculty_id}&section_id={section_id}&rfc_id={rfc_id}",
+                "route": base_route,
                 "kind": kind,
                 "term_id": term_id,
                 "faculty_id": faculty_id,
@@ -4604,6 +4647,7 @@ async def respond_load_assignment_rfc(
                 "rfc_id": rfc_id,
                 "course_code": course_code,
                 "section_code": section_code,
+                "is_special_class": is_special_class,
             },
             send_email=True,
             email_from_user_id=user_id,

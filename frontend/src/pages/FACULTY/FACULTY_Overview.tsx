@@ -2401,7 +2401,12 @@ const scheduleFinalLabel = (() => {
 	        </div>
 	      )}
 
-      {scheduleFinal && (
+      {/*
+        IMPORTANT:
+        "Schedule Locked" applies only to regular/serviced load assignment.
+        It must NOT appear in the Special Class tab.
+      */}
+      {scheduleFinal && view !== "Special" && (
         <div className="mt-3 rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900">
           <span className="font-semibold">Schedule Locked:</span> {scheduleFinalLabel}. You can no longer submit RFCs.
         </div>
@@ -3263,6 +3268,17 @@ function ChangeRequestModal({
 
   if (!open || !context) return null;
 
+  // IMPORTANT:
+  // Special Classes use a synthetic section_id like "SPECIAL:<special_id>" for display.
+  // The RFC thread key and backend routing for Special Classes expect the raw special_id.
+  // Normalize here so Faculty can always message OM from the Conversation panel.
+  const normalizeRfcKey = (rawId: string, isSpecial: boolean) => {
+    const s = String(rawId || "").trim();
+    if (!s) return "";
+    if (!isSpecial) return s;
+    return s.replace(/^SPECIAL:/i, "");
+  };
+
   const forceConversationOnly = Boolean((context.item as any)?.forceConversationOnly);
   const effectivePanel: "request" | "conversation" = forceConversationOnly ? "conversation" : panel;
 
@@ -3360,13 +3376,22 @@ function ChangeRequestModal({
 	        {effectivePanel === "conversation" ? (
 	          <RfcThreadView
 	            term={term}
-	            sectionId={
-	              (context.item.originalItem as any)?.section_id ||
-	              (context.item.originalItem as any)?.sectionId ||
-	              (context.item.originalItem as any)?.special_id ||
-	              ""
-	            }
+	            sectionId={(() => {
+	              const oiAny: any = (context.item.originalItem as any) || {};
+	              const isSpecial = Boolean(
+	                (context.item as any)?.is_special_class ||
+	                  (context.item as any)?.isSpecialClass ||
+	                  oiAny?.is_special_class
+	              );
+	              const raw =
+	                (isSpecial ? (oiAny?.special_id || (context.item as any)?.special_id) : "") ||
+	                oiAny?.section_id ||
+	                oiAny?.sectionId ||
+	                "";
+	              return normalizeRfcKey(raw, isSpecial);
+	            })()}
 	            allowStartConversation={Boolean((context.item as any)?.allowStartConversation)}
+	            alwaysShowReply={Boolean((context.item as any)?.is_special_class)}
 	          />
 	        ) : (
 	          <div className="space-y-4">
@@ -3690,10 +3715,12 @@ function RfcThreadView({
   term,
   sectionId,
   allowStartConversation,
+  alwaysShowReply,
 }: {
   term: any;
   sectionId: string;
   allowStartConversation?: boolean;
+  alwaysShowReply?: boolean;
 }) {
   const [thread, setThread] = useState<any | null>(null);
   const [loading, setLoading] = useState(false);
@@ -3778,7 +3805,7 @@ function RfcThreadView({
       )}
 
       {/* Quick reply: allow faculty to respond in-thread even without creating a new RFC request */}
-      {!locked && (hasMsgs || Boolean(allowStartConversation)) && (
+      {!locked && !!sectionId && (Boolean(alwaysShowReply) || hasMsgs || Boolean(allowStartConversation)) && (
         <div className="mt-3 flex items-end gap-2">
           <textarea
             rows={2}

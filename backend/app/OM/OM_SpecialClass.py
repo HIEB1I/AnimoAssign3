@@ -42,6 +42,10 @@ COL_FAC_PROFILES = "faculty_profiles"
 COL_FAC_LOADS = "faculty_loads"
 COL_PREEN_COUNT = "preenlistment_count"
 
+# RFC (shared with Load Assignment). We reuse this collection for Special Class
+# conversation threads keyed by (term_id + section_id), where section_id == special_id.
+COL_LOAD_RFC = "faculty_rfc"
+
 OM_ALLOWED_STATUSES = ["Forwarded To Department", "Approved", "Rejected"]
 
 # ---------------- notifications (CHAIR) ----------------
@@ -1928,6 +1932,54 @@ async def om_specialclass_post(
                 or (rr.get("course_title") or "").lower().find(s) >= 0
                 or (rr.get("section_code") or "").lower().find(s) >= 0
             ]
+
+        # Attach RFC state per special_id so the OM UI can show a red-dot indicator
+        # on the Message action when faculty has sent a message and OM needs to respond.
+        try:
+            special_ids = [rr.get("special_id") for rr in shaped if rr.get("special_id")]
+            if special_ids:
+                rfc_docs = await db[COL_LOAD_RFC].find(
+                    {"term_id": current_term_id, "section_id": {"$in": special_ids}},
+                    {"_id": 0, "section_id": 1, "status": 1, "locked": 1, "updated_at": 1},
+                ).to_list(20000)
+
+                rfc_map: Dict[str, Dict[str, Any]] = {}
+                for rfc in rfc_docs or []:
+                    sid = _safe_str(rfc.get("section_id"))
+                    if not sid:
+                        continue
+                    # Keep the most recently updated RFC per section_id.
+                    prev = rfc_map.get(sid)
+                    if not prev:
+                        rfc_map[sid] = rfc
+                        continue
+                    try:
+                        prev_ts = prev.get("updated_at")
+                        cur_ts = rfc.get("updated_at")
+                        if cur_ts and (not prev_ts or cur_ts > prev_ts):
+                            rfc_map[sid] = rfc
+                    except Exception:
+                        # If timestamps are not comparable, keep the existing one.
+                        pass
+
+                for rr in shaped:
+                    sid = _safe_str(rr.get("special_id"))
+                    rfc = rfc_map.get(sid) if sid else None
+                    st = _safe_str((rfc or {}).get("status")).upper()
+                    rr["rfc_status"] = st
+                    rr["rfc_locked"] = bool((rfc or {}).get("locked"))
+                    rr["rfc_needs_om"] = (st == "NEEDS_OM")
+            else:
+                for rr in shaped:
+                    rr["rfc_status"] = ""
+                    rr["rfc_locked"] = False
+                    rr["rfc_needs_om"] = False
+        except Exception:
+            # Best-effort only; never block list rendering due to RFC lookups.
+            for rr in shaped:
+                rr["rfc_status"] = rr.get("rfc_status") or ""
+                rr["rfc_locked"] = bool(rr.get("rfc_locked")) if rr.get("rfc_locked") is not None else False
+                rr["rfc_needs_om"] = bool(rr.get("rfc_needs_om")) if rr.get("rfc_needs_om") is not None else False
 
         return {"ok": True, "rows": shaped, "term_id": current_term_id}
 

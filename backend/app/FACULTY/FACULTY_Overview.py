@@ -261,12 +261,28 @@ async def _special_class_schedule_two(
             {"schedule_id": {"$in": sids}},
             {"_id": 0, "schedule_id": 1, "day": 1, "start_time": 1, "end_time": 1, "room_type": 1, "room_id": 1},
         ).to_list(10)
-        scheds.sort(key=lambda x: str(x.get("schedule_id") or ""))
+        # IMPORTANT:
+        # Do NOT sort schedules by schedule_id for Special Classes.
+        # schedule_id1/2 represent Meeting 1/2 order, but IDs are random strings.
+        # Sorting by ID can swap Room1/Room2 and break calendar syncing.
+        by_id = {str((s or {}).get("schedule_id") or "").strip(): (s or {}) for s in (scheds or [])}
+        ordered: List[Dict[str, Any]] = []
+        for sid in sids:
+            if sid in by_id:
+                ordered.append(by_id[sid])
+        # Append any extras (shouldn't happen, but keep best-effort behavior)
+        for s in (scheds or []):
+            sid = str((s or {}).get("schedule_id") or "").strip()
+            if sid and sid not in sids:
+                ordered.append(s)
+        scheds = ordered
     elif section_id:
         scheds = await db[COL_SCHED].find(
             {"section_id": section_id},
             {"_id": 0, "schedule_id": 1, "day": 1, "start_time": 1, "end_time": 1, "room_type": 1, "room_id": 1},
         ).to_list(10)
+        # Best-effort fallback: when special_class.schedule_id1/2 are missing,
+        # keep the existing deterministic ordering.
         scheds.sort(key=lambda x: str(x.get("schedule_id") or ""))
 
     def _empty():
@@ -3227,7 +3243,12 @@ async def faculty_get_load_rfc(
     q = {"faculty_id": faculty.get("faculty_id"), "term_id": term_id}
 
     # per-course isolation
+    # NOTE: Special Classes are displayed with a synthetic section_id like "SPECIAL:<special_id>".
+    # RFC threads + OM routing for Special Classes use the raw special_id.
     if section_id:
+        section_id = section_id.strip()
+        if section_id.upper().startswith("SPECIAL:"):
+            section_id = section_id.split(":", 1)[1].strip()
         q["section_id"] = section_id
         rfc = await db[COL_LOAD_RFC].find_one(q, {"_id": 0})
         return {"ok": True, "rfc": _normalize_rfc_doc(rfc) if rfc else None}
@@ -3254,6 +3275,10 @@ async def faculty_send_load_rfc_message(userId: str = Query(...), payload: Dict[
     section_id = (payload.get("section_id") or payload.get("sectionId") or "").strip()
     if not section_id:
         raise HTTPException(status_code=400, detail="section_id is required")
+
+    # Frontend may send special classes as "SPECIAL:<special_id>"; normalize to raw special_id.
+    if section_id.upper().startswith("SPECIAL:"):
+        section_id = section_id.split(":", 1)[1].strip()
 
     message = (payload.get("message") or "").strip()
     if not message:
@@ -3347,17 +3372,40 @@ async def faculty_send_load_rfc_message(userId: str = Query(...), payload: Dict[
         upsert=True,
     )
 
+    # If this section_id corresponds to a Special Class (special_id), route the notification
+    # to the OM Special Class page and use a dedicated kind so the OM UI can differentiate.
+    is_special_class = False
+    try:
+        sc = await db[COL_SPECIAL_CLASS].find_one(
+            {"term_id": term_id, "special_id": section_id},
+            {"_id": 0, "special_id": 1},
+        )
+        is_special_class = bool(sc)
+    except Exception:
+        # Best-effort only; fall back to load assignment routing.
+        is_special_class = False
+
     if om_uid:
         await create_notification(
             user_id=om_uid,
-            title="Load Assignment: Faculty sent a Request for Change",
-            details=f"{faculty.get('first_name','')} {faculty.get('last_name','')} sent a Request for Change.",
+            title=(
+                "Special Class: Faculty sent a message"
+                if is_special_class
+                else "Load Assignment: Faculty sent a Request for Change"
+            ),
+            details=(
+                f"{faculty.get('first_name','')} {faculty.get('last_name','')} sent a message."
+                if is_special_class
+                else f"{faculty.get('first_name','')} {faculty.get('last_name','')} sent a Request for Change."
+            ),
             meta={
-                "route": "/om/load-assignment",
-                "kind": "load_rfc_received",
+                "route": "/om/special-class" if is_special_class else "/om/load-assignment",
+                "kind": "special_class_rfc_received" if is_special_class else "load_rfc_received",
                 "term_id": term_id,
                 "faculty_id": fid,
-                "section_id": section_id,   # ✅ IMPORTANT
+                # NOTE: we keep using section_id as the RFC key; for special class it equals special_id.
+                "section_id": section_id,
+                "special_id": section_id if is_special_class else "",
                 "rfc_id": existing.get("rfc_id"),
             },
             send_email=True,
