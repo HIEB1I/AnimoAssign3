@@ -191,9 +191,9 @@ export default function OM_StudentPetition() {
       </div>
 
       {/* Table */}
-      <div className="border border-gray-200 bg-gray-50 shadow-sm overflow-visible rounded-xl">
-        <table className="w-full text-sm">
-          <thead className="bg-gray-50 border-b text-gray-700">
+        <div className="border border-gray-200 bg-white shadow-sm overflow-auto rounded-xl">
+          <table className="w-full text-sm table-auto">
+            <thead className="bg-gray-50 border-b text-gray-900">
             <tr>
               <th className="w-10 px-4 py-2 text-center">
                 <input

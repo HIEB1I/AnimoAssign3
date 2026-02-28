@@ -395,9 +395,9 @@ export default function OM_ClassRetention(
       </div>
 
       {/* Table */}
-      <div className="overflow-visible rounded-xl border border-gray-200 bg-gray-50 shadow-sm">
-        <table className="w-full text-sm">
-          <thead className="border-b bg-gray-50 text-gray-700">
+        <div className="border border-gray-200 bg-white shadow-sm overflow-auto rounded-xl">
+          <table className="w-full text-sm table-auto">
+            <thead className="bg-gray-50 border-b text-gray-900">
             <tr>
               <th className="px-4 py-2 text-left">Course Code & Title</th>
               <th className="px-4 py-2 text-center">Section</th>
@@ -406,7 +406,7 @@ export default function OM_ClassRetention(
               <th className="px-4 py-2 text-center">Enrolled</th>
               <th className="px-4 py-2 text-left">Faculty</th>
               <th className="px-4 py-2 text-center">Status</th>
-              <th className="px-4 py-2 text-center">Actions</th>
+              <th className="px-4 py-2 text-center"> </th>
             </tr>
           </thead>
           <tbody className="divide-y">

@@ -778,11 +778,27 @@ async def facultymanagement_handler(
                 "teaching_units": "$teaching_units_display",
                 "faculty_type": "$faculty_type_display",
                 "status": "$status_display",
+                "certifications": {"$ifNull": ["$certifications", []]},
+                "hire_date": {"$ifNull": ["$hire_date", None]},
+                "teaching_years": {"$ifNull": ["$teaching_years", None]},
             }},
             {"$sort": {"name": 1}},
         ])
 
         rows = [r async for r in db[COL_FACULTY].aggregate(pipeline)]
+
+        # Normalize lightweight profile fields for table display
+        for r in rows:
+            r["certifications"] = _normalize_certifications(r.get("certifications"))
+
+            hd = _normalize_hire_date(r.get("hire_date"))
+            r["hire_date"] = hd
+
+            ty = _coerce_int(r.get("teaching_years"))
+            if ty is None:
+                ty = _teaching_years_from_hire_date(hd)
+            r["teaching_years"] = ty
+
         return {"ok": True, "rows": rows}
 
 # ----- DETAILS (View More Details) -----
@@ -904,13 +920,20 @@ async def facultymanagement_handler(
         if not match_ids:
             match_ids = [fid_str]
 
-        # Resolve CURRENT term if not provided (schedule should reflect active teaching load)
+        # Resolve term if not provided.
+        # UI requirement: show the *latest* schedule the faculty has in the DB (no prev/next navigation).
+        # So, by default, pick the most recent term where the faculty has assignments.
         if not termId:
-            current = await _current_term()
-            termId = current.get("term_id") if current else None
-            if not termId:
-                active = await _active_term()
-                termId = active.get("term_id")
+            latest_terms = await _faculty_terms(fid_str)
+            if latest_terms:
+                termId = latest_terms[-1].get("term_id")
+            else:
+                # Fall back to current/active term if the faculty has no assignments yet.
+                current = await _current_term()
+                termId = current.get("term_id") if current else None
+                if not termId:
+                    active = await _active_term()
+                    termId = active.get("term_id")
 
         # faculty_assignments -> sections (filter by term) -> courses -> section_schedules
         # NOTE: Do NOT filter archived rows here. Faculty Management schedule/history

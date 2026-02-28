@@ -2093,6 +2093,7 @@ export type FacultyRow = {
   status: string; // Active | On Leave
   // Optional fields used by Edit Faculty Details
   certifications?: string[];
+  hire_date?: string | null;
   teaching_years?: number | null;
 };
 
@@ -2374,7 +2375,7 @@ export async function listCMCourses(params: {
   const { data } = await axios.post(`${API_BASE}/om/course-management`, {}, {
     params: { action: "list", userEmail, userId, cluster, search },
   });
-  return data as { ok: boolean; rows: CMCourseRow[]; term?: any };
+  return data as { ok: boolean; rows: CMCourseRow[]; term?: any; total_all?: number };
 }
 
 export async function getCMHeader(userEmail?: string, userId?: string) {
@@ -2399,7 +2400,7 @@ export async function listChairCMCourses(params: {
   const { data } = await axios.post(`${API_BASE}/chair/course-management`, {}, {
     params: { action: "list", userEmail, userId, cluster, search },
   });
-  return data as { ok: boolean; rows: CMCourseRow[]; term?: any };
+  return data as { ok: boolean; rows: CMCourseRow[]; term?: any; total_all?: number };
 }
 
 export async function getChairCMHeader(userEmail?: string, userId?: string) {
