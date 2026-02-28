@@ -44,15 +44,15 @@ function ClipboardStarIcon({
 }
 
 const defaultItems: SidebarItem[] = [
-  { to: "/om/load-assignment", label: "Load Assignment", Icon: ListChecks },
-  { to: "/om/faculty-management", label: "Faculty Directory", Icon: Users },
-  { to: "/om/course-management", label: "Course Management", Icon: BookOpen },
-  { to: "/om/reports-analytics", label: "Reports and Analytics", Icon: BarChart3 },
-  { to: "/om/faculty-form", label: "Faculty Preferences", Icon: FileText },
-  { to: "/om/faculty-service", label: "Faculty Service", Icon: ClipboardList },
-  { to: "/om/student-petition", label: "Student Petition", Icon: FilePlus },
-  { to: "/om/special-class", label: "Special Class", Icon: ClipboardStarIcon },
-  { to: "/om/class-retention", label: "Class Retention", Icon: BookMarked },
+  { to: "/om/home", label: "Load Assignment", Icon: ListChecks },
+  { to: "/om/home/faculty-management", label: "Faculty Directory", Icon: Users },
+  { to: "/om/home/course-management", label: "Course Management", Icon: BookOpen },
+  { to: "/om/home/reports-analytics", label: "Reports and Analytics", Icon: BarChart3 },
+  { to: "/om/home/faculty-form", label: "Faculty Preferences", Icon: FileText },
+  { to: "/om/home/faculty-service", label: "Faculty Service", Icon: ClipboardList },
+  { to: "/om/home/student-petition", label: "Student Petition", Icon: FilePlus },
+  { to: "/om/home/special-class", label: "Special Class", Icon: ClipboardStarIcon },
+  { to: "/om/home/class-retention", label: "Class Retention", Icon: BookMarked },
 ];
 
 export default function Sidebar({ open, items = defaultItems }: SidebarProps) {
@@ -84,10 +84,11 @@ export default function Sidebar({ open, items = defaultItems }: SidebarProps) {
             <li key={to}>
               <NavLink
                 to={to}
+                end={to === "/om/home"}
                 className={({ isActive }) =>
                   cls(
                     "group flex items-center gap-3 rounded-md px-3 py-2 text-[15px] font-semibold",
-                    isActive ? "bg-white/20" : "hover:bg-white/10"
+                    isActive ? "bg-white/20 relative after:content-[''] after:absolute after:left-3 after:right-3 after:-bottom-[2px] after:h-[2px] after:bg-white after:rounded-full" : "hover:bg-white/10"
                   )
                 }
               >
@@ -107,10 +108,11 @@ export default function Sidebar({ open, items = defaultItems }: SidebarProps) {
             <li key={to}>
               <NavLink
                 to={to}
+                end={to === "/om/home"}
                 className={({ isActive }) =>
                   cls(
                     "group flex items-center gap-3 rounded-md px-3 py-2 text-[15px] font-semibold",
-                    isActive ? "bg-white/20" : "hover:bg-white/10"
+                    isActive ? "bg-white/20 relative after:content-[''] after:absolute after:left-3 after:right-3 after:-bottom-[2px] after:h-[2px] after:bg-white after:rounded-full" : "hover:bg-white/10"
                   )
                 }
               >
