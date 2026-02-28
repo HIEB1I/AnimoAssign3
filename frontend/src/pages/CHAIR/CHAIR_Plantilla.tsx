@@ -338,25 +338,122 @@ const DepartmentPlantilla: React.FC<{
     const esc = (v: string) =>
       v.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
-    let html = '<html><head><meta charset="utf-8" /></head><body><table><thead><tr>';
+    // NOTE: Excel HTML export needs explicit styles.
+    // Target look: 1 boxed "group" per faculty (like the plantilla screenshot)
+    // - Rank + Faculty are vertically merged (rowspan) per faculty
+    // - Vertical column dividers stay visible
+    // - No per-row horizontal borders inside a faculty group (only top + bottom)
+    const excelCss = `
+      table{border-collapse:collapse;}
+      th{border:2px solid #000;padding:4px;font-weight:700;text-align:center;vertical-align:top;}
+      td{padding:4px;vertical-align:top;border-left:1px solid #000;border-right:1px solid #000;}
+    `;
+
+    // Determine per-faculty groups based on the visible table rows.
+    // The Faculty column may be blank on continuation rows (to mimic merged cells),
+    // so we carry-forward the last non-empty faculty value.
+    const facultyKeyByRow: string[] = [];
+    let lastFaculty = "";
+    dataRows.forEach((r) => {
+      const rawFaculty = String((r?.[1] ?? "") as string).trim();
+      if (rawFaculty) lastFaculty = rawFaculty;
+      facultyKeyByRow.push(lastFaculty);
+    });
+
+    const isGroupStart = (rowIdx: number) => rowIdx === 0 || facultyKeyByRow[rowIdx] !== facultyKeyByRow[rowIdx - 1];
+
+    const isGroupEnd = (rowIdx: number) =>
+      rowIdx === facultyKeyByRow.length - 1 || facultyKeyByRow[rowIdx] !== facultyKeyByRow[rowIdx + 1];
+
+    const groupRowSpan = (startIdx: number) => {
+      const key = facultyKeyByRow[startIdx];
+      let span = 1;
+      for (let i = startIdx + 1; i < facultyKeyByRow.length; i++) {
+        if (facultyKeyByRow[i] !== key) break;
+        span++;
+      }
+      return span;
+    };
+
+    const cellBorderStyle = (rowIdx: number, colIdx: number, colCount: number) => {
+      const start = isGroupStart(rowIdx);
+      const end = isGroupEnd(rowIdx);
+      const firstCol = colIdx === 0;
+      const lastCol = colIdx === colCount - 1;
+
+      const parts: string[] = [];
+      if (start) parts.push("border-top:2px solid #000");
+      if (end) parts.push("border-bottom:2px solid #000");
+      if (firstCol) parts.push("border-left:2px solid #000");
+      if (lastCol) parts.push("border-right:2px solid #000");
+
+      return parts.join(";");
+    };
+
+    let html =
+      '<html><head><meta charset="utf-8" />' +
+      `<style>${excelCss}</style>` +
+      '</head><body><table><thead><tr>';
     headers.forEach((h) => {
       html += `<th>${esc(String(h))}</th>`;
     });
     html += "</tr></thead><tbody>";
 
-    dataRows.forEach((row) => {
+    for (let rowIdx = 0; rowIdx < dataRows.length; rowIdx++) {
+      const row = dataRows[rowIdx];
+      const start = isGroupStart(rowIdx);
+
       html += "<tr>";
-      row.forEach((cell, idx) => {
+
+      // Merge Rank + Faculty per faculty group (rowspan) to match the plantilla screenshot.
+      if (start) {
+        const span = groupRowSpan(rowIdx);
+
+        // Rank (col 0)
+        {
+          const idx = 0;
+          const raw = row?.[idx] == null ? "" : String(row[idx]);
+          const normalized = normalizeForExcel(raw, false);
+          const safe = esc(normalized);
+          // For merged cells, force both top+bottom borders so the group box closes.
+          const parts: string[] = ["border-top:2px solid #000", "border-bottom:2px solid #000", "border-left:2px solid #000"];
+          const borderStyle = parts.join(";");
+          const extraStyle = `${borderStyle};`;
+          html += `<td rowspan="${span}" style="${extraStyle}">${safe}</td>`;
+        }
+
+        // Faculty (col 1)
+        {
+          const idx = 1;
+          const raw = row?.[idx] == null ? "" : String(row[idx]);
+          const normalized = normalizeForExcel(raw, false);
+          const safe = esc(normalized);
+          // For merged cells, force both top+bottom borders so the group box closes.
+          const parts: string[] = ["border-top:2px solid #000", "border-bottom:2px solid #000"];
+          const borderStyle = parts.join(";");
+          const extraStyle = `${borderStyle};`;
+          html += `<td rowspan="${span}" style="${extraStyle}">${safe}</td>`;
+        }
+      }
+
+      // Remaining columns always render per-row.
+      for (let idx = 2; idx < headers.length; idx++) {
+        const cell = row?.[idx];
         const raw = cell == null ? "" : String(cell);
         const preserveNewlines = idx === 4 || idx === 5 || idx === 6; // Day / Time / Room
         const normalized = normalizeForExcel(raw, preserveNewlines);
         const safe = preserveNewlines ? esc(normalized).replace(/\n/g, "<br/>") : esc(normalized);
+
+        const borderStyle = cellBorderStyle(rowIdx, idx, headers.length);
+        const extraStyle = borderStyle ? `${borderStyle};` : "";
+
         html += preserveNewlines
-          ? `<td style="white-space:pre-wrap;">${safe}</td>`
-          : `<td>${safe}</td>`;
-      });
+          ? `<td style="white-space:pre-wrap;${extraStyle}">${safe}</td>`
+          : `<td style="${extraStyle}">${safe}</td>`;
+      }
+
       html += "</tr>";
-    });
+    }
 
     html += "</tbody></table></body></html>";
 

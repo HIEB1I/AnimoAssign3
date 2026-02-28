@@ -52,6 +52,7 @@ COL_ROOMS = "rooms"
 COL_CAMPUSES = "campuses"
 COL_COURSES = "courses"
 COL_DEPTS = "departments"
+COL_USERS = "users"
 
 # Special Class reflection (OM_SpecialClass -> Faculty)
 COL_SPECIAL_CLASS = "special_class"
@@ -63,8 +64,118 @@ COL_LOAD_RFC = "faculty_rfc"
 
 import uuid
 
+
+async def _role_user_ids_by_name_patterns(patterns: List[str]) -> List[str]:
+    """Best-effort: resolve user_ids for roles whose name matches any of the patterns."""
+    pats = [p for p in (patterns or []) if str(p or "").strip()]
+    if not pats:
+        return []
+
+    roles_coll = None
+    try:
+        roles_coll = db["roles"]
+    except Exception:
+        roles_coll = None
+
+    if roles_coll is None:
+        return []
+
+    ors = []
+    for p in pats:
+        ors.append({"role_name": {"$regex": p, "$options": "i"}})
+        ors.append({"name": {"$regex": p, "$options": "i"}})
+
+    role_docs = await roles_coll.find({"$or": ors}, {"_id": 0, "role_id": 1}).to_list(50)
+    role_ids = [str(r.get("role_id") or "").strip() for r in (role_docs or []) if str(r.get("role_id") or "").strip()]
+    role_ids = sorted(set(role_ids))
+    if not role_ids:
+        return []
+
+    ras = await db["role_assignments"].find(
+        {"role_id": {"$in": role_ids}},
+        {"_id": 0, "user_id": 1},
+    ).to_list(200)
+    user_ids = [str(x.get("user_id") or "").strip() for x in (ras or []) if str(x.get("user_id") or "").strip()]
+    return sorted(set(user_ids))
+
+
+async def _room_label(room_id: str) -> str:
+    rid = str(room_id or "").strip()
+    if not rid or rid.upper() == "ONLINE":
+        return "TBA"
+    r = await db[COL_ROOMS].find_one({"room_id": rid}, {"_id": 0, "room_number": 1, "room_name": 1}) or {}
+    return str(r.get("room_number") or r.get("room_name") or rid).strip() or rid
+
+
+def _overlaps(a_start: str, a_end: str, b_start: str, b_end: str) -> bool:
+    """All args are HHMM strings."""
+    try:
+        a1 = int(a_start)
+        a2 = int(a_end)
+        b1 = int(b_start)
+        b2 = int(b_end)
+        return a1 < b2 and b1 < a2
+    except Exception:
+        return False
+
 def _gcal_events_insert_url(calendar_id: str = "primary") -> str:
     return f"https://www.googleapis.com/calendar/v3/calendars/{quote(calendar_id, safe='')}/events"
+
+def _gcal_event_url(event_id: str, calendar_id: str = "primary") -> str:
+    return f"https://www.googleapis.com/calendar/v3/calendars/{quote(calendar_id, safe='')}/events/{quote(str(event_id), safe='')}"
+
+
+def _rfc3339(dt: datetime) -> str:
+    """Convert datetime to RFC3339 string (UTC, with 'Z')."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    s = dt.astimezone(timezone.utc).isoformat()
+    return s.replace("+00:00", "Z")
+
+
+async def _list_gcal_events(
+    token: str,
+    *,
+    time_min: str,
+    time_max: str,
+    q: Optional[str] = None,
+    private_ext: Optional[Dict[str, str]] = None,
+    single_events: bool = True,
+) -> httpx.Response:
+    headers = {"Authorization": f"Bearer {token}"}
+    url = _gcal_events_insert_url("primary")
+    params: Dict[str, Any] = {
+        "timeMin": time_min,
+        "timeMax": time_max,
+        "singleEvents": "true" if single_events else "false",
+        "maxResults": 2500,
+    }
+    # Google Calendar only supports orderBy=startTime when singleEvents=true.
+    if single_events:
+        params["orderBy"] = "startTime"
+    if q:
+        params["q"] = q
+    if private_ext:
+        # Google Calendar supports repeating privateExtendedProperty query params.
+        params["privateExtendedProperty"] = [f"{k}={v}" for k, v in private_ext.items() if k and v is not None]
+    async with httpx.AsyncClient(timeout=25) as client:
+        return await client.get(url, headers=headers, params=params)
+
+
+async def _delete_gcal_event(token: str, event_id: str) -> httpx.Response:
+    headers = {"Authorization": f"Bearer {token}"}
+    url = _gcal_event_url(event_id, "primary")
+    async with httpx.AsyncClient(timeout=25) as client:
+        return await client.delete(url, headers=headers)
+
+
+async def _patch_gcal_event(token: str, event_id: str, body: Dict[str, Any]) -> httpx.Response:
+    """PATCH an existing Google Calendar event."""
+    headers = {"Authorization": f"Bearer {token}"}
+    url = _gcal_event_url(event_id, "primary")
+    async with httpx.AsyncClient(timeout=25) as client:
+        return await client.patch(url, headers=headers, json=body)
+
 
 def _to_hhmm(v: Any) -> str:
     """Normalize various DB time formats to 4-digit HHMM used by _hhmm_to_hm.
@@ -379,9 +490,12 @@ async def _insert_gcal_event(token: str, event_body: Dict[str, Any]) -> httpx.Re
 async def _create_term_calendar_for_user(
     *,
     user_id: str,
+    term_id: Optional[str] = None,
     term_start_at: datetime,
     rows: List[Dict[str, Any]],
     week_count: int = _TERM_WEEK_COUNT,
+    overwrite: bool = False,
+    kind: str = "regular",
 ) -> Tuple[bool, int, Optional[str]]:
     """
     Creates weekly recurring events (COUNT=week_count) starting from the week of term_start_at.
@@ -403,30 +517,28 @@ async def _create_term_calendar_for_user(
 
     created = 0
 
-    async def _ensure_token_and_retry(event_body: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
+    async def _do_with_token(req_fn) -> Tuple[Optional[httpx.Response], Optional[str]]:
+        """Run a Google Calendar request with automatic access_token refresh on 401."""
         nonlocal access_token
 
-        # try current access token first
+        # Try current access token
         if access_token:
-            r = await _insert_gcal_event(access_token, event_body)
+            r = await req_fn(access_token)
             if r is None:
-                return False, "Calendar insert returned no response (check _insert_gcal_event return)."
+                return None, "Calendar request returned no response."
             if r.status_code < 400:
-                return True, None
-
-            if r.status_code < 400:
-                return True, None
+                return r, None
             if r.status_code != 401:
-                return False, r.text
+                return None, r.text
 
-        # refresh if possible
+        # Refresh if possible
         if not refresh_token:
-            return False, "Access token expired and no refresh_token available. Reconnect Google."
+            return None, "Access token expired and no refresh_token available. Reconnect Google."
 
         tokens = await _refresh_access_token(refresh_token)
         new_access = (tokens.get("access_token") or "").strip()
         if not new_access:
-            return False, "Failed to refresh Google access token."
+            return None, "Failed to refresh Google access token."
 
         access_token = new_access
         await db["users"].update_one(
@@ -439,10 +551,163 @@ async def _create_term_calendar_for_user(
             }},
         )
 
-        r2 = await _insert_gcal_event(new_access, event_body)
+        r2 = await req_fn(new_access)
+        if r2 is None:
+            return None, "Calendar request returned no response after refresh."
         if r2.status_code < 400:
+            return r2, None
+        return None, r2.text
+
+    async def _ensure_insert(event_body: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
+        r, err = await _do_with_token(lambda tok: _insert_gcal_event(tok, event_body))
+        return (r is not None), err
+
+    def _norm_kind(v: Any) -> str:
+        s = str(v or "").strip().lower()
+        return s if s in {"regular", "special"} else "regular"
+
+    kind_norm = _norm_kind(kind)
+
+    def _norm_key_part(v: Any) -> str:
+        return re.sub(r"\s+", "", str(v or "").strip().upper())
+
+    # Window: from term start to end of recurrence span (+1 week buffer).
+    _time_min = _rfc3339(_coerce_dt(term_start_at).astimezone(timezone.utc))
+    _time_max_dt = _coerce_dt(term_start_at).astimezone(timezone.utc) + timedelta(days=int((week_count + 1) * 7))
+    _time_max = _rfc3339(_time_max_dt)
+
+    async def _upsert_event(event_body: Dict[str, Any], *, aa_key: str) -> Tuple[bool, Optional[str]]:
+        """Idempotent upsert by aa_key.
+
+        - If an event with the same aa_key exists, PATCH it (update schedule/details)
+        - If none exists, INSERT it
+        - If multiple exist (legacy duplicates), update the first and delete the rest
+
+        This prevents re-syncing Special Classes (same course/section) from creating
+        new events, while not affecting other events.
+        """
+
+        # 1) Find existing by private extended property (fast & precise)
+        # IMPORTANT: Use singleEvents=false so we fetch the *master* recurring event,
+        # not every expanded instance. If we fetch instances and then "dedupe" by
+        # deleting items[1:], we would accidentally delete the whole series.
+        r, err = await _do_with_token(
+            lambda tok: _list_gcal_events(
+                tok,
+                time_min=_time_min,
+                time_max=_time_max,
+                private_ext={"aa_key": aa_key},
+                single_events=False,
+            )
+        )
+        if err:
+            return False, err
+
+        items = (r.json() or {}).get("items", []) if r is not None else []
+        items = [ev for ev in items if str(((ev.get("extendedProperties") or {}).get("private") or {}).get("aa_key") or "") == aa_key]
+
+        if not items:
+            # Insert new
+            r2, err2 = await _do_with_token(lambda tok: _insert_gcal_event(tok, event_body))
+            return (r2 is not None), err2
+
+        # Patch first match
+        primary_id = str(items[0].get("id") or "").strip()
+        if not primary_id:
+            # Can't patch without an id; fallback to insert
+            r3, err3 = await _do_with_token(lambda tok: _insert_gcal_event(tok, event_body))
+            return (r3 is not None), err3
+
+        patch_body = {
+            "summary": event_body.get("summary"),
+            "location": event_body.get("location"),
+            "description": event_body.get("description"),
+            "start": event_body.get("start"),
+            "end": event_body.get("end"),
+            "recurrence": event_body.get("recurrence"),
+            "extendedProperties": event_body.get("extendedProperties"),
+        }
+        r4, err4 = await _do_with_token(lambda tok: _patch_gcal_event(tok, primary_id, patch_body))
+        if err4:
+            return False, err4
+
+        # Delete any extra duplicates to keep the calendar clean
+        for ev in items[1:]:
+            eid = str(ev.get("id") or "").strip()
+            if not eid or eid == primary_id:
+                continue
+            _, derr = await _do_with_token(lambda tok, _eid=eid: _delete_gcal_event(tok, _eid))
+            if derr:
+                # best-effort cleanup only; do not fail sync
+                pass
+
+        return True, None
+
+    async def _delete_existing_events() -> Tuple[bool, Optional[str]]:
+        """Delete existing AnimoAssign events for this term/time window to avoid duplicates.
+
+        IMPORTANT:
+        - Only delete events that match the SAME kind (regular vs special), so syncing
+          Special Classes will not wipe Regular/Serviced classes that were previously synced.
+        """
+        if not overwrite:
             return True, None
-        return False, r2.text
+
+        # NOTE: For Special Class sync, we do NOT mass-delete.
+        # We upsert per-event (by aa_key) so re-sync updates existing events
+        # without impacting other special events.
+        if kind_norm == "special":
+            return True, None
+
+        time_min = _time_min
+        time_max = _time_max
+
+        # First pass: events tagged by our private extended properties (newer syncs).
+        # Use BOTH term + kind to prevent cross-tab wipes.
+        if term_id:
+            r1, err1 = await _do_with_token(
+                lambda tok: _list_gcal_events(
+                    tok,
+                    time_min=time_min,
+                    time_max=time_max,
+                    private_ext={"aa_term": str(term_id), "aa_kind": kind_norm},
+                )
+            )
+            if err1:
+                return False, err1
+            items = (r1.json() or {}).get("items", []) if r1 is not None else []
+            for ev in items:
+                eid = str(ev.get("id") or "").strip()
+                if not eid:
+                    continue
+                _, derr = await _do_with_token(lambda tok, _eid=eid: _delete_gcal_event(tok, _eid))
+                if derr:
+                    return False, derr
+
+        # Second pass: legacy events (older syncs) matched by AnimoAssign marker in description.
+        # Only delete those that explicitly match the same kind to avoid wiping other schedules.
+        r2, err2 = await _do_with_token(
+            lambda tok: _list_gcal_events(tok, time_min=time_min, time_max=time_max, q="Created by AnimoAssign")
+        )
+        if err2:
+            return False, err2
+        items2 = (r2.json() or {}).get("items", []) if r2 is not None else []
+        for ev in items2:
+            desc = str(ev.get("description") or "")
+            if "AnimoAssign" not in desc:
+                continue
+            # Require explicit kind marker (new description format). If missing, do NOT delete.
+            # This prevents legacy special sync (overwrite) from deleting regular classes.
+            if f"AA_KIND: {kind_norm}" not in desc:
+                continue
+            eid = str(ev.get("id") or "").strip()
+            if not eid:
+                continue
+            _, derr = await _do_with_token(lambda tok, _eid=eid: _delete_gcal_event(tok, _eid))
+            if derr:
+                return False, derr
+
+        return True, None
 
     def _make_event(*, course_code: str, section: str, day_full: str, time_band: str, room: str, mode: str):
         hm = _parse_time_band_to_hm(time_band)
@@ -462,11 +727,22 @@ async def _create_term_calendar_for_user(
 
         title = f"{(course_code or '').strip()} {(section or '').strip()}".strip() or "Class"
         location = (room or "").strip() or "Online"
-        desc = (
-            f"Mode: {(mode or '').strip()}\n"
-            f"Created by AnimoAssign upon schedule acceptance.\n"
-            f"Login: {_aa_login_link()}"
-        )
+        # Stable unique key for idempotent upserts.
+        # Meeting index (m1/m2) is appended by caller.
+        # Format is intentionally compact to fit in query params.
+        base_key = f"{_norm_key_part(term_id)}|{_norm_key_part(user_id)}|{kind_norm}|{_norm_key_part(course_code)}|{_norm_key_part(section)}"
+
+        # Include a stable marker + kind, so overwrite can selectively remove events.
+        # Do NOT remove the "Created by AnimoAssign" marker because it is used by legacy searches.
+        desc_lines = [
+            f"Mode: {(mode or '').strip()}",
+            "Created by AnimoAssign.",
+            f"AA_KIND: {kind_norm}",
+        ]
+        if kind_norm == "special":
+            desc_lines.append("AA_NOTE: Special Class")
+        desc_lines.append(f"Login: {_aa_login_link()}")
+        desc = "\n".join(desc_lines)
 
         return {
             "summary": title,
@@ -475,7 +751,22 @@ async def _create_term_calendar_for_user(
             "start": {"dateTime": start_dt.isoformat(), "timeZone": _DEFAULT_TZ},
             "end": {"dateTime": end_dt.isoformat(), "timeZone": _DEFAULT_TZ},
             "recurrence": [f"RRULE:FREQ=WEEKLY;COUNT={int(week_count)}"],
+            "extendedProperties": {
+                "private": {
+                    "aa_app": "AnimoAssign",
+                    "aa_user": str(user_id),
+                    "aa_kind": kind_norm,
+                    "aa_key": base_key,
+                    **({"aa_term": str(term_id)} if term_id else {}),
+                }
+            },
         }
+
+    
+    # If requested, overwrite existing schedule (remove prior AnimoAssign events in this term window).
+    ok_del, err_del = await _delete_existing_events()
+    if not ok_del:
+        return False, created, err_del
 
     for rr in rows or []:
         course_code = rr.get("course_code") or rr.get("course") or ""
@@ -501,7 +792,14 @@ async def _create_term_calendar_for_user(
             mode=mode,
         )
         if ev1:
-            ok1, err1 = await _ensure_token_and_retry(ev1)
+            # Append meeting index to aa_key for uniqueness across meeting1/meeting2.
+            try:
+                kbase = (((ev1.get("extendedProperties") or {}).get("private") or {}).get("aa_key") or "")
+                ev1["extendedProperties"]["private"]["aa_key"] = f"{kbase}|M1"
+            except Exception:
+                pass
+
+            ok1, err1 = await _upsert_event(ev1, aa_key=str((((ev1.get("extendedProperties") or {}).get("private") or {}).get("aa_key") or "")))
             if ok1:
                 created += 1
             else:
@@ -518,7 +816,13 @@ async def _create_term_calendar_for_user(
             mode=mode,
         )
         if ev2:
-            ok2, err2 = await _ensure_token_and_retry(ev2)
+            try:
+                kbase2 = (((ev2.get("extendedProperties") or {}).get("private") or {}).get("aa_key") or "")
+                ev2["extendedProperties"]["private"]["aa_key"] = f"{kbase2}|M2"
+            except Exception:
+                pass
+
+            ok2, err2 = await _upsert_event(ev2, aa_key=str((((ev2.get("extendedProperties") or {}).get("private") or {}).get("aa_key") or "")))
             if ok2:
                 created += 1
             else:
@@ -656,6 +960,10 @@ async def _fetch_reflected_special_classes_for_faculty(
         {
             "_id": 0,
             "special_id": 1,
+            "user_id": 1,
+            "student_number": 1,
+            "reason": 1,
+            "reason_other": 1,
             "course_id": 1,
             "courseId": 1,
             "course_code": 1,
@@ -802,6 +1110,26 @@ async def _fetch_reflected_special_classes_for_faculty(
 
         mode = (sch.get("room1_room_type") or sch.get("room2_room_type") or "Special Class")
 
+        # Student + Reason (for Faculty Special Class tab)
+        student_name = ""
+        try:
+            uid = (d.get("user_id") or "").strip()
+            if uid:
+                udoc = await db[COL_USERS].find_one(
+                    {"user_id": uid},
+                    {"_id": 0, "first_name": 1, "last_name": 1, "name": 1},
+                ) or {}
+                fn = (udoc.get("first_name") or "").strip()
+                ln = (udoc.get("last_name") or "").strip()
+                student_name = (f"{fn} {ln}".strip() or (udoc.get("name") or "").strip())
+        except Exception:
+            student_name = ""
+
+        reason = (d.get("reason") or "").strip()
+        reason_other = (d.get("reason_other") or "").strip()
+        reason_display = reason_other if (reason.lower() == "other" and reason_other) else reason
+        reason_display = reason_display or "—"
+
         # Units can be stored as float/int/string; normalize to number
         units_num = 0
         try:
@@ -814,6 +1142,8 @@ async def _fetch_reflected_special_classes_for_faculty(
             "section_id": f"SPECIAL:{special_id}",
             "special_id": special_id,
             "is_special_class": True,
+            "student": student_name or "—",
+            "reason": reason_display,
             "course_code": course_code,
             "course_title": course_title,
             "section": section_display or "—",
@@ -831,6 +1161,19 @@ async def _fetch_reflected_special_classes_for_faculty(
     # Keep stable ordering: sort by course_code then section.
     out.sort(key=lambda x: (x.get("course_code", ""), x.get("section", "")))
     return out
+
+
+def _payload_bool(v: Any, default: bool = False) -> bool:
+    if v is None:
+        return default
+    if isinstance(v, bool):
+        return v
+    s = str(v).strip().lower()
+    if s in {"1", "true", "yes", "y", "on"}:
+        return True
+    if s in {"0", "false", "no", "n", "off"}:
+        return False
+    return default
 
 
 def _is_real_room_label(room_label: str) -> bool:
@@ -3286,8 +3629,14 @@ async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[s
     ) or {}
 
     # Calendar checkbox flag (default True = keeps current behavior)
-    send_to_gcal = payload.get("send_to_gcal", True)
-    send_to_gcal = True if send_to_gcal is None else bool(send_to_gcal)
+    send_to_gcal = _payload_bool(payload.get("send_to_gcal", True), True)
+
+    # Special Class tab: allow syncing to Google Calendar *without* accepting/locking the schedule.
+    # Frontend uses the same endpoint but passes sync_special_only=true.
+    sync_special_only = _payload_bool(payload.get("sync_special_only"), False)
+
+    # Overwrite flag: Special Class sync uses overwrite by default to prevent duplicates.
+    overwrite_gcal = _payload_bool(payload.get("overwrite_gcal"), sync_special_only)
 
     term_id = (payload.get("term_id") or "").strip()
     if not term_id:
@@ -3298,6 +3647,86 @@ async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[s
         raise HTTPException(status_code=409, detail="No active/upcoming term")
 
     fid = faculty.get("faculty_id")
+
+    # --- Special-only sync shortcut (NO accept, NO emails, NO proposal changes) ---
+    if sync_special_only:
+        calendar_ok: Optional[bool] = None
+        calendar_error: Optional[str] = None
+        calendar_events_created = 0
+        calendar_term_id: Optional[str] = None
+        term_start_at = None
+        week_count = _TERM_WEEK_COUNT
+
+        if not send_to_gcal:
+            return {
+                "ok": True,
+                "status": "SYNC_ONLY",
+                "send_to_gcal": False,
+                "calendar_ok": None,
+                "calendar_events_created": 0,
+                "calendar_error": None,
+                "calendar_term_id": None,
+                "term_start_at": None,
+                "week_count": week_count,
+            }
+
+        try:
+            sc_rows = await _fetch_reflected_special_classes_for_faculty(term_id=term_id, faculty_id=fid)
+            if not sc_rows:
+                return {
+                    "ok": True,
+                    "status": "SYNC_ONLY",
+                    "send_to_gcal": True,
+                    "calendar_ok": True,
+                    "calendar_events_created": 0,
+                    "calendar_error": None,
+                    "calendar_term_id": None,
+                    "term_start_at": None,
+                    "week_count": week_count,
+                }
+
+            nxt_term = await _next_term_from_current()
+            if not nxt_term:
+                calendar_ok = False
+                calendar_error = "No next term found after current term."
+            else:
+                calendar_term_id = (nxt_term.get("term_id") or "").strip()
+                term_start_at = _coerce_dt(nxt_term.get("start_at"))
+                term_end_at = _coerce_dt(nxt_term.get("end_at"))
+
+                if not term_start_at:
+                    calendar_ok = False
+                    calendar_error = f"Next term {calendar_term_id or ''} has no start_at; cannot create calendar events."
+                else:
+                    if term_end_at:
+                        span_weeks = max(1, ((term_end_at.date() - term_start_at.date()).days // 7) + 1)
+                        week_count = min(_TERM_WEEK_COUNT, span_weeks)
+
+                    calendar_ok, calendar_events_created, calendar_error = await _create_term_calendar_for_user(
+                        user_id=userId,
+                        term_id=calendar_term_id or term_id,
+                        term_start_at=term_start_at,
+                        rows=sc_rows,
+                        week_count=week_count,
+                        overwrite=overwrite_gcal,
+                        kind="special",
+                    )
+        except Exception as e:
+            calendar_ok = False
+            calendar_error = str(e)
+
+        return {
+            "ok": True,
+            "status": "SYNC_ONLY",
+            "send_to_gcal": True,
+            "calendar_ok": calendar_ok,
+            "calendar_events_created": calendar_events_created,
+            "calendar_error": calendar_error,
+            "calendar_term_id": calendar_term_id,
+            "term_start_at": (term_start_at.isoformat() if term_start_at else None),
+            "week_count": week_count,
+        }
+
     proposal = await db[COL_LOAD_PROPOSALS].find_one({"faculty_id": fid, "term_id": term_id}, {"_id": 0})
     if not proposal:
         return {"ok": True, "message": "No proposal to accept."}
@@ -3305,7 +3734,10 @@ async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[s
     base_rows = proposal.get("rows", []) or []
 
     # Email rows include reflected special classes + serviced classes.
-    # Calendar rows also include special + serviced rows so they sync to Google Calendar on accept.
+    # IMPORTANT: Calendar rows MUST NOT include special classes when accepting the schedule,
+    # because special classes have their own dedicated "Sync to Google Calendar" button
+    # (sync_special_only=true path). This prevents duplicate/surprise special-class events
+    # when faculty ticks "Send to GCalendar" during Accept Schedule.
     email_rows = list(base_rows)
     calendar_rows = list(base_rows)
 
@@ -3342,7 +3774,6 @@ async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[s
         sc_rows = await _fetch_reflected_special_classes_for_faculty(term_id=term_id, faculty_id=fid)
         if sc_rows:
             email_rows += sc_rows
-            calendar_rows += sc_rows
     except Exception:
         pass
 
@@ -3512,9 +3943,12 @@ async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[s
 
                     calendar_ok, calendar_events_created, calendar_error = await _create_term_calendar_for_user(
                         user_id=userId,
+                        term_id=calendar_term_id or term_id,
                         term_start_at=term_start_at,
                         rows=calendar_rows,
                         week_count=week_count,
+                        overwrite=overwrite_gcal,
+                        kind="regular",
                     )
         except Exception as e:
             calendar_ok = False
@@ -3539,4 +3973,289 @@ async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[s
         "term_start_at": (term_start_at.isoformat() if term_start_at else None),
         "week_count": week_count,
         "calendar_url_used": _GCAL_EVENTS_INSERT_URL,
+    }
+
+
+@router.get("/special-class/eligible-rooms")
+async def faculty_special_class_eligible_rooms(
+    user_id: str = Query(...),
+    section_id: str = Query(...),
+    day: str = Query(...),
+    start_time: str = Query(...),
+    end_time: str = Query(...),
+    room_type: Optional[str] = Query(None),
+    capacity: Optional[int] = Query(None),
+    exclude: Optional[str] = Query(None),
+):
+    """Return rooms that are not busy for (day,start,end) and match section campus.
+
+    This is a lightweight equivalent of APO's eligible room picker, intended for
+    Faculty Special Class edits.
+    """
+
+    # Normalize times
+    st = _to_hhmm(start_time)
+    et = _to_hhmm(end_time)
+    if not st or not et:
+        raise HTTPException(status_code=400, detail="Invalid time range")
+
+    # Parse exclude list (comma-separated schedule_ids)
+    exclude_ids: List[str] = []
+    if exclude:
+        exclude_ids = [x.strip() for x in str(exclude).split(",") if x.strip()]
+
+    sec = await db[COL_SECTIONS].find_one({"section_id": str(section_id).strip()}, {"_id": 0, "campus_id": 1}) or {}
+    campus_id = str(sec.get("campus_id") or "").strip()
+
+    # Candidate rooms
+    q: Dict[str, Any] = {"is_archived": {"$ne": True}}
+    if campus_id:
+        q["campus_id"] = campus_id
+    if room_type:
+        rt = str(room_type).strip()
+        if rt and rt.upper() != "ONLINE":
+            # Best-effort match: many schemas use either room_type or type
+            q["$or"] = [
+                {"room_type": rt},
+                {"type": rt},
+                {"room_type": {"$regex": f"^{re.escape(rt)}$", "$options": "i"}},
+            ]
+
+    rooms = await db[COL_ROOMS].find(q, {"_id": 0, "room_id": 1, "room_number": 1, "room_name": 1, "capacity": 1}).to_list(2000)
+
+    # Capacity filter (best-effort)
+    if capacity and capacity > 0:
+        filtered: List[Dict[str, Any]] = []
+        for r in rooms:
+            c = r.get("capacity")
+            try:
+                n = int(c) if c is not None else 0
+            except Exception:
+                n = 0
+            if n <= 0 or n >= int(capacity):
+                filtered.append(r)
+        rooms = filtered
+
+    # Busy rooms for overlapping schedules on the same day
+    sched_q: Dict[str, Any] = {"day": str(day).strip()}
+    if exclude_ids:
+        sched_q["schedule_id"] = {"$nin": exclude_ids}
+
+    scheds = await db[COL_SCHED].find(
+        sched_q,
+        {"_id": 0, "schedule_id": 1, "start_time": 1, "end_time": 1, "room_id": 1},
+    ).to_list(5000)
+
+    busy_room_ids: set[str] = set()
+    for sc in scheds:
+        rid = str(sc.get("room_id") or "").strip()
+        if not rid or rid.upper() == "ONLINE":
+            continue
+        sc_st = _to_hhmm(sc.get("start_time"))
+        sc_et = _to_hhmm(sc.get("end_time"))
+        if not sc_st or not sc_et:
+            continue
+        if _overlaps(st, et, sc_st, sc_et):
+            busy_room_ids.add(rid)
+
+    out: List[Dict[str, Any]] = []
+    for r in rooms:
+        rid = str(r.get("room_id") or "").strip()
+        if not rid or rid in busy_room_ids:
+            continue
+        out.append(
+            {
+                "room_id": rid,
+                "room_number": str(r.get("room_number") or r.get("room_name") or rid).strip(),
+            }
+        )
+
+    out.sort(key=lambda x: str(x.get("room_number") or ""))
+    return out
+
+
+@router.post("/special-class/update-schedule")
+async def faculty_special_class_update_schedule(
+    payload: Dict[str, Any] = Body(...),
+):
+    """Faculty edits Special Class schedule (no approval). Updates schedules and notifies OM/Chair."""
+    user_id = str(payload.get("user_id") or "").strip()
+    special_id = str(payload.get("special_id") or "").strip()
+    section_id = str(payload.get("section_id") or "").strip()
+    if not user_id or not special_id or not section_id:
+        raise HTTPException(status_code=400, detail="Missing required fields")
+
+    # Load special class
+    sc = await db[COL_SPECIAL_CLASS].find_one({"special_id": special_id}, {"_id": 0})
+    if not sc:
+        raise HTTPException(status_code=404, detail="Special class not found")
+
+    # Meetings payload
+    m1 = payload.get("meeting1") or {}
+    m2 = payload.get("meeting2") or {}
+
+    def _norm_meeting(m: Dict[str, Any]) -> Dict[str, Any]:
+        day = str(m.get("day") or "").strip() or "TBA"
+        begin = _to_hhmm(m.get("begin"))
+        end = _to_hhmm(m.get("end"))
+        room_id = str(m.get("room_id") or "").strip()
+        if not room_id:
+            room_id = "ONLINE"  # treat as TBA
+        return {"day": day, "start_time": begin, "end_time": end, "room_id": room_id}
+
+    nm1 = _norm_meeting(m1)
+    nm2 = _norm_meeting(m2) if m2 else {"day": "", "start_time": "", "end_time": "", "room_id": ""}
+
+    if nm1["day"] != "TBA" and (not nm1["start_time"] or not nm1["end_time"]):
+        raise HTTPException(status_code=400, detail="Meeting 1 time is required")
+
+    # Existing schedule ids
+    sid1 = str(sc.get("schedule_id1") or "").strip()
+    sid2 = str(sc.get("schedule_id2") or "").strip()
+
+    now = _now_utc()
+
+    # Snapshot current schedule (for notification)
+    before = await _special_class_schedule_two(
+        section_id=section_id,
+        schedule_id1=sid1 or None,
+        schedule_id2=sid2 or None,
+        schedule_cleared=bool(sc.get("schedule_cleared")),
+    )
+
+    # Upsert schedule rows
+    async def _upsert_schedule(schedule_id: str | None, m: Dict[str, Any]) -> str:
+        nonlocal section_id
+        if not m.get("day"):
+            return ""
+        doc = {
+            "section_id": section_id,
+            "day": m.get("day"),
+            "start_time": m.get("start_time"),
+            "end_time": m.get("end_time"),
+            "room_id": m.get("room_id"),
+            # room_type is used inconsistently across data sets; keep best-effort
+            "room_type": "Online" if str(m.get("room_id") or "").upper() == "ONLINE" else "",
+            "updated_at": now,
+        }
+        if schedule_id:
+            await db[COL_SCHED].update_one({"schedule_id": schedule_id}, {"$set": doc}, upsert=True)
+            return schedule_id
+        new_id = f"SCH{uuid.uuid4().hex[:10].upper()}"
+        await db[COL_SCHED].insert_one({"schedule_id": new_id, **doc, "created_at": now})
+        return new_id
+
+    new_sid1 = await _upsert_schedule(sid1 or None, nm1)
+    new_sid2 = ""
+    has_m2 = bool(m2) and bool(str(nm2.get("day") or "").strip())
+    if has_m2:
+        if nm2["day"] != "TBA" and (not nm2["start_time"] or not nm2["end_time"]):
+            raise HTTPException(status_code=400, detail="Meeting 2 time is required")
+        new_sid2 = await _upsert_schedule(sid2 or None, nm2)
+
+    await db[COL_SPECIAL_CLASS].update_one(
+        {"special_id": special_id},
+        {
+            "$set": {
+                "schedule_id1": new_sid1,
+                "schedule_id2": new_sid2 or None,
+                "schedule_cleared": False,
+                "updated_at": now,
+            }
+        },
+    )
+
+    after = await _special_class_schedule_two(
+        section_id=section_id,
+        schedule_id1=new_sid1 or None,
+        schedule_id2=(new_sid2 or None),
+        schedule_cleared=False,
+    )
+
+    # Compose summary
+    u = await db[COL_USERS].find_one({"user_id": user_id}, {"_id": 0, "first_name": 1, "last_name": 1, "email": 1}) or {}
+    actor = (f"{(u.get('first_name') or '').strip()} {(u.get('last_name') or '').strip()}".strip() or (u.get("email") or user_id))
+
+    # Resolve room labels
+    b_r1 = str(before.get("room1") or "TBA")
+    b_r2 = str(before.get("room2") or "")
+    a_r1 = await _room_label(nm1.get("room_id") or "")
+    a_r2 = await _room_label(nm2.get("room_id") or "") if has_m2 else ""
+
+    def _fmt_hhmm(hhmm: str) -> str:
+        s = _to_hhmm(hhmm)
+        if not s:
+            return ""
+        return f"{s[:2]}:{s[2:]}"
+
+    subj = "Special Class schedule updated"
+
+    lines = [
+        f"{actor} updated a Special Class schedule.",
+        "",
+        "BEFORE",
+        f"Meeting 1: Day {before.get('day1') or 'TBA'} | {_fmt_hhmm(before.get('begin1') or '')}–{_fmt_hhmm(before.get('end1') or '')} | Room {b_r1}",
+        f"Meeting 2: Day {before.get('day2') or 'TBA'} | {_fmt_hhmm(before.get('begin2') or '')}–{_fmt_hhmm(before.get('end2') or '')} | Room {b_r2 or 'TBA'}",
+        "",
+        "AFTER",
+        f"Meeting 1: Day {nm1.get('day') or 'TBA'} | {_fmt_hhmm(nm1.get('start_time') or '')}–{_fmt_hhmm(nm1.get('end_time') or '')} | Room {a_r1}",
+    ]
+    if has_m2:
+        lines.append(
+            f"Meeting 2: Day {nm2.get('day') or 'TBA'} | {_fmt_hhmm(nm2.get('start_time') or '')}–{_fmt_hhmm(nm2.get('end_time') or '')} | Room {a_r2}"
+        )
+    else:
+        lines.append("Meeting 2: —")
+
+    summary = "\n".join(lines)
+
+    # Notify OM + Chair (best-effort; broad roles)
+    recipients = set()
+    for uid in await _role_user_ids_by_name_patterns([r"office\s*manager", r"\bom\b"]):
+        recipients.add(uid)
+    for uid in await _role_user_ids_by_name_patterns([r"^chair$", r"chair"]):
+        recipients.add(uid)
+
+    # Fallback: if roles aren't set up, email the env recipient (keeps behavior aligned with RFC fallback)
+    fallback_email = _RFC_EMAIL_TO
+
+    email_sent_any = False
+    email_errors: List[str] = []
+
+    if recipients:
+        for rid in sorted(recipients):
+            try:
+                await create_notification(
+                    user_id=rid,
+                    title=subj,
+                    details=summary,
+                    meta={
+                        "type": "SPECIAL_CLASS_SCHEDULE_EDIT",
+                        "special_id": special_id,
+                        "section_id": section_id,
+                        "actor_user_id": user_id,
+                        "when": now.isoformat(),
+                    },
+                    send_email=True,
+                )
+                email_sent_any = True
+            except Exception as e:
+                email_errors.append(str(e))
+    else:
+        # At least send one email so OM/Chair gets the change summary
+        ok, err = await _send_email_via_user_gmail(user_id=user_id, to_email=fallback_email, subject=subj, body=summary)
+        email_sent_any = bool(ok)
+        if err:
+            email_errors.append(err)
+
+    return {
+        "ok": True,
+        "special_id": special_id,
+        "section_id": section_id,
+        "schedule_id1": new_sid1,
+        "schedule_id2": new_sid2,
+        "before": before,
+        "after": after,
+        "email_sent": email_sent_any,
+        "email_errors": email_errors,
     }

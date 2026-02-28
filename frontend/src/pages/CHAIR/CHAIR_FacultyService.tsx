@@ -1,14 +1,13 @@
 // frontend/src/pages/CHAIR/CHAIR_FacultyService.tsx
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { Send, ChevronDown, X, CheckCircle2, AlertCircle, Info, Undo2, Redo2, Plus, Trash2 } from "lucide-react";
+import { Send, ChevronDown, X, CheckCircle2, AlertCircle, Info, Undo2, Redo2, Plus, Trash2, MessageSquareText } from "lucide-react";
 import {
   getFSOptions,
   listFacultyService,
   createFacultyService,
   sendFacultyService,
-  respondFacultyService,
-  rejectFacultyService,
-  restoreFacultyService,
+  getOmLoadAssignmentRfc,
+  respondOmLoadAssignmentRfc,
   type FacultyServiceRow,
   type DayShort,
   getChairHeader,
@@ -21,7 +20,9 @@ const eqDept = (a?: string, b?: string) => norm(a) === norm(b);
 
 /* ---------------- received-tab new indicator (client-side) ----------------
    We mark requests as "seen" once the chair opens the Received Requests tab.
-   Any unseen fs_id will trigger a red-dot indicator on the tab label.
+   Any unseen fs_id will trigger a "New" badge on the section header.
+
+   IMPORTANT: This is separate from RFC unread indicators.
 */
 
 /* ---------------- Toasts (in-file, no external libs) ---------------- */
@@ -107,6 +108,256 @@ function ToastViewport({
           </div>
         </div>
       ))}
+    </div>
+  );
+}
+
+/* ---------------- RFC Modal (mirrors OM Load Assignment) ---------------- */
+function ServiceRfcModal({
+  open,
+  onClose,
+  userId,
+  termId,
+  facultyId,
+  facultyName,
+  sectionId,
+  onAfterUpdate,
+  onToast,
+}: {
+  open: boolean;
+  onClose: () => void;
+  userId: string;
+  termId: string;
+  facultyId?: string;
+  facultyName?: string;
+  sectionId?: string;
+  onAfterUpdate: (decision: "reply" | "approve" | "reject") => Promise<void> | void;
+  onToast: (input: ToastInput) => void;
+}) {
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [messages, setMessages] = useState<any[]>([]);
+  const [status, setStatus] = useState<string | null>(null);
+  const [locked, setLocked] = useState<boolean>(false);
+  const [reply, setReply] = useState("");
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!open) {
+      setLoading(false);
+      setError(null);
+      setMessages([]);
+      setStatus(null);
+      setLocked(false);
+      setReply("");
+      return;
+    }
+
+    (async () => {
+      try {
+        setLoading(true);
+        setError(null);
+        setMessages([]);
+        setStatus(null);
+        setLocked(false);
+
+        if (!facultyId) {
+          setError("No faculty selected for this service class.");
+          return;
+        }
+        if (!sectionId) {
+          setError("Missing section id.");
+          return;
+        }
+
+        const res = await getOmLoadAssignmentRfc(userId, {
+          term_id: termId,
+          faculty_id: facultyId,
+          section_id: sectionId,
+        });
+
+        if (!res?.ok || !res?.rfc) {
+          setMessages([]);
+          setStatus(null);
+          return;
+        }
+
+        const rfc = res.rfc;
+        setStatus(rfc.status || null);
+        setLocked(Boolean(rfc.locked));
+        setMessages(rfc.messages || rfc.thread || []);
+      } catch (e: any) {
+        setError(e?.message || "Failed to load RFC.");
+      } finally {
+        setLoading(false);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+  }, [messages, open]);
+
+  if (!open) return null;
+
+  const isTerminal = Boolean(locked);
+
+  const respond = async (decision: "reply" | "approve" | "reject") => {
+    if (!userId || !termId || !facultyId) {
+      onToast({ type: "error", message: "Missing context." });
+      return;
+    }
+    if (isTerminal) {
+      onToast({ type: "error", message: "RFC is already locked." });
+      return;
+    }
+    if (decision === "reply" && !reply.trim()) {
+      onToast({ type: "info", message: "Please type a reply message." });
+      return;
+    }
+
+    setLoading(true);
+    try {
+      await respondOmLoadAssignmentRfc(userId, {
+        term_id: termId,
+        faculty_id: facultyId,
+        section_id: sectionId,
+        action: decision,
+        message: reply.trim() || undefined,
+      });
+
+      await onAfterUpdate(decision);
+
+      const msg =
+        decision === "reply"
+          ? "Reply sent to faculty."
+          : decision === "approve"
+          ? "RFC approved."
+          : "RFC rejected.";
+      onToast({ type: "success", message: msg });
+      onClose();
+    } catch (e: any) {
+      onToast({ type: "error", title: "Failed", message: e?.message || "Failed to send response." });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-[120] grid place-items-center bg-black/40 p-4">
+      <div className="w-full max-w-5xl rounded-2xl bg-white shadow-2xl relative max-h-[92vh] flex flex-col overflow-hidden">
+        <button
+          aria-label="Close"
+          className="absolute right-3 top-3 rounded-md p-1.5 hover:bg-gray-100"
+          onClick={onClose}
+        >
+          <X className="h-5 w-5 text-gray-500" />
+        </button>
+
+        <div className="p-6 pb-4">
+          <h3 className="text-lg font-semibold text-emerald-700 mb-2">Request for Change</h3>
+          <div className="text-sm text-gray-600 mb-1">
+            From: <span className="font-semibold">{facultyName || "Faculty"}</span>
+          </div>
+
+          {loading && <div className="mb-4 text-sm text-gray-600">Loading…</div>}
+          {error && <div className="mb-4 text-sm text-red-600">{error}</div>}
+
+          {!loading && !error && !status && (
+            <div className="mb-4 rounded-lg border border-gray-200 bg-gray-50 p-3 text-sm text-gray-700">
+              No RFC thread found for this course.
+            </div>
+          )}
+        </div>
+
+        <div
+          ref={scrollRef}
+          className="mx-6 mb-4 flex-1 min-h-0 overflow-auto rounded-lg border border-gray-200 bg-gray-50 p-3"
+        >
+          {messages.length ? (
+            <div className="space-y-2">
+              {messages.map((m: any, idx: number) => {
+                const whoRaw = (m.sender_role || m.from || "").toString();
+                const who = whoRaw.toUpperCase();
+                const ts = m.created_at ? new Date(m.created_at).toLocaleString() : "";
+                const isFaculty = /FACULTY/i.test(whoRaw) || who === "F";
+                const bubble = m.message || m.text || "";
+
+                return (
+                  <div key={idx} className={cls("flex", isFaculty ? "justify-start" : "justify-end")}>
+                    <div className={cls("max-w-[85%]", isFaculty ? "text-left" : "text-right")}>
+                      <div className={cls("mb-1 text-[11px] text-gray-500", isFaculty ? "pl-1" : "pr-1")}>
+                        {who || (isFaculty ? (facultyName || "FACULTY").toUpperCase() : "OM")}
+                        {ts ? ` • ${ts}` : ""}
+                      </div>
+                      <div
+                        className={cls(
+                          "inline-block rounded-2xl px-3 py-2 text-sm whitespace-pre-wrap",
+                          isFaculty
+                            ? "bg-white text-gray-800 border border-gray-200"
+                            : "bg-emerald-700 text-white"
+                        )}
+                      >
+                        {bubble}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="text-sm text-gray-600">No messages yet.</div>
+          )}
+        </div>
+
+        <div className="mx-6">
+          <label className="block text-sm font-medium mb-1">Reply</label>
+          <textarea
+            className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30 mb-6"
+            rows={4}
+            placeholder={isTerminal ? "This RFC is locked." : "Type your reply…"}
+            value={reply}
+            disabled={loading || !status || isTerminal}
+            onChange={(e) => setReply(e.target.value)}
+          />
+        </div>
+
+        <div className="mx-6 pb-6 flex justify-end gap-2">
+          <button
+            disabled={loading || !status || isTerminal}
+            className={cls(
+              "px-4 py-2 rounded-lg bg-red-600 text-white text-sm",
+              (loading || !status || isTerminal) && "opacity-60 cursor-not-allowed"
+            )}
+            onClick={() => void respond("reject")}
+          >
+            Reject
+          </button>
+          <button
+            disabled={loading || !status || isTerminal}
+            className={cls(
+              "px-4 py-2 rounded-lg bg-emerald-700 text-white text-sm",
+              (loading || !status || isTerminal) && "opacity-60 cursor-not-allowed"
+            )}
+            onClick={() => void respond("approve")}
+          >
+            Approve
+          </button>
+          <button
+            disabled={loading || !status || isTerminal}
+            className={cls(
+              "px-4 py-2 rounded-lg bg-blue-600 text-white text-sm",
+              (loading || !status || isTerminal) && "opacity-60 cursor-not-allowed"
+            )}
+            onClick={() => void respond("reply")}
+          >
+            Reply
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -381,7 +632,7 @@ const COLS_14 = [
   "16ch", // Begin2
   "16ch", // End2
   "28ch", // Remarks
-  "16ch", // Status
+  "30ch", // Status (wider for message + status control)
 ];
 
 function ColGroup14() {
@@ -438,6 +689,39 @@ function facultyLabel(f?: { first_name?: string; last_name?: string; email?: str
   const F = (f.first_name || "").toUpperCase();
   return L || F ? `${L}, ${F}` : "";
 }
+
+
+/* ---------------- RFC schedule helpers ---------------- */
+const normalizeDayShort = (d?: string): DayShort | "" => {
+  const raw = (d || "").trim().toUpperCase();
+  if (!raw) return "";
+  // accept "TH" / "TTh" variants for Thursday
+  if (raw.startsWith("TH") || raw === "H") return "H";
+  const c = raw[0];
+  if (c === "M") return "M";
+  if (c === "T") return "T";
+  if (c === "W") return "W";
+  if (c === "F") return "F";
+  if (c === "S") return "S";
+  return "";
+};
+
+const splitTimeRange = (range?: string): { begin?: string; end?: string } => {
+  const s = (range || "").trim();
+  if (!s) return {};
+  // common formats:
+  //  - "07:30 - 09:00"
+  //  - "07:30-09:00"
+  //  - "07:30–09:00" (en-dash from backend)
+  //  - "07:30—09:00" (em-dash)
+  //  - "7:30 AM - 9:00 AM"
+  const parts = s
+    .split(/\s*[-–—]\s*/g)
+    .map((x) => x.trim())
+    .filter(Boolean);
+  if (parts.length >= 2) return { begin: parts[0], end: parts[1] };
+  return {};
+};
 
 /* ---------------- Departments ---------------- */
 // NOTE: Faculty Service is bi-directional. "From" is always the logged-in chair's department.
@@ -508,6 +792,7 @@ export default function CHAIR_FacultyService({ chairDepartmentName }: ChairFacul
 
   // Working / planning term coming from backend activeTerm
   const [termLabel, setTermLabel] = useState<string>("");
+  const [termId, setTermId] = useState<string>("");
 
   // Start empty; we derive from props or chair header.
   // Fallback to ST only if we truly can't derive a department.
@@ -519,12 +804,37 @@ export default function CHAIR_FacultyService({ chairDepartmentName }: ChairFacul
   const updateTermLabelFromOptions = (o: any) => {
     const ay = o?.activeTerm?.acad_year_start;
     const tn = o?.activeTerm?.term_number;
+    const tid = o?.activeTerm?.term_id || o?.activeTerm?.id || o?.activeTerm?._id;
+    if (tid) setTermId(String(tid));
     if (ay) {
       setTermLabel(`Term ${tn ?? "—"} · AY ${ay}-${ay + 1}`);
     } else {
       setTermLabel("");
     }
   };
+
+  const meUserId = useMemo(() => {
+    try {
+      const raw = localStorage.getItem("animo.user");
+      const u = raw ? JSON.parse(raw) : {};
+      return String(u?.userId || u?.user_id || u?.id || "");
+    } catch {
+      return "";
+    }
+  }, []);
+
+  const [rfcModal, setRfcModal] = useState<null | {
+    open: boolean;
+    facultyId: string;
+    facultyName: string;
+    sectionId: string;
+    fsId?: string;
+  }>(null);
+
+  // RFC presence/status cache for Faculty Service rows (used in Received Requests table)
+  const [rfcPendingByKey, setRfcPendingByKey] = useState<Record<string, boolean>>({});
+  const rfcKey = (sectionId?: string | null, facultyId?: string | null) =>
+    `${String(sectionId || "")}::${String(facultyId || "")}`;
 
   // If parent doesn’t pass chairDepartmentName, derive it from the chair header.
   useEffect(() => {
@@ -808,6 +1118,66 @@ export default function CHAIR_FacultyService({ chairDepartmentName }: ChairFacul
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [receivedRows]);
 
+  /* --------- RFC unread indicator (persisted locally per chair user) ---------
+     We show a red dot on the message icon when:
+       - there is an active RFC (pending), AND
+       - the RFC has been updated since the chair last opened the thread.
+
+     Key is section_id::faculty_id (same as rfcKey()).
+  */
+
+  const [rfcUpdatedAtByKey, setRfcUpdatedAtByKey] = useState<Record<string, string>>({});
+  const seenRfcRef = useRef<Record<string, string>>({});
+
+  const rfcSeenKey = useMemo(() => {
+    let uid = "anon";
+    try {
+      const raw = localStorage.getItem("animo.user");
+      const u = raw ? JSON.parse(raw) : null;
+      uid = (u?.userId ?? u?.id ?? "anon") as string;
+    } catch {
+      // ignore
+    }
+    return `animo.fs.rfc.seen.${uid}`;
+  }, []);
+
+  const loadSeenRfc = () => {
+    try {
+      const raw = localStorage.getItem(rfcSeenKey);
+      const obj = raw ? JSON.parse(raw) : {};
+      seenRfcRef.current = obj && typeof obj === "object" ? obj : {};
+    } catch {
+      seenRfcRef.current = {};
+    }
+  };
+
+  const saveSeenRfc = () => {
+    try {
+      localStorage.setItem(rfcSeenKey, JSON.stringify(seenRfcRef.current || {}));
+    } catch {
+      // ignore
+    }
+  };
+
+  useEffect(() => {
+    loadSeenRfc();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const isRfcUnseen = (key: string) => {
+    const upd = rfcUpdatedAtByKey[key];
+    if (!upd) return false;
+    const seen = seenRfcRef.current?.[key];
+    if (!seen) return true;
+    return new Date(seen).getTime() < new Date(upd).getTime();
+  };
+
+  const markRfcSeen = (key: string) => {
+    const upd = rfcUpdatedAtByKey[key] || new Date().toISOString();
+    seenRfcRef.current = { ...(seenRfcRef.current || {}), [key]: upd };
+    saveSeenRfc();
+  };
+
   // Options for creating requests: departments list + working term.
   useEffect(() => {
     if (!activeDeptName) return;
@@ -847,6 +1217,125 @@ export default function CHAIR_FacultyService({ chairDepartmentName }: ChairFacul
     }
   }
 
+  // Determine if a row has an active (non-terminal) RFC thread.
+  const computeRfcPending = (rfc: any): boolean => {
+    if (!rfc) return false;
+    if (Boolean(rfc.locked)) return false;
+    const st = norm(String(rfc.status || ""));
+    if (st === "approved" || st === "rejected") return false;
+    // Any existing unlocked RFC is treated as pending.
+    return true;
+  };
+
+  // Best-effort "last updated" timestamp for RFC threads.
+  // Used to drive the red-dot unread indicator.
+  const getRfcUpdatedAt = (rfc: any): string => {
+    if (!rfc) return "";
+    const cand =
+      rfc.updated_at ||
+      rfc.updatedAt ||
+      rfc.updated ||
+      rfc.last_updated_at ||
+      rfc.lastUpdatedAt ||
+      rfc.last_message_at ||
+      rfc.lastMessageAt;
+    if (cand) {
+      try {
+        // handle both Date objects and ISO strings
+        const d = cand instanceof Date ? cand : new Date(String(cand));
+        if (!Number.isNaN(d.getTime())) return d.toISOString();
+      } catch {
+        // ignore
+      }
+    }
+
+    const msgs = (rfc.messages || rfc.thread || []) as any[];
+    const last = Array.isArray(msgs) && msgs.length ? msgs[msgs.length - 1] : null;
+    const lastAt = last?.created_at || last?.createdAt;
+    if (lastAt) {
+      try {
+        const d = lastAt instanceof Date ? lastAt : new Date(String(lastAt));
+        if (!Number.isNaN(d.getTime())) return d.toISOString();
+      } catch {
+        // ignore
+      }
+    }
+
+    return "";
+  };
+
+  async function hydrateRfcPendingForReceived(receivedList: FacultyServiceRow[]) {
+    if (!meUserId || !termId) return;
+    const targets = (receivedList || [])
+      .map((r) => {
+        const sid = String((r as any)?.section_id || "").trim();
+        const fid = String((r as any)?.faculty?.faculty_id || (r as any)?.faculty_id || "").trim();
+        if (!sid || !fid) return null;
+        return { sid, fid };
+      })
+      .filter(Boolean) as Array<{ sid: string; fid: string }>;
+
+    if (!targets.length) return;
+
+    // Always re-check RFC status for current Received rows so
+    // new RFCs (false -> true) are reflected without requiring a full page refresh.
+    const need = targets;
+
+    // Small concurrency limiter to avoid spamming the backend.
+    const limit = 6;
+    const nextMap: Record<string, boolean> = {};
+    const nextUpdated: Record<string, string> = {};
+
+    for (let i = 0; i < need.length; i += limit) {
+      const chunk = need.slice(i, i + limit);
+      const results = await Promise.all(
+        chunk.map(async ({ sid, fid }) => {
+          try {
+            const res = await getOmLoadAssignmentRfc(meUserId, {
+              term_id: termId,
+              faculty_id: fid,
+              section_id: sid,
+            });
+            const pending = computeRfcPending(res?.rfc);
+            const key = rfcKey(sid, fid);
+            const upd = getRfcUpdatedAt(res?.rfc);
+            return { key, pending, updatedAt: upd };
+          } catch {
+            return { key: rfcKey(sid, fid), pending: false, updatedAt: "" };
+          }
+        })
+      );
+      for (const r of results) {
+        nextMap[r.key] = r.pending;
+        if (r.updatedAt) nextUpdated[r.key] = r.updatedAt;
+      }
+    }
+
+    if (Object.keys(nextMap).length) {
+      setRfcPendingByKey((prev) => ({ ...prev, ...nextMap }));
+    }
+    if (Object.keys(nextUpdated).length) {
+      setRfcUpdatedAtByKey((prev) => ({ ...prev, ...nextUpdated }));
+    }
+  }
+
+  async function refreshSingleRfcPending(sectionId: string, facultyId: string) {
+    if (!meUserId || !termId || !sectionId || !facultyId) return;
+    try {
+      const res = await getOmLoadAssignmentRfc(meUserId, {
+        term_id: termId,
+        faculty_id: facultyId,
+        section_id: sectionId,
+      });
+      const pending = computeRfcPending(res?.rfc);
+      setRfcPendingByKey((prev) => ({ ...prev, [rfcKey(sectionId, facultyId)]: pending }));
+      const upd = getRfcUpdatedAt(res?.rfc);
+      if (upd) setRfcUpdatedAtByKey((prev) => ({ ...prev, [rfcKey(sectionId, facultyId)]: upd }));
+    } catch {
+      setRfcPendingByKey((prev) => ({ ...prev, [rfcKey(sectionId, facultyId)]: false }));
+    }
+  }
+
   /**
    * Fetch BOTH boxes for the logged-in CHAIR's department.
    * - sent:   from_department === myDept
@@ -865,6 +1354,9 @@ export default function CHAIR_FacultyService({ chairDepartmentName }: ChairFacul
 
       setSentRows(sentList);
       setReceivedRows(receivedList);
+
+      // Populate RFC pending status for Received rows (Approve/Pending indicator).
+      hydrateRfcPendingForReceived(receivedList).catch(() => {});
 
       // Prefill receiver-side edits from the latest server values so fields stay editable across status changes.
       setEdits((prev) => {
@@ -903,6 +1395,14 @@ export default function CHAIR_FacultyService({ chairDepartmentName }: ChairFacul
       setLoadingList(false);
     }
   }
+
+  // If termId arrives after the initial list load, we still need to hydrate RFC state.
+  useEffect(() => {
+    if (!termId || !meUserId) return;
+    if (!receivedRows || receivedRows.length === 0) return;
+    hydrateRfcPendingForReceived(receivedRows).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [termId, meUserId, receivedRows]);
 
   // Course suggestions (Software Tech as requester)
   const [courseTerm, setCourseTerm] = useState("");
@@ -1048,47 +1548,6 @@ export default function CHAIR_FacultyService({ chairDepartmentName }: ChairFacul
     refresh().catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeDeptName]);
-
-  async function handleSendBack(fs_id: string, dept: string) {
-    const e = getEdit(fs_id);
-    try {
-      if (!e.faculty?.faculty_id && !e.faculty?.email) {
-        showToast({ type: "info", title: "Select a faculty", message: "Please select a faculty to proceed." });
-        return;
-      }
-      await respondFacultyService(fs_id, {
-        faculty: e.faculty || {},
-        day1: e.day1,
-        begin1: e.begin1,
-        end1: e.end1,
-        day2: e.day2,
-        begin2: e.begin2,
-        end2: e.end2,
-        remarks: e.remarks,
-      });
-
-      setEdits((p) => ({
-        ...p,
-        [fs_id]: { ...EMPTY_EDIT },
-      }));
-      await refresh();
-      ensureFacultyForDept(dept);
-      showToast({ type: "success", message: "Request Accepted." });
-    } catch (err: any) {
-      showToast({ type: "error", title: "Send failed", message: friendlyError(err) });
-    }
-  }
-
-  async function handleReject(fs_id: string) {
-    try {
-      await rejectFacultyService(fs_id, { remarks: getEdit(fs_id).remarks || "" });
-      await refresh();
-      showToast({ type: "error", message: "Request rejected." });
-    } catch (err: any) {
-      showToast({ type: "error", title: "Reject failed", message: friendlyError(err) });
-    }
-  }
-
   
   // Sent list: keep "most recent" at the bottom (oldest -> newest)
   const mySentRows = useMemo(() => {
@@ -1328,7 +1787,35 @@ export default function CHAIR_FacultyService({ chairDepartmentName }: ChairFacul
                         </span>
                       </td>
                       <td className={PLANTILLA_TD}>
-                        <span className={cls("inline-block rounded-full px-2 py-[2px] text-[12px]", badge)}>{label}</span>
+                        <div className="flex items-center justify-center gap-2">
+                          <button
+                            type="button"
+                            title="Message"
+                            aria-label="Message"
+                            disabled={!termId || !(r as any)?.section_id || !((r as any)?.faculty?.faculty_id)}
+                            onClick={() => {
+                              const fid = String((r as any)?.faculty?.faculty_id || "");
+                              const sid = String((r as any)?.section_id || "");
+                              if (!fid || !sid) return;
+                              setRfcModal({
+                                open: true,
+                                facultyId: fid,
+                                facultyName: facultyLabel((r as any)?.faculty) || "Faculty",
+                                sectionId: sid,
+                              });
+                            }}
+                            className={cls(
+                              "inline-flex h-8 w-8 items-center justify-center rounded-full",
+                              "border border-emerald-200 text-emerald-700 hover:bg-emerald-50",
+                              (!termId || !(r as any)?.section_id || !((r as any)?.faculty?.faculty_id)) &&
+                                "opacity-50 cursor-not-allowed hover:bg-transparent"
+                            )}
+                          >
+                            <MessageSquareText className="h-4 w-4" />
+                          </button>
+
+                          <span className={cls("inline-block rounded-full px-2 py-[2px] text-[12px]", badge)}>{label}</span>
+                        </div>
                       </td>
                     </tr>
                   );
@@ -1435,48 +1922,16 @@ export default function CHAIR_FacultyService({ chairDepartmentName }: ChairFacul
                     const e = getEdit(fsid);
                     const facultyOptions = facultyCache[dept] || [];
 
-                    const statusLabel =
-                      r.status === "responded" ? "Approved" : r.status === "rejected" ? "Rejected" : "Pending";
-
-                    const setStatus = async (nextLabel: string) => {
-                      if (nextLabel === statusLabel) return;
-
-                      if (nextLabel === "Approved") {
-                        const missing: string[] = [];
-                        if (!e.faculty?.faculty_id && !e.faculty?.email) missing.push("Faculty");
-                        if (!e.day1) missing.push("Day1");
-                        if (!e.begin1) missing.push("Begin1");
-                        if (!e.end1) missing.push("End1");
-                        if (!e.day2) missing.push("Day2");
-                        if (!e.begin2) missing.push("Begin2");
-                        if (!e.end2) missing.push("End2");
-
-                        if (missing.length) {
-                          showToast({
-                            type: "info",
-                            title: "Missing details",
-                            message: `Please complete: ${missing.join(", ")}.`,
-                          });
-                          return;
-                        }
-
-                        await handleSendBack(fsid, dept);
-                        return;
-                      }
-
-                      if (nextLabel === "Rejected") {
-                        await handleReject(fsid);
-                        return;
-                      }
-
-                      try {
-                        await restoreFacultyService(fsid, { status: "sent" as any });
-                        await refresh();
-                        showToast({ type: "info", message: "Status set to Pending." });
-                      } catch (err: any) {
-                        showToast({ type: "error", title: "Update failed", message: friendlyError(err) });
-                      }
-                    };
+                    // RFC status (Approve/Pending) for Faculty Service rows
+                    const sid = String((r as any)?.section_id || "").trim();
+                    const fid = String((r as any)?.faculty?.faculty_id || (e.faculty as any)?.faculty_id || "").trim();
+                    const rkey = sid && fid ? rfcKey(sid, fid) : "";
+                    const pendingRfc = rkey ? Boolean(rfcPendingByKey[rkey]) : false;
+                    const statusLabel = pendingRfc ? "Pending" : "Approve";
+                    const statusBadge =
+                      statusLabel === "Pending"
+                        ? "bg-amber-100 text-amber-800 border-amber-300"
+                        : "bg-emerald-100 text-emerald-800 border-emerald-300";
 
                     return (
                       <tr key={fsid} className={PLANTILLA_ROW} onMouseEnter={() => ensureFacultyForDept(dept)}>
@@ -1613,26 +2068,79 @@ export default function CHAIR_FacultyService({ chairDepartmentName }: ChairFacul
                         </td>
 
                         <td className={cls(PLANTILLA_TD, "align-middle")}>
-                          <Dropdown
-                            value={statusLabel}
-                            onChange={(v) => {
-                              setStatus(v).catch(() => {});
-                            }}
-                            options={["Pending", "Approved", "Rejected"]}
-                            placeholder="Pending"
-                            className={cls(
-                              "max-w-[140px] mx-auto",
-                              // color-coordinate statuses (Approved=green, Pending=yellow, Rejected=red)
-                              "[&>div>button]:border",
-                              statusLabel === "Approved" &&
-                                "[&>div>button]:bg-emerald-100 [&>div>button]:text-emerald-800 [&>div>button]:border-emerald-300",
-                              statusLabel === "Rejected" &&
-                                "[&>div>button]:bg-red-100 [&>div>button]:text-red-800 [&>div>button]:border-red-300",
-                              statusLabel === "Pending" &&
-                                "[&>div>button]:bg-amber-100 [&>div>button]:text-amber-800 [&>div>button]:border-amber-300"
-                            )}
-                            searchable={false}
-                          />
+                          <div className="flex items-center justify-center gap-2">
+                            <button
+                              type="button"
+                              title="Message"
+                              aria-label="Message"
+                              disabled={!termId || !r.section_id || !(e.faculty?.faculty_id || (r as any)?.faculty?.faculty_id)}
+                              onClick={() => {
+                                const fid = String(e.faculty?.faculty_id || (r as any)?.faculty?.faculty_id || "");
+                                const sid = String(r.section_id || "");
+                                if (!fid || !sid) return;
+
+                                // RFC unread indicator: once the chair opens the thread, mark it as seen.
+                                try {
+                                  markRfcSeen(rfcKey(sid, fid));
+                                } catch {
+                                  // ignore
+                                }
+                                // mark this RFC as seen (for red-dot indicator)
+                                try {
+                                  if (fsid) {
+                                    seenReceivedRef.current.add(String(fsid));
+                                    saveSeenReceived();
+                                    setHasNewReceived(receivedRows.some((x) => {
+                                      const id = x?.fs_id || (x as any)?.id;
+                                      return !!id && !seenReceivedRef.current.has(String(id));
+                                    }));
+                                  }
+                                } catch {
+                                  // ignore
+                                }
+
+                                setRfcModal({
+                                  open: true,
+                                  facultyId: fid,
+                                  facultyName: facultyLabel(e.faculty) || facultyLabel((r as any)?.faculty) || "Faculty",
+                                  sectionId: sid,
+                                  fsId: String(fsid),
+                                });
+                              }}
+                              className={cls(
+                                "inline-flex h-8 w-8 items-center justify-center rounded-full",
+                                "border border-emerald-200 text-emerald-700 hover:bg-emerald-50",
+                                (!termId || !r.section_id || !(e.faculty?.faculty_id || (r as any)?.faculty?.faculty_id)) &&
+                                  "opacity-50 cursor-not-allowed hover:bg-transparent"
+                              )}
+                            >
+                              <span className="relative inline-flex">
+                                <MessageSquareText className="h-4 w-4" />
+                                {pendingRfc && rkey && isRfcUnseen(rkey) && (
+                                  <span
+                                    className="absolute -top-1 -right-1 h-2.5 w-2.5 rounded-full bg-red-600 ring-2 ring-white"
+                                    aria-label="New RFC"
+                                    title="New RFC"
+                                  />
+                                )}
+                              </span>
+                            </button>
+
+                            <span
+                              className={cls(
+                                "inline-flex items-center justify-center",
+                                "h-9 min-w-[120px] rounded-md border px-3 text-[13px] font-semibold",
+                                statusBadge
+                              )}
+                              title={
+                                statusLabel === "Pending"
+                                  ? "There is an active RFC thread for this service class."
+                                  : "No active RFC thread."
+                              }
+                            >
+                              {statusLabel}
+                            </span>
+                          </div>
                         </td>
                       </tr>
                     );
@@ -1657,6 +2165,51 @@ export default function CHAIR_FacultyService({ chairDepartmentName }: ChairFacul
               </table>
             </div>
           </div>
+
+        {/* RFC / Message thread (mirrors OM Load Assignment) */}
+        <ServiceRfcModal
+          open={!!rfcModal?.open}
+          onClose={() => setRfcModal(null)}
+          userId={meUserId}
+          termId={termId}
+          facultyId={rfcModal?.facultyId}
+          facultyName={rfcModal?.facultyName}
+          sectionId={rfcModal?.sectionId}
+          onAfterUpdate={async (decision) => {
+            await refresh();
+            if (rfcModal?.sectionId && rfcModal?.facultyId) {
+              await refreshSingleRfcPending(rfcModal.sectionId, rfcModal.facultyId);
+            }
+
+            // If approved, apply the RFC's requested schedule to the Received row immediately
+            // (backend already reflects it on the FACULTY side; this keeps the mirror table in sync).
+            if (decision === "approve" && rfcModal?.sectionId && rfcModal?.facultyId && rfcModal?.fsId) {
+              try {
+                const res = await getOmLoadAssignmentRfc(meUserId, {
+                  term_id: termId,
+                  faculty_id: rfcModal.facultyId,
+                  section_id: rfcModal.sectionId,
+                });
+                const req = (res as any)?.rfc?.requested;
+                if (req && typeof req === "object") {
+                  const t1 = splitTimeRange(String(req.time1 || ""));
+                  const t2 = splitTimeRange(String(req.time2 || ""));
+                  patchEdit(String(rfcModal.fsId), {
+                    day1: normalizeDayShort(String(req.day1 || "")) as any,
+                    begin1: (t1.begin || "") as any,
+                    end1: (t1.end || "") as any,
+                    day2: normalizeDayShort(String(req.day2 || "")) as any,
+                    begin2: (t2.begin || "") as any,
+                    end2: (t2.end || "") as any,
+                  });
+                }
+              } catch {
+                // ignore (best-effort UI sync)
+              }
+            }
+          }}
+          onToast={showToast}
+        />
       </main>
     </div>
   );

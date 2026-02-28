@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
-import { Search as SearchIcon, Edit, Check, Eraser, ChevronDown, Eye, X, Download } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Search as SearchIcon, Edit, Check, Eraser, ChevronDown, Eye, X, Download, MessageSquareText, Send } from "lucide-react";
 import SelectBox from "../../component/SelectBox";
 import { cls } from "../../utilities/cls";
 import {
@@ -9,12 +9,228 @@ import {
   getOMSC_SchedulePresets,
   getOMSC_Detail,
   exportOMSC_Pdf,
+  getOmLoadAssignmentRfc,
+  respondOmLoadAssignmentRfc,
   downloadBlob,
   type OMSpecialClassRow,
   type OMSpecialClassOptions,
   type OMSCSchedulePreset,
   type OMSpecialClassDetail,
 } from "../../api";
+
+/* ---------------- RFC Conversation Modal (Special Class) ---------------- */
+function SpecialConversationModal({
+  open,
+  onClose,
+  userId,
+  termId,
+  facultyId,
+  facultyName,
+  sectionId,
+  onToast,
+}: {
+  open: boolean;
+  onClose: () => void;
+  userId: string;
+  termId: string;
+  facultyId?: string | null;
+  facultyName?: string;
+  sectionId?: string;
+  onToast?: (message: string, kind?: "success" | "error") => void;
+}) {
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [messages, setMessages] = useState<any[]>([]);
+  const [locked, setLocked] = useState<boolean>(false);
+  const [reply, setReply] = useState("");
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!open) {
+      setLoading(false);
+      setError(null);
+      setMessages([]);
+      setLocked(false);
+      setReply("");
+      return;
+    }
+
+    (async () => {
+      try {
+        setLoading(true);
+        setError(null);
+        setMessages([]);
+        setLocked(false);
+
+        if (!facultyId) {
+          setError("No faculty assigned yet.");
+          return;
+        }
+        if (!sectionId) {
+          setError("Missing special class id.");
+          return;
+        }
+
+        const res = await getOmLoadAssignmentRfc(userId, {
+          term_id: termId,
+          faculty_id: String(facultyId),
+          section_id: sectionId,
+        });
+
+        if (!res?.ok || !res?.rfc) {
+          setMessages([]);
+          return;
+        }
+
+        const rfc = res.rfc;
+        setLocked(Boolean(rfc.locked));
+        setMessages(rfc.messages || rfc.thread || []);
+      } catch (e: any) {
+        setError(e?.message || "Failed to load conversation.");
+      } finally {
+        setLoading(false);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+  }, [messages, open]);
+
+  if (!open) return null;
+
+  const canReply = !loading && !locked && !!facultyId && !!sectionId;
+
+  const sendReply = async () => {
+    if (!canReply) return;
+    if (!reply.trim()) {
+      onToast?.("Please type a message.", "error");
+      return;
+    }
+    try {
+      setLoading(true);
+      await respondOmLoadAssignmentRfc(userId, {
+        term_id: termId,
+        faculty_id: String(facultyId),
+        section_id: sectionId,
+        action: "reply",
+        message: reply.trim(),
+      });
+      setReply("");
+      const res = await getOmLoadAssignmentRfc(userId, {
+        term_id: termId,
+        faculty_id: String(facultyId),
+        section_id: sectionId,
+      });
+      setMessages(res?.rfc?.messages || res?.rfc?.thread || []);
+      onToast?.("Message sent.", "success");
+    } catch (e: any) {
+      onToast?.(e?.message || "Failed to send message.", "error");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-[120] grid place-items-center bg-black/40 p-4">
+      <div className="w-full max-w-4xl rounded-2xl bg-white shadow-2xl relative max-h-[92vh] flex flex-col overflow-hidden">
+        <button
+          aria-label="Close"
+          className="absolute right-3 top-3 rounded-md p-1.5 hover:bg-gray-100"
+          onClick={onClose}
+        >
+          <X className="h-5 w-5 text-gray-500" />
+        </button>
+
+        <div className="p-6 pb-4">
+          <h3 className="text-lg font-semibold text-purple-700 mb-2">Conversation</h3>
+          <div className="text-sm text-gray-600">
+            Faculty: <span className="font-semibold">{facultyName || "UNASSIGNED"}</span>
+          </div>
+
+          {loading && <div className="mt-3 text-sm text-gray-600">Loading…</div>}
+          {error && <div className="mt-3 text-sm text-red-600">{error}</div>}
+
+          {!loading && !error && !messages.length && (
+            <div className="mt-3 rounded-lg border border-gray-200 bg-gray-50 p-3 text-sm text-gray-700">
+              No messages yet. The faculty can start the conversation from the Special Class modal.
+            </div>
+          )}
+        </div>
+
+        <div
+          ref={scrollRef}
+          className="mx-6 mb-4 flex-1 min-h-0 overflow-auto rounded-lg border border-gray-200 bg-gray-50 p-3"
+        >
+          {messages.length ? (
+            <div className="space-y-2">
+              {messages.map((m: any, idx: number) => {
+                const whoRaw = (m.sender_role || m.from || "").toString();
+                const who = whoRaw.toUpperCase();
+                const ts = m.created_at ? new Date(m.created_at).toLocaleString() : "";
+                const isFaculty = /FACULTY/i.test(whoRaw) || who === "F";
+                const bubble = m.message || m.text || "";
+                return (
+                  <div key={idx} className={cls("flex", isFaculty ? "justify-start" : "justify-end")}>
+                    <div className={cls("max-w-[85%]", isFaculty ? "text-left" : "text-right")}>
+                      <div className={cls("mb-1 text-[11px] text-gray-500", isFaculty ? "pl-1" : "pr-1")}>
+                        {who || (isFaculty ? (facultyName || "FACULTY").toUpperCase() : "OM")}
+                        {ts ? ` • ${ts}` : ""}
+                      </div>
+                      <div
+                        className={cls(
+                          "inline-block rounded-2xl px-3 py-2 text-sm whitespace-pre-wrap",
+                          isFaculty
+                            ? "bg-white text-gray-800 border border-gray-200"
+                            : "bg-purple-600 text-white"
+                        )}
+                      >
+                        {bubble}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="text-sm text-gray-600">No messages yet.</div>
+          )}
+        </div>
+
+        <div className="mx-6 pb-6">
+          <label className="block text-sm font-medium mb-1">Reply</label>
+          <div className="flex items-end gap-2">
+            <textarea
+              className="flex-1 rounded-lg border border-gray-300 px-3 py-2 text-sm shadow-sm focus:ring-2 focus:ring-purple-500/30"
+              rows={3}
+              placeholder={locked ? "Conversation is locked." : "Type your message…"}
+              value={reply}
+              disabled={!canReply}
+              onChange={(e) => setReply(e.target.value)}
+            />
+            <button
+              type="button"
+              disabled={!canReply || !reply.trim()}
+              onClick={() => void sendReply()}
+              className={cls(
+                "inline-flex h-10 w-10 items-center justify-center rounded-xl text-white shadow",
+                "bg-purple-600 hover:brightness-[1.06] active:translate-y-[0.5px]",
+                (!canReply || !reply.trim()) && "opacity-60 cursor-not-allowed"
+              )}
+              title="Send"
+              aria-label="Send"
+            >
+              <Send className={cls("h-4 w-4", loading && "animate-pulse")} />
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 /* --------------------------------- helpers --------------------------------- */
 type DayCode = "M" | "T" | "W" | "H" | "F" | "S";
@@ -244,6 +460,32 @@ export default function OM_SpecialClass() {
   const [viewLoading, setViewLoading] = useState(false);
   const [viewErr, setViewErr] = useState("");
   const [viewData, setViewData] = useState<OMSpecialClassDetail | null>(null);
+
+  // RFC / conversation modal (Special Class)
+  const [conv, setConv] = useState<{
+    open: boolean;
+    termId: string;
+    facultyId?: string | null;
+    facultyName?: string;
+    sectionId: string;
+  } | null>(null);
+
+  const userId = useMemo(() => {
+    try {
+      const raw = JSON.parse(localStorage.getItem("animo.user") || "{}");
+      return String(raw.userId || raw.user_id || raw.id || "");
+    } catch {
+      return "";
+    }
+  }, []);
+
+  const toast = (message: string, kind?: "success" | "error") => {
+    // This screen uses an inline banner for feedback; keep it consistent.
+    setErr(message);
+    if (kind === "success") {
+      window.setTimeout(() => setErr(""), 2500);
+    }
+  };
 
   const roomLabel = (r: Partial<OMSpecialClassRow>, slot: 1 | 2) => {
     const direct = (slot === 1 ? r.room1 : r.room2) || "";
@@ -1264,6 +1506,29 @@ export default function OM_SpecialClass() {
                           ) : (
                             <>
                               <button
+                                type="button"
+                                onClick={() => {
+                                  setConv({
+                                    open: true,
+                                    termId: r.term_id,
+                                    facultyId: r.faculty_id ?? null,
+                                    facultyName: r.faculty_name || "UNASSIGNED",
+                                    sectionId: r.special_id,
+                                  });
+                                }}
+                                disabled={!r.faculty_id}
+                                className={cls(
+                                  "flex h-8 w-8 items-center justify-center rounded-full border border-purple-200 text-purple-700",
+                                  "hover:bg-purple-50",
+                                  !r.faculty_id && "opacity-50 cursor-not-allowed hover:bg-transparent"
+                                )}
+                                title={r.faculty_id ? "Message" : "Assign a faculty first to open conversation"}
+                                aria-label="Message"
+                              >
+                                <MessageSquareText className="h-4 w-4" />
+                              </button>
+
+                              <button
                                 onClick={() => openView(r)}
                                 className="flex h-8 w-8 items-center justify-center rounded-full border border-gray-200 text-gray-700 hover:bg-gray-50"
                                 title="View Application"
@@ -1419,6 +1684,18 @@ export default function OM_SpecialClass() {
           </div>
         </div>
       )}
+
+      {/* Special Class conversation (RFC thread) */}
+      <SpecialConversationModal
+        open={!!conv?.open}
+        onClose={() => setConv(null)}
+        userId={userId}
+        termId={conv?.termId || ""}
+        facultyId={conv?.facultyId}
+        facultyName={conv?.facultyName}
+        sectionId={conv?.sectionId}
+        onToast={toast}
+      />
     </main>
   );
 }
