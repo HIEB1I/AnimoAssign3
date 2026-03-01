@@ -4439,9 +4439,9 @@ ${msg}`,
               />
 
               {showCurrImportModal && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4">
-                  <div className="w-full max-w-2xl overflow-hidden rounded-2xl bg-white shadow-xl">
-                    <div className="p-6">
+                <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/30 p-4">
+                  <div className="w-full max-w-2xl max-h-[calc(100vh-3rem)] overflow-hidden rounded-2xl bg-white shadow-xl flex flex-col">
+                    <div className="p-6 overflow-y-auto flex-1">
                       <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-full border border-emerald-600 text-emerald-700">
                         <Upload className="h-7 w-7" />
                       </div>
@@ -7905,8 +7905,8 @@ const GlobalCourseEditModal: React.FC<GlobalCourseEditModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/40 p-4 sm:p-6 overflow-y-auto">
-      <div className="w-full max-w-4xl rounded-2xl bg-white shadow-xl border border-gray-200 my-8 overflow-hidden flex flex-col">
+    <div className="fixed inset-0 z-[120] flex items-start justify-center bg-black/40 p-4 sm:p-6 overflow-y-auto">
+      <div className="w-full max-w-4xl max-h-[calc(100vh-3rem)] sm:max-h-[calc(100vh-4rem)] rounded-2xl bg-white shadow-xl border border-gray-200 my-8 overflow-hidden flex flex-col">
         <div className="flex items-center justify-between border-b px-6 py-4">
           <div className="font-semibold">Edit Course</div>
           <button className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50" onClick={onClose}>
@@ -8228,8 +8228,8 @@ const noMatches = query.trim().length >= 2 && list.length === 0;
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/40 p-4 sm:p-6 overflow-y-auto">
-      <div className="w-full max-w-5xl rounded-2xl bg-white shadow-xl border border-gray-200 my-8 overflow-hidden flex flex-col">
+    <div className="fixed inset-0 z-[120] flex items-start justify-center bg-black/40 p-4 sm:p-6 overflow-y-auto">
+      <div className="w-full max-w-5xl max-h-[calc(100vh-3rem)] sm:max-h-[calc(100vh-4rem)] rounded-2xl bg-white shadow-xl border border-gray-200 my-8 overflow-hidden flex flex-col">
         <div className="flex items-center justify-between border-b px-6 py-4">
           <div className="font-semibold">
             Edit Courses to Take — {programCode} • {base.batch_code || "ID"}
@@ -8428,8 +8428,8 @@ const CreateCourseModal: React.FC<{
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/40 p-4 sm:p-6 overflow-y-auto">
-      <div className="w-full max-w-2xl rounded-2xl bg-white shadow-xl border border-gray-200 my-8 overflow-hidden flex flex-col">
+    <div className="fixed inset-0 z-[120] flex items-start justify-center bg-black/40 p-4 sm:p-6 overflow-y-auto">
+      <div className="w-full max-w-2xl max-h-[calc(100vh-3rem)] sm:max-h-[calc(100vh-4rem)] rounded-2xl bg-white shadow-xl border border-gray-200 my-8 overflow-hidden flex flex-col">
         <div className="flex items-center justify-between border-b px-6 py-4">
           <div className="font-semibold">Add Course</div>
           <button className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50" onClick={onClose}>
