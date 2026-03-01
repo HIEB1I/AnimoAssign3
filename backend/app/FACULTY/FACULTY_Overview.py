@@ -2622,6 +2622,14 @@ async def overview_handler(
         max_preps = faculty.get("max_preps")
         teaching_years = faculty.get("teaching_years")
         certifications = faculty.get("certifications") or []
+        hire_date = faculty.get("hire_date")
+        if isinstance(hire_date, datetime):
+            hire_date = hire_date.date().isoformat()
+        elif hasattr(hire_date, "isoformat") and not isinstance(hire_date, str):
+            try:
+                hire_date = hire_date.isoformat()
+            except Exception:
+                pass
 
         # Qualified KACs (include course list with code + title)
         kac_ids = faculty.get("qualified_kacs") or []
@@ -2694,6 +2702,7 @@ async def overview_handler(
                 "min_units": min_units,
                 "max_preps": max_preps,
                 "teaching_years": teaching_years,
+                "hire_date": hire_date,
                 "certifications": certifications,
                 "qualified_kacs": qualified_kacs_details,
             },

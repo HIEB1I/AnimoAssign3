@@ -657,17 +657,34 @@ function FacultyProfileTab({
     return s || "—";
   };
 
+  const formatHireDate = (v: any) => {
+    const rawVal = v ?? "";
+    const s = String(rawVal).trim();
+    if (!s) return "—";
+    const d = new Date(s);
+    if (!Number.isNaN(d.getTime())) {
+      return new Intl.DateTimeFormat("en-US", { year: "numeric", month: "short", day: "2-digit" }).format(d);
+    }
+    return s;
+  };
+
+
   const email = String(faculty?.email || faculty?.email_address || faculty?.emailAddress || "").trim();
 
   // Pills intentionally kept empty for now; key profile attributes are shown as cards on the right.
   const pills: { label: string; value: string }[] = [];
 
-  const guardrails: { key: "employment" | "teaching"; label: string; value: string }[] = [
+  const guardrails: { key: "employment" | "teaching"; label: string; value: React.ReactNode }[] = [
     { key: "employment", label: "Employment", value: employmentLabel(faculty?.employment_type) },
     {
       key: "teaching",
       label: "Teaching experience",
-      value: faculty?.teaching_years != null ? `${faculty.teaching_years} yrs` : "—",
+      value: (
+        <div className="flex flex-col leading-tight">
+          <span>{faculty?.teaching_years != null ? `${faculty.teaching_years} yrs` : "—"}</span>
+          <span className="text-sm font-medium text-slate-600">Hire date: {formatHireDate(faculty?.hire_date)}</span>
+        </div>
+      ),
     },
   ];
 
