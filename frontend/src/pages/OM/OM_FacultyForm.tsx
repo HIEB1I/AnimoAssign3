@@ -9,8 +9,10 @@ import {
   GraduationCap,
   MapPin,
   Calendar,
+  CalendarClock,
   BookOpen,
   Info,
+  AlertTriangle,
   X,
 } from "lucide-react";
 import {
@@ -54,18 +56,16 @@ function DeadlineBanner({
   // NEW: no window started yet
   if (!hasWindow) {
     return (
-      <div
-        className={cls(
-          "mb-4 flex items-start gap-3 rounded-xl border p-4 border-gray-200 bg-gray-50 text-gray-700",
-          className
-        )}
-      >
-        <div className="mt-0.5 h-2.5 w-2.5 shrink-0 rounded-full bg-gray-400" />
-        <div className="text-sm">
-          <div className="font-semibold">Submission Window Not Started</div>
-          <div className="mt-0.5 text-[13px]">
-            The OM can start the submission window from this page. Until then,
-            faculty will not be able to submit their preferences for this term.
+      <div className={cls("mb-4 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700", className)}>
+        <div className="flex items-start gap-3">
+          <div className="mt-0.5 grid h-9 w-9 place-items-center rounded-full bg-slate-200 text-slate-700">
+            <Info className="h-5 w-5" />
+          </div>
+          <div>
+            <div className="font-semibold">Submission Window Not Started</div>
+            <div className="text-xs text-slate-600">
+              Set an opening time and deadline above. Until then, faculty will not be able to submit preferences for this term.
+            </div>
           </div>
         </div>
       </div>
@@ -77,24 +77,17 @@ function DeadlineBanner({
 
   if (!openPassed) {
     return (
-      <div
-        className={cls(
-          "mb-4 flex items-start gap-3 rounded-xl border p-4 border-amber-300 bg-amber-50 text-amber-900",
-          className
-        )}
-      >
-        <div className="mt-0.5 h-2.5 w-2.5 shrink-0 rounded-full bg-amber-500" />
-        <div className="text-sm">
-          <div className="font-semibold">Submissions Open In</div>
-          <div className="mt-0.5">
-            Opens:{" "}
-            <span className="font-medium">
-              {openISO ? new Date(openISO).toLocaleString() : "—"}
-            </span>{" "}
-            •{" "}
-            <span className="font-bold text-amber-700">
-              {openISO ? openLabel : "TBA"}
-            </span>
+      <div className={cls("mb-4 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-950", className)}>
+        <div className="flex items-start gap-3">
+          <div className="mt-0.5 grid h-9 w-9 place-items-center rounded-full bg-amber-200 text-amber-900">
+            <CalendarClock className="h-5 w-5" />
+          </div>
+          <div>
+            <div className="font-semibold">Submissions Open In</div>
+            <div className="text-xs text-amber-900">
+              Opens: {openISO ? new Date(openISO).toLocaleString() : "—"} · {openISO ? openLabel : "TBA"}
+            </div>
+            <div className="mt-1 text-[11px] text-amber-900/80">Once open, faculty can submit and update their preferences until the deadline.</div>
           </div>
         </div>
       </div>
@@ -103,22 +96,14 @@ function DeadlineBanner({
 
   if (deadlinePassed) {
     return (
-      <div
-        className={cls(
-          "mb-4 flex items-start gap-3 rounded-xl border p-4 border-red-300 bg-red-50 text-red-800",
-          className
-        )}
-      >
-        <div className="mt-0.5 h-2.5 w-2.5 shrink-0 rounded-full bg-red-500" />
-        <div className="text-sm">
-          <div className="font-semibold">Editing Locked</div>
-          <div className="mt-0.5">
-            Deadline:{" "}
-            <span className="font-medium">
-              {deadlineISO ? new Date(deadlineISO).toLocaleString() : "—"}
-            </span>{" "}
-            •{" "}
-            <span className="font-bold text-red-700">Deadline passed</span>
+      <div className={cls("mb-4 rounded-xl border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-900", className)}>
+        <div className="flex items-start gap-3">
+          <div className="mt-0.5 grid h-9 w-9 place-items-center rounded-full bg-red-200 text-red-900">
+            <AlertTriangle className="h-5 w-5" />
+          </div>
+          <div>
+            <div className="font-semibold">Editing Locked</div>
+            <div className="text-xs text-red-800">Deadline: {deadlineISO ? new Date(deadlineISO).toLocaleString() : "—"}</div>
           </div>
         </div>
       </div>
@@ -126,24 +111,16 @@ function DeadlineBanner({
   }
 
   return (
-    <div
-      className={cls(
-        "mb-4 flex items-start gap-3 rounded-xl border p-4 border-amber-300 bg-amber-50 text-amber-900",
-        className
-      )}
-    >
-      <div className="mt-0.5 h-2.5 w-2.5 shrink-0 rounded-full bg-amber-500" />
-      <div className="text-sm">
-        <div className="font-semibold">Submission Deadline Approaching</div>
-        <div className="mt-0.5">
-          Deadline:{" "}
-          <span className="font-medium">
-            {deadlineISO ? new Date(deadlineISO).toLocaleString() : "—"}
-          </span>{" "}
-          •{" "}
-          <span className="font-bold text-amber-700">
-            {deadlineISO ? deadlineLabel : "TBA"}
-          </span>
+    <div className={cls("mb-4 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-950", className)}>
+      <div className="flex items-start gap-3">
+        <div className="mt-0.5 grid h-9 w-9 place-items-center rounded-full bg-amber-200 text-amber-900">
+          <CalendarClock className="h-5 w-5" />
+        </div>
+        <div>
+          <div className="font-semibold">Submission Deadline Approaching</div>
+          <div className="text-xs text-amber-900">
+            Deadline: {deadlineISO ? new Date(deadlineISO).toLocaleString() : "—"} · {deadlineISO ? deadlineLabel : "TBA"}
+          </div>
         </div>
       </div>
     </div>
@@ -221,6 +198,7 @@ export default function OM_FacultyForm() {
         message: string;
         accent: "emerald" | "amber";
         confirmText: string;
+        note?: string;
       }
     | null
   >(null);
@@ -230,6 +208,7 @@ export default function OM_FacultyForm() {
     message: string;
     accent: "emerald" | "amber";
     confirmText: string;
+    note?: string;
   }) => {
     return new Promise<boolean>((resolve) => {
       confirmResolverRef.current = resolve;
@@ -247,30 +226,62 @@ export default function OM_FacultyForm() {
   const handleStartWindow = async () => {
     if (startingWindow) return;
 
-    // Validate draft datetimes
-    const openDate = new Date(openDraft);
+    const hasExistingWindow = !!prefsWindow.openISO;
+
+    // Validate deadline datetime
     const deadlineDate = new Date(deadlineDraft);
-    if (!openDraft || Number.isNaN(openDate.getTime())) {
-      setErr("Please provide a valid opening date and time.");
-      return;
-    }
     if (!deadlineDraft || Number.isNaN(deadlineDate.getTime())) {
       setErr("Please provide a valid deadline date and time.");
       return;
     }
+
+    // If a window was already set before, we auto-open submissions now (today/current)
+    // and only let the user update the deadline.
+    let openDate: Date;
+    if (hasExistingWindow) {
+      openDate = new Date();
+      openDate.setSeconds(0, 0);
+    } else {
+      const d = new Date(openDraft);
+      if (!openDraft || Number.isNaN(d.getTime())) {
+        setErr("Please provide a valid opening date and time.");
+        return;
+      }
+      openDate = d;
+    }
+
     if (deadlineDate.getTime() <= openDate.getTime()) {
-      setErr("Deadline must be after the opening date and time.");
+      setErr(
+        hasExistingWindow
+          ? "Deadline must be after the current time."
+          : "Deadline must be after the opening date and time."
+      );
       return;
     }
 
-    const verb = prefsWindow.openISO ? "Restart" : "Start";
-    const message = `${verb} submission window with the following schedule? This will override the existing schedule.\n\nOpens: ${openDate.toLocaleString()}\nDeadline: ${deadlineDate.toLocaleString()}`;
+    const title = hasExistingWindow
+      ? "Set submission deadline?"
+      : "Start submission window?";
+
+    const confirmText = hasExistingWindow ? "Set deadline" : "Start window";
+
+    const message = hasExistingWindow
+      ? `Set a new submission deadline? This will open submissions immediately and replace the current deadline.
+
+Deadline: ${deadlineDate.toLocaleString()}`
+      : `Start submission window with the following schedule?
+
+Opens: ${openDate.toLocaleString()}
+Deadline: ${deadlineDate.toLocaleString()}`;
 
     const ok = await openConfirm({
-      title: `${verb} submission window?`,
+      title,
       message,
-      accent: prefsWindow.openISO ? "amber" : "emerald",
-      confirmText: verb === "Restart" ? "Restart window" : "Start window",
+      accent: "emerald",
+      confirmText,
+      note: hasExistingWindow
+        ? "This will apply immediately and replace the current deadline."
+        : "This will apply immediately and set the opening time and deadline.",
     });
     if (!ok) return;
 
@@ -278,10 +289,6 @@ export default function OM_FacultyForm() {
       setStartingWindow(true);
       setErr("");
 
-      // NOTE: We intentionally call the endpoint directly instead of using the
-      // startOMFWindow helper from ../../api because its TypeScript payload type
-      // may not include openISO/deadlineISO in some codebases.
-      // This keeps the change isolated to this page and avoids TS errors.
       const params = new URLSearchParams();
       params.set("action", "startWindow");
       if (activeTerm?.term_id) params.set("termId", activeTerm.term_id);
@@ -293,11 +300,11 @@ export default function OM_FacultyForm() {
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        throw new Error(data?.detail || "Failed to start submission window.");
+        throw new Error(data?.detail || "Failed to set submission window.");
       }
 
       if (!data?.ok || !data.prefs_window) {
-        throw new Error("Failed to start submission window.");
+        throw new Error("Failed to set submission window.");
       }
 
       setPrefsWindow({
@@ -308,7 +315,7 @@ export default function OM_FacultyForm() {
       setErr(
         e?.response?.data?.detail ||
           e?.message ||
-          "Failed to start submission window."
+          "Failed to set submission window."
       );
     } finally {
       setStartingWindow(false);
@@ -485,20 +492,22 @@ useEffect(() => {
 
           {isOm && (
             <div className="flex flex-wrap items-center justify-end gap-2">
-              <div className="flex items-center gap-2">
-                <span className="text-sm font-medium text-slate-700">Opens</span>
-                <input
-                  type="datetime-local"
-                  className="h-9 rounded-md border border-gray-300 bg-white px-2 text-sm"
-                  value={openDraft}
-                  onChange={(e) => setOpenDraft(e.target.value)}
-                />
-              </div>
+              {!prefsWindow.openISO && (
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-medium text-slate-700">Opens</span>
+                  <input
+                    type="datetime-local"
+                    className="h-9 rounded-md border border-gray-300 bg-white px-2 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/30"
+                    value={openDraft}
+                    onChange={(e) => setOpenDraft(e.target.value)}
+                  />
+                </div>
+              )}
               <div className="flex items-center gap-2">
                 <span className="text-sm font-medium text-slate-700">Deadline</span>
                 <input
                   type="datetime-local"
-                  className="h-9 rounded-md border border-gray-300 bg-white px-2 text-sm"
+                  className="h-9 rounded-md border border-gray-300 bg-white px-2 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/30"
                   value={deadlineDraft}
                   onChange={(e) => setDeadlineDraft(e.target.value)}
                 />
@@ -508,11 +517,12 @@ useEffect(() => {
                 onClick={handleStartWindow}
                 disabled={startingWindow}
                 className="inline-flex h-9 items-center rounded-md bg-emerald-700 px-3 text-sm font-semibold text-white shadow-sm hover:bg-emerald-800 disabled:opacity-50"
+                title={prefsWindow.openISO ? "Set a new deadline (opens immediately)" : "Set the opening time and deadline"}
               >
                 {startingWindow
                   ? "Saving…"
                   : prefsWindow.openISO
-                    ? "Restart Window"
+                    ? "Set Deadline"
                     : "Start Window"}
               </button>
             </div>
@@ -565,11 +575,11 @@ useEffect(() => {
           <table className="w-full text-sm table-auto">
             <thead className="bg-gray-50 border-b text-gray-900">
             <tr>
-              <th className="w-[32%] text-left px-4 py-3">Faculty</th>
+              <th className="w-[22%] text-left px-4 py-3">Faculty</th>
               <th className="w-[32%] text-center px-4 py-3">Department</th>
               <th className="w-[13.5%] text-center px-4 py-3">Faculty Type</th>
               <th className="w-[13.5%] text-center px-4 py-3">Last Submitted</th>
-              <th className="w-[13.5%] text-center px-4 py-3">Status</th>
+              <th className="w-[23.5%] text-center px-4 py-3">Status</th>
               <th className="w-[14%] text-center px-4 py-3"> </th>
             </tr>
           </thead>
@@ -654,12 +664,8 @@ useEffect(() => {
               </div>
 
               <div className="p-5">
-                <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-800">
+                <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-800 whitespace-pre-line">
                   {confirmState.message}
-                </div>
-
-                <div className="mt-4 text-xs text-gray-600">
-                  <span className="font-semibold">Note:</span> This action will apply immediately and replace any existing schedule.
                 </div>
 
                 <div className="mt-5 flex items-center justify-end gap-2">

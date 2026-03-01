@@ -1,5 +1,5 @@
 // src/base/Sidebar.tsx
-import { NavLink } from "react-router-dom";
+import { NavLink, useLocation } from "react-router-dom";
 import type { ComponentType } from "react";
 import {
   ListChecks,
@@ -44,18 +44,145 @@ function ClipboardStarIcon({
 }
 
 const defaultItems: SidebarItem[] = [
+  // OM routes are nested under /om/home/* (see App.tsx). Using the real URLs
+  // ensures the active/selected state works correctly.
   { to: "/om/home", label: "Load Assignment", Icon: ListChecks },
   { to: "/om/home/faculty-management", label: "Faculty Directory", Icon: Users },
   { to: "/om/home/course-management", label: "Course Management", Icon: BookOpen },
-  { to: "/om/home/reports-analytics", label: "Reports and Analytics", Icon: BarChart3 },
   { to: "/om/home/faculty-form", label: "Faculty Preferences", Icon: FileText },
   { to: "/om/home/faculty-service", label: "Faculty Service", Icon: ClipboardList },
   { to: "/om/home/student-petition", label: "Student Petition", Icon: FilePlus },
   { to: "/om/home/special-class", label: "Special Class", Icon: ClipboardStarIcon },
   { to: "/om/home/class-retention", label: "Class Retention", Icon: BookMarked },
+  { to: "/om/home/reports-analytics", label: "Reports and Analytics", Icon: BarChart3 },
 ];
 
+function Section({
+  title,
+  items,
+  open,
+  first = false,
+}: {
+  title: string;
+  items: SidebarItem[];
+  open: boolean;
+  first?: boolean;
+}) {
+  const { pathname } = useLocation();
+  return (
+    <>
+      <p
+        className={cls(
+          first
+            ? "px-2 text-xs font-semibold uppercase tracking-wide text-white/90"
+            : "mt-6 px-2 text-xs font-semibold uppercase tracking-wide text-white/90",
+          open ? "block" : "sr-only"
+        )}
+      >
+        {title}
+      </p>
+      <ul className="mt-2 space-y-1">
+        {items.map(({ to, label, Icon }) => (
+          <li key={to}>
+            <NavLink
+              to={to}
+              // IMPORTANT:
+              // /om/home is the parent route for ALL OM pages, so we must NOT
+              // mark it active for every /om/home/* path.
+              end={to === "/om/home"}
+              className={({ isActive }) => {
+                const isOmLoadAlias =
+                  to === "/om/home" && pathname === "/om/home/load-assignment";
+                const active = isActive || isOmLoadAlias;
+                return cls(
+                  "group relative flex items-center gap-3 rounded-md px-3 py-2 text-[15px] font-semibold",
+                  active
+                    ? "bg-white/20 before:content-[''] before:absolute before:left-0 before:top-1 before:bottom-1 before:w-[4px] before:rounded-r-full before:bg-white/90"
+                    : "hover:bg-white/10"
+                );
+              }}
+            >
+              <Icon size={18} className="shrink-0 opacity-95" />
+              <span className={open ? "truncate" : "sr-only"}>{label}</span>
+            </NavLink>
+          </li>
+        ))}
+      </ul>
+    </>
+  );
+}
+
 export default function Sidebar({ open, items = defaultItems }: SidebarProps) {
+  const { pathname } = useLocation();
+  const isOM = pathname.startsWith("/om/");
+  const isCHAIR = pathname.startsWith("/chair/");
+
+  // OM sidebar grouping requested by user:
+  // PLANNING & ANALYTICS
+  //  - Load Assignment
+  //  - Faculty Directory
+  //  - Course Management
+  //  - Faculty Preferences
+  //  - Faculty Service
+  //  - Class Retention
+  //  - Reports and Analytics
+  // STUDENT REQUESTS
+  //  - Student Petition
+  //  - Special Class
+  const byTo = new Map(items.map((it) => [it.to, it] as const));
+  const omPlanningAndAnalytics = (
+    [
+      "/om/home",
+      "/om/home/faculty-management",
+      "/om/home/course-management",
+      "/om/home/faculty-form",
+      "/om/home/faculty-service",
+      "/om/home/class-retention",
+      "/om/home/reports-analytics",
+    ] as const
+  )
+    .map((to) => byTo.get(to))
+    .filter(Boolean) as SidebarItem[];
+
+  const omStudentRequests = ([
+    "/om/home/student-petition",
+    "/om/home/special-class",
+  ] as const)
+    .map((to) => byTo.get(to))
+    .filter(Boolean) as SidebarItem[];
+
+  // CHAIR sidebar grouping requested by user:
+  // PLANNING & ANALYTICS
+  //  - Plantilla
+  //  - Load Assignment
+  //  - Faculty Directory
+  //  - Course Management
+  //  - Faculty Service
+  //  - Class Retention
+  // STUDENT REQUESTS
+  //  - Student Petition
+  //  - Special Class
+  const chairPlanningAndAnalytics = (
+    [
+      "/chair/plantilla",
+      "/chair/load-assignment",
+      "/chair/faculty-management",
+      "/chair/course-management",
+      "/chair/faculty-service",
+      "/chair/class-retention",
+    ] as const
+  )
+    .map((to) => byTo.get(to))
+    .filter(Boolean) as SidebarItem[];
+
+  const chairStudentRequests = (["/chair/student-petitions", "/chair/special-class"] as const)
+    .map((to) => byTo.get(to))
+    .filter(Boolean) as SidebarItem[];
+
+  const hasOMGroups = isOM && omPlanningAndAnalytics.length + omStudentRequests.length > 0;
+  const hasChairGroups =
+    isCHAIR && chairPlanningAndAnalytics.length + chairStudentRequests.length > 0;
+
   return (
     <aside
       className={cls(
@@ -75,53 +202,27 @@ export default function Sidebar({ open, items = defaultItems }: SidebarProps) {
       </div>
 
       <nav className="mt-1 px-3">
-        <p className={cls("px-2 text-xs font-semibold uppercase tracking-wide text-white/90", open ? "block" : "sr-only")}>
-          Main Navigation
-        </p>
-
-        <ul className="mt-2 space-y-1">
-          {items.slice(0, 4).map(({ to, label, Icon }) => (
-            <li key={to}>
-              <NavLink
-                to={to}
-                end={to === "/om/home"}
-                className={({ isActive }) =>
-                  cls(
-                    "group flex items-center gap-3 rounded-md px-3 py-2 text-[15px] font-semibold",
-                    isActive ? "bg-white/20 relative after:content-[''] after:absolute after:left-3 after:right-3 after:-bottom-[2px] after:h-[2px] after:bg-white after:rounded-full" : "hover:bg-white/10"
-                  )
-                }
-              >
-                <Icon size={18} className="shrink-0 opacity-95" />
-                <span className={open ? "truncate" : "sr-only"}>{label}</span>
-              </NavLink>
-            </li>
-          ))}
-        </ul>
-
-        <p className={cls("mt-6 px-2 text-xs font-semibold uppercase tracking-wide text-white/90", open ? "block" : "sr-only")}>
-          Data Management
-        </p>
-
-        <ul className="mt-2 space-y-1">
-          {items.slice(4).map(({ to, label, Icon }) => (
-            <li key={to}>
-              <NavLink
-                to={to}
-                end={to === "/om/home"}
-                className={({ isActive }) =>
-                  cls(
-                    "group flex items-center gap-3 rounded-md px-3 py-2 text-[15px] font-semibold",
-                    isActive ? "bg-white/20 relative after:content-[''] after:absolute after:left-3 after:right-3 after:-bottom-[2px] after:h-[2px] after:bg-white after:rounded-full" : "hover:bg-white/10"
-                  )
-                }
-              >
-                <Icon size={18} className="shrink-0 opacity-95" />
-                <span className={open ? "truncate" : "sr-only"}>{label}</span>
-              </NavLink>
-            </li>
-          ))}
-        </ul>
+        {hasOMGroups ? (
+          <>
+            <Section title="PLANNING & ANALYTICS" items={omPlanningAndAnalytics} open={open} first />
+            <Section title="STUDENT REQUESTS" items={omStudentRequests} open={open} />
+          </>
+        ) : hasChairGroups ? (
+          <>
+            <Section
+              title="PLANNING & ANALYTICS"
+              items={chairPlanningAndAnalytics}
+              open={open}
+              first
+            />
+            <Section title="STUDENT REQUESTS" items={chairStudentRequests} open={open} />
+          </>
+        ) : (
+          <>
+            <Section title="Main Navigation" items={items.slice(0, 4)} open={open} first />
+            <Section title="Data Management" items={items.slice(4)} open={open} />
+          </>
+        )}
       </nav>
     </aside>
   );
