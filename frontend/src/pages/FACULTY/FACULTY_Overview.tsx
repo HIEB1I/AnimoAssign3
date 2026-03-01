@@ -144,6 +144,11 @@ function ToastViewport({
   );
 }
 
+// Shared chip style for course codes shown under Qualified KACs.
+// Requested to match the light-green tone used for "This term:" chips in FACULTY_History.
+const QUALIFIED_KAC_COURSE_CHIP =
+  "inline-flex items-center gap-2 rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-xs text-emerald-900";
+
 const lightRedBtn =
   "inline-flex items-center gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800 hover:bg-red-100";
 
@@ -1103,12 +1108,12 @@ function FacultyProfileTab({
                               {(k as any).courses.map((c: any) => (
                                 <span
                                   key={c.course_id || `${c.course_code}-${c.course_title}`}
-                                  className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs text-slate-900"
+                                  className={QUALIFIED_KAC_COURSE_CHIP}
                                   title={c.course_title || ""}
                                 >
                                   <span className="font-semibold">{c.course_code || "—"}</span>
-                                  <span className="text-slate-400">•</span>
-                                  <span className="max-w-[260px] truncate text-slate-700">{c.course_title || "—"}</span>
+                                  <span className="text-emerald-300">•</span>
+                                  <span className="max-w-[260px] truncate text-emerald-800/90">{c.course_title || "—"}</span>
                                 </span>
                               ))}
                             </div>
@@ -1184,12 +1189,12 @@ function FacultyProfileTab({
                         {(k.courses || []).map((c: any) => (
                           <span
                             key={c.course_id || `${c.course_code}-${c.course_title}`}
-                            className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs text-slate-900"
+                            className={QUALIFIED_KAC_COURSE_CHIP}
                             title={c.course_title || ""}
                           >
                             <span className="font-semibold">{c.course_code || "—"}</span>
-                            <span className="text-slate-400">•</span>
-                            <span className="max-w-[280px] truncate text-slate-700">{c.course_title || "—"}</span>
+                            <span className="text-emerald-300">•</span>
+                            <span className="max-w-[280px] truncate text-emerald-800/90">{c.course_title || "—"}</span>
                           </span>
                         ))}
                       </div>

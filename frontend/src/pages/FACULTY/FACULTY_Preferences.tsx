@@ -2918,7 +2918,7 @@ useEffect(() => {
                 (saved.kac || []).length ? (
                   <div className="flex flex-wrap gap-1.5">
                     {saved.kac.map((k: any) => (
-                      <Tag key={String(k)} tone="blue">
+                      <Tag key={String(k)} tone="emerald">
                         {String(k)}
                       </Tag>
                     ))}
@@ -3113,7 +3113,7 @@ useEffect(() => {
                           (p.kac || []).length ? (
                             <div className="flex flex-wrap gap-1.5">
                               {p.kac.map((k: any) => (
-                                <Tag key={String(k)} tone="blue">
+                                <Tag key={String(k)} tone="emerald">
                                   {String(k)}
                                 </Tag>
                               ))}
@@ -3261,7 +3261,7 @@ useEffect(() => {
                           (p.kac || []).length ? (
                             <div className="flex flex-wrap gap-1.5">
                               {p.kac.map((k: any) => (
-                                <Tag key={String(k)} tone="blue">
+                                <Tag key={String(k)} tone="emerald">
                                   {String(k)}
                                 </Tag>
                               ))}

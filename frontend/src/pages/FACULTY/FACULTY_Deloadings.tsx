@@ -1,10 +1,149 @@
-import { useEffect, useMemo, useState } from "react";
-import { ChevronLeft, Pencil, Check, X } from "lucide-react";
+import React, { useEffect, useMemo, useState } from "react";
+import { ChevronLeft, Edit, Check, X } from "lucide-react";
 import { Link } from "react-router-dom";
-import SelectBox from "../../component/SelectBox";
 import { API_BASE } from "../../api";
 
 const cls = (...s: (string | false | undefined)[]) => s.filter(Boolean).join(" ");
+
+// ---------- shared Dropdown (copied from FACULTY_History for parity) ----------
+function Dropdown({
+  value,
+  onChange,
+  options,
+  className = "w-full",
+  placeholder = "— Select an option —",
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  options: string[];
+  className?: string;
+  placeholder?: string;
+}) {
+  const [open, setOpen] = React.useState(false);
+  const [hover, setHover] = React.useState(() =>
+    Math.max(0, options.findIndex((o) => o === value))
+  );
+  const btnRef = React.useRef<HTMLButtonElement>(null);
+  const listRef = React.useRef<HTMLDivElement>(null);
+
+  React.useEffect(
+    () => setHover(Math.max(0, options.findIndex((o) => o === value))),
+    [value, options]
+  );
+
+  React.useEffect(() => {
+    const close = (e: MouseEvent) =>
+      open &&
+      !btnRef.current?.contains(e.target as Node) &&
+      !listRef.current?.contains(e.target as Node) &&
+      setOpen(false);
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [open]);
+
+  const onKey = (e: React.KeyboardEvent) => {
+    if (!open && ["ArrowDown", "Enter", " "].includes(e.key)) {
+      e.preventDefault();
+      setOpen(true);
+      return;
+    }
+    if (!open) return;
+    if (e.key === "Escape") {
+      e.preventDefault();
+      setOpen(false);
+      btnRef.current?.focus();
+    }
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setHover((i) => (i + 1) % options.length);
+    }
+    if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setHover((i) => (i - 1 + options.length) % options.length);
+    }
+    if (e.key === "Enter") {
+      e.preventDefault();
+      onChange(options[hover] ?? options[0]);
+      setOpen(false);
+      btnRef.current?.focus();
+    }
+  };
+
+  return (
+    <div className={cls("relative", className)} onKeyDown={onKey}>
+      <button
+        ref={btnRef}
+        onClick={() => setOpen((v) => !v)}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        className={cls(
+          "w-full min-w-0 rounded-xl border border-gray-200 bg-white py-2.5 pl-3 pr-10 text-left text-sm shadow-sm outline-none",
+          "hover:bg-gray-50 focus:ring-2 focus:ring-emerald-500/30"
+        )}
+      >
+        <span className="block min-w-0 truncate">
+          {value || <span className="text-gray-400">{placeholder}</span>}
+        </span>
+        <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2">
+          ▾
+        </span>
+      </button>
+
+      {open && (
+        <div
+          ref={listRef}
+          role="listbox"
+          className="absolute z-20 mt-2 max-h-80 w-full overflow-auto rounded-2xl border border-gray-300 bg-white shadow-lg"
+        >
+          {options.map((opt, i) => (
+            <button
+              key={opt}
+              role="option"
+              aria-selected={value === opt}
+              onMouseEnter={() => setHover(i)}
+              onClick={() => {
+                onChange(opt);
+                setOpen(false);
+                btnRef.current?.focus();
+              }}
+              className={cls(
+                "block w-full px-4 py-3 text-left text-sm",
+                i === hover && "bg-emerald-50"
+              )}
+            >
+              {opt}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------- legacy SelectBox used in the embedded edit form ----------
+// Kept as a thin wrapper around Dropdown to preserve existing behavior
+// while keeping the UI consistent and avoiding TS errors.
+function SelectBox({
+  value,
+  onChange,
+  options,
+  className = "w-full",
+}: {
+  value: string;
+  onChange: (label: string) => void;
+  options: string[];
+  className?: string;
+}) {
+  return (
+    <Dropdown
+      value={value}
+      onChange={onChange}
+      options={options}
+      className={className}
+      placeholder="Select…"
+    />
+  );
+}
 
 const lightRedBtn =
   "inline-flex items-center gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800 shadow-sm hover:bg-red-100";
@@ -60,14 +199,34 @@ export default function FACULTY_Deloadings({ embedded = false }: { embedded?: bo
 
   function labelOf(t: TermLite) {
     const ayEnd = t.acad_year_start + 1;
-    return `AY ${t.acad_year_start}–${ayEnd} • Term ${t.term_number}${t.is_current ? " (Current)" : ""}`;
+    return `AY ${t.acad_year_start}–${ayEnd} • Term ${t.term_number}`;
   }
 
   const currentLabel = useMemo(
     () => (data?.term ? labelOf(data.term) : ""),
     [data?.term]
   );
-  const termLabels = useMemo(() => terms.map(labelOf), [terms]);
+  // Most-recent first, to match FACULTY_History's navigation direction.
+  const termOptions = useMemo(() => {
+    const sorted = [...terms].sort((a, b) => {
+      if (a.acad_year_start !== b.acad_year_start) return b.acad_year_start - a.acad_year_start;
+      return b.term_number - a.term_number;
+    });
+    return sorted.map(labelOf);
+  }, [terms]);
+
+  const labelToTermId = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const t of terms) m.set(labelOf(t), t.term_id);
+    return m;
+  }, [terms]);
+
+  const termIndex = useMemo(
+    () => termOptions.findIndex((o) => o === currentLabel),
+    [termOptions, currentLabel]
+  );
+  const atFirst = termIndex <= 0 || termOptions.length === 0;
+  const atLast = termIndex === termOptions.length - 1 || termOptions.length === 0;
 
   async function load(direction: "current" | "next" | "prev" = "current", anchor?: string) {
     const userId = getUserId();
@@ -177,10 +336,22 @@ export default function FACULTY_Deloadings({ embedded = false }: { embedded?: bo
   }
 
   const onSelectTerm = (label: string) => {
-    const idx = termLabels.indexOf(label);
-    if (idx >= 0 && terms[idx]) {
-      load("current", terms[idx].term_id);
-    }
+    const termId = labelToTermId.get(label);
+    if (termId) load("current", termId);
+  };
+
+  const goPrev = () => {
+    // Prev = newer (toward index 0), consistent with FACULTY_History
+    const i = termOptions.indexOf(currentLabel);
+    if (i > 0) onSelectTerm(termOptions[i - 1]);
+    else if (!currentLabel && termOptions.length) onSelectTerm(termOptions[0]);
+  };
+
+  const goNext = () => {
+    // Next = older (toward end), consistent with FACULTY_History
+    const i = termOptions.indexOf(currentLabel);
+    if (i >= 0 && i < termOptions.length - 1) onSelectTerm(termOptions[i + 1]);
+    else if (i === -1 && termOptions.length) onSelectTerm(termOptions[0]);
   };
 
   useEffect(() => {
@@ -224,39 +395,50 @@ export default function FACULTY_Deloadings({ embedded = false }: { embedded?: bo
               "flex flex-wrap items-center gap-2",
               embedded ? "order-1" : "order-2"
             )}>
-              <button
-                onClick={() => load("prev")}
-                disabled={!data?.has_prev || loading}
-                className={`rounded-lg border px-3 py-2 text-sm font-semibold ${
-                !data?.has_prev || loading
-                  ? "cursor-default border-gray-200 bg-gray-100 text-gray-500"
-                  : "cursor-pointer border-[#007a55] bg-[#007a55] text-white hover:bg-[#006a4a]"
-              }`}
-                title="Previous term"
-              >
-                ← Prev
-              </button>
+              {/* Dropdown with Prev (left) / Next (right) controls
+                  (Look + behavior aligned with FACULTY_History's AY controls) */}
+              {/* Match FACULTY_History sizing + layout for identical look */}
+              <div className="w-full sm:w-[360px] md:w-[420px]">
+                <div className="grid w-full grid-cols-1 items-center gap-2 sm:grid-cols-[auto_minmax(0,1fr)_auto]">
+                  <button
+                    type="button"
+                    onClick={goPrev}
+                    disabled={atFirst}
+                    className={`shrink-0 w-full sm:w-auto whitespace-nowrap rounded-lg border px-3 py-2 text-sm font-semibold ${
+                      atFirst
+                        ? "cursor-default border-gray-200 bg-gray-100 text-gray-500"
+                        : "cursor-pointer border-[#007a55] bg-[#007a55] text-white hover:bg-[#006a4a]"
+                    }`}
+                    title="Previous academic year"
+                  >
+                    ‹ Prev AY
+                  </button>
 
-              <div className="min-w-[260px]">
-                <SelectBox
-                  value={currentLabel}
-                  onChange={onSelectTerm}
-                  options={termLabels}
-                />
+                  <div className="min-w-0 w-full">
+                    <Dropdown
+                      value={currentLabel}
+                      onChange={onSelectTerm}
+                      options={termOptions}
+                      placeholder="Select academic year"
+                      className="w-full"
+                    />
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={goNext}
+                    disabled={atLast}
+                    className={`shrink-0 w-full sm:w-auto whitespace-nowrap rounded-lg border px-3 py-2 text-sm font-semibold ${
+                      atLast
+                        ? "cursor-default border-gray-200 bg-gray-100 text-gray-500"
+                        : "cursor-pointer border-[#007a55] bg-[#007a55] text-white hover:bg-[#006a4a]"
+                    }`}
+                    title="Next academic year"
+                  >
+                    Next AY ›
+                  </button>
+                </div>
               </div>
-
-              <button
-                onClick={() => load("next")}
-                disabled={!data?.has_next || loading}
-                className={`rounded-lg border px-3 py-2 text-sm font-semibold ${
-                  !data?.has_next || loading
-                    ? "cursor-default border-gray-200 bg-gray-100 text-gray-500"
-                    : "cursor-pointer border-[#007a55] bg-[#007a55] text-white hover:bg-[#006a4a]"
-                }`}
-                title="Next term"
-              >
-                Next →
-              </button>
             </div>
 
             {/* RIGHT: edit controls (embedded only) */}
@@ -268,7 +450,7 @@ export default function FACULTY_Deloadings({ embedded = false }: { embedded?: bo
                     onClick={startEdit}
                     title="Edit deloading"
                   >
-                    <Pencil className="h-4 w-4" />
+                    <Edit className="h-4 w-4" />
                   </button>
                 )}
 
