@@ -33,6 +33,22 @@ interface TopBarProps {
   inboxEvent?: string;
 }
 
+// IMPORTANT:
+// When the parent does not pass a `notifications` prop, we must NOT default it to
+// a fresh `[]` on every render.
+//
+// Why: this TopBar keeps a local `notifications` state and has a useEffect that
+// syncs state when `incomingNotifs` changes. If `incomingNotifs` is a new array
+// each render, the effect will fire each render and overwrite fetched
+// notifications with an empty list, making the bell look like it has
+// "No notifications" even when the backend has rows.
+// NOTE: TopBarProps["notifications"] is optional, so its type is
+//   Notif[] | undefined
+// We want a *non-optional* array type here so TS knows `incomingNotifs` is never
+// undefined.
+type IncomingNotifs = NonNullable<TopBarProps["notifications"]>;
+const EMPTY_NOTIFS: IncomingNotifs = [];
+
 /**
  * Universal TopBar used by Admin, APO, and Faculty roles.
  * - Dynamic gradient bar and account dropdown
@@ -40,14 +56,17 @@ interface TopBarProps {
  * - Optional department + notifications
  * - Inbox button: navigate to inboxPath if provided; otherwise dispatches inboxEvent
  */
-export default function TopBar({
-  fullName,
-  role,
-  department,
-  notifications: incomingNotifs = [],
-  inboxEvent = "faculty:openInbox",
-  inboxPath,
-}: TopBarProps) {
+export default function TopBar(props: TopBarProps) {
+  const {
+    fullName,
+    role,
+    department,
+    inboxEvent = "faculty:openInbox",
+    inboxPath,
+  } = props;
+
+  const incomingNotifs: IncomingNotifs = props.notifications ?? EMPTY_NOTIFS;
+
   const navigate = useNavigate();
   const { unreadTotal } = useInboxBadge();
   const hasInboxUnread = unreadTotal > 0;
@@ -134,20 +153,20 @@ export default function TopBar({
     return [];
   });
 
-  // Keep state in sync when new notifications come in
+  // If a screen provides notifications explicitly, reflect them.
+  // IMPORTANT: do NOT overwrite backend-fetched notifications with an empty array
+  // (many screens don't pass notifications at all).
   useEffect(() => {
-    if (!incomingNotifs) return;
+    if (!incomingNotifs.length) return;
     setNotifications(
-      incomingNotifs.length
-        ? incomingNotifs.map((n: any) => ({
-            id: String(n?.notif_id || n?.id || Math.random()),
-            title: String(n?.title || ""),
-            details: String(n?.details || ""),
-            time: pickNotifTime(n) || new Date(),
-            seen: !!n?.seen,
-            meta: n?.meta,
-          }))
-        : []
+      incomingNotifs.map((n: any) => ({
+        id: String(n?.notif_id || n?.id || Math.random()),
+        title: String(n?.title || ""),
+        details: String(n?.details || ""),
+        time: pickNotifTime(n) || new Date(),
+        seen: !!n?.seen,
+        meta: n?.meta,
+      }))
     );
   }, [incomingNotifs]);
 

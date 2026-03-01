@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import re
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Body
@@ -9,8 +10,9 @@ from pymongo.errors import DuplicateKeyError
 from bson import ObjectId
 
 from ..main import db
+from ..Notifications import create_notification
 
-router = APIRouter(prefix="/chair", tags=["chair"])
+router = APIRouter(prefix="/om", tags=["om"])
 
 # --- collections ---
 COL_CLASS_RETENTION = "class_retention"
@@ -60,6 +62,202 @@ async def _ensure_section_remarks_tag(section_id: Optional[str], status: str, no
         {"section_id": sid},
         {"$set": {"remarks": new_remarks, "updated_at": now}},
     )
+
+# --- Notifications: OM Class Retention -> APO ---------------------------------
+# When OM marks a section as "Dissolved", APO should be notified via:
+#   1) in-app bell (notifications collection)
+#   2) Gmail (best-effort)
+# We mirror the recipient-resolution logic from OM_LoadAssignment.
+async def _resolve_actor_user_id(raw: str | None) -> str:
+    """Resolve a possibly-ObjectId user identifier into canonical users.user_id."""
+    s = str(raw or "").strip()
+    if not s:
+        return ""
+    if s.upper().startswith("USR"):
+        return s
+    # Best-effort ObjectId -> users.user_id
+    try:
+        if len(s) == 24:
+            oid = ObjectId(s)
+            u = await db[COL_USERS].find_one({"_id": oid}, {"_id": 0, "user_id": 1})
+            resolved = str((u or {}).get("user_id") or "").strip()
+            return resolved or s
+    except Exception:
+        pass
+    return s
+
+# NOTE: Recipient resolution mirrors OM_LoadAssignment._apo_user_ids_for_campus
+# and APO_CourseOfferings.apo_scope(). This is important because hardcoding a
+# role_id (e.g., ROLE0004) is risky across deployments.
+
+async def _apo_user_ids_for_campus(campus_id: str) -> list[str]:
+    """Return APO user_ids scoped to the given campus (best-effort)."""
+
+    campus_id = (campus_id or "").strip().upper()
+    if not campus_id:
+        return []
+
+    # Prefer dynamic APO role_id from user_roles.
+    ROLE_APO = ""
+    try:
+        role_doc = await db.get_collection("user_roles").find_one(
+            {"role_type": {"$regex": "^APO$", "$options": "i"}},
+            {"_id": 0, "role_id": 1},
+        )
+        ROLE_APO = str((role_doc or {}).get("role_id") or "").strip()
+    except Exception:
+        ROLE_APO = ""
+
+    if not ROLE_APO:
+        ROLE_APO = "ROLE0004"  # legacy fallback
+
+    def _scope_has_campus(scope_val: Any) -> bool:
+        if not scope_val:
+            return False
+        scopes = scope_val if isinstance(scope_val, list) else [scope_val]
+        for s in scopes:
+            if not isinstance(s, dict):
+                continue
+            typ = str(s.get("type") or s.get("scope_type") or "").strip().lower()
+            sid = str(s.get("id") or s.get("scope_id") or s.get("campus_id") or "").strip().upper()
+            if sid == campus_id and (typ in ("campus", "campuses", "") or "campus" in typ):
+                return True
+        return False
+
+    out: set[str] = set()
+
+    # 1) role_assignments with campus scope (primary behavior)
+    try:
+        docs = (
+            await db.get_collection("role_assignments")
+            .find({"role_id": ROLE_APO}, {"_id": 0, "user_id": 1, "scope": 1})
+            .to_list(None)
+        )
+    except Exception:
+        docs = []
+
+    for d in docs or []:
+        uid = str((d or {}).get("user_id") or "").strip()
+        if not uid:
+            continue
+        if _scope_has_campus((d or {}).get("scope")):
+            out.add(uid)
+
+    # 2) Legacy fallback: users.role field + users.campus_id
+    try:
+        cur = db.get_collection(COL_USERS).find(
+            {"role": {"$regex": r"\bAPO\b", "$options": "i"}, "campus_id": campus_id},
+            {"_id": 0, "user_id": 1},
+        )
+        async for u in cur:
+            uid = str((u or {}).get("user_id") or "").strip()
+            if uid:
+                out.add(uid)
+    except Exception:
+        pass
+
+    return sorted(list(out))
+
+
+async def _all_apo_user_ids() -> list[str]:
+    """Return all APO user_ids (best-effort)."""
+
+    uids: set[str] = set()
+
+    # 1) role_assignments for APO role
+    try:
+        apo_role = await db.get_collection("user_roles").find_one(
+            {"role_type": {"$regex": "^APO$", "$options": "i"}},
+            {"_id": 0, "role_id": 1},
+        )
+        apo_role_id = str((apo_role or {}).get("role_id") or "").strip()
+        if apo_role_id:
+            cur = db.get_collection("role_assignments").find(
+                {"role_id": apo_role_id},
+                {"_id": 0, "user_id": 1},
+            )
+            async for r in cur:
+                uid = str((r or {}).get("user_id") or "").strip()
+                if uid:
+                    uids.add(uid)
+    except Exception:
+        pass
+
+    # 2) legacy users.role field
+    try:
+        cur2 = db.get_collection(COL_USERS).find(
+            {"role": {"$regex": r"\bAPO\b", "$options": "i"}},
+            {"_id": 0, "user_id": 1},
+        )
+        async for r in cur2:
+            uid = str((r or {}).get("user_id") or "").strip()
+            if uid:
+                uids.add(uid)
+    except Exception:
+        pass
+
+    return sorted(uids)
+def _fmt_course_code(course_doc: dict) -> str:
+    cc = (course_doc or {}).get("course_code")
+    if isinstance(cc, list):
+        return str(cc[0] if cc else "").strip()
+    return str(cc or "").strip()
+async def _notify_apo_class_dissolved(*, term_id: str, course_id: str, section_id: str, enrolled: int | None, actor_user_id: str) -> None:
+    """Send in-app + Gmail notification to APO users for a dissolved section."""
+
+    # Fetch course + section info (best-effort)
+    course = await db[COL_COURSES].find_one({"course_id": course_id}, {"_id": 0, "course_code": 1, "course_title": 1}) or {}
+    sec = await db[COL_SECTIONS].find_one({"section_id": section_id}, {"_id": 0, "section_code": 1, "campus_id": 1, "enrolled": 1}) or {}
+
+    course_code = _fmt_course_code(course)
+    course_title = str(course.get("course_title") or "").strip()
+    section_code = str(sec.get("section_code") or "").strip()
+    campus_id = str(sec.get("campus_id") or "").strip()
+
+    eff_enrolled = enrolled
+    if eff_enrolled is None:
+        try:
+            eff_enrolled = int(sec.get("enrolled")) if sec.get("enrolled") is not None else None
+        except Exception:
+            eff_enrolled = None
+
+    title = "Class dissolved (low enrollment)"
+    details = (
+        "OM marked this section as Dissolved due to low enrollment.\n\n"
+        f"Course: {course_code}{(' — ' + course_title) if course_title else ''}\n"
+        f"Section: {section_code or section_id}{(' (enrolled: ' + str(eff_enrolled) + ')') if eff_enrolled is not None else ''}"
+    )
+
+    meta = {
+        "kind": "om_classretention_dissolved",
+        "route": "/apo/courseofferings",
+        "term_id": term_id,
+        "course_id": course_id,
+        "section_id": section_id,
+        "campus_id": campus_id,
+        "course_code": course_code,
+        "section_code": section_code,
+    }
+
+    # Resolve APO recipients
+    recipients = await _apo_user_ids_for_campus(campus_id) if campus_id else []
+    if not recipients:
+        recipients = await _all_apo_user_ids()
+
+    # Send best-effort to all recipients
+    for uid in recipients:
+        try:
+            await create_notification(
+                user_id=uid,
+                title=title,
+                details=details,
+                meta=meta,
+                send_email=True,
+                email_from_user_id=actor_user_id or None,
+            )
+        except Exception:
+            # Best-effort: do not block save if notification fails
+            pass
 
 # indexes (safe with Motor or PyMongo; ignore failures)
 try:
@@ -554,11 +752,19 @@ async def cr_get(
 
 
 @router.post("/classretention")
-async def cr_post(action: str = Query(...), payload: Dict[str, Any] = Body(default={})):
+async def cr_post(
+    action: str = Query(...),
+    userId: Optional[str] = Query(None),
+    user_id: Optional[str] = Query(None),
+    payload: Dict[str, Any] = Body(default={}),
+):
     now = datetime.utcnow()
 
     if action == "save":
         rid = payload.get("retention_id")
+
+        # actor user id (used as Gmail sender when available)
+        actor_user_id = await _resolve_actor_user_id(userId or user_id)
 
         # normalize & validate enrolled
         if "enrolled" in payload:
@@ -576,6 +782,13 @@ async def cr_post(action: str = Query(...), payload: Dict[str, Any] = Body(defau
                 _id = ObjectId(rid)
             except Exception:
                 raise HTTPException(status_code=400, detail="Invalid retention_id")
+
+            # Load the current row so we can detect status transitions (e.g., Under Review -> Dissolved).
+            existing_doc = await db[COL_CLASS_RETENTION].find_one(
+                {"_id": _id},
+                {"_id": 0, "status": 1, "term_id": 1, "course_id": 1, "section_id": 1, "enrolled": 1},
+            ) or {}
+            old_status = str(existing_doc.get("status") or "").strip()
 
             allowed = [
                 "term_id", "course_id", "section_id",
@@ -629,6 +842,19 @@ async def cr_post(action: str = Query(...), payload: Dict[str, Any] = Body(defau
             # so APO_CourseOfferings + OM_LoadAssignment can display it.
             status_effective = (update_doc.get("status") or existing_status or "").strip()
             await _ensure_section_remarks_tag(section_id_for_fac, status_effective, now)
+
+            # Notify APO when transitioning into Dissolved
+            try:
+                if old_status.strip().lower() != 'dissolved' and status_effective.strip().lower() == 'dissolved':
+                    await _notify_apo_class_dissolved(
+                        term_id=str(out.get('term_id') or update_doc.get('term_id') or existing_doc.get('term_id') or ''),
+                        course_id=str(out.get('course_id') or update_doc.get('course_id') or existing_doc.get('course_id') or ''),
+                        section_id=str(section_id_for_fac or out.get('section_id') or existing_doc.get('section_id') or ''),
+                        enrolled=payload.get('enrolled') if 'enrolled' in payload else existing_doc.get('enrolled'),
+                        actor_user_id=actor_user_id,
+                    )
+            except Exception:
+                pass
             return {"ok": True, "retention_id": rid}
 
         # CREATE
@@ -674,6 +900,19 @@ async def cr_post(action: str = Query(...), payload: Dict[str, Any] = Body(defau
         # so APO_CourseOfferings + OM_LoadAssignment can display it.
         await _ensure_section_remarks_tag(doc.get("section_id"), doc.get("status") or "", now)
 
+        # Notify APO if the row is created as Dissolved
+        try:
+            if str(doc.get('status') or '').strip().lower() == 'dissolved':
+                await _notify_apo_class_dissolved(
+                    term_id=str(doc.get('term_id') or ''),
+                    course_id=str(doc.get('course_id') or ''),
+                    section_id=str(doc.get('section_id') or ''),
+                    enrolled=doc.get('enrolled'),
+                    actor_user_id=actor_user_id,
+                )
+        except Exception:
+            pass
+
         return {"ok": True, "retention_id": str(res.inserted_id)}
 
     if action == "delete":
@@ -692,6 +931,9 @@ async def cr_post(action: str = Query(...), payload: Dict[str, Any] = Body(defau
         new_status = payload.get("to_status") or "Under Review"
         if new_status not in STATUS_OPTIONS:
             raise HTTPException(status_code=400, detail="Invalid status")
+
+        actor_user_id = await _resolve_actor_user_id(userId or user_id)
+
         obj_ids: List[ObjectId] = []
         for s in ids:
             try:
@@ -700,10 +942,38 @@ async def cr_post(action: str = Query(...), payload: Dict[str, Any] = Body(defau
                 continue
         if not obj_ids:
             return {"ok": True, "matched": 0, "modified": 0}
+
+        # Fetch current docs so we can detect transitions to Dissolved
+        docs = await db[COL_CLASS_RETENTION].find(
+            {"_id": {"$in": obj_ids}},
+            {"_id": 1, "status": 1, "term_id": 1, "course_id": 1, "section_id": 1, "enrolled": 1},
+        ).to_list(None)
+
         res = await db[COL_CLASS_RETENTION].update_many(
             {"_id": {"$in": obj_ids}},
             {"$set": {"status": new_status, "updated_at": now}},
         )
+
+        # Write section remarks + notify APO only for transitions into Dissolved
+        if str(new_status).strip().lower() == "dissolved":
+            for d in docs or []:
+                old_status = str((d or {}).get("status") or "").strip().lower()
+                if old_status == "dissolved":
+                    continue
+                sid = str((d or {}).get("section_id") or "").strip()
+                if sid:
+                    await _ensure_section_remarks_tag(sid, "Dissolved", now)
+                try:
+                    await _notify_apo_class_dissolved(
+                        term_id=str((d or {}).get("term_id") or ""),
+                        course_id=str((d or {}).get("course_id") or ""),
+                        section_id=sid,
+                        enrolled=(d or {}).get("enrolled"),
+                        actor_user_id=actor_user_id,
+                    )
+                except Exception:
+                    pass
+
         return {"ok": True, "matched": res.matched_count, "modified": res.modified_count}
 
     raise HTTPException(status_code=400, detail="Unsupported action")

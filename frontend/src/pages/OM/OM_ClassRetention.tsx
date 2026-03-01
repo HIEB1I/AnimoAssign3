@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Search, Plus, Check, X, Trash2, Edit, Download, ChevronDown } from "lucide-react";
 import { cls } from "../../utilities/cls";
 import SelectBox from "../../component/SelectBox";
+import { getSessionUserId } from "../../lib/session";
 import {
   getOMCR_Options,
   listOMCR,
@@ -170,7 +171,7 @@ export default function OM_ClassRetention(
         enrolled: draft.enrolled ?? null,
         // faculty_id is auto-derived on backend
       };
-      await saveOMCR(payload);
+      await saveOMCR(payload, getSessionUserId() || undefined);
       setAdding(false);
       setEditingId(null);
       setDraft({});
