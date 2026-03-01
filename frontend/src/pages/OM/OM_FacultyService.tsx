@@ -68,9 +68,9 @@ export default function OM_FacultyService() {
   }, [userId]);
 
   return (
-    <div className="space-y-4">
-      {/* Mirror the CHAIR faculty service UI, pinning department from OM context. */}
-      <CHAIR_FacultyService chairDepartmentName={deptName || undefined} />
-    </div>
+    <main className="w-full px-8 py-8">
+      {/* OM page wrapper (matches Special Class / Class Retention / Student Petition layout) */}
+      <CHAIR_FacultyService chairDepartmentName={deptName || undefined} variant="embedded" />
+    </main>
   );
 }

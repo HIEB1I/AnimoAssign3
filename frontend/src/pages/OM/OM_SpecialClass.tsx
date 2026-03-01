@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Search as SearchIcon, Edit, Check, Eraser, ChevronDown, Eye, X, Download, MessageSquareText, Send } from "lucide-react";
+import { Search as SearchIcon, Edit, Check, ChevronDown, Eye, X, Download, MessageSquareText, Send } from "lucide-react";
 import SelectBox from "../../component/SelectBox";
 import { cls } from "../../utilities/cls";
 import {
@@ -414,7 +414,7 @@ function DetailRow({ label, value }: { label: string; value: any }) {
   );
 }
 
-export default function OM_SpecialClass() {
+export default function OM_SpecialClass({ hideMessageIcon = false }: { hideMessageIcon?: boolean } = {}) {
   const [status, setStatus] = useState("All Status");
   const [searchInput, setSearchInput] = useState("");
   const [q, setQ] = useState("");
@@ -939,29 +939,16 @@ export default function OM_SpecialClass() {
     }));
   };
 
-  const clearAllDraft = () => {
-    // Clear EVERYTHING: faculty + section + schedule
-    setDidClearAll(true);
+  const cancelEdit = () => {
+    setEditId(null);
+    setDraft({});
+    setPresets([]);
     setPresetChoice("CUSTOM");
-
-    setDraft((d) => ({
-      ...d,
-      faculty_id: null,
-      section_id: null,
-      section_code: "",
-      day1: "" as any,
-      begin1: "",
-      end1: "",
-      day2: "" as any,
-      begin2: "",
-      end2: "",
-      schedule_id1: null,
-      schedule_id2: null,
-      assignment_id: null,
-    }));
-
     setFacultyInput("");
+    setDidClearAll(false);
+    setClearMode("none");
   };
+
   const saveEdit = async () => {
     if (!editId) return;
 
@@ -1182,7 +1169,7 @@ export default function OM_SpecialClass() {
 
                 <th className="text-center px-4 py-2 whitespace-nowrap">Status</th>
                 <th className="text-left px-4 py-2 whitespace-nowrap">Remarks</th>
-                <th className="w-20 px-4 py-2 text-center whitespace-nowrap">Action</th>
+                <th className="w-20 px-4 py-2 text-center whitespace-nowrap"> </th>
               </tr>
             </thead>
 
@@ -1500,78 +1487,85 @@ export default function OM_SpecialClass() {
                         )}
                       </td>
 
-                      <td className="px-4 py-3">
-                        <div className="flex items-center justify-center gap-2">
-                          {editing ? (
-                            <>
-                              <button
-                                onClick={saveEdit}
-                                className="flex h-8 w-8 items-center justify-center rounded-full border-2 border-green-600 text-green-600 hover:bg-green-50"
-                                title="Save"
-                              >
-                                <Check className="h-4 w-4" />
-                              </button>
+                      <td className="px-2 py-3 whitespace-nowrap">
+  <div className="flex items-center justify-center gap-1">
+    {editing ? (
+      <>
+        <button
+          onClick={saveEdit}
+          className="flex h-8 w-8 items-center justify-center rounded-full border-2 border-green-600 text-green-600 hover:bg-green-50"
+          title="Save"
+          aria-label="Save"
+        >
+          <Check className="h-4 w-4" />
+        </button>
 
-                              <button
-                                type="button"
-                                onClick={clearAllDraft}
-                                className="flex h-8 w-8 items-center justify-center rounded-full border-2 border-red-600 text-red-600 hover:bg-red-50"
-                                title="Clear all fields"
-                              >
-                                <Eraser className="h-4 w-4" />
-                              </button>
-                            </>
-                          ) : (
-                            <>
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setConv({
-                                    open: true,
-                                    termId: r.term_id,
-                                    facultyId: r.faculty_id ?? null,
-                                    facultyName: r.faculty_name || "UNASSIGNED",
-                                    sectionId: r.special_id,
-                                  });
-                                }}
-                                disabled={!r.faculty_id}
-                                className={cls(
-                                  "relative flex h-8 w-8 items-center justify-center rounded-full border border-purple-200 text-purple-700",
-                                  "hover:bg-purple-50",
-                                  !r.faculty_id && "opacity-50 cursor-not-allowed hover:bg-transparent"
-                                )}
-                                title={r.faculty_id ? "Message" : "Assign a faculty first to open conversation"}
-                                aria-label="Message"
-                              >
-                                <MessageSquareText className="h-4 w-4" />
-                                {Boolean((r as any)?.rfc_needs_om) && (
-                                  <span
-                                    className="absolute -top-0.5 -right-0.5 h-2.5 w-2.5 rounded-full bg-red-600"
-                                    aria-label="New message"
-                                    title="New message"
-                                  />
-                                )}
-                              </button>
+        <button
+          type="button"
+          onClick={cancelEdit}
+          className="flex h-8 w-8 items-center justify-center rounded-full border-2 border-red-600 text-red-600 hover:bg-red-50"
+          title="Cancel"
+          aria-label="Cancel"
+        >
+          <X className="h-4 w-4" />
+        </button>
+      </>
+    ) : (
+      <>
+        {!hideMessageIcon && (
+        <button
+          type="button"
+          onClick={() => {
+            setConv({
+              open: true,
+              termId: r.term_id,
+              facultyId: r.faculty_id ?? null,
+              facultyName: r.faculty_name || "UNASSIGNED",
+              sectionId: r.special_id,
+            });
+          }}
+          disabled={!r.faculty_id}
+          className={cls(
+            "relative inline-flex items-center justify-center p-1 rounded-md text-blue-700 hover:bg-blue-50",
+            !r.faculty_id && "opacity-50 cursor-not-allowed hover:bg-transparent"
+          )}
+          title={r.faculty_id ? "Message" : "Assign a faculty first to open conversation"}
+          aria-label="Message"
+        >
+          <MessageSquareText className="h-4 w-4" />
+          {Boolean((r as any)?.rfc_needs_om) && (
+            <span
+              className="absolute -top-0.5 -right-0.5 h-2.5 w-2.5 rounded-full bg-red-600"
+              aria-label="New message"
+              title="New message"
+            />
+          )}
+        </button>
+        )}
 
-                              <button
-                                onClick={() => openView(r)}
-                                className="flex h-8 w-8 items-center justify-center rounded-full border border-gray-200 text-gray-700 hover:bg-gray-50"
-                                title="View Application"
-                              >
-                                <Eye className="h-4 w-4" />
-                              </button>
+        <button
+          type="button"
+          onClick={() => openView(r)}
+          className="inline-flex items-center justify-center p-1 rounded-md text-gray-700 hover:bg-gray-100"
+          title="View Application"
+          aria-label="View Application"
+        >
+          <Eye className="h-4 w-4" />
+        </button>
 
-                              <button
-                                onClick={() => beginEdit(r)}
-                                className="flex h-8 w-8 items-center justify-center rounded-full border border-emerald-200 text-emerald-700 hover:bg-emerald-50"
-                                title="Edit"
-                              >
-                                <Edit className="h-4 w-4" />
-                              </button>
-                            </>
-                          )}
-                        </div>
-                      </td>
+        <button
+          type="button"
+          onClick={() => beginEdit(r)}
+          className="inline-flex items-center justify-center p-1 rounded-md text-emerald-700 hover:bg-emerald-50"
+          title="Edit"
+          aria-label="Edit"
+        >
+          <Edit className="h-4 w-4" />
+        </button>
+      </>
+    )}
+  </div>
+</td>
                     </tr>
                   );
                 })
@@ -1711,6 +1705,7 @@ export default function OM_SpecialClass() {
       )}
 
       {/* Special Class conversation (RFC thread) */}
+      {!hideMessageIcon && (
       <SpecialConversationModal
         open={!!conv?.open}
         onClose={() => setConv(null)}
@@ -1721,6 +1716,7 @@ export default function OM_SpecialClass() {
         sectionId={conv?.sectionId}
         onToast={toast}
       />
+      )}
     </main>
   );
 }

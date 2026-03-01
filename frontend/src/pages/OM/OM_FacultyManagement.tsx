@@ -1,12 +1,12 @@
 /* ------------- OM_FacultyManagement.tsx ------------- */
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import SelectBox from "../../component/SelectBox";
 import { cls } from "../../utilities/cls";
 import {
   Search as SearchIcon,
-  Users,
   Calendar,
   BookOpen,
+  MoreVertical,
   X as XIcon,
 } from "lucide-react";
 
@@ -18,47 +18,6 @@ import {
   type FacultyRow,
   type FMOptions,
 } from "../../api";
-
-function InitialsAvatar({ name }: { name: string }) {
-  const initials = useMemo(() => {
-    const parts = (name || "").trim().split(/\s+/).filter(Boolean);
-    const a = parts[0]?.[0] ?? "?";
-    const b = parts.length > 1 ? parts[parts.length - 1]?.[0] ?? "" : "";
-    return (a + b).toUpperCase();
-  }, [name]);
-
-  return (
-    <span
-      aria-hidden="true"
-      className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-gray-100 text-[12px] font-semibold text-gray-700 ring-1 ring-inset ring-gray-200"
-    >
-      {initials}
-    </span>
-  );
-}
-
-function ActionButton({
-  onClick,
-  icon,
-  label,
-}: {
-  onClick: () => void;
-  icon: ReactNode;
-  label: string;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs font-medium text-gray-700 shadow-sm hover:bg-gray-50"
-      title={label}
-      aria-label={label}
-    >
-      <span className="text-gray-600">{icon}</span>
-      <span className="hidden sm:inline">{label}</span>
-    </button>
-  );
-}
 
 /* ---------- Schedule + Teaching History table helpers (Reports & Analytics style) ---------- */
 type ScheduleRow = {
@@ -101,10 +60,10 @@ function groupHistoryByTerm(rows: HistRow[]) {
 
 function renderScheduleTable(rows: ScheduleRow[]) {
   return (
-    <div className="border border-gray-200 bg-gray-50 shadow-sm overflow-visible rounded-xl">
+    <div className="border border-gray-200 bg-white shadow-sm overflow-auto rounded-xl">
       <div className="overflow-x-auto rounded-xl">
-        <table className="w-full text-sm">
-          <thead className="bg-gray-50 border-b text-gray-700">
+          <table className="w-full text-sm table-auto">
+            <thead className="bg-gray-50 border-b text-gray-900">
             <tr>
               <th className="text-left px-4 py-2">Course Code &amp; Title</th>
               <th className="text-left px-4 py-2">Section</th>
@@ -213,6 +172,26 @@ function renderTeachingHistoryByTerm(flatRows: HistRow[]) {
   );
 }
 
+function summarizeCertifications(certs: any): { display: string; full: string } {
+  const arr = Array.isArray(certs)
+    ? certs
+        .filter(Boolean)
+        .map((c) => String(c).trim())
+        .filter(Boolean)
+    : [];
+
+  const full = arr.length ? arr.join(", ") : "—";
+
+  // Keep the list compact in-table (full list is still available via tooltip).
+  // Examples:
+  // - ["AWS", "Cisco"] -> "AWS, Cisco"
+  // - ["AWS", "Cisco", "TESDA", "..." ] -> "AWS, Cisco +2"
+  if (arr.length === 0) return { display: "—", full: "—" };
+  if (arr.length <= 2) return { display: full, full };
+
+  return { display: `${arr.slice(0, 2).join(", ")} +${arr.length - 2}`, full };
+}
+
 /* ---------------- Page ---------------- */
 export default function OM_FacultyManagement() {
   type ModalType = null | "schedule" | "history";
@@ -230,7 +209,7 @@ export default function OM_FacultyManagement() {
   const [deptOptions, setDeptOptions] = useState<string[]>(["All Departments"]);
   const [typeOptions, setTypeOptions] = useState<string[]>(["All Type"]);
   const statusOptions = useMemo(() => ["All Status", "Active", "On Leave"], []);
-const [historyYears, setHistoryYears] = useState<number[]>([]);
+  const [historyYears, setHistoryYears] = useState<number[]>([]);
   const [termLabel, setTermLabel] = useState("");
 
   // rows
@@ -238,13 +217,18 @@ const [historyYears, setHistoryYears] = useState<number[]>([]);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string>("");
 
-  // baseline dept counts (used for “Showing X of Y”)
-  const [baselineDeptCounts, setBaselineDeptCounts] = useState<Record<string, number>>({});
+  // baseline total count for “Showing X of Y” (Y = total faculty in directory)
+  const [baselineTotalFaculty, setBaselineTotalFaculty] = useState<number>(0);
 
   // modals
   const [activeModal, setActiveModal] = useState<ModalType>(null);
   const [selected, setSelected] = useState<FacultyRow | null>(null);
 
+  // row actions dropdown
+  const [openMenuId, setOpenMenuId] = useState<string | null>(null);
+  const openMenuRef = useRef<HTMLDivElement | null>(null);
+
+  const [modalError, setModalError] = useState<string>("");
   const [schedule, setSchedule] = useState<any>(null);
   const [history, setHistory] = useState<{ teaching_history: HistRow[] } | null>(null);
   const [historyYearIndex, setHistoryYearIndex] = useState(0);
@@ -258,7 +242,8 @@ const [historyYears, setHistoryYears] = useState<number[]>([]);
 
         setDeptOptions(["All Departments", ...(opt.departments || [])]);
         setTypeOptions(["All Type", ...(opt.facultyTypes || [])]);
-const ay = opt.activeTerm?.acad_year_start;
+
+        const ay = opt.activeTerm?.acad_year_start;
         const tn = opt.activeTerm?.term_number;
         setTermLabel(ay ? `Term ${tn ?? "—"} · AY ${ay}-${ay + 1}` : "");
       } catch (e: any) {
@@ -268,10 +253,51 @@ const ay = opt.activeTerm?.acad_year_start;
   }, []);
 
   // Debounce search input
+  const searchRef = useRef<HTMLInputElement | null>(null);
   useEffect(() => {
     const t = setTimeout(() => setSearch(searchInput.trim()), 300);
     return () => clearTimeout(t);
   }, [searchInput]);
+
+  // Ensure we always know the total faculty count in the directory (for "X of Y")
+  useEffect(() => {
+    if (baselineTotalFaculty > 0) return;
+    (async () => {
+      try {
+        const { ok, rows: allRows } = await listFaculty({
+          department: "All Departments",
+          facultyType: "All Type",
+          search: "",
+        });
+        if (ok) setBaselineTotalFaculty((allRows || []).length);
+      } catch {
+        // ignore baseline fetch errors (page still works)
+      }
+    })();
+  }, [baselineTotalFaculty]);
+
+  // Close actions dropdown on outside click / ESC
+  useEffect(() => {
+    if (!openMenuId) return;
+
+    const onDown = (e: MouseEvent) => {
+      const target = e.target as Node;
+      if (openMenuRef.current && !openMenuRef.current.contains(target)) {
+        setOpenMenuId(null);
+      }
+    };
+
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpenMenuId(null);
+    };
+
+    window.addEventListener("mousedown", onDown);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mousedown", onDown);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [openMenuId]);
 
   // Fetch rows (status filter is client-side)
   useEffect(() => {
@@ -280,24 +306,23 @@ const ay = opt.activeTerm?.acad_year_start;
         setLoading(true);
         setErr("");
 
-        const { ok, rows } = await listFaculty({ department, facultyType, search });
+        const { ok, rows: fetchedRows } = await listFaculty({ department, facultyType, search });
         if (!ok) throw new Error("Failed to load faculty list");
 
-        const filtered = (rows || []).filter((r) => {
+        const filtered = (fetchedRows || []).filter((r) => {
           if (!statusFilter || statusFilter === "All Status") return true;
           return String(r.status || "").trim().toLowerCase() === statusFilter.toLowerCase();
         });
 
         setRows(filtered);
 
-        // baseline counts update only when search is empty
-        if (!search) {
-          const counts: Record<string, number> = {};
-          for (const r of filtered) {
-            const k = (r.department || "Uncategorized").trim() || "Uncategorized";
-            counts[k] = (counts[k] || 0) + 1;
-          }
-          setBaselineDeptCounts(counts);
+        if (
+          baselineTotalFaculty === 0 &&
+          department === "All Departments" &&
+          facultyType === "All Type" &&
+          !search
+        ) {
+          setBaselineTotalFaculty((fetchedRows || []).length);
         }
       } catch (e: any) {
         setRows([]);
@@ -306,10 +331,11 @@ const ay = opt.activeTerm?.acad_year_start;
         setLoading(false);
       }
     })();
-  }, [department, facultyType, statusFilter, search]);
+  }, [department, facultyType, statusFilter, search, baselineTotalFaculty]);
 
   const openModal = (type: Exclude<ModalType, null>, item: FacultyRow) => {
     setSelected(item);
+    setModalError("");
     if (type === "history") {
       setHistoryYears([]);
       setHistoryYearIndex(0);
@@ -320,11 +346,13 @@ const ay = opt.activeTerm?.acad_year_start;
 
   const closeModal = () => {
     setActiveModal(null);
+    setModalError("");
     setSelected(null);
     setSchedule(null);
     setHistory(null);
     setHistoryYears([]);
     setHistoryYearIndex(0);
+    setOpenMenuId(null);
   };
 
   // Load modal content
@@ -332,12 +360,17 @@ const ay = opt.activeTerm?.acad_year_start;
     (async () => {
       if (!activeModal || !selected) return;
       try {
+        // In seeded/legacy data, `faculty_assignments.faculty_id` may store either
+        // faculty_profiles.faculty_id OR users.user_id. The list API returns
+        // `user_id` (when resolvable), so prefer it for schedule/history queries.
+        const facKey = (selected as any)?.user_id || selected.faculty_id;
+
         if (activeModal === "schedule") {
-          const data = await getFacultySchedule(selected.faculty_id);
+          const data = await getFacultySchedule(facKey);
           setSchedule(data);
         } else if (activeModal === "history") {
           if (!historyYears.length) {
-            const data = await getFacultyHistory(selected.faculty_id);
+            const data = await getFacultyHistory(facKey);
             const yrs = Array.isArray(data?.academicYears) ? data.academicYears : [];
             setHistoryYears(yrs);
 
@@ -348,12 +381,15 @@ const ay = opt.activeTerm?.acad_year_start;
             setHistory({ teaching_history: data?.teaching_history || [] });
           } else {
             const ay = historyYears[historyYearIndex];
-            const data = await getFacultyHistory(selected.faculty_id, ay);
+            const data = await getFacultyHistory(facKey, ay);
             setHistory({ teaching_history: data?.teaching_history || [] });
           }
         }
-      } catch {
-        /* ignore */
+      } catch (e: any) {
+        const msg =
+          e?.message ||
+          (activeModal === "schedule" ? "Failed to load schedule." : "Failed to load teaching history.");
+        setModalError(String(msg));
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -364,35 +400,30 @@ const ay = opt.activeTerm?.acad_year_start;
     return ay ? `AY ${ay}–${ay + 1}` : "—";
   }, [historyYearIndex, historyYears]);
 
+  const scheduleMeta = useMemo(() => {
+    const terms = Array.isArray(schedule?.terms) ? schedule.terms : [];
+    const idxFromServer = typeof schedule?.term_index === "number" ? schedule.term_index : -1;
+    const idxFromList = terms.findIndex((t: any) => String(t?.term_id ?? "") === String(schedule?.term_id ?? ""));
+    const termIndex = idxFromServer >= 0 ? idxFromServer : Math.max(0, idxFromList);
 
-const scheduleMeta = useMemo(() => {
-  const terms = Array.isArray(schedule?.terms) ? schedule.terms : [];
-  const idxFromServer = typeof schedule?.term_index === "number" ? schedule.term_index : -1;
-  const idxFromList = terms.findIndex((t: any) => String(t?.term_id ?? "") === String(schedule?.term_id ?? ""));
-  const termIndex = idxFromServer >= 0 ? idxFromServer : Math.max(0, idxFromList);
+    const term = (schedule?.term as any) || terms[termIndex] || null;
+    const ay = term?.acad_year_start;
+    const tn = term?.term_number;
 
-  const term = (schedule?.term as any) || terms[termIndex] || null;
-  const ay = term?.acad_year_start;
-  const tn = term?.term_number;
+    const centerTitle =
+      typeof ay === "number"
+        ? `AY ${ay}–${ay + 1} · Term ${tn ?? "—"}`
+        : tn != null
+          ? `Term ${tn}`
+          : schedule?.term_id
+            ? `Term ${schedule.term_id}`
+            : "Term";
 
-  const centerTitle =
-    typeof ay === "number"
-      ? `AY ${ay}–${ay + 1} · Term ${tn ?? "—"}`
-      : tn != null
-        ? `Term ${tn}`
-        : schedule?.term_id
-          ? `Term ${schedule.term_id}`
-          : "Term";
+    const isActive =
+      schedule?.active_term_id != null && String(schedule.active_term_id) === String(schedule?.term_id);
 
-  const isActive =
-    schedule?.active_term_id != null &&
-    String(schedule.active_term_id) === String(schedule?.term_id);
-
-  const indexLabel = terms.length ? `${termIndex + 1} of ${terms.length}` : "";
-
-  return { terms, termIndex, centerTitle, isActive, indexLabel };
-}, [schedule]);
-
+    return { centerTitle, isActive, termIndex, terms };
+  }, [schedule]);
 
   const grouped = useMemo(() => {
     const by: Record<string, FacultyRow[]> = {};
@@ -408,8 +439,6 @@ const scheduleMeta = useMemo(() => {
     return entries;
   }, [rows, department]);
 
-  const searchRef = useRef<HTMLInputElement | null>(null);
-
   return (
     <main className="w-full px-8 py-8">
       <header className="mb-6">
@@ -421,162 +450,224 @@ const scheduleMeta = useMemo(() => {
         <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{err}</div>
       )}
 
-      {/* Filters (match Chair layout; OM has no Add/Edit) */}
-      <div className="sticky top-0 z-10 mb-6 -mx-8 px-8 pt-2">
-        <div className="flex flex-wrap items-center gap-3 rounded-2xl border border-gray-200 bg-white/90 p-4 shadow-sm backdrop-blur">
-          <div className="relative flex-1 min-w-[240px]">
-            <SearchIcon className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-500" />
-            <input
-              ref={searchRef}
-              value={searchInput}
-              onChange={(e) => setSearchInput(e.target.value)}
-              placeholder="Search by name or email…"
-              className="w-full rounded-lg border border-gray-300 pl-9 pr-9 py-2 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30"
-            />
-
-            {searchInput.trim().length > 0 && (
-              <button
-                type="button"
-                aria-label="Clear search"
-                onClick={() => {
-                  setSearchInput("");
-                  setSearch("");
-                  requestAnimationFrame(() => searchRef.current?.focus());
-                }}
-                className="absolute right-3 top-1/2 -translate-y-1/2 rounded-full p-1 text-neutral-500 hover:bg-gray-100 hover:text-neutral-700"
-              >
-                <XIcon className="h-4 w-4" />
-              </button>
-            )}
-          </div>
-
-          <SelectBox value={department} onChange={setDepartment} options={deptOptions} />
-          <SelectBox value={facultyType} onChange={setFacultyType} options={typeOptions} />
-          <SelectBox value={statusFilter} onChange={setStatusFilter} options={statusOptions} />
+      {/* Filters */}
+      <div className="flex flex-wrap items-center gap-3 rounded-xl border border-gray-200 bg-white p-4 shadow-sm mb-6">
+        <div className="relative flex-1 min-w-[260px]">
+          <SearchIcon className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-500" />
+          <input
+            ref={searchRef}
+            value={searchInput}
+            onChange={(e) => setSearchInput(e.target.value)}
+            placeholder="Search by name or email…"
+            className="w-full rounded-lg border border-gray-300 px-9 py-2 pr-8 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30"
+          />
+          {searchInput && (
+            <button
+              type="button"
+              onClick={() => {
+                setSearchInput("");
+                setSearch("");
+                requestAnimationFrame(() => searchRef.current?.focus());
+              }}
+              className="absolute right-2 top-1/2 -translate-y-1/2 text-neutral-400 hover:text-neutral-600"
+              aria-label="Clear search"
+            >
+              ×
+            </button>
+          )}
         </div>
+
+        <SelectBox value={department} onChange={setDepartment} options={deptOptions} />
+        <SelectBox value={facultyType} onChange={setFacultyType} options={typeOptions} />
+        <SelectBox value={statusFilter} onChange={setStatusFilter} options={statusOptions} />
       </div>
 
-      <section className="space-y-4">
+      <section className="space-y-6">
         {loading ? (
-          <div className="grid gap-2">
-            {Array.from({ length: 6 }).map((_, i) => (
-              <div key={i} className="rounded-2xl border border-gray-200 bg-white p-3 shadow-sm">
-                <div className="flex items-start justify-between gap-4">
-                  <div className="flex items-center gap-3">
-                    <div className="h-9 w-9 rounded-full bg-gray-100" />
-                    <div>
-                      <div className="h-4 w-48 rounded bg-gray-100" />
-                      <div className="mt-2 h-3 w-56 rounded bg-gray-50" />
-                    </div>
-                  </div>
-                  <div className="h-8 w-8 rounded-full bg-gray-50" />
-                </div>
-                <div className="mt-3 flex flex-wrap gap-2">
-                  <div className="h-6 w-24 rounded-full bg-gray-50" />
-                  <div className="h-6 w-28 rounded-full bg-gray-50" />
-                  <div className="h-6 w-20 rounded-full bg-gray-50" />
-                  <div className="h-6 w-24 rounded-full bg-gray-50" />
-                </div>
-              </div>
-            ))}
+          <div className="border border-gray-200 bg-white shadow-sm overflow-visible rounded-xl">
+            <table className="w-full table-fixed text-sm">
+              <thead className="bg-gray-50 border-b text-gray-900">
+                <tr>
+                  <th className="w-[30%] text-left px-4 py-2">Faculty</th>
+                  <th className="w-[12%] text-center px-4 py-2">Faculty Type</th>
+                  <th className="w-[22%] text-left px-4 py-2">Certifications</th>
+                  <th className="w-[12%] text-center px-4 py-2">Hire Date</th>
+                  <th className="w-[10%] text-center px-4 py-2">Teaching Years</th>
+                  <th className="w-[10%] text-center px-4 py-2">Status</th>
+                  <th className="w-16 text-center px-2 py-2">Actions</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y">
+                <tr>
+                  <td className="px-4 py-6 text-center text-gray-500" colSpan={7}>
+                    Loading…
+                  </td>
+                </tr>
+              </tbody>
+            </table>
           </div>
         ) : rows.length === 0 ? (
-          <div className="rounded-2xl border border-dashed border-gray-300 bg-white p-10 text-center">
-            <div className="mx-auto mb-2 grid h-12 w-12 place-items-center rounded-2xl bg-gray-50">
-              <Users className="h-6 w-6 text-gray-400" />
-            </div>
-            <div className="text-sm font-medium text-gray-900">No results</div>
-            <div className="mt-1 text-sm text-gray-500">Try a different search term or adjust the filters.</div>
+          <div className="border border-gray-200 bg-white shadow-sm overflow-visible rounded-xl">
+            <table className="w-full table-fixed text-sm">
+              <thead className="bg-gray-50 border-b text-gray-900">
+                <tr>
+                  <th className="w-[30%] text-left px-4 py-2">Faculty</th>
+                  <th className="w-[12%] text-center px-4 py-2">Faculty Type</th>
+                  <th className="w-[22%] text-left px-4 py-2">Certifications</th>
+                  <th className="w-[12%] text-center px-4 py-2">Hire Date</th>
+                  <th className="w-[10%] text-center px-4 py-2">Teaching Years</th>
+                  <th className="w-[10%] text-center px-4 py-2">Status</th>
+                  <th className="w-16 text-center px-2 py-2">Actions</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y">
+                <tr>
+                  <td className="px-4 py-6 text-center text-gray-500" colSpan={7}>
+                    No results
+                  </td>
+                </tr>
+              </tbody>
+            </table>
           </div>
         ) : (
           grouped.map(([dept, items]) => (
             <div key={dept} className="space-y-2">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
-                  <h2 className="text-sm font-semibold text-gray-900">{dept}</h2>
-                  <span className="text-xs text-gray-500">{`Showing ${items.length} of ${baselineDeptCounts[dept] ?? items.length}`}</span>
+                  <h2 className="text-base font-semibold text-gray-800">{dept}</h2>
+                  <span className="text-xs text-gray-500">{`Showing ${items.length} of ${baselineTotalFaculty || items.length}`}</span>
                 </div>
               </div>
 
-              <div className="grid gap-2">
-                {items.map((r) => {
-                  const name = r.name || "—";
-                  const status = String(r.status || "").toLowerCase();
-                  const statusTone = status.includes("active")
-                    ? "emerald"
-                    : status.includes("inactive")
-                      ? "amber"
-                      : "gray";
+              <div className="border border-gray-200 bg-white shadow-sm overflow-visible rounded-xl">
+                <div className="overflow-x-auto rounded-xl">
+                  <table className="w-full table-fixed text-sm">
+                    <thead className="bg-gray-50 border-b text-gray-900">
+                      <tr>
+                        <th className="w-[30%] text-left px-4 py-2">Faculty</th>
+                        <th className="w-[12%] text-center px-4 py-2">Faculty Type</th>
+                        <th className="w-[22%] text-left px-4 py-2">Certifications</th>
+                        <th className="w-[12%] text-center px-4 py-2">Hire Date</th>
+                        <th className="w-[10%] text-center px-4 py-2">Teaching Years</th>
+                        <th className="w-[10%] text-center px-4 py-2">Status</th>
+                        <th className="w-16 text-center px-2 py-2">Actions</th>
+                      </tr>
+                    </thead>
 
-                  return (
-                    <div
-                      key={r.faculty_id}
-                      className="rounded-2xl border border-gray-200 bg-white p-3 shadow-sm transition hover:shadow"
-                    >
-                      <div className="flex flex-wrap items-start justify-between gap-2">
-                        <div className="flex min-w-[240px] items-start gap-3">
-                          <InitialsAvatar name={name} />
-                          <div className="min-w-0">
-                            <div className="truncate text-sm font-semibold text-gray-900">{name}</div>
-                            <div className="truncate text-xs text-gray-500">{r.email || "—"}</div>
-                          </div>
-                        </div>
+                    <tbody className="divide-y">
+                      {items.map((r) => {
+                        const s = String(r.status || "").toLowerCase();
+                        const chip =
+                          s.includes("active")
+                            ? "bg-emerald-100 text-emerald-700"
+                            : s.includes("leave") || s.includes("inactive")
+                              ? "bg-amber-100 text-amber-700"
+                              : "bg-gray-100 text-gray-700";
 
-                        <div className="flex-1 min-w-[220px]">
-                          <div className="grid grid-cols-3 rounded-xl bg-gray-50 px-3 py-2 text-center divide-x divide-gray-200">
-                            <div className="min-w-0 px-2 flex flex-col items-center justify-center">
-                              <div className="text-[11px] font-semibold text-gray-500">Units</div>
-                              <div className="truncate text-sm font-normal text-gray-900">{r.teaching_units ?? "—"}</div>
-                            </div>
+                        const cert = summarizeCertifications(r.certifications);
 
-                            <div className="min-w-0 px-2 flex flex-col items-center justify-center">
-                              <div className="text-[11px] font-semibold text-gray-500">Employment</div>
-                              <div className="truncate text-sm font-normal text-gray-900">{r.faculty_type || "—"}</div>
-                            </div>
+                        const hireDate = (r as any)?.hire_date ? String((r as any).hire_date) : "—";
 
-                            <div className="min-w-0 px-2 flex flex-col items-center justify-center">
-                              <div className="text-[11px] font-semibold text-gray-500">Status</div>
+                        return (
+                          <tr key={r.faculty_id} className="hover:bg-gray-50">
+                            <td className="px-4 py-3 text-emerald-700 font-semibold">
+                              {r.name || "—"}
+                              <div className="text-xs text-gray-500">{r.email || "—"}</div>
+                            </td>
+
+                            <td className="px-4 py-3 text-center">{r.faculty_type || "—"}</td>
+
+                            <td className="px-4 py-3">
                               <div
-                                className={cls(
-                                  "truncate text-sm font-normal",
-                                  statusTone === "emerald"
-                                    ? "text-emerald-700"
-                                    : statusTone === "amber"
-                                      ? "text-amber-700"
-                                      : "text-gray-700"
-                                )}
+                                className="block w-full max-w-full overflow-hidden text-ellipsis whitespace-nowrap text-gray-900"
+                                title={cert.full}
                               >
-                                {r.status || "—"}
+                                {cert.display}
                               </div>
-                            </div>
-                          </div>
-                        </div>
+                            </td>
 
-                        <div className="flex flex-wrap items-center justify-end gap-2">
-                          <ActionButton
-                            onClick={() => openModal("schedule", r)}
-                            icon={<Calendar className="h-3.5 w-3.5" />}
-                            label="Schedule"
-                          />
-                          <ActionButton
-                            onClick={() => openModal("history", r)}
-                            icon={<BookOpen className="h-3.5 w-3.5" />}
-                            label="History"
-                          />
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })}
+                            <td className="px-4 py-3 text-center whitespace-nowrap">{hireDate}</td>
+
+                            <td className="px-4 py-3 text-center">{(r.teaching_years ?? "—") as any}</td>
+
+                            <td className="px-4 py-3 text-center">
+                              <span className={cls("inline-block rounded-full px-3 py-1 text-xs font-semibold", chip)}>
+                                {r.status || "—"}
+                              </span>
+                            </td>
+
+                            <td className="px-2 py-3 text-center">
+                              <div
+                                className="relative flex items-center justify-center"
+                                ref={(node) => {
+                                  if (openMenuId === r.faculty_id) openMenuRef.current = node;
+                                }}
+                              >
+                                <button
+                                  type="button"
+                                  onClick={() => setOpenMenuId((cur) => (cur === r.faculty_id ? null : r.faculty_id))}
+                                  className={cls(
+                                    // No extra "white box" around the 3-dots. Keep it clean and table-native.
+                                    "inline-flex h-9 w-9 items-center justify-center rounded-full text-gray-700 hover:bg-gray-100",
+                                    openMenuId === r.faculty_id ? "bg-gray-100" : ""
+                                  )}
+                                  aria-haspopup="menu"
+                                  aria-expanded={openMenuId === r.faculty_id}
+                                  aria-label="Actions"
+                                  title="Actions"
+                                >
+                                  <MoreVertical className="h-4 w-4" />
+                                </button>
+
+                                {openMenuId === r.faculty_id && (
+                                  <div
+                                    role="menu"
+                                    className="absolute right-0 top-11 z-30 w-56 overflow-hidden rounded-xl border border-gray-200 bg-white shadow-lg"
+                                  >
+                                    <button
+                                      type="button"
+                                      role="menuitem"
+                                      className="flex w-full items-center gap-2 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
+                                      onClick={() => {
+                                        setOpenMenuId(null);
+                                        openModal("schedule", r);
+                                      }}
+                                    >
+                                      <Calendar className="h-4 w-4 text-gray-500" />
+                                      <span>Schedule</span>
+                                    </button>
+
+                                    <button
+                                      type="button"
+                                      role="menuitem"
+                                      className="flex w-full items-center gap-2 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
+                                      onClick={() => {
+                                        setOpenMenuId(null);
+                                        openModal("history", r);
+                                      }}
+                                    >
+                                      <BookOpen className="h-4 w-4 text-gray-500" />
+                                      <span>Teaching History</span>
+                                    </button>
+                                  </div>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
               </div>
             </div>
           ))
         )}
       </section>
 
-            {/* -------- Schedule / History Modals -------- */}
+      {/* -------- Schedule / History Modals -------- */}
       {activeModal && selected && (
-        <div className="fixed inset-0 z-[40] grid place-items-center bg-black/40 p-4">
+        <div className="fixed inset-0 z-[2000] grid place-items-center bg-black/40 p-4">
           <div className="relative w-full max-w-screen-xl rounded-2xl bg-white shadow-2xl overflow-y-auto max-h-[90vh]">
             {/* Top-right close (X) */}
             <button
@@ -589,6 +680,12 @@ const scheduleMeta = useMemo(() => {
             </button>
 
             <div className="p-6 pt-10">
+              {!!modalError && (
+                <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                  {modalError}
+                </div>
+              )}
+
               {activeModal === "schedule" && (
                 <>
                   <div className="text-center mb-4">
@@ -599,66 +696,16 @@ const scheduleMeta = useMemo(() => {
                   {/* Term header (Chair-style) */}
                   {!!schedule && (
                     <div className="mb-4">
-                      <div className="grid grid-cols-3 items-center gap-2">
-                        <button
-                          type="button"
-                          onClick={async () => {
-                            const i = scheduleMeta.termIndex - 1;
-                            if (!selected || i < 0) return;
-                            const tid = scheduleMeta.terms?.[i]?.term_id;
-                            if (!tid) return;
-                            setSchedule(null);
-                            const data = await getFacultySchedule(selected.faculty_id, tid);
-                            setSchedule(data);
-                          }}
-                          disabled={scheduleMeta.termIndex <= 0}
-                          className={cls(
-                            "justify-self-start inline-flex items-center gap-2 rounded-xl border px-3 py-2 text-sm font-medium shadow-sm",
-                            scheduleMeta.termIndex <= 0
-                              ? "bg-gray-100 text-gray-400 cursor-not-allowed"
-                              : "bg-white hover:bg-gray-50 text-gray-700"
-                          )}
-                        >
-                          <span>←</span>
-                          <span>Previous Term</span>
-                        </button>
-
-                        <div className="justify-self-center text-center">
-                          <div className="inline-flex items-center gap-2 rounded-full border border-emerald-200 bg-emerald-50 px-4 py-1.5">
-                            <span className="text-sm font-semibold text-emerald-900">{scheduleMeta.centerTitle}</span>
-                            {scheduleMeta.isActive && (
-                              <span className="rounded-full bg-emerald-600 px-2 py-0.5 text-[11px] font-semibold text-white">
-                                Active
-                              </span>
-                            )}
-                          </div>
-                          {scheduleMeta.indexLabel && (
-                            <div className="mt-1 text-xs text-gray-500">{scheduleMeta.indexLabel}</div>
+                      {/* Only show ONE schedule (latest term). No prev/next buttons per UI feedback. */}
+                      <div className="flex justify-center">
+                        <div className="inline-flex items-center gap-2 rounded-full border border-emerald-200 bg-emerald-50 px-4 py-1.5">
+                          <span className="text-sm font-semibold text-emerald-900">{scheduleMeta.centerTitle}</span>
+                          {scheduleMeta.isActive && (
+                            <span className="rounded-full bg-emerald-600 px-2 py-0.5 text-[11px] font-semibold text-white">
+                              Active
+                            </span>
                           )}
                         </div>
-
-                        <button
-                          type="button"
-                          onClick={async () => {
-                            const i = scheduleMeta.termIndex + 1;
-                            if (!selected || i >= (scheduleMeta.terms?.length || 0)) return;
-                            const tid = scheduleMeta.terms?.[i]?.term_id;
-                            if (!tid) return;
-                            setSchedule(null);
-                            const data = await getFacultySchedule(selected.faculty_id, tid);
-                            setSchedule(data);
-                          }}
-                          disabled={scheduleMeta.termIndex >= (scheduleMeta.terms?.length || 0) - 1}
-                          className={cls(
-                            "justify-self-end inline-flex items-center gap-2 rounded-xl border px-3 py-2 text-sm font-medium shadow-sm",
-                            scheduleMeta.termIndex >= (scheduleMeta.terms?.length || 0) - 1
-                              ? "bg-gray-100 text-gray-400 cursor-not-allowed"
-                              : "bg-white hover:bg-gray-50 text-gray-700"
-                          )}
-                        >
-                          <span>Next Term</span>
-                          <span>→</span>
-                        </button>
                       </div>
                     </div>
                   )}
@@ -669,7 +716,7 @@ const scheduleMeta = useMemo(() => {
                     </div>
                   ) : (schedule?.teaching_load || []).length === 0 ? (
                     <div className="rounded-lg border border-neutral-200 bg-neutral-50 px-3 py-3 text-sm text-neutral-600">
-                      No schedule records for the selected term.
+                      No schedule records found.
                     </div>
                   ) : (
                     renderScheduleTable(schedule?.teaching_load || [])

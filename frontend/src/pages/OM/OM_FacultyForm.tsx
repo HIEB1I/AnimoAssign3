@@ -561,16 +561,16 @@ useEffect(() => {
       </div>
 
       {/* Table */}
-      <div className="border border-gray-200 bg-gray-50 shadow-sm overflow-visible rounded-xl">
-        <table className="w-full table-fixed text-sm">
-          <thead className="bg-gray-50 border-b text-gray-700">
+        <div className="border border-gray-200 bg-white shadow-sm overflow-auto rounded-xl">
+          <table className="w-full text-sm table-auto">
+            <thead className="bg-gray-50 border-b text-gray-900">
             <tr>
               <th className="w-[32%] text-left px-4 py-3">Faculty</th>
               <th className="w-[32%] text-center px-4 py-3">Department</th>
               <th className="w-[13.5%] text-center px-4 py-3">Faculty Type</th>
-              <th className="w-[13.5%] text-center px-4 py-3">Submission Date</th>
+              <th className="w-[13.5%] text-center px-4 py-3">Last Submitted</th>
               <th className="w-[13.5%] text-center px-4 py-3">Status</th>
-              <th className="w-[14%] text-center px-4 py-3">Preference</th>
+              <th className="w-[14%] text-center px-4 py-3"> </th>
             </tr>
           </thead>
           <tbody className="divide-y">

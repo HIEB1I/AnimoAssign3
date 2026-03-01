@@ -2083,6 +2083,7 @@ export async function getOmHeader(userEmail?: string, userId?: string): Promise<
    ========================================================= */
 export type FacultyRow = {
   faculty_id: string;
+  user_id?: string;
   name: string;
   email: string;
   department: string;
@@ -2092,6 +2093,7 @@ export type FacultyRow = {
   status: string; // Active | On Leave
   // Optional fields used by Edit Faculty Details
   certifications?: string[];
+  hire_date?: string | null;
   teaching_years?: number | null;
 };
 
@@ -2172,6 +2174,37 @@ export async function getFacultyProfile(facultyId: string) {
       load?: { teaching?: number; admin?: number; research?: number; faculty_units?: number };
     };
   };
+}
+
+export type FacultyDetailsResponse = {
+  ok: boolean;
+  faculty_id: string;
+  details: {
+    first_name: string;
+    last_name: string;
+    email: string;
+    department: string;
+    faculty_type: string;
+    certifications: string[];
+    hire_date: string | null;
+    teaching_years: number | null;
+  };
+  deloading: null | {
+    type_id: string | null;
+    deloading_type: string | null;
+    units_deloaded: number | null;
+    notes: string | null;
+    term_id: string;
+    term_label?: string | null;
+    updated_at?: string | null;
+  };
+};
+
+export async function getFacultyDetails(facultyId: string): Promise<FacultyDetailsResponse> {
+  const { data } = await axios.post(`${API_BASE}/om/facultymanagement`, {}, {
+    params: { action: "details", facultyId },
+  });
+  return data as FacultyDetailsResponse;
 }
 
 export async function getFacultySchedule(
@@ -2342,7 +2375,7 @@ export async function listCMCourses(params: {
   const { data } = await axios.post(`${API_BASE}/om/course-management`, {}, {
     params: { action: "list", userEmail, userId, cluster, search },
   });
-  return data as { ok: boolean; rows: CMCourseRow[]; term?: any };
+  return data as { ok: boolean; rows: CMCourseRow[]; term?: any; total_all?: number };
 }
 
 export async function getCMHeader(userEmail?: string, userId?: string) {
@@ -2367,7 +2400,7 @@ export async function listChairCMCourses(params: {
   const { data } = await axios.post(`${API_BASE}/chair/course-management`, {}, {
     params: { action: "list", userEmail, userId, cluster, search },
   });
-  return data as { ok: boolean; rows: CMCourseRow[]; term?: any };
+  return data as { ok: boolean; rows: CMCourseRow[]; term?: any; total_all?: number };
 }
 
 export async function getChairCMHeader(userEmail?: string, userId?: string) {

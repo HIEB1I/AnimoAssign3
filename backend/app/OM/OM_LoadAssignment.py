@@ -872,31 +872,61 @@ def _fmt_time(hhmm: Optional[Any]) -> str:
     return ""
 
 # DEBUG function
-async def _faculty_on_leave_map(db, active_term_id: str):
+async def _faculty_on_leave_map(db, active_term_id: str) -> set[str]:
+    """
+    Returns set of faculty_id who are on approved + active leave
+    where active_term_id falls within [start_term_id, end_term_id] inclusive,
+    based on term ordering from terms collection.
+    """
+
+    if not active_term_id:
+        return set()
+
+    # Fetch all terms and build an index map for ordering
+    term_list = await db["terms"].find(
+        {},
+        {"_id": 0, "term_id": 1, "acad_year_start": 1, "term_number": 1},
+    ).sort([("acad_year_start", 1), ("term_number", 1)]).to_list(None)
+
+    term_ids = [t.get("term_id") for t in term_list if t.get("term_id")]
+    if not term_ids:
+        return set()
+
+    term_index = {tid: i for i, tid in enumerate(term_ids)}
+    active_idx = term_index.get(active_term_id)
+    if active_idx is None:
+        # Active term_id not recognized → safest behavior is "no one is on leave for this term"
+        return set()
+
+    # Pull active + approved leaves (only fields we need)
     leaves = await db["leaves"].find(
-        {
-            "approval_status": "APPROVED",
-            "is_active": True,
-        },
+        {"approval_status": "APPROVED", "is_active": True},
         {"_id": 0, "faculty_id": 1, "start_term_id": 1, "end_term_id": 1},
     ).to_list(None)
 
-    term_list = await db["terms"].find({}, {"_id": 0, "term_id": 1}).sort([
-        ("acad_year_start", 1),
-        ("term_number", 1)
-    ]).to_list(None)
-    term_ids = [t["term_id"] for t in term_list]
-    active_idx = term_ids.index(active_term_id) if active_term_id in term_ids else -1
+    blocked: set[str] = set()
 
-    blocked = set()
     for lv in leaves:
-        if lv["start_term_id"] in term_ids and lv["end_term_id"] in term_ids:
-            s = term_ids.index(lv["start_term_id"])
-            e = term_ids.index(lv["end_term_id"])
-            if s <= active_idx <= e:
-                blocked.add(lv["faculty_id"])
+        fid = str(lv.get("faculty_id") or "").strip()
+        if not fid:
+            continue
 
-    print(f"[DEBUG] Active term: {active_term_id}, blocked faculty: {blocked}")
+        start_tid = lv.get("start_term_id")
+        end_tid = lv.get("end_term_id")
+
+        # If either term id is missing or not in our known ordering, skip safely
+        s = term_index.get(start_tid)
+        e = term_index.get(end_tid)
+        if s is None or e is None:
+            continue
+
+        # Normalize if accidentally reversed
+        if s > e:
+            s, e = e, s
+
+        if s <= active_idx <= e:
+            blocked.add(fid)
+
     return blocked
 
 # --- APO-set deadline window (OM/GS schedule + faculty encoding) -------------
@@ -3488,6 +3518,14 @@ async def get_om_load_assignment_list(user_id: str, term_id: Optional[str] = Non
     except Exception:
         pass
 
+    on_leave_faculty_ids: list[str] = []
+    try:
+        blocked = await _faculty_on_leave_map(db, str(active.get("term_id") or "").strip())
+        on_leave_faculty_ids = sorted(list(blocked)) if blocked else []
+    except Exception:
+        # Best-effort only; never break list load if leave logic fails
+        on_leave_faculty_ids = []
+
     return {
         "term": _term_label(active),
         "term_id": active.get("term_id"),
@@ -3499,6 +3537,7 @@ async def get_om_load_assignment_list(user_id: str, term_id: Optional[str] = Non
         "om_submit_deadline_passed": bool(om_submit_deadline_passed),
         "om_submit_has_apo_submission": bool(om_submit_has_apo_submission),
         "preferred_units_by_faculty": preferred_units_by_faculty,
+        "on_leave_faculty_ids": on_leave_faculty_ids,
         "courseToKac": course_kac_simple,
         "facultyToKacs": faculty_to_kacs,
         "facultyAllowedModes": faculty_allowed_modes,

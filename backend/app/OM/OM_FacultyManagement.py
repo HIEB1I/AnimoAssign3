@@ -1,5 +1,6 @@
 # backend/app/OM/facultymanagement.py
 from typing import Any, Dict, List, Optional
+from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException, Query, Body
 from ..main import db
 
@@ -17,6 +18,8 @@ COL_PREFS = "faculty_preferences"
 COL_ROLE_ASSIGN = "role_assignments"
 COL_USER_ROLES = "user_roles"             # uses { role_id, role_type, ... }
 COL_COURSES = "courses"                   # NEW: to fetch course_title/units for schedule
+COL_DELOADINGS = "deloadings"             # NEW: faculty deloading records
+COL_DELOADING_TYPES = "deloading_types"     # NEW: deloading type lookup
 
 WEEKDAY_ORDER = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
 
@@ -135,6 +138,68 @@ def _fmt_time_band(start_raw: Any, end_raw: Any) -> str:
     en = _fmt_hhmm(end_raw)
     return f"{st} – {en}".strip(" –")
 
+# ---------- Faculty details helpers ----------
+
+def _normalize_certifications(raw: Any) -> List[str]:
+    """Normalize certifications into a list of strings.
+
+    Accepts list[str], comma-separated string, or None.
+    """
+    if raw is None:
+        return []
+    parts: List[str] = []
+    if isinstance(raw, list):
+        for item in raw:
+            for piece in str(item or '').split(','):
+                parts.append(piece)
+    else:
+        for piece in str(raw or '').split(','):
+            parts.append(piece)
+    return [p.strip() for p in parts if p and p.strip()]
+
+
+def _normalize_hire_date(hire_date_raw: Any) -> Optional[str]:
+    """Normalize hire/start date into YYYY-MM-DD string (or None)."""
+    if hire_date_raw is None:
+        return None
+    # already a datetime
+    if isinstance(hire_date_raw, datetime):
+        return hire_date_raw.date().isoformat()
+    s = str(hire_date_raw).strip()
+    if not s:
+        return None
+    try:
+        dt = datetime.strptime(s, '%Y-%m-%d').date()
+        return dt.isoformat()
+    except Exception:
+        return None
+
+
+def _teaching_years_from_hire_date(hire_date_str: Optional[str]) -> Optional[int]:
+    """Compute whole-year teaching years from a YYYY-MM-DD hire date string."""
+    if not hire_date_str:
+        return None
+    try:
+        hire_dt = datetime.strptime(hire_date_str, '%Y-%m-%d').date()
+    except Exception:
+        return None
+
+    today = datetime.now(timezone.utc).date()
+    years = today.year - hire_dt.year
+    if (today.month, today.day) < (hire_dt.month, hire_dt.day):
+        years -= 1
+    return max(0, years)
+
+
+def _coerce_int(val: Any) -> Optional[int]:
+    if val is None or val == '':
+        return None
+    try:
+        return int(val)
+    except Exception:
+        return None
+
+
 # ---------- Expression helpers ----------
 def _dept_name_expr():
     return {"$ifNull": ["$dept.department_name", "$dept.dept_name"]}
@@ -246,15 +311,79 @@ async def _current_term() -> Dict[str, Any]:
     return current or {}
 
 
+async def _resolve_faculty_match_ids(faculty_id_or_user_id: str) -> List[str]:
+    """Return identifiers that may appear in faculty_assignments.faculty_id.
+
+    In seeded/legacy data, faculty_assignments.faculty_id can be either the
+    faculty profile id (faculty_profiles.faculty_id) OR the user id (users.user_id).
+    We resolve both (and a best-effort user_id via email) so history/schedule
+    works consistently across datasets.
+    """
+    base = (str(faculty_id_or_user_id) if faculty_id_or_user_id is not None else "").strip()
+    if not base:
+        return []
+
+    ids: List[str] = [base]
+
+    fac = await db[COL_FACULTY].find_one(
+        {"$or": [{"faculty_id": base}, {"user_id": base}, {"email": base}]},
+        {"_id": 0, "faculty_id": 1, "user_id": 1, "email": 1},
+    )
+
+    if fac:
+        if fac.get("faculty_id"):
+            ids.append(str(fac.get("faculty_id")))
+        if fac.get("user_id"):
+            ids.append(str(fac.get("user_id")))
+        if fac.get("email"):
+            ids.append(str(fac.get("email") or "").strip().lower())
+
+    # Resolve user_id by email (common when faculty_profiles.user_id is missing)
+    email = None
+    if fac and fac.get("email"):
+        email = str(fac.get("email") or "").strip().lower()
+    elif "@" in base:
+        email = base.strip().lower()
+
+    if email:
+        user = await db[COL_USERS].find_one({"email": email}, {"_id": 0, "user_id": 1})
+        if user and user.get("user_id"):
+            ids.append(str(user.get("user_id")))
+
+    # De-dupe, drop empties
+    out: List[str] = []
+    seen = set()
+    for x in ids:
+        s = (str(x) if x is not None else "").strip()
+        if not s:
+            continue
+        if s in seen:
+            continue
+        seen.add(s)
+        out.append(s)
+    return out
+
+
 async def _faculty_academic_years(fid_str: str) -> List[int]:
-    """Return academic years where the faculty has (non-archived) teaching assignments."""
+    """Return academic years where the faculty has teaching assignments.
+
+    IMPORTANT:
+    Teaching *history* must include archived assignment rows (many past terms are
+    stored with `is_archived=True`). Filtering archived rows here causes the UI
+    to show "No teaching history found" even when data exists (e.g. Reports &
+    Analytics Teaching History still shows rows because it does not filter).
+    """
     if not fid_str:
         return []
 
+    match_ids = await _resolve_faculty_match_ids(fid_str)
+    if not match_ids:
+        match_ids = [fid_str]
+
+    # NOTE: DO NOT filter out archived rows for history discovery.
     pipeline: List[Dict[str, Any]] = [
         {"$match": {"$expr": {"$and": [
-            {"$eq": [{"$toString": "$faculty_id"}, fid_str]},
-            {"$ne": ["$is_archived", True]},
+            {"$in": [{"$toString": "$faculty_id"}, match_ids]},
         ]}}},
         {"$lookup": {"from": COL_SECTIONS, "localField": "section_id", "foreignField": "section_id", "as": "sec"}},
         {"$unwind": {"path": "$sec", "preserveNullAndEmptyArrays": False}},
@@ -290,14 +419,22 @@ async def _faculty_academic_years(fid_str: str) -> List[int]:
 
 
 async def _faculty_terms(fid_str: str) -> List[Dict[str, Any]]:
-    """Return distinct term docs where the faculty has (non-archived) assignments."""
+    """Return distinct term docs where the faculty has assignments.
+
+    NOTE: Past teaching loads are commonly stored under `is_archived=True`, so we
+    must include archived rows for navigation (Prev/Next Term) to work.
+    """
     if not fid_str:
         return []
 
+    match_ids = await _resolve_faculty_match_ids(fid_str)
+    if not match_ids:
+        match_ids = [fid_str]
+
+    # NOTE: DO NOT filter out archived rows for term discovery.
     pipeline: List[Dict[str, Any]] = [
         {"$match": {"$expr": {"$and": [
-            {"$eq": [{"$toString": "$faculty_id"}, fid_str]},
-            {"$ne": ["$is_archived", True]},
+            {"$in": [{"$toString": "$faculty_id"}, match_ids]},
         ]}}},
         {"$lookup": {"from": COL_SECTIONS, "localField": "section_id", "foreignField": "section_id", "as": "sec"}},
         {"$unwind": {"path": "$sec", "preserveNullAndEmptyArrays": False}},
@@ -358,7 +495,7 @@ async def _faculty_terms(fid_str: str) -> List[Dict[str, Any]]:
 # ---------- Route ----------
 @router.post("/facultymanagement")
 async def facultymanagement_handler(
-    action: str = Query("list", description="header | options | list | schedule | history"),
+    action: str = Query("list", description="header | options | list | details | schedule | history"),
 
     # header (who’s logged in)
     userEmail: Optional[str] = Query(None),
@@ -519,7 +656,7 @@ async def facultymanagement_handler(
                         {"$and": [{"$ne": ["$$uid", None]}, {"$eq": [{"$toString": "$user_id"}, {"$toString": "$$uid"}]}]},
                         {"$and": [{"$ne": ["$$femail", None]}, {"$eq": ["$email", "$$femail"]}]},
                     ]}}},  # noqa: E231
-                    {"$project": {"_id": 0, "first_name": 1, "last_name": 1, "status": 1, "email": 1}}
+                    {"$project": {"_id": 0, "user_id": 1, "first_name": 1, "last_name": 1, "status": 1, "email": 1}}
                 ],
                 "as": "u"
             }},
@@ -585,6 +722,7 @@ async def facultymanagement_handler(
                 "department_display": _dept_name_expr(),
                 "name": _full_name_expr(),
                 "email_display": {"$ifNull": ["$u.email", "$email"]},
+                "user_id_display": {"$ifNull": ["$u.user_id", "$user_id"]},
                 "status_display": {
                     "$cond": [
                         {
@@ -633,18 +771,144 @@ async def facultymanagement_handler(
                 "_id": 0,
                 "faculty_id": 1,
                 "name": 1,
+                "user_id": "$user_id_display",
                 "email": "$email_display",
                 "department": "$department_display",
                 "position": {"$ifNull": ["$position", {"$ifNull": ["$fac_position", ""]}]},
                 "teaching_units": "$teaching_units_display",
                 "faculty_type": "$faculty_type_display",
                 "status": "$status_display",
+                "certifications": {"$ifNull": ["$certifications", []]},
+                "hire_date": {"$ifNull": ["$hire_date", None]},
+                "teaching_years": {"$ifNull": ["$teaching_years", None]},
             }},
             {"$sort": {"name": 1}},
         ])
 
         rows = [r async for r in db[COL_FACULTY].aggregate(pipeline)]
+
+        # Normalize lightweight profile fields for table display
+        for r in rows:
+            r["certifications"] = _normalize_certifications(r.get("certifications"))
+
+            hd = _normalize_hire_date(r.get("hire_date"))
+            r["hire_date"] = hd
+
+            ty = _coerce_int(r.get("teaching_years"))
+            if ty is None:
+                ty = _teaching_years_from_hire_date(hd)
+            r["teaching_years"] = ty
+
         return {"ok": True, "rows": rows}
+
+# ----- DETAILS (View More Details) -----
+    if action == "details":
+        if not facultyId:
+            raise HTTPException(status_code=400, detail="facultyId is required.")
+
+        fac = await db[COL_FACULTY].find_one(
+            {"faculty_id": facultyId},
+            {
+                "_id": 0,
+                "faculty_id": 1,
+                "user_id": 1,
+                "email": 1,
+                "department_id": 1,
+                "employment_type": 1,
+                "certifications": 1,
+                "hire_date": 1,
+                "teaching_years": 1,
+            },
+        )
+        if not fac:
+            raise HTTPException(status_code=404, detail="Faculty profile not found.")
+
+        # User info (prefer user_id; fall back to email)
+        user = None
+        if fac.get("user_id"):
+            user = await db[COL_USERS].find_one(
+                {"user_id": fac.get("user_id")},
+                {"_id": 0, "first_name": 1, "last_name": 1, "email": 1},
+            )
+        if not user and fac.get("email"):
+            user = await db[COL_USERS].find_one(
+                {"email": fac.get("email")},
+                {"_id": 0, "first_name": 1, "last_name": 1, "email": 1},
+            )
+
+        first_name = (user or {}).get("first_name") or ""
+        last_name = (user or {}).get("last_name") or ""
+        email = (user or {}).get("email") or fac.get("email") or ""
+
+        dept_name = ""
+        if fac.get("department_id"):
+            dept = await db[COL_DEPARTMENTS].find_one(
+                {"department_id": fac.get("department_id")},
+                {"_id": 0, "department_name": 1, "dept_name": 1},
+            )
+            dept_name = ((dept or {}).get("department_name") or (dept or {}).get("dept_name") or "").strip()
+
+        et = str(fac.get("employment_type") or "").strip().upper()
+        faculty_type = ("Full-Time" if et == "FT" else "Part-Time" if et == "PT" else et)
+
+        certifications = _normalize_certifications(fac.get("certifications"))
+        hire_date = _normalize_hire_date(fac.get("hire_date"))
+        teaching_years = _teaching_years_from_hire_date(hire_date) if hire_date else _coerce_int(fac.get("teaching_years"))
+
+        # Deloading for working/active term (same logic as CHAIR Edit Faculty Details)
+        active = await _active_term()
+        term_id = (active or {}).get("term_id")
+        deloading = None
+        term_label = None
+        if term_id:
+            term_label = None
+            try:
+                ay = active.get("acad_year_start")
+                tn = active.get("term_number")
+                if ay is not None and tn is not None:
+                    term_label = f"AY {ay}-{ay + 1} · Term {tn}"
+            except Exception:
+                term_label = None
+
+            dl_list = await db[COL_DELOADINGS].find(
+                {"term_id": term_id, "faculty_id": facultyId},
+                {"_id": 0, "type_id": 1, "deloadingtype_id": 1, "units_deloaded": 1, "notes": 1, "deloading_notes": 1, "updated_at": 1},
+            ).sort([("updated_at", -1), ("_id", -1)]).to_list(1)
+
+            d = (dl_list or [None])[0]
+            if d:
+                type_id_val = (d.get("type_id") or d.get("deloadingtype_id") or "").strip() or None
+                dt = None
+                if type_id_val:
+                    dt = await db[COL_DELOADING_TYPES].find_one(
+                        {"$or": [{"type_id": type_id_val}, {"deloadingtype_id": type_id_val}]},
+                        {"_id": 0, "type": 1},
+                    )
+                deloading = {
+                    "type_id": type_id_val,
+                    "deloading_type": (dt or {}).get("type"),
+                    "units_deloaded": d.get("units_deloaded"),
+                    "notes": (d.get("notes") or d.get("deloading_notes") or "").strip() or None,
+                    "term_id": term_id,
+                    "term_label": term_label,
+                    "updated_at": d.get("updated_at"),
+                }
+
+        return {
+            "ok": True,
+            "faculty_id": facultyId,
+            "details": {
+                "first_name": first_name,
+                "last_name": last_name,
+                "email": email,
+                "department": dept_name,
+                "faculty_type": faculty_type,
+                "certifications": certifications,
+                "hire_date": hire_date,
+                "teaching_years": teaching_years,
+            },
+            "deloading": deloading,
+        }
 
         # ----- SCHEDULE: current/selected term sections (reuse FACULTY_Overview logic) -----
     if action == "schedule":
@@ -652,18 +916,30 @@ async def facultymanagement_handler(
             raise HTTPException(status_code=400, detail="facultyId is required.")
 
         fid_str = str(facultyId)
+        match_ids = await _resolve_faculty_match_ids(fid_str)
+        if not match_ids:
+            match_ids = [fid_str]
 
-        # Resolve CURRENT term if not provided (schedule should reflect active teaching load)
+        # Resolve term if not provided.
+        # UI requirement: show the *latest* schedule the faculty has in the DB (no prev/next navigation).
+        # So, by default, pick the most recent term where the faculty has assignments.
         if not termId:
-            current = await _current_term()
-            termId = current.get("term_id") if current else None
-            if not termId:
-                active = await _active_term()
-                termId = active.get("term_id")
+            latest_terms = await _faculty_terms(fid_str)
+            if latest_terms:
+                termId = latest_terms[-1].get("term_id")
+            else:
+                # Fall back to current/active term if the faculty has no assignments yet.
+                current = await _current_term()
+                termId = current.get("term_id") if current else None
+                if not termId:
+                    active = await _active_term()
+                    termId = active.get("term_id")
 
         # faculty_assignments -> sections (filter by term) -> courses -> section_schedules
+        # NOTE: Do NOT filter archived rows here. Faculty Management schedule/history
+        # views are read-only and should show past terms as well.
         pipeline: List[Dict[str, Any]] = [
-            {"$match": {"$expr": {"$and": [ {"$eq": [{"$toString": "$faculty_id"}, fid_str]}, {"$ne": ["$is_archived", True]} ]}}},
+            {"$match": {"$expr": {"$and": [ {"$in": [{"$toString": "$faculty_id"}, match_ids]} ]}}},
             {"$lookup": {"from": COL_SECTIONS, "localField": "section_id", "foreignField": "section_id", "as": "sec"}},
             {"$unwind": {"path": "$sec", "preserveNullAndEmptyArrays": True}},
         ]
@@ -834,6 +1110,9 @@ async def facultymanagement_handler(
             raise HTTPException(status_code=400, detail="facultyId is required.")
 
         fid_str = str(facultyId)
+        match_ids = await _resolve_faculty_match_ids(fid_str)
+        if not match_ids:
+            match_ids = [fid_str]
 
         # Default AY = most recent AY *with data* for this faculty
         ay_list = await _faculty_academic_years(fid_str)
@@ -844,8 +1123,9 @@ async def facultymanagement_handler(
             acadYearStart = ay_list[0]
 
         # Build like FACULTY_History: assign -> section -> course -> term -> schedules -> room -> campus
+        # NOTE: Do NOT filter archived rows for history (matches Reports & Analytics behavior).
         pipeline = [
-            {"$match": {"$expr": {"$and": [ {"$eq": [{"$toString": "$faculty_id"}, fid_str]}, {"$ne": ["$is_archived", True]} ]}}},
+            {"$match": {"$expr": {"$and": [ {"$in": [{"$toString": "$faculty_id"}, match_ids]} ]}}},
             {"$lookup": {"from": "sections", "localField": "section_id", "foreignField": "section_id", "as": "sec"}},
             {"$unwind": {"path": "$sec", "preserveNullAndEmptyArrays": True}},
             {"$lookup": {"from": "courses", "localField": "sec.course_id", "foreignField": "course_id", "as": "course"}},

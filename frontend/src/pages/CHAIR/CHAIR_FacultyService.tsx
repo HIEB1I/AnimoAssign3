@@ -748,9 +748,16 @@ type ChairFacultyServiceProps = {
    * to "Department of Software Technology" for backwards compatibility.
    */
   chairDepartmentName?: string;
+
+  /**
+   * UI rendering mode.
+   * - page: full-page layout (default for CHAIR route)
+   * - embedded: render without page shell/sticky header so OM pages can wrap it
+   */
+  variant?: "page" | "embedded";
 };
 
-export default function CHAIR_FacultyService({ chairDepartmentName }: ChairFacultyServiceProps) {
+export default function CHAIR_FacultyService({ chairDepartmentName, variant = "page" }: ChairFacultyServiceProps) {
   /**
    * Bi-directional behavior:
    * - Any department can create and send requests to any other department.
@@ -1561,20 +1568,35 @@ export default function CHAIR_FacultyService({ chairDepartmentName }: ChairFacul
 
 /* ---------------- UI ---------------- */
   return (
-    <div className="min-h-screen w-full bg-gray-50 text-slate-900">
+    <div
+      className={cls(
+        "w-full text-slate-900",
+        variant !== "embedded" && "min-h-screen bg-gray-50"
+      )}
+    >
       <ToastViewport items={toasts} onClose={closeToast} />
 
-      <div className="sticky top-0 z-10 bg-white px-8 pt-8">
-        <header className="mb-2">
+      {variant !== "embedded" ? (
+        <div className="sticky top-0 z-10 bg-white px-8 pt-8">
+          <header className="mb-2">
+            <h1 className="text-2xl font-bold">Faculty Service</h1>
+            <p className="text-sm text-gray-600">
+              Create &amp; send faculty service requests, track request status, and respond to received requests.
+              {termLabel ? ` for ${termLabel}` : ""}
+            </p>
+          </header>
+        </div>
+      ) : (
+        <header className="mb-6">
           <h1 className="text-2xl font-bold">Faculty Service</h1>
           <p className="text-sm text-gray-600">
             Create &amp; send faculty service requests, track request status, and respond to received requests.
             {termLabel ? ` for ${termLabel}` : ""}
           </p>
         </header>
-      </div>
+      )}
 
-      <main className="w-full px-8 pb-24 space-y-10">
+      <main className={cls("w-full pb-24 space-y-10", variant !== "embedded" && "px-8")}>
         {/* 1) CREATE & SENT REQUESTS (From = activeDeptName) */}
         <div className={cls(PLANTILLA_TABLE_WRAP, "overflow-y-visible")}>
           <div className={cls(PLANTILLA_SECTION_TITLE, "w-full flex items-center justify-between gap-3")}>

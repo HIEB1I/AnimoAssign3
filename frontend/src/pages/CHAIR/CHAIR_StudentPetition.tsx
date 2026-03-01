@@ -191,16 +191,16 @@ export default function CHAIR_StudentPetition() {
       </div>
 
       {/* Table */}
-      <div className="border border-gray-200 bg-gray-50 shadow-sm overflow-visible rounded-xl">
-        <table className="w-full text-sm">
-          <thead className="bg-gray-50 border-b text-gray-700">
+        <div className="border border-gray-200 bg-white shadow-sm overflow-auto rounded-xl">
+          <table className="w-full text-sm table-auto">
+            <thead className="bg-gray-50 border-b text-gray-900">
             <tr>
-              <th className="w-10 px-4 py-2 text-center">
+              <th className="w-10 px-3 py-2 text-center">
                 <input
                   type="checkbox"
                   checked={rows.length > 0 && selected.length === rows.length}
                   onChange={(e) => toggleAll(e.target.checked)}
-                  className="rounded border-gray-300 text-emerald-600 focus:ring-emerald-500"
+                  className="h-4 w-4 accent-emerald-600"
                 />
               </th>
               <th className="text-left px-4 py-2">Course Code & Title</th>
@@ -228,7 +228,7 @@ export default function CHAIR_StudentPetition() {
                 const editing = editCourseId === r.course_id;
                 return (
                   <tr key={r.course_id} className="hover:bg-gray-50 align-top">
-                    <td className="text-center pt-3">
+                    <td className="px-3 py-3 text-center">
                       <input
                         type="checkbox"
                         checked={selected.includes(r.course_id)}
@@ -239,7 +239,7 @@ export default function CHAIR_StudentPetition() {
                               : [...prev, r.course_id]
                           )
                         }
-                        className="rounded border-gray-300 text-emerald-600 focus:ring-emerald-500"
+                        className="h-4 w-4 accent-emerald-600"
                       />
                     </td>
 
@@ -248,9 +248,9 @@ export default function CHAIR_StudentPetition() {
                       <div className="text-xs text-gray-500">{r.course_title}</div>
                     </td>
 
-                    <td className="text-center pt-3">{r.count}</td>
+                    <td className="px-4 py-3 text-center">{r.count}</td>
 
-                    <td className="text-center pt-3">
+                    <td className="px-4 py-3 text-center">
                       {editing ? (
                         <SelectBox
                           value={draft.status || ""}
@@ -264,7 +264,7 @@ export default function CHAIR_StudentPetition() {
                       )}
                     </td>
 
-                    <td className="px-4 py-2 text-left">
+                    <td className="px-4 py-3 text-left">
                       {editing ? (
                         <TextBox
                           value={draft.remarks || ""}
@@ -280,7 +280,7 @@ export default function CHAIR_StudentPetition() {
                       )}
                     </td>
 
-                    <td className="text-center pt-3">
+                    <td className="px-4 py-3 text-center">
                       {editing ? (
                         <button
                           onClick={saveEdit}
