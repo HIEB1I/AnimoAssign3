@@ -3688,12 +3688,15 @@ async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[s
     # Calendar checkbox flag (default True = keeps current behavior)
     send_to_gcal = _payload_bool(payload.get("send_to_gcal", True), True)
 
-    # Special Class tab: allow syncing to Google Calendar *without* accepting/locking the schedule.
-    # Frontend uses the same endpoint but passes sync_special_only=true.
+    # Special Class tab uses this flag to sync without accepting/locking the schedule.
     sync_special_only = _payload_bool(payload.get("sync_special_only"), False)
 
-    # Overwrite flag: Special Class sync uses overwrite by default to prevent duplicates.
+    # Special Class sync overwrites by default to prevent duplicates.
     overwrite_gcal = _payload_bool(payload.get("overwrite_gcal"), sync_special_only)
+
+    gcal_action = (payload.get("gcal_action") or "cleanup").lower().strip()
+    if gcal_action not in {"sync", "cleanup", "reset"}:
+        gcal_action = "cleanup"
 
     term_id = (payload.get("term_id") or "").strip()
     if not term_id:
@@ -3704,14 +3707,14 @@ async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[s
         raise HTTPException(status_code=409, detail="No active/upcoming term")
 
     fid = faculty.get("faculty_id")
-
+    
     # --- Special-only sync shortcut (NO accept, NO emails, NO proposal changes) ---
     if sync_special_only:
         calendar_ok: Optional[bool] = None
         calendar_error: Optional[str] = None
         calendar_events_created = 0
         calendar_term_id: Optional[str] = None
-        term_start_at = None
+        term_start_at_out: Optional[datetime] = None
         week_count = _TERM_WEEK_COUNT
 
         if not send_to_gcal:
@@ -3755,10 +3758,13 @@ async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[s
                     calendar_ok = False
                     calendar_error = f"Next term {calendar_term_id or ''} has no start_at; cannot create calendar events."
                 else:
+                    term_start_at_out = term_start_at
+
                     if term_end_at:
                         span_weeks = max(1, ((term_end_at.date() - term_start_at.date()).days // 7) + 1)
                         week_count = min(_TERM_WEEK_COUNT, span_weeks)
 
+                    # Use the older proven function for special sync (kind="special")
                     calendar_ok, calendar_events_created, calendar_error = await _create_term_calendar_for_user(
                         user_id=userId,
                         term_id=calendar_term_id or term_id,
@@ -3771,6 +3777,202 @@ async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[s
         except Exception as e:
             calendar_ok = False
             calendar_error = str(e)
+
+        return {
+            "ok": True,
+            "status": "SYNC_ONLY",
+            "send_to_gcal": True,
+            "calendar_ok": calendar_ok,
+            "calendar_events_created": int(calendar_events_created or 0),
+            "calendar_error": calendar_error,
+            "calendar_term_id": calendar_term_id,
+            "term_start_at": (term_start_at_out.isoformat() if term_start_at_out else None),
+            "week_count": week_count,
+        }
+    
+    proposal = await db[COL_LOAD_PROPOSALS].find_one({"faculty_id": fid, "term_id": term_id}, {"_id": 0})
+    if not proposal:
+        return {"ok": True, "message": "No proposal to accept."}
+
+    proposal_rows = proposal.get("rows", []) or []
+
+    # (keep your special class email append if you want)
+    try:
+        sc_rows = await _fetch_reflected_special_classes_for_faculty(term_id=term_id, faculty_id=fid)
+        if sc_rows:
+            proposal_rows = list(proposal_rows) + sc_rows
+    except Exception:
+        pass
+
+    # pending RFC guard
+    pending_rfc = await db[COL_LOAD_RFC].find_one({"faculty_id": fid, "term_id": term_id}, {"_id": 0}) or None
+    if pending_rfc:
+        existing_norm = _normalize_rfc_doc(pending_rfc)
+        st = str(existing_norm.get("status") or "").upper()
+        if st and st not in RFC_TERMINAL:
+            raise HTTPException(
+                status_code=409,
+                detail="You have a pending RFC. Please wait for OM to respond before accepting the schedule.",
+            )
+
+    accepted_room_sig = ""
+    try:
+        # Sign the authoritative rooms (APO assigns rooms via section_schedules)
+        for rr in (proposal_rows or []):
+            if bool((rr or {}).get("is_special_class")):
+                continue
+            sid = str((rr or {}).get("section_id") or (rr or {}).get("sectionId") or "").strip()
+            if sid:
+                await _apply_section_rooms_to_row(rr, sid)
+
+        accepted_room_sig = _room_signature_from_rows(proposal_rows)
+    except Exception:
+        accepted_room_sig = ""
+
+    # approve/lock proposal
+    await db[COL_LOAD_PROPOSALS].update_one(
+    {"faculty_id": fid, "term_id": term_id},
+    {"$set": {
+        "status": "approved",
+        "locked": True,
+        "accepted_at": _now_utc(),
+        "accepted_room_sig": accepted_room_sig,
+        "accepted_room_sig_at": _now_utc(),
+        "updated_at": _now_utc(),
+    },
+     "$setOnInsert": {"created_at": _now_utc()}},
+)
+    # finalize rows
+    try:
+        await db[COL_LOAD_PROPOSALS].update_one(
+            {"faculty_id": fid, "term_id": term_id},
+            {"$set": {"rows.$[].finalized": True}},
+        )
+    except Exception:
+        pass
+
+    # lock RFC threads
+    now = _now_utc()
+    await db[COL_LOAD_RFC].update_many(
+        {"faculty_id": fid, "term_id": term_id},
+        {"$set": {"status": "ACCEPTED", "locked": True, "updated_at": now}},
+    )
+
+    # faculty email
+    recipient_email = (
+        ((user.get("google_token") or {}).get("connected_email") or "").strip()
+        or (user.get("gmail") or "").strip()
+        or (user.get("email") or "").strip()
+    )
+
+    term_doc = await db[COL_TERMS].find_one({"term_id": term_id}, {"_id": 0, "acad_year_start": 1, "term_number": 1}) or {}
+    term_label = _term_label(term_doc) if term_doc else term_id
+
+    faculty_name = f"{(faculty.get('first_name') or '').strip()} {(faculty.get('last_name') or '').strip()}".strip() or "Faculty"
+
+    email_sent = False
+    email_error: Optional[str] = None
+    if recipient_email:
+        subject, body_text, body_html = _build_faculty_accept_email(
+            term_label=term_label,
+            faculty_name=faculty_name,
+            rows=proposal_rows,
+            login_url="http://ccscloud.dlsu.edu.ph:11160/login",
+        )
+        try:
+            email_sent, email_error = await _send_email_via_user_gmail(
+                user_id=userId,
+                to_email=recipient_email,
+                subject=subject,
+                body=body_text,
+                html_body=body_html,
+            )
+        except Exception as e:
+            email_error = str(e)
+    else:
+        email_error = "No recipient email found for this user."
+
+    # OM mailbox email (kept)
+    om_mailbox_sent = False
+    om_mailbox_error: Optional[str] = None
+    if OM_NOTIFY_EMAIL:
+        om_subject, om_body_text, om_body_html = _build_om_finalized_email(
+            term_label=term_label,
+            faculty_name=faculty_name,
+            rows=proposal_rows,
+            om_link=OM_LOAD_ASSIGNMENT_URL,
+        )
+        try:
+            om_mailbox_sent, om_mailbox_error = await _send_email_via_user_gmail(
+                user_id=userId,
+                to_email=OM_NOTIFY_EMAIL,
+                subject=om_subject,
+                body=om_body_text,
+                html_body=om_body_html,
+            )
+        except Exception as e:
+            om_mailbox_error = str(e)
+
+    # OM notification (kept)
+    rfc_id = None
+    lst = await db[COL_LOAD_RFC].find({"faculty_id": fid, "term_id": term_id}, {"_id": 0, "rfc_id": 1}) \
+        .sort([("updated_at", -1), ("created_at", -1)]).to_list(1)
+    if lst:
+        rfc_id = lst[0].get("rfc_id")
+
+    om_uid = (proposal.get("om_user_id") or "").strip()
+    if om_uid:
+        await create_notification(
+            user_id=om_uid,
+            title="Load Assignment: Faculty accepted schedule",
+            details=f"{faculty.get('first_name','')} {faculty.get('last_name','')} accepted the proposed schedule.",
+            meta={
+                "route": "/om/load-assignment",
+                "kind": "proposal_accepted",
+                "term_id": term_id,
+                "faculty_id": fid,
+                "rfc_id": rfc_id or "",
+            },
+        )
+
+    # RESYNC calendar
+    calendar_ok: Optional[bool] = None
+    calendar_error: Optional[str] = None
+    calendar_term_id: Optional[str] = None
+    term_start_at = None
+    week_count = _TERM_WEEK_COUNT
+    created = updated = deleted = skipped = 0
+
+    if send_to_gcal:
+        nxt_term = await _next_term_from_current()
+        if not nxt_term:
+            calendar_ok = False
+            calendar_error = "No next term found after current term."
+        else:
+            calendar_term_id = (nxt_term.get("term_id") or "").strip()
+            term_start_at = _coerce_dt(nxt_term.get("start_at"))
+            term_end_at = _coerce_dt(nxt_term.get("end_at"))
+
+            if not term_start_at:
+                calendar_ok = False
+                calendar_error = f"Next term {calendar_term_id or ''} has no start_at."
+            else:
+                rows_for_calendar = [rr for rr in (proposal_rows or []) if not bool((rr or {}).get("is_special_class"))]
+                ok, stats, err = await _sync_term_calendar_for_user(
+                    user_id=userId,
+                    calendar_term_id=calendar_term_id,
+                    term_start_at=term_start_at,
+                    term_end_at=term_end_at,
+                    rows=rows_for_calendar,
+                    action=gcal_action,      # cleanup removes deleted schedule rows
+                    week_count=week_count,
+                )
+                calendar_ok = ok
+                calendar_error = err
+                created = int((stats or {}).get("created") or 0)
+                updated = int((stats or {}).get("updated") or 0)
+                deleted = int((stats or {}).get("deleted") or 0)
+                skipped = int((stats or {}).get("skipped") or 0)
 
         return {
             "ok": True,
