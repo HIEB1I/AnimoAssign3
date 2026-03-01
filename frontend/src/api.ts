@@ -38,7 +38,7 @@ export const ANALYTICS_BASE = resolveBase(
 );
 
 // Optional axios instance if you use axios elsewhere
-export const api = axios.create({ baseURL: API_BASE });
+export const api = axios.create({ baseURL: API_BASE, withCredentials: true });
 
 // DONT REMOVE ABOVE
 
@@ -65,6 +65,15 @@ export async function loginWithPassword(email: string, password: string): Promis
   });
   if (!r.ok) throw new Error(await r.text());
   return r.json();
+}
+
+// frontend/src/api.ts
+export async function logoutApi(): Promise<void> {
+  // ignore errors (user might already be logged out)
+  await fetch(join(API_BASE, "logout"), {
+    method: "POST",
+    credentials: "include", // important if backend is not same-origin
+  }).catch(() => {});
 }
 
 /* =========================================================

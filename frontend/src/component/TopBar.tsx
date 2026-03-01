@@ -4,6 +4,8 @@ import { useNavigate } from "react-router-dom";
 import { UserCircle, LogOut, Inbox, Bell } from "lucide-react";
 import { useInboxBadge } from "@/realtime/inboxBadge";
 
+import { logoutApi } from "../api"; 
+
 import {
   listNotifications,
   markNotificationsSeen,
@@ -206,11 +208,12 @@ export default function TopBar({
   }, []);
 
   // Logout
-  const logout = () => {
-    localStorage.removeItem("authToken");
-    sessionStorage.clear();
-    navigate("/login");
-  };
+const logout = async () => {
+  await logoutApi(); // <-- NEW: clear cookie session on server
+  localStorage.removeItem("authToken");
+  sessionStorage.clear();
+  navigate("/login");
+};
 
   // “x minutes ago” helper
   const timeAgo = (d: Date) => {
