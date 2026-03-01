@@ -143,6 +143,24 @@ def _norm_scope_list(scope_val: Any) -> List[Dict[str, Any]]:
     return []
 
 
+def _is_dissolved_remarks(val: Any) -> bool:
+    """Return True if a remarks-like value contains a DISSOLVED marker.
+
+    Context:
+    - OM_ClassRetention / CHAIR_ClassRetention persist the class retention status "Dissolved"
+      as a marker in `sections.remarks` (e.g., "... | DISSOLVED").
+    - OM_LoadAssignment and APO_CourseOfferings display this marker.
+    - CHAIR_Plantilla should *exclude* dissolved classes from plantilla output.
+    """
+    if val is None:
+        return False
+    try:
+        s = str(val)
+    except Exception:
+        return False
+    return "dissolved" in s.lower()
+
+
 async def _dept_id_for_user(user_id: str) -> Optional[str]:
     """
     Resolve department_id for a user.
@@ -363,6 +381,20 @@ async def chair_plantilla_get(
         if combined_section_ids:
             sec_match = {**sec_match, "section_id": {"$in": list(combined_section_ids)}}
         section_docs = await db.sections.find(sec_match).to_list(10000)
+
+        # Exclude dissolved classes from plantilla.
+        # Dissolved status is stored as a marker in `sections.remarks`.
+        dissolved_section_ids: Set[str] = set()
+        if section_docs:
+            filtered_sections: List[dict] = []
+            for s in section_docs:
+                if _is_dissolved_remarks(s.get("remarks")):
+                    sid = str(s.get("section_id") or "").strip()
+                    if sid:
+                        dissolved_section_ids.add(sid)
+                    continue
+                filtered_sections.append(s)
+            section_docs = filtered_sections
         
 
         # Fallback: If no sections, try to guess from assignments
@@ -376,12 +408,27 @@ async def chair_plantilla_get(
             sec_ids = list({a.get("section_id") for a in asg_docs if a.get("section_id")})
             if sec_ids:
                 section_docs = await db.sections.find({"section_id": {"$in": sec_ids}}).to_list(10000)
+
+                # Exclude dissolved classes from plantilla.
+                filtered_sections: List[dict] = []
+                for s in section_docs:
+                    if _is_dissolved_remarks(s.get("remarks")):
+                        sid = str(s.get("section_id") or "").strip()
+                        if sid:
+                            dissolved_section_ids.add(sid)
+                        continue
+                    filtered_sections.append(s)
+                section_docs = filtered_sections
         
         if not asg_docs and section_docs:
             asg_docs = await db.faculty_assignments.find(
                 {"section_id": {"$in": [s.get("section_id") for s in section_docs]},
                  "is_archived": {"$in": [False, None]}}
             ).to_list(100000)
+
+        # If we discovered dissolved sections, drop any assignments referencing them.
+        if dissolved_section_ids and asg_docs:
+            asg_docs = [a for a in asg_docs if str(a.get("section_id") or "").strip() not in dissolved_section_ids]
 
         by_section = {s["section_id"]: s for s in section_docs}
 
