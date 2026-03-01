@@ -2536,9 +2536,13 @@ export async function listOMSP(params: { status?: string; search?: string }) {
   return data as { ok: boolean; rows: OMPetitionRow[]; term_id: string };
 }
 
-export async function updateOMSPCourse(course_id: string, payload: { status?: string; remarks?: string }) {
+export async function updateOMSPCourse(
+  course_id: string,
+  payload: { status?: string; remarks?: string },
+  userId?: string | null
+) {
   const { data } = await axios.post(`${API_BASE}/om/student-petition`, payload, {
-    params: { action: "update", courseId: course_id },
+    params: { action: "update", courseId: course_id, ...(userId ? { userId } : {}) },
   });
   return data as { ok: boolean; matched: number; modified: number };
 }
@@ -2704,10 +2708,11 @@ export async function getOMSC_SchedulePresets(
 
 export async function updateOMSC(
   special_id: string,
-  payload: Partial<OMSpecialClassRow>
+  payload: Partial<OMSpecialClassRow>,
+  userId?: string | null
 ): Promise<{ ok: boolean; matched: number; modified: number }> {
   const { data } = await api.post(`/om/specialclass`, payload, {
-    params: { action: "update", specialId: special_id },
+    params: { action: "update", specialId: special_id, ...(userId ? { userId } : {}) },
   });
   return data as { ok: boolean; matched: number; modified: number };
 }
@@ -2853,17 +2858,12 @@ export async function getOMCR_SectionOptions(
 }
 
 export async function saveOMCR(
-  payload: Partial<OMCRRow>,
-  userId?: string
+  payload: Partial<OMCRRow>
 ): Promise<{ ok: boolean; retention_id: string }> {
   const copy = { ...payload };
   // faculty is auto-derived on backend — do not send
   delete (copy as any).faculty_id;
-
-  const params: any = { action: "save" };
-  if (userId) params.userId = userId;
-
-  const { data } = await api.post(`/om/classretention`, copy, { params });
+  const { data } = await api.post(`/om/classretention`, copy, { params: { action: "save" } });
   return data as { ok: boolean; retention_id: string };
 }
 
@@ -3013,7 +3013,7 @@ export async function sendFacultyLoadAssignmentRfcMessage(
 
 export async function acceptFacultyLoadAssignment(
   userId: string,
-  payload: { term_id?: string; send_to_gcal?: boolean }
+  payload: { term_id?: string; send_to_gcal?: boolean; gcal_action?: "sync" | "cleanup" | "reset" }
 ) {
   const base = (typeof API_BASE !== "undefined" ? API_BASE : "").replace(/\/+$/, "");
   const url = `${base}/faculty/load-assignment/accept?userId=${encodeURIComponent(userId)}`;

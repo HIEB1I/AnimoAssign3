@@ -22,7 +22,7 @@ export function getSessionUser(): SessionUser | null {
 
 export function getSessionUserId(): string | null {
   const u = getSessionUser();
-  const id = u?.userId || u?.user_id || u?.id;
+  const id = u?.userId || u?.user_id || u?.id || (u as any)?._id;
   if (!id) return null;
   const s = String(id).trim();
   return s ? s : null;

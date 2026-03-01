@@ -33,19 +33,7 @@ interface TopBarProps {
   inboxEvent?: string;
 }
 
-// IMPORTANT:
-// When the parent does not pass a `notifications` prop, we must NOT default it to
-// a fresh `[]` on every render.
-//
-// Why: this TopBar keeps a local `notifications` state and has a useEffect that
-// syncs state when `incomingNotifs` changes. If `incomingNotifs` is a new array
-// each render, the effect will fire each render and overwrite fetched
-// notifications with an empty list, making the bell look like it has
-// "No notifications" even when the backend has rows.
-// NOTE: TopBarProps["notifications"] is optional, so its type is
-//   Notif[] | undefined
-// We want a *non-optional* array type here so TS knows `incomingNotifs` is never
-// undefined.
+
 type IncomingNotifs = NonNullable<TopBarProps["notifications"]>;
 const EMPTY_NOTIFS: IncomingNotifs = [];
 
@@ -56,20 +44,20 @@ const EMPTY_NOTIFS: IncomingNotifs = [];
  * - Optional department + notifications
  * - Inbox button: navigate to inboxPath if provided; otherwise dispatches inboxEvent
  */
-export default function TopBar(props: TopBarProps) {
-  const {
-    fullName,
-    role,
-    department,
-    inboxEvent = "faculty:openInbox",
-    inboxPath,
-  } = props;
-
-  const incomingNotifs: IncomingNotifs = props.notifications ?? EMPTY_NOTIFS;
-
+export default function TopBar({
+  fullName,
+  role,
+  department,
+  notifications: incomingNotifsProp,
+  inboxEvent = "faculty:openInbox",
+  inboxPath,
+}: TopBarProps) {
   const navigate = useNavigate();
   const { unreadTotal } = useInboxBadge();
   const hasInboxUnread = unreadTotal > 0;
+
+  const incomingNotifs: IncomingNotifs = incomingNotifsProp ?? EMPTY_NOTIFS;
+
 
 
   const [menuOpen, setMenuOpen] = useState(false);
@@ -83,7 +71,7 @@ export default function TopBar(props: TopBarProps) {
     try {
       const raw = localStorage.getItem("animo.user");
       const u = raw ? JSON.parse(raw) : null;
-      return String(u?.userId || u?.user_id || u?.id || "").trim();
+      return String(u?.userId || u?.user_id || u?.id || u?._id || "").trim();
     } catch {
       return "";
     }
@@ -138,8 +126,8 @@ export default function TopBar(props: TopBarProps) {
 
   const [notifications, setNotifications] = useState<NotifUI[]>(() => {
     // If a screen passes notifications explicitly, keep that behavior.
-    if (incomingNotifs.length) {
-      return incomingNotifs.map((n: any) => ({
+    if (incomingNotifsProp?.length) {
+      return (incomingNotifsProp || EMPTY_NOTIFS).map((n: any) => ({
         id: String(n?.notif_id || n?.id || Math.random()),
         title: String(n?.title || ""),
         details: String(n?.details || ""),
@@ -153,26 +141,26 @@ export default function TopBar(props: TopBarProps) {
     return [];
   });
 
-  // If a screen provides notifications explicitly, reflect them.
-  // IMPORTANT: do NOT overwrite backend-fetched notifications with an empty array
-  // (many screens don't pass notifications at all).
+  // Keep state in sync when a screen provides notifications explicitly
   useEffect(() => {
-    if (!incomingNotifs.length) return;
+    if (!incomingNotifsProp) return;
     setNotifications(
-      incomingNotifs.map((n: any) => ({
-        id: String(n?.notif_id || n?.id || Math.random()),
-        title: String(n?.title || ""),
-        details: String(n?.details || ""),
-        time: pickNotifTime(n) || new Date(),
-        seen: !!n?.seen,
-        meta: n?.meta,
-      }))
+      incomingNotifsProp.length
+        ? incomingNotifsProp.map((n: any) => ({
+            id: String(n?.notif_id || n?.id || Math.random()),
+            title: String(n?.title || ""),
+            details: String(n?.details || ""),
+            time: pickNotifTime(n) || new Date(),
+            seen: !!n?.seen,
+            meta: n?.meta,
+          }))
+        : []
     );
-  }, [incomingNotifs]);
+  }, [incomingNotifsProp]);
 
   const refreshNotifs = async () => {
     // Only auto-fetch when the page didn't supply notifications.
-    if (incomingNotifs.length) return;
+    if (incomingNotifsProp?.length) return;
     const uid = sessionUserId || readSessionUserId();
     if (!uid) return;
 

@@ -1255,6 +1255,77 @@ async def _get_all_om_user_ids() -> list[str]:
     return list(dict.fromkeys([x for x in ids if x]))
 
 
+
+
+async def _get_all_student_user_ids() -> list[str]:
+    """Best-effort: return all student user_ids.
+
+    Used for broadcast notifications (e.g., dissolved classes) where *all* students
+    should receive an in-app notification.
+
+    Resolution order:
+      1) role_assignments + user_roles (role_type contains 'student')
+      2) fallback to users where student_number exists
+
+    Returns canonical users.user_id values (e.g., 'USR0123').
+    """
+
+    ids: list[str] = []
+
+    # 1) Role-based resolution
+    role_ids: list[str] = []
+    try:
+        cur_roles = db['user_roles'].find(
+            {'role_type': {'$regex': r'(\bstudent\b)', '$options': 'i'}},
+            {'_id': 0, 'role_id': 1},
+        )
+        async for r in cur_roles:
+            rid = str((r or {}).get('role_id') or '').strip()
+            if rid:
+                role_ids.append(rid)
+    except Exception:
+        role_ids = []
+
+    role_ids = list(dict.fromkeys([r for r in role_ids if r]))
+
+    if role_ids:
+        try:
+            # Primary: role_assignments.role_id in student role_ids
+            cur_ra = db['role_assignments'].find(
+                {'role_id': {'$in': role_ids}},
+                {'_id': 0, 'user_id': 1},
+            )
+            async for ra in cur_ra:
+                uid = str((ra or {}).get('user_id') or '').strip()
+                if uid:
+                    ids.append(uid)
+        except Exception:
+            pass
+
+    # 2) Fallback: any user with student_number
+    if not ids:
+        try:
+            # Some deployments store student_number as int; match both null and missing.
+            cur = db[COL_USERS].find(
+                {'student_number': {'$exists': True, '$ne': None}},
+                {'_id': 0, 'user_id': 1},
+            )
+            async for r in cur:
+                uid = str((r or {}).get('user_id') or '').strip()
+                if uid:
+                    ids.append(uid)
+        except Exception:
+            pass
+
+    # De-dup + filter blanks
+    out: list[str] = []
+    seen = set()
+    for u in ids:
+        if u and u not in seen:
+            seen.add(u)
+            out.append(u)
+    return out
+
 async def _get_not_finished_faculty_user_ids(term_id: str) -> list[str]:
     # find faculty_ids that already finished for this term
     finished_ids = await db[COL_FACULTY_PREFS].distinct(

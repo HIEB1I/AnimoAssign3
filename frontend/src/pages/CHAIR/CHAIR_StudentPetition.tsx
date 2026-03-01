@@ -9,6 +9,7 @@ import {
   type OMPetitionRow,
   type OMPetitionOptions,
 } from "../../api";
+import { getSessionUserId } from "../../lib/session";
 
 // simple textbox
 function TextBox({
@@ -148,7 +149,7 @@ export default function CHAIR_StudentPetition() {
     try {
       setLoading(true);
       setErr("");
-      await updateOMSPCourse(editCourseId, draft);
+      await updateOMSPCourse(editCourseId, draft, getSessionUserId());
       const { rows } = await listOMSP({ status, search });
       setRows(rows);
       setEditCourseId(null);
