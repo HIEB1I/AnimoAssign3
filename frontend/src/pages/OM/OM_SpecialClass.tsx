@@ -1138,9 +1138,9 @@ export default function OM_SpecialClass({ hideMessageIcon = false }: { hideMessa
       </div>
 
       <div className="table-wrapper w-full overflow-hidden">
-        <div className="border border-gray-200 bg-white shadow-sm overflow-auto rounded-xl">
+        <div className="border border-gray-200 bg-gray-50 shadow-sm overflow-auto rounded-xl">
           <table className="w-full text-sm table-auto">
-            <thead className="bg-gray-50 border-b text-gray-900">
+            <thead className="bg-gray-50 border-b text-gray-700">
               <tr>
                 <th className="text-left px-3 py-2 whitespace-nowrap w-10">
                   <input

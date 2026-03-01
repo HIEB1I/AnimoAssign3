@@ -303,7 +303,6 @@ const pushToast = useCallback(
       proposal_status: (list as any).proposal_status,
       rfc: (list as any).rfc,
       schedule_final: (list as any).schedule_final,
-      room_changed_since_accept: (list as any).room_changed_since_accept,
     };
     setData(nextData);
     setError(null);
@@ -1645,7 +1644,6 @@ type TeachingLoadEnhancedProps = {
   workflow?: {
     schedule_final?: boolean;
     proposal_status?: string | null;
-    room_changed_since_accept?: boolean;
     rfc?: { status?: string | null } | null;
   };
   onToast?: (kind: ToastKind, message: string, title?: string) => void;
@@ -2186,7 +2184,7 @@ const [isAccepting, setIsAccepting] = useState(false);
   // The button should re-enable when OM sends a new schedule proposal (proposal_status changes away from Approved/Accepted).
   const proposalStatusLower = String(workflow?.proposal_status || "").toLowerCase();
   const isAlreadyApproved = proposalStatusLower === "approved" || proposalStatusLower === "accepted";
-  const roomChangedSinceAccept = Boolean(workflow?.room_changed_since_accept);
+
 
 const scheduleFinalLabel = (() => {
   if (proposalStatusLower === "accepted") return "Finalized (Accepted)";
@@ -2291,7 +2289,7 @@ const scheduleFinalLabel = (() => {
 
                 const resp: any = await acceptFacultyLoadAssignment(
                   userId,
-                  { ...(termId ? { term_id: termId } : {}), send_to_gcal: sendToGcal, gcal_action: "cleanup", }
+                  { ...(termId ? { term_id: termId } : {}), send_to_gcal: sendToGcal }
                 );
 
                 console.log("ACCEPT resp:", resp);
@@ -2317,24 +2315,22 @@ const scheduleFinalLabel = (() => {
                 setIsAccepting(false);
               }
 	                  }}
-	                  disabled={isAccepting || (!roomChangedSinceAccept && (scheduleFinal || isAlreadyApproved))}
+	                  disabled={isAccepting || scheduleFinal || isAlreadyApproved}
 	                  className={cls(
 	                    "inline-flex h-9 items-center justify-center rounded-lg px-4 text-sm font-medium shadow",
 	                    "focus:outline-none focus:ring-2 focus:ring-emerald-600/40",
-	                    (isAccepting || (!roomChangedSinceAccept && (scheduleFinal || isAlreadyApproved)))
+	                    (isAccepting || scheduleFinal || isAlreadyApproved)
 	                      ? "bg-neutral-300 text-neutral-600 cursor-not-allowed"
 	                      : "bg-blue-700 text-white hover:bg-blue-800 active:translate-y-[0.5px]"
 	                  )}
 	                >
-	                  {roomChangedSinceAccept
-                      ? "Accept Updated Rooms"
-                      : scheduleFinal
-                      ? scheduleFinalLabel
-                      : isAlreadyApproved
-                      ? "Approved"
-                      : isAccepting
-                      ? "Accepting…"
-                      : "Accept Schedule"}
+	                  {scheduleFinal
+	                    ? "Finalized"
+	                    : isAlreadyApproved
+	                    ? "Approved"
+	                    : isAccepting
+	                    ? "Accepting…"
+	                    : "Accept Schedule"}
 	                </button>
 
 	                <label className="mt-2 inline-flex items-center gap-2 text-xs text-slate-700 select-none">
@@ -2343,7 +2339,7 @@ const scheduleFinalLabel = (() => {
 	                    className="h-3.5 w-3.5 rounded border-neutral-300 text-emerald-700 focus:ring-emerald-600/40"
 	                    checked={sendToGcal}
 	                    onChange={(e) => setSendToGcal(e.target.checked)}
-	                    disabled={isAccepting}
+	                    disabled={isAccepting || scheduleFinal || isAlreadyApproved}
 	                  />
 	                  <span>Send to GCalendar</span>
 	                </label>
@@ -2360,11 +2356,10 @@ const scheduleFinalLabel = (() => {
 	                    const userId = raw.userId || raw.user_id || raw.id || "";
 	                    const termId = (term as any)?.term_id || (term as any)?._id || (term as any)?.id;
 
-	                    const resp: any = await acceptFacultyLoadAssignment(userId, {
-                      ...(termId ? { term_id: termId } : {}),
-                      send_to_gcal: true,
-                      gcal_action: "cleanup", // resync + remove deleted schedule events
-                    } as any);
+	                    const resp: any = await acceptFacultyLoadAssignment(
+	                      userId,
+	                      ({ ...(termId ? { term_id: termId } : {}), send_to_gcal: true, sync_special_only: true, overwrite_gcal: true } as any)
+	                    );
 
 	                    if (resp?.calendar_ok === false) {
 	                      onToast?.("warning", resp?.calendar_error || "Calendar was not created.", "Sync issue");
