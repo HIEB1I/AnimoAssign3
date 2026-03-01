@@ -303,7 +303,6 @@ const pushToast = useCallback(
       proposal_status: (list as any).proposal_status,
       rfc: (list as any).rfc,
       schedule_final: (list as any).schedule_final,
-      room_changed_since_accept: (list as any).room_changed_since_accept,
     };
     setData(nextData);
     setError(null);
@@ -1628,7 +1627,6 @@ type TeachingLoadEnhancedProps = {
   workflow?: {
     schedule_final?: boolean;
     proposal_status?: string | null;
-    room_changed_since_accept?: boolean;
     rfc?: { status?: string | null } | null;
   };
   onToast?: (kind: ToastKind, message: string, title?: string) => void;
@@ -2169,7 +2167,7 @@ const [isAccepting, setIsAccepting] = useState(false);
   // The button should re-enable when OM sends a new schedule proposal (proposal_status changes away from Approved/Accepted).
   const proposalStatusLower = String(workflow?.proposal_status || "").toLowerCase();
   const isAlreadyApproved = proposalStatusLower === "approved" || proposalStatusLower === "accepted";
-  const roomChangedSinceAccept = Boolean(workflow?.room_changed_since_accept);
+
 
 const scheduleFinalLabel = (() => {
   if (proposalStatusLower === "accepted") return "Finalized (Accepted)";
@@ -2300,24 +2298,22 @@ const scheduleFinalLabel = (() => {
                 setIsAccepting(false);
               }
 	                  }}
-	                  disabled={isAccepting || (!roomChangedSinceAccept && (scheduleFinal || isAlreadyApproved))}
+	                  disabled={isAccepting || scheduleFinal || isAlreadyApproved}
 	                  className={cls(
 	                    "inline-flex h-9 items-center justify-center rounded-lg px-4 text-sm font-medium shadow",
 	                    "focus:outline-none focus:ring-2 focus:ring-emerald-600/40",
-	                    (isAccepting || (!roomChangedSinceAccept && (scheduleFinal || isAlreadyApproved)))
+	                    (isAccepting || scheduleFinal || isAlreadyApproved)
 	                      ? "bg-neutral-300 text-neutral-600 cursor-not-allowed"
 	                      : "bg-blue-700 text-white hover:bg-blue-800 active:translate-y-[0.5px]"
 	                  )}
 	                >
-	                  {roomChangedSinceAccept
-                      ? "Accept Updated Rooms"
-                      : scheduleFinal
-                      ? scheduleFinalLabel
-                      : isAlreadyApproved
-                      ? "Approved"
-                      : isAccepting
-                      ? "Accepting…"
-                      : "Accept Schedule"}
+	                  {scheduleFinal
+	                    ? "Finalized"
+	                    : isAlreadyApproved
+	                    ? "Approved"
+	                    : isAccepting
+	                    ? "Accepting…"
+	                    : "Accept Schedule"}
 	                </button>
 
 	                <label className="mt-2 inline-flex items-center gap-2 text-xs text-slate-700 select-none">
