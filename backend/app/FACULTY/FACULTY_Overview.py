@@ -4258,7 +4258,12 @@ async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[s
     ) or {}
 
     send_to_gcal = _payload_bool(payload.get("send_to_gcal", True), True)
-    overwrite_gcal = _payload_bool(payload.get("overwrite_gcal", False), False)
+
+    # Special Class tab uses this flag to sync without accepting/locking the schedule.
+    sync_special_only = _payload_bool(payload.get("sync_special_only"), False)
+
+    # Special Class sync overwrites by default to prevent duplicates.
+    overwrite_gcal = _payload_bool(payload.get("overwrite_gcal"), sync_special_only)
 
     gcal_action = (payload.get("gcal_action") or "cleanup").lower().strip()
     if gcal_action not in {"sync", "cleanup", "reset"}:
@@ -4272,6 +4277,89 @@ async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[s
         raise HTTPException(status_code=409, detail="No active/upcoming term")
 
     fid = faculty.get("faculty_id")
+    
+    # --- Special-only sync shortcut (NO accept, NO emails, NO proposal changes) ---
+    if sync_special_only:
+        calendar_ok: Optional[bool] = None
+        calendar_error: Optional[str] = None
+        calendar_events_created = 0
+        calendar_term_id: Optional[str] = None
+        term_start_at_out: Optional[datetime] = None
+        week_count = _TERM_WEEK_COUNT
+
+        if not send_to_gcal:
+            return {
+                "ok": True,
+                "status": "SYNC_ONLY",
+                "send_to_gcal": False,
+                "calendar_ok": None,
+                "calendar_events_created": 0,
+                "calendar_error": None,
+                "calendar_term_id": None,
+                "term_start_at": None,
+                "week_count": week_count,
+            }
+
+        try:
+            sc_rows = await _fetch_reflected_special_classes_for_faculty(term_id=term_id, faculty_id=fid)
+            if not sc_rows:
+                return {
+                    "ok": True,
+                    "status": "SYNC_ONLY",
+                    "send_to_gcal": True,
+                    "calendar_ok": True,
+                    "calendar_events_created": 0,
+                    "calendar_error": None,
+                    "calendar_term_id": None,
+                    "term_start_at": None,
+                    "week_count": week_count,
+                }
+
+            nxt_term = await _next_term_from_current()
+            if not nxt_term:
+                calendar_ok = False
+                calendar_error = "No next term found after current term."
+            else:
+                calendar_term_id = (nxt_term.get("term_id") or "").strip()
+                term_start_at = _coerce_dt(nxt_term.get("start_at"))
+                term_end_at = _coerce_dt(nxt_term.get("end_at"))
+
+                if not term_start_at:
+                    calendar_ok = False
+                    calendar_error = f"Next term {calendar_term_id or ''} has no start_at; cannot create calendar events."
+                else:
+                    term_start_at_out = term_start_at
+
+                    if term_end_at:
+                        span_weeks = max(1, ((term_end_at.date() - term_start_at.date()).days // 7) + 1)
+                        week_count = min(_TERM_WEEK_COUNT, span_weeks)
+
+                    # Use the older proven function for special sync (kind="special")
+                    calendar_ok, calendar_events_created, calendar_error = await _create_term_calendar_for_user(
+                        user_id=userId,
+                        term_id=calendar_term_id or term_id,
+                        term_start_at=term_start_at,
+                        rows=sc_rows,
+                        week_count=week_count,
+                        overwrite=overwrite_gcal,
+                        kind="special",
+                    )
+        except Exception as e:
+            calendar_ok = False
+            calendar_error = str(e)
+
+        return {
+            "ok": True,
+            "status": "SYNC_ONLY",
+            "send_to_gcal": True,
+            "calendar_ok": calendar_ok,
+            "calendar_events_created": int(calendar_events_created or 0),
+            "calendar_error": calendar_error,
+            "calendar_term_id": calendar_term_id,
+            "term_start_at": (term_start_at_out.isoformat() if term_start_at_out else None),
+            "week_count": week_count,
+        }
+    
     proposal = await db[COL_LOAD_PROPOSALS].find_one({"faculty_id": fid, "term_id": term_id}, {"_id": 0})
     if not proposal:
         return {"ok": True, "message": "No proposal to accept."}
@@ -4439,12 +4527,13 @@ async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[s
                 calendar_ok = False
                 calendar_error = f"Next term {calendar_term_id or ''} has no start_at."
             else:
+                rows_for_calendar = [rr for rr in (proposal_rows or []) if not bool((rr or {}).get("is_special_class"))]
                 ok, stats, err = await _sync_term_calendar_for_user(
                     user_id=userId,
                     calendar_term_id=calendar_term_id,
                     term_start_at=term_start_at,
                     term_end_at=term_end_at,
-                    rows=proposal_rows,
+                    rows=rows_for_calendar,
                     action=gcal_action,      # cleanup removes deleted schedule rows
                     week_count=week_count,
                 )

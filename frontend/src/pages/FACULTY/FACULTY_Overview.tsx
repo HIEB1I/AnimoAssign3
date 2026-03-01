@@ -2343,11 +2343,15 @@ const scheduleFinalLabel = (() => {
 	                    const userId = raw.userId || raw.user_id || raw.id || "";
 	                    const termId = (term as any)?.term_id || (term as any)?._id || (term as any)?.id;
 
-	                    const resp: any = await acceptFacultyLoadAssignment(userId, {
-                      ...(termId ? { term_id: termId } : {}),
-                      send_to_gcal: true,
-                      gcal_action: "cleanup", // resync + remove deleted schedule events
-                    } as any);
+	                    const resp: any = await acceptFacultyLoadAssignment(
+                      userId,
+                      ({
+                        ...(termId ? { term_id: termId } : {}),
+                        send_to_gcal: true,
+                        sync_special_only: true,
+                        overwrite_gcal: true,
+                      } as any)
+                    );
 
 	                    if (resp?.calendar_ok === false) {
 	                      onToast?.("warning", resp?.calendar_error || "Calendar was not created.", "Sync issue");
