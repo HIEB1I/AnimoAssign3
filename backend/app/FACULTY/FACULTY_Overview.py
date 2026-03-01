@@ -152,17 +152,16 @@ def _payload_bool(v: Any, default: bool) -> bool:
             return False
     return bool(v)
 
-def _aa_event_key(term_id: str, course_code: str, section: str, meeting_idx: int) -> str:
-    return f"{term_id}|{(course_code or '').strip()}|{(section or '').strip()}|M{meeting_idx}"
+def _aa_event_key(course_code: str, section: str) -> str:
+    return f"|{(course_code or '').strip()}|{(section or '').strip()}|"
 
-def _aa_managed_block(term_id: str, event_key: str, mode: str, room: str) -> str:
+def _aa_managed_block(event_key: str, mode: str, room: str) -> str:
     return (
         f"{AA_DESC_BEGIN}\n"
         f"AnimoAssign Calendar Sync\n"
-        f"term_id: {term_id}\n"
-        f"event_key: {event_key}\n"
-        f"mode: {(mode or '').strip()}\n"
-        f"room: {(room or '').strip()}\n"
+        f"Event: {event_key}\n"
+        f"Mode: {(mode or '').strip()}\n"
+        f"Room: {(room or '').strip()}\n"
         f"{AA_DESC_END}"
     )
 
@@ -1054,7 +1053,7 @@ async def _sync_term_calendar_for_user(
         start_dt_local = datetime(first_date.year, first_date.month, first_date.day, sh, sm, tzinfo=tzinfo)
         end_dt_local = datetime(first_date.year, first_date.month, first_date.day, eh, em, tzinfo=tzinfo)
 
-        event_key = _aa_event_key(calendar_term_id, course_code, section, meeting_idx)
+        event_key = _aa_event_key(course_code, section)
         desired_keys.add(event_key)
 
         title = f"{(course_code or '').strip()} {(section or '').strip()}".strip() or "Class"
@@ -1068,11 +1067,10 @@ async def _sync_term_calendar_for_user(
             "recurrence": [rrule],
         }
         h = _sync_hash(managed_fields)
-        managed_block = _aa_managed_block(calendar_term_id, event_key, mode, location)
+        managed_block = _aa_managed_block(event_key, mode, location)
 
         private_props = {
             AA_APP_KEY: AA_APP_VAL,
-            AA_TERM_KEY: calendar_term_id,
             AA_EVENT_KEY: event_key,
             AA_HASH_KEY: h,
         }
