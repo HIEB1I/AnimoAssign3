@@ -265,12 +265,6 @@ function ServiceRfcModal({
 
           {loading && <div className="mb-4 text-sm text-gray-600">Loading…</div>}
           {error && <div className="mb-4 text-sm text-red-600">{error}</div>}
-
-          {!loading && !error && !status && (
-            <div className="mb-4 rounded-lg border border-gray-200 bg-gray-50 p-3 text-sm text-gray-700">
-              No RFC thread found for this course.
-            </div>
-          )}
         </div>
 
         <div
@@ -424,12 +418,14 @@ function Dropdown({
     const r = el.getBoundingClientRect();
     const vw = window.innerWidth;
     const vh = window.innerHeight;
-    const estMenuH = Math.min(48 + shown.length * 36, Math.floor(vh * 0.6));
-    const roomBelow = vh - r.bottom;
-    const place: "down" | "up" = roomBelow >= estMenuH || r.top < estMenuH ? "down" : "up";
+
+    // Always open downward.
+    const place: "down" | "up" = "down";
+
     const width = Math.max(r.width, 180);
     const left = Math.max(8, Math.min(vw - width - 8, align === "right" ? r.right - width : r.left));
-    const top = place === "down" ? Math.min(vh - 8, r.bottom + 8) : Math.max(8, r.top - 8);
+    const top = Math.min(vh - 8, r.bottom + 6);
+
     setMenuRect({ left, top, width, place });
   };
 
@@ -481,7 +477,7 @@ function Dropdown({
   };
 
   const baseBtn = cls(
-    "w-full rounded-lg border px-3 py-2 text-left text-sm outline-none pr-8",
+    "w-full h-10 rounded-lg border px-3 text-left text-sm outline-none pr-8 flex items-center",
     "border-gray-300 bg-white shadow-sm focus:ring-2 focus:ring-emerald-200 focus:border-emerald-300",
     disabled && "cursor-not-allowed bg-gray-100 text-gray-400"
   );
@@ -563,13 +559,12 @@ function Dropdown({
           style={{
             position: "fixed",
             left: menuRect.left,
-            top: menuRect.place === "down" ? menuRect.top : undefined,
-            bottom: menuRect.place === "up" ? window.innerHeight - menuRect.top : undefined,
+            top: menuRect.top,
             width: menuRect.width,
             maxHeight: "60vh",
           }}
           className={cls(
-            "z-[5000] overflow-auto rounded-xl border border-gray-300 bg-white shadow-xl",
+            "z-[100000] overflow-auto rounded-xl border border-gray-300 bg-white shadow-xl",
             "overscroll-contain py-1"
           )}
         >
@@ -578,14 +573,14 @@ function Dropdown({
               key={opt}
               onClick={() => onPick(opt)}
               className={cls(
-                "block w-full truncate px-4 py-2 text-left text-sm hover:bg-emerald-50 transition-colors",
+                "block w-full h-10 truncate px-4 text-left text-sm hover:bg-emerald-50 transition-colors flex items-center",
                 value === opt && "bg-emerald-100 text-emerald-800 font-medium"
               )}
             >
               {opt}
             </button>
           ))}
-          {shown.length === 0 && <div className="px-4 py-2 text-sm text-neutral-500">No results</div>}
+          {shown.length === 0 && <div className="px-4 h-10 flex items-center text-sm text-neutral-500">No results</div>}
         </div>
       )}
     </div>
@@ -1495,6 +1490,101 @@ export default function CHAIR_FacultyService({ chairDepartmentName, variant = "p
     return typeof m === "string" ? m : JSON.stringify(m);
   }
 
+  /* ---------------- Minimal local POST helper (keeps this page self-contained) ----------------
+     We intentionally use a relative '/api' prefix which matches the rest of the app's API
+     calls (via '@/api') under typical dev/prod proxy setups.
+  */
+  async function apiPostJSON(path: string, body?: any) {
+    const res = await fetch(path, {
+      method: "POST",
+      credentials: "include",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    let data: any = null;
+    try {
+      data = await res.json();
+    } catch {
+      // ignore
+    }
+    if (!res.ok || (data && data.ok === false)) {
+      const msg = data?.detail || data?.message || `Request failed (${res.status})`;
+      throw new Error(typeof msg === "string" ? msg : JSON.stringify(msg));
+    }
+    return data;
+  }
+
+  const FS_STATUS_OPTIONS = ["Pending", "Approved", "Rejected"] as const;
+  const toFsStatusLabel = (s?: string) => (s === "responded" ? "Approved" : s === "rejected" ? "Rejected" : "Pending");
+  const labelToFsStatus = (label: string) => (label === "Approved" ? "responded" : label === "Rejected" ? "rejected" : "sent");
+
+  async function changeReceivedStatus(fsid: string, label: string, row: FacultyServiceRow) {
+    try {
+      const st = labelToFsStatus(label);
+      const e = getEdit(fsid);
+
+      if (st === "responded") {
+        const facId = String(e?.faculty?.faculty_id || (row as any)?.faculty?.faculty_id || "").trim();
+        if (!facId) {
+          showToast({ type: "info", title: "Missing faculty", message: "Select a faculty before approving." });
+          return;
+        }
+
+        // Require schedule fields before approving (matches UI asterisks)
+        const missing: string[] = [];
+        if (!e.day1) missing.push("Day1");
+        if (!e.begin1) missing.push("Begin1");
+        if (!e.end1) missing.push("End1");
+        if (!e.day2) missing.push("Day2");
+        if (!e.begin2) missing.push("Begin2");
+        if (!e.end2) missing.push("End2");
+        if (missing.length) {
+          showToast({
+            type: "info",
+            title: "Missing schedule",
+            message: `Fill required fields: ${missing.join(", ")}.`,
+          });
+          return;
+        }
+
+        await apiPostJSON(`/api/chair/faculty-service/respond/${encodeURIComponent(fsid)}?userId=${encodeURIComponent(meUserId)}`, {
+          faculty: {
+            faculty_id: facId,
+            first_name: e?.faculty?.first_name || (row as any)?.faculty?.first_name,
+            last_name: e?.faculty?.last_name || (row as any)?.faculty?.last_name,
+            email: e?.faculty?.email || (row as any)?.faculty?.email,
+          },
+          day1: e.day1,
+          begin1: e.begin1,
+          end1: e.end1,
+          day2: e.day2,
+          begin2: e.begin2,
+          end2: e.end2,
+          remarks: e.remarks,
+        });
+
+        showToast({ type: "success", message: "Request approved." });
+      } else if (st === "rejected") {
+        await apiPostJSON(`/api/chair/faculty-service/reject/${encodeURIComponent(fsid)}?userId=${encodeURIComponent(meUserId)}`, {
+          remarks: e.remarks,
+        });
+        showToast({ type: "success", message: "Request rejected." });
+      } else {
+        // Pending (sent) — allow reverting anytime.
+        await apiPostJSON(`/api/chair/faculty-service/restore/${encodeURIComponent(fsid)}`, {
+          status: "sent",
+        });
+        showToast({ type: "success", message: "Status set to pending." });
+      }
+
+      await refresh();
+    } catch (err: any) {
+      showToast({ type: "error", title: "Update failed", message: friendlyError(err) });
+    }
+  }
+
   async function handleCreateAndSend() {
     try {
       const selected = draftRows.filter((r) => (selectedDraftIds[r._tmpId] ?? true));
@@ -1999,11 +2089,7 @@ export default function CHAIR_FacultyService({ chairDepartmentName, variant = "p
                     const fid = String((r as any)?.faculty?.faculty_id || (e.faculty as any)?.faculty_id || "").trim();
                     const rkey = sid && fid ? rfcKey(sid, fid) : "";
                     const pendingRfc = rkey ? Boolean(rfcPendingByKey[rkey]) : false;
-                    const statusLabel = pendingRfc ? "Pending" : "Approve";
-                    const statusBadge =
-                      statusLabel === "Pending"
-                        ? "bg-amber-100 text-amber-800 border-amber-300"
-                        : "bg-emerald-100 text-emerald-800 border-emerald-300";
+                    const curStatusLabel = toFsStatusLabel((r as any)?.status);
 
                     return (
                       <tr key={fsid} className={PLANTILLA_ROW} onMouseEnter={() => ensureFacultyForDept(dept)}>
@@ -2187,21 +2273,15 @@ export default function CHAIR_FacultyService({ chairDepartmentName, variant = "p
                                 )}
                               </span>
                             </button>
-
-                            <span
-                              className={cls(
-                                "inline-flex items-center justify-center",
-                                "h-9 min-w-[120px] rounded-md border px-3 text-[13px] font-semibold",
-                                statusBadge
-                              )}
-                              title={
-                                statusLabel === "Pending"
-                                  ? "There is an active RFC thread for this service class."
-                                  : "No active RFC thread."
-                              }
-                            >
-                              {statusLabel}
-                            </span>
+                            {/* Faculty Service request status (clickable) */}
+                            <Dropdown
+                              value={curStatusLabel}
+                              onChange={(v) => void changeReceivedStatus(fsid, String(v), r)}
+                              options={[...FS_STATUS_OPTIONS] as any}
+                              placeholder="Pending"
+                              className="min-w-[140px]"
+                              searchable={false}
+                            />
                           </div>
                         </td>
                       </tr>
