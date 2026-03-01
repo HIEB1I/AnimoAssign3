@@ -40,6 +40,7 @@ import OM_RP_LoadRisk from "@/pages/OM/OM_REPORTS_ANALYTICS/OM_RP_LoadRisk";
 import STUDENT_Petition from "./pages/STUDENT/STUDENT_Petition";
 import STUDENT_SpecialClass from "./pages/STUDENT/STUDENT_SpecialClass";
 import STUDENT_CourseOfferings from "./pages/STUDENT/STUDENT_CourseOfferings";
+import STUDENT_Inbox from "./pages/STUDENT/STUDENT_Inbox";
 
 // ---------------- Faculty ----------------
 import FACULTY_Overview from "./pages/FACULTY/FACULTY_Overview";
@@ -189,6 +190,7 @@ export default function App() {
           <Route path="/student/petition" element={<STUDENT_Petition />} />
           <Route path="/student/specialclass" element={<STUDENT_SpecialClass />} />
           <Route path="/student/courseofferings" element={<STUDENT_CourseOfferings />} />
+          <Route path="/student/inbox" element={<STUDENT_Inbox />} />
 
           {/* APO */}
           <Route path="/apo/preenlistment" element={<APO_PreEnlistment />} />

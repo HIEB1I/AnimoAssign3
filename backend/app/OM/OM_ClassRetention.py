@@ -20,6 +20,7 @@ COL_CLASS_RETENTION = "class_retention"
 COL_TERMS = "terms"
 COL_COURSES = "courses"
 COL_SECTIONS = "sections"
+COL_CAMPUSES = "campuses"
 COL_USERS = "users"
 COL_FAC_PROFILES = "faculty_profiles"
 COL_FAC_ASSIGN = "faculty_assignments"
@@ -138,6 +139,123 @@ async def _broadcast_dissolved_to_students(*, term_id: str, course_id: str, sect
         # best-effort only
         return
 
+
+async def _notify_interested_students_dissolved(
+    *,
+    term_id: str,
+    course_id: str,
+    section_id: str,
+    enrolled: Any = None,
+    email_from_user_id: str | None = None,
+) -> None:
+    """Notify *interested* students (in-app + Gmail) that a class was dissolved.
+
+    We avoid mass-emailing ALL students. "Interested" is best-effort:
+    - Students who filed a petition for this course in this term.
+    - Students who submitted a Special Class request for this course in this term.
+    """
+
+    try:
+        term_id = str(term_id or "").strip()
+        course_id = str(course_id or "").strip()
+        section_id = str(section_id or "").strip()
+        if not term_id or not course_id:
+            return
+
+        uids: set[str] = set()
+
+        # (1) Petitioners
+        try:
+            pet_uids = await db.get_collection("student_petitions").distinct(
+                "user_id",
+                {"term_id": term_id, "course_id": course_id, "petition_id": {"$exists": True}},
+            )
+            for u in pet_uids or []:
+                s = str(u or "").strip()
+                if s:
+                    uids.add(s)
+        except Exception:
+            pass
+
+        # (2) Special class requesters (new + legacy key)
+        try:
+            sc_uids = await db.get_collection("special_class").distinct(
+                "user_id",
+                {"term_id": term_id, "course_id": course_id},
+            )
+            for u in sc_uids or []:
+                s = str(u or "").strip()
+                if s:
+                    uids.add(s)
+        except Exception:
+            pass
+
+        try:
+            sc_uids2 = await db.get_collection("special_class").distinct(
+                "student_user_id",
+                {"term_id": term_id, "course_id": course_id},
+            )
+            for u in sc_uids2 or []:
+                s = str(u or "").strip()
+                if s:
+                    uids.add(s)
+        except Exception:
+            pass
+
+        if not uids:
+            return
+
+        # Resolve display fields (best-effort).
+        course = await db[COL_COURSES].find_one(
+            {"course_id": course_id},
+            {"_id": 0, "course_code": 1, "course_title": 1},
+        ) or {}
+        cc = course.get("course_code")
+        course_code = (cc[0] if isinstance(cc, list) and cc else cc) or ""
+        course_code = str(course_code or "").strip()
+        course_title = str(course.get("course_title") or "").strip()
+
+        sec = await db[COL_SECTIONS].find_one(
+            {"section_id": section_id},
+            {"_id": 0, "section_code": 1, "enrolled": 1},
+        ) or {}
+        section_code = str(sec.get("section_code") or "").strip()
+        enrolled_val = enrolled if enrolled is not None else sec.get("enrolled")
+
+        title = "Class dissolved (low enrollment)"
+        parts = ["A class was marked as Dissolved due to low enrollment."]
+        if course_code or course_title:
+            parts.append(f"Course: {course_code} — {course_title}".strip(" —"))
+        if section_code:
+            if enrolled_val is not None and str(enrolled_val) != "":
+                parts.append(f"Section: {section_code} (enrolled: {enrolled_val})")
+            else:
+                parts.append(f"Section: {section_code}")
+        details = "\n".join([p for p in parts if p])
+
+        meta = {
+            "route": "/student/courseofferings",
+            "kind": "class_dissolved",
+            "term_id": term_id,
+            "course_id": course_id,
+            "section_id": section_id,
+        }
+
+        for uid in sorted(uids):
+            try:
+                await create_notification(
+                    user_id=uid,
+                    title=title,
+                    details=details,
+                    meta=meta,
+                    send_email=True,
+                    email_from_user_id=email_from_user_id,
+                )
+            except Exception:
+                continue
+    except Exception:
+        return
+
 async def _campus_id_for_section(section_id: str) -> str:
     """Best-effort resolve campus_id for a section."""
     sid = (section_id or "").strip()
@@ -148,6 +266,42 @@ async def _campus_id_for_section(section_id: str) -> str:
         return str(sec.get("campus_id") or "").strip().upper()
     except Exception:
         return ""
+
+
+async def _campus_display_name(campus_id_or_name: str) -> str:
+    """Return a human-friendly campus name (best-effort).
+
+    Requirement: notifications should show campus *name* (not the id).
+    Data can be inconsistent across deployments:
+      - sections.campus_id might store campuses.campus_id (e.g., "CMPS0001")
+      - or it might already store a campus name (e.g., "Manila")
+    """
+    v = (campus_id_or_name or "").strip()
+    if not v:
+        return ""
+    try:
+        # 1) direct campus_id match
+        doc = await db[COL_CAMPUSES].find_one({"campus_id": v}, {"_id": 0, "campus_name": 1})
+        if doc and doc.get("campus_name"):
+            return str(doc["campus_name"]).strip()
+
+        # 2) uppercase campus_id match
+        doc = await db[COL_CAMPUSES].find_one({"campus_id": v.upper()}, {"_id": 0, "campus_name": 1})
+        if doc and doc.get("campus_name"):
+            return str(doc["campus_name"]).strip()
+
+        # 3) exact campus_name match (case-insensitive)
+        doc = await db[COL_CAMPUSES].find_one(
+            {"campus_name": {"$regex": f"^{v}$", "$options": "i"}},
+            {"_id": 0, "campus_name": 1},
+        )
+        if doc and doc.get("campus_name"):
+            return str(doc["campus_name"]).strip()
+    except Exception:
+        pass
+
+    # Fallback: show the raw value (better than blank).
+    return v
 
 
 async def _apo_user_ids_for_campus(campus_id: str) -> list[str]:
@@ -282,7 +436,9 @@ async def _notify_apo_dissolved(*, term_id: str, course_id: str, section_id: str
             else:
                 parts.append(f"Section: {section_code}")
         if campus_id:
-            parts.append(f"Campus: {campus_id}")
+            campus_name = await _campus_display_name(campus_id)
+            if campus_name:
+                parts.append(f"Campus: {campus_name}")
         details = "\n".join([p for p in parts if p])
 
         meta = {
@@ -888,6 +1044,14 @@ async def cr_post(action: str = Query(...), userId: Optional[str] = Query(None),
                     enrolled=(payload.get("enrolled") if "enrolled" in payload else out.get("enrolled", prev_enrolled)),
                 )
 
+                await _notify_interested_students_dissolved(
+                    term_id=prev_term_id or str(out.get("term_id") or ""),
+                    course_id=prev_course_id or str(out.get("course_id") or ""),
+                    section_id=str(section_id_for_fac or "").strip(),
+                    enrolled=(payload.get("enrolled") if "enrolled" in payload else out.get("enrolled", prev_enrolled)),
+                    email_from_user_id=(userId or None),
+                )
+
                 await _notify_apo_dissolved(
                     term_id=prev_term_id or str(out.get("term_id") or ""),
                     course_id=prev_course_id or str(out.get("course_id") or ""),
@@ -948,6 +1112,14 @@ async def cr_post(action: str = Query(...), userId: Optional[str] = Query(None),
                 course_id=str(doc.get("course_id") or ""),
                 section_id=str(doc.get("section_id") or ""),
                 enrolled=doc.get("enrolled"),
+            )
+
+            await _notify_interested_students_dissolved(
+                term_id=str(doc.get("term_id") or ""),
+                course_id=str(doc.get("course_id") or ""),
+                section_id=str(doc.get("section_id") or ""),
+                enrolled=doc.get("enrolled"),
+                email_from_user_id=(userId or None),
             )
 
             await _notify_apo_dissolved(
@@ -1015,6 +1187,14 @@ async def cr_post(action: str = Query(...), userId: Optional[str] = Query(None),
                         course_id=course_id,
                         section_id=section_id,
                         enrolled=(r or {}).get("enrolled"),
+                    )
+
+                    await _notify_interested_students_dissolved(
+                        term_id=term_id,
+                        course_id=course_id,
+                        section_id=section_id,
+                        enrolled=(r or {}).get("enrolled"),
+                        email_from_user_id=(userId or None),
                     )
 
                     await _notify_apo_dissolved(

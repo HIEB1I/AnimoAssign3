@@ -2321,7 +2321,25 @@ async def om_specialclass_post(
             if student_uid and res.modified_count:
                 updated_doc = await db[COL_SPECIAL].find_one(
                     {"term_id": current_term_id, "special_id": specialId},
-                    {"_id": 0, "status": 1, "remarks": 1, "course_id": 1, "courseId": 1, "section_id": 1, "section_code": 1},
+                    {
+                        "_id": 0,
+                        "status": 1,
+                        "remarks": 1,
+                        "course_id": 1,
+                        "courseId": 1,
+                        "section_id": 1,
+                        "section_code": 1,
+                        # schedule display
+                        "schedule_cleared": 1,
+                        "schedule_id1": 1,
+                        "schedule_id2": 1,
+                        "day1": 1,
+                        "begin1": 1,
+                        "end1": 1,
+                        "day2": 1,
+                        "begin2": 1,
+                        "end2": 1,
+                    },
                 ) or {}
 
                 new_status = _safe_str(updated_doc.get("status"))
@@ -2346,12 +2364,42 @@ async def om_specialclass_post(
                         sdoc = await db[COL_SECTIONS].find_one({"section_id": sid}, {"_id": 0, "section_code": 1}) or {}
                         section_code = _safe_str(sdoc.get("section_code"))
 
+                # Schedule line for student email (best-effort)
+                schedule_line = ""
+                try:
+                    schedule_cleared = bool(updated_doc.get("schedule_cleared", False))
+                    if not schedule_cleared:
+                        sid = _safe_str(updated_doc.get("section_id"))
+                        sch1 = _safe_str(updated_doc.get("schedule_id1"))
+                        sch2 = _safe_str(updated_doc.get("schedule_id2"))
+                        if sch1 or sch2:
+                            df = await _section_schedule_two_from_schedule_ids(sch1 or None, sch2 or None)
+                        elif sid:
+                            df = await _section_schedule_two(sid)
+                        else:
+                            # backward-compat only
+                            df = {
+                                "day1": _normalize_day(updated_doc.get("day1")),
+                                "begin1": _to_hhmm(updated_doc.get("begin1")),
+                                "end1": _to_hhmm(updated_doc.get("end1")),
+                                "room_id1": None,
+                                "day2": _normalize_day(updated_doc.get("day2")),
+                                "begin2": _to_hhmm(updated_doc.get("begin2")),
+                                "end2": _to_hhmm(updated_doc.get("end2")),
+                                "room_id2": None,
+                            }
+                        schedule_line = (_schedule_line(df) or "").strip()
+                except Exception:
+                    schedule_line = ""
+
                 title = "Special Class updated"
                 parts = []
                 if course_code or course_title:
                     parts.append(f"Course: {course_code} — {course_title}".strip(" —"))
                 if section_code:
                     parts.append(f"Section: {section_code}")
+                if schedule_line:
+                    parts.append(f"Schedule: {schedule_line}")
                 if new_status:
                     parts.append(f"Status: {new_status}")
                 if new_remarks:
