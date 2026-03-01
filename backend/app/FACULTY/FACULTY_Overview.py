@@ -1605,6 +1605,31 @@ async def _apply_section_rooms_to_row(row: Dict[str, Any], section_id: str) -> N
     else:
         # Keep consistent with the schema used elsewhere: None when no 2nd meeting.
         row["room2"] = None
+        
+def _room_signature_from_rows(rows: List[Dict[str, Any]]) -> str:
+    """Stable signature of room assignments (room1/room2) per section."""
+    items: List[Dict[str, str]] = []
+    for r in (rows or []):
+        if not isinstance(r, dict):
+            continue
+        if bool(r.get("is_special_class")):
+            continue
+
+        k = str(r.get("section_id") or r.get("sectionId") or "").strip()
+        if not k:
+            code = str(r.get("course_code") or r.get("course") or "").strip()
+            sec = str(r.get("section") or r.get("section_code") or "").strip()
+            k = f"{code}:{sec}".strip(":")
+
+        room1 = str(r.get("room1") or "").strip() or "TBA"
+        room2 = r.get("room2")
+        room2s = str(room2 or "").strip() if room2 not in (None, "") else ""
+
+        items.append({"k": k, "room1": room1, "room2": room2s})
+
+    items.sort(key=lambda x: x.get("k", ""))
+    raw = json.dumps(items, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 async def _fetch_reflected_faculty_service_rows_for_faculty(
     *,
@@ -2924,6 +2949,7 @@ async def overview_handler(
         proposal = await db[COL_LOAD_PROPOSALS].find_one({"faculty_id": faculty_id, "term_id": term_id}, {"_id": 0}) or None
         rfc_doc = await db[COL_LOAD_RFC].find_one({"faculty_id": faculty_id, "term_id": term_id}, {"_id": 0}) or None
         rfc_norm = _normalize_rfc_doc(rfc_doc) if rfc_doc else None
+        room_changed_since_accept = False
 
         # IMPORTANT BEHAVIOR CHANGE:
         # - If this is a PLANNING term (next/upcoming term) and OM has NOT forwarded a proposal yet,
@@ -3055,7 +3081,30 @@ async def overview_handler(
                     except Exception:
                         # Non-fatal: keep proposal payload rooms if refresh fails.
                         pass
+                # --- Detect room changes since last acceptance (rooms only) ---
+                try:
+                    accepted_sig = str((proposal or {}).get("accepted_room_sig") or "").strip()
 
+                    # Backfill baseline for older accepts where signature was never stored (or stored as empty string).
+                    if (not accepted_sig) and proposal_status_l in ("approved", "accepted") and isinstance((proposal or {}).get("rows"), list):
+                        accepted_sig = _room_signature_from_rows((proposal or {}).get("rows") or [])
+                        if accepted_sig:
+                            await db[COL_LOAD_PROPOSALS].update_one(
+                                {"faculty_id": faculty_id, "term_id": term_id},
+                                {"$set": {
+                                    "accepted_room_sig": accepted_sig,
+                                    "accepted_room_sig_at": _now_utc(),
+                                    "updated_at": _now_utc(),
+                                }},
+                            )
+
+                    if accepted_sig and proposal_status_l in ("approved", "accepted"):
+                        room_changed_since_accept = (_room_signature_from_rows(final_teaching_load) != accepted_sig)
+                    else:
+                        room_changed_since_accept = False
+                except Exception:
+                    room_changed_since_accept = False
+                    
                 # Faculty-side label:
                 # - Locked -> Finalized
                 # - Accepted/approved -> Accepted
@@ -3153,6 +3202,7 @@ async def overview_handler(
         "proposal_status": proposal_status,
         "rfc": rfc_norm,
         "schedule_final": schedule_final,
+        "room_changed_since_accept": room_changed_since_accept,
     }
     raise HTTPException(status_code=400, detail="Invalid action parameter.")
 
@@ -3961,6 +4011,7 @@ async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[s
     ) or {}
 
     send_to_gcal = _payload_bool(payload.get("send_to_gcal", True), True)
+    overwrite_gcal = _payload_bool(payload.get("overwrite_gcal", False), False)
 
     gcal_action = (payload.get("gcal_action") or "cleanup").lower().strip()
     if gcal_action not in {"sync", "cleanup", "reset"}:
@@ -3999,13 +4050,33 @@ async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[s
                 detail="You have a pending RFC. Please wait for OM to respond before accepting the schedule.",
             )
 
+    accepted_room_sig = ""
+    try:
+        # Sign the authoritative rooms (APO assigns rooms via section_schedules)
+        for rr in (proposal_rows or []):
+            if bool((rr or {}).get("is_special_class")):
+                continue
+            sid = str((rr or {}).get("section_id") or (rr or {}).get("sectionId") or "").strip()
+            if sid:
+                await _apply_section_rooms_to_row(rr, sid)
+
+        accepted_room_sig = _room_signature_from_rows(proposal_rows)
+    except Exception:
+        accepted_room_sig = ""
+
     # approve/lock proposal
     await db[COL_LOAD_PROPOSALS].update_one(
-        {"faculty_id": fid, "term_id": term_id},
-        {"$set": {"status": "approved", "locked": True, "accepted_at": _now_utc(), "updated_at": _now_utc()},
-         "$setOnInsert": {"created_at": _now_utc()}},
-    )
-
+    {"faculty_id": fid, "term_id": term_id},
+    {"$set": {
+        "status": "approved",
+        "locked": True,
+        "accepted_at": _now_utc(),
+        "accepted_room_sig": accepted_room_sig,
+        "accepted_room_sig_at": _now_utc(),
+        "updated_at": _now_utc(),
+    },
+     "$setOnInsert": {"created_at": _now_utc()}},
+)
     # finalize rows
     try:
         await db[COL_LOAD_PROPOSALS].update_one(
@@ -4243,6 +4314,8 @@ async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[s
                 "status": "approved",
                 "locked": True,
                 "accepted_at": _now_utc(),
+                "accepted_room_sig": accepted_room_sig,
+                "accepted_room_sig_at": _now_utc(),
                 "updated_at": _now_utc(),
             },
             "$setOnInsert": {"created_at": _now_utc()},
