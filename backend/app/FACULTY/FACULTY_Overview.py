@@ -152,8 +152,12 @@ def _payload_bool(v: Any, default: bool) -> bool:
             return False
     return bool(v)
 
-def _aa_event_key(course_code: str, section: str) -> str:
-    return f"|{(course_code or '').strip()}|{(section or '').strip()}|"
+def _aa_event_key(course_code: str, section: str, meeting_idx: Optional[int] = None) -> str:
+    code = (course_code or "").strip()
+    sec = (section or "").strip()
+    if meeting_idx in (1, 2):
+        return f"|{code}|{sec}|M{int(meeting_idx)}|"
+    return f"|{code}|{sec}|"
 
 def _aa_managed_block(event_key: str, mode: str, room: str) -> str:
     return (
@@ -599,6 +603,42 @@ async def _gcal_list_term_tagged_events(
                 break
     return out
 
+async def _gcal_list_app_tagged_events(
+    token: str,
+    *,
+    time_min: datetime,
+    time_max: datetime,
+    calendar_id: str = "primary",
+) -> List[Dict[str, Any]]:
+    """Lists AnimoAssign-managed events in the time window even if they lack aa_term_id.
+    Used to migrate older events so future sync becomes true patch/update.
+    """
+    url = _gcal_events_url(calendar_id)
+    headers = {"Authorization": f"Bearer {token}"}
+    params = [
+        ("timeMin", _dt_to_rfc3339z(time_min)),
+        ("timeMax", _dt_to_rfc3339z(time_max)),
+        ("singleEvents", "false"),
+        ("showDeleted", "false"),
+        ("maxResults", "2500"),
+        ("privateExtendedProperty", f"{AA_APP_KEY}={AA_APP_VAL}"),
+    ]
+
+    out: List[Dict[str, Any]] = []
+    page_token = None
+    async with httpx.AsyncClient(timeout=25) as client:
+        while True:
+            p = params + ([("pageToken", page_token)] if page_token else [])
+            r = await client.get(url, headers=headers, params=p)
+            if r.status_code >= 400:
+                raise Exception(r.text)
+            j = r.json()
+            out.extend(j.get("items") or [])
+            page_token = j.get("nextPageToken")
+            if not page_token:
+                break
+    return out
+
 async def _gcal_patch_event(token: str, event_id: str, patch_body: Dict[str, Any]) -> httpx.Response:
     headers = {"Authorization": f"Bearer {token}"}
     async with httpx.AsyncClient(timeout=25) as client:
@@ -1011,28 +1051,116 @@ async def _sync_term_calendar_for_user(
 
     stats = {"created": 0, "updated": 0, "deleted": 0, "skipped": 0}
 
-    existing_items = await _gcal_list_term_tagged_events(
+    # Pull existing events:
+    # - term-tagged (best)
+    # - app-tagged (for migrating older events that lack term tag)
+    existing_term_items = await _gcal_list_term_tagged_events(
         access_token, term_id=calendar_term_id, time_min=time_min, time_max=time_max
     )
-    existing_by_key: Dict[str, Dict[str, Any]] = {}
-    for ev in existing_items or []:
+    existing_app_items = await _gcal_list_app_tagged_events(
+        access_token, time_min=time_min, time_max=time_max
+    )
+
+    # Merge + de-dupe by event id
+    existing_map: Dict[str, Dict[str, Any]] = {}
+    for ev in (existing_term_items or []):
+        ev_id = ev.get("id")
+        if ev_id:
+            existing_map[ev_id] = ev
+    for ev in (existing_app_items or []):
+        ev_id = ev.get("id")
+        if ev_id and ev_id not in existing_map:
+            existing_map[ev_id] = ev
+
+    def _base_key(course_code: str, section: str) -> str:
+        code = (course_code or "").strip()
+        sec = (section or "").strip()
+        return f"|{code}|{sec}|"
+
+    def _meeting_key(course_code: str, section: str, meeting_idx: int) -> str:
+        return f"{_base_key(course_code, section)}M{int(meeting_idx)}|"
+
+    def _base_key_from_event_key(ek: str) -> str:
+        toks = [t for t in (ek or "").split("|") if t]
+        if len(toks) >= 2:
+            return f"|{toks[0]}|{toks[1]}|"
+        return (ek or "").strip()
+
+    def _parse_iso_dt(s: Any) -> Optional[datetime]:
+        if not s:
+            return None
+        try:
+            ss = str(s).strip()
+            if ss.endswith("Z"):
+                ss = ss[:-1] + "+00:00"
+            return datetime.fromisoformat(ss)
+        except Exception:
+            return None
+
+    # Key maps (lists because duplicates already exist)
+    existing_by_key: Dict[str, List[Dict[str, Any]]] = {}
+    existing_by_base: Dict[str, List[Dict[str, Any]]] = {}
+    for ev in existing_map.values():
         priv = ((ev.get("extendedProperties") or {}).get("private") or {})
         ek = (priv.get(AA_EVENT_KEY) or "").strip()
-        if ek:
-            existing_by_key[ek] = ev
+        if not ek:
+            continue
+        existing_by_key.setdefault(ek, []).append(ev)
+        existing_by_base.setdefault(_base_key_from_event_key(ek), []).append(ev)
 
-    # reset: delete all tagged term events
-    if action == "reset":
-        for ev in existing_items or []:
-            ev_id = ev.get("id")
-            if not ev_id:
+    used_event_ids: set[str] = set()
+
+    def _pick_best(cands: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        if not cands:
+            return None
+
+        # Prefer those already used/selected in this run
+        used = [e for e in cands if (e.get("id") or "") in used_event_ids]
+        pool = used if used else cands
+
+        def _score(ev: Dict[str, Any]) -> str:
+            return str(ev.get("updated") or ev.get("created") or "")
+        pool = sorted(pool, key=_score, reverse=True)
+        return pool[0] if pool else None
+
+    def _pick_keep_for_dedupe(cands: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        if not cands:
+            return None
+        # Prefer one that we actually touched in this run; else newest
+        touched = [e for e in cands if (e.get("id") or "") in used_event_ids]
+        return _pick_best(touched if touched else cands)
+
+    def _find_migration_candidate(base_key: str, desired_start_iso: str) -> Optional[Dict[str, Any]]:
+        cands = existing_by_base.get(base_key, []) or []
+        if not cands:
+            return None
+
+        desired_dt = _parse_iso_dt(desired_start_iso)
+        if not desired_dt:
+            return _pick_best(cands)
+
+        best = None
+        best_diff = None
+        for ev in cands:
+            ev_id = ev.get("id") or ""
+            if ev_id in used_event_ids:
                 continue
-            rdel = await _gcal_delete_event(access_token, ev_id)
-            if rdel.status_code < 400 or rdel.status_code == 404:
-                stats["deleted"] += 1
-        existing_by_key = {}
+            ev_start = (ev.get("start") or {}).get("dateTime")
+            ev_dt = _parse_iso_dt(ev_start)
+            if not ev_dt:
+                continue
+            diff = abs((ev_dt - desired_dt).total_seconds())
+            if best is None or diff < best_diff:
+                best = ev
+                best_diff = diff
+
+        # Accept match if within 10 minutes
+        if best is not None and (best_diff is not None) and best_diff <= 600:
+            return best
+        return None
 
     desired_keys: set[str] = set()
+    desired_base_keys: set[str] = set()
 
     def _make_payload(rr: Dict[str, Any], meeting_idx: int, day_key: str, time_key: str, room_key: str):
         course_code = rr.get("course_code") or rr.get("course") or ""
@@ -1053,8 +1181,11 @@ async def _sync_term_calendar_for_user(
         start_dt_local = datetime(first_date.year, first_date.month, first_date.day, sh, sm, tzinfo=tzinfo)
         end_dt_local = datetime(first_date.year, first_date.month, first_date.day, eh, em, tzinfo=tzinfo)
 
-        event_key = _aa_event_key(course_code, section)
-        desired_keys.add(event_key)
+        bk = _base_key(course_code, section)
+        ek = _meeting_key(course_code, section, meeting_idx)
+
+        desired_base_keys.add(bk)
+        desired_keys.add(ek)
 
         title = f"{(course_code or '').strip()} {(section or '').strip()}".strip() or "Class"
         location = (str(rr.get(room_key) or "Online")).strip() or "Online"
@@ -1067,29 +1198,91 @@ async def _sync_term_calendar_for_user(
             "recurrence": [rrule],
         }
         h = _sync_hash(managed_fields)
-        managed_block = _aa_managed_block(event_key, mode, location)
+        managed_block = _aa_managed_block(ek, mode, location)
 
         private_props = {
             AA_APP_KEY: AA_APP_VAL,
-            AA_EVENT_KEY: event_key,
+            AA_TERM_KEY: calendar_term_id,     # critical for future updates
+            AA_EVENT_KEY: ek,                  # M1/M2 unique key
             AA_HASH_KEY: h,
         }
-        return event_key, managed_fields, private_props, managed_block
+        return ek, managed_fields, private_props, managed_block
 
-    # Upsert
+    async def _delete_event(ev: Dict[str, Any]) -> Optional[str]:
+        ev_id = ev.get("id")
+        if not ev_id:
+            return None
+        rdel = await _gcal_delete_event(access_token, ev_id)
+        if rdel.status_code < 400 or rdel.status_code == 404:
+            stats["deleted"] += 1
+            return None
+        return rdel.text
+
+    # reset: delete this term’s AnimoAssign events (and only legacy events that match this schedule base keys)
+    if action == "reset":
+        # Build base keys first so we don't wipe unrelated legacy events lacking aa_term_id
+        for rr in rows or []:
+            cc = rr.get("course_code") or rr.get("course") or ""
+            sec = rr.get("section") or ""
+            if cc and sec:
+                desired_base_keys.add(_base_key(cc, sec))
+
+        for ev in list(existing_map.values()):
+            priv = ((ev.get("extendedProperties") or {}).get("private") or {})
+            ev_term = str(priv.get(AA_TERM_KEY) or "").strip()
+            ek = (priv.get(AA_EVENT_KEY) or "").strip()
+            if not ek:
+                continue
+
+            # Protect other terms
+            if ev_term and ev_term != calendar_term_id:
+                continue
+
+            # If legacy (no term tag), only delete if it matches this schedule's base keys
+            if (not ev_term) and (_base_key_from_event_key(ek) not in desired_base_keys):
+                continue
+
+            derr = await _delete_event(ev)
+            if derr:
+                return False, stats, derr
+
+        existing_map = {}
+        existing_by_key = {}
+        existing_by_base = {}
+
+        # Continue to upsert fresh after reset
+        action = "cleanup"
+
+    # Upsert: patch existing or insert new; migrate legacy by base key + start time
     for rr in rows or []:
-        for out in [
+        for out in (
             _make_payload(rr, 1, "day1", "time1", "room1"),
             _make_payload(rr, 2, "day2", "time2", "room2"),
-        ]:
+        ):
             if not out:
                 continue
+
             event_key, managed_fields, private_props, managed_block = out
-            existing = existing_by_key.get(event_key)
+
+            # 1) direct match (new key)
+            existing = _pick_best(existing_by_key.get(event_key, []) or [])
+
+            # 2) migrate legacy event (old key or missing term tag)
+            if not existing:
+                course_code = rr.get("course_code") or rr.get("course") or ""
+                section = rr.get("section") or ""
+                base_k = _base_key(course_code, section)
+                existing = _find_migration_candidate(base_k, managed_fields["start"]["dateTime"])
 
             if existing:
+                ev_id = existing.get("id")
+                if ev_id:
+                    used_event_ids.add(ev_id)
+
                 priv = ((existing.get("extendedProperties") or {}).get("private") or {})
                 old_hash = (priv.get(AA_HASH_KEY) or "").strip()
+
+                # already up to date
                 if old_hash == private_props[AA_HASH_KEY]:
                     stats["skipped"] += 1
                     continue
@@ -1102,8 +1295,28 @@ async def _sync_term_calendar_for_user(
                 rpatch = await _gcal_patch_event(access_token, existing["id"], patch_body)
                 if rpatch.status_code < 400:
                     stats["updated"] += 1
+
+                    # Update local maps so cleanup doesn't delete migrated/updated events
+                    try:
+                        updated_ev = rpatch.json()
+                        if isinstance(updated_ev, dict) and updated_ev.get("id"):
+                            existing_map[updated_ev["id"]] = updated_ev
+                            existing = updated_ev
+                    except Exception:
+                        # fallback: keep our patched shape
+                        existing["extendedProperties"] = patch_body["extendedProperties"]
+                        existing["description"] = patch_body["description"]
+                        existing["start"] = patch_body["start"]
+                        existing["end"] = patch_body["end"]
+                        existing["recurrence"] = patch_body.get("recurrence")
+
+                    # refresh indexes for this event_key
+                    existing_by_key.setdefault(event_key, []).append(existing)
+                    base_for_index = _base_key_from_event_key(event_key)
+                    existing_by_base.setdefault(base_for_index, []).append(existing)
                 else:
                     return False, stats, rpatch.text
+
             else:
                 insert_body = dict(managed_fields)
                 insert_body["description"] = _merge_description("", managed_block)
@@ -1112,22 +1325,56 @@ async def _sync_term_calendar_for_user(
                 rins = await _insert_gcal_event(access_token, insert_body)
                 if rins.status_code < 400:
                     stats["created"] += 1
+                    try:
+                        created = rins.json()
+                        if isinstance(created, dict) and created.get("id"):
+                            existing_map[created["id"]] = created
+                            existing_by_key.setdefault(event_key, []).append(created)
+                            existing_by_base.setdefault(_base_key_from_event_key(event_key), []).append(created)
+                    except Exception:
+                        pass
                 else:
                     return False, stats, rins.text
 
-    # Cleanup: delete orphans
+    # Cleanup: delete any AnimoAssign-managed events in the window NOT matching desired keys.
+    # Also dedupe: if multiple exist for the same desired key, keep one and delete the rest.
     if action == "cleanup":
-        for ek, ev in (existing_by_key or {}).items():
+        # Rebuild key->events from existing_map after upserts (includes migrated/created)
+        key_to_events: Dict[str, List[Dict[str, Any]]] = {}
+        for ev in (existing_map.values() or []):
+            priv = ((ev.get("extendedProperties") or {}).get("private") or {})
+            ek = (priv.get(AA_EVENT_KEY) or "").strip()
+            if not ek:
+                continue
+            key_to_events.setdefault(ek, []).append(ev)
+
+        for ek, evs in (key_to_events or {}).items():
+            # Protect other terms: if term tag exists and is not this term, never touch it
+            priv0 = ((evs[0].get("extendedProperties") or {}).get("private") or {})
+            ev_term = str(priv0.get(AA_TERM_KEY) or "").strip()
+            if ev_term and ev_term != calendar_term_id:
+                continue
+
+            # If legacy (no term tag), only touch if it matches this schedule base keys
+            if (not ev_term) and (_base_key_from_event_key(ek) not in desired_base_keys):
+                continue
+
             if ek in desired_keys:
-                continue
-            ev_id = ev.get("id")
-            if not ev_id:
-                continue
-            rdel = await _gcal_delete_event(access_token, ev_id)
-            if rdel.status_code < 400 or rdel.status_code == 404:
-                stats["deleted"] += 1
+                # Deduplicate: keep 1, delete extras
+                keep = _pick_keep_for_dedupe(evs)
+                keep_id = (keep.get("id") if keep else None)
+                for ev in evs:
+                    if keep_id and ev.get("id") == keep_id:
+                        continue
+                    derr = await _delete_event(ev)
+                    if derr:
+                        return False, stats, derr
             else:
-                return False, stats, rdel.text
+                # Not desired for this term schedule -> delete
+                for ev in evs:
+                    derr = await _delete_event(ev)
+                    if derr:
+                        return False, stats, derr
 
     return True, stats, None
 
