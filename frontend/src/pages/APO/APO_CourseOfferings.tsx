@@ -1200,6 +1200,7 @@ export default function CourseOfferingsPage() {
   const [scSelectedIds, setScSelectedIds] = useState<Record<string, boolean>>({});
   const [scExporting, setScExporting] = useState(false);
   const [scExportErr, setScExportErr] = useState<string>("");
+  const [scExportOpen, setScExportOpen] = useState(false);
 
   /** ------------------ Editing state ------------------ */
   const [scEditingId, setScEditingId] = useState<string | null>(null);
@@ -1341,31 +1342,222 @@ const [currImportErr, setCurrImportErr] = useState<string | null>(null);
   };
 
   const exportSelectedSpecialClassPdf = async () => {
+    // Export each selected application as its own PDF file (separate downloads)
+    const safe = (s: string) =>
+      (s || "")
+        .replace(/[\\/:*?"<>|]+/g, "_")
+        .replace(/\s+/g, "_")
+        .replace(/_+/g, "_")
+        .replace(/^_+|_+$/g, "");
+
+    const makeFileName = (id: string) => {
+      const r = scRowsForCampus.find((x: any) => String((x as any)?.special_id) === String(id));
+      const date = new Date().toISOString().slice(0, 10);
+      const course = safe(String((r as any)?.course?.course_code || (r as any)?.course_code || "Course"));
+      const sec = safe(String((r as any)?.section?.section_code || (r as any)?.section_code || "Section"));
+      const stud = safe(
+        String(
+          (r as any)?.student?.student_number ||
+            (r as any)?.student_number ||
+            (r as any)?.student?.student_name ||
+            (r as any)?.student_name ||
+            ""
+        )
+      );
+      const parts = ["SpecialClass", course, sec, stud, safe(String(id)), date].filter(Boolean);
+      return `${parts.join("_")}.pdf`;
+    };
+
     try {
       setScExportErr("");
       if (scSelectedList.length === 0) {
-        setScExportErr("Select 1 row to export.");
+        setScExportErr("Select at least one row to export.");
         return;
       }
-      if (scSelectedList.length !== 1) {
-        setScExportErr("Select only 1 row to export.");
-        return;
-      }
-      const exportId = scSelectedList[0];
 
       setScExporting(true);
-      const blob = await exportOMSC_Pdf({
-        termId: scData?.term_id,
-        specialId: exportId,
-      });
-
-      const fname = `SpecialClass_${exportId}_${new Date().toISOString().slice(0, 10)}.pdf`;
-      downloadBlob(blob, fname);
+      for (const id of scSelectedList) {
+        const blob = await exportOMSC_Pdf({
+          termId: scData?.term_id,
+          special_ids: [id],
+        });
+        downloadBlob(blob, makeFileName(id));
+      }
     } catch (e: any) {
       setScExportErr(e?.response?.data?.detail || e?.message || "Failed to export PDF.");
     } finally {
       setScExporting(false);
     }
+  };
+
+  // Special Class: Excel export (HTML -> .xls), matching OM_SpecialClass export format.
+  const exportSpecialClassTableExcel = () => {
+    if (!scRowsForCampus || scRowsForCampus.length === 0) {
+      setScExportErr("No rows to export.");
+      return;
+    }
+
+    const normalizeForExcel = (value: string) => {
+      let v = value ?? "";
+      if (v === "—") v = "";
+      v = v
+        .replace(/[\u2012\u2013\u2014\u2015]/g, "-")
+        .replace(/[\u2018\u2019]/g, "'")
+        .replace(/[\u201C\u201D]/g, '"')
+        .replace(/\u00A0/g, " ")
+        .replace(/[\r\n\t]/g, " ");
+      v = v.replace(/\s+/g, " ").trim();
+      return v;
+    };
+
+    const esc = (v: string) =>
+      v.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+    const pretty = (t: any) => {
+      const s = fmtTime(t);
+      return s === "—" ? "" : s;
+    };
+
+    const slotRoom = (s: any) => {
+      const rn = String(s?.room_number || s?.room_name || "").trim();
+      const rid = String(s?.room_id || "").trim();
+      const ridOrRn = String(rn || rid).trim().toUpperCase();
+      if (ridOrRn === "ONLINE") return "TBA";
+      if (!rn && !rid) return "TBA";
+      return rn || rid || "TBA";
+    };
+
+    const scheduleForRow = (r: any) => {
+      const entries = Array.isArray(r?.schedule_entries)
+        ? r.schedule_entries
+        : [r?.slot1, r?.slot2].filter(Boolean);
+
+      const parts: string[] = [];
+      for (const e of (entries || []).slice(0, 2)) {
+        if (!e) continue;
+        const day = String(e?.day || "").trim();
+        const st = pretty(e?.start_time);
+        const en = pretty(e?.end_time);
+        if (day && st && en) parts.push(`${day} ${st}-${en}`);
+        else if (day && (st || en)) parts.push(`${day} ${st || ""}${st && en ? "-" : ""}${en || ""}`.trim());
+      }
+      return parts.join("; ");
+    };
+
+    const roomForRow = (r: any) => {
+      const s1 = r?.slot1 || (Array.isArray(r?.schedule_entries) ? r.schedule_entries[0] : null);
+      const s2 = r?.slot2 || (Array.isArray(r?.schedule_entries) ? r.schedule_entries[1] : null);
+      const parts = [s1 ? slotRoom(s1) : "", s2 ? slotRoom(s2) : ""].filter((x) => x && x !== "TBA");
+      if (parts.length === 0) return "TBA";
+      return parts.join(" / ");
+    };
+
+    const termLine = (scData?.term_label || scData?.term_id || "").toString();
+    const COLS = 8;
+
+    const headerRows = `
+      <tr><td colspan="${COLS}" style="text-align:center;font-weight:bold;font-size:14pt;">De La Salle University</td></tr>
+      <tr><td colspan="${COLS}" style="text-align:center;font-weight:bold;">OFFICE OF THE PROVOST</td></tr>
+      <tr><td colspan="${COLS}" style="text-align:center;font-weight:bold;">APPLICATION FOR SPECIAL CLASS</td></tr>
+      <tr><td colspan="${COLS}" style="text-align:center;">${esc(termLine)}</td></tr>
+      <tr><td colspan="${COLS}" style="height:12px;"></td></tr>
+
+      <tr>
+        <td style="font-weight:bold;">DATE:</td>
+        <td colspan="3"></td>
+        <td style="font-weight:bold;">For:</td>
+        <td colspan="3"></td>
+      </tr>
+      <tr>
+        <td style="font-weight:bold;">From:</td>
+        <td colspan="3"></td>
+        <td style="font-weight:bold;">Endorsed by:</td>
+        <td colspan="3"></td>
+      </tr>
+      <tr><td colspan="${COLS}" style="height:12px;"></td></tr>
+      <tr><td colspan="${COLS}">This is to request for the opening of the following classes as <b>SPECIAL CLASS</b>.</td></tr>
+      <tr><td colspan="${COLS}" style="height:12px;"></td></tr>
+    `;
+
+    const tableHeader = `
+      <tr>
+        <th style="border:1px solid #000;background:#f3f4f6;padding:6px;text-align:center;">No.</th>
+        <th style="border:1px solid #000;background:#f3f4f6;padding:6px;text-align:center;">Course Code</th>
+        <th style="border:1px solid #000;background:#f3f4f6;padding:6px;text-align:center;">Section</th>
+        <th style="border:1px solid #000;background:#f3f4f6;padding:6px;text-align:center;">Student / Reason</th>
+        <th style="border:1px solid #000;background:#f3f4f6;padding:6px;text-align:center;">Schedule</th>
+        <th style="border:1px solid #000;background:#f3f4f6;padding:6px;text-align:center;">Room</th>
+        <th style="border:1px solid #000;background:#f3f4f6;padding:6px;text-align:center;">Name of Faculty</th>
+        <th style="border:1px solid #000;background:#f3f4f6;padding:6px;text-align:center;">Provost Approval</th>
+      </tr>
+    `;
+
+    const bodyRows = scRowsForCampus
+      .map((r0: any, i: number) => {
+        const r = r0 as any;
+        const student = String(r?.student?.student_name || r?.student_name || "").trim();
+        const reason = String(r?.reason_other || r?.reason || "").trim();
+        const studentReason = [student, reason].filter(Boolean).join(" — ");
+        const course = String(r?.course?.course_code || r?.course_code || "").trim();
+        const section = String(r?.section?.section_code || r?.section_code || "").trim();
+        const schedule = scheduleForRow(r);
+        const room = roomForRow(r);
+        const faculty = String(r?.faculty?.faculty_name || r?.faculty_name || "").trim();
+
+        const cells = [
+          String(i + 1),
+          course,
+          section,
+          studentReason,
+          schedule,
+          room,
+          faculty === "UNASSIGNED" ? "" : faculty,
+          "",
+        ].map((c) => esc(normalizeForExcel(String(c ?? ""))));
+
+        return `
+          <tr>
+            <td style="border:1px solid #000;padding:6px;text-align:center;">${cells[0]}</td>
+            <td style="border:1px solid #000;padding:6px;">${cells[1]}</td>
+            <td style="border:1px solid #000;padding:6px;text-align:center;">${cells[2]}</td>
+            <td style="border:1px solid #000;padding:6px;">${cells[3]}</td>
+            <td style="border:1px solid #000;padding:6px;">${cells[4]}</td>
+            <td style="border:1px solid #000;padding:6px;">${cells[5]}</td>
+            <td style="border:1px solid #000;padding:6px;">${cells[6]}</td>
+            <td style="border:1px solid #000;padding:6px;"></td>
+          </tr>
+        `;
+      })
+      .join("");
+
+    const safeTerm = (scData?.term_label || "")
+      .toString()
+      .replace(/[^a-z0-9\-\s_]/gi, "")
+      .trim();
+    const filename = safeTerm ? `Special_Class_${safeTerm}.xls` : "Special_Class.xls";
+
+    const html = `
+      <html>
+        <head><meta charset="utf-8" /></head>
+        <body>
+          <table cellspacing="0" cellpadding="0" style="border-collapse:collapse;font-family:Calibri;font-size:11pt;">
+            ${headerRows}
+            ${tableHeader}
+            ${bodyRows}
+          </table>
+        </body>
+      </html>
+    `;
+
+    const blob = new Blob([html], { type: "application/vnd.ms-excel;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   };
 
 
@@ -4052,23 +4244,59 @@ const promptSaveEdit = () => {
     />
   </div>
 
-  {/* Special Class: Export PDF (select 1 row) */}
+  {/* Special Class: Export (PDF / Excel) — match OM_SpecialClass */}
   {view === "specialclass" && (
-    <button
-      onClick={exportSelectedSpecialClassPdf}
-      disabled={scExporting || scSelectedList.length !== 1}
-      className={cls(
-        "inline-flex items-center gap-2 rounded-md bg-emerald-700 px-4 py-2 text-sm font-medium text-white shadow-sm"
+    <div className="relative">
+      <button
+        type="button"
+        onClick={() => setScExportOpen((v) => !v)}
+        disabled={scExporting}
+        title="Export"
+        className="inline-flex items-center gap-2 rounded-md bg-emerald-700 px-4 py-2 text-sm font-medium text-white shadow-sm hover:brightness-110 disabled:opacity-50 disabled:cursor-not-allowed"
+      >
+        <Download className="h-4 w-4" />
+        Export
+        <ChevronDown className="h-4 w-4" />
+      </button>
+
+      {scExportOpen && (
+        <div
+          className="absolute right-0 mt-2 w-64 rounded-lg border border-gray-200 bg-white shadow-lg z-[120]"
+          onMouseLeave={() => setScExportOpen(false)}
+        >
+          <button
+            type="button"
+            onClick={() => {
+              setScExportOpen(false);
+              exportSelectedSpecialClassPdf();
+            }}
+            disabled={scSelectedList.length === 0 || scExporting}
+            className={cls(
+              "w-full text-left px-3 py-2 text-sm hover:bg-gray-50",
+              (scSelectedList.length === 0 || scExporting) && "opacity-60 cursor-not-allowed"
+            )}
+            title={scSelectedList.length === 0 ? "Select at least one row" : "Export selected rows to PDF"}
+          >
+            Export selected (PDF)
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setScExportOpen(false);
+              exportSpecialClassTableExcel();
+            }}
+            disabled={scRowsForCampus.length === 0 || scExporting}
+            className={cls(
+              "w-full text-left px-3 py-2 text-sm hover:bg-gray-50",
+              (scRowsForCampus.length === 0 || scExporting) && "opacity-60 cursor-not-allowed"
+            )}
+            title={scRowsForCampus.length === 0 ? "No rows to export" : "Export the current table to Excel"}
+          >
+            Export table (Excel)
+          </button>
+        </div>
       )}
-      title={
-        scSelectedList.length !== 1
-          ? "Select exactly 1 row in Special Class to export"
-          : "Export selected Special Class row as PDF"
-      }
-    >
-      <Download className="h-4 w-4" />
-      {scExporting ? "Exporting…" : "Export PDF"}
-    </button>
+    </div>
   )}
 </div>
 
@@ -4439,9 +4667,9 @@ ${msg}`,
               />
 
               {showCurrImportModal && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4">
-                  <div className="w-full max-w-2xl overflow-hidden rounded-2xl bg-white shadow-xl">
-                    <div className="p-6">
+                <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/30 p-4">
+                  <div className="w-full max-w-2xl max-h-[calc(100vh-3rem)] overflow-hidden rounded-2xl bg-white shadow-xl flex flex-col">
+                    <div className="p-6 overflow-y-auto flex-1">
                       <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-full border border-emerald-600 text-emerald-700">
                         <Upload className="h-7 w-7" />
                       </div>
@@ -7905,8 +8133,8 @@ const GlobalCourseEditModal: React.FC<GlobalCourseEditModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/40 p-4 sm:p-6 overflow-y-auto">
-      <div className="w-full max-w-4xl rounded-2xl bg-white shadow-xl border border-gray-200 my-8 overflow-hidden flex flex-col">
+    <div className="fixed inset-0 z-[120] flex items-start justify-center bg-black/40 p-4 sm:p-6 overflow-y-auto">
+      <div className="w-full max-w-4xl max-h-[calc(100vh-3rem)] sm:max-h-[calc(100vh-4rem)] rounded-2xl bg-white shadow-xl border border-gray-200 my-8 overflow-hidden flex flex-col">
         <div className="flex items-center justify-between border-b px-6 py-4">
           <div className="font-semibold">Edit Course</div>
           <button className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50" onClick={onClose}>
@@ -8228,8 +8456,8 @@ const noMatches = query.trim().length >= 2 && list.length === 0;
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/40 p-4 sm:p-6 overflow-y-auto">
-      <div className="w-full max-w-5xl rounded-2xl bg-white shadow-xl border border-gray-200 my-8 overflow-hidden flex flex-col">
+    <div className="fixed inset-0 z-[120] flex items-start justify-center bg-black/40 p-4 sm:p-6 overflow-y-auto">
+      <div className="w-full max-w-5xl max-h-[calc(100vh-3rem)] sm:max-h-[calc(100vh-4rem)] rounded-2xl bg-white shadow-xl border border-gray-200 my-8 overflow-hidden flex flex-col">
         <div className="flex items-center justify-between border-b px-6 py-4">
           <div className="font-semibold">
             Edit Courses to Take — {programCode} • {base.batch_code || "ID"}
@@ -8428,8 +8656,8 @@ const CreateCourseModal: React.FC<{
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/40 p-4 sm:p-6 overflow-y-auto">
-      <div className="w-full max-w-2xl rounded-2xl bg-white shadow-xl border border-gray-200 my-8 overflow-hidden flex flex-col">
+    <div className="fixed inset-0 z-[120] flex items-start justify-center bg-black/40 p-4 sm:p-6 overflow-y-auto">
+      <div className="w-full max-w-2xl max-h-[calc(100vh-3rem)] sm:max-h-[calc(100vh-4rem)] rounded-2xl bg-white shadow-xl border border-gray-200 my-8 overflow-hidden flex flex-col">
         <div className="flex items-center justify-between border-b px-6 py-4">
           <div className="font-semibold">Add Course</div>
           <button className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50" onClick={onClose}>
