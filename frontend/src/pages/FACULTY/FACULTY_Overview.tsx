@@ -656,17 +656,34 @@ function FacultyProfileTab({
     return s || "—";
   };
 
+  const formatHireDate = (v: any) => {
+    const rawVal = v ?? "";
+    const s = String(rawVal).trim();
+    if (!s) return "—";
+    const d = new Date(s);
+    if (!Number.isNaN(d.getTime())) {
+      return new Intl.DateTimeFormat("en-US", { year: "numeric", month: "short", day: "2-digit" }).format(d);
+    }
+    return s;
+  };
+
+
   const email = String(faculty?.email || faculty?.email_address || faculty?.emailAddress || "").trim();
 
   // Pills intentionally kept empty for now; key profile attributes are shown as cards on the right.
   const pills: { label: string; value: string }[] = [];
 
-  const guardrails: { key: "employment" | "teaching"; label: string; value: string }[] = [
+  const guardrails: { key: "employment" | "teaching"; label: string; value: React.ReactNode }[] = [
     { key: "employment", label: "Employment", value: employmentLabel(faculty?.employment_type) },
     {
       key: "teaching",
       label: "Teaching experience",
-      value: faculty?.teaching_years != null ? `${faculty.teaching_years} yrs` : "—",
+      value: (
+        <div className="flex flex-col leading-tight">
+          <span>{faculty?.teaching_years != null ? `${faculty.teaching_years} yrs` : "—"}</span>
+          <span className="text-sm font-medium text-slate-600">Hire date: {formatHireDate(faculty?.hire_date)}</span>
+        </div>
+      ),
     },
   ];
 
@@ -2272,7 +2289,7 @@ const scheduleFinalLabel = (() => {
 
                 const resp: any = await acceptFacultyLoadAssignment(
                   userId,
-                  { ...(termId ? { term_id: termId } : {}), send_to_gcal: sendToGcal, gcal_action: "cleanup", }
+                  { ...(termId ? { term_id: termId } : {}), send_to_gcal: sendToGcal }
                 );
 
                 console.log("ACCEPT resp:", resp);
@@ -2322,7 +2339,7 @@ const scheduleFinalLabel = (() => {
 	                    className="h-3.5 w-3.5 rounded border-neutral-300 text-emerald-700 focus:ring-emerald-600/40"
 	                    checked={sendToGcal}
 	                    onChange={(e) => setSendToGcal(e.target.checked)}
-	                    disabled={isAccepting}
+	                    disabled={isAccepting || scheduleFinal || isAlreadyApproved}
 	                  />
 	                  <span>Send to GCalendar</span>
 	                </label>
@@ -2339,11 +2356,15 @@ const scheduleFinalLabel = (() => {
 	                    const userId = raw.userId || raw.user_id || raw.id || "";
 	                    const termId = (term as any)?.term_id || (term as any)?._id || (term as any)?.id;
 
-	                    const resp: any = await acceptFacultyLoadAssignment(userId, {
-                      ...(termId ? { term_id: termId } : {}),
-                      send_to_gcal: true,
-                      gcal_action: "cleanup", // resync + remove deleted schedule events
-                    } as any);
+	                    const resp: any = await acceptFacultyLoadAssignment(
+                      userId,
+                      ({
+                        ...(termId ? { term_id: termId } : {}),
+                        send_to_gcal: true,
+                        sync_special_only: true,
+                        overwrite_gcal: true,
+                      } as any)
+                    );
 
 	                    if (resp?.calendar_ok === false) {
 	                      onToast?.("warning", resp?.calendar_error || "Calendar was not created.", "Sync issue");

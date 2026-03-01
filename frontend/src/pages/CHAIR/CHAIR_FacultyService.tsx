@@ -1,6 +1,6 @@
 // frontend/src/pages/CHAIR/CHAIR_FacultyService.tsx
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { Search, Send, ChevronDown, X, CheckCircle2, AlertCircle, Info, Undo2, Redo2, Plus, Trash2, MessageSquareText } from "lucide-react";
+import { Send, ChevronDown, X, CheckCircle2, AlertCircle, Info, Undo2, Redo2, Plus, Trash2, MessageSquareText } from "lucide-react";
 import {
   getFSOptions,
   listFacultyService,
@@ -364,18 +364,24 @@ function ServiceRfcModal({
 
 /** unify control heights */
 const CONTROL =
-  "w-full min-w-0 rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm shadow-sm " +
-  "focus:outline-none focus:ring-2 focus:ring-emerald-200 focus:border-emerald-300";
+  "h-10 w-full rounded-md border border-gray-300 px-3 text-[13px] shadow-sm focus:ring-2 focus:ring-emerald-500/30";
 
 /* ---------------- Plantilla table design system (source of truth) ---------------- */
 const PLANTILLA_TABLE_WRAP =
-  "rounded-xl border border-gray-200 bg-white shadow-sm";
+  "rounded-xl border border-gray-200 bg-white shadow-sm overflow-x-auto overflow-y-auto";
 
 const PLANTILLA_TABLE =
   "min-w-full w-full text-sm table-fixed border-collapse leading-snug [&_td]:align-middle [&_td]:whitespace-normal [&_td]:break-words";
-const PLANTILLA_TH = "px-4 py-2 text-left";
-const PLANTILLA_TD = "px-4 py-3 text-center";
-const PLANTILLA_ROW = "hover:bg-gray-50 [&>td]:border-b [&>td]:border-gray-200";
+
+// NOTE: keep sticky headers *below* global overlays (e.g., topbar notifications)
+const PLANTILLA_THEAD = "bg-gray-50 text-emerald-800 sticky top-0 z-[1] text-xs";
+const PLANTILLA_HEAD_TR = "whitespace-nowrap text-[13px] font-semibold";
+
+const PLANTILLA_TH = "px-3 py-2 text-center border border-gray-300";
+const PLANTILLA_TD = "px-3 py-2 text-center";
+const PLANTILLA_ROW = "hover:bg-gray-50 [&>td]:border [&>td]:border-gray-200";
+const PLANTILLA_SECTION_TITLE =
+  "px-5 py-3 text-sm font-semibold text-white text-center bg-emerald-600";
 
 /* ---------------- Dropdown (portal-less, fixed-positioned) ---------------- */
 function Dropdown({
@@ -387,7 +393,6 @@ function Dropdown({
   searchable = false,
   align = "left",
   onOpen,
-  disabled = false,
 }: {
   value: string;
   onChange: (v: string) => void;
@@ -397,7 +402,6 @@ function Dropdown({
   searchable?: boolean;
   align?: "left" | "right";
   onOpen?: () => void;
-  disabled?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [term, setTerm] = useState("");
@@ -427,15 +431,17 @@ function Dropdown({
     const estMenuH = Math.min(48 + shown.length * 36, Math.floor(vh * 0.6));
     const roomBelow = vh - r.bottom;
     const place: "down" | "up" = roomBelow >= estMenuH || r.top < estMenuH ? "down" : "up";
-    const width = Math.max(r.width, 180);
-    const left = Math.max(8, Math.min(vw - width - 8, align === "right" ? r.right - width : r.left));
+    const width = Math.max(r.width, 220);
+    const left = Math.max(
+      8,
+      Math.min(vw - width - 8, align === "right" ? r.right - width : r.left)
+    );
     const top = place === "down" ? Math.min(vh - 8, r.bottom + 8) : Math.max(8, r.top - 8);
     setMenuRect({ left, top, width, place });
   };
 
   const menuId = useMemo(() => `dd-${Math.random().toString(36).slice(2)}`, []);
 
-  // Close on outside click
   useEffect(() => {
     const onDoc = (e: MouseEvent) => {
       if (!open) return;
@@ -455,7 +461,9 @@ function Dropdown({
     const onScroll = () => compute();
     window.addEventListener("resize", onResize);
     window.addEventListener("scroll", onScroll, true);
-    if (searchable) inputRef.current?.focus();
+    if (searchable) {
+      inputRef.current?.focus();
+    }
     return () => {
       window.removeEventListener("resize", onResize);
       window.removeEventListener("scroll", onScroll, true);
@@ -464,7 +472,6 @@ function Dropdown({
   }, [open, term, align, shown.length, searchable]);
 
   const openFresh = () => {
-    if (disabled) return;
     if (searchable) setTerm("");
     onOpen?.();
     setOpen(true);
@@ -480,38 +487,28 @@ function Dropdown({
     setOpen(false);
   };
 
-  const baseBtn = cls(
-    "w-full rounded-lg border px-3 py-2 text-left text-sm outline-none pr-8",
-    "border-gray-300 bg-white shadow-sm focus:ring-2 focus:ring-emerald-200 focus:border-emerald-300",
-    disabled && "cursor-not-allowed bg-gray-100 text-gray-400"
-  );
-
   return (
     <div className={cls("relative", className)} ref={boxRef}>
       <div className="relative">
         {searchable ? (
+          // SEARCHABLE MODE: input acts like typeahead
           <input
             ref={inputRef}
             value={open ? term : value}
-            disabled={disabled}
             onMouseDown={(e) => {
-              if (disabled) return;
               if (!open) {
                 e.preventDefault();
                 openFresh();
               }
             }}
             onFocus={() => {
-              if (disabled) return;
               if (!open) openFresh();
             }}
             onChange={(e) => {
-              if (disabled) return;
               setTerm(e.target.value);
               if (!open) setOpen(true);
             }}
             onKeyDown={(e) => {
-              if (disabled) return;
               if (e.key === "ArrowDown" && !open) {
                 openFresh();
                 e.preventDefault();
@@ -520,24 +517,25 @@ function Dropdown({
               if (e.key === "Escape") setOpen(false);
             }}
             placeholder={placeholder}
-            className={cls(baseBtn, "truncate")}
+            className={cls(CONTROL, "pr-16 truncate")}
+            title={value || undefined}
           />
         ) : (
+          // NON-SEARCHABLE MODE: plain button shows selected value
           <button
             type="button"
-            disabled={disabled}
-            className={cls(baseBtn, !value && "text-gray-400")}
+            className={cls(CONTROL, "pr-8 text-left truncate", !value && "text-neutral-400")}
             onClick={() => {
-              if (disabled) return;
               if (open) setOpen(false);
               else openFresh();
             }}
+            title={value || placeholder}
           >
-            {value ? value : <span className="text-gray-400">{placeholder}</span>}
+            {value || placeholder}
           </button>
         )}
 
-        {searchable && open && term && !disabled && (
+        {searchable && open && term && (
           <button
             type="button"
             onClick={() => {
@@ -549,15 +547,17 @@ function Dropdown({
             }}
             className="absolute right-8 top-1/2 -translate-y-1/2 p-0.5 rounded hover:bg-neutral-100"
             aria-label="Clear"
+            title="Clear"
           >
             <X className="h-4 w-4 text-neutral-500" />
           </button>
         )}
 
-        <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-500" />
+        {/* Chevron icon (purely visual) */}
+        <ChevronDown className="pointer-events-none absolute right-1.5 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-500" />
       </div>
 
-      {open && menuRect && !disabled && (
+      {open && menuRect && (
         <div
           id={menuId}
           style={{
@@ -569,8 +569,8 @@ function Dropdown({
             maxHeight: "60vh",
           }}
           className={cls(
-            "z-[5000] overflow-auto rounded-xl border border-gray-300 bg-white shadow-xl",
-            "overscroll-contain py-1"
+            "z-[9999] overflow-auto rounded-xl border border-neutral-300 bg-white",
+            "shadow-[0_8px_24px_rgba(0,0,0,0.15)] overscroll-contain py-1"
           )}
         >
           {shown.map((opt) => (
@@ -578,14 +578,15 @@ function Dropdown({
               key={opt}
               onClick={() => onPick(opt)}
               className={cls(
-                "block w-full truncate px-4 py-2 text-left text-sm hover:bg-emerald-50 transition-colors",
+                "block w-full truncate px-3 py-2 text-left text-[13px] hover:bg-emerald-50/60 transition-colors",
                 value === opt && "bg-emerald-100 text-emerald-800 font-medium"
               )}
+              title={opt}
             >
               {opt}
             </button>
           ))}
-          {shown.length === 0 && <div className="px-4 py-2 text-sm text-neutral-500">No results</div>}
+          {shown.length === 0 && <div className="px-3 py-2 text-[13px] text-neutral-500">No results</div>}
         </div>
       )}
     </div>
@@ -593,7 +594,6 @@ function Dropdown({
 }
 
 /* ---------------- Spec constants ---------------- */
-
 const BEGIN_OPTIONS = ["07:30", "09:15", "11:00", "12:45", "14:30", "16:15", "18:00", "19:45"] as const;
 const END_BY_BEGIN: Record<(typeof BEGIN_OPTIONS)[number], string> = {
   "07:30": "09:00",
@@ -1566,41 +1566,6 @@ export default function CHAIR_FacultyService({ chairDepartmentName, variant = "p
   const canUndoReceived = historyTick >= 0 && undoRef.current.length > 0;
   const canRedoReceived = historyTick >= 0 && redoRef.current.length > 0;
 
-  // Shared search across Sent + Received lists (draft row stays visible)
-  const [tableSearch, setTableSearch] = useState("");
-  const [debouncedTableSearch, setDebouncedTableSearch] = useState("");
-
-  useEffect(() => {
-    const t = window.setTimeout(() => setDebouncedTableSearch(tableSearch.trim()), 250);
-    return () => window.clearTimeout(t);
-  }, [tableSearch]);
-
-  const q = useMemo(() => norm(debouncedTableSearch), [debouncedTableSearch]);
-
-  const rowMatches = (r: FacultyServiceRow) => {
-    if (!q) return true;
-    const fac: any = (r as any)?.faculty || {};
-    const parts = [
-      r.course_code,
-      r.course_title,
-      r.section,
-      r.from_department,
-      r.to_department,
-      facultyLabel(fac),
-      fac.email,
-      (r as any)?.faculty_name,
-      (r as any)?.remarks,
-    ];
-    return parts.some((p) => norm(String(p || "")).includes(q));
-  };
-
-  const filteredSentRows = useMemo(() => (q ? mySentRows.filter(rowMatches) : mySentRows), [mySentRows, q]);
-  const filteredReceivedRows = useMemo(
-    () => (q ? receivedRows.filter(rowMatches) : receivedRows),
-    [receivedRows, q]
-  );
-
-
 /* ---------------- UI ---------------- */
   return (
     <div
@@ -1612,8 +1577,8 @@ export default function CHAIR_FacultyService({ chairDepartmentName, variant = "p
       <ToastViewport items={toasts} onClose={closeToast} />
 
       {variant !== "embedded" ? (
-        <div className="bg-white px-8 pt-8">
-          <header className="mb-4">
+        <div className="sticky top-0 z-10 bg-white px-8 pt-8">
+          <header className="mb-2">
             <h1 className="text-2xl font-bold">Faculty Service</h1>
             <p className="text-sm text-gray-600">
               Create &amp; send faculty service requests, track request status, and respond to received requests.
@@ -1631,346 +1596,331 @@ export default function CHAIR_FacultyService({ chairDepartmentName, variant = "p
         </header>
       )}
 
-      <main className={cls("w-full pb-24 space-y-8", variant !== "embedded" && "px-8")}>
-        {/* Search + actions (shared) */}
-        <div className="rounded-xl border border-gray-200 bg-white shadow-sm p-4">
-          <div className="flex flex-col gap-3 md:flex-row md:items-center">
-            <div className="relative flex-1">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
-              <input
-                className={cls(
-                  "w-full h-10 rounded-lg border border-gray-300 bg-white pl-9 pr-3 text-sm shadow-sm",
-                  "focus:outline-none focus:ring-2 focus:ring-emerald-200 focus:border-emerald-300"
-                )}
-                placeholder="Search by course code or faculty…"
-                value={tableSearch}
-                onChange={(e) => setTableSearch(e.target.value)}
-              />
-            </div>
+      <main className={cls("w-full pb-24 space-y-10", variant !== "embedded" && "px-8")}>
+        {/* 1) CREATE & SENT REQUESTS (From = activeDeptName) */}
+        <div className={cls(PLANTILLA_TABLE_WRAP, "overflow-y-visible")}>
+          <div className={cls(PLANTILLA_SECTION_TITLE, "w-full flex items-center justify-between gap-3")}>
+            <span>Sent Requests</span>
 
-            <div className="flex items-center justify-end gap-2">
+            <div className="flex items-center gap-2">
               <button
                 type="button"
                 onClick={addDraftRow}
                 className={cls(
-                  "inline-flex items-center gap-2 rounded-md bg-emerald-500 px-3 py-2 text-sm font-medium text-white shadow-sm"
+                  "inline-flex items-center justify-center gap-2 rounded-md px-3 py-1.5 text-[13px] font-medium shadow-sm",
+                  "bg-white text-emerald-800 border border-white/40 hover:bg-white/10"
                 )}
                 title="Add another request row"
               >
                 <Plus className="h-4 w-4" />
-                Add Class
+                Add Row
               </button>
 
               <button
                 type="button"
                 onClick={handleCreateAndSend}
                 className={cls(
-                "inline-flex items-center gap-2 rounded-md bg-emerald-600 px-3 py-2 text-sm font-medium text-white shadow-sm hover:brightness-110"
+                  "inline-flex items-center justify-center gap-2 rounded-md px-3 py-1.5 text-[13px] font-medium shadow-sm",
+                  "bg-blue-600 text-white hover:bg-blue-700"
                 )}
                 title="Send selected requests"
               >
                 <Send className="h-4 w-4" />
                 Send
               </button>
+
             </div>
+          </div>
+
+          <div className="overflow-x-auto">
+            <table className={PLANTILLA_TABLE}>
+              <ColGroupCombined />
+              <thead className={PLANTILLA_THEAD}>
+                <tr className={PLANTILLA_HEAD_TR}>
+                  <th className={PLANTILLA_TH}>
+                    <span className="sr-only">Select</span>
+                  </th>
+                  <th className={PLANTILLA_TH}>Course Code &amp; Title<span className="text-red-600 ml-0.5">*</span></th>
+                  <th className={PLANTILLA_TH}>Section<span className="text-red-600 ml-0.5">*</span></th>
+                  <th className={PLANTILLA_TH}>Units</th>
+                  <th className={PLANTILLA_TH}>To<span className="text-red-600 ml-0.5">*</span></th>
+                  <th className={PLANTILLA_TH}>Faculty</th>
+                  <th className={PLANTILLA_TH}>Day1</th>
+                  <th className={PLANTILLA_TH}>Begin1</th>
+                  <th className={PLANTILLA_TH}>End1</th>
+                  <th className={PLANTILLA_TH}>Day2</th>
+                  <th className={PLANTILLA_TH}>Begin2</th>
+                  <th className={PLANTILLA_TH}>End2</th>
+                  <th className={PLANTILLA_TH}>Remarks</th>
+                  <th className={PLANTILLA_TH}>Status</th>
+                </tr>
+              </thead>
+
+              <tbody className="text-gray-800">
+                {/* Draft rows (editable before sending) */}
+                {draftRows.map((r) => {
+                  const checked = selectedDraftIds[r._tmpId] ?? true;
+                  const secs = sectionOptionsByCode[(r.course_code || "").trim()] || [];
+                  const sectionCodes = Array.from(new Set(secs.map((s) => s.section_code))).sort();
+                  return (
+                    <tr key={r._tmpId} className={PLANTILLA_ROW}>
+                      <td className={cls(PLANTILLA_TD, "align-middle")}>
+                        <input
+                          type="checkbox"
+                          className="h-4 w-4 accent-emerald-600"
+                          checked={checked}
+                          onChange={(e) => {
+                            const v = e.target.checked;
+                            setSelectedDraftIds((prev) => ({ ...prev, [r._tmpId]: v }));
+                          }}
+                          aria-label="Select row to send"
+                        />
+                      </td>
+
+                      <td className={cls(PLANTILLA_TD, "text-left")}>
+                        <Dropdown
+                          value={r.course_code}
+                          onChange={(code) => {
+                            const hit = courseSuggestions.find((c) => c.code === code);
+                            updateDraftRow(r._tmpId, {
+                              course_code: code,
+                              section_id: "",
+                              section: "",
+                              course_title: hit?.title ?? "",
+                              units: hit?.units ?? null,
+                            });
+                            setCourseTerm("");
+                          }}
+                          options={codeOptions}
+                          placeholder="Select code…"
+                          searchable
+                          className="block w-full [&_button]:h-9 [&_button]:px-2 [&_input]:h-9 [&_input]:px-2"
+                          onOpen={() => setCourseTerm("")}
+                        />
+                        <div className="mt-1 text-[12px] text-neutral-600 leading-tight">{r.course_title || ""}</div>
+                      </td>
+
+                      <td className={cls(PLANTILLA_TD, "align-middle")}>
+                        <Dropdown
+                          value={r.section}
+                          onChange={(sec) => {
+                            const hit = secs.find((s) => s.section_code === sec);
+                            updateDraftRow(r._tmpId, { section: sec, section_id: hit?.section_id || "" });
+                          }}
+                          options={sectionCodes}
+                          placeholder={r.course_code ? "Select section…" : "Select course first"}
+                          className="block w-full [&_button]:h-9 [&_button]:px-2 [&_input]:h-9 [&_input]:px-2"
+                        />
+                      </td>
+
+                      <td className={cls(PLANTILLA_TD, "align-middle tabular-nums")}>
+                        <span className="inline-block leading-6">{r.units ?? "—"}</span>
+                      </td>
+
+                      <td className={cls(PLANTILLA_TD, "align-middle")}>
+                        <Dropdown
+                          value={r.to_department}
+                          onChange={(v) => updateDraftRow(r._tmpId, { to_department: v })}
+                          options={toDepts}
+                          placeholder="Select department…"
+                          className="block w-full [&_button]:h-9 [&_button]:px-2 [&_input]:h-9 [&_input]:px-2"
+                        />
+                      </td>
+
+                      {/* disabled fields until receiver responds */}
+                      <td className={PLANTILLA_TD}>—</td>
+                      <td className={PLANTILLA_TD}>—</td>
+                      <td className={PLANTILLA_TD}>—</td>
+                      <td className={PLANTILLA_TD}>—</td>
+                      <td className={PLANTILLA_TD}>—</td>
+                      <td className={PLANTILLA_TD}>—</td>
+                      <td className={PLANTILLA_TD}>—</td>
+
+                      <td className={cls(PLANTILLA_TD, "text-left")}>
+                        <input
+                          className={cls(CONTROL, "h-9 px-2")}
+                          value={r.remarks}
+                          onChange={(ev) => updateDraftRow(r._tmpId, { remarks: ev.target.value })}
+                          placeholder="Remarks…"
+                        />
+                      </td>
+
+                      <td className={PLANTILLA_TD}>
+                        <div className="flex items-center justify-center gap-2">
+                          <span className="inline-block rounded-full px-2 py-[2px] text-[12px] bg-neutral-200 text-neutral-700">
+                            Draft
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => removeDraftRow(r._tmpId)}
+                            className={cls(
+                              "inline-flex items-center justify-center rounded-md p-1.5",
+                              "hover:bg-red-50 focus:outline-none focus:ring-2 focus:ring-red-500/30"
+                            )}
+                            title="Delete draft row"
+                            aria-label="Delete draft row"
+                          >
+                            <Trash2 className="h-4 w-4 text-red-600" />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+
+                {/* Sent rows (read-only) */}
+                {mySentRows.map((r) => {
+                  const label = r.status === "responded" ? "Approved" : r.status === "rejected" ? "Rejected" : "Pending";
+                  const badge =
+                    r.status === "responded"
+                      ? "bg-emerald-100 text-emerald-700"
+                      : r.status === "rejected"
+                      ? "bg-red-100 text-red-700"
+                      : "bg-amber-100 text-amber-700";
+
+                  return (
+                    <tr key={r.fs_id || r.id} className={PLANTILLA_ROW}>
+                      <td className={PLANTILLA_TD}>
+                        <input type="checkbox" className="h-4 w-4" disabled />
+                      </td>
+
+                      <td className={cls(PLANTILLA_TD, "text-left")}>
+                        <div className="font-semibold text-emerald-700">{r.course_code}</div>
+                        <div className="text-[12px] text-neutral-600 leading-tight">{r.course_title}</div>
+                      </td>
+
+                      <td className={PLANTILLA_TD}>{r.section || "—"}</td>
+                      <td className={cls(PLANTILLA_TD, "tabular-nums")}>{r.units ?? "—"}</td>
+                      <td className={cls(PLANTILLA_TD, "truncate")} title={r.to_department}>
+                        {r.to_department}
+                      </td>
+                      <td className={cls(PLANTILLA_TD, "truncate")} title={facultyLabel(r.faculty)}>
+                        {facultyLabel(r.faculty) || "—"}
+                      </td>
+                      <td className={PLANTILLA_TD}>{r.day1 || "—"}</td>
+                      <td className={PLANTILLA_TD}>{r.begin1 || "—"}</td>
+                      <td className={PLANTILLA_TD}>{r.end1 || "—"}</td>
+                      <td className={PLANTILLA_TD}>{r.day2 || "—"}</td>
+                      <td className={PLANTILLA_TD}>{r.begin2 || "—"}</td>
+                      <td className={PLANTILLA_TD}>{r.end2 || "—"}</td>
+                      <td className={cls(PLANTILLA_TD, "text-left")}>
+                        <span className="block whitespace-normal break-words" title={r.remarks || ""}>
+                          {r.remarks || "—"}
+                        </span>
+                      </td>
+                      <td className={PLANTILLA_TD}>
+                        <div className="flex items-center justify-center gap-2">
+                          <button
+                            type="button"
+                            title="Message"
+                            aria-label="Message"
+                            disabled={!termId || !(r as any)?.section_id || !((r as any)?.faculty?.faculty_id)}
+                            onClick={() => {
+                              const fid = String((r as any)?.faculty?.faculty_id || "");
+                              const sid = String((r as any)?.section_id || "");
+                              if (!fid || !sid) return;
+                              setRfcModal({
+                                open: true,
+                                facultyId: fid,
+                                facultyName: facultyLabel((r as any)?.faculty) || "Faculty",
+                                sectionId: sid,
+                              });
+                            }}
+                            className={cls(
+                              "inline-flex h-8 w-8 items-center justify-center rounded-full",
+                              "border border-emerald-200 text-emerald-700 hover:bg-emerald-50",
+                              (!termId || !(r as any)?.section_id || !((r as any)?.faculty?.faculty_id)) &&
+                                "opacity-50 cursor-not-allowed hover:bg-transparent"
+                            )}
+                          >
+                            <MessageSquareText className="h-4 w-4" />
+                          </button>
+
+                          <span className={cls("inline-block rounded-full px-2 py-[2px] text-[12px]", badge)}>{label}</span>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+
+                {mySentRows.length === 0 && !loadingList && (
+                  <tr className={PLANTILLA_ROW}>
+                    <td className={cls(PLANTILLA_TD, "py-6 text-sm text-gray-500")} colSpan={14}>
+                      No sent requests yet.
+                    </td>
+                  </tr>
+                )}
+
+                {loadingList && (
+                  <tr className={PLANTILLA_ROW}>
+                    <td className={cls(PLANTILLA_TD, "py-6 text-sm text-gray-500")} colSpan={14}>
+                      Loading…
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
           </div>
         </div>
 
-        {/* 1) CREATE & SENT REQUESTS (From = activeDeptName) */}
-        <section className="space-y-2">
-          <h2 className="text-base font-semibold text-gray-800">Sent Requests</h2>
-
-          <div className={PLANTILLA_TABLE_WRAP}>
-            <div className="overflow-x-auto rounded-xl">
-              <table className={PLANTILLA_TABLE}>
-                <ColGroupCombined />
-                <thead className="bg-gray-50 border-b text-gray-900">
-                <tr>
-                    <th className={PLANTILLA_TH}>
-                      <span className="sr-only">Select</span>
-                    </th>
-                    <th className="px-4 py-2 text-left">Course Code &amp; Title<span className="text-red-600 ml-0.5">*</span></th>
-                    <th className="px-4 py-2 text-left">Section<span className="text-red-600 ml-0.5">*</span></th>
-                    <th className="px-4 py-2 text-left">Units</th>
-                    <th className="px-4 py-2 text-left">To<span className="text-red-600 ml-0.5">*</span></th>
-                    <th className="px-4 py-2 text-left">Faculty</th>
-                    <th className="px-4 py-2 text-left">Day1</th>
-                    <th className="px-4 py-2 text-left">Begin1</th>
-                    <th className="px-4 py-2 text-left">End1</th>
-                    <th className="px-4 py-2 text-left">Day2</th>
-                    <th className="px-4 py-2 text-left">Begin2</th>
-                    <th className="px-4 py-2 text-left">End2</th>
-                    <th className="px-4 py-2 text-left">Remarks</th>
-                    <th className="px-4 py-2 text-left">Status</th>
-                  </tr>
-                </thead>
-
-                <tbody className="text-gray-800">
-                  {/* Draft rows (editable before sending) */}
-                  {draftRows.map((r) => {
-                    const checked = selectedDraftIds[r._tmpId] ?? true;
-                    const secs = sectionOptionsByCode[(r.course_code || "").trim()] || [];
-                    const sectionCodes = Array.from(new Set(secs.map((s) => s.section_code))).sort();
-                    const sectionDisabled = !r.course_code || sectionCodes.length === 0;
-
-                    return (
-                      <tr key={r._tmpId} className={PLANTILLA_ROW}>
-                        <td className={cls(PLANTILLA_TD, "align-middle")}> 
-                          <input
-                            type="checkbox"
-                            className="h-4 w-4 accent-emerald-600"
-                            checked={checked}
-                            onChange={(e) => {
-                              const v = e.target.checked;
-                              setSelectedDraftIds((prev) => ({ ...prev, [r._tmpId]: v }));
-                            }}
-                            aria-label="Select row to send"
-                          />
-                        </td>
-
-                        <td className={cls(PLANTILLA_TD, "text-left")}> 
-                          <Dropdown
-                            value={r.course_code}
-                            onChange={(code) => {
-                              const hit = courseSuggestions.find((c) => c.code === code);
-                              updateDraftRow(r._tmpId, {
-                                course_code: code,
-                                section_id: "",
-                                section: "",
-                                course_title: hit?.title ?? "",
-                                units: hit?.units ?? null,
-                              });
-                              setCourseTerm("");
-                            }}
-                            options={codeOptions}
-                            placeholder="— Select Course —"
-                            searchable
-                            className="w-full"
-                            onOpen={() => setCourseTerm("")}
-                          />
-                          <div className="mt-1 text-[12px] text-neutral-600 leading-tight">{r.course_title || ""}</div>
-                        </td>
-
-                        <td className={cls(PLANTILLA_TD, "align-middle")}> 
-                          <Dropdown
-                            value={r.section}
-                            onChange={(sec) => {
-                              const hit = secs.find((s) => s.section_code === sec);
-                              updateDraftRow(r._tmpId, { section: sec, section_id: hit?.section_id || "" });
-                            }}
-                            options={sectionCodes}
-                            placeholder={r.course_code ? "— Select —" : "— Select —"}
-                            className="w-full"
-                            searchable={false}
-                            disabled={sectionDisabled}
-                          />
-                        </td>
-
-                        <td className={cls(PLANTILLA_TD, "align-middle tabular-nums")}> 
-                          <span className="inline-block leading-6">{r.units ?? "—"}</span>
-                        </td>
-
-                        <td className={cls(PLANTILLA_TD, "align-middle")}> 
-                          <Dropdown
-                            value={r.to_department}
-                            onChange={(v) => updateDraftRow(r._tmpId, { to_department: v })}
-                            options={toDepts}
-                            placeholder="— Select Department —"
-                            className="w-full"
-                            searchable={false}
-                          />
-                        </td>
-
-                        {/* disabled fields until receiver responds */}
-                        <td className={PLANTILLA_TD}>—</td>
-                        <td className={PLANTILLA_TD}>—</td>
-                        <td className={PLANTILLA_TD}>—</td>
-                        <td className={PLANTILLA_TD}>—</td>
-                        <td className={PLANTILLA_TD}>—</td>
-                        <td className={PLANTILLA_TD}>—</td>
-                        <td className={PLANTILLA_TD}>—</td>
-
-                        <td className={cls(PLANTILLA_TD, "text-left")}> 
-                          <input
-                            className={CONTROL}
-                            value={r.remarks}
-                            onChange={(ev) => updateDraftRow(r._tmpId, { remarks: ev.target.value })}
-                            placeholder="Remarks…"
-                          />
-                        </td>
-
-                        <td className={PLANTILLA_TD}>
-                          <div className="flex items-center justify-center gap-2">
-                            <span className="inline-block rounded-full px-2 py-[2px] text-[12px] bg-neutral-200 text-neutral-700">
-                              Draft
-                            </span>
-                            <button
-                              type="button"
-                              onClick={() => removeDraftRow(r._tmpId)}
-                              className={cls(
-                                "inline-flex items-center justify-center rounded-md p-1.5",
-                                "hover:bg-red-50 focus:outline-none focus:ring-2 focus:ring-red-500/30"
-                              )}
-                              title="Delete draft row"
-                              aria-label="Delete draft row"
-                            >
-                              <Trash2 className="h-4 w-4 text-red-600" />
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })}
-
-                  {/* Sent rows (read-only) */}
-                  {filteredSentRows.map((r) => {
-                    const label = r.status === "responded" ? "Approved" : r.status === "rejected" ? "Rejected" : "Pending";
-                    const badge =
-                      r.status === "responded"
-                        ? "bg-emerald-100 text-emerald-700"
-                        : r.status === "rejected"
-                        ? "bg-red-100 text-red-700"
-                        : "bg-amber-100 text-amber-700";
-
-                    return (
-                      <tr key={r.fs_id} className={PLANTILLA_ROW}>
-                        <td className={PLANTILLA_TD} />
-
-                        <td className={cls(PLANTILLA_TD, "text-left")}> 
-                          <div className="font-semibold text-emerald-700">{r.course_code || "—"}</div>
-                          <div className="text-[12px] text-neutral-600 leading-tight">{r.course_title || "—"}</div>
-                        </td>
-
-                        <td className={PLANTILLA_TD}>{r.section || "—"}</td>
-                        <td className={PLANTILLA_TD}>{r.units ?? "—"}</td>
-                        <td className={PLANTILLA_TD}>{r.to_department || "—"}</td>
-
-                        <td className={PLANTILLA_TD}>{facultyLabel((r as any)?.faculty) || "—"}</td>
-                        <td className={PLANTILLA_TD}>{(r as any)?.day1 || "—"}</td>
-                        <td className={PLANTILLA_TD}>{(r as any)?.begin1 || "—"}</td>
-                        <td className={PLANTILLA_TD}>{(r as any)?.end1 || "—"}</td>
-                        <td className={PLANTILLA_TD}>{(r as any)?.day2 || "—"}</td>
-                        <td className={PLANTILLA_TD}>{(r as any)?.begin2 || "—"}</td>
-                        <td className={PLANTILLA_TD}>{(r as any)?.end2 || "—"}</td>
-                        <td className={cls(PLANTILLA_TD, "text-left")}>{r.remarks || "—"}</td>
-
-                        <td className={PLANTILLA_TD}>
-                          <div className="flex items-center justify-center gap-2">
-                            <button
-                              type="button"
-                              aria-label="Message"
-                              disabled={!termId || !(r as any)?.section_id || !((r as any)?.faculty?.faculty_id)}
-                              onClick={() => {
-                                const fid = String((r as any)?.faculty?.faculty_id || "");
-                                const sid = String((r as any)?.section_id || "");
-                                if (!fid || !sid) return;
-                                setRfcModal({
-                                  open: true,
-                                  facultyId: fid,
-                                  facultyName: facultyLabel((r as any)?.faculty) || "Faculty",
-                                  sectionId: sid,
-                                });
-                              }}
-                              className={cls(
-                                "relative inline-flex items-center justify-center p-1 rounded-md text-blue-700 hover:bg-blue-50",
-                                (!termId || !(r as any)?.section_id || !((r as any)?.faculty?.faculty_id)) &&
-                                  "opacity-50 cursor-not-allowed hover:bg-transparent"
-                              )}
-                              title={(!termId || !(r as any)?.section_id || !((r as any)?.faculty?.faculty_id)) ? "Assign a faculty first to open conversation" : "Message"}
-                            >
-                              <MessageSquareText className="h-4 w-4" />
-                            </button>
-
-                            <span className={cls("inline-block rounded-full px-2 py-[2px] text-[12px]", badge)}>{label}</span>
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })}
-
-                  {mySentRows.length === 0 && !loadingList && (
-                    <tr className={PLANTILLA_ROW}>
-                      <td className={cls(PLANTILLA_TD, "py-6 text-sm text-gray-500")} colSpan={14}>
-                        No sent requests yet.
-                      </td>
-                    </tr>
-                  )}
-
-                  {mySentRows.length > 0 && filteredSentRows.length === 0 && !!q && !loadingList && (
-                    <tr className={PLANTILLA_ROW}>
-                      <td className={cls(PLANTILLA_TD, "py-6 text-sm text-gray-500")} colSpan={14}>
-                        No matches found.
-                      </td>
-                    </tr>
-                  )}
-
-                  {loadingList && (
-                    <tr className={PLANTILLA_ROW}>
-                      <td className={cls(PLANTILLA_TD, "py-6 text-sm text-gray-500")} colSpan={14}>
-                        Loading…
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </section>
-
         {/* 2) RECEIVED REQUESTS (To = activeDeptName) */}
-        <section className="space-y-2">
-          <div className="flex items-center justify-between gap-3">
-            <div className="flex items-center gap-2">
-              <h2 className="text-base font-semibold text-gray-800">Received Requests</h2>
-              {hasNewReceived && (
-                <span
-                  className="inline-flex items-center rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] font-semibold text-emerald-800"
-                  title="New requests received"
+          <div className={cls(PLANTILLA_TABLE_WRAP, "mt-3 flex-1 min-h-[320px] overflow-y-auto")}>
+            <div className={cls(PLANTILLA_SECTION_TITLE, "w-full flex items-center justify-between gap-3")}
+            >
+				  <span className="inline-flex items-center gap-2">
+				    Received Requests
+				    {hasNewReceived && (
+				      <span
+				        className="inline-flex items-center rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] font-semibold text-emerald-800"
+				        title="New requests received"
+				      >
+				        New
+				      </span>
+				    )}
+				  </span>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    undoEdit();
+                  }}
+                  disabled={!canUndoReceived}
+                  className={cls(
+                    "inline-flex items-center justify-center rounded-md px-2 py-1",
+                    "border border-white/30",
+                    canUndoReceived ? "hover:bg-white/10" : "opacity-50 cursor-not-allowed"
+                  )}
+                  title="Undo (Ctrl/Cmd+Z)"
+                  aria-label="Undo"
                 >
-                  New
-                </span>
-              )}
+                  <Undo2 className="h-4 w-4" />
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    redoEdit();
+                  }}
+                  disabled={!canRedoReceived}
+                  className={cls(
+                    "inline-flex items-center justify-center rounded-md px-2 py-1",
+                    "border border-white/30",
+                    canRedoReceived ? "hover:bg-white/10" : "opacity-50 cursor-not-allowed"
+                  )}
+                  title="Redo (Ctrl/Cmd+Y or Ctrl/Cmd+Shift+Z)"
+                  aria-label="Redo"
+                >
+                  <Redo2 className="h-4 w-4" />
+                </button>
+              </div>
             </div>
 
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={() => undoEdit()}
-                disabled={!canUndoReceived}
-                className={cls(
-                  "inline-flex items-center justify-center rounded-md p-2",
-                  "border border-gray-200 bg-white hover:bg-gray-50",
-                  !canUndoReceived && "opacity-50 cursor-not-allowed hover:bg-white"
-                )}
-                title="Undo (Ctrl/Cmd+Z)"
-                aria-label="Undo"
-              >
-                <Undo2 className="h-4 w-4" />
-              </button>
-
-              <button
-                type="button"
-                onClick={() => redoEdit()}
-                disabled={!canRedoReceived}
-                className={cls(
-                  "inline-flex items-center justify-center rounded-md p-2",
-                  "border border-gray-200 bg-white hover:bg-gray-50",
-                  !canRedoReceived && "opacity-50 cursor-not-allowed hover:bg-white"
-                )}
-                title="Redo (Ctrl/Cmd+Y or Ctrl/Cmd+Shift+Z)"
-                aria-label="Redo"
-              >
-                <Redo2 className="h-4 w-4" />
-              </button>
-            </div>
-          </div>
-
-          <div className={PLANTILLA_TABLE_WRAP}>
-            <div className="overflow-x-auto rounded-xl">
+            <div className="overflow-x-auto">
               <table className={PLANTILLA_TABLE}>
                 <ColGroup14 />
-                <thead className="bg-gray-50 border-b text-gray-900">
-                <tr>
+                <thead className={PLANTILLA_THEAD}>
+                  <tr className={PLANTILLA_HEAD_TR}>
                     <th className={cls(PLANTILLA_TH, "text-left")}>Course Code &amp; Title</th>
                     <th className={PLANTILLA_TH}>Section</th>
                     <th className={PLANTILLA_TH}>Units</th>
@@ -1988,7 +1938,7 @@ export default function CHAIR_FacultyService({ chairDepartmentName, variant = "p
                 </thead>
 
                 <tbody className="text-gray-800">
-                  {filteredReceivedRows.map((r) => {
+                  {receivedRows.map((r) => {
                     const fsid = r.fs_id!;
                     const dept = r.to_department || "";
                     const e = getEdit(fsid);
@@ -2007,16 +1957,20 @@ export default function CHAIR_FacultyService({ chairDepartmentName, variant = "p
 
                     return (
                       <tr key={fsid} className={PLANTILLA_ROW} onMouseEnter={() => ensureFacultyForDept(dept)}>
-                        <td className={cls(PLANTILLA_TD, "text-left align-top")}> 
+                        <td className={cls(PLANTILLA_TD, "text-left align-top")}>
                           <div className="font-semibold text-emerald-700">{r.course_code}</div>
                           <div className="text-[12px] text-neutral-600 leading-tight">{r.course_title}</div>
                         </td>
 
                         <td className={cls(PLANTILLA_TD, "tabular-nums")}>{r.section || "—"}</td>
-                        <td className={cls(PLANTILLA_TD, "tabular-nums")}>{r.units ?? ""}</td>
-                        <td className={cls(PLANTILLA_TD, "truncate")} title={r.from_department}>{r.from_department}</td>
 
-                        <td className={cls(PLANTILLA_TD, "align-middle")}> 
+                        <td className={cls(PLANTILLA_TD, "tabular-nums")}>{r.units ?? ""}</td>
+
+                        <td className={cls(PLANTILLA_TD, "truncate")} title={r.from_department}>
+                          {r.from_department}
+                        </td>
+
+                        <td className={cls(PLANTILLA_TD, "align-middle")}>
                           <Dropdown
                             value={
                               e.faculty?.faculty_id
@@ -2037,12 +1991,12 @@ export default function CHAIR_FacultyService({ chairDepartmentName, variant = "p
                               }
                             }}
                             options={facultyOptions.map((f) => f.label).filter(Boolean)}
-                            placeholder={facultyOptions.length ? "— Select Faculty —" : "Loading…"}
+                            placeholder={facultyOptions.length ? "Select faculty…" : "Loading…"}
                             searchable
                           />
                         </td>
 
-                        <td className={cls(PLANTILLA_TD, "align-middle")}> 
+                        <td className={cls(PLANTILLA_TD, "align-middle")}>
                           <Dropdown
                             value={e.day1 || ""}
                             onChange={(val) => {
@@ -2054,12 +2008,12 @@ export default function CHAIR_FacultyService({ chairDepartmentName, variant = "p
                             }}
                             options={[...DAY1_OPTIONS]}
                             placeholder=""
-                            className="max-w-[110px] mx-auto"
+                            className="max-w-[90px] mx-auto"
                             searchable={false}
                           />
                         </td>
 
-                        <td className={cls(PLANTILLA_TD, "align-middle")}> 
+                        <td className={cls(PLANTILLA_TD, "align-middle")}>
                           <Dropdown
                             value={e.begin1 || ""}
                             onChange={(val) => {
@@ -2071,34 +2025,34 @@ export default function CHAIR_FacultyService({ chairDepartmentName, variant = "p
                             }}
                             options={timeBegins}
                             placeholder=""
-                            className="max-w-[110px] mx-auto"
+                            className="max-w-[90px] mx-auto"
                             searchable={false}
                           />
                         </td>
 
-                        <td className={cls(PLANTILLA_TD, "align-middle")}> 
+                        <td className={cls(PLANTILLA_TD, "align-middle")}>
                           <Dropdown
                             value={e.end1 || ""}
                             onChange={(v) => patchEdit(fsid, { end1: v })}
                             options={timeBegins}
                             placeholder="—"
-                            className="max-w-[110px] mx-auto"
+                            className="max-w-[90px] mx-auto"
                             searchable={false}
                           />
                         </td>
 
-                        <td className={cls(PLANTILLA_TD, "align-middle")}> 
+                        <td className={cls(PLANTILLA_TD, "align-middle")}>
                           <Dropdown
                             value={e.day2 || ""}
                             onChange={(v) => patchEdit(fsid, { day2: v as DayShort | "" })}
                             options={[...DAY1_OPTIONS]}
                             placeholder="—"
-                            className="max-w-[110px] mx-auto"
+                            className="max-w-[90px] mx-auto"
                             searchable={false}
                           />
                         </td>
 
-                        <td className={cls(PLANTILLA_TD, "align-middle")}> 
+                        <td className={cls(PLANTILLA_TD, "align-middle")}>
                           <Dropdown
                             value={e.begin2 || ""}
                             onChange={(val) => {
@@ -2110,23 +2064,23 @@ export default function CHAIR_FacultyService({ chairDepartmentName, variant = "p
                             }}
                             options={timeBegins}
                             placeholder=""
-                            className="max-w-[110px] mx-auto"
+                            className="max-w-[90px] mx-auto"
                             searchable={false}
                           />
                         </td>
 
-                        <td className={cls(PLANTILLA_TD, "align-middle")}> 
+                        <td className={cls(PLANTILLA_TD, "align-middle")}>
                           <Dropdown
                             value={e.end2 || ""}
                             onChange={(v) => patchEdit(fsid, { end2: v })}
                             options={timeBegins}
                             placeholder="—"
-                            className="max-w-[110px] mx-auto"
+                            className="max-w-[90px] mx-auto"
                             searchable={false}
                           />
                         </td>
 
-                        <td className={cls(PLANTILLA_TD, "align-middle")}> 
+                        <td className={cls(PLANTILLA_TD, "align-middle")}>
                           <input
                             value={e.remarks}
                             onChange={(ev) => patchEdit(fsid, { remarks: ev.target.value })}
@@ -2135,21 +2089,25 @@ export default function CHAIR_FacultyService({ chairDepartmentName, variant = "p
                           />
                         </td>
 
-                        <td className={cls(PLANTILLA_TD, "align-middle")}> 
+                        <td className={cls(PLANTILLA_TD, "align-middle")}>
                           <div className="flex items-center justify-center gap-2">
                             <button
                               type="button"
+                              title="Message"
                               aria-label="Message"
                               disabled={!termId || !r.section_id || !(e.faculty?.faculty_id || (r as any)?.faculty?.faculty_id)}
                               onClick={() => {
                                 const fid = String(e.faculty?.faculty_id || (r as any)?.faculty?.faculty_id || "");
-                                const sid2 = String(r.section_id || "");
-                                if (!fid || !sid2) return;
+                                const sid = String(r.section_id || "");
+                                if (!fid || !sid) return;
 
+                                // RFC unread indicator: once the chair opens the thread, mark it as seen.
                                 try {
-                                  markRfcSeen(rfcKey(sid2, fid));
-                                } catch {}
-
+                                  markRfcSeen(rfcKey(sid, fid));
+                                } catch {
+                                  // ignore
+                                }
+                                // mark this RFC as seen (for red-dot indicator)
                                 try {
                                   if (fsid) {
                                     seenReceivedRef.current.add(String(fsid));
@@ -2159,22 +2117,24 @@ export default function CHAIR_FacultyService({ chairDepartmentName, variant = "p
                                       return !!id && !seenReceivedRef.current.has(String(id));
                                     }));
                                   }
-                                } catch {}
+                                } catch {
+                                  // ignore
+                                }
 
                                 setRfcModal({
                                   open: true,
                                   facultyId: fid,
                                   facultyName: facultyLabel(e.faculty) || facultyLabel((r as any)?.faculty) || "Faculty",
-                                  sectionId: sid2,
+                                  sectionId: sid,
                                   fsId: String(fsid),
                                 });
                               }}
                               className={cls(
-                                "relative inline-flex items-center justify-center p-1 rounded-md text-blue-700 hover:bg-blue-50",
+                                "inline-flex h-8 w-8 items-center justify-center rounded-full",
+                                "border border-emerald-200 text-emerald-700 hover:bg-emerald-50",
                                 (!termId || !r.section_id || !(e.faculty?.faculty_id || (r as any)?.faculty?.faculty_id)) &&
                                   "opacity-50 cursor-not-allowed hover:bg-transparent"
                               )}
-                              title={(!termId || !r.section_id || !(e.faculty?.faculty_id || (r as any)?.faculty?.faculty_id)) ? "— Select —" : "Message"}
                             >
                               <span className="relative inline-flex">
                                 <MessageSquareText className="h-4 w-4" />
@@ -2216,17 +2176,9 @@ export default function CHAIR_FacultyService({ chairDepartmentName, variant = "p
                     </tr>
                   )}
 
-                  {receivedRows.length > 0 && filteredReceivedRows.length === 0 && !!q && !loadingList && (
-                    <tr className={PLANTILLA_ROW}>
-                      <td className={cls(PLANTILLA_TD, "py-6 text-sm text-gray-500")} colSpan={13}>
-                        No matches found.
-                      </td>
-                    </tr>
-                  )}
-
                   {loadingList && (
                     <tr className={PLANTILLA_ROW}>
-                      <td className={cls(PLANTILLA_TD, "py-6 text-sm text-gray-500")} colSpan={13}>
+                    <td className={cls(PLANTILLA_TD, "py-6 text-sm text-gray-500")} colSpan={14}>
                         Loading…
                       </td>
                     </tr>
@@ -2235,7 +2187,6 @@ export default function CHAIR_FacultyService({ chairDepartmentName, variant = "p
               </table>
             </div>
           </div>
-        </section>
 
         {/* RFC / Message thread (mirrors OM Load Assignment) */}
         <ServiceRfcModal
