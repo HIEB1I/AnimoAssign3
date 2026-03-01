@@ -2853,12 +2853,17 @@ export async function getOMCR_SectionOptions(
 }
 
 export async function saveOMCR(
-  payload: Partial<OMCRRow>
+  payload: Partial<OMCRRow>,
+  userId?: string
 ): Promise<{ ok: boolean; retention_id: string }> {
   const copy = { ...payload };
   // faculty is auto-derived on backend — do not send
   delete (copy as any).faculty_id;
-  const { data } = await api.post(`/om/classretention`, copy, { params: { action: "save" } });
+
+  const params: any = { action: "save" };
+  if (userId) params.userId = userId;
+
+  const { data } = await api.post(`/om/classretention`, copy, { params });
   return data as { ok: boolean; retention_id: string };
 }
 
