@@ -255,15 +255,52 @@ export default function InboxShell({
   }, []);
 
   const navigate = useNavigate();
-
-  const me = useMemo(() => {
+  const readMe = () => {
     const u = getSessionUser();
-    const userId = String(u?.userId || u?.user_id || u?.id || "").trim();
+    const userId = String(u?.userId || u?.user_id || u?.id || (u as any)?._id || "").trim();
     const fullName = String(u?.fullName || u?.full_name || "").trim();
     return {
       userId: userId || fullName || "me",
       fullName: fullName || userId || "me",
     };
+  };
+
+  const [me, setMe] = useState(() => readMe());
+
+  useEffect(() => {
+    const sync = () => setMe(readMe());
+    sync();
+
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === "animo.user") sync();
+    };
+    window.addEventListener("storage", onStorage);
+
+    // Same-tab updates (no storage event): poll lightly
+    const t = window.setInterval(() => {
+      const next = readMe();
+      setMe((prev) => {
+        return String(prev.userId) === String(next.userId) && String(prev.fullName) === String(next.fullName) ? prev : next;
+      });
+    }, 2000);
+
+    // If socket reports the canonical userId, prefer it (fixes student inbox issues if localStorage was stale)
+    const s = getSocket();
+    const onReady = (msg: any) => {
+      const canonical = String(msg?.userId || "").trim();
+      if (!canonical || !/^USR/i.test(canonical)) return;
+      setMe((prev) => ({ ...prev, userId: canonical }));
+    };
+    if (s) s.on("socket:ready", onReady);
+
+    return () => {
+      window.removeEventListener("storage", onStorage);
+      window.clearInterval(t);
+      try {
+        if (s) s.off("socket:ready", onReady);
+      } catch {}
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const handleBack = () => {

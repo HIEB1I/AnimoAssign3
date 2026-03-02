@@ -53,11 +53,13 @@ const ITEMS: SidebarItem[] = [
 /* ---------------- Utilities ---------------- */
 const cls = (...s: (string | false | null | undefined)[]) => s.filter(Boolean).join(" ");
 
-const normalizeDay = (s: string) => {
+const normalizeDayLines = (s: string) => {
   const toks = (s || "")
     .toUpperCase()
+    // Keep common separators but split into day tokens.
     .split(/[^A-Z]/g)
     .filter(Boolean);
+
   const map: Record<string, string> = {
     M: "M",
     T: "T",
@@ -70,12 +72,44 @@ const normalizeDay = (s: string) => {
     SUN: "Su",
     SAT: "S",
   };
-  return toks.map((t) => map[t] ?? t.charAt(0)).join(" / ");
+
+  const lines = toks.map((t) => map[t] ?? t.charAt(0));
+  // Remove consecutive duplicates just in case the raw string is weird.
+  return lines.filter((v, idx) => v && (idx === 0 || v !== lines[idx - 1]));
+};
+
+const MultiLineCell: React.FC<{ lines: string[]; raw?: string }> = ({ lines, raw }) => {
+  const safe = (lines || []).map((l) => String(l || "").trim()).filter(Boolean);
+  if (safe.length === 0) return <span data-raw={raw}>—</span>;
+
+  return (
+    <span data-raw={raw} className="inline-block leading-tight">
+      {safe.map((l, idx) => (
+        <div key={idx}>{l}</div>
+      ))}
+    </span>
+  );
 };
 
 const DayCell: React.FC<{ raw: string }> = ({ raw }) => (
-  <span data-raw-day={raw}>{normalizeDay(raw).replace(/ \/ /g, " / ")}</span>
+  <MultiLineCell raw={raw} lines={normalizeDayLines(raw)} />
 );
+
+const TimeCell: React.FC<{ raw: string }> = ({ raw }) => {
+  const parts = String(raw || "")
+    .split("/")
+    .map((p) => p.trim())
+    .filter(Boolean);
+  return <MultiLineCell raw={raw} lines={parts} />;
+};
+
+const RoomCell: React.FC<{ raw: string }> = ({ raw }) => {
+  const parts = String(raw || "")
+    .split("/")
+    .map((p) => p.trim())
+    .filter(Boolean);
+  return <MultiLineCell raw={raw} lines={parts} />;
+};
 
 /* ----------- Name helpers (mirror OM behavior) ----------- */
 const normalizeCommaName = (n: string) =>
@@ -212,39 +246,91 @@ const DepartmentPlantilla: React.FC<{
       "Remarks",
     ];
 
-    const dataRows = filteredRows.map((r) => [
-      r.rank ?? "",
-      r.faculty_name || "",
-      r.course_code || "",
-      r.section_code || "",
-      r.day_text || "",
-      r.time_text || "",
-      r.room_text || "",
-      r.student_count ?? "",
-      r.lec_hours ?? "",
-      r.lab_hours ?? "",
-      r.student_units ?? "",
-      r.on_leave || "",
-      r.course_type || "",
-      r.nature_teaching ?? "",
-      r.nature_admin ?? "",
-      r.nature_research ?? "",
-      r.nature_faculty_units ?? "",
-      r.premium_grad ?? "",
-      r.premium_4th_prep ?? "",
-      r.premium_overload ?? "",
-      r.remarks || "",
-    ]);
+    // IMPORTANT: Export exactly what is currently visible in the table.
+    // This guarantees the Excel export respects the active filter (e.g., Special Classes)
+    // and the active search input.
+    const dataRows = (() => {
+      const table = tableRef.current;
+      const bodyRows = table?.querySelectorAll("tbody tr") ?? [];
 
-    const normalizeForExcel = (value: string) => {
+      const visible: string[][] = [];
+      bodyRows.forEach((tr) => {
+        const tds = Array.from(tr.querySelectorAll("td"));
+        // Skip the empty-state row (it uses a single cell with colSpan).
+        if (tds.length < headers.length) return;
+        visible.push(
+          tds.slice(0, headers.length).map((td, idx) => {
+            const el = td as HTMLElement;
+            // Preserve visible line breaks for Day / Time / Room.
+            const raw =
+              idx === 4 || idx === 5 || idx === 6
+                ? (el.innerText || el.textContent || "")
+                : (td.textContent || "");
+            return String(raw || "").trim();
+          })
+        );
+      });
+
+      if (visible.length > 0) return visible;
+
+      // Fallback: if DOM isn't available for some reason, export from filteredRows.
+      return filteredRows.map((r) => [
+        String(r.rank ?? ""),
+        String(r.faculty_name || ""),
+        String(r.course_code || ""),
+        String(r.section_code || ""),
+        normalizeDayLines(String(r.day_text || "")).join("\n"),
+        String(r.time_text || "")
+          .split("/")
+          .map((p) => p.trim())
+          .filter(Boolean)
+          .join("\n"),
+        String(r.room_text || "")
+          .split("/")
+          .map((p) => p.trim())
+          .filter(Boolean)
+          .join("\n"),
+        String(r.student_count ?? ""),
+        String(r.lec_hours ?? ""),
+        String(r.lab_hours ?? ""),
+        String(r.student_units ?? ""),
+        String(r.on_leave || ""),
+        String(r.course_type || ""),
+        String(r.nature_teaching ?? ""),
+        String(r.nature_admin ?? ""),
+        String(r.nature_research ?? ""),
+        String(r.nature_faculty_units ?? ""),
+        String(r.premium_grad ?? ""),
+        String(r.premium_4th_prep ?? ""),
+        String(r.premium_overload ?? ""),
+        String(r.remarks || ""),
+      ]);
+    })();
+
+    const normalizeForExcel = (value: string, preserveNewlines: boolean) => {
       let v = value ?? "";
       if (v === "—") v = "";
+
+      // Normalize common typography to ASCII so Excel doesn't choke.
       v = v
         .replace(/[\u2012\u2013\u2014\u2015]/g, "-")
         .replace(/[\u2018\u2019]/g, "'")
         .replace(/[\u201C\u201D]/g, '"')
-        .replace(/\u00A0/g, " ")
-        .replace(/[\r\n\t]/g, " ");
+        .replace(/\u00A0/g, " ");
+
+      if (preserveNewlines) {
+        // Keep line breaks (Day/Time/Room) exactly as displayed.
+        v = v.replace(/\r\n/g, "\n").replace(/\r/g, "\n").replace(/\t/g, " ");
+        v = v
+          .split("\n")
+          .map((line) => line.replace(/\s+/g, " ").trim())
+          .filter(Boolean)
+          .join("\n");
+        return v;
+      }
+
+      // For other cells, collapse whitespace and remove line breaks.
+      v = v.replace(/[\r\n\t]/g, " ");
       v = v.replace(/\s+/g, " ").trim();
       return v;
     };
@@ -252,21 +338,122 @@ const DepartmentPlantilla: React.FC<{
     const esc = (v: string) =>
       v.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
-    let html = '<html><head><meta charset="utf-8" /></head><body><table><thead><tr>';
+    // NOTE: Excel HTML export needs explicit styles.
+    // Target look: 1 boxed "group" per faculty (like the plantilla screenshot)
+    // - Rank + Faculty are vertically merged (rowspan) per faculty
+    // - Vertical column dividers stay visible
+    // - No per-row horizontal borders inside a faculty group (only top + bottom)
+    const excelCss = `
+      table{border-collapse:collapse;}
+      th{border:2px solid #000;padding:4px;font-weight:700;text-align:center;vertical-align:top;}
+      td{padding:4px;vertical-align:top;border-left:1px solid #000;border-right:1px solid #000;}
+    `;
+
+    // Determine per-faculty groups based on the visible table rows.
+    // The Faculty column may be blank on continuation rows (to mimic merged cells),
+    // so we carry-forward the last non-empty faculty value.
+    const facultyKeyByRow: string[] = [];
+    let lastFaculty = "";
+    dataRows.forEach((r) => {
+      const rawFaculty = String((r?.[1] ?? "") as string).trim();
+      if (rawFaculty) lastFaculty = rawFaculty;
+      facultyKeyByRow.push(lastFaculty);
+    });
+
+    const isGroupStart = (rowIdx: number) => rowIdx === 0 || facultyKeyByRow[rowIdx] !== facultyKeyByRow[rowIdx - 1];
+
+    const isGroupEnd = (rowIdx: number) =>
+      rowIdx === facultyKeyByRow.length - 1 || facultyKeyByRow[rowIdx] !== facultyKeyByRow[rowIdx + 1];
+
+    const groupRowSpan = (startIdx: number) => {
+      const key = facultyKeyByRow[startIdx];
+      let span = 1;
+      for (let i = startIdx + 1; i < facultyKeyByRow.length; i++) {
+        if (facultyKeyByRow[i] !== key) break;
+        span++;
+      }
+      return span;
+    };
+
+    const cellBorderStyle = (rowIdx: number, colIdx: number, colCount: number) => {
+      const start = isGroupStart(rowIdx);
+      const end = isGroupEnd(rowIdx);
+      const firstCol = colIdx === 0;
+      const lastCol = colIdx === colCount - 1;
+
+      const parts: string[] = [];
+      if (start) parts.push("border-top:2px solid #000");
+      if (end) parts.push("border-bottom:2px solid #000");
+      if (firstCol) parts.push("border-left:2px solid #000");
+      if (lastCol) parts.push("border-right:2px solid #000");
+
+      return parts.join(";");
+    };
+
+    let html =
+      '<html><head><meta charset="utf-8" />' +
+      `<style>${excelCss}</style>` +
+      '</head><body><table><thead><tr>';
     headers.forEach((h) => {
       html += `<th>${esc(String(h))}</th>`;
     });
     html += "</tr></thead><tbody>";
 
-    dataRows.forEach((row) => {
+    for (let rowIdx = 0; rowIdx < dataRows.length; rowIdx++) {
+      const row = dataRows[rowIdx];
+      const start = isGroupStart(rowIdx);
+
       html += "<tr>";
-      row.forEach((cell) => {
+
+      // Merge Rank + Faculty per faculty group (rowspan) to match the plantilla screenshot.
+      if (start) {
+        const span = groupRowSpan(rowIdx);
+
+        // Rank (col 0)
+        {
+          const idx = 0;
+          const raw = row?.[idx] == null ? "" : String(row[idx]);
+          const normalized = normalizeForExcel(raw, false);
+          const safe = esc(normalized);
+          // For merged cells, force both top+bottom borders so the group box closes.
+          const parts: string[] = ["border-top:2px solid #000", "border-bottom:2px solid #000", "border-left:2px solid #000"];
+          const borderStyle = parts.join(";");
+          const extraStyle = `${borderStyle};`;
+          html += `<td rowspan="${span}" style="${extraStyle}">${safe}</td>`;
+        }
+
+        // Faculty (col 1)
+        {
+          const idx = 1;
+          const raw = row?.[idx] == null ? "" : String(row[idx]);
+          const normalized = normalizeForExcel(raw, false);
+          const safe = esc(normalized);
+          // For merged cells, force both top+bottom borders so the group box closes.
+          const parts: string[] = ["border-top:2px solid #000", "border-bottom:2px solid #000"];
+          const borderStyle = parts.join(";");
+          const extraStyle = `${borderStyle};`;
+          html += `<td rowspan="${span}" style="${extraStyle}">${safe}</td>`;
+        }
+      }
+
+      // Remaining columns always render per-row.
+      for (let idx = 2; idx < headers.length; idx++) {
+        const cell = row?.[idx];
         const raw = cell == null ? "" : String(cell);
-        const normalized = normalizeForExcel(raw);
-        html += `<td>${esc(normalized)}</td>`;
-      });
+        const preserveNewlines = idx === 4 || idx === 5 || idx === 6; // Day / Time / Room
+        const normalized = normalizeForExcel(raw, preserveNewlines);
+        const safe = preserveNewlines ? esc(normalized).replace(/\n/g, "<br/>") : esc(normalized);
+
+        const borderStyle = cellBorderStyle(rowIdx, idx, headers.length);
+        const extraStyle = borderStyle ? `${borderStyle};` : "";
+
+        html += preserveNewlines
+          ? `<td style="white-space:pre-wrap;${extraStyle}">${safe}</td>`
+          : `<td style="${extraStyle}">${safe}</td>`;
+      }
+
       html += "</tr>";
-    });
+    }
 
     html += "</tbody></table></body></html>";
 
@@ -461,15 +648,28 @@ const DepartmentPlantilla: React.FC<{
                 >
                   <td className="px-3 py-2 text-center">{r.rank ?? ""}</td>
                   <td className="px-3 py-2 text-left font-semibold text-emerald-700">
-                    {r.faculty_name || "—"}
+                    {(() => {
+                      // Display the faculty name only once for a contiguous block of the same faculty,
+                      // to avoid redundant repeated names in the table.
+                      const prev = filteredRows[i - 1];
+                      const prevName = String(prev?.faculty_name || "").trim().toLowerCase();
+                      const curName = String(r.faculty_name || "").trim().toLowerCase();
+                      const show = i === 0 || prevName !== curName;
+                      if (!curName) return "—";
+                      return show ? r.faculty_name : "";
+                    })()}
                   </td>
                   <td className="px-3 py-2 text-center">{r.course_code || "—"}</td>
                   <td className="px-3 py-2 text-center">{r.section_code || "—"}</td>
                   <td className="px-3 py-2 text-center whitespace-nowrap">
                     <DayCell raw={r.day_text || "—"} />
                   </td>
-                  <td className="px-3 py-2 text-center whitespace-nowrap">{r.time_text || "—"}</td>
-                  <td className="px-3 py-2 text-center whitespace-nowrap">{r.room_text || "—"}</td>
+                  <td className="px-3 py-2 text-center whitespace-nowrap">
+                    <TimeCell raw={r.time_text || "—"} />
+                  </td>
+                  <td className="px-3 py-2 text-center">
+                    <RoomCell raw={r.room_text || ""} />
+                  </td>
                   <td className="px-3 py-2 text-center">{r.student_count ?? "—"}</td>
                   <td className="px-3 py-2 text-center">{r.lec_hours ?? "—"}</td>
                   <td className="px-3 py-2 text-center">{r.lab_hours ?? "—"}</td>

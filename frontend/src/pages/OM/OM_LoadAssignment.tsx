@@ -1307,7 +1307,7 @@ function ArchivedLoadsSummary({
             <col className="w-1/4" />
           </colgroup>
 
-          <thead className="bg-gray-50 text-emerald-800 sticky top-0 z-10">
+          <thead className="bg-gray-50 text-gray-900 sticky top-0 z-10">
             <tr>
               <th className="border-b border-gray-200 px-3 py-2 text-left font-semibold">
                 Faculty
@@ -2734,8 +2734,31 @@ export type OMLoadAssignmentProps = {
 
 export default function OM_LoadAssignment(props: OMLoadAssignmentProps = {}) {
   const [copiedRowId, setCopiedRowId] = useState<string | null>(null);
-
   const { embedded = false, hideForwardToChair = false, showToPlantilla = false } = props;
+
+  const [onLeaveFacultyIds, setOnLeaveFacultyIds] = useState<string[]>([]);
+  const onLeaveSet = useMemo(() => new Set(onLeaveFacultyIds), [onLeaveFacultyIds]);
+
+  const classForTeaching = (t: number) => {
+    if (t === 0) return "";
+    if (t < 12) return "bg-emerald-100";     // light green
+    if (t === 12) return "bg-emerald-600 text-white"; // dark green
+    return "bg-red-400 text-white";          // over 12
+  };
+  
+  const classForAdmin = (a: number) => {
+    if (a === 0) return "";
+    if (a < 12) return "bg-emerald-100";     // light green
+    if (a === 12) return "bg-emerald-600 text-white"; // dark green
+    return "bg-red-400 text-white";          // over 12
+  };
+  
+  const classForTotal = (u: number) => {
+    if (u === 0) return "bg-red-600 text-white";        // matches screenshot
+    if (u < 12) return "bg-orange-300";                 // orange under 12
+    if (u === 12) return "bg-emerald-600 text-white";   // dark green
+    return "bg-red-400 text-white";                     // over 12
+  };
 
   const formatRowForClipboard = (row: Row) =>
     [
@@ -2891,36 +2914,17 @@ useEffect(() => {
       "Mode",
       "Campus",
     ];
-    const sample = [
-      [
-        "SHS-ENG1 - English 1",
-        3,
-        "A",
-        "M",
-        "08:00",
-        "09:30",
-        "R101",
-        "W",
-        "08:00",
-        "09:30",
-        "R101",
-        40,
-        "F2F",
-        "Manila",
-      ],
-    ];
-    const csv = [
-      headers.map(esc).join(","),
-      ...sample.map((r) => r.map(esc).join(",")),
-    ].join("\n");
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "om_shs_import_TEMPLATE.csv";
-    a.click();
-    URL.revokeObjectURL(url);
-  };
+
+  const csv = headers.map(esc).join(",") + "\n";
+
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "om_shs_import_TEMPLATE.csv";
+  a.click();
+  URL.revokeObjectURL(url);
+};
 
   const splitCsvLine = (line: string): string[] => {
     const out: string[] = [];
@@ -3447,6 +3451,9 @@ useEffect(() => {
   // Filter rows by academic level (derived from backend courseProgramLevel map).
   // Values: ALL | UG | GS | SHS
   const [levelFilter, setLevelFilter] = useState<string>("ALL");
+  // Filter rows by assignment state.
+  // Values: ALL | ASSIGNED | UNASSIGNED
+  const [assignedFilter, setAssignedFilter] = useState<string>("ALL");
   const [rows, setRows] = useState<Row[]>([]);
 
   // APO-set deadline windows (schedule + faculty encoding) for OM/GS.
@@ -4071,6 +4078,31 @@ const inferOmCampusId = useCallback((): string => {
     { value: "GS", label: "Graduate" },
     { value: "SHS", label: "SHS" },
   ];
+
+  const assignedOptions: SelectOption[] = [
+    // Be explicit: this shows both assigned and unassigned rows.
+    { value: "ALL", label: "All loads" },
+    { value: "ASSIGNED", label: "Assigned" },
+    { value: "UNASSIGNED", label: "Unassigned" },
+  ];
+
+  const isRowAssigned = (r: Row): boolean => {
+    const status = String((r as any)?.status || "")
+      .trim()
+      .toLowerCase();
+    if (status === "unassigned") return false;
+
+    const fid = String((r as any)?.faculty_id || "").trim();
+    if (fid) return true;
+
+    const fac = String((r as any)?.faculty || "")
+      .trim()
+      .toLowerCase();
+    if (!fac) return false;
+    if (fac === "tba" || fac === "unassigned" || fac === "-" || fac === "—")
+      return false;
+    return true;
+  };
   const getRowProgramLevel = (r: Row): "UG" | "GS" | "SHS" | "" => {
     // Prefer explicit course_id from backend row; fall back to sectionCourse map.
     const sid = String((r as any)?.id || (r as any)?.section_id || "").trim();
@@ -4127,6 +4159,13 @@ const inferOmCampusId = useCallback((): string => {
     return "";
   };
   const filtered = rows.filter((r) => {
+    // Apply assignment filter first (so it works even when search is blank).
+    if (assignedFilter !== "ALL") {
+      const assigned = isRowAssigned(r);
+      if (assignedFilter === "ASSIGNED" && !assigned) return false;
+      if (assignedFilter === "UNASSIGNED" && assigned) return false;
+    }
+
     // Apply the level filter first so it works even when search is blank.
     if (levelFilter !== "ALL") {
       const lvl = getRowProgramLevel(r);
@@ -4333,6 +4372,7 @@ const inferOmCampusId = useCallback((): string => {
     >;
 
     const res = await getOmLoadAssignmentList(userId, overrideTermId);
+    setOnLeaveFacultyIds(Array.isArray((res as any)?.on_leave_faculty_ids) ? (res as any).on_leave_faculty_ids : []);
 
     // Deadline window info for OM/GS (set by APO per campus + planning term)
     try {
@@ -5233,21 +5273,25 @@ async function handleSaveNewLineRow(r: Row) {
     }
 
     // compute diff after accumulating
+    // NOTE: diff is based on TOTAL units (Teaching + Deloading) vs Preferred,
+    // to match the "Load Status (vs Preferred)" column.
     Object.values(acc).forEach((row) => {
       if (row.preferredUnits != null) {
-        row.diff = row.assignedUnits - row.preferredUnits;
+        const deload = row.facultyId
+          ? Number(deloadUnitsByFacultyId[row.facultyId] || 0)
+          : 0;
+        row.diff = (row.assignedUnits + deload) - row.preferredUnits;
       }
     });
 
     return Object.values(acc).sort((a, b) =>
       a.facultyName.localeCompare(b.facultyName)
     );
-  }, [rows, facultyById, preferredByFaculty]);
+  }, [rows, facultyById, preferredByFaculty, deloadUnitsByFacultyId]);
 
-  type UnitsFilterMode = "all" | "unassigned" | "issues";
-  type UnitsSortKey = "faculty" | "assigned" | "preferred" | "deload" | "gap";
-
-  const [showUnitsFilters, setShowUnitsFilters] = useState(false);
+  type UnitsFilterMode = "all" | "issues" | "match";
+  type UnitsSortKey = "faculty" | "assigned" | "preferred" | "deload" | "leave" | "gap";
+  // Filters are always visible in this view (no toggle)
   const [unitsFilterMode, setUnitsFilterMode] =
     useState<UnitsFilterMode>("all");
   const [hideNoPrefs, setHideNoPrefs] = useState(false);
@@ -5293,14 +5337,24 @@ async function handleSaveNewLineRow(r: Row) {
 
     const filtered = base.filter((f) => {
       const assigned = Number(f.assignedUnits ?? 0);
+      const deload = Number(
+        (f.facultyId && deloadUnitsByFacultyId[f.facultyId]) || 0
+      );
+      const totalUnits = assigned + deload;
       const hasPref = f.preferredUnits != null;
-      const diff = f.diff;
-
       if (hideNoPrefs && !hasPref) return false;
 
-      if (unitsFilterMode === "unassigned") return assigned === 0;
-      if (unitsFilterMode === "issues")
-        return hasPref && diff != null && diff !== 0;
+      if (unitsFilterMode === "issues" || unitsFilterMode === "match") {
+        // Compare TOTAL units (Teaching + Deloading) against preferred.
+        // This must match the Load Status column (vs Preferred).
+        if (f.preferredUnits == null) return false;
+
+        const preferred = Number(f.preferredUnits);
+        const isMatch = Math.abs(totalUnits - preferred) <= 1e-6;
+
+        // "issues" = underloaded or overloaded vs preferred (i.e., not matching)
+        return unitsFilterMode === "match" ? isMatch : !isMatch;
+      }
       return true;
     });
 
@@ -5322,16 +5376,27 @@ async function handleSaveNewLineRow(r: Row) {
           ? Number.POSITIVE_INFINITY
           : Number(b.preferredUnits);
 
-      const aGap = a.diff == null ? Number.POSITIVE_INFINITY : Number(a.diff);
-      const bGap = b.diff == null ? Number.POSITIVE_INFINITY : Number(b.diff);
-
       const aDeload = (a.facultyId && deloadUnitsByFacultyId[a.facultyId]) || 0;
       const bDeload = (b.facultyId && deloadUnitsByFacultyId[b.facultyId]) || 0;
+
+      // Gap is based on TOTAL units vs preferred (same as Load Status).
+      const aGap =
+        a.preferredUnits == null
+          ? Number.POSITIVE_INFINITY
+          : (aAssigned + aDeload) - Number(a.preferredUnits);
+      const bGap =
+        b.preferredUnits == null
+          ? Number.POSITIVE_INFINITY
+          : (bAssigned + bDeload) - Number(b.preferredUnits);
+
+      const aLeave = a.facultyId && onLeaveSet.has(a.facultyId) ? 12 : 0;
+      const bLeave = b.facultyId && onLeaveSet.has(b.facultyId) ? 12 : 0;
 
       if (unitsSortKey === "faculty") return dir * aName.localeCompare(bName);
       if (unitsSortKey === "assigned") return dir * (aAssigned - bAssigned);
       if (unitsSortKey === "preferred") return dir * (aPref - bPref);
       if (unitsSortKey === "deload") return dir * (aDeload - bDeload);
+      if (unitsSortKey === "leave") return dir * (aLeave - bLeave);
 
       if (aGap !== bGap) return dir * (aGap - bGap);
       return aName.localeCompare(bName);
@@ -6055,6 +6120,15 @@ const courseCodeToInfo = useMemo(() => {
                   buttonClassName="inline-flex h-10 w-full items-center justify-center gap-2 rounded-md border border-gray-300 bg-white px-4 py-2 pr-9 text-sm font-medium text-gray-700 shadow-sm hover:bg-gray-50"
                 />
 
+                <SelectBox
+                  value={assignedFilter}
+                  onChange={setAssignedFilter}
+                  options={assignedOptions}
+                  // Keep this compact: match the longest option text ("Unassigned") without being overly wide.
+                  className="min-w-[140px] w-[140px]"
+                  buttonClassName="inline-flex h-10 w-full items-center justify-center gap-2 rounded-md border border-gray-300 bg-white px-4 py-2 pr-9 text-sm font-medium text-gray-700 shadow-sm hover:bg-gray-50"
+                />
+
                 <div className="relative flex-1 min-w-[260px]">
                   <SearchIcon className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-500" />
                   <input
@@ -6107,7 +6181,7 @@ const courseCodeToInfo = useMemo(() => {
                       setShowSend(true);
                     }}
                     className={cls(
-                      "inline-flex h-10 min-w-[140px] items-center justify-center gap-2 rounded-md px-4 py-2 text-sm font-medium shadow-sm",
+                      "inline-flex h-10 min-w-[110px] items-center justify-center gap-2 rounded-md px-4 py-2 text-sm font-medium shadow-sm",
                       anySelected && isRunning && !isArchiveView
                         ? "bg-blue-600 text-white hover:brightness-110"
                         : "bg-gray-200 text-gray-500 cursor-not-allowed"
@@ -6396,7 +6470,7 @@ const courseCodeToInfo = useMemo(() => {
                         <col className="w-[120px]" />
                       </colgroup>
 
-                      <thead className="bg-gray-50 text-emerald-800 sticky top-0 z-10">
+                      <thead className="bg-gray-50 text-gray-900 sticky top-0 z-10">
                         <tr className="whitespace-nowrap text-[13px] font-semibold">
                           <th className="px-3 py-2 text-center border border-gray-300">
                             {isRunning && (
@@ -7051,7 +7125,7 @@ const courseCodeToInfo = useMemo(() => {
                 </div>
               </div>
               {/* ---- Faculty Deloading (term-wide; show immediately) ---- */}
-              <div className="mt-6 rounded-xl border border-gray-200 bg-white shadow-sm">
+              <div className="mt-6 rounded-xl border border-gray-300 bg-white shadow-sm">
                 <div className="flex flex-wrap items-start justify-between gap-4 px-4 pt-4 pb-2">
                   <div>
                     <h2 className="text-lg font-semibold">Faculty Deloading</h2>
@@ -7065,7 +7139,7 @@ const courseCodeToInfo = useMemo(() => {
                 )}
 
                 <div className="px-4 pb-4 border-t">
-                  <div className="mt-3 overflow-x-auto rounded-lg border border-gray-200 bg-white">
+                  <div className="mt-3 max-h-[255px] overflow-x-auto overflow-y-auto rounded-xl border border-gray-300 bg-white">
                     {deloadAllLoading ? (
                       <div className="py-6 text-center text-sm text-gray-500">
                         Loading…
@@ -7077,8 +7151,7 @@ const courseCodeToInfo = useMemo(() => {
                           : "No deloadings match your search."}
                       </div>
                     ) : (
-                      <div className="max-h-[255px] overflow-y-auto">
-                        <table className="w-full text-sm table-fixed">
+                      <table className="w-full text-sm table-fixed border-collapse">
                           <colgroup>
                             <col style={{ width: "22%" }} />
                             <col style={{ width: "20%" }} />
@@ -7086,48 +7159,48 @@ const courseCodeToInfo = useMemo(() => {
                             <col style={{ width: "33%" }} />
                             <col style={{ width: "15%" }} />
                           </colgroup>
-                          <thead className="bg-gray-50 border-y text-gray-700 sticky top-0 z-10">
-                            <tr>
-                              <th className="px-3 py-2 text-left font-semibold">
+                          <thead className="bg-gray-50 text-gray-900 sticky top-0 z-10">
+                            <tr className="whitespace-nowrap text-[13px] font-semibold">
+                              <th className="px-3 py-2 text-left border border-gray-300">
                                 Faculty
                               </th>
-                              <th className="px-3 py-2 text-left font-semibold">
+                              <th className="px-3 py-2 text-left border border-gray-300">
                                 Deloading Type
                               </th>
-                              <th className="px-3 py-2 text-right font-semibold">
+                              <th className="px-3 py-2 text-right border border-gray-300">
                                 Units
                               </th>
-                              <th className="px-3 py-2 text-left font-semibold">
+                              <th className="px-3 py-2 text-left border border-gray-300">
                                 Notes
                               </th>
-                              <th className="px-3 py-2 text-center font-semibold">
+                              <th className="px-3 py-2 text-center border border-gray-300">
                                 Last Updated
                               </th>
                             </tr>
                           </thead>
-                          <tbody className="divide-y">
+                          <tbody>
                             {deloadFiltered.map((r, i) => (
                               <tr
                                 key={`${r.faculty_id}-${
                                   r.deloading_type || "row"
                                 }-${i}`}
-                                className="hover:bg-amber-50/40"
+                                className="hover:bg-gray-50"
                               >
-                                <td className="px-3 py-2 align-middle">
+                                <td className="px-3 py-2 align-middle border border-gray-300">
                                   <div className="font-medium text-gray-900">
                                     {r.faculty_name_display || r.faculty_id}
                                   </div>
                                 </td>
-                                <td className="px-3 py-2 align-middle">
+                                <td className="px-3 py-2 align-middle border border-gray-300">
                                   {r.deloading_type || "—"}
                                 </td>
-                                <td className="px-3 py-2 text-right align-middle">
+                                <td className="px-3 py-2 text-right align-middle border border-gray-300">
                                   {r.units_deloaded ?? "—"}
                                 </td>
-                                <td className="px-3 py-2 align-middle">
+                                <td className="px-3 py-2 align-middle border border-gray-300">
                                   {r.notes || "—"}
                                 </td>
-                                <td className="px-3 py-2 text-center align-middle">
+                                <td className="px-3 py-2 text-center align-middle border border-gray-300">
                                   {r.updated_at
                                     ? new Date(
                                         r.updated_at as any
@@ -7138,7 +7211,6 @@ const courseCodeToInfo = useMemo(() => {
                             ))}
                           </tbody>
                         </table>
-                      </div>
                     )}
                   </div>
 
@@ -7152,7 +7224,7 @@ const courseCodeToInfo = useMemo(() => {
 
               {/* ---- Summary section under Load Recommendations ---- */}
               {rows.length > 0 && (
-                <div className="mt-6 rounded-xl border border-gray-200 bg-white shadow-sm">
+                <div className="mt-6 rounded-xl border border-gray-300 bg-white shadow-sm">
                   <div className="flex items-center justify-between px-4 pt-4 pb-2">
                     <div>
                       <h2 className="text-lg font-semibold">
@@ -7204,36 +7276,18 @@ const courseCodeToInfo = useMemo(() => {
                   {/* Tab 1: Units vs Preferred Units */}
                   {summaryTab === "units" && (
                     <div className="border-t px-4 pb-4 w-full">
-                      {/* + Add filters button row */}
-                      <div className="flex items-center gap-2 py-3">
-                        <button
-                          type="button"
-                          onClick={() => setShowUnitsFilters((v) => !v)}
-                          className={cls(
-                            "px-4 py-2 text-sm font-medium",
-                            "rounded-md border border-gray-300 bg-white text-gray-700",
-                            "hover:bg-gray-50",
-                            "focus:outline-none focus:ring-2 focus:ring-emerald-500/30"
-                          )}
-                        >
-                          + Add filters
-                        </button>
+                      <div className="py-3">
+                        <div className="flex items-center justify-between">
+                          <div className="text-xs font-semibold text-gray-700">Filters</div>
 
-                        <div className="ml-auto text-xs text-gray-500">
-                          Showing{" "}
-                          <span className="font-semibold">
-                            {facultySummaryView.length}
-                          </span>{" "}
-                          of{" "}
-                          <span className="font-semibold">
-                            {facultySummaryFiltered.length}
-                          </span>
+                          <div className="text-xs text-gray-500">
+                            Showing{" "}
+                            <span className="font-semibold">{facultySummaryView.length}</span> of{" "}
+                            <span className="font-semibold">{facultySummaryFiltered.length}</span>
+                          </div>
                         </div>
-                      </div>
 
-                      {/* Filter options */}
-                      {showUnitsFilters && (
-                        <div className="mb-3 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2">
+                        <div className="mt-2 rounded-lg border border-gray-300 bg-gray-50 px-3 py-2">
                           <div className="flex flex-wrap items-center gap-4 text-xs">
                             <label className="inline-flex items-center gap-2">
                               <input
@@ -7249,48 +7303,52 @@ const courseCodeToInfo = useMemo(() => {
                               <input
                                 type="radio"
                                 name="unitsFilterMode"
-                                checked={unitsFilterMode === "unassigned"}
-                                onChange={() =>
-                                  setUnitsFilterMode("unassigned")
-                                }
+                                checked={unitsFilterMode === "issues"}
+                                onChange={() => setUnitsFilterMode("issues")}
                               />
-                              Unassigned only
+                              Under/Overloaded vs preferred
                             </label>
 
                             <label className="inline-flex items-center gap-2">
                               <input
                                 type="radio"
                                 name="unitsFilterMode"
-                                checked={unitsFilterMode === "issues"}
-                                onChange={() => setUnitsFilterMode("issues")}
+                                checked={unitsFilterMode === "match"}
+                                onChange={() => setUnitsFilterMode("match")}
                               />
-                              Only issues
+                              Matches preferred units
                             </label>
 
-                            <span className="hidden sm:inline text-gray-300">
-                              |
-                            </span>
-
-                            <label className="inline-flex items-center gap-2 font-medium text-gray-900">
+                            <label className="inline-flex items-center gap-2">
                               <input
                                 type="checkbox"
                                 checked={hideNoPrefs}
-                                onChange={(e) =>
-                                  setHideNoPrefs(e.target.checked)
-                                }
+                                onChange={(e) => setHideNoPrefs(e.target.checked)}
                               />
-                              Hide faculty without preferences
+                              Hide no preferences
                             </label>
                           </div>
                         </div>
-                      )}
+                      </div>
 
-                      {/* Scroll wrapper */}
-                      <div className="overflow-x-auto w-full">
-                        <table className="w-full text-sm table-fixed">
-                          <thead className="bg-gray-50 border-y text-gray-700">
-                            <tr>
-                              <th className="px-3 py-2 text-left font-semibold">
+
+{/* Scroll wrapper */}
+                      <div className="max-h-[360px] overflow-x-auto overflow-y-auto rounded-xl border border-gray-300 bg-white">
+                        <table className="w-full text-sm table-fixed border-collapse">
+                          {/* Unequal widths: left half (Faculty/Status) wider, right half (numbers) narrower */}
+                          <colgroup>
+                            <col className="w-[40%]" /> {/* Faculty */}
+                            <col className="w-[18%]" /> {/* Status */}
+                            {/* <col className="w-[8%]" />  Leaves */}
+                            <col className="w-[10%]" /> {/* Teaching */}
+                            <col className="w-[10%]" /> {/* Preferred */}
+                            <col className="w-[10%]" /> {/* Deloading */}
+                            <col className="w-[12%]" /> {/* Total */}
+                          </colgroup>
+
+                          <thead className="bg-gray-50 text-gray-900 sticky top-0 z-10">
+                            <tr className="whitespace-nowrap text-[13px] font-semibold">
+                              <th className="px-3 py-2 text-left font-semibold border border-gray-300">
                                 <button
                                   type="button"
                                   onClick={() => toggleUnitsSort("faculty")}
@@ -7305,13 +7363,36 @@ const courseCodeToInfo = useMemo(() => {
                                 </button>
                               </th>
 
-                              <th className="px-3 py-2 text-center font-semibold">
+                              <th className="px-3 py-2 text-left font-semibold border border-gray-300">
+                                <span className="whitespace-nowrap">
+                                  Load Status <span className="text-[11px] font-medium text-gray-500">(vs Preferred)</span>
+                                </span>
+                              </th>
+                              
+                              {/* <th className="px-3 py-2 text-center font-semibold border border-gray-300">
                                 <button
                                   type="button"
-                                  onClick={() => toggleUnitsSort("assigned")}
+                                  onClick={() => toggleUnitsSort("leave")}
                                   className="inline-flex items-center justify-center gap-1 hover:underline"
+                                  title="Leave units (credited or counted units from leaves)"
                                 >
-                                  Assigned Units{" "}
+                                  Leaves{" "}
+                                  {unitsSortKey === "leave"
+                                    ? unitsSortDir === "asc"
+                                      ? "▲"
+                                      : "▼"
+                                    : ""}
+                                </button>
+                              </th> */}
+
+                              <th className="px-3 py-2 text-center font-semibold border border-gray-300">
+                                <button
+                                  type="button"
+                                  onClick={() => toggleUnitsSort("assigned")} // keep existing key
+                                  className="inline-flex items-center justify-center gap-1 hover:underline"
+                                  title="Teaching units from scheduled assignments (classes only)"
+                                >
+                                  Teaching Units{" "}
                                   {unitsSortKey === "assigned"
                                     ? unitsSortDir === "asc"
                                       ? "▲"
@@ -7320,11 +7401,12 @@ const courseCodeToInfo = useMemo(() => {
                                 </button>
                               </th>
 
-                              <th className="px-3 py-2 text-center font-semibold">
+                              <th className="px-3 py-2 text-center font-semibold border border-gray-300">
                                 <button
                                   type="button"
                                   onClick={() => toggleUnitsSort("preferred")}
                                   className="inline-flex items-center justify-center gap-1 hover:underline"
+                                  title="Preferred/target units submitted by faculty"
                                 >
                                   Preferred Units{" "}
                                   {unitsSortKey === "preferred"
@@ -7335,12 +7417,12 @@ const courseCodeToInfo = useMemo(() => {
                                 </button>
                               </th>
 
-                              <th className="px-3 py-2 text-center font-semibold">
+                              <th className="px-3 py-2 text-center font-semibold border border-gray-300">
                                 <button
                                   type="button"
                                   onClick={() => toggleUnitsSort("deload")}
                                   className="inline-flex items-center justify-center gap-1 hover:underline"
-                                  title="Deloading units (from Faculty Deloading rows)"
+                                  title="Deloading units credited from faculty deloading rows"
                                 >
                                   Deloading Units{" "}
                                   {unitsSortKey === "deload"
@@ -7351,33 +7433,23 @@ const courseCodeToInfo = useMemo(() => {
                                 </button>
                               </th>
 
-                              <th className="px-3 py-2 text-center font-semibold">
-                                <button
-                                  type="button"
-                                  onClick={() => toggleUnitsSort("gap")}
-                                  className="inline-flex items-center justify-center gap-1 hover:underline"
-                                >
-                                  Load Gap (Units){" "}
-                                  {unitsSortKey === "gap"
-                                    ? unitsSortDir === "asc"
-                                      ? "▲"
-                                      : "▼"
-                                    : ""}
-                                </button>
-                              </th>
-
-                              <th className="px-3 py-2 text-center font-semibold">
-                                Status
+                              <th className="px-3 py-2 text-center font-semibold border border-gray-300">
+                                <div className="leading-tight">
+                                  <div>Total Units</div>
+                                  <div className="text-[11px] font-medium text-gray-500">
+                                    (Teaching + Deloading)
+                                  </div>
+                                </div>
                               </th>
                             </tr>
                           </thead>
 
-                          <tbody className="divide-y">
+                          <tbody>
                             {facultySummary.length === 0 ? (
                               <tr>
                                 <td
-                                  colSpan={5}
-                                  className="px-3 py-6 text-center text-xs text-gray-500"
+                                  colSpan={6}
+                                  className="px-3 py-6 text-center text-sm text-gray-500 border border-gray-300"
                                 >
                                   No faculty have assignments yet for this term.
                                 </td>
@@ -7385,8 +7457,8 @@ const courseCodeToInfo = useMemo(() => {
                             ) : facultySummaryView.length === 0 ? (
                               <tr>
                                 <td
-                                  colSpan={5}
-                                  className="px-3 py-6 text-center text-xs text-gray-500"
+                                  colSpan={6}
+                                  className="px-3 py-6 text-center text-sm text-gray-500 border border-gray-300"
                                 >
                                   No matching faculty rows.
                                 </td>
@@ -7395,72 +7467,137 @@ const courseCodeToInfo = useMemo(() => {
 
                             {facultySummaryView.map((f) => {
                               const hasPref = f.preferredUnits != null;
-                              let statusLabel = "—";
-                              let statusTone =
-                                "bg-gray-100 text-gray-700 border-gray-200";
 
-                              if (hasPref && f.diff != null) {
-                                if (f.diff > 0) {
-                                  statusLabel = `Over by ${f.diff}`;
-                                  statusTone =
-                                    "bg-red-50 text-red-700 border-red-200";
-                                } else if (f.diff < 0) {
-                                  statusLabel = `Under by ${Math.abs(f.diff)}`;
-                                  statusTone =
-                                    "bg-amber-50 text-amber-700 border-amber-200";
-                                } else {
-                                  statusLabel = "Match";
-                                  statusTone =
-                                    "bg-emerald-50 text-emerald-700 border-emerald-200";
-                                }
-                              }
+                              // const isOnLeave = !!(f.facultyId && onLeaveSet.has(f.facultyId));
+                              // const leaveUnits = isOnLeave ? 12 : 0;
+
+                              const teachingUnits = Number(f.assignedUnits ?? 0);
+                              const deloadUnits = Number(
+                                (f.facultyId && deloadUnitsByFacultyId[f.facultyId]) || 0
+                              );
+                              // const totalUnits = teachingUnits + deloadUnits + leaveUnits;
+                              const totalUnits = teachingUnits + deloadUnits
+                              
+                              const teachTone = classForTeaching(teachingUnits);
+                              const adminTone = classForAdmin(deloadUnits);
+                              const totalTone = classForTotal(totalUnits);
+
+                              const diff = hasPref ? totalUnits - Number(f.preferredUnits) : null;
+
+                              const fmt = (n: number) => Number(n).toFixed(1).replace(/\.0$/, "");
 
                               return (
-                                <tr key={f.facultyId || f.facultyName}>
-                                  <td className="px-3 py-2 align-middle">
-                                    <div className="font-medium text-gray-900">
-                                      {f.facultyName}
-                                    </div>
+                                <tr key={f.facultyId || f.facultyName} className="hover:bg-gray-50">
+                                  <td className="px-3 py-2 align-middle border border-gray-300">
+                                    <div className="font-medium text-gray-900">{f.facultyName}</div>
                                   </td>
 
-                                  <td className="px-3 py-2 text-center align-middle">
-                                    {Number(f.assignedUnits ?? 0)
-                                      .toFixed(1)
-                                      .replace(/\.0$/, "")}
-                                  </td>
-
-                                  <td className="px-3 py-2 text-center align-middle">
-                                    {hasPref
-                                      ? Number(f.preferredUnits)
-                                          .toFixed(1)
-                                          .replace(/\.0$/, "")
-                                      : "—"}
-                                  </td>
-                                  
-                                  <td className="px-3 py-2 text-center align-middle">
-                                    {Number((f.facultyId && deloadUnitsByFacultyId[f.facultyId]) || 0)
-                                      .toFixed(1)
-                                      .replace(/\.0$/, "")}
-                                  </td>
-
-                                  <td className="px-3 py-2 text-center align-middle">
-                                    {hasPref && f.diff != null
-                                      ? f.diff > 0
-                                        ? `+${f.diff}`
-                                        : `${f.diff}`
-                                      : "—"}
-                                  </td>
-
-                                  <td className="px-3 py-2 text-center align-middle">
+                                  {/* old pill status */}
+                                  {/* <td className="px-3 py-2 align-middle border border-gray-300">
+                                  {hasPref && diff != null ? (
                                     <span
                                       className={cls(
-                                        "inline-flex items-center justify-center rounded-full border px-2.5 py-0.5 text-[11px] font-medium",
-                                        statusTone
+                                        "inline-flex items-stretch overflow-hidden rounded-md border text-[11px] font-semibold",
+                                        diff > 0
+                                          ? "border-red-200"
+                                          : diff < 0
+                                          ? "border-amber-200"
+                                          : "border-emerald-200"
                                       )}
                                     >
-                                      {statusLabel}
+                                      <span
+                                        className={cls(
+                                          "px-2 py-0.5",
+                                          diff > 0
+                                            ? "bg-red-50 text-red-700"
+                                            : diff < 0
+                                            ? "bg-amber-50 text-amber-700"
+                                            : "bg-emerald-50 text-emerald-700"
+                                        )}
+                                      >
+                                        {diff > 0 ? "OVER" : diff < 0 ? "UNDER" : "MATCH"}
+                                      </span>
+
+                                      <span className="px-2 py-0.5 bg-white text-gray-900 tabular-nums">
+                                        {diff === 0 ? "0" : Math.abs(diff)}
+                                      </span>
+
+                                      <span className="px-2 py-0.5 bg-white text-gray-500 font-medium">
+                                        units
+                                      </span>
                                     </span>
+                                  ) : (
+                                    <span className="text-xs text-gray-400">—</span>
+                                  )}
+                                </td> */}
+                                  
+                                  <td
+                                    className="px-3 py-2 text-left align-middle border border-gray-300 tabular-nums"
+                                    title={
+                                      hasPref && diff != null
+                                        ? diff === 0
+                                          ? "Match: Total equals Preferred"
+                                          : diff > 0
+                                          ? `Over: Total is ${diff} unit(s) above Preferred`
+                                          : `Under: Total is ${Math.abs(diff)} unit(s) below Preferred`
+                                        : ""
+                                    }
+                                  >
+                                    {hasPref && diff != null ? (
+                                      <span
+                                        className={cls(
+                                          "font-semibold",
+                                          diff === 0
+                                            ? "text-emerald-700"
+                                            : diff > 0
+                                            ? "text-red-700"
+                                            : "text-amber-700"
+                                        )}
+                                      >
+                                        {diff > 0 ? `+${diff}` : `${diff}`}
+                                      </span>
+                                    ) : (
+                                      <span className="text-xs text-gray-400">—</span>
+                                    )}
                                   </td>
+
+                                {/* <td className="px-3 py-2 text-center align-middle border border-gray-300 tabular-nums">
+                                  {leaveUnits > 0 ? fmt(leaveUnits) : "0"}
+                                </td> */}
+
+                                  <td className={cls("px-3 py-2 text-center align-middle border border-gray-300", teachTone)}>
+                                    {fmt(teachingUnits)}
+                                  </td>
+
+                                  <td className="px-3 py-2 text-center align-middle border border-gray-300">
+                                    {hasPref ? fmt(Number(f.preferredUnits)) : "—"}
+                                  </td>
+
+                                  <td className={cls("px-3 py-2 text-center align-middle border border-gray-300", adminTone)}>
+                                    {fmt(deloadUnits)}
+                                  </td>
+
+                                  <td className={cls("px-3 py-2 text-center align-middle border border-gray-300 tabular-nums font-semibold", totalTone)}>
+                                    {fmt(totalUnits)}
+                                  </td>
+
+                                  {/* <td className={cls("px-3 py-2 text-center align-middle border border-gray-300 tabular-nums font-semibold", totalTone)}>
+                                  <span className="whitespace-nowrap">
+                                    {fmt(totalUnits)}
+                                    {(deloadUnits > 0 || teachingUnits > 0) && (
+                                      <span
+                                      className={cls(
+                                        "ml-2 font-medium",
+                                        totalUnits === 12 || totalUnits > 12 || totalUnits === 0
+                                          ? "text-white/90"
+                                          : "text-gray-600"
+                                      )}
+                                    >
+                                      ({fmt(teachingUnits)} + {fmt(deloadUnits)})
+                                    </span>
+                                    )}
+                                  </span>
+                                </td> */}
                                 </tr>
                               );
                             })}
@@ -7473,7 +7610,7 @@ const courseCodeToInfo = useMemo(() => {
                   {/* Tab 2: Rule / condition flags */}
                   {summaryTab === "second" && (
                     <div className="px-4 pb-4 border-t">
-                      <div className="mt-3 overflow-x-auto rounded-lg border border-gray-200 bg-white">
+                      <div className="mt-3 max-h-[360px] overflow-x-auto overflow-y-auto rounded-xl border border-gray-300 bg-white">
                         {ruleAlerts.length === 0 ? (
                           <div className="py-6 text-center text-sm text-gray-500">
                             No rule violations detected for the current
@@ -7484,52 +7621,52 @@ const courseCodeToInfo = useMemo(() => {
                             No violations match your search.
                           </div>
                         ) : (
-                          <table className="w-full text-sm table-fixed">
-                            <thead className="bg-gray-50 border-y text-gray-700">
-                              <tr>
-                                <th className="px-3 py-2 text-left font-semibold">
+                          <table className="w-full text-sm table-fixed border-collapse">
+                            <thead className="bg-gray-50 text-gray-900 sticky top-0 z-10">
+                              <tr className="whitespace-nowrap text-[13px] font-semibold">
+                                <th className="px-3 py-2 text-left border border-gray-300">
                                   Rule
                                 </th>
-                                <th className="px-3 py-2 text-left font-semibold">
+                                <th className="px-3 py-2 text-left border border-gray-300">
                                   Faculty
                                 </th>
-                                <th className="px-3 py-2 text-center font-semibold">
+                                <th className="px-3 py-2 text-center border border-gray-300">
                                   Course
                                 </th>
-                                <th className="px-3 py-2 text-center font-semibold">
+                                <th className="px-3 py-2 text-center border border-gray-300">
                                   Section
                                 </th>
-                                <th className="px-3 py-2 text-left font-semibold">
+                                <th className="px-3 py-2 text-left border border-gray-300">
                                   Message
                                 </th>
-                                <th className="px-3 py-2 text-center font-semibold">
+                                <th className="px-3 py-2 text-center border border-gray-300">
                                   Severity
                                 </th>
                               </tr>
                             </thead>
-                            <tbody className="divide-y divide-gray-100">
+                            <tbody >
                               {ruleAlertsFiltered.map((a) => (
-                                <tr key={a.id}>
-                                  <td className="px-3 py-2 align-top">
+                                <tr key={a.id} className="hover:bg-gray-50">
+                                  <td className="px-3 py-2 align-top border border-gray-300">
                                     <span className="font-mono text-[11px]">
                                       {a.rule}
                                     </span>
                                   </td>
-                                  <td className="px-3 py-2 align-top">
+                                  <td className="px-3 py-2 align-top border border-gray-300">
                                     <div className="font-medium text-gray-900">
                                       {a.facultyName || "—"}
                                     </div>
                                   </td>
-                                  <td className="px-3 py-2 text-center align-top text-gray-600">
+                                  <td className="px-3 py-2 text-center align-top text-gray-600 border border-gray-300">
                                     {a.course || "—"}
                                   </td>
-                                  <td className="px-3 py-2 text-center align-top text-gray-600">
+                                  <td className="px-3 py-2 text-center align-top text-gray-600 border border-gray-300">
                                     {a.section || "—"}
                                   </td>
-                                  <td className="px-3 py-2 align-top">
+                                  <td className="px-3 py-2 align-top border border-gray-300">
                                     {a.message}
                                   </td>
-                                  <td className="px-3 py-2 text-center align-top">
+                                  <td className="px-3 py-2 text-center align-top border border-gray-300">
                                     <span
                                       className={cls(
                                         "inline-flex items-center justify-center rounded-full px-2.5 py-0.5 text-[11px] font-medium border",
@@ -7552,48 +7689,48 @@ const courseCodeToInfo = useMemo(() => {
 
                   {summaryTab === "blocked" && (
                     <div className="px-4 pb-4 border-t">
-                      <div className="mt-3 overflow-x-auto rounded-lg border border-gray-200 bg-white">
-                        <table className="w-full text-sm table-auto">
-                          <thead className="bg-gray-50 border-y text-gray-700">
-                            <tr>
-                              <th className="px-3 py-2 text-left font-semibold">
+                      <div className="mt-3 max-h-[360px] overflow-x-auto overflow-y-auto rounded-xl border border-gray-300 bg-white">
+                        <table className="w-full text-sm table-fixed border-collapse">
+                          <thead className="bg-gray-50 text-gray-900 sticky top-0 z-10">
+                            <tr className="whitespace-nowrap text-[13px] font-semibold">
+                              <th className="px-3 py-2 text-left border border-gray-300">
                                 Course
                               </th>
-                              <th className="px-3 py-2 text-left font-semibold">
+                              <th className="px-3 py-2 text-left border border-gray-300">
                                 Section
                               </th>
-                              <th className="px-3 py-2 text-left font-semibold">
+                              <th className="px-3 py-2 text-left border border-gray-300">
                                 Day 1
                               </th>
-                              <th className="px-3 py-2 text-left font-semibold">
+                              <th className="px-3 py-2 text-left border border-gray-300">
                                 Begin 1
                               </th>
-                              <th className="px-3 py-2 text-left font-semibold">
+                              <th className="px-3 py-2 text-left border border-gray-300">
                                 End 1
                               </th>
-                              <th className="px-3 py-2 text-left font-semibold">
+                              <th className="px-3 py-2 text-left border border-gray-300">
                                 Day 2
                               </th>
-                              <th className="px-3 py-2 text-left font-semibold">
+                              <th className="px-3 py-2 text-left border border-gray-300">
                                 Begin 2
                               </th>
-                              <th className="px-3 py-2 text-left font-semibold">
+                              <th className="px-3 py-2 text-left border border-gray-300">
                                 End 2
                               </th>
-                              <th className="px-3 py-2 text-left font-semibold">
+                              <th className="px-3 py-2 text-left border border-gray-300">
                                 Program
                               </th>
-                              <th className="px-3 py-2 text-left font-semibold">
+                              <th className="px-3 py-2 text-left border border-gray-300">
                                 Batch
                               </th>
                             </tr>
                           </thead>
-                          <tbody className="divide-y divide-gray-100">
+                          <tbody >
                             {blockedSections.length === 0 ? (
                               <tr>
                                 <td
                                   colSpan={10}
-                                  className="py-6 text-center text-sm text-gray-500"
+                                  className="border border-gray-300 py-6 text-center text-sm text-gray-500"
                                 >
                                   No blocked GE sections for Laguna.
                                 </td>
@@ -7602,7 +7739,7 @@ const courseCodeToInfo = useMemo(() => {
                               <tr>
                                 <td
                                   colSpan={10}
-                                  className="py-6 text-center text-sm text-gray-500"
+                                  className="border border-gray-300 py-6 text-center text-sm text-gray-500"
                                 >
                                   No blocked sections match your search.
                                 </td>
@@ -7648,35 +7785,35 @@ const courseCodeToInfo = useMemo(() => {
                                 const end2 = s2?.end ?? "—";
 
                                 return (
-                                  <tr key={b.rowId}>
-                                    <td className="px-3 py-2 text-gray-900 font-medium">
+                                  <tr key={b.rowId} className="hover:bg-gray-50">
+                                    <td className="px-3 py-2 text-gray-900 font-medium border border-gray-300">
                                       {b.course || "—"}
                                     </td>
-                                    <td className="px-3 py-2 text-gray-700">
+                                    <td className="px-3 py-2 text-gray-700 border border-gray-300">
                                       {b.section || "—"}
                                     </td>
-                                    <td className="px-3 py-2 text-gray-700">
+                                    <td className="px-3 py-2 text-gray-700 border border-gray-300">
                                       {day1}
                                     </td>
-                                    <td className="px-3 py-2 text-gray-700">
+                                    <td className="px-3 py-2 text-gray-700 border border-gray-300">
                                       {begin1}
                                     </td>
-                                    <td className="px-3 py-2 text-gray-700">
+                                    <td className="px-3 py-2 text-gray-700 border border-gray-300">
                                       {end1}
                                     </td>
-                                    <td className="px-3 py-2 text-gray-700">
+                                    <td className="px-3 py-2 text-gray-700 border border-gray-300">
                                       {day2}
                                     </td>
-                                    <td className="px-3 py-2 text-gray-700">
+                                    <td className="px-3 py-2 text-gray-700 border border-gray-300">
                                       {begin2}
                                     </td>
-                                    <td className="px-3 py-2 text-gray-700">
+                                    <td className="px-3 py-2 text-gray-700 border border-gray-300">
                                       {end2}
                                     </td>
-                                    <td className="px-3 py-2 text-gray-700">
+                                    <td className="px-3 py-2 text-gray-700 border border-gray-300">
                                       {b.program || "—"}
                                     </td>
-                                    <td className="px-3 py-2 text-gray-700">
+                                    <td className="px-3 py-2 text-gray-700 border border-gray-300">
                                       {b.batch || "—"}
                                     </td>
                                   </tr>

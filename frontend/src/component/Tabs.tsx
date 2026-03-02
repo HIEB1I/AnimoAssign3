@@ -49,8 +49,8 @@ export default function Tabs({
                     cls(
                       "inline-flex w-full min-w-0 items-center justify-center gap-2 rounded-xl px-2 py-2 text-xs font-semibold transition sm:px-4 sm:text-sm",
                       isActive
-                        ? "bg-white text-emerald-700 shadow"
-                        : "text-gray-800 hover:bg-white/60"
+                        ? "bg-emerald-600 text-white shadow"
+                        : "text-gray-800 hover:bg-emerald/60"
                     )
                   }
                 >
@@ -65,7 +65,7 @@ export default function Tabs({
                   className={cls(
                     "inline-flex w-full min-w-0 items-center justify-center gap-2 rounded-xl px-2 py-2 text-xs font-semibold transition sm:px-4 sm:text-sm",
                     activeTab === label
-                      ? "bg-white text-emerald-700 shadow"
+                      ? "bg-emerald-600 text-white shadow hover:bg-emerald-700"
                       : "text-gray-800 hover:bg-white/60"
                   )}
                 >

@@ -105,7 +105,8 @@ export default function SelectBox({
               width: pos.width,
               maxHeight: pos.maxH,
             }}
-            className="z-[1500] overflow-auto rounded-xl border border-gray-300 bg-white shadow-xl"
+            // NOTE: Must stay above page modals (some are z-[2000+]).
+            className="z-[5000] overflow-auto rounded-xl border border-gray-300 bg-white shadow-xl"
           >
             {options.map((opt, i) => (
               <button

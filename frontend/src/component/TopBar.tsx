@@ -4,6 +4,8 @@ import { useNavigate } from "react-router-dom";
 import { UserCircle, LogOut, Inbox, Bell } from "lucide-react";
 import { useInboxBadge } from "@/realtime/inboxBadge";
 
+import { logoutApi } from "../api"; 
+
 import {
   listNotifications,
   markNotificationsSeen,
@@ -31,6 +33,10 @@ interface TopBarProps {
   inboxEvent?: string;
 }
 
+
+type IncomingNotifs = NonNullable<TopBarProps["notifications"]>;
+const EMPTY_NOTIFS: IncomingNotifs = [];
+
 /**
  * Universal TopBar used by Admin, APO, and Faculty roles.
  * - Dynamic gradient bar and account dropdown
@@ -42,13 +48,16 @@ export default function TopBar({
   fullName,
   role,
   department,
-  notifications: incomingNotifs = [],
+  notifications: incomingNotifsProp,
   inboxEvent = "faculty:openInbox",
   inboxPath,
 }: TopBarProps) {
   const navigate = useNavigate();
   const { unreadTotal } = useInboxBadge();
   const hasInboxUnread = unreadTotal > 0;
+
+  const incomingNotifs: IncomingNotifs = incomingNotifsProp ?? EMPTY_NOTIFS;
+
 
 
   const [menuOpen, setMenuOpen] = useState(false);
@@ -62,7 +71,7 @@ export default function TopBar({
     try {
       const raw = localStorage.getItem("animo.user");
       const u = raw ? JSON.parse(raw) : null;
-      return String(u?.userId || u?.user_id || u?.id || "").trim();
+      return String(u?.userId || u?.user_id || u?.id || u?._id || "").trim();
     } catch {
       return "";
     }
@@ -117,8 +126,8 @@ export default function TopBar({
 
   const [notifications, setNotifications] = useState<NotifUI[]>(() => {
     // If a screen passes notifications explicitly, keep that behavior.
-    if (incomingNotifs.length) {
-      return incomingNotifs.map((n: any) => ({
+    if (incomingNotifsProp?.length) {
+      return (incomingNotifsProp || EMPTY_NOTIFS).map((n: any) => ({
         id: String(n?.notif_id || n?.id || Math.random()),
         title: String(n?.title || ""),
         details: String(n?.details || ""),
@@ -132,12 +141,12 @@ export default function TopBar({
     return [];
   });
 
-  // Keep state in sync when new notifications come in
+  // Keep state in sync when a screen provides notifications explicitly
   useEffect(() => {
-    if (!incomingNotifs) return;
+    if (!incomingNotifsProp) return;
     setNotifications(
-      incomingNotifs.length
-        ? incomingNotifs.map((n: any) => ({
+      incomingNotifsProp.length
+        ? incomingNotifsProp.map((n: any) => ({
             id: String(n?.notif_id || n?.id || Math.random()),
             title: String(n?.title || ""),
             details: String(n?.details || ""),
@@ -147,11 +156,11 @@ export default function TopBar({
           }))
         : []
     );
-  }, [incomingNotifs]);
+  }, [incomingNotifsProp]);
 
   const refreshNotifs = async () => {
     // Only auto-fetch when the page didn't supply notifications.
-    if (incomingNotifs.length) return;
+    if (incomingNotifsProp?.length) return;
     const uid = sessionUserId || readSessionUserId();
     if (!uid) return;
 
@@ -206,11 +215,12 @@ export default function TopBar({
   }, []);
 
   // Logout
-  const logout = () => {
-    localStorage.removeItem("authToken");
-    sessionStorage.clear();
-    navigate("/login");
-  };
+const logout = async () => {
+  await logoutApi(); // <-- NEW: clear cookie session on server
+  localStorage.removeItem("authToken");
+  sessionStorage.clear();
+  navigate("/login");
+};
 
   // “x minutes ago” helper
   const timeAgo = (d: Date) => {

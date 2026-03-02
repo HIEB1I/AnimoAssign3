@@ -912,6 +912,12 @@ async def fs_options(
 
     if wants_courses and dept_id and active_term_id:
         # Read from OM Load Assignment source (sections_submitted)
+        #
+        # IMPORTANT:
+        # Faculty Service (CHAIR) must only show course/sections that are *UNASSIGNED*
+        # in OM Load Assignment. We treat a section as assigned when there exists a
+        # non-archived faculty_assignments row for the section+term with a non-empty
+        # faculty_id.
         pipe: List[Dict[str, Any]] = [
             {
                 "$match": {
@@ -919,6 +925,31 @@ async def fs_options(
                     "submitted_for_scheduling": True,
                 }
             },
+            {
+                "$lookup": {
+                    "from": COL_ASSIGN,
+                    "let": {"sid": "$section_id"},
+                    "pipeline": [
+                        {
+                            "$match": {
+                                "$expr": {
+                                    "$and": [
+                                        {"$eq": ["$section_id", "$$sid"]},
+                                        {"$eq": ["$term_id", active_term_id]},
+                                        {"$ne": ["$is_archived", True]},
+                                        {"$ne": ["$faculty_id", None]},
+                                        {"$ne": ["$faculty_id", ""]},
+                                    ]
+                                }
+                            }
+                        },
+                        {"$project": {"_id": 1}},
+                        {"$limit": 1},
+                    ],
+                    "as": "_assigned",
+                }
+            },
+            {"$match": {"_assigned": {"$size": 0}}},
             {
                 "$lookup": {
                     "from": "courses",
@@ -1039,6 +1070,8 @@ async def fs_options(
                 {"_id": 0, "section_id": 1, "section_code": 1},
             ).sort([("section_code", 1)])
 
+            # Collect section ids first so we can batch-check assignment state.
+            raw: List[Dict[str, str]] = []
             seen: set[str] = set()
             async for s in cur:
                 sid = str(s.get("section_id") or "").strip()
@@ -1046,7 +1079,30 @@ async def fs_options(
                 if not sid or sid in seen:
                     continue
                 seen.add(sid)
-                sections.append({"section_id": sid, "section_code": sc})
+                raw.append({"section_id": sid, "section_code": sc})
+
+            if raw:
+                sids = [r["section_id"] for r in raw]
+                # Assigned sections: any non-archived assignment with a real faculty_id.
+                asg_cur = db[COL_ASSIGN].find(
+                    {
+                        "term_id": active_term_id,
+                        "section_id": {"$in": sids},
+                        "is_archived": {"$ne": True},
+                        "faculty_id": {"$nin": [None, ""]},
+                    },
+                    {"_id": 0, "section_id": 1},
+                )
+                assigned: set[str] = set()
+                async for a in asg_cur:
+                    sid = str(a.get("section_id") or "").strip()
+                    if sid:
+                        assigned.add(sid)
+
+                for r in raw:
+                    if r["section_id"] in assigned:
+                        continue
+                    sections.append(r)
 
     faculty_opts = await _faculty_dropdown(toDepartment) if toDepartment else []
 

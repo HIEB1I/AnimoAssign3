@@ -1,15 +1,22 @@
 # backend/app/main.py
+from cmath import exp
+
 import socketio as socketio_pkg
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from fastapi.concurrency import run_in_threadpool
 from .MESSAGING.store import ensure_messaging_indexes
 
 from .config import get_settings
+
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import JSONResponse
+import json
+from .session import COOKIE_NAME, hash_session_token
 
 # NEW (Phase 9)
 from .MESSAGING.store import ensure_messaging_indexes
@@ -88,6 +95,7 @@ async def _ensure_faculty_overview_indexes() -> None:
     await db.notifications.create_index([('user_id', 1), ('seen', 1), ('created_at', -1)])
     await db.notifications.create_index('notif_id', unique=True)
 
+    await db.users.create_index("session.hash")
 
 # NEW (Phase 9): messaging + unread indexes (pymongo store.py; run in threadpool)
 @app.on_event("startup")
@@ -106,6 +114,72 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+class SessionAuthMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        path = request.url.path
+
+        if not path.startswith("/api"):
+            return await call_next(request)
+
+        if request.method == "OPTIONS":
+            return await call_next(request)
+
+        # allow login routes without cookie
+        if path in {"/api/login", "/api/login/password", "/api/auth/google/login"}:
+            return await call_next(request)
+
+        token = request.cookies.get(COOKIE_NAME)
+        if not token:
+            return JSONResponse({"detail": "Not authenticated"}, status_code=401)
+
+        sess_hash = hash_session_token(token)
+
+        user = await db["users"].find_one(
+            {"session.hash": sess_hash},
+            {"_id": 0, "user_id": 1, "email": 1, "gmail": 1, "session": 1},
+        )
+        if not user:
+            return JSONResponse({"detail": "Session expired or you logged in elsewhere."}, status_code=401)
+
+        # optional expiry enforcement
+        sess = (user.get("session") or {})
+        exp = sess.get("expires_at")
+        
+        if isinstance(exp, datetime):
+    # Mongo often gives tz-naive datetimes; treat them as UTC
+            if exp.tzinfo is None:
+                exp = exp.replace(tzinfo=timezone.utc)
+            else:
+                exp = exp.astimezone(timezone.utc)
+
+            if exp < datetime.now(timezone.utc):
+                await db["users"].update_one({"user_id": user["user_id"]}, {"$unset": {"session": ""}})
+                return JSONResponse({"detail": "Session expired. Please log in again."}, status_code=401)
+        request.state.user = user
+        request.state.user_id = user.get("user_id")
+
+        # optional safety: prevent acting as another user via userId params/body
+        q_user = request.query_params.get("userId") or request.query_params.get("user_id")
+        if q_user and str(q_user) != str(user.get("user_id")):
+            return JSONResponse({"detail": "Forbidden (user mismatch)."}, status_code=403)
+
+        if request.method in {"POST", "PUT", "PATCH"}:
+            ct = (request.headers.get("content-type") or "").lower()
+            if "application/json" in ct:
+                try:
+                    body = await request.body()
+                    if body:
+                        data = json.loads(body)
+                        for k in ("userId", "user_id"):
+                            if k in data and str(data[k]) != str(user.get("user_id")):
+                                return JSONResponse({"detail": "Forbidden (user mismatch)."}, status_code=403)
+                except Exception:
+                    pass
+
+        return await call_next(request)
+
+app.add_middleware(SessionAuthMiddleware)
 
 # --------------------------------------------------------------------
 # Small helpers (safe to keep even if unused by new routes)
@@ -149,6 +223,7 @@ from .OM.OM_FacultyForm import router as om_facultyform
 from .OM.OM_StudentPetition import router as om_studentpetition
 from .OM.OM_SpecialClass import router as om_specialclass
 from .OM.OM_ClassRetention import router as om_classretention
+from .OM.OM_FacultyService import router as om_faculty_service_router
 
 from .OM.OM_Inbox import router as om_inbox_router
 from .OM.OM_LoadAssignment import router as om_loadassignment_router
@@ -207,6 +282,7 @@ app.include_router(om_facultyform, prefix="/api")
 app.include_router(om_studentpetition, prefix="/api")
 app.include_router(om_specialclass, prefix="/api")
 app.include_router(om_classretention, prefix="/api")
+app.include_router(om_faculty_service_router, prefix="/api")
 
 app.include_router(facultyoverview_router, prefix="/api")
 app.include_router(faculty_prefs_router, prefix="/api")

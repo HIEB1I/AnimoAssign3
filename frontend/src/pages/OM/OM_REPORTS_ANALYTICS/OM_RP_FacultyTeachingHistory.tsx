@@ -24,8 +24,12 @@ type TeachingHistoryRow = {
   // Flattened Schedule
   day1?: string;
   room1?: string;
+  begin1?: string;
+  end1?: string;
   day2?: string;
   room2?: string;
+  begin2?: string;
+  end2?: string;
   time?: string;
 };
 
@@ -191,7 +195,7 @@ export default function OM_RP_FacultyTeachingHistory() {
     <div className="w-full px-8 py-8">
       <h1 className="text-2xl font-bold mb-2">Teaching History per Faculty</h1>
       <p className="text-sm text-gray-600 mb-6">
-      Highlights time/day pressure points (slots that are hard to fill) based on submitted faculty availability/preferences for the target term, so you can anticipate scheduling conflicts early.
+        Shows a descriptive summary of a faculty member's past teaching loads (courses/sections taught). 
       </p>
       <FacultyAccordion />
     </div>
@@ -243,11 +247,20 @@ function inferCampusFromSection(sectionCode?: string | null): "Manila" | "Laguna
   return null;
 }
 
+
+function inferCampusFromRow(r: TeachingHistoryRow): "Manila" | "Laguna" | null {
+  const c = String(r?.campus || "").trim().toLowerCase();
+  if (c.includes("manila")) return "Manila";
+  if (c.includes("laguna")) return "Laguna";
+  // fallback: infer from section code prefixes (legacy)
+  return inferCampusFromSection(r?.section_code);
+}
+
 function computePrimaryCampusFromRows(rows: TeachingHistoryRow[]): PrimaryCampus {
   let manila = 0;
   let laguna = 0;
   for (const r of rows || []) {
-    const c = inferCampusFromSection(r.section_code);
+    const c = inferCampusFromRow(r);
     if (c === "Manila") manila += 1;
     else if (c === "Laguna") laguna += 1;
   }
@@ -590,10 +603,19 @@ function FacultyAccordion() {
           const rows = cache[id] || [];
 
           return (
-            <li key={id} className="bg-white">
+            <li
+              key={id}
+              className={
+                isOpen
+                  ? "bg-gray-50/60 transition-colors"
+                  : "bg-white transition-colors"
+              }
+            >
               <button
                 onClick={() => toggle(f)}
-                className="w-full flex items-center justify-between gap-3 px-4 py-3 text-left hover:bg-gray-50"
+                className={`w-full flex items-center justify-between gap-3 px-4 py-3 text-left transition-colors ${
+                  isOpen ? "hover:bg-gray-100/60" : "hover:bg-gray-50"
+                }`}
               >
                 <span className="inline-flex items-center gap-2">
                   {isOpen ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
@@ -1104,6 +1126,10 @@ function HistoryTables({ rows }: { rows: TeachingHistoryRow[] }) {
                 <tbody className="divide-y">
                   {activeRows.map((r, idx) => {
                     const t = splitTimeForDays(r.time, !!r.day2);
+                    const begin1 = r.begin1 ?? t.begin1;
+                    const end1 = r.end1 ?? t.end1;
+                    const begin2 = r.begin2 ?? t.begin2;
+                    const end2 = r.end2 ?? t.end2;
                     return (
                       <tr key={idx} className="hover:bg-gray-50">
                         <td className="px-4 py-3 text-left font-semibold text-emerald-700">
@@ -1114,11 +1140,11 @@ function HistoryTables({ rows }: { rows: TeachingHistoryRow[] }) {
                         <td className="px-4 py-3">{r.section_code || "—"}</td>
                         <td className="px-4 py-3 text-center">{r.units ?? "—"}</td>
                         <td className="px-4 py-3">{dayInitial(r.day1)}</td>
-                        <td className="px-4 py-3">{t.begin1 ?? "—"}</td>
-                        <td className="px-4 py-3">{t.end1 ?? "—"}</td>
+                        <td className="px-4 py-3">{begin1 ?? "—"}</td>
+                        <td className="px-4 py-3">{end1 ?? "—"}</td>
                         <td className="px-4 py-3">{dayInitial(r.day2)}</td>
-                        <td className="px-4 py-3">{t.begin2 ?? "—"}</td>
-                        <td className="px-4 py-3">{t.end2 ?? "—"}</td>
+                        <td className="px-4 py-3">{begin2 ?? "—"}</td>
+                        <td className="px-4 py-3">{end2 ?? "—"}</td>
                       </tr>
                     );
                   })}
