@@ -367,7 +367,7 @@ export default function FACULTY_History({ embedded = false }: { embedded?: boole
               <input
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                placeholder="Search teaching history…"
+                placeholder="Search by course code…"
                 className="w-full bg-transparent outline-none placeholder:text-gray-400 pr-6"
               />
               {query && (
