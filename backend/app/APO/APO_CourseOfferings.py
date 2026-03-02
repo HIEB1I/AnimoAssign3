@@ -4394,14 +4394,53 @@ async def get_course_offerings(
         batch_by_number, batch_by_id = await map_batches()
         prog_ids = sorted(list({c["program_id"] for c in curr if c.get("program_id")}))
         prog_map = await map_programs(prog_ids)
-        dep_ids = sorted(list({
+        # Collect all course ids referenced by curriculum rows (used for row display + department mapping)
+        all_cids = sorted(list({cid for r in curr for cid in ensure_list(r.get("course_list"))}))
+        cinfo = await map_courses(all_cids)
+
+        # Department options should include ALL departments for the APO campus (not just the ones already present
+        # in the current term's curriculum), so the "Department" dropdown in List of Courses can show everything.
+        dep_ids_prog = sorted(list({
             (prog_map.get(p) or {}).get("department_id","")
             for p in prog_ids if (prog_map.get(p) or {}).get("department_id")
         }))
-        dep_map = await map_departments(dep_ids)
+        dep_ids_course = sorted(list({
+            (cinfo.get(cid) or {}).get("department_id","")
+            for cid in all_cids if (cinfo.get(cid) or {}).get("department_id")
+        }))
 
-        all_cids = sorted(list({cid for r in curr for cid in ensure_list(r.get("course_list"))}))
-        cinfo = await map_courses(all_cids)
+        dep_ids_campus: List[str] = []
+        try:
+            campus_name = str((campus or {}).get("campus_name") or "").strip()
+            dept_q = {"$or": [{"campus_id": campus_id}, {"campus": campus_id}]}
+            if campus_name:
+                dept_q["$or"].extend([{"campus_id": campus_name}, {"campus": campus_name}])
+
+            async for d in db[COL_DEPARTMENTS].find(
+                dept_q,
+                {"_id": 0, "department_id": 1, "dept_id": 1, "id": 1},
+            ):
+                did = str(d.get("department_id") or d.get("dept_id") or d.get("id") or "").strip()
+                if did:
+                    dep_ids_campus.append(did)
+        except Exception:
+            dep_ids_campus = []
+
+        # Fallback: if department docs don't store campus fields consistently, show all departments instead of only one.
+        if not dep_ids_campus:
+            try:
+                async for d in db[COL_DEPARTMENTS].find(
+                    {},
+                    {"_id": 0, "department_id": 1, "dept_id": 1, "id": 1},
+                ):
+                    did = str(d.get("department_id") or d.get("dept_id") or d.get("id") or "").strip()
+                    if did:
+                        dep_ids_campus.append(did)
+            except Exception:
+                dep_ids_campus = []
+
+        dep_ids = sorted(list(set(dep_ids_prog) | set(dep_ids_course) | set(dep_ids_campus)))
+        dep_map = await map_departments(dep_ids)
 
         items: List[Dict[str, Any]] = []
         for r in curr:
@@ -4452,7 +4491,11 @@ async def get_course_offerings(
             opts = sorted(by_dep.get(dep_id, []), key=lambda x: x["course_code"])
             course_options_by_program[pid] = opts
 
-        departments = [{"department_id": d, "department_name": dep_map.get(d,{}).get("department_name","")} for d in dep_ids]
+        # Departments shown in the UI should be all departments for the APO campus when available.
+        dep_ids_for_ui = dep_ids_campus if dep_ids_campus else dep_ids
+        departments = [{"department_id": d, "department_name": dep_map.get(d,{}).get("department_name","")} for d in dep_ids_for_ui]
+        departments.sort(key=lambda x: (x.get("department_name") or x.get("department_id") or "").lower())
+
         
         # Submission state (for UI: decide whether re-submission must include a comment)
         sub_doc = await db[COL_APO_SUBMISSIONS].find_one(
